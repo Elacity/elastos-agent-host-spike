@@ -11,7 +11,8 @@
 //! whole token.
 //! A crash records `not started` or `settlement_unknown` and does not dispatch
 //! that step again. A read proposal with no grant stays `denied` and is not
-//! dispatched. Cancel before dispatch stays `cancelled` and does not run.
+//! dispatched, and the refusal reason is written into the journal. Cancel
+//! before dispatch stays `cancelled` and does not run.
 //! Cancel after dispatch leaves the step where it is. A snapshot of the
 //! workspace, the time, and the open files appends after the head and does
 //! not start a series. A checkpoint copies the model bytes before a step.
@@ -3449,7 +3450,7 @@ fn authorize_child(journal: &mut Journal, child_id: u64, grant: Option<&str>) ->
     if grant.is_none() || grant == Some("") || parent_grant.as_deref() == grant {
         return false;
     }
-    authorize(journal, child_id, grant)
+    authorize(journal, child_id, grant).is_ok()
 }
 
 /// A child host is a second journal. It keeps the system head and does not
@@ -3494,7 +3495,7 @@ fn grant_child_host(child: &mut Journal, parent_grant: Option<&str>, grant: Opti
     else {
         return false;
     };
-    authorize(child, id, grant)
+    authorize(child, id, grant).is_ok()
 }
 
 /// The parent stores one result line. The child's log is not copied in.
@@ -3523,24 +3524,95 @@ fn record_child_result(parent: &mut Journal, child: &Journal, result: &str) -> b
     parent.epoch == epoch && parent.events.len() == before + 1
 }
 
-/// A missing grant denies the step. A grant id is recorded and does not run it.
+/// One grant refusal in the journal: the word `refused`, the reason, and what
+/// was refused. The person and the model can read it. It is not a grant.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> bool {
-    let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) else {
-        return false;
+fn record_grant_refusal(journal: &mut Journal, reason: &'static str, what: &str) {
+    let grant_refusal = SurfaceNode {
+        role: Role::User,
+        text: String::new(),
+        source: NodeSource::Refused {
+            reason: reason.to_string(),
+            what: what.to_string(),
+        },
     };
-    if step.state != StepState::Prepared {
-        return false;
+    journal.events.push(grant_refusal);
+}
+
+/// The events under a trailing grant refusal. The refusal is the explanation.
+/// The bytes under it are what that refusal must leave unchanged.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn events_under_grant_refusal(events: &[SurfaceNode]) -> &[SurfaceNode] {
+    match events.last() {
+        Some(node) if is_refusal_record(node) => &events[..events.len() - 1],
+        _ => events,
+    }
+}
+
+/// The last record is this grant refusal.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn grant_refusal_is(events: &[SurfaceNode], reason: &str, what: &str) -> bool {
+    events.last().is_some_and(|node| {
+        matches!(
+            &node.source,
+            NodeSource::Refused {
+                reason: got,
+                what: got_what,
+            } if got == reason && got_what == what
+        )
+    })
+}
+
+/// Why a journal grant ask was refused. `denied`, `invalid`, and an unknown
+/// outcome stay different reasons. The guest does not collapse them.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn grant_failure_reason(failure: BusFailure) -> &'static str {
+    match failure {
+        BusFailure::Denied => "grant denied",
+        BusFailure::Invalid => "grant invalid",
+        BusFailure::Other => "grant outcome unknown",
+    }
+}
+
+/// A missing grant denies the step and records why. A grant id is recorded
+/// and does not run the step. An unknown step, and a step that is not
+/// prepared, are refused with their own reasons. Each refusal is returned
+/// and written into the journal.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn authorize(journal: &mut Journal, id: u64, grant: Option<&str>) -> Result<(), &'static str> {
+    let found = journal
+        .steps
+        .iter()
+        .find(|step| step.id == id)
+        .map(|step| (step.state, step.resource.clone()));
+    let Some((state, resource)) = found else {
+        let what = format!("step {id}");
+        record_grant_refusal(journal, "unknown step", &what);
+        return Err("unknown step");
+    };
+    let what = if resource.is_empty() {
+        format!("step {id}")
+    } else {
+        resource
+    };
+    if state != StepState::Prepared {
+        record_grant_refusal(journal, "step is not prepared", &what);
+        return Err("step is not prepared");
     }
     match grant {
         None | Some("") => {
-            step.state = StepState::Denied;
-            step.grant = None;
-            false
+            if let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) {
+                step.state = StepState::Denied;
+                step.grant = None;
+            }
+            record_grant_refusal(journal, "no grant", &what);
+            Err("no grant")
         }
         Some(grant_id) => {
-            step.grant = Some(grant_id.to_string());
-            true
+            if let Some(step) = journal.steps.iter_mut().find(|step| step.id == id) {
+                step.grant = Some(grant_id.to_string());
+            }
+            Ok(())
         }
     }
 }
@@ -3636,7 +3708,7 @@ fn apply_inbox(journal: &mut Journal, id: u64, answer: InboxAnswer, grant: Optio
             source: NodeSource::Inbox(answer),
         });
     }
-    authorize(journal, id, grant)
+    authorize(journal, id, grant).is_ok()
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -3823,32 +3895,67 @@ fn journal_cursor(agent_id: &str, task_id: &str) -> Result<JournalCursor, &'stat
     })
 }
 
-/// The two grants an append and a resume need.
+/// The two grants an append and a resume need. A missing grant carries the
+/// reason the Runtime, or the guest, refused that ask.
 #[cfg(any(test, target_arch = "wasm32"))]
 struct JournalGrants {
     write: Option<JournalGrant>,
     read: Option<JournalGrant>,
+    write_reason: Option<&'static str>,
+    read_reason: Option<&'static str>,
 }
 
 /// Ask the Runtime for exactly two grants on this agent's own journal: write,
-/// then read. Nothing else is asked for. A refusal leaves that grant empty, so
-/// nothing is sent with it.
+/// then read. Nothing else is asked for. A refusal leaves that grant empty,
+/// returns its reason, and writes that reason into the journal. A denied ask,
+/// an invalid ask, and an unknown outcome stay different reasons. Nothing is
+/// sent with an empty grant.
 #[cfg(any(test, target_arch = "wasm32"))]
-fn request_journal_grants(bus: &mut impl ResourceBus, cursor: &JournalCursor) -> JournalGrants {
-    if !cursor.resource.starts_with(JOURNAL_ROOT) || host_path(&cursor.resource) {
+fn request_journal_grants(
+    bus: &mut impl ResourceBus,
+    journal: &mut Journal,
+    cursor: &JournalCursor,
+) -> JournalGrants {
+    if host_path(&cursor.resource) || !cursor.resource.starts_with(JOURNAL_ROOT) {
+        let reason = if host_path(&cursor.resource) {
+            "host path"
+        } else {
+            "journal resource"
+        };
+        record_grant_refusal(journal, reason, &format!("write {}", cursor.resource));
+        record_grant_refusal(journal, reason, &format!("read {}", cursor.resource));
         return JournalGrants {
             write: None,
             read: None,
+            write_reason: Some(reason),
+            read_reason: Some(reason),
         };
     }
-    let mut ask = |action: &str| {
-        bus.request_grant(&cursor.resource, action, "Agent Host task journal")
-            .ok()
-            .and_then(|id| JournalGrant::new(&id))
+    let mut ask = |action: &str| -> (Option<JournalGrant>, Option<&'static str>) {
+        let what = format!("{action} {}", cursor.resource);
+        match bus.request_grant(&cursor.resource, action, "Agent Host task journal") {
+            Ok(id) => match JournalGrant::new(&id) {
+                Some(grant) => (Some(grant), None),
+                None => {
+                    record_grant_refusal(journal, "grant invalid", &what);
+                    (None, Some("grant invalid"))
+                }
+            },
+            Err(failure) => {
+                let reason = grant_failure_reason(failure);
+                record_grant_refusal(journal, reason, &what);
+                (None, Some(reason))
+            }
+        }
     };
-    let write = ask("write");
-    let read = ask("read");
-    JournalGrants { write, read }
+    let (write, write_reason) = ask("write");
+    let (read, read_reason) = ask("read");
+    JournalGrants {
+        write,
+        read,
+        write_reason,
+        read_reason,
+    }
 }
 
 /// A Bus failure as the guest sees it. The Runtime refuses `denied` and
@@ -4032,7 +4139,7 @@ fn append_journal(
     let Ok(id) = propose_journal_append(journal, cursor) else {
         return AppendOutcome::Held;
     };
-    if !authorize(journal, id, grant.map(JournalGrant::id)) {
+    if authorize(journal, id, grant.map(JournalGrant::id)).is_err() {
         return AppendOutcome::Denied;
     }
     let Some(grant) = grant else {
@@ -4353,17 +4460,21 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let epoch = journal.epoch;
         let before_read = model_bytes(&journal.events);
-        let read_id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        if authorize(&mut journal, read_id, None)
+        let read_resource = "localhost://Users/self/Documents/note.txt";
+        let read_id = propose_read(&mut journal, read_resource);
+        if authorize(&mut journal, read_id, None).is_ok()
+            || !grant_refusal_is(&journal.events, "no grant", read_resource)
             || step_state(&journal, read_id) != Some(StepState::Denied)
             || dispatch(&mut journal, read_id)
             || journal.epoch != epoch
-            || model_bytes(&journal.events).as_ref() != before_read.as_ref()
+            || model_bytes(events_under_grant_refusal(&journal.events)).as_ref()
+                != before_read.as_ref()
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a read with no grant was executed".to_string(),
             ));
         }
+        let after_read_refusal = model_bytes(&journal.events);
         let held = propose_step(&mut journal);
         if !cancel(&mut journal, held)
             || step_state(&journal, held) != Some(StepState::Cancelled)
@@ -4371,7 +4482,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || dispatch(&mut journal, held)
             || note_crash(&mut journal, held)
             || journal.epoch != epoch
-            || model_bytes(&journal.events).as_ref() != before_read.as_ref()
+            || model_bytes(&journal.events).as_ref() != after_read_refusal.as_ref()
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a cancelled step was dispatched".to_string(),
@@ -4439,7 +4550,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         let before_send = checkpoint(&journal).ok_or_else(|| {
             elastos::bus::types::BusError::Invalid("checkpoint could not be recorded".to_string())
         })?;
-        if !authorize(&mut journal, sent, Some("fixture-grant"))
+        if authorize(&mut journal, sent, Some("fixture-grant")).is_err()
             || !dispatch(&mut journal, sent)
             || cancel(&mut journal, sent)
             || step_state(&journal, sent) != Some(StepState::Dispatched)
@@ -4739,10 +4850,12 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !prompt.contains(COMPACTION_SUMMARY)
             || !prompt.contains("the person greeted")
             || checkpoint(&journal).as_ref() != Some(&summary_before)
-            || authorize(&mut journal, summary_step, None)
+            || authorize(&mut journal, summary_step, None).is_ok()
+            || !grant_refusal_is(&journal.events, "no grant", summary_model)
             || step_state(&journal, summary_step) != Some(StepState::Denied)
             || dispatch(&mut journal, summary_step)
-            || checkpoint(&journal).as_ref() != Some(&summary_before)
+            || model_bytes(events_under_grant_refusal(&journal.events)).as_ref()
+                != Some(&summary_before)
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a compaction summary did not use the hosted model path".to_string(),
@@ -4763,7 +4876,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )
         })?;
         let recorded_epoch = recorded.epoch;
-        if !authorize(&mut recorded, recorded_step, Some("fixture-grant"))
+        if authorize(&mut recorded, recorded_step, Some("fixture-grant")).is_err()
             || !dispatch(&mut recorded, recorded_step)
             || record_compact_summary(
                 &mut recorded,
@@ -4785,7 +4898,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                         "a recorded summary request was refused".to_string(),
                     )
                 })?;
-        if !authorize(&mut recorded, good_step, Some("fixture-grant"))
+        if authorize(&mut recorded, good_step, Some("fixture-grant")).is_err()
             || !dispatch(&mut recorded, good_step)
             || record_compact_summary(&mut recorded, good_step, Ok(good_answer.to_string()))
                 .is_err()
@@ -4954,7 +5067,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || first_effect == second_effect
             || dispatch(&mut writes, second)
             || step_state(&writes, second) != Some(StepState::Prepared)
-            || !authorize(&mut writes, second, Some("fixture-grant"))
+            || authorize(&mut writes, second, Some("fixture-grant")).is_err()
             || dispatch(&mut writes, second)
             || step_state(&writes, second) != Some(StepState::Prepared)
             || record_tool_result(&mut writes, second, "beta replaced")
@@ -5037,7 +5150,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             elastos::bus::types::BusError::Invalid("the change was refused".to_string())
         })?;
         for id in &change {
-            if !authorize(&mut bound, *id, Some("fixture-grant")) || !dispatch(&mut bound, *id) {
+            if authorize(&mut bound, *id, Some("fixture-grant")).is_err()
+                || !dispatch(&mut bound, *id)
+            {
                 return Err(elastos::bus::types::BusError::Invalid(
                     "the change was not dispatched".to_string(),
                 ));
@@ -5199,10 +5314,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             .iter()
             .find(|step| step.id == hosted_id)
             .is_none_or(|step| step.kind != ProposalKind::Hosted || step.grant.is_some())
-            || authorize(&mut hosted, hosted_id, None)
+            || authorize(&mut hosted, hosted_id, None).is_ok()
+            || !grant_refusal_is(&hosted.events, "no grant", model)
             || step_state(&hosted, hosted_id) != Some(StepState::Denied)
             || dispatch(&mut hosted, hosted_id)
-            || hosted.events != hosted_events
+            || events_under_grant_refusal(&hosted.events) != hosted_events.as_slice()
         {
             return Err(elastos::bus::types::BusError::Invalid(
                 "a hosted proposal carried a secret or ran without a grant".to_string(),
@@ -5220,7 +5336,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("the parent run was refused".to_string())
         })?;
-        if !authorize(&mut family, parent, Some("fixture-grant"))
+        if authorize(&mut family, parent, Some("fixture-grant")).is_err()
             || propose_child(&mut family, parent, "localhost://Users/self/Projects/other").is_ok()
             || family.steps.len() != 1
         {
@@ -5393,7 +5509,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let events_before_result = project.events.clone();
         if record_run_result(&mut project, run, 0, "ok", "")
-            || !authorize(&mut project, run, Some("fixture-grant"))
+            || authorize(&mut project, run, Some("fixture-grant")).is_err()
             || record_run_result(&mut project, run, 0, "ok", "")
             || !dispatch(&mut project, run)
             || record_run_result(&mut project, run, 0, "ok", "/tmp/out")
@@ -5418,7 +5534,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("a failed command was refused".to_string())
         })?;
-        if !authorize(&mut project, failed, Some("fixture-grant"))
+        if authorize(&mut project, failed, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, failed)
             || !record_run_result(&mut project, failed, 1, "init: command failed", "")
             || project.events.len() != events_before_result.len() + 2
@@ -5478,7 +5594,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             "localhost://Users/self/Projects/demo/notes.txt",
             1,
             "hello from the project",
-        ) || !authorize(&mut project, tested, Some("fixture-grant"))
+        ) || authorize(&mut project, tested, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, tested)
             || !record_run_result(
                 &mut project,
@@ -5487,7 +5603,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "project demo a1097f0d6ed225ad16b19f19d6a260816af54c74bfe82b11e4ce2020233497f1\ntest result: ok",
                 "",
             )
-            || !authorize(&mut project, broken, Some("fixture-grant"))
+            || authorize(&mut project, broken, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, broken)
             || !record_run_result(&mut project, broken, 101, "test result: FAILED", "")
             || project.events.iter().rev().nth(1).is_none_or(|node| {
@@ -5513,7 +5629,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             elastos::bus::types::BusError::Invalid("a mismatched exit was refused".to_string())
         })?;
         let before_mismatch = project.events.len();
-        if !authorize(&mut project, mismatch, Some("fixture-grant"))
+        if authorize(&mut project, mismatch, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, mismatch)
             || record_run_result(&mut project, mismatch, 0, "test result: FAILED", "")
             || project.events.len() != before_mismatch
@@ -5536,7 +5652,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             elastos::bus::types::BusError::Invalid("the stylesheet edit was refused".to_string())
         })?;
         if note_provider_wrote(&mut edited, edit)
-            || !authorize(&mut edited, edit, Some("fixture-grant"))
+            || authorize(&mut edited, edit, Some("fixture-grant")).is_err()
             || !dispatch(&mut edited, edit)
             || !note_provider_wrote(&mut edited, edit)
             || note_crash(&mut edited, edit)
@@ -5574,7 +5690,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("the note edit was refused".to_string())
         })?;
-        if !authorize(&mut crashed, pending, Some("fixture-grant"))
+        if authorize(&mut crashed, pending, Some("fixture-grant")).is_err()
             || !dispatch(&mut crashed, pending)
             || !note_crash(&mut crashed, pending)
             || note_provider_wrote(&mut crashed, pending)
@@ -5625,7 +5741,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             elastos::bus::types::BusError::Invalid("the file list was refused".to_string())
         })?;
         let doubled = "project file index.html\nproject file index.html\nproject file notes.txt\nproject file notes.txt\nproject file style.css\nproject file style.css";
-        if !authorize(&mut project, listed, Some("fixture-grant"))
+        if authorize(&mut project, listed, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, listed)
             || record_run_result(
                 &mut project,
@@ -5669,7 +5785,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             .map(|step| step.effect_id);
         if listed_effect.is_none()
             || listed_effect == noted_effect
-            || !authorize(&mut project, noted, Some("fixture-grant"))
+            || authorize(&mut project, noted, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, noted)
             || record_run_result(&mut project, noted, 0, doubled, "")
             || !record_run_result(
@@ -5694,7 +5810,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("the note rewrite was refused".to_string())
         })?;
-        if !authorize(&mut project, blocked, Some("fixture-grant"))
+        if authorize(&mut project, blocked, Some("fixture-grant")).is_err()
             || dispatch(&mut project, blocked)
             || note_provider_wrote(&mut project, blocked)
             || current_observed_text(
@@ -5725,7 +5841,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 != Some("hello from the project")
             || !dispatch(&mut project, blocked)
             || !note_provider_wrote(&mut project, blocked)
-            || !authorize(&mut project, reread, Some("fixture-grant"))
+            || authorize(&mut project, reread, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, reread)
             || record_run_result(
                 &mut project,
@@ -5768,7 +5884,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             "localhost://Users/self/Projects/demo/notes.txt",
             1,
             "hello from the project",
-        ) || !authorize(&mut project, pending, Some("fixture-grant"))
+        ) || authorize(&mut project, pending, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, pending)
             || note_provider_wrote(&mut project, pending)
             || step_state(&project, pending) != Some(StepState::Denied)
@@ -5778,7 +5894,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )
             .as_deref()
                 != Some("hello from the project")
-            || !authorize(&mut project, earlier, Some("fixture-grant"))
+            || authorize(&mut project, earlier, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, earlier)
             || record_run_result(&mut project, earlier, 0, "project note hello again", "")
             || !record_run_result(
@@ -5811,7 +5927,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("the current note edit was refused".to_string())
         })?;
-        if !authorize(&mut project, fresh, Some("fixture-grant"))
+        if authorize(&mut project, fresh, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, fresh)
             || !note_provider_wrote(&mut project, fresh)
             || current_observed_text(
@@ -5820,7 +5936,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )
             .as_deref()
                 != Some("hello again")
-            || !authorize(&mut project, quoted, Some("fixture-grant"))
+            || authorize(&mut project, quoted, Some("fixture-grant")).is_err()
             || !dispatch(&mut project, quoted)
             || record_run_result(
                 &mut project,
@@ -5891,12 +6007,12 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "a refused scaffold blocked the note".to_string(),
             )
         })?;
-        if !authorize(&mut page, filling, Some("fixture-grant"))
+        if authorize(&mut page, filling, Some("fixture-grant")).is_err()
             || !dispatch(&mut page, filling)
             || note_provider_wrote(&mut page, filling)
             || step_state(&page, filling) != Some(StepState::Denied)
             || current_observed_text(&page.events, page_file).as_deref() != Some("")
-            || !authorize(&mut page, follow, Some("fixture-grant"))
+            || authorize(&mut page, follow, Some("fixture-grant")).is_err()
             || !dispatch(&mut page, follow)
             || !note_provider_wrote(&mut page, follow)
             || current_observed_text(
@@ -5950,7 +6066,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "a shorter log refused the current note".to_string(),
             )
         })?;
-        if !authorize(&mut folded, quoted, Some("fixture-grant"))
+        if authorize(&mut folded, quoted, Some("fixture-grant")).is_err()
             || !dispatch(&mut folded, quoted)
             || record_run_result(
                 &mut folded,
@@ -5960,7 +6076,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "",
             )
             || !record_run_result(&mut folded, quoted, 0, "project note hello again", "")
-            || !authorize(&mut folded, follow, Some("fixture-grant"))
+            || authorize(&mut folded, follow, Some("fixture-grant")).is_err()
             || !dispatch(&mut folded, follow)
             || !note_provider_wrote(&mut folded, follow)
             || current_observed_text(
@@ -6074,7 +6190,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         })?;
         if !tree.events.iter().any(|node| {
             node.source == NodeSource::Skill && node.text == "Prefer the Runtime grant."
-        }) || !authorize(&mut tree, listed, Some("fixture-grant"))
+        }) || authorize(&mut tree, listed, Some("fixture-grant")).is_err()
             || !dispatch(&mut tree, listed)
             || record_run_result(
                 &mut tree,
@@ -6090,7 +6206,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "project file index.html\nproject file notes.txt\nproject file style.css",
                 "",
             )
-            || !authorize(&mut tree, checked, Some("fixture-grant"))
+            || authorize(&mut tree, checked, Some("fixture-grant")).is_err()
             || !dispatch(&mut tree, checked)
             || !record_run_result(
                 &mut tree,
@@ -6288,7 +6404,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "a later edit moved the spill pointer".to_string(),
             )
         })?;
-        if !authorize(&mut inbox, moved, Some("fixture-grant"))
+        if authorize(&mut inbox, moved, Some("fixture-grant")).is_err()
             || !dispatch(&mut inbox, moved)
             || !note_provider_wrote(&mut inbox, moved)
             || current_observed_text(&inbox.events, notes).as_deref() != Some("hello again")
@@ -6317,7 +6433,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "the newer spill pointer was ignored".to_string(),
             )
         })?;
-        if !authorize(&mut inbox, again, Some("fixture-grant"))
+        if authorize(&mut inbox, again, Some("fixture-grant")).is_err()
             || !dispatch(&mut inbox, again)
             || !spill_pointer(&mut inbox, again, notes)
             || text_at_spill(&inbox.events, notes).as_deref() != Some("hello again")
@@ -6353,7 +6469,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         })?;
         if !observe(&mut inbox, style, 1, "body{}")
             || spill_pointer(&mut inbox, again, style)
-            || !authorize(&mut inbox, styled, Some("fixture-grant"))
+            || authorize(&mut inbox, styled, Some("fixture-grant")).is_err()
             || !dispatch(&mut inbox, styled)
             || !spill_pointer(&mut inbox, styled, style)
             || text_at_spill(&inbox.events, notes).as_deref() != Some("hello again")
@@ -6552,10 +6668,10 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("the same command ran twice".to_string())
         })?;
-        if !authorize(&mut repeats, first, Some("fixture-grant"))
-            || !authorize(&mut repeats, second, Some("fixture-grant"))
-            || !authorize(&mut repeats, third, Some("fixture-grant"))
-            || !authorize(&mut repeats, other, Some("fixture-grant"))
+        if authorize(&mut repeats, first, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, second, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, third, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, other, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, first)
             || dispatch(&mut repeats, third)
             || !dispatch(&mut repeats, other)
@@ -6607,9 +6723,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "different tests were treated as one command".to_string(),
             )
         })?;
-        if !authorize(&mut repeats, ready, Some("fixture-grant"))
-            || !authorize(&mut repeats, missing, Some("fixture-grant"))
-            || !authorize(&mut repeats, ready_again, Some("fixture-grant"))
+        if authorize(&mut repeats, ready, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, missing, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, ready_again, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, ready)
             || !dispatch(&mut repeats, missing)
             || dispatch(&mut repeats, ready_again)
@@ -6635,7 +6751,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !repeats.steps.iter().any(|step| {
                 step.id == missing && step.state == StepState::Dispatched && !step.has_result
             })
-            || !authorize(&mut repeats, missing_again, Some("fixture-grant"))
+            || authorize(&mut repeats, missing_again, Some("fixture-grant")).is_err()
             || dispatch(&mut repeats, missing_again)
             || step_state(&repeats, missing_again) != Some(StepState::Prepared)
         {
@@ -6675,7 +6791,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )
         })?;
         if !record_run_result(&mut repeats, ready_again, 0, "test result: ok", "")
-            || !authorize(&mut repeats, ready_third, Some("fixture-grant"))
+            || authorize(&mut repeats, ready_third, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, ready_third)
             || dispatch(&mut repeats, missing_again)
             || step_state(&repeats, missing) != Some(StepState::SettlementUnknown)
@@ -6715,7 +6831,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             || !cancel(&mut repeats, missing_again)
             || dispatch(&mut repeats, missing_again)
             || step_state(&repeats, missing_again) != Some(StepState::Cancelled)
-            || !authorize(&mut repeats, missing_third, Some("fixture-grant"))
+            || authorize(&mut repeats, missing_third, Some("fixture-grant")).is_err()
             || dispatch(&mut repeats, missing_third)
             || step_state(&repeats, missing_third) != Some(StepState::Prepared)
             || !repeats.steps.iter().any(|step| {
@@ -6737,7 +6853,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("the other project freed this crash".to_string())
         })?;
-        if !authorize(&mut repeats, elsewhere, Some("fixture-grant"))
+        if authorize(&mut repeats, elsewhere, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, elsewhere)
             || !record_run_result(&mut repeats, elsewhere, 101, "test result: FAILED", "")
             || dispatch(&mut repeats, missing_third)
@@ -6791,7 +6907,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "the grant was written into the log".to_string(),
             ));
         }
-        if !authorize(&mut repeats, elsewhere_again, Some("fixture-grant"))
+        if authorize(&mut repeats, elsewhere_again, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, elsewhere_again)
             || dispatch(&mut repeats, missing_third)
             || step_state(&repeats, missing) != Some(StepState::SettlementUnknown)
@@ -6827,7 +6943,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )
             || cancel(&mut repeats, elsewhere_again)
             || step_state(&repeats, elsewhere_again) != Some(StepState::SettlementUnknown)
-            || !authorize(&mut repeats, elsewhere_third, Some("fixture-grant"))
+            || authorize(&mut repeats, elsewhere_third, Some("fixture-grant")).is_err()
             || dispatch(&mut repeats, elsewhere_third)
             || step_state(&repeats, elsewhere_third) != Some(StepState::Prepared)
             || step_state(&repeats, missing) != Some(StepState::SettlementUnknown)
@@ -6862,7 +6978,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )
         })?;
         if !record_run_result(&mut repeats, ready_third, 0, "test result: ok", "")
-            || !authorize(&mut repeats, ready_fourth, Some("fixture-grant"))
+            || authorize(&mut repeats, ready_fourth, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, ready_fourth)
             || dispatch(&mut repeats, missing_third)
             || dispatch(&mut repeats, elsewhere_third)
@@ -6920,9 +7036,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                     "a different program freed a crash".to_string(),
                 )
             })?;
-        if !authorize(&mut repeats, demo_true, Some("fixture-grant"))
-            || !authorize(&mut repeats, other_true, Some("fixture-grant"))
-            || !authorize(&mut repeats, demo_true_again, Some("fixture-grant"))
+        if authorize(&mut repeats, demo_true, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, other_true, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, demo_true_again, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, demo_true)
             || dispatch(&mut repeats, demo_true_again)
             || step_state(&repeats, demo_true_again) != Some(StepState::Prepared)
@@ -6995,9 +7111,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             propose_run(&mut repeats, project, &["false".to_string()]).map_err(|_| {
                 elastos::bus::types::BusError::Invalid("a failed program freed a crash".to_string())
             })?;
-        if !authorize(&mut repeats, demo_false, Some("fixture-grant"))
-            || !authorize(&mut repeats, other_false, Some("fixture-grant"))
-            || !authorize(&mut repeats, demo_false_again, Some("fixture-grant"))
+        if authorize(&mut repeats, demo_false, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, other_false, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, demo_false_again, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, demo_false)
             || dispatch(&mut repeats, demo_false_again)
             || step_state(&repeats, demo_false_again) != Some(StepState::Prepared)
@@ -7085,8 +7201,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "an unread note closed the edited test".to_string(),
             )
         })?;
-        if !authorize(&mut repeats, edited, Some("fixture-grant"))
-            || !authorize(&mut repeats, edited_again, Some("fixture-grant"))
+        if authorize(&mut repeats, edited, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, edited_again, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, edited)
             || dispatch(&mut repeats, edited_again)
             || step_state(&repeats, edited_again) != Some(StepState::Prepared)
@@ -7226,8 +7342,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "the file list named a file that was not read".to_string(),
             )
         })?;
-        if !authorize(&mut repeats, files_again, Some("fixture-grant"))
-            || !authorize(&mut repeats, other_files, Some("fixture-grant"))
+        if authorize(&mut repeats, files_again, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, other_files, Some("fixture-grant")).is_err()
             || dispatch(&mut repeats, files_again)
             || step_state(&repeats, files_again) != Some(StepState::Prepared)
             || !dispatch(&mut repeats, other_files)
@@ -7362,7 +7478,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "the ready test quoted an unread tree".to_string(),
             )
         })?;
-        if !authorize(&mut repeats, other_ready, Some("fixture-grant"))
+        if authorize(&mut repeats, other_ready, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, other_ready)
             || record_run_result(
                 &mut repeats,
@@ -7440,7 +7556,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )
         })?;
         if !observe(&mut repeats, &style, 2, "h1{}")
-            || !authorize(&mut repeats, ready_fifth, Some("fixture-grant"))
+            || authorize(&mut repeats, ready_fifth, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, ready_fifth)
             || record_run_result(
                 &mut repeats,
@@ -7493,7 +7609,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                     "the file list dropped the rewritten stylesheet".to_string(),
                 )
             })?;
-        if !authorize(&mut repeats, files_after, Some("fixture-grant"))
+        if authorize(&mut repeats, files_after, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, files_after)
             || record_run_result(&mut repeats, files_after, 0, "project file notes.txt", "")
             || !record_run_result(
@@ -7521,7 +7637,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                     "an unread file entered the list".to_string(),
                 )
             })?;
-        if !authorize(&mut repeats, files_unread, Some("fixture-grant"))
+        if authorize(&mut repeats, files_unread, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, files_unread)
             || record_run_result(
                 &mut repeats,
@@ -7584,8 +7700,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             )
         })?;
         if !observe(&mut repeats, &page, 1, "<h1>demo</h1>")
-            || !authorize(&mut repeats, files_page, Some("fixture-grant"))
-            || !authorize(&mut repeats, ready_page, Some("fixture-grant"))
+            || authorize(&mut repeats, files_page, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, ready_page, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, files_page)
             || !dispatch(&mut repeats, ready_page)
             || record_run_result(
@@ -7678,8 +7794,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 )
             })?;
         if !observe(&mut repeats, &page, 2, "<h1>next</h1>")
-            || !authorize(&mut repeats, ready_next, Some("fixture-grant"))
-            || !authorize(&mut repeats, files_next, Some("fixture-grant"))
+            || authorize(&mut repeats, ready_next, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, files_next, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, ready_next)
             || !dispatch(&mut repeats, files_next)
             || record_run_result(
@@ -7758,7 +7874,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         if observe(&mut repeats, &page, 2, "<h1>other</h1>")
             || current_observed_text(&repeats.events, &page).as_deref() != Some("<h1>next</h1>")
             || !observe(&mut repeats, &page, 1, "<h1>demo</h1>")
-            || !authorize(&mut repeats, ready_older, Some("fixture-grant"))
+            || authorize(&mut repeats, ready_older, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, ready_older)
             || record_run_result(
                 &mut repeats,
@@ -7859,8 +7975,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         .map_err(|_| {
             elastos::bus::types::BusError::Invalid("a host path joined the project".to_string())
         })?;
-        if !authorize(&mut repeats, files_clean, Some("fixture-grant"))
-            || !authorize(&mut repeats, ready_clean, Some("fixture-grant"))
+        if authorize(&mut repeats, files_clean, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, ready_clean, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, files_clean)
             || !dispatch(&mut repeats, ready_clean)
             || record_run_result(&mut repeats, files_clean, 0, "project file /tmp/out", "")
@@ -7970,8 +8086,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "shortening dropped the current page".to_string(),
             )
         })?;
-        if !authorize(&mut repeats, files_kept, Some("fixture-grant"))
-            || !authorize(&mut repeats, ready_kept, Some("fixture-grant"))
+        if authorize(&mut repeats, files_kept, Some("fixture-grant")).is_err()
+            || authorize(&mut repeats, ready_kept, Some("fixture-grant")).is_err()
             || !dispatch(&mut repeats, files_kept)
             || !dispatch(&mut repeats, ready_kept)
             || record_run_result(
@@ -8083,7 +8199,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         let mut cursor = journal_cursor("agent-host", "demo").map_err(|_| {
             elastos::bus::types::BusError::Invalid("the journal id was refused".to_string())
         })?;
-        let grants = request_journal_grants(&mut WasmBus, &cursor);
+        let grants = request_journal_grants(&mut WasmBus, &mut journal, &cursor);
         let appended = append_journal(
             &mut WasmBus,
             &mut journal,
@@ -8092,7 +8208,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         );
         let followed = match (&grants.write, appended) {
             (None, AppendOutcome::Denied) => {
-                cursor.revision.is_none()
+                grants.write_reason.is_some()
+                    && (grants.read.is_some() || grants.read_reason.is_some())
+                    && cursor.revision.is_none()
                     && journal.steps.last().is_some_and(|step| {
                         step.kind == ProposalKind::JournalAppend && step.state == StepState::Denied
                     })
@@ -9499,13 +9617,13 @@ mod tests {
         let project = "localhost://Users/self/Projects/demo";
         let mut journal = two_turns();
         let run = propose_run(&mut journal, project, &[]).unwrap();
-        assert!(authorize(&mut journal, run, Some("run-grant")));
+        assert!(authorize(&mut journal, run, Some("run-grant")).is_ok());
         assert!(dispatch(&mut journal, run));
         let read = propose_read(&mut journal, project);
-        assert!(authorize(&mut journal, read, Some("read-grant")));
+        assert!(authorize(&mut journal, read, Some("read-grant")).is_ok());
         assert!(dispatch(&mut journal, read));
         let again = propose_run(&mut journal, project, &[]).unwrap();
-        assert!(authorize(&mut journal, again, Some("run-grant-2")));
+        assert!(authorize(&mut journal, again, Some("run-grant-2")).is_ok());
         assert!(!dispatch(&mut journal, again));
     }
 
@@ -9529,7 +9647,7 @@ mod tests {
         assert!(!observe(&mut journal, note, u64::MAX, "hello"));
         assert!(observe(&mut journal, note, u64::MAX - 1, "hello"));
         let edit = propose_edit(&mut journal, note, "hello", "hi", Some(u64::MAX - 1)).unwrap();
-        assert!(authorize(&mut journal, edit, Some("write-grant")));
+        assert!(authorize(&mut journal, edit, Some("write-grant")).is_ok());
         assert!(dispatch(&mut journal, edit));
         let events = journal.events.len();
         assert!(!note_provider_wrote(&mut journal, edit));
@@ -9619,7 +9737,7 @@ mod tests {
             &["note".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(authorize(&mut journal, id, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, id));
         let before = journal.clone();
         assert!(!spill_pointer(&mut journal, id, notes));
@@ -10444,7 +10562,7 @@ mod tests {
         let events = journal.events.clone();
         assert!(!dispatch(&mut journal, second));
         assert_eq!(step_state(&journal, second), Some(StepState::Prepared));
-        assert!(authorize(&mut journal, second, Some("fixture-grant")));
+        assert!(authorize(&mut journal, second, Some("fixture-grant")).is_ok());
         assert!(!dispatch(&mut journal, second));
         assert_eq!(step_state(&journal, second), Some(StepState::Prepared));
         assert!(!record_tool_result(&mut journal, second, "beta replaced"));
@@ -10462,7 +10580,7 @@ mod tests {
         let id = propose_edit(&mut journal, resource, "alpha", "one", Some(1)).unwrap();
         let before = journal.clone();
         assert!(!provider_write_may_be_asked(&journal, id, 1));
-        assert!(authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(authorize(&mut journal, id, Some("fixture-grant")).is_ok());
         assert!(!provider_write_may_be_asked(&journal, id, 2));
         assert!(provider_write_may_be_asked(&journal, id, 1));
         assert_eq!(journal.events, before.events);
@@ -10479,7 +10597,7 @@ mod tests {
                 .has_result
         );
         let read = propose_read(&mut journal, resource);
-        assert!(authorize(&mut journal, read, Some("fixture-grant")));
+        assert!(authorize(&mut journal, read, Some("fixture-grant")).is_ok());
         assert!(!provider_write_may_be_asked(&journal, read, 1));
     }
 
@@ -10514,7 +10632,7 @@ mod tests {
         assert_eq!(step_state(&journal, id), Some(StepState::Cancelled));
         assert_eq!(checkpoint(&journal).unwrap(), before);
         let blocked = propose_run(&mut journal, project, &argv).unwrap();
-        assert!(authorize(&mut journal, blocked, Some("fixture-grant")));
+        assert!(authorize(&mut journal, blocked, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, blocked));
         assert!(!record_run_result(&mut journal, blocked, 0, "ok", ""));
         assert!(
@@ -10820,10 +10938,14 @@ mod tests {
         assert_eq!(step.grant, None);
         assert_eq!(step.state, StepState::Prepared);
         let events = journal.events.clone();
-        assert!(!authorize(&mut journal, id, None));
+        assert_eq!(authorize(&mut journal, id, None), Err("no grant"));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
         assert!(!dispatch(&mut journal, id));
-        assert_eq!(journal.events, events);
+        assert_eq!(without_refusal_records(&journal.events), events);
+        assert_eq!(
+            refusal_records(&journal),
+            vec!["refused: no grant (localhost://Models/hosted)".to_string()]
+        );
         let mut shared = two_turns();
         let project = "localhost://Users/self/Projects/demo";
         let argv = [
@@ -10939,7 +11061,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, parent, Some("fixture-grant")));
+        assert!(authorize(&mut journal, parent, Some("fixture-grant")).is_ok());
         assert_eq!(
             propose_child(
                 &mut journal,
@@ -11288,7 +11410,27 @@ mod tests {
         assert!(project_tree_hash(&[("/tmp/style.css", "body{}")]).is_none());
         assert!(project_tree_hash(&[]).is_none());
         let signer = include_str!("../../../elastos/crates/elastos-server/src/runtime.rs");
-        assert!(signer.contains("Compute content hash (hash the entrypoint file)"));
+        let rule_at = signer
+            .find(
+                "Hash the entrypoint: the bytes already read for a component, the file otherwise.",
+            )
+            .expect("entrypoint hash rule");
+        let verify_at = signer[rule_at..]
+            .find("Verify signature; the matched trusted key names the signer.")
+            .expect("signature check after the entrypoint hash");
+        let rule = &signer[rule_at..rule_at + verify_at];
+        assert!(
+            rule.contains("Some(bytes) => hash_content(bytes),"),
+            "a component admission hashes the entrypoint bytes already read"
+        );
+        assert!(
+            rule.contains("let entrypoint_path = path.join(&manifest.entrypoint);"),
+            "any other admission hashes the entrypoint file"
+        );
+        assert!(
+            rule.contains("hash_content(&tokio::fs::read(&entrypoint_path)"),
+            "the entrypoint file is the hashed bytes"
+        );
     }
 
     #[test]
@@ -11668,7 +11810,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, again, Some("fixture-grant")));
+        assert!(authorize(&mut journal, again, Some("fixture-grant")).is_ok());
         assert!(!record_run_result(&mut journal, again, 0, "ok", ""));
         assert!(dispatch(&mut journal, again));
         assert!(!record_run_result(&mut journal, again, 0, "ok", "/tmp/out"));
@@ -11709,7 +11851,7 @@ mod tests {
             &["true".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(authorize(&mut journal, id, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, id));
         let before = model_bytes(&journal.events);
         assert!(record_run_result(
@@ -11743,7 +11885,7 @@ mod tests {
             &["false".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(authorize(&mut journal, id, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, id));
         assert!(record_run_result(
             &mut journal,
@@ -11766,7 +11908,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, wrong, Some("fixture-grant")));
+        assert!(authorize(&mut journal, wrong, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, wrong));
         assert!(!record_run_result(
             &mut journal,
@@ -11814,7 +11956,7 @@ mod tests {
             1,
             "hello from the project",
         ));
-        assert!(authorize(&mut journal, passed, Some("fixture-grant")));
+        assert!(authorize(&mut journal, passed, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, passed));
         assert!(record_run_result(
             &mut journal,
@@ -11832,7 +11974,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, failed, Some("fixture-grant")));
+        assert!(authorize(&mut journal, failed, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, failed));
         assert!(record_run_result(
             &mut journal,
@@ -11866,7 +12008,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, crossed, Some("fixture-grant")));
+        assert!(authorize(&mut journal, crossed, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, crossed));
         assert!(!record_run_result(
             &mut journal,
@@ -11917,7 +12059,7 @@ mod tests {
             1,
             "body{}",
         ));
-        assert!(authorize(&mut journal, first, Some("fixture-grant")));
+        assert!(authorize(&mut journal, first, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, first));
         assert!(record_run_result(
             &mut journal,
@@ -11941,7 +12083,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, second, Some("fixture-grant")));
+        assert!(authorize(&mut journal, second, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, second));
         assert!(!record_run_result(
             &mut journal,
@@ -11972,7 +12114,7 @@ mod tests {
             current_observed_text(&journal.events, style).as_deref(),
             Some("body{}")
         );
-        assert!(authorize(&mut journal, edit, Some("fixture-grant")));
+        assert!(authorize(&mut journal, edit, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, edit));
         assert!(note_provider_wrote(&mut journal, edit));
         assert!(!note_provider_wrote(&mut journal, edit));
@@ -11997,7 +12139,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, run));
         assert!(!record_run_result(
             &mut journal,
@@ -12042,7 +12184,7 @@ mod tests {
             &["note".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, shown, Some("fixture-grant")));
+        assert!(authorize(&mut journal, shown, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, shown));
         assert!(record_run_result(
             &mut journal,
@@ -12057,7 +12199,7 @@ mod tests {
             &["note".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, hidden, Some("fixture-grant")));
+        assert!(authorize(&mut journal, hidden, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, hidden));
         assert!(!record_run_result(
             &mut journal,
@@ -12093,7 +12235,7 @@ mod tests {
             current_observed_text(&journal.events, notes).as_deref(),
             Some("hello from the project")
         );
-        assert!(authorize(&mut journal, edit, Some("fixture-grant")));
+        assert!(authorize(&mut journal, edit, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, edit));
         assert!(note_provider_wrote(&mut journal, edit));
         assert_eq!(
@@ -12109,7 +12251,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, run));
         assert!(!record_run_result(
             &mut journal,
@@ -12137,7 +12279,7 @@ mod tests {
             &["note".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, spoken, Some("fixture-grant")));
+        assert!(authorize(&mut journal, spoken, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, spoken));
         assert!(!record_run_result(
             &mut journal,
@@ -12159,7 +12301,7 @@ mod tests {
             &["files".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, listed, Some("fixture-grant")));
+        assert!(authorize(&mut journal, listed, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, listed));
         let names = "project file index.html\nproject file notes.txt\nproject file style.css";
         assert!(!record_run_result(
@@ -12179,7 +12321,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, edited_run, Some("fixture-grant")));
+        assert!(authorize(&mut journal, edited_run, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, edited_run));
         assert!(!record_run_result(
             &mut journal,
@@ -12214,7 +12356,7 @@ mod tests {
             "body{}",
         ));
         let run = propose_run(&mut journal, project, &["files".to_string()]).unwrap();
-        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, run));
         assert!(record_run_result(
             &mut journal,
@@ -12224,7 +12366,7 @@ mod tests {
             ""
         ));
         let unread = propose_run(&mut journal, project, &["files".to_string()]).unwrap();
-        assert!(authorize(&mut journal, unread, Some("fixture-grant")));
+        assert!(authorize(&mut journal, unread, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, unread));
         assert!(!record_run_result(
             &mut journal,
@@ -12296,7 +12438,7 @@ mod tests {
         )
         .unwrap();
         for id in [files, note, tested] {
-            assert!(authorize(&mut journal, id, Some("fixture-grant")));
+            assert!(authorize(&mut journal, id, Some("fixture-grant")).is_ok());
             assert!(dispatch(&mut journal, id));
         }
         let effect = |id: u64| {
@@ -12342,7 +12484,7 @@ mod tests {
         assert!(observe(&mut journal, style, 1, "body{}"));
         let edit = propose_edit(&mut journal, style, "body{}", "h1{}", Some(1)).unwrap();
         assert!(observe(&mut journal, style, 2, "body{}\n/* touched */"));
-        assert!(authorize(&mut journal, edit, Some("fixture-grant")));
+        assert!(authorize(&mut journal, edit, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, edit));
         assert!(!note_provider_wrote(&mut journal, edit));
         assert_eq!(step_state(&journal, edit), Some(StepState::Denied));
@@ -12366,7 +12508,7 @@ mod tests {
             Some(2),
         )
         .unwrap();
-        assert!(authorize(&mut journal, follow, Some("fixture-grant")));
+        assert!(authorize(&mut journal, follow, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, follow));
         assert!(note_provider_wrote(&mut journal, follow));
         assert_eq!(
@@ -12388,7 +12530,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, edit, Some("fixture-grant")));
+        assert!(authorize(&mut journal, edit, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, edit));
         assert!(note_crash(&mut journal, edit));
         assert_eq!(
@@ -12411,7 +12553,7 @@ mod tests {
             &["note".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, run));
         assert!(!record_run_result(
             &mut journal,
@@ -12468,7 +12610,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, run, Some("fixture-grant")));
+        assert!(authorize(&mut journal, run, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, run));
         let old = "a1097f0d6ed225ad16b19f19d6a260816af54c74bfe82b11e4ce2020233497f1";
         let rewritten = "8256365b5a513111b73d3ee3b646a78d58c821c9f3cba1346f6f27c0f38dd36d";
@@ -12494,7 +12636,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, sent, Some("fixture-grant")));
+        assert!(authorize(&mut journal, sent, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, sent));
         assert!(!cancel(&mut journal, sent));
         assert_eq!(
@@ -12526,7 +12668,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, edit, Some("fixture-grant")));
+        assert!(authorize(&mut journal, edit, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, edit));
         assert!(note_provider_wrote(&mut journal, edit));
         assert!(!note_crash(&mut journal, edit));
@@ -12569,11 +12711,11 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, edit, Some("fixture-grant")));
+        assert!(authorize(&mut journal, edit, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, edit));
         assert!(note_provider_wrote(&mut journal, edit));
         let reread = propose_run(&mut journal, project, &["note".to_string()]).unwrap();
-        assert!(authorize(&mut journal, reread, Some("fixture-grant")));
+        assert!(authorize(&mut journal, reread, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, reread));
         assert!(!record_run_result(
             &mut journal,
@@ -12598,7 +12740,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, checked, Some("fixture-grant")));
+        assert!(authorize(&mut journal, checked, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, checked));
         assert!(!record_run_result(
             &mut journal,
@@ -12622,7 +12764,7 @@ mod tests {
             Some(2),
         )
         .unwrap();
-        assert!(authorize(&mut journal, pending, Some("fixture-grant")));
+        assert!(authorize(&mut journal, pending, Some("fixture-grant")).is_ok());
         assert!(!observe(&mut journal, notes, 1, "hello again"));
         assert_eq!(
             current_observed_text(&journal.events, notes).as_deref(),
@@ -12654,7 +12796,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, fresh, Some("fixture-grant")));
+        assert!(authorize(&mut journal, fresh, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, fresh));
         assert!(note_provider_wrote(&mut journal, fresh));
         assert_eq!(
@@ -12662,7 +12804,7 @@ mod tests {
             Some("hello again")
         );
         let earlier = propose_run(&mut journal, project, &["note".to_string()]).unwrap();
-        assert!(authorize(&mut journal, earlier, Some("fixture-grant")));
+        assert!(authorize(&mut journal, earlier, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, earlier));
         assert!(!record_run_result(
             &mut journal,
@@ -12687,7 +12829,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, restored, Some("fixture-grant")));
+        assert!(authorize(&mut journal, restored, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, restored));
         assert!(!record_run_result(
             &mut journal,
@@ -12730,7 +12872,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, rewrite, Some("fixture-grant")));
+        assert!(authorize(&mut journal, rewrite, Some("fixture-grant")).is_ok());
         assert!(!dispatch(&mut journal, rewrite));
         assert_eq!(
             current_observed_text(&journal.events, notes).as_deref(),
@@ -12744,7 +12886,7 @@ mod tests {
         assert!(dispatch(&mut journal, rewrite));
         assert!(note_provider_wrote(&mut journal, rewrite));
         let reread = propose_run(&mut journal, project, &["note".to_string()]).unwrap();
-        assert!(authorize(&mut journal, reread, Some("fixture-grant")));
+        assert!(authorize(&mut journal, reread, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, reread));
         assert!(!record_run_result(
             &mut journal,
@@ -12776,7 +12918,7 @@ mod tests {
             .find(|step| step.id == scaffold)
             .unwrap()
             .seen_version = Some(1);
-        assert!(authorize(&mut journal, scaffold, Some("fixture-grant")));
+        assert!(authorize(&mut journal, scaffold, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, scaffold));
         assert!(!note_provider_wrote(&mut journal, scaffold));
         assert_eq!(step_state(&journal, scaffold), Some(StepState::Denied));
@@ -12803,7 +12945,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, follow, Some("fixture-grant")));
+        assert!(authorize(&mut journal, follow, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, follow));
         assert!(note_provider_wrote(&mut journal, follow));
         assert_eq!(
@@ -12841,7 +12983,7 @@ mod tests {
     fn dispatched_summary_step(journal: &mut Journal, required: &[&str]) -> u64 {
         let id = propose_compact_summary(journal, "localhost://Models/hosted", required)
             .expect("a compaction summary request");
-        assert!(authorize(journal, id, Some("fixture-grant")));
+        assert!(authorize(journal, id, Some("fixture-grant")).is_ok());
         assert!(dispatch(journal, id));
         id
     }
@@ -12957,10 +13099,14 @@ mod tests {
         assert!(prompt.contains(SYSTEM_HEAD));
         assert!(prompt.contains("BUILD_ID=7F3A"));
         assert!(!prompt.contains(COMPACTION_SUMMARY));
-        assert!(!authorize(&mut journal, id, None));
+        assert_eq!(authorize(&mut journal, id, None), Err("no grant"));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
         assert!(!dispatch(&mut journal, id));
-        assert_eq!(journal.events, before);
+        assert_eq!(without_refusal_records(&journal.events), before);
+        assert_eq!(
+            refusal_records(&journal),
+            vec!["refused: no grant (localhost://Models/hosted)".to_string()]
+        );
     }
 
     #[test]
@@ -13314,7 +13460,7 @@ mod tests {
     fn a_crash_after_dispatch_is_settlement_unknown() {
         let mut journal = two_turns();
         let id = propose_step(&mut journal);
-        assert!(authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(authorize(&mut journal, id, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, id));
         assert!(!dispatch(&mut journal, id));
         assert!(note_crash(&mut journal, id));
@@ -13496,7 +13642,7 @@ mod tests {
     fn a_grant_is_never_stored() {
         let mut journal = a_rich_journal();
         let read = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        assert!(authorize(&mut journal, read, Some("fixture-grant")));
+        assert!(authorize(&mut journal, read, Some("fixture-grant")).is_ok());
         let standing = propose_read(&mut journal, "localhost://Users/self/Documents/other.txt");
         assert!(apply_inbox(
             &mut journal,
@@ -13684,13 +13830,13 @@ mod tests {
     fn a_read_with_no_grant_is_denied() {
         let mut journal = two_turns();
         let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        assert!(!authorize(&mut journal, id, None));
+        assert!(authorize(&mut journal, id, None).is_err());
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
         assert!(!dispatch(&mut journal, id));
         assert!(!note_crash(&mut journal, id));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
         let empty = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        assert!(!authorize(&mut journal, empty, Some("")));
+        assert!(authorize(&mut journal, empty, Some("")).is_err());
         assert_eq!(step_state(&journal, empty), Some(StepState::Denied));
     }
 
@@ -13698,8 +13844,8 @@ mod tests {
     fn a_second_authorize_stays_denied() {
         let mut journal = two_turns();
         let id = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        assert!(!authorize(&mut journal, id, None));
-        assert!(!authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(authorize(&mut journal, id, None).is_err());
+        assert!(authorize(&mut journal, id, Some("fixture-grant")).is_err());
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
         assert!(!dispatch(&mut journal, id));
         assert_eq!(step_state(&journal, id), Some(StepState::Denied));
@@ -13717,7 +13863,7 @@ mod tests {
         assert!(!dispatch(&mut journal, id));
         assert_eq!(model_bytes(&journal.events).unwrap(), before);
         let granted = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        assert!(authorize(&mut journal, granted, Some("fixture-grant")));
+        assert!(authorize(&mut journal, granted, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, granted));
         assert_eq!(step_state(&journal, granted), Some(StepState::Dispatched));
     }
@@ -13755,7 +13901,7 @@ mod tests {
     fn cancel_after_dispatch_is_not_success() {
         let mut journal = two_turns();
         let id = propose_step(&mut journal);
-        assert!(authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(authorize(&mut journal, id, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, id));
         assert!(!cancel(&mut journal, id));
         assert_eq!(step_state(&journal, id), Some(StepState::Dispatched));
@@ -13774,7 +13920,7 @@ mod tests {
         assert_eq!(model_bytes(&journal.events).unwrap(), before);
         assert_eq!(journal.epoch, epoch);
         let denied = propose_read(&mut journal, "localhost://Users/self/Documents/note.txt");
-        assert!(!authorize(&mut journal, denied, None));
+        assert!(authorize(&mut journal, denied, None).is_err());
         assert!(!cancel(&mut journal, denied));
         assert_eq!(step_state(&journal, denied), Some(StepState::Denied));
     }
@@ -13903,7 +14049,7 @@ mod tests {
         assert_eq!(model_bytes(&journal.events).unwrap(), before_crash);
         let before_send = checkpoint(&journal).unwrap();
         let sent = propose_step(&mut journal);
-        assert!(authorize(&mut journal, sent, Some("fixture-grant")));
+        assert!(authorize(&mut journal, sent, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, sent));
         assert!(note_crash(&mut journal, sent));
         assert_eq!(
@@ -14116,7 +14262,7 @@ mod tests {
         );
         let project = "localhost://Users/self/Projects/demo";
         let quoted = propose_run(&mut journal, project, &["note".to_string()]).unwrap();
-        assert!(authorize(&mut journal, quoted, Some("fixture-grant")));
+        assert!(authorize(&mut journal, quoted, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, quoted));
         assert!(!record_run_result(
             &mut journal,
@@ -14140,7 +14286,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, follow, Some("fixture-grant")));
+        assert!(authorize(&mut journal, follow, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, follow));
         assert!(note_provider_wrote(&mut journal, follow));
         assert_eq!(
@@ -14204,7 +14350,7 @@ mod tests {
             node.source == NodeSource::Skill && node.text == "Prefer the Runtime grant."
         }));
         let listed = propose_run(&mut journal, project, &["files".to_string()]).unwrap();
-        assert!(authorize(&mut journal, listed, Some("fixture-grant")));
+        assert!(authorize(&mut journal, listed, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, listed));
         assert!(!record_run_result(
             &mut journal,
@@ -14229,7 +14375,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, checked, Some("fixture-grant")));
+        assert!(authorize(&mut journal, checked, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, checked));
         assert!(record_run_result(
             &mut journal,
@@ -14425,7 +14571,7 @@ mod tests {
         )
         .unwrap();
         assert!(!spill_pointer(&mut journal, id, notes));
-        assert!(authorize(&mut journal, id, Some("fixture-grant")));
+        assert!(authorize(&mut journal, id, Some("fixture-grant")).is_ok());
         assert!(!spill_pointer(&mut journal, id, notes));
         assert!(dispatch(&mut journal, id));
         assert!(!spill_pointer(&mut journal, id, "/tmp/secret"));
@@ -14463,7 +14609,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        assert!(authorize(&mut journal, moved, Some("fixture-grant")));
+        assert!(authorize(&mut journal, moved, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, moved));
         assert!(note_provider_wrote(&mut journal, moved));
         assert_eq!(
@@ -14484,7 +14630,7 @@ mod tests {
             &["note".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, again, Some("fixture-grant")));
+        assert!(authorize(&mut journal, again, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, again));
         assert!(spill_pointer(&mut journal, again, notes));
         assert_eq!(
@@ -14518,7 +14664,7 @@ mod tests {
             &["files".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, styled, Some("fixture-grant")));
+        assert!(authorize(&mut journal, styled, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, styled));
         assert!(spill_pointer(&mut journal, styled, style));
         assert_eq!(
@@ -14537,14 +14683,14 @@ mod tests {
             &["note".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, parent, Some("fixture-grant")));
+        assert!(authorize(&mut journal, parent, Some("fixture-grant")).is_ok());
         let child = propose_child(
             &mut journal,
             parent,
             "localhost://Users/self/Projects/demo/src",
         )
         .unwrap();
-        assert!(authorize(&mut journal, child, Some("child-grant")));
+        assert!(authorize(&mut journal, child, Some("child-grant")).is_ok());
         assert!(dispatch(&mut journal, child));
         assert!(!spill_pointer(&mut journal, child, notes));
         assert!(spill_pointer(&mut journal, child, main));
@@ -14598,9 +14744,9 @@ mod tests {
         let first = propose_run(&mut journal, project, &["note".to_string()]).unwrap();
         let second = propose_run(&mut journal, project, &["files".to_string()]).unwrap();
         let third = propose_run(&mut journal, project, &["note".to_string()]).unwrap();
-        assert!(authorize(&mut journal, first, Some("fixture-grant")));
-        assert!(authorize(&mut journal, second, Some("fixture-grant")));
-        assert!(authorize(&mut journal, third, Some("fixture-grant")));
+        assert!(authorize(&mut journal, first, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, second, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, third, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, first));
         assert!(!dispatch(&mut journal, third));
         let other = propose_run(
@@ -14609,7 +14755,7 @@ mod tests {
             &["note".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, other, Some("fixture-grant")));
+        assert!(authorize(&mut journal, other, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, other));
         assert_eq!(step_state(&journal, third), Some(StepState::Prepared));
         assert!(journal
@@ -14623,8 +14769,8 @@ mod tests {
         assert!(record_run_result(&mut journal, third, 0, "ok", ""));
         let crashed = propose_run(&mut journal, project, &["note".to_string()]).unwrap();
         let waiting = propose_run(&mut journal, project, &["note".to_string()]).unwrap();
-        assert!(authorize(&mut journal, crashed, Some("fixture-grant")));
-        assert!(authorize(&mut journal, waiting, Some("fixture-grant")));
+        assert!(authorize(&mut journal, crashed, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, waiting, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, crashed));
         assert!(!dispatch(&mut journal, waiting));
         assert!(note_crash(&mut journal, crashed));
@@ -14657,9 +14803,9 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, ready, Some("fixture-grant")));
-        assert!(authorize(&mut journal, missing, Some("fixture-grant")));
-        assert!(authorize(&mut journal, ready_again, Some("fixture-grant")));
+        assert!(authorize(&mut journal, ready, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, missing, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, ready_again, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, ready));
         assert!(dispatch(&mut journal, missing));
         assert!(!dispatch(&mut journal, ready_again));
@@ -14684,11 +14830,7 @@ mod tests {
         assert!(journal.steps.iter().any(|step| {
             step.id == missing && step.state == StepState::Dispatched && !step.has_result
         }));
-        assert!(authorize(
-            &mut journal,
-            missing_again,
-            Some("fixture-grant")
-        ));
+        assert!(authorize(&mut journal, missing_again, Some("fixture-grant")).is_ok());
         assert!(!dispatch(&mut journal, missing_again));
         assert_eq!(
             step_state(&journal, missing_again),
@@ -14735,7 +14877,7 @@ mod tests {
             "test result: ok",
             ""
         ));
-        assert!(authorize(&mut journal, ready_third, Some("fixture-grant")));
+        assert!(authorize(&mut journal, ready_third, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, ready_third));
         assert!(!dispatch(&mut journal, missing_again));
         assert_eq!(
@@ -14778,11 +14920,7 @@ mod tests {
             step_state(&journal, missing_again),
             Some(StepState::Cancelled)
         );
-        assert!(authorize(
-            &mut journal,
-            missing_third,
-            Some("fixture-grant")
-        ));
+        assert!(authorize(&mut journal, missing_third, Some("fixture-grant")).is_ok());
         assert!(!dispatch(&mut journal, missing_third));
         assert_eq!(
             step_state(&journal, missing_third),
@@ -14800,7 +14938,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, elsewhere, Some("fixture-grant")));
+        assert!(authorize(&mut journal, elsewhere, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, elsewhere));
         assert!(record_run_result(
             &mut journal,
@@ -14846,11 +14984,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(
-            &mut journal,
-            elsewhere_again,
-            Some("fixture-grant")
-        ));
+        assert!(authorize(&mut journal, elsewhere_again, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, elsewhere_again));
         assert!(!dispatch(&mut journal, missing_third));
         assert_eq!(
@@ -14886,11 +15020,7 @@ mod tests {
             step_state(&journal, elsewhere_again),
             Some(StepState::SettlementUnknown)
         );
-        assert!(authorize(
-            &mut journal,
-            elsewhere_third,
-            Some("fixture-grant")
-        ));
+        assert!(authorize(&mut journal, elsewhere_third, Some("fixture-grant")).is_ok());
         assert!(!dispatch(&mut journal, elsewhere_third));
         assert_eq!(
             step_state(&journal, elsewhere_third),
@@ -14931,7 +15061,7 @@ mod tests {
             "test result: ok",
             ""
         ));
-        assert!(authorize(&mut journal, ready_fourth, Some("fixture-grant")));
+        assert!(authorize(&mut journal, ready_fourth, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, ready_fourth));
         assert!(!dispatch(&mut journal, missing_third));
         assert!(!dispatch(&mut journal, elsewhere_third));
@@ -14975,13 +15105,9 @@ mod tests {
         )
         .unwrap();
         let demo_true_again = propose_run(&mut journal, project, &["true".to_string()]).unwrap();
-        assert!(authorize(&mut journal, demo_true, Some("fixture-grant")));
-        assert!(authorize(&mut journal, other_true, Some("fixture-grant")));
-        assert!(authorize(
-            &mut journal,
-            demo_true_again,
-            Some("fixture-grant")
-        ));
+        assert!(authorize(&mut journal, demo_true, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, other_true, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, demo_true_again, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, demo_true));
         assert!(!dispatch(&mut journal, demo_true_again));
         assert_eq!(
@@ -15049,13 +15175,9 @@ mod tests {
         )
         .unwrap();
         let demo_false_again = propose_run(&mut journal, project, &["false".to_string()]).unwrap();
-        assert!(authorize(&mut journal, demo_false, Some("fixture-grant")));
-        assert!(authorize(&mut journal, other_false, Some("fixture-grant")));
-        assert!(authorize(
-            &mut journal,
-            demo_false_again,
-            Some("fixture-grant")
-        ));
+        assert!(authorize(&mut journal, demo_false, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, other_false, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, demo_false_again, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, demo_false));
         assert!(!dispatch(&mut journal, demo_false_again));
         assert_eq!(
@@ -15154,8 +15276,8 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, edited, Some("fixture-grant")));
-        assert!(authorize(&mut journal, edited_again, Some("fixture-grant")));
+        assert!(authorize(&mut journal, edited, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, edited_again, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, edited));
         assert!(!dispatch(&mut journal, edited_again));
         assert_eq!(
@@ -15285,8 +15407,8 @@ mod tests {
             &["files".to_string()],
         )
         .unwrap();
-        assert!(authorize(&mut journal, files_again, Some("fixture-grant")));
-        assert!(authorize(&mut journal, other_files, Some("fixture-grant")));
+        assert!(authorize(&mut journal, files_again, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, other_files, Some("fixture-grant")).is_ok());
         assert!(!dispatch(&mut journal, files_again));
         assert_eq!(step_state(&journal, files_again), Some(StepState::Prepared));
         assert!(dispatch(&mut journal, other_files));
@@ -15450,7 +15572,7 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, other_ready, Some("fixture-grant")));
+        assert!(authorize(&mut journal, other_ready, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, other_ready));
         assert!(!record_run_result(
             &mut journal,
@@ -15521,7 +15643,7 @@ mod tests {
         )
         .unwrap();
         assert!(observe(&mut journal, &style, 2, "h1{}"));
-        assert!(authorize(&mut journal, ready_fifth, Some("fixture-grant")));
+        assert!(authorize(&mut journal, ready_fifth, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, ready_fifth));
         assert!(!record_run_result(
             &mut journal,
@@ -15566,7 +15688,7 @@ mod tests {
             .windows(b"fixture-grant".len())
             .any(|window| window == b"fixture-grant"));
         let files_after = propose_run(&mut journal, project, &["files".to_string()]).unwrap();
-        assert!(authorize(&mut journal, files_after, Some("fixture-grant")));
+        assert!(authorize(&mut journal, files_after, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, files_after));
         assert!(!record_run_result(
             &mut journal,
@@ -15596,7 +15718,7 @@ mod tests {
             .iter()
             .any(|step| step.id == files_after && step.has_result));
         let files_unread = propose_run(&mut journal, project, &["files".to_string()]).unwrap();
-        assert!(authorize(&mut journal, files_unread, Some("fixture-grant")));
+        assert!(authorize(&mut journal, files_unread, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, files_unread));
         assert!(!record_run_result(
             &mut journal,
@@ -15651,8 +15773,8 @@ mod tests {
         )
         .unwrap();
         assert!(observe(&mut journal, &page, 1, "<h1>demo</h1>"));
-        assert!(authorize(&mut journal, files_page, Some("fixture-grant")));
-        assert!(authorize(&mut journal, ready_page, Some("fixture-grant")));
+        assert!(authorize(&mut journal, files_page, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, ready_page, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, files_page));
         assert!(dispatch(&mut journal, ready_page));
         assert!(!record_run_result(
@@ -15733,8 +15855,8 @@ mod tests {
         .unwrap();
         let files_next = propose_run(&mut journal, project, &["files".to_string()]).unwrap();
         assert!(observe(&mut journal, &page, 2, "<h1>next</h1>"));
-        assert!(authorize(&mut journal, ready_next, Some("fixture-grant")));
-        assert!(authorize(&mut journal, files_next, Some("fixture-grant")));
+        assert!(authorize(&mut journal, ready_next, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, files_next, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, ready_next));
         assert!(dispatch(&mut journal, files_next));
         assert!(!record_run_result(
@@ -15809,7 +15931,7 @@ mod tests {
             Some("<h1>next</h1>")
         );
         assert!(observe(&mut journal, &page, 1, "<h1>demo</h1>"));
-        assert!(authorize(&mut journal, ready_older, Some("fixture-grant")));
+        assert!(authorize(&mut journal, ready_older, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, ready_older));
         assert!(!record_run_result(
             &mut journal,
@@ -15901,8 +16023,8 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, files_clean, Some("fixture-grant")));
-        assert!(authorize(&mut journal, ready_clean, Some("fixture-grant")));
+        assert!(authorize(&mut journal, files_clean, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, ready_clean, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, files_clean));
         assert!(dispatch(&mut journal, ready_clean));
         assert!(!record_run_result(
@@ -16021,8 +16143,8 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(authorize(&mut journal, files_kept, Some("fixture-grant")));
-        assert!(authorize(&mut journal, ready_kept, Some("fixture-grant")));
+        assert!(authorize(&mut journal, files_kept, Some("fixture-grant")).is_ok());
+        assert!(authorize(&mut journal, ready_kept, Some("fixture-grant")).is_ok());
         assert!(dispatch(&mut journal, files_kept));
         assert!(dispatch(&mut journal, ready_kept));
         assert!(!record_run_result(
@@ -17066,7 +17188,8 @@ mod tests {
     #[test]
     fn the_guest_asks_for_exactly_two_grants_on_its_own_journal() {
         let (mut runtime, cursor) = fake_runtime();
-        let grants = request_journal_grants(&mut runtime, &cursor);
+        let mut grant_log = empty_journal();
+        let grants = request_journal_grants(&mut runtime, &mut grant_log, &cursor);
         assert_eq!(
             grants.write.as_ref().map(JournalGrant::id),
             Some(WRITE_GRANT)
@@ -17098,9 +17221,11 @@ mod tests {
     fn a_refused_grant_request_sends_nothing() {
         let (mut runtime, mut cursor) = fake_runtime();
         runtime.refuse_grants = true;
-        let grants = request_journal_grants(&mut runtime, &cursor);
-        assert!(grants.write.is_none() && grants.read.is_none());
         let mut journal = two_turns();
+        let grants = request_journal_grants(&mut runtime, &mut journal, &cursor);
+        assert!(grants.write.is_none() && grants.read.is_none());
+        assert_eq!(grants.write_reason, Some("grant denied"));
+        assert_eq!(grants.read_reason, Some("grant denied"));
         assert_eq!(
             append_journal(
                 &mut runtime,
@@ -17127,13 +17252,203 @@ mod tests {
             "localhost://Users/self/.AppData/Agents/../../Documents/journal",
         ] {
             cursor.resource = resource.to_string();
-            let grants = request_journal_grants(&mut runtime, &cursor);
+            let mut journal = empty_journal();
+            let grants = request_journal_grants(&mut runtime, &mut journal, &cursor);
             assert!(
                 grants.write.is_none() && grants.read.is_none(),
                 "{resource}"
             );
         }
         assert!(runtime.calls.is_empty());
+    }
+
+    /// One reply per journal action, so a test can tell a denied ask from an
+    /// invalid one.
+    struct SplitGrantBus {
+        write: Result<String, BusFailure>,
+        read: Result<String, BusFailure>,
+    }
+
+    impl ResourceBus for SplitGrantBus {
+        fn request_grant(
+            &mut self,
+            _resource: &str,
+            action: &str,
+            _reason: &str,
+        ) -> Result<String, BusFailure> {
+            match action {
+                "write" => self.write.clone(),
+                "read" => self.read.clone(),
+                _ => Err(BusFailure::Invalid),
+            }
+        }
+
+        fn invoke(
+            &mut self,
+            _resource: &str,
+            _operation: &str,
+            _body: &[u8],
+            _grant: &str,
+        ) -> Result<Vec<u8>, BusFailure> {
+            Err(BusFailure::Denied)
+        }
+    }
+
+    /// A refusal returns its reason and writes that reason into the journal.
+    /// Dropping the record, or turning every Bus error into one empty grant,
+    /// fails this test. The record survives encode and decode.
+    #[test]
+    fn a_dropped_grant_reason_is_visible() {
+        let note = "localhost://Users/self/Documents/note.txt";
+        let mut journal = empty_journal();
+        assert_eq!(
+            authorize(&mut journal, 7, Some("fixture-grant")),
+            Err("unknown step")
+        );
+        assert_eq!(
+            refusal_records(&journal),
+            vec!["refused: unknown step (step 7)".to_string()]
+        );
+        assert!(grant_refusal_is(&journal.events, "unknown step", "step 7"));
+        assert!(events_under_grant_refusal(&journal.events).is_empty());
+        let bytes = encode_journal(&journal, &[0; 32]).unwrap();
+        let (back, _, _) = decode_journal(&bytes).unwrap();
+        assert_eq!(refusal_records(&back), refusal_records(&journal));
+
+        let mut journal = empty_journal();
+        let cancelled = propose_read(&mut journal, note);
+        assert!(cancel(&mut journal, cancelled));
+        assert_eq!(
+            authorize(&mut journal, cancelled, Some("fixture-grant")),
+            Err("step is not prepared")
+        );
+        assert_eq!(step_state(&journal, cancelled), Some(StepState::Cancelled));
+        assert!(journal
+            .steps
+            .iter()
+            .find(|step| step.id == cancelled)
+            .unwrap()
+            .grant
+            .is_none());
+        assert_eq!(
+            refusal_records(&journal),
+            vec![format!("refused: step is not prepared ({note})")]
+        );
+
+        let mut journal = empty_journal();
+        let missing = propose_read(&mut journal, note);
+        assert_eq!(authorize(&mut journal, missing, None), Err("no grant"));
+        assert_eq!(step_state(&journal, missing), Some(StepState::Denied));
+        let empty = propose_read(&mut journal, note);
+        assert_eq!(authorize(&mut journal, empty, Some("")), Err("no grant"));
+        assert_eq!(
+            refusal_records(&journal),
+            vec![
+                format!("refused: no grant ({note})"),
+                format!("refused: no grant ({note})"),
+            ]
+        );
+        let granted = propose_read(&mut journal, note);
+        let before_grant = journal.events.clone();
+        assert_eq!(
+            authorize(&mut journal, granted, Some("fixture-grant")),
+            Ok(())
+        );
+        assert_eq!(journal.events, before_grant);
+        assert_eq!(
+            journal
+                .steps
+                .iter()
+                .find(|step| step.id == granted)
+                .unwrap()
+                .grant
+                .as_deref(),
+            Some("fixture-grant")
+        );
+
+        let cursor = journal_cursor("demo-agent", "task-1").unwrap();
+        let mut journal = empty_journal();
+        let mut bus = SplitGrantBus {
+            write: Err(BusFailure::Invalid),
+            read: Err(BusFailure::Denied),
+        };
+        let grants = request_journal_grants(&mut bus, &mut journal, &cursor);
+        assert!(grants.write.is_none() && grants.read.is_none());
+        assert_eq!(grants.write_reason, Some("grant invalid"));
+        assert_eq!(grants.read_reason, Some("grant denied"));
+        assert_ne!(grants.write_reason, grants.read_reason);
+        assert_eq!(
+            refusal_records(&journal),
+            vec![
+                format!("refused: grant invalid (write {})", cursor.resource),
+                format!("refused: grant denied (read {})", cursor.resource),
+            ]
+        );
+        let stored = encode_journal(&journal, &[0; 32]).unwrap();
+        assert_eq!(
+            refusal_records(&decode_journal(&stored).unwrap().0),
+            refusal_records(&journal)
+        );
+
+        let mut journal = empty_journal();
+        let mut bus = SplitGrantBus {
+            write: Err(BusFailure::Other),
+            read: Ok(String::new()),
+        };
+        let grants = request_journal_grants(&mut bus, &mut journal, &cursor);
+        assert_eq!(grants.write_reason, Some("grant outcome unknown"));
+        assert_eq!(grants.read_reason, Some("grant invalid"));
+        assert_eq!(
+            refusal_records(&journal),
+            vec![
+                format!("refused: grant outcome unknown (write {})", cursor.resource),
+                format!("refused: grant invalid (read {})", cursor.resource),
+            ]
+        );
+
+        let mut journal = empty_journal();
+        let mut bus = SplitGrantBus {
+            write: Ok("write-grant".to_string()),
+            read: Ok("read-grant".to_string()),
+        };
+        let grants = request_journal_grants(&mut bus, &mut journal, &cursor);
+        assert_eq!(
+            grants.write.as_ref().map(JournalGrant::id),
+            Some("write-grant")
+        );
+        assert_eq!(
+            grants.read.as_ref().map(JournalGrant::id),
+            Some("read-grant")
+        );
+        assert_eq!(grants.write_reason, None);
+        assert_eq!(grants.read_reason, None);
+        assert!(refusal_records(&journal).is_empty());
+
+        let (mut runtime, mut cursor) = fake_runtime();
+        cursor.resource = "localhost://Users/self".to_string();
+        let mut journal = empty_journal();
+        let grants = request_journal_grants(&mut runtime, &mut journal, &cursor);
+        assert!(runtime.calls.is_empty());
+        assert_eq!(grants.write_reason, Some("journal resource"));
+        assert_eq!(grants.read_reason, Some("journal resource"));
+        assert_eq!(
+            refusal_records(&journal),
+            vec![
+                format!("refused: journal resource (write {})", cursor.resource),
+                format!("refused: journal resource (read {})", cursor.resource),
+            ]
+        );
+
+        cursor.resource =
+            "localhost://Users/self/.AppData/Agents/../../Documents/journal".to_string();
+        let mut journal = empty_journal();
+        let grants = request_journal_grants(&mut runtime, &mut journal, &cursor);
+        assert!(runtime.calls.is_empty());
+        assert_eq!(grants.write_reason, Some("host path"));
+        assert_eq!(
+            refusal_records(&journal)[0],
+            format!("refused: host path (write {})", cursor.resource)
+        );
     }
 
     // omp idea 1: seen range and edit binding.
@@ -17152,7 +17467,7 @@ mod tests {
 
     fn granted(journal: &mut Journal, ids: &[u64]) {
         for id in ids {
-            assert!(authorize(journal, *id, Some("fixture-grant")));
+            assert!(authorize(journal, *id, Some("fixture-grant")).is_ok());
         }
         for id in ids {
             assert!(dispatch(journal, *id), "dispatch {id}");
@@ -19628,7 +19943,7 @@ mod tests {
                 let Ok(run) = propose_run(journal, &session_project(index), &argv) else {
                     return false;
                 };
-                authorize(journal, run, Some(&format!("{index}-run-grant")))
+                authorize(journal, run, Some(&format!("{index}-run-grant"))).is_ok()
                     && dispatch(journal, run)
                     && record_tool_result(journal, run, &format!("{mark} tool result ok"))
             }
@@ -19765,7 +20080,7 @@ mod tests {
         assert_eq!(first_run, second_run);
         let second_view = checkpoint(&second).unwrap();
 
-        assert!(authorize(&mut first, first_run, Some("session-a-grant")));
+        assert!(authorize(&mut first, first_run, Some("session-a-grant")).is_ok());
         assert!(dispatch(&mut first, first_run));
         assert_eq!(step_state(&first, first_run), Some(StepState::Dispatched));
 
@@ -20428,7 +20743,8 @@ mod tests {
     fn the_two_journal_requests_fit_the_manifest_asks() {
         let cursor = journal_cursor("agent-host", "demo").expect("the guest's journal id");
         let mut bus = GrantRequestLog { calls: Vec::new() };
-        let _grants = request_journal_grants(&mut bus, &cursor);
+        let mut journal = empty_journal();
+        let _grants = request_journal_grants(&mut bus, &mut journal, &cursor);
         assert_eq!(
             bus.calls,
             vec![

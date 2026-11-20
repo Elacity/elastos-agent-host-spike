@@ -547,8 +547,8 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/serve_cmd.rs",
-            "run_serve",
-            "vm_provider.load",
+            "load_microvm_capsule",
+            "provider.load",
             "VM capsule",
             "none",
             "P2-8",

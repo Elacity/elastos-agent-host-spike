@@ -4,6 +4,88 @@
 use super::*;
 use serde_json::{json, Value};
 
+static DISPATCH_FIXTURES: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn dispatch_fixture_enabled(data_dir: &Path) -> bool {
+    DISPATCH_FIXTURES
+        .get()
+        .is_some_and(|homes| homes.lock().unwrap().contains(data_dir))
+}
+
+pub(crate) fn plant_for_dispatch(data_dir: &Path, owner_id: &str, admin_id: &str) -> String {
+    crate::auth::store_test_principal_root_protection(data_dir, owner_id);
+    make_admin(data_dir, admin_id);
+    let admin = crate::auth::stored_principal_record(data_dir, admin_id)
+        .unwrap()
+        .unwrap();
+    let admin_caller = Caller {
+        principal_id: admin_id,
+        proof_binding_id: &admin.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    set_enabled_in_any_build(data_dir, &admin_caller, true, 9).unwrap();
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let owner_caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    let id = create_in_any_build(
+        data_dir,
+        &owner_caller,
+        &request("request-dispatch"),
+        admit,
+        10,
+    )
+    .unwrap()
+    .agent_id;
+    let opened = open(data_dir, true).unwrap();
+    let mut after = opened.file.clone();
+    let agent = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == id)
+        .unwrap();
+    agent.active = true;
+    agent.record.updated_at = 11;
+    after.sequence += 1;
+    write(
+        data_dir,
+        &opened,
+        Operation::SetActive,
+        &after,
+        &owner_caller,
+        &id,
+        11,
+    )
+    .unwrap();
+    DISPATCH_FIXTURES
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(data_dir.to_path_buf());
+    id
+}
+
+pub(crate) fn stop_dispatch_agent(data_dir: &Path, owner_id: &str, agent_id: &str, disable: bool) {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    if disable {
+        set_enabled_in_any_build(data_dir, &caller, false, 20).unwrap();
+    } else {
+        retire_in_any_build(data_dir, &caller, agent_id, 20).unwrap();
+    }
+}
+
 #[path = "frozen_audit_v2_0_1.rs"]
 mod frozen_audit;
 
@@ -1173,6 +1255,38 @@ fn a_create_leaves_one_record_and_one_protection_in_the_agent_file_only() {
     let digest = hex::encode(Sha256::digest(home.agent_bytes()));
     assert_eq!(event.reason, format!("seq=2 sha256={digest}"));
     assert_eq!(events.len(), 2, "one event for enable and one for create");
+}
+
+#[test]
+fn the_list_returns_whether_each_agent_is_on() {
+    let home = Home::new();
+    turn_on(&home);
+    let created = create_one(&home, "request-list");
+    let caller = home.caller();
+    let off = serde_json::json!({ "agents": list_in_any_build(home.path(), &caller).unwrap() });
+    assert_eq!(off["agents"][0]["agent_id"], json!(created.agent_id));
+    assert_eq!(
+        off["agents"][0]["active"],
+        json!(false),
+        "the_list_returns_whether_each_agent_is_on"
+    );
+    write_change(&home, Operation::SetActive, |file| {
+        let agent = &mut file.agents[0];
+        agent.active = true;
+        agent.record.updated_at = 10;
+    })
+    .unwrap();
+    // On disk an agent that is on omits the field. The list still says on.
+    let stored: Value = serde_json::from_slice(&home.agent_bytes()).unwrap();
+    assert!(stored["agents"][0].get("active").is_none());
+    let on = serde_json::json!({
+        "agents": list_in_any_build(home.path(), &home.caller()).unwrap()
+    });
+    assert_eq!(
+        on["agents"][0]["active"],
+        json!(true),
+        "the_list_returns_whether_each_agent_is_on"
+    );
 }
 
 #[test]
