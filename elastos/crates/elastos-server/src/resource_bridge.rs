@@ -6,6 +6,7 @@
 //! Wire format: newline-delimited JSON matching `RequestEnvelope` / `ResponseEnvelope`
 //! from `elastos-guest::runtime`.
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,7 +21,9 @@ use elastos_common::localhost::{
     is_supported_resource_scheme, is_system_only_backend_resource, rooted_localhost_fs_path,
     rooted_localhost_uri,
 };
+use elastos_common::AuthorityBound;
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use elastos_runtime::auth::RuntimeAuditEventV1;
@@ -30,6 +33,259 @@ use elastos_runtime::provider::ProviderRegistry;
 const CAPABILITY_APPROVAL_POLL_MS: u64 = 100;
 const CAPABILITY_APPROVAL_MAX_POLLS: usize = 300;
 const MAX_RESOURCE_FRAME_BYTES: usize = 1_048_576;
+
+/// The name a content launch binds for its program, and the pattern that
+/// program asks for and is granted: a read of the bare name is the listing,
+/// a read of a name under it is that file of the content.
+pub const LAUNCH_CONTENT: &str = "elastos://launch/content/";
+/// Every name of a launch starts so. The bridge answers each itself, at
+/// once: none is put to the shell and none reaches a provider.
+pub const LAUNCH_NAMES: &str = "elastos://launch/";
+/// The bridge's one answer where no launch binds the name for the caller.
+const NO_LAUNCH: &str = "no content launch binds this name for this capsule";
+pub const LAUNCH_CONTENT_PATTERN: &str = "elastos://launch/content/*";
+/// The listing of a launch's content may be this long as text, no longer.
+pub const LAUNCH_LISTING_MAX_BYTES: usize = 256 * 1024;
+/// Where the program of a content launch writes what it makes for the
+/// launch (the photo core, its playlist): names directly under this, kept
+/// in the launch's memory and gone with it. The program asks for the
+/// pattern, to write and to read.
+pub const LAUNCH_OUTPUT: &str = "elastos://launch/output/";
+pub const LAUNCH_OUTPUT_PATTERN: &str = "elastos://launch/output/*";
+/// All of one launch's output together may be this large, no larger: each
+/// name's bytes and the bytes of its contents count.
+pub const LAUNCH_OUTPUT_MAX_BYTES: usize = 64 * 1024;
+/// And it may hold this many names, no more.
+pub const LAUNCH_OUTPUT_MAX_NAMES: usize = 16;
+
+/// What one content launch lets its program read: the content bundle's
+/// files exactly as the start's walk read them, and their listing, made
+/// once. The store is not read again for either. The listing is the one
+/// format the Runtime owns here: a schema name and, for each file in the
+/// order of its path, `path` and `size`. And what the program writes for the
+/// launch, its output, kept here and nowhere else: it goes when the launch
+/// is over, with this value.
+pub struct LaunchContent {
+    files: BTreeMap<String, Vec<u8>>,
+    listing: Vec<u8>,
+    /// What the program has written for the launch, by name.
+    output: std::sync::Mutex<BTreeMap<String, Vec<u8>>>,
+    /// The sha256 of a content file, by its path: made once, on the first
+    /// digest asked for, and kept, so one launch hashes each file at most once.
+    digests: std::sync::Mutex<HashMap<String, String>>,
+    /// How many times this launch has hashed a file: a test's window onto
+    /// the memo. It is not part of the product.
+    #[cfg(test)]
+    hashes: std::sync::atomic::AtomicUsize,
+}
+
+/// One plain name of a launch's output: letters, digits, `.`, `_` and `-`,
+/// not `.` or `..`, at most 128 bytes. The writer keeps only such names, and
+/// the gateway asks the Runtime for no other.
+pub(crate) fn plain_output_name(name: &str) -> bool {
+    let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"._-".contains(&byte);
+    !matches!(name, "" | "." | "..") && name.len() <= 128 && name.bytes().all(plain)
+}
+
+/// Why a write to a launch's output was refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OutputRefusal {
+    /// The name is not one plain name directly under the output.
+    Name,
+    /// The output would be larger than a launch keeps.
+    TooLarge,
+}
+
+impl LaunchContent {
+    /// `Err` holds the listing's length when it would pass the cap.
+    pub fn new(files: BTreeMap<String, Vec<u8>>) -> std::result::Result<Self, usize> {
+        let entry = |(path, bytes): (&String, &Vec<u8>)| serde_json::json!({"path": path, "size": bytes.len()});
+        let listed: Vec<_> = files.iter().map(entry).collect();
+        let listing =
+            serde_json::json!({"schema": "elastos.launch.content-listing/v1", "files": listed});
+        let listing = listing.to_string().into_bytes();
+        match listing.len() > LAUNCH_LISTING_MAX_BYTES {
+            true => Err(listing.len()),
+            false => Ok(Self {
+                files,
+                listing,
+                output: std::sync::Mutex::default(),
+                digests: std::sync::Mutex::default(),
+                #[cfg(test)]
+                hashes: std::sync::atomic::AtomicUsize::new(0),
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn paths(&self) -> Vec<String> {
+        self.files.keys().cloned().collect()
+    }
+
+    /// What a read of `name` gets: the listing for the bare name, and for a
+    /// name under it the file with exactly that path. The path is looked up
+    /// as text among the files the walk read; it is joined onto no folder.
+    pub(crate) fn read(&self, name: &str) -> Option<Vec<u8>> {
+        if let Some(name) = name.strip_prefix(LAUNCH_OUTPUT) {
+            let output = self.output.lock().unwrap_or_else(|it| it.into_inner());
+            return output.get(name).cloned();
+        }
+        match name.strip_prefix(LAUNCH_CONTENT)? {
+            "" => Some(self.listing.clone()),
+            path => self.files.get(path).cloned(),
+        }
+    }
+
+    /// The size of the content file at `path` and its sha256, as 64 lowercase
+    /// hex digits, over the whole file: the bytes `read` serves, all of them.
+    /// The digest is made on the first ask and kept for this launch. A name
+    /// the content does not hold gets nothing.
+    pub(crate) fn digest(&self, path: &str) -> Option<(usize, String)> {
+        let bytes = self.files.get(path)?;
+        let mut digests = self.digests.lock().unwrap_or_else(|it| it.into_inner());
+        let sha256 = digests.entry(path.to_string()).or_insert_with(|| {
+            #[cfg(test)]
+            self.hashes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            format!("{:x}", Sha256::digest(bytes))
+        });
+        Some((bytes.len(), sha256.clone()))
+    }
+
+    /// Write `bytes` under `name` in the launch's output, in place of what
+    /// was there. A name is one plain name directly under the output: letters,
+    /// digits, `.`, `_` and `-`, not `.` or `..`, at most 128 bytes. All the
+    /// output together, names and contents, stays within the byte cap, and it
+    /// holds at most so many names; a write past either changes nothing.
+    #[cfg(test)]
+    pub(crate) fn write_for_test(
+        &self,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<usize, OutputRefusal> {
+        self.write(name, bytes)
+    }
+
+    fn write(&self, name: &str, bytes: Vec<u8>) -> std::result::Result<usize, OutputRefusal> {
+        let name = name
+            .strip_prefix(LAUNCH_OUTPUT)
+            .ok_or(OutputRefusal::Name)?;
+        if !plain_output_name(name) {
+            return Err(OutputRefusal::Name);
+        }
+        let mut output = self.output.lock().unwrap_or_else(|it| it.into_inner());
+        let others: usize = output
+            .iter()
+            .filter(|(kept, _)| kept.as_str() != name)
+            .map(|(kept, contents)| kept.len() + contents.len())
+            .sum();
+        let names = output.len() + usize::from(!output.contains_key(name));
+        let bytes_after = others + name.len() + bytes.len();
+        if names > LAUNCH_OUTPUT_MAX_NAMES || bytes_after > LAUNCH_OUTPUT_MAX_BYTES {
+            return Err(OutputRefusal::TooLarge);
+        }
+        let size = bytes.len();
+        output.insert(name.to_string(), bytes);
+        Ok(size)
+    }
+}
+
+/// The bridge's own answer to a launch name, for the caller whose launch this
+/// is: a read gets the bytes, in the window asked for; a write to the output
+/// is kept; anything else, or a caller with no launch, gets `not_found`. Its
+/// caller has already held the request to the ceiling and to the token.
+fn launch_response(
+    launch: Option<&LaunchContent>,
+    operation: &str,
+    request: &serde_json::Value,
+) -> serde_json::Value {
+    let name = request["path"].as_str().unwrap_or_default();
+    let Some(launch) = launch else {
+        return resource_error_response("not_found", NO_LAUNCH);
+    };
+    // A digest names one file of the content, whole: `offset` and `length`
+    // are no part of it, and neither the listing nor the output has one.
+    if operation == "digest" {
+        let held = name
+            .strip_prefix(LAUNCH_CONTENT)
+            .filter(|path| !path.is_empty());
+        return match held.and_then(|path| launch.digest(path)) {
+            Some((size, sha256)) => provider_ok_result(serde_json::json!({
+                "path": name, "size": size, "algorithm": "sha256", "sha256": sha256
+            })),
+            None => resource_error_response("not_found", NO_LAUNCH),
+        };
+    }
+    if operation == "write" {
+        let bytes = match request_content_bytes(request) {
+            Ok(bytes) => bytes,
+            Err(message) => return resource_error_response("invalid_content", &message),
+        };
+        return match launch.write(name, bytes) {
+            Ok(size) => provider_ok_result(serde_json::json!({"size": size})),
+            Err(OutputRefusal::Name) => resource_error_response(
+                "invalid_name",
+                "a launch's output is one plain name directly under it",
+            ),
+            Err(OutputRefusal::TooLarge) => resource_error_response(
+                "output_too_large",
+                "a launch's output may hold 64 KiB in all, names included, and 16 names",
+            ),
+        };
+    }
+    let Some(bytes) = launch.read(name) else {
+        return resource_error_response("not_found", NO_LAUNCH);
+    };
+    let window = |key: &str| request.get(key).and_then(|value| value.as_u64());
+    let bytes = apply_read_window(bytes, window("offset"), window("length"));
+    provider_ok_result(serde_json::json!({"content": bytes, "size": bytes.len()}))
+}
+
+/// A bridge principal: who a capsule runs for, after verification.
+///
+/// The seal is the private field plus the `pub(crate)` constructors: a
+/// `BridgePrincipal` is minted only from a verified launch grant
+/// (`from_grant`) or from an agent admission context (`from_admission`), and
+/// no string constructor, `From`, `Deref`, `Default`, `FromStr`, `Serialize`
+/// or `Deserialize` exists. Reading the id (`principal_str`) gives no
+/// authority. The guarantee ends at the two named conversion sites that hand
+/// a `String` to `BridgeContext::principal_id` (supervisor.rs and runtime.rs),
+/// and inside the witness modules' single pinned construction literals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BridgePrincipal(String);
+
+impl BridgePrincipal {
+    pub(crate) fn from_grant(grant: &crate::api::gateway::VerifiedLaunchGrant) -> Self {
+        Self(grant.principal_id().to_string())
+    }
+
+    pub(crate) fn from_admission(admission: &crate::agent_admission::AdmissionContext) -> Self {
+        Self(admission.actor().to_string())
+    }
+
+    pub(crate) fn principal_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn into_bridge_principal_string(self) -> String {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(id: &str) -> Self {
+        Self(id.to_string())
+    }
+}
+
+/// One activation's stop request, shared by its end and the bridge's wait
+/// loop (M1-R A10-R). `requested` is set by the stop route before it waits;
+/// `cancelled` is set by the wait loop when it leaves the guest's call
+/// because of it, so the end can tell this stop's ending from a trap's.
+#[derive(Debug, Default)]
+pub struct ActivationStopFlag {
+    pub requested: std::sync::atomic::AtomicBool,
+    pub cancelled: std::sync::atomic::AtomicBool,
+}
 
 /// Resources needed by the bridge to handle requests.
 #[derive(Clone)]
@@ -41,10 +297,22 @@ pub struct BridgeContext {
     pub capsule_id: String,
     /// Runtime principal used to resolve capsule-facing `Users/self` aliases.
     pub principal_id: Option<String>,
-    /// Manifest-declared resource ceilings for capsule-requestable authority.
-    pub manifest_capabilities: Vec<String>,
+    /// Manifest-declared resource ceilings for capsule-requestable authority:
+    /// each a resource pattern and, for a manifest with asks, its actions.
+    pub manifest_capabilities: Vec<AuthorityBound>,
     /// Runtime data directory used by protected principal-root storage helpers.
     pub data_dir: Option<PathBuf>,
+    /// The content this capsule was launched with, when it is the program of
+    /// a content launch that is still running. Nothing else has one.
+    pub launch: Option<Arc<LaunchContent>>,
+    /// Model-token ceiling admission recorded for this capsule. `None` is not
+    /// an admitted agent, and the model rule does not apply.
+    pub model_token_ceiling: Option<u64>,
+    /// The stop requested for this activation, if any (M1-R A10-R). The wait
+    /// loop reads it, so a guest held in a capability wait leaves at once
+    /// instead of waiting out the shell's polls; it records that it left for
+    /// the stop, and the activation's own end then denies the request.
+    pub stop: Option<Arc<ActivationStopFlag>>,
 }
 
 /// Spawn a resource bridge handler for a microVM capsule.
@@ -222,6 +490,9 @@ fn resource_invoke_dispatch(
     if !body.is_object() {
         return Err("resource_invoke body must be a JSON object".to_string());
     }
+    if scheme == "launch" {
+        body["path"] = serde_json::Value::String(uri.to_string());
+    }
     if scheme == "localhost" {
         if let Some(object) = body.as_object_mut() {
             object.remove("token");
@@ -257,14 +528,22 @@ fn resource_invoke_dispatch(
     })
 }
 
-fn manifest_allows_resource(
-    manifest_capabilities: &[String],
+/// Whether the capsule's ceiling lets it ask for `action` on `resource`: one
+/// entry must cover the resource and, when the manifest states actions (its
+/// asks), list that action. `action` is one of the Runtime's action words in
+/// lower case; a word that is none of them is on no ask. An entry that
+/// covers the resource without the action does not stop another entry from
+/// allowing it.
+pub(crate) fn manifest_allows_resource(
+    manifest_capabilities: &[AuthorityBound],
     resource: &str,
+    action: &str,
     principal_id: Option<&str>,
     data_dir: Option<&Path>,
 ) -> bool {
     let requested = ResourceId::new(resource);
-    manifest_capabilities.iter().any(|capability| {
+    manifest_capabilities.iter().any(|bound| {
+        let capability = &bound.resource;
         let pattern = if is_unscoped_current_user_alias(capability) {
             match scope_current_user_alias(capability, principal_id, data_dir) {
                 Ok(scoped) => scoped,
@@ -273,15 +552,28 @@ fn manifest_allows_resource(
         } else {
             capability.clone()
         };
-        requested.matches(&ResourceId::new(pattern))
+        requested.matches(&ResourceId::new(pattern)) && bound.allows_action(action)
     })
 }
 
-fn manifest_denied_response(resource: &str) -> serde_json::Value {
-    resource_error_response(
-        "manifest_capability_denied",
-        &format!("capsule manifest does not declare authority for {resource}"),
-    )
+/// The refusal of a request beyond the manifest's ceiling. Under a ceiling
+/// that states no action (every manifest without asks) the sentence is the
+/// one it has always been, to the letter: other code matches on it. Under
+/// asks it names the action as well, because the action may be what is
+/// missing.
+fn manifest_denied_response(
+    manifest_capabilities: &[AuthorityBound],
+    resource: &str,
+    action: &str,
+) -> serde_json::Value {
+    let asks = manifest_capabilities
+        .iter()
+        .any(|bound| bound.actions.is_some());
+    let message = match asks {
+        true => format!("capsule manifest does not declare authority to {action} {resource}"),
+        false => format!("capsule manifest does not declare authority for {resource}"),
+    };
+    resource_error_response("manifest_capability_denied", &message)
 }
 
 fn emit_component_invoke_audit(
@@ -362,6 +654,7 @@ async fn authorize_and_dispatch_resource_invoke(
     if !manifest_allows_resource(
         &bridge_ctx.manifest_capabilities,
         &dispatch.resource,
+        &dispatch.required_action.to_string(),
         bridge_ctx.principal_id.as_deref(),
         bridge_ctx.data_dir.as_deref(),
     ) {
@@ -370,7 +663,11 @@ async fn authorize_and_dispatch_resource_invoke(
             &audit_id,
             &dispatch,
             "denied",
-            manifest_denied_response(&dispatch.resource),
+            manifest_denied_response(
+                &bridge_ctx.manifest_capabilities,
+                &dispatch.resource,
+                &dispatch.required_action.to_string(),
+            ),
         );
     }
 
@@ -446,6 +743,18 @@ async fn authorize_and_dispatch_resource_invoke(
         }
     }
 
+    // A launch name is answered here, from the caller's own launch, and
+    // never by a provider.
+    if dispatch.scheme == "launch" {
+        let launch = bridge_ctx.launch.as_deref();
+        let response = launch_response(launch, &dispatch.operation, &dispatch.request);
+        let outcome = match response.get("type").and_then(|value| value.as_str()) {
+            Some("resource_result") => invoke_outcome(&response["result"]),
+            _ => "denied",
+        };
+        return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
+    }
+
     if let Some(response) = protected_principal_root_resource_response(
         bridge_ctx,
         &dispatch.operation,
@@ -456,6 +765,12 @@ async fn authorize_and_dispatch_resource_invoke(
             _ => "error",
         };
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
+    }
+
+    if dispatch.scheme == "model" {
+        if let Some(refusal) = model_budget_refusal(bridge_ctx) {
+            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+        }
     }
 
     match bridge_ctx
@@ -761,6 +1076,18 @@ fn principal_root_read_write_uri(operation: &str, request: &serde_json::Value) -
         .then_some(rooted)
 }
 
+/// The protected path's answer for one request, for a test that drives this
+/// entry directly with a context it builds. The bridge's own callers reach it
+/// through `handle_request`; no production caller needs this name.
+#[cfg(test)]
+pub(crate) fn protected_principal_root_resource_response_for_test(
+    bridge_ctx: &BridgeContext,
+    operation: &str,
+    request: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    protected_principal_root_resource_response(bridge_ctx, operation, request)
+}
+
 fn request_content_bytes(request: &serde_json::Value) -> Result<Vec<u8>, String> {
     let Some(value) = request.get("content") else {
         return Err("write request missing content".to_string());
@@ -803,6 +1130,32 @@ fn provider_error_result(code: &str, message: &str) -> serde_json::Value {
             "message": message,
         },
     })
+}
+
+/// Why an admitted agent's model invoke is refused. One reason: the signed
+/// ceiling is 0. The request body is not a source of the ceiling, and it is
+/// not compared with the ceiling. A spend bound is a later slice.
+enum ModelBudgetRefusal {
+    SignedCeiling(u64),
+}
+
+impl ModelBudgetRefusal {
+    fn response(self) -> serde_json::Value {
+        let Self::SignedCeiling(held) = self;
+        // The wire code is the existing `denied`. The sentence names the reason.
+        resource_error_response(
+            "denied",
+            &format!("model_budget_exceeded: signed ceiling is {held}"),
+        )
+    }
+}
+
+/// Refuse a model invoke when the admitted agent's signed ceiling is 0.
+/// `None` means this capsule is not an admitted agent: there is no ceiling
+/// entry, and the model rule does not apply. The request is not an argument.
+fn model_budget_refusal(ctx: &BridgeContext) -> Option<serde_json::Value> {
+    let held = ctx.model_token_ceiling?;
+    (held == 0).then(|| ModelBudgetRefusal::SignedCeiling(held).response())
 }
 
 fn resource_error_response(code: &str, message: &str) -> serde_json::Value {
@@ -1018,26 +1371,60 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                 if !manifest_allows_resource(
                     &ctx.manifest_capabilities,
                     resource,
+                    &action.to_string(),
                     ctx.principal_id.as_deref(),
                     ctx.data_dir.as_deref(),
                 ) {
                     return Ok(serde_json::json!({
                         "id": id,
-                        "response": manifest_denied_response(resource),
+                        "response": manifest_denied_response(
+                            &ctx.manifest_capabilities,
+                            resource,
+                            &action.to_string(),
+                        ),
                     }));
                 }
                 let resource_id = elastos_runtime::capability::ResourceId::new(resource);
 
+                // A launch name is never put to the shell. The bridge answers
+                // at once from what it holds for this caller: a grant for the
+                // content's pattern, to read, or for the output's pattern, to
+                // read or to write; or `not_found`.
+                if resource.starts_with(LAUNCH_NAMES) {
+                    use elastos_runtime::capability::Action::{Read, Write};
+                    let bound = ctx.launch.is_some()
+                        && match resource {
+                            LAUNCH_CONTENT_PATTERN => action == Read,
+                            LAUNCH_OUTPUT_PATTERN => matches!(action, Read | Write),
+                            _ => false,
+                        };
+                    let response = match bound {
+                        true => {
+                            let token = ctx.capability_manager.grant(
+                                &ctx.capsule_id,
+                                resource_id,
+                                action,
+                                elastos_runtime::capability::TokenConstraints::default(),
+                                None,
+                            );
+                            let token = encode_bridge_capability_token(&token);
+                            serde_json::json!({"type": "capability_token", "token": token})
+                        }
+                        false => resource_error_response("not_found", NO_LAUNCH),
+                    };
+                    return Ok(serde_json::json!({"id": id, "response": response}));
+                }
+
                 // Create a pending request — the shell decides whether to grant.
-                let pending = ctx
-                    .pending_store
-                    .create_request_with_reason(
-                        elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
-                        resource_id.clone(),
-                        action,
-                        reason,
-                    )
-                    .await;
+                let pending = crate::api::handlers::capability::create_request_retiring(
+                    &ctx.pending_store,
+                    &ctx.capability_manager,
+                    elastos_runtime::session::SessionId(ctx.capsule_id.clone()),
+                    resource_id.clone(),
+                    action,
+                    reason,
+                )
+                .await;
                 let request_id = pending.id.to_string();
 
                 if pending.is_denied() {
@@ -1057,6 +1444,31 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                     // The shell polls /api/capability/pending and grants/denies.
                     let mut granted_token = None;
                     for _ in 0..CAPABILITY_APPROVAL_MAX_POLLS {
+                        // A stop requested for this activation ends the wait
+                        // now (M1-R A10-R): a guest whose call waits up to 30 s
+                        // for the shell must not hold the stop for that long.
+                        if ctx.stop.as_ref().is_some_and(|stop| {
+                            stop.requested.load(std::sync::atomic::Ordering::Acquire)
+                        }) {
+                            if let Some(stop) = &ctx.stop {
+                                stop.cancelled
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
+                            tracing::info!(
+                                "bridge: cancelled {} {} for capsule '{}'",
+                                action,
+                                resource,
+                                ctx.capsule_id,
+                            );
+                            return Ok(serde_json::json!({
+                                "id": id,
+                                "response": {
+                                    "type": "error",
+                                    "code": "cancelled",
+                                    "message": "the activation was stopped",
+                                },
+                            }));
+                        }
                         tokio::time::sleep(std::time::Duration::from_millis(
                             CAPABILITY_APPROVAL_POLL_MS,
                         ))
@@ -1072,6 +1484,7 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                                 }
                                 elastos_runtime::capability::pending::RequestStatus::Denied {
                                     reason,
+                                    ..
                                 } => {
                                     tracing::info!(
                                         "bridge: denied {} {} for capsule '{}': {}",
@@ -1186,7 +1599,7 @@ pub async fn handle_remote_request(
     api_url: &str,
     client_token: &str,
     capsule_id: &str,
-    manifest_capabilities: &[String],
+    manifest_capabilities: &[AuthorityBound],
     principal_id: Option<&str>,
 ) -> Result<serde_json::Value> {
     handle_remote_request_with_audit_dir(
@@ -1206,7 +1619,7 @@ pub async fn handle_remote_request_with_audit_dir(
     api_url: &str,
     client_token: &str,
     capsule_id: &str,
-    manifest_capabilities: &[String],
+    manifest_capabilities: &[AuthorityBound],
     principal_id: Option<&str>,
     audit_data_dir: Option<&Path>,
 ) -> Result<serde_json::Value> {
@@ -1278,6 +1691,16 @@ pub async fn handle_remote_request_with_audit_dir(
                 }
             };
             audit("requested", "pending")?;
+            // A capsule attached to a running Runtime is never the program
+            // of a content launch: a launch name is refused first, before the
+            // Runtime's address is looked at, goes to no provider, and is
+            // audited as every refusal here is.
+            if dispatch.scheme == "launch" {
+                audit("completed", "denied")?;
+                let mut refusal = resource_error_response("not_found", NO_LAUNCH);
+                refusal["audit"] = serde_json::Value::String(audit_id.clone());
+                return Ok(serde_json::json!({"id": id, "response": refusal}));
+            }
             let api_base = match api_base {
                 Ok(api_base) => api_base,
                 Err(err) => {
@@ -1288,10 +1711,15 @@ pub async fn handle_remote_request_with_audit_dir(
             let refusal = if !manifest_allows_resource(
                 manifest_capabilities,
                 &dispatch.resource,
+                &dispatch.required_action.to_string(),
                 principal_id,
                 audit_data_dir,
             ) {
-                Some(manifest_denied_response(&dispatch.resource))
+                Some(manifest_denied_response(
+                    manifest_capabilities,
+                    &dispatch.resource,
+                    &dispatch.required_action.to_string(),
+                ))
             } else if cap_token.is_empty() {
                 Some(resource_error_response(
                     "missing_token",
@@ -1399,6 +1827,11 @@ pub async fn handle_remote_request_with_audit_dir(
             let resource = request["resource"].as_str().unwrap_or("");
             let action_str = request["action"].as_str().unwrap_or("execute");
             let reason = request["reason"].as_str().unwrap_or("");
+            // Nor is a launch name ever sent on to be put to the shell.
+            if resource.starts_with(LAUNCH_NAMES) {
+                let response = resource_error_response("not_found", NO_LAUNCH);
+                return Ok(serde_json::json!({"id": id, "response": response}));
+            }
 
             let data_dir = audit_data_dir;
             let scoped_resource = match scope_current_user_alias(resource, principal_id, data_dir) {
@@ -1436,10 +1869,19 @@ pub async fn handle_remote_request_with_audit_dir(
                     return Ok(bridge_error_envelope(id, "generic_wallet_denied", &message));
                 }
             }
-            if !manifest_allows_resource(manifest_capabilities, resource, principal_id, data_dir) {
+            // The word as the Runtime will read it. One that is no action
+            // word is on no ask; without asks the Runtime's API refuses it.
+            let asked = action_str.to_lowercase();
+            if !manifest_allows_resource(
+                manifest_capabilities,
+                resource,
+                &asked,
+                principal_id,
+                data_dir,
+            ) {
                 return Ok(serde_json::json!({
                     "id": id,
-                    "response": manifest_denied_response(resource),
+                    "response": manifest_denied_response(manifest_capabilities, resource, &asked),
                 }));
             }
 
@@ -1559,6 +2001,15 @@ fn record_component_invoke_event(data_dir: &Path, event: ComponentInvokeAudit<'_
         .unwrap_or_default()
         .as_millis()
         .min(u128::from(u64::MAX)) as u64;
+    // The person an agent acts for is read from the actor's stored record, so
+    // an agent's every bridge call names both. A person record holds no owner,
+    // and an event for one keeps the reason it has always had.
+    let owner = event.principal_id.and_then(|principal_id| {
+        crate::auth::stored_principal_record(data_dir, principal_id)
+            .ok()
+            .flatten()
+            .and_then(|record| record.owner)
+    });
     crate::auth::append_audit_event(
         data_dir,
         RuntimeAuditEventV1 {
@@ -1571,7 +2022,10 @@ fn record_component_invoke_event(data_dir: &Path, event: ComponentInvokeAudit<'_
             challenge_id: Some(event.audit_id.to_string()),
             capsule_id: Some(event.capsule_id.to_string()),
             result: event.outcome.to_string(),
-            reason: format!("{} {}", event.operation, event.resource),
+            reason: match owner {
+                Some(owner) => format!("{} {} owner={owner}", event.operation, event.resource),
+                None => format!("{} {}", event.operation, event.resource),
+            },
             occurred_at,
             signer_did: None,
             signature: None,
@@ -1588,6 +2042,12 @@ fn random_hex(bytes_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ceiling of resource patterns alone: any action on each, as a
+    /// manifest without asks gives.
+    fn any_action(resources: Vec<String>) -> Vec<AuthorityBound> {
+        resources.into_iter().map(AuthorityBound::from).collect()
+    }
     use ed25519_dalek::SigningKey;
     use elastos_runtime::{
         capability::token::{Action, CapabilityToken, ResourceId, TokenConstraints},
@@ -1701,10 +2161,13 @@ mod tests {
             ),
             capsule_id: "test-capsule".to_string(),
             principal_id: None,
-            manifest_capabilities: vec![
-                "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string()
-            ],
+            manifest_capabilities: any_action(vec![
+                "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+            ]),
             data_dir: None,
+            launch: None,
+            model_token_ceiling: None,
+            stop: None,
         }
     }
 
@@ -1716,15 +2179,1668 @@ mod tests {
             "{}/.AppData/LocalHost/Chat/state.json",
             crate::auth::principal_localhost_root(principal_id)
         );
-        let bounds = vec!["localhost://Users/self/.AppData/LocalHost/Chat/*".to_string()];
+        let bounds = any_action(vec![
+            "localhost://Users/self/.AppData/LocalHost/Chat/*".to_string()
+        ]);
 
         assert!(manifest_allows_resource(
             &bounds,
             &resource,
+            "read",
             Some(principal_id),
             Some(temp.path())
         ));
-        assert!(!manifest_allows_resource(&bounds, &resource, None, None));
+        assert!(!manifest_allows_resource(
+            &bounds, &resource, "read", None, None
+        ));
+    }
+
+    /// The listing of a launch's content: a schema name and, for each file
+    /// in the order of its path, the path and the size, and nothing else.
+    /// It is made once, from the files handed over. Past the cap there is
+    /// no launch content at all, and the length is given back.
+    #[test]
+    fn the_listing_of_a_launchs_content_is_its_files_by_path_and_is_capped() {
+        let file = |path: &str, size: usize| (path.to_string(), vec![7u8; size]);
+        let files = BTreeMap::from([
+            file("images/02.png", 5),
+            file("capsule.json", 3),
+            file("images/01.png", 0),
+        ]);
+        let content = LaunchContent::new(files).map_err(|_| ()).unwrap();
+        let listing: serde_json::Value = serde_json::from_slice(&content.listing).unwrap();
+        assert_eq!(
+            listing,
+            serde_json::json!({
+                "schema": "elastos.launch.content-listing/v1",
+                "files": [
+                    {"path": "capsule.json", "size": 3},
+                    {"path": "images/01.png", "size": 0},
+                    {"path": "images/02.png", "size": 5}
+                ]
+            })
+        );
+        assert_eq!(content.paths().len(), 3);
+
+        // 256 paths of about a thousand bytes each: over the cap by a little.
+        let long = |n: usize| format!("{}/{n:04}", "d".repeat(1_015));
+        let many = |count: usize| -> BTreeMap<String, Vec<u8>> {
+            (0..count).map(|n| (long(n), Vec::new())).collect()
+        };
+        let over = LaunchContent::new(many(256)).map(|_| ()).unwrap_err();
+        assert!(over > LAUNCH_LISTING_MAX_BYTES, "{over}");
+        assert!(LaunchContent::new(many(240)).is_ok());
+    }
+
+    /// A context for the program of a content launch: its own capsule id,
+    /// the asks a photo core would sign, and the launch's content. Each
+    /// shares `base`'s capability manager, pending store and audit log.
+    fn launched(base: &BridgeContext, capsule: &str, files: &[(&str, &[u8])]) -> BridgeContext {
+        let files = files
+            .iter()
+            .map(|(path, bytes)| (path.to_string(), bytes.to_vec()));
+        let mut ctx = base.clone();
+        ctx.capsule_id = capsule.to_string();
+        ctx.manifest_capabilities = vec![AuthorityBound {
+            resource: LAUNCH_CONTENT_PATTERN.to_string(),
+            actions: Some(vec![elastos_common::AskAction::Read]),
+        }];
+        ctx.launch = Some(Arc::new(
+            LaunchContent::new(files.collect()).map_err(|_| ()).unwrap(),
+        ));
+        ctx
+    }
+
+    fn launch_request(resource: &str, action: &str) -> String {
+        format!(
+            r#"{{"id":41,"request":{{"type":"request_capability","resource":"{resource}","action":"{action}"}}}}"#
+        )
+    }
+
+    fn launch_read(name: &str, token: &str, body: serde_json::Value) -> String {
+        let request = serde_json::json!({
+            "type": "resource_invoke", "uri": name, "operation": "read", "token": token, "body": body
+        });
+        serde_json::json!({"id": 42, "request": request}).to_string()
+    }
+
+    fn launch_digest(name: &str, token: &str, body: serde_json::Value) -> String {
+        let request = serde_json::json!({
+            "type": "resource_invoke", "uri": name, "operation": "digest", "token": token, "body": body
+        });
+        serde_json::json!({"id": 45, "request": request}).to_string()
+    }
+
+    /// The `data` a read or a digest answers, or the refusal's code.
+    async fn launch_data(
+        ctx: &BridgeContext,
+        line: &str,
+    ) -> std::result::Result<serde_json::Value, String> {
+        let answer = handle_request(line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        let response = &answer["response"];
+        match response["result"]["status"].as_str() {
+            Some("ok") => Ok(response["result"]["data"].clone()),
+            _ => Err(response["code"].as_str().unwrap_or("?").to_string()),
+        }
+    }
+
+    /// This launch's count of content files it has hashed.
+    fn hashes(ctx: &BridgeContext) -> usize {
+        ctx.launch
+            .as_ref()
+            .unwrap()
+            .hashes
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The token of a granted request, or the refusal's code.
+    async fn launch_grant(
+        ctx: &BridgeContext,
+        resource: &str,
+        action: &str,
+    ) -> std::result::Result<String, String> {
+        let answer = handle_request(&launch_request(resource, action), &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        match answer["response"]["type"].as_str() {
+            Some("capability_token") => {
+                Ok(answer["response"]["token"].as_str().unwrap().to_string())
+            }
+            _ => Err(answer["response"]["code"]
+                .as_str()
+                .unwrap_or("?")
+                .to_string()),
+        }
+    }
+
+    /// The bytes a read returns, or the refusal's code.
+    async fn launch_bytes(ctx: &BridgeContext, line: &str) -> std::result::Result<Vec<u8>, String> {
+        let answer = handle_request(line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        let response = &answer["response"];
+        match response["result"]["status"].as_str() {
+            Some("ok") => {
+                let data = &response["result"]["data"];
+                let bytes: Vec<u8> = serde_json::from_value(data["content"].clone()).unwrap();
+                assert_eq!(data["size"], bytes.len());
+                Ok(bytes)
+            }
+            _ => Err(response["code"].as_str().unwrap_or("?").to_string()),
+        }
+    }
+
+    /// The bridge answers every launch name itself. Two programs of two
+    /// content launches are alive at once: each asks for the launch name and
+    /// is granted it at once, with nothing put to the shell, and each reads
+    /// its own content under the same names, never the other's; a token is
+    /// its holder's alone. The bare name is the listing; a name under it is
+    /// that file, by its exact path, in the window asked for. A path with
+    /// `..`, a path the content does not hold, another launch name, a write,
+    /// and any other action are refused, and nothing is read for them. When
+    /// the launch is over the same token opens nothing.
+    #[tokio::test]
+    async fn the_bridge_answers_a_launch_name_itself_for_the_caller_it_binds() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[
+                ("capsule.json", b"{}"),
+                ("images/01.png", b"first set"),
+                ("images/02.png", b"0123456789"),
+            ],
+        );
+        let two = launched(&base, "core-two", &[("images/01.png", b"second set")]);
+        let token_one = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let token_two = launch_grant(&two, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        assert!(
+            base.pending_store.list_pending().await.is_empty(),
+            "nothing was put to the shell"
+        );
+
+        let picture = "elastos://launch/content/images/01.png";
+        let none = serde_json::json!({});
+        let read = |ctx: &BridgeContext, name: &str, token: &str, body: &serde_json::Value| {
+            let (ctx, line) = (ctx.clone(), launch_read(name, token, body.clone()));
+            async move { launch_bytes(&ctx, &line).await }
+        };
+        assert_eq!(
+            read(&one, picture, &token_one, &none).await.unwrap(),
+            b"first set"
+        );
+        assert_eq!(
+            read(&two, picture, &token_two, &none).await.unwrap(),
+            b"second set"
+        );
+        // A token is its holder's: the other program's token is no use here.
+        assert_eq!(
+            read(&two, picture, &token_one, &none).await.unwrap_err(),
+            "capability_denied"
+        );
+        assert_eq!(
+            read(&one, picture, "", &none).await.unwrap_err(),
+            "missing_token"
+        );
+
+        // The bare name is the listing, and only this caller's.
+        let listing = read(&one, LAUNCH_CONTENT, &token_one, &none).await.unwrap();
+        let listing: serde_json::Value = serde_json::from_slice(&listing).unwrap();
+        let paths: Vec<&str> = listing["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(paths, ["capsule.json", "images/01.png", "images/02.png"]);
+        assert_eq!(listing["files"][2]["size"], 10);
+
+        // A window, as a storage read has.
+        let window = serde_json::json!({"offset": 2, "length": 3});
+        let second = "elastos://launch/content/images/02.png";
+        assert_eq!(
+            read(&one, second, &token_one, &window).await.unwrap(),
+            b"234"
+        );
+
+        // Not a file of this content: the other content's file names mean
+        // nothing here, and neither does a path from outside.
+        for missing in [
+            "elastos://launch/content/images/03.png",
+            "elastos://launch/content/images",
+            "elastos://launch/content//etc/passwd",
+            "elastos://launch/content/Images/01.png",
+        ] {
+            let refused = read(&one, missing, &token_one, &none).await.unwrap_err();
+            assert_eq!(refused, "not_found", "{missing}");
+        }
+        // A path with `..` does not pass the ceiling at all.
+        let climbing = "elastos://launch/content/images/../capsule.json";
+        let refused = read(&one, climbing, &token_one, &none).await.unwrap_err();
+        assert_eq!(refused, "manifest_capability_denied");
+        // No other text is a launch name, and the content is read only.
+        let refused = read(&one, "elastos://launch/store", &token_one, &none)
+            .await
+            .unwrap_err();
+        assert_eq!(refused, "invalid_resource_invoke");
+        let write = serde_json::json!({
+            "id": 43,
+            "request": {"type": "resource_invoke", "uri": picture, "operation": "write",
+                        "token": token_one, "body": {"content": "x"}}
+        });
+        let refused = launch_bytes(&one, &write.to_string()).await.unwrap_err();
+        assert_eq!(refused, "invalid_resource_invoke");
+
+        // A request for any other action, or any other launch name, is
+        // refused at once too: by the ceiling when the manifest does not ask
+        // for it, and with `not_found` when it does.
+        assert_eq!(
+            launch_grant(&one, LAUNCH_CONTENT_PATTERN, "write")
+                .await
+                .unwrap_err(),
+            "manifest_capability_denied"
+        );
+        let mut wide = one.clone();
+        wide.manifest_capabilities = any_action(vec!["elastos://launch/*".to_string()]);
+        for (resource, action) in [
+            (LAUNCH_CONTENT_PATTERN, "write"),
+            ("elastos://launch/output/playlist.json", "write"),
+            ("elastos://launch/content/images/01.png", "read"),
+            ("elastos://launch/*", "read"),
+        ] {
+            let refused = launch_grant(&wide, resource, action).await.unwrap_err();
+            assert_eq!(refused, "not_found", "{action} {resource}");
+        }
+        assert!(
+            base.pending_store.list_pending().await.is_empty(),
+            "still nothing for the shell"
+        );
+
+        // The launch is over: the entry is gone, and the token it left opens
+        // nothing.
+        let mut over = one.clone();
+        over.launch = None;
+        assert_eq!(
+            read(&over, picture, &token_one, &none).await.unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            read(&over, LAUNCH_CONTENT, &token_one, &none)
+                .await
+                .unwrap_err(),
+            "not_found"
+        );
+    }
+
+    /// A digest of a launch's content file is the sha256 of that whole file's
+    /// bytes, the path asked for, the file's size and the algorithm it was made
+    /// with: the known vector for `abc`, and nothing else in the answer.
+    #[tokio::test]
+    async fn a_digest_of_a_launch_file_is_the_sha256_of_its_whole_bytes() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[("notes/abc.txt", b"abc"), ("images/01.png", b"first set")],
+        );
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let name = "elastos://launch/content/notes/abc.txt";
+        assert_eq!(
+            launch_data(&one, &launch_digest(name, &token, serde_json::json!({})))
+                .await
+                .unwrap(),
+            serde_json::json!({
+                "path": name,
+                "size": 3,
+                "algorithm": "sha256",
+                "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            })
+        );
+    }
+
+    /// A digest is of the whole file, so `offset` and `length` in the request
+    /// change nothing: the answer that carries them is the answer that does not.
+    #[tokio::test]
+    async fn a_digest_answers_the_whole_file_whatever_window_the_request_carries() {
+        let base = bridge_context();
+        let one = launched(&base, "core-one", &[("notes/abc.txt", b"abc")]);
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let name = "elastos://launch/content/notes/abc.txt";
+        let whole = launch_data(&one, &launch_digest(name, &token, serde_json::json!({})))
+            .await
+            .unwrap();
+        let windowed = launch_data(
+            &one,
+            &launch_digest(name, &token, serde_json::json!({"offset": 1, "length": 2})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(windowed, whole);
+        assert_eq!(
+            windowed["sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(windowed["size"], 3);
+    }
+
+    /// Where the name is no file of the content, a digest is `not_found`: an
+    /// unknown name, or a launch that is over. The bare content name is the
+    /// listing: `launch_resource` refuses its digest before the branch, and the
+    /// branch refuses it as `not_found` too.
+    #[tokio::test]
+    async fn a_digest_answers_not_found_for_a_name_that_is_no_content_file() {
+        let base = bridge_context();
+        let one = launched(&base, "core-one", &[("notes/abc.txt", b"abc")]);
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let none = serde_json::json!({});
+        for missing in [
+            "elastos://launch/content/notes/def.txt",
+            "elastos://launch/content/notes",
+            "elastos://launch/content/Notes/abc.txt",
+        ] {
+            assert_eq!(
+                launch_data(&one, &launch_digest(missing, &token, none.clone()))
+                    .await
+                    .unwrap_err(),
+                "not_found",
+                "{missing}"
+            );
+        }
+        assert_eq!(
+            launch_data(&one, &launch_digest(LAUNCH_CONTENT, &token, none.clone()))
+                .await
+                .unwrap_err(),
+            "invalid_resource_invoke"
+        );
+        let branch = launch_response(
+            one.launch.as_deref(),
+            "digest",
+            &serde_json::json!({"path": LAUNCH_CONTENT}),
+        );
+        assert_eq!(branch["code"], "not_found", "{branch}");
+        let mut over = one.clone();
+        over.launch = None;
+        assert_eq!(
+            launch_data(
+                &over,
+                &launch_digest(
+                    "elastos://launch/content/notes/abc.txt",
+                    &token,
+                    none.clone()
+                )
+            )
+            .await
+            .unwrap_err(),
+            "not_found"
+        );
+    }
+
+    /// A digest never answers a name of the launch's output. The caller holds
+    /// read on the output pattern, and the output name holds the same three
+    /// bytes as a content file, so the refusal is the digest's own:
+    /// `launch_resource` refuses the operation on an output name, and the
+    /// branch refuses it as `not_found` when it is asked directly.
+    #[tokio::test]
+    async fn a_digest_never_answers_a_launch_output_name() {
+        use elastos_common::AskAction::{Read, Write};
+        let base = bridge_context();
+        let mut one = launched(&base, "core-one", &[("notes/abc.txt", b"abc")]);
+        one.manifest_capabilities = vec![
+            AuthorityBound {
+                resource: LAUNCH_CONTENT_PATTERN.to_string(),
+                actions: Some(vec![Read]),
+            },
+            AuthorityBound {
+                resource: LAUNCH_OUTPUT_PATTERN.to_string(),
+                actions: Some(vec![Read, Write]),
+            },
+        ];
+        let write = launch_grant(&one, LAUNCH_OUTPUT_PATTERN, "write")
+            .await
+            .unwrap();
+        let read = launch_grant(&one, LAUNCH_OUTPUT_PATTERN, "read")
+            .await
+            .unwrap();
+        let playlist = "elastos://launch/output/playlist.json";
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"abc".to_vec()).await,
+            Ok(3)
+        );
+        assert_eq!(
+            launch_bytes(&one, &launch_read(playlist, &read, serde_json::json!({})))
+                .await
+                .unwrap(),
+            b"abc"
+        );
+        assert_eq!(
+            launch_data(&one, &launch_digest(playlist, &read, serde_json::json!({})))
+                .await
+                .unwrap_err(),
+            "invalid_resource_invoke"
+        );
+        assert_eq!(hashes(&one), 0);
+        let branch = launch_response(
+            one.launch.as_deref(),
+            "digest",
+            &serde_json::json!({"path": playlist}),
+        );
+        assert_eq!(branch["code"], "not_found", "{branch}");
+        assert_eq!(hashes(&one), 0);
+    }
+
+    /// A digest is judged by the read action on the content's names, exactly as
+    /// a read is: a token for another name opens neither, and a write-only token
+    /// opens neither.
+    #[tokio::test]
+    async fn a_digest_is_judged_by_the_read_action_exactly_as_a_read_is() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[("notes/abc.txt", b"abc"), ("images/01.png", b"first set")],
+        );
+        let none = serde_json::json!({});
+        let abc = "elastos://launch/content/notes/abc.txt";
+        let picture = "elastos://launch/content/images/01.png";
+        let read_abc = bridge_token(&one, abc, Action::Read);
+        assert!(
+            launch_data(&one, &launch_digest(abc, &read_abc, none.clone()))
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            launch_data(&one, &launch_digest(picture, &read_abc, none.clone()))
+                .await
+                .unwrap_err(),
+            "capability_denied"
+        );
+        assert_eq!(
+            launch_bytes(&one, &launch_read(picture, &read_abc, none.clone()))
+                .await
+                .unwrap_err(),
+            "capability_denied"
+        );
+        let write_content = bridge_token(&one, LAUNCH_CONTENT_PATTERN, Action::Write);
+        assert_eq!(
+            launch_data(&one, &launch_digest(abc, &write_content, none.clone()))
+                .await
+                .unwrap_err(),
+            "capability_denied"
+        );
+        assert_eq!(
+            launch_bytes(&one, &launch_read(abc, &write_content, none.clone()))
+                .await
+                .unwrap_err(),
+            "capability_denied"
+        );
+    }
+
+    /// One launch hashes each content file at most once: two digests of one file
+    /// compute one hash, and a second file is a second hash.
+    #[tokio::test]
+    async fn a_launch_hashes_each_content_file_once() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[("notes/abc.txt", b"abc"), ("images/01.png", b"first set")],
+        );
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let none = serde_json::json!({});
+        let abc = "elastos://launch/content/notes/abc.txt";
+        let picture = "elastos://launch/content/images/01.png";
+        assert_eq!(hashes(&one), 0);
+        let first = launch_data(&one, &launch_digest(abc, &token, none.clone()))
+            .await
+            .unwrap();
+        assert_eq!(hashes(&one), 1);
+        let again = launch_data(&one, &launch_digest(abc, &token, none.clone()))
+            .await
+            .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(hashes(&one), 1);
+        launch_data(&one, &launch_digest(picture, &token, none.clone()))
+            .await
+            .unwrap();
+        assert_eq!(hashes(&one), 2);
+        launch_data(&one, &launch_digest(picture, &token, none.clone()))
+            .await
+            .unwrap();
+        assert_eq!(hashes(&one), 2);
+    }
+
+    /// The listing and a read answer exactly as they did before the digest: the
+    /// listing is its own text, and a read is its bytes and its size.
+    #[tokio::test]
+    async fn the_listing_and_a_read_answer_as_they_did_before_the_digest() {
+        let base = bridge_context();
+        let one = launched(
+            &base,
+            "core-one",
+            &[("notes/abc.txt", b"abc"), ("capsule.json", b"{}")],
+        );
+        let token = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let listing = launch_bytes(
+            &one,
+            &launch_read(LAUNCH_CONTENT, &token, serde_json::json!({})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(listing).unwrap(),
+            r#"{"files":[{"path":"capsule.json","size":2},{"path":"notes/abc.txt","size":3}],"schema":"elastos.launch.content-listing/v1"}"#
+        );
+        assert_eq!(
+            launch_data(
+                &one,
+                &launch_read(
+                    "elastos://launch/content/notes/abc.txt",
+                    &token,
+                    serde_json::json!({})
+                )
+            )
+            .await
+            .unwrap()
+            .to_string(),
+            r#"{"content":[97,98,99],"size":3}"#
+        );
+    }
+
+    /// Where no content launch binds the name, the answer comes at once and
+    /// is `not_found`: that one code is how a program learns it was not
+    /// launched with content. Nothing is put to the shell. A program whose
+    /// manifest asks for other names but not this one is refused before
+    /// that, by its own ceiling, by name: under content too, so such a
+    /// program starts and cannot read. (A program that asks for nothing at
+    /// all never gets this far: a start by CID loads it sealed, and its call
+    /// is refused before any bridge sees it.)
+    #[tokio::test]
+    async fn a_launch_name_without_a_launch_is_not_found_at_once() {
+        let base = bridge_context();
+        let mut asking = launched(&base, "from-a-folder", &[]);
+        asking.launch = None;
+        let started = std::time::Instant::now();
+        let refused = launch_grant(&asking, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap_err();
+        assert_eq!(refused, "not_found");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "at once"
+        );
+        assert!(
+            base.pending_store.list_pending().await.is_empty(),
+            "nothing was put to the shell"
+        );
+
+        let mut not_asking = launched(&base, "under-content", &[("images/01.png", b"x")]);
+        not_asking.manifest_capabilities = any_action(vec!["elastos://did/*".to_string()]);
+        let answer = handle_request(
+            &launch_request(LAUNCH_CONTENT_PATTERN, "read"),
+            &Some(not_asking.clone()),
+        )
+        .await
+        .expect("the bridge answers");
+        assert_eq!(answer["response"]["code"], "manifest_capability_denied");
+        assert_eq!(
+            answer["response"]["message"],
+            "capsule manifest does not declare authority for elastos://launch/content/*"
+        );
+        let line = launch_read(LAUNCH_CONTENT, "", serde_json::json!({}));
+        assert_eq!(
+            launch_bytes(&not_asking, &line).await.unwrap_err(),
+            "manifest_capability_denied"
+        );
+    }
+
+    /// A capsule attached to a running Runtime is never the program of a
+    /// content launch. The attached bridge refuses a launch name at once,
+    /// request and read alike, and sends nothing on: the address it is given
+    /// here has nothing behind it, and no answer speaks of a failed send.
+    #[tokio::test]
+    async fn the_attached_bridge_refuses_a_launch_name_and_sends_nothing() {
+        let asks = vec![AuthorityBound {
+            resource: LAUNCH_CONTENT_PATTERN.to_string(),
+            actions: Some(vec![elastos_common::AskAction::Read]),
+        }];
+        let lines = [
+            launch_request(LAUNCH_CONTENT_PATTERN, "read"),
+            launch_request("elastos://launch/output/playlist.json", "write"),
+            launch_read(
+                "elastos://launch/content/images/01.png",
+                "any-token",
+                serde_json::json!({}),
+            ),
+            launch_read(LAUNCH_CONTENT, "any-token", serde_json::json!({})),
+        ];
+        for line in lines {
+            let answer = handle_remote_request(
+                &line,
+                "http://127.0.0.1:9",
+                "client-token",
+                "attached-capsule",
+                &any_action(vec!["elastos://launch/*".to_string()]),
+                None,
+            )
+            .await
+            .expect("the bridge answers");
+            assert_eq!(answer["response"]["code"], "not_found", "{line}: {answer}");
+            assert_eq!(answer["response"]["message"], NO_LAUNCH, "{line}");
+        }
+        // The same, under the asks a photo core signs: the read of a file is
+        // inside them and is refused by the launch rule, not by the ceiling.
+        let line = launch_read(
+            "elastos://launch/content/images/01.png",
+            "any-token",
+            serde_json::json!({}),
+        );
+        let answer = handle_remote_request(
+            &line,
+            "http://127.0.0.1:9",
+            "client-token",
+            "attached-capsule",
+            &asks,
+            None,
+        )
+        .await
+        .expect("the bridge answers");
+        assert_eq!(answer["response"]["code"], "not_found", "{answer}");
+    }
+
+    /// The bytes a write leaves, or the refusal's code.
+    async fn launch_write(
+        ctx: &BridgeContext,
+        name: &str,
+        token: &str,
+        content: Vec<u8>,
+    ) -> std::result::Result<u64, String> {
+        let request = serde_json::json!({
+            "type": "resource_invoke", "uri": name, "operation": "write", "token": token,
+            "body": {"content": content}
+        });
+        let line = serde_json::json!({"id": 44, "request": request}).to_string();
+        let answer = handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        let response = &answer["response"];
+        match response["result"]["status"].as_str() {
+            Some("ok") => Ok(response["result"]["data"]["size"].as_u64().unwrap()),
+            _ => Err(response["code"].as_str().unwrap_or("?").to_string()),
+        }
+    }
+
+    /// The launch's output. The program of a content launch asks for the
+    /// output pattern, to write and to read, and is granted it at once, with
+    /// nothing put to the shell. It writes a name directly under the output
+    /// and reads it back; a second write replaces the first. All of one
+    /// launch's output together stays within 64 KiB: a write to the cap is
+    /// kept, one past it is refused and changes nothing. A name with a folder
+    /// in it, the bare output name, a climbing path and a write to the
+    /// content are refused. Another launch's program finds none of it under
+    /// the same name, and the token of one is no use to the other. The
+    /// content's listing does not show it. When the launch is over, the name
+    /// answers `not_found`.
+    #[tokio::test]
+    async fn the_program_of_a_content_launch_writes_its_launchs_output() {
+        use elastos_common::AskAction::{Read, Write};
+        let base = bridge_context();
+        let asking = |ctx: &mut BridgeContext| {
+            ctx.manifest_capabilities = vec![
+                AuthorityBound {
+                    resource: LAUNCH_CONTENT_PATTERN.to_string(),
+                    actions: Some(vec![Read]),
+                },
+                AuthorityBound {
+                    resource: LAUNCH_OUTPUT_PATTERN.to_string(),
+                    actions: Some(vec![Read, Write]),
+                },
+            ];
+        };
+        let mut one = launched(&base, "core-one", &[("images/01.png", b"first set")]);
+        asking(&mut one);
+        let mut two = launched(&base, "core-two", &[("images/01.png", b"second set")]);
+        asking(&mut two);
+        let write = launch_grant(&one, LAUNCH_OUTPUT_PATTERN, "write")
+            .await
+            .unwrap();
+        let read = launch_grant(&one, LAUNCH_OUTPUT_PATTERN, "read")
+            .await
+            .unwrap();
+        assert!(
+            base.pending_store.list_pending().await.is_empty(),
+            "nothing was put to the shell"
+        );
+
+        let playlist = "elastos://launch/output/playlist.json";
+        let read_back = |ctx: &BridgeContext, name: &str, token: &str| {
+            let (ctx, line) = (ctx.clone(), launch_read(name, token, serde_json::json!({})));
+            async move { launch_bytes(&ctx, &line).await }
+        };
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"first".to_vec()).await,
+            Ok(5)
+        );
+        assert_eq!(read_back(&one, playlist, &read).await.unwrap(), b"first");
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"second".to_vec()).await,
+            Ok(6)
+        );
+        assert_eq!(read_back(&one, playlist, &read).await.unwrap(), b"second");
+
+        // The cap is on all of the output together, names and contents: here
+        // `playlist.json` (13 bytes) with 6 bytes, and `other.json` (10).
+        let other = "elastos://launch/output/other.json";
+        let room = LAUNCH_OUTPUT_MAX_BYTES - (13 + 6) - 10;
+        assert_eq!(
+            launch_write(&one, other, &write, vec![1; room + 1]).await,
+            Err("output_too_large".to_string())
+        );
+        assert_eq!(
+            read_back(&one, other, &read).await.unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            launch_write(&one, other, &write, vec![1; room]).await,
+            Ok(room as u64)
+        );
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"second!".to_vec()).await,
+            Err("output_too_large".to_string())
+        );
+        assert_eq!(read_back(&one, playlist, &read).await.unwrap(), b"second");
+        // A name written again is counted once: at the cap, the same six
+        // bytes over the same name are still taken.
+        assert_eq!(
+            launch_write(&one, playlist, &write, b"third!".to_vec()).await,
+            Ok(6)
+        );
+
+        // Names count too: at the cap, an empty write under a new name is
+        // refused. And at most 16 names, however small.
+        let empty = "elastos://launch/output/e";
+        assert_eq!(
+            launch_write(&one, empty, &write, Vec::new()).await,
+            Err("output_too_large".to_string())
+        );
+        let mut three = launched(&base, "core-three", &[("images/01.png", b"z")]);
+        asking(&mut three);
+        let three_writes = launch_grant(&three, LAUNCH_OUTPUT_PATTERN, "write")
+            .await
+            .unwrap();
+        for index in 0..LAUNCH_OUTPUT_MAX_NAMES {
+            let name = format!("elastos://launch/output/{index:02}");
+            assert_eq!(
+                launch_write(&three, &name, &three_writes, Vec::new()).await,
+                Ok(0),
+                "{index}"
+            );
+        }
+        assert_eq!(
+            launch_write(
+                &three,
+                "elastos://launch/output/16",
+                &three_writes,
+                Vec::new()
+            )
+            .await,
+            Err("output_too_large".to_string())
+        );
+        assert_eq!(
+            launch_write(
+                &three,
+                "elastos://launch/output/00",
+                &three_writes,
+                b"x".to_vec()
+            )
+            .await,
+            Ok(1)
+        );
+
+        // Names, on a launch of its own so that no cap is near: a folder in
+        // the name, and one byte past 128, are refused as names; 128 is taken.
+        let mut four = launched(&base, "core-four", &[("images/01.png", b"w")]);
+        asking(&mut four);
+        let four_writes = launch_grant(&four, LAUNCH_OUTPUT_PATTERN, "write")
+            .await
+            .unwrap();
+        let nested = "elastos://launch/output/lists/playlist.json";
+        assert_eq!(
+            launch_write(&four, nested, &four_writes, b"x".to_vec()).await,
+            Err("invalid_name".to_string())
+        );
+        let long = |length: usize| format!("{LAUNCH_OUTPUT}{}", "n".repeat(length));
+        assert_eq!(
+            launch_write(&four, &long(129), &four_writes, b"x".to_vec()).await,
+            Err("invalid_name".to_string())
+        );
+        assert_eq!(
+            launch_write(&four, &long(128), &four_writes, b"x".to_vec()).await,
+            Ok(1)
+        );
+        assert_eq!(
+            launch_write(&one, "elastos://launch/output/", &write, b"x".to_vec()).await,
+            Err("invalid_resource_invoke".to_string())
+        );
+        let climbing = "elastos://launch/output/../content/images/01.png";
+        assert_eq!(
+            launch_write(&one, climbing, &write, b"x".to_vec()).await,
+            Err("manifest_capability_denied".to_string())
+        );
+        let picture = "elastos://launch/content/images/01.png";
+        assert_eq!(
+            launch_write(&one, picture, &write, b"x".to_vec()).await,
+            Err("invalid_resource_invoke".to_string())
+        );
+
+        // Another launch: none of it, and one's token is no use there.
+        let two_reads = launch_grant(&two, LAUNCH_OUTPUT_PATTERN, "read")
+            .await
+            .unwrap();
+        assert_eq!(
+            read_back(&two, playlist, &two_reads).await.unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            read_back(&two, playlist, &read).await.unwrap_err(),
+            "capability_denied"
+        );
+
+        // The content's listing is the content's files only.
+        let content = launch_grant(&one, LAUNCH_CONTENT_PATTERN, "read")
+            .await
+            .unwrap();
+        let listing = read_back(&one, LAUNCH_CONTENT, &content).await.unwrap();
+        let listing: serde_json::Value = serde_json::from_slice(&listing).unwrap();
+        assert_eq!(listing["files"].as_array().unwrap().len(), 1);
+
+        // Any other action on the output is not this launch's to grant.
+        let mut wide = one.clone();
+        wide.manifest_capabilities = any_action(vec!["elastos://launch/*".to_string()]);
+        for action in ["execute", "delete", "admin"] {
+            let refused = launch_grant(&wide, LAUNCH_OUTPUT_PATTERN, action)
+                .await
+                .unwrap_err();
+            assert_eq!(refused, "not_found", "{action}");
+        }
+
+        // The launch is over: the name answers `not_found`.
+        let mut over = one.clone();
+        over.launch = None;
+        assert_eq!(
+            read_back(&over, playlist, &read).await.unwrap_err(),
+            "not_found"
+        );
+        assert_eq!(
+            launch_write(&over, playlist, &write, b"late".to_vec()).await,
+            Err("not_found".to_string())
+        );
+    }
+
+    /// The attached bridge's refusal of a launch name is audited as its other
+    /// refusals are: a "requested" record and a "completed / denied" one,
+    /// under one id that the answer carries. A read and a write alike.
+    #[tokio::test]
+    async fn the_attached_bridge_audits_its_refusal_of_a_launch_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let lines = [
+            remote_invoke_line(51, "read", "elastos://launch/content/images/01.png", "tok"),
+            remote_invoke_line(52, "write", "elastos://launch/output/playlist.json", "tok"),
+        ];
+        for line in lines {
+            let before = remote_invoke_audit(temp.path()).len();
+            let answer = handle_remote_request_with_audit_dir(
+                &line,
+                "http://127.0.0.1:9",
+                "client-token",
+                "attached-capsule",
+                &any_action(vec!["elastos://launch/*".to_string()]),
+                None,
+                Some(temp.path()),
+            )
+            .await
+            .expect("the bridge answers");
+            assert_eq!(answer["response"]["code"], "not_found", "{answer}");
+            let events = remote_invoke_audit(temp.path());
+            let new = &events[before..];
+            assert_eq!(new.len(), 2, "{new:?}");
+            assert_eq!(
+                (new[0].0.as_str(), new[0].1.as_str()),
+                ("component.invoke.requested", "pending")
+            );
+            assert_eq!(
+                (new[1].0.as_str(), new[1].1.as_str()),
+                ("component.invoke.completed", "denied")
+            );
+            assert_eq!(answer["response"]["audit"], new[1].2.as_str());
+        }
+        // Before the Runtime's address is looked at: with an address the
+        // attached bridge does not take, a launch name is still refused the
+        // same way, not failed on the address.
+        let line = remote_invoke_line(53, "read", "elastos://launch/content/images/01.png", "tok");
+        let answer = handle_remote_request_with_audit_dir(
+            &line,
+            "https://example.com",
+            "client-token",
+            "attached-capsule",
+            &any_action(vec!["elastos://launch/*".to_string()]),
+            None,
+            Some(temp.path()),
+        )
+        .await
+        .expect("the bridge answers before it looks at the address");
+        assert_eq!(answer["response"]["code"], "not_found", "{answer}");
+    }
+
+    /// A manifest's asks are its ceiling. A request passes the ceiling when
+    /// one ask covers its resource and lists its action; an ask that covers
+    /// the resource without the action does not stop another that has it.
+    /// The control is the same resource as a capability, which names no
+    /// action: any action passes, as for every manifest without asks, even
+    /// a word that is no action (the Runtime refuses that one later).
+    #[test]
+    fn a_manifest_with_asks_is_held_to_their_resources_and_their_actions() {
+        let manifest = |extra: serde_json::Value| -> elastos_common::CapsuleManifest {
+            let mut value = serde_json::json!({
+                "schema": "elastos.capsule/v1", "name": "asks-bridge", "version": "0.1.0",
+                "role": "app", "type": "data", "entrypoint": "index.html"
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let manifest: elastos_common::CapsuleManifest = serde_json::from_value(value).unwrap();
+            manifest.validate().unwrap();
+            manifest
+        };
+        let allows = |manifest: &elastos_common::CapsuleManifest, resource: &str, action: &str| {
+            manifest_allows_resource(
+                &manifest.resource_authority_bounds(),
+                resource,
+                action,
+                None,
+                None,
+            )
+        };
+        let words = ["read", "write", "execute", "message", "delete", "admin"];
+
+        let granted = manifest(serde_json::json!({"capabilities": ["elastos://did/*"]}));
+        assert_eq!(granted.resource_authority_bounds(), ["elastos://did/*"]);
+        for word in words.into_iter().chain(["no-such-action"]) {
+            assert!(allows(&granted, "elastos://did/key", word), "{word}");
+        }
+        assert!(!allows(&granted, "elastos://content/x", "read"));
+
+        let asked = manifest(serde_json::json!({
+            "asks": [
+                {"resource": "elastos://did/*", "actions": ["read"]},
+                {"resource": "elastos://did/key", "actions": ["write", "delete"]}
+            ]
+        }));
+        let bounds = asked.resource_authority_bounds();
+        assert_eq!(bounds.len(), 2);
+        assert_eq!(bounds[0].resource, "elastos://did/*");
+        assert_ne!(bounds[0], "elastos://did/*", "an ask is not a bare pattern");
+        // (resource, the words that pass)
+        let rows: [(&str, &[&str]); 3] = [
+            ("elastos://did/key", &["read", "write", "delete"]),
+            ("elastos://did/other", &["read"]),
+            ("elastos://content/x", &[]),
+        ];
+        for (resource, passing) in rows {
+            for word in words.into_iter().chain(["no-such-action", "READ"]) {
+                assert_eq!(
+                    allows(&asked, resource, word),
+                    passing.contains(&word),
+                    "{word} on {resource}"
+                );
+            }
+        }
+
+        // The empty ceiling: what a capsule without asks has at a start by
+        // CID, and what the bridge gives a capsule id it holds no entry for.
+        // No word passes, on any resource.
+        for (resource, _) in rows {
+            for word in words.into_iter().chain(["no-such-action", "READ"]) {
+                assert!(
+                    !manifest_allows_resource(&[], resource, word, None, None),
+                    "{word} on {resource}"
+                );
+            }
+        }
+    }
+
+    /// The production text of a source file: comment lines dropped, and
+    /// everything from its test module on left out.
+    fn production_text(source: &str) -> String {
+        let markers = ["\nmod tests {", "\npub(crate) mod tests {"];
+        let end = markers
+            .iter()
+            .filter_map(|marker| source.find(marker))
+            .min();
+        source[..end.unwrap_or(source.len())]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every `.rs` file under `dir` that is not test code by its place.
+    fn production_files(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains("tests") || name == "target" {
+                continue;
+            }
+            if path.is_dir() {
+                production_files(&path, found);
+            } else if name.ends_with(".rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// Production uses of `needle`, with the type/function DEFINITION and
+    /// `impl` lines excluded (a definition is not a construction or a call).
+    /// A use counts only where `needle` stands as its own identifier or ends
+    /// with punctuation: `principal_str` does not count inside
+    /// `into_bridge_principal_string`.
+    fn production_uses(text: &str, needle: &str) -> usize {
+        uses_outside_definitions(text, needle, false)
+    }
+
+    /// Uses of `needle` outside its definition and `impl` lines. A `call`
+    /// needle ends in an opening paren, so its first argument may start
+    /// immediately after it; only the left identifier boundary is checked
+    /// there, and an inline call with an identifier first argument counts.
+    fn uses_outside_definitions(text: &str, needle: &str, call: bool) -> usize {
+        let fn_definition = format!("fn {needle}");
+        text.lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !(trimmed.starts_with("struct ")
+                    || trimmed.starts_with("pub struct ")
+                    || trimmed.starts_with("pub(crate) struct ")
+                    || trimmed.starts_with("pub(in crate::api) struct ")
+                    || trimmed.starts_with("impl ")
+                    || line.contains(&fn_definition))
+            })
+            .map(|line| {
+                if !call {
+                    return ident_uses(line, needle);
+                }
+                line.match_indices(needle)
+                    .filter(|(start, _)| {
+                        let before = line[..*start].chars().next_back();
+                        !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Occurrences of `needle` that begin and end on an identifier boundary.
+    fn ident_uses(line: &str, needle: &str) -> usize {
+        line.match_indices(needle)
+            .filter(|(start, _)| {
+                let before = line[..*start].chars().next_back();
+                let after = line[start + needle.len()..].chars().next();
+                !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+                    && !after.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+            })
+            .count()
+    }
+
+    /// The walker's tree-wide `(file, count)` list for one production literal.
+    fn production_counts(needle: &str) -> Vec<(String, usize)> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            let count = production_uses(&text, needle);
+            if count > 0 {
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((name, count));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// The end (exclusive) of the item a preceding `#[cfg(test)]` applies to.
+    /// Scans to the matching block end or to a statement-ending semicolon,
+    /// skipping string literals.
+    fn cfg_test_item_end(text: &str) -> usize {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (index, byte) in bytes.iter().copied().enumerate() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match byte {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if text[index + 1..].trim_start().starts_with(';') {
+                            return text[index + 1..].find(';').unwrap() + index + 2;
+                        }
+                        return index + 1;
+                    }
+                }
+                b';' if depth == 0 => return index + 1,
+                _ => {}
+            }
+        }
+        text.len()
+    }
+
+    /// The byte index just past the `}` that closes the block opening at
+    /// `open` (`open` indexes the `{`). Line and block comments, string
+    /// literals, raw strings, byte/char literals and lifetimes are skipped, so
+    /// braces in code text do not move the depth. Checked against a Rust token
+    /// stream for every non-test source file in `elastos/crates`.
+    fn block_end(text: &str, open: usize) -> usize {
+        let bytes = text.as_bytes();
+        let mut depth = 0usize;
+        let mut index = open;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    index = text[index..]
+                        .find('\n')
+                        .map_or(bytes.len(), |at| index + at + 1);
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    index = text[index..]
+                        .find("*/")
+                        .map_or(bytes.len(), |at| index + at + 2);
+                }
+                b'"' => index = string_end(text, index),
+                b'\'' => index = char_or_lifetime_end(bytes, index),
+                b'r' => match raw_string_end(text, index) {
+                    Some(end) => index = end,
+                    None => index += 1,
+                },
+                b'b' if matches!(bytes.get(index + 1), Some(b'"') | Some(b'\'')) => {
+                    index = if bytes[index + 1] == b'"' {
+                        string_end(text, index + 1)
+                    } else {
+                        char_or_lifetime_end(bytes, index + 1)
+                    };
+                }
+                b'{' => {
+                    depth += 1;
+                    index += 1;
+                }
+                b'}' => {
+                    depth -= 1;
+                    index += 1;
+                    if depth == 0 {
+                        return index;
+                    }
+                }
+                _ => index += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    /// One past the closing quote of the string opening at `open`.
+    fn string_end(text: &str, open: usize) -> usize {
+        let bytes = text.as_bytes();
+        let mut index = open + 1;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => index += 2,
+                b'"' => return index + 1,
+                _ => index += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    /// One past a char literal opening at `open`, or past the quote of a
+    /// lifetime (which does not close).
+    fn char_or_lifetime_end(bytes: &[u8], open: usize) -> usize {
+        let first = open + 1;
+        if bytes.get(first) == Some(&b'\\') {
+            let mut index = first + 1;
+            while index < bytes.len() && bytes[index] != b'\'' {
+                index += 1;
+            }
+            return (index + 1).min(bytes.len());
+        }
+        if bytes.get(first + 1) == Some(&b'\'') {
+            return first + 2;
+        }
+        open + 1
+    }
+
+    /// One past the closing delimiter of the raw string opening at `open`, if
+    /// one opens there (`r"`, `r#"`, `br##"`).
+    fn raw_string_end(text: &str, open: usize) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut index = open + 1;
+        let mut hashes = 0usize;
+        while bytes.get(index) == Some(&b'#') {
+            hashes += 1;
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'"') {
+            return None;
+        }
+        let close = format!("\"{}", "#".repeat(hashes));
+        text[index + 1..]
+            .find(&close)
+            .map(|at| index + 1 + at + close.len())
+    }
+
+    /// The byte range of the first `tests` module item in `text`, if any. The
+    /// module is dropped with the attribute lines above it, from the `mod`
+    /// keyword through its closing brace, so production code written after it
+    /// stays in the text and no dangling `#[cfg(test)]` is left to apply to the
+    /// next item.
+    fn test_module_range(text: &str) -> Option<std::ops::Range<usize>> {
+        const MARKERS: [&str; 3] = [
+            "\nmod tests {",
+            "\npub(crate) mod tests {",
+            "\npub mod tests {",
+        ];
+        let (start, marker) = MARKERS
+            .iter()
+            .filter_map(|marker| text.find(marker).map(|start| (start, *marker)))
+            .min_by_key(|(start, _)| *start)?;
+        let mut begin = start;
+        while begin > 0 {
+            let previous_end = begin - 1;
+            let previous_start = text[..previous_end].rfind('\n').map_or(0, |at| at + 1);
+            if text[previous_start..previous_end]
+                .trim_start()
+                .starts_with("#[")
+            {
+                begin = previous_start;
+            } else {
+                break;
+            }
+        }
+        let open = start + marker.len() - 1;
+        Some(begin..block_end(text, open))
+    }
+
+    /// The production text of a source file with each `tests` module dropped by
+    /// brace match, then `#[cfg(test)]` items and statement-level
+    /// `#[cfg(test)]` lines dropped, then comment lines dropped. This is
+    /// stricter than `production_text`, whose first-marker cut keeps a
+    /// `#[cfg(test)]` item written before the test module and drops all
+    /// production code written after one.
+    fn production_text_ignoring_cfg_test(source: &str) -> String {
+        let mut kept_source = String::new();
+        let mut rest = source;
+        while let Some(range) = test_module_range(rest) {
+            kept_source.push_str(&rest[..range.start]);
+            rest = &rest[range.end..];
+        }
+        kept_source.push_str(rest);
+        let source: &str = &kept_source;
+        let mut kept = String::new();
+        let mut rest = source;
+        while let Some(start) = rest.find("#[cfg(test)]") {
+            kept.push_str(&rest[..start]);
+            let after = &rest[start + "#[cfg(test)]".len()..];
+            let trimmed = after.trim_start();
+            let skipped = after.len() - trimmed.len();
+            let item_end = cfg_test_item_end(trimmed);
+            rest = &after[skipped + item_end..];
+        }
+        kept.push_str(rest);
+        kept.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The walker's tree-wide `(file, count)` list for one production literal,
+    /// with `#[cfg(test)]` items dropped.
+    fn production_counts_ignoring_cfg_test(needle: &str) -> Vec<(String, usize)> {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut found = Vec::new();
+        for file in files {
+            let text = production_text_ignoring_cfg_test(&std::fs::read_to_string(&file).unwrap());
+            let count = uses_outside_definitions(&text, needle, needle.ends_with('('));
+            if count > 0 {
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((name, count));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    fn expected_counts(pairs: &[(&str, usize)]) -> Vec<(String, usize)> {
+        let mut expected: Vec<(String, usize)> = pairs
+            .iter()
+            .map(|(file, count)| (file.to_string(), *count))
+            .collect();
+        expected.sort();
+        expected
+    }
+
+    /// R6-1 row r3: source pins over the production text of `elastos/crates`,
+    /// same filters as `every_place_that_fills_a_ceiling_asks_the_one_bounds_function`
+    /// (comment lines dropped, test modules left out, paths whose name contains
+    /// "tests" skipped). These are REVIEW TRIGGERS, not proofs: a second
+    /// production literal or caller turns the walker's list red and forces a
+    /// ruling, and the type seal covers code outside the two minting modules.
+    ///
+    /// What this cannot show: a call split across lines, a construction written
+    /// as a struct-update (`..`), and a workspace member outside `elastos/crates`.
+    #[test]
+    fn r6_typed_principal_pins_hold_tree_wide() {
+        // The one production construction of each witness, the struct
+        // definition excluded (the definition is not a construction).
+        assert_eq!(
+            production_counts("VerifiedLaunchGrant {"),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
+            "VerifiedLaunchGrant construction literal"
+        );
+        assert_eq!(
+            production_counts("AdmissionContext {"),
+            expected_counts(&[("elastos-server/src/agent_admission.rs", 1)]),
+            "AdmissionContext construction literal"
+        );
+        // The one production caller of each constructor.
+        assert_eq!(
+            production_counts("BridgePrincipal::from_grant("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
+            "BridgePrincipal::from_grant callers"
+        );
+        assert_eq!(
+            production_counts("BridgePrincipal::from_admission("),
+            expected_counts(&[("elastos-server/src/runtime.rs", 1)]),
+            "BridgePrincipal::from_admission callers"
+        );
+        // The accessors: one read per agent refusal, one consuming conversion
+        // per route boundary. Definitions are excluded.
+        assert_eq!(
+            production_counts("principal_str"),
+            expected_counts(&[
+                ("elastos-server/src/api/routes.rs", 1),
+                ("elastos-server/src/runtime.rs", 1),
+                ("elastos-server/src/supervisor.rs", 1),
+            ]),
+            "principal_str uses"
+        );
+        assert_eq!(
+            production_counts("into_bridge_principal_string"),
+            expected_counts(&[
+                ("elastos-server/src/runtime.rs", 1),
+                ("elastos-server/src/supervisor.rs", 1),
+            ]),
+            "into_bridge_principal_string uses"
+        );
+        // The bridge field stays a String and is filled at exactly two
+        // production literals; `BridgeContext`'s definition is not one.
+        assert_eq!(
+            production_counts("BridgeContext {"),
+            expected_counts(&[
+                ("elastos-server/src/runtime.rs", 1),
+                ("elastos-server/src/supervisor.rs", 1),
+            ]),
+            "BridgeContext literals"
+        );
+    }
+
+    /// G1-r4 (r4 §3, kept by r6 §0): the production `SupervisorRequest`
+    /// variant set and `LaunchCapsule`'s field set are exact literals read
+    /// from supervisor.rs's production text, and every production site that
+    /// builds a bridge principal or hands one to a bridge is pinned as a
+    /// `(file, count)` list with the same walker as the row above. A new
+    /// variant, a new field or a new caller turns this row red and forces a
+    /// ruling. It is a review trigger, not a proof that a future variant is
+    /// safe: the walker cannot see a call split across lines, and it walks
+    /// `elastos/crates` only.
+    #[test]
+    fn r6_g1_supervisor_variants_and_principal_sites_hold_tree_wide() {
+        let supervisor = production_text(include_str!("supervisor.rs"));
+        let body = {
+            let rest = &supervisor[supervisor.find("pub enum SupervisorRequest {").unwrap()..];
+            &rest[..rest.find("\n}\n").expect("the enum closes at column 0")]
+        };
+        let variants: Vec<&str> = body
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| {
+                line.chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_uppercase())
+            })
+            .filter_map(|line| line.split('{').next().map(str::trim))
+            .collect();
+        assert_eq!(
+            variants,
+            [
+                "EnsureCapsule",
+                "LaunchCapsule",
+                "StopCapsule",
+                "WaitCapsule",
+                "CapsuleStatus",
+                "DownloadExternal",
+                "StartGateway",
+            ],
+            "SupervisorRequest variant set"
+        );
+        let launch = {
+            let rest = &body[body.find("LaunchCapsule {").unwrap()..];
+            &rest[..rest
+                .find("\n    },")
+                .expect("the variant closes at field indent")]
+        };
+        let mut fields: Vec<&str> = launch
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                line.chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_lowercase())
+            })
+            .filter_map(|line| line.split(':').next())
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "capsule_args",
+                "guest_payload",
+                "interactive",
+                "name",
+                "principal_id"
+            ],
+            "LaunchCapsule field set"
+        );
+
+        // The production sites that build a bridge principal or hand one to a
+        // bridge. `BridgeContext` and the two constructors are pinned above.
+        for (needle, expected) in [
+            (
+                "set_bridge_principal",
+                &[("elastos-server/src/runtime.rs", 1)][..],
+            ),
+            (
+                "set_bridge_hostcall",
+                &[
+                    ("elastos-server/src/capsule_cmd.rs", 1),
+                    ("elastos-server/src/run_cmd.rs", 1),
+                ][..],
+            ),
+            ("start_loaded", &[("elastos-server/src/runtime.rs", 2)][..]),
+            (
+                "start_local_admitted",
+                &[("elastos-server/src/api/routes.rs", 1)][..],
+            ),
+            ("run_local_admitted", &[][..]),
+            (
+                "spawn_resource_bridge",
+                &[("elastos-server/src/supervisor.rs", 1)][..],
+            ),
+            ("handle_remote_request", &[][..]),
+            (
+                "handle_remote_request_with_audit_dir",
+                &[
+                    ("elastos-server/src/capsule_cmd.rs", 1),
+                    ("elastos-server/src/resource_bridge.rs", 1),
+                    ("elastos-server/src/run_cmd.rs", 1),
+                ][..],
+            ),
+            (
+                "handle_component_resource_request",
+                &[("elastos-server/src/runtime.rs", 1)][..],
+            ),
+        ] {
+            assert_eq!(
+                production_counts(needle),
+                expected_counts(expected),
+                "{needle} callers"
+            );
+        }
+    }
+
+    /// G3b (r6 §3 M-c, r5 §4; A3): the guest payload is moved whole and read
+    /// once. Every production use of `guest_payload` under `elastos/crates` is
+    /// pinned by `(file, count)` with the same walker as the r3 row above: the
+    /// field, the request literal, the HTTP entrance's refusal read, the
+    /// gateway's in-process literal, the supervisor's destructure and moves,
+    /// and the one serialisation read. The
+    /// serialisation is also pinned once as an exact literal, so the read
+    /// cannot move or grow an inspection. A new use, a new file or a second
+    /// read turns this row red and forces a ruling. These are review triggers,
+    /// not proofs: a developer who adds one must also edit the pinned list.
+    ///
+    /// What this cannot show: a call split across lines, a struct-update
+    /// construction, and a workspace member outside `elastos/crates`.
+    #[test]
+    fn the_guest_payload_is_moved_whole_and_read_once() {
+        assert_eq!(
+            production_counts("guest_payload"),
+            expected_counts(&[
+                ("elastos-server/src/api/handlers/supervisor_api.rs", 7),
+                ("elastos-server/src/gateway_cmd.rs", 1),
+                ("elastos-server/src/supervisor.rs", 7),
+            ]),
+            "guest_payload uses"
+        );
+        assert_eq!(
+            production_text(include_str!("supervisor.rs"))
+                .matches("serde_json::to_vec(&guest_payload)")
+                .count(),
+            1,
+            "the one host read of the guest payload"
+        );
+    }
+
+    /// Every place that fills a capsule's ceiling asks the one function that
+    /// decides it, and none of those files reads a manifest's capability list
+    /// or storage permissions itself. So a rule placed in that function (such
+    /// as: a manifest with asks is bounded by them and by nothing else) holds
+    /// wherever a capsule is started. This test counts callers; what the
+    /// function returns is held by its own tests. And those four are the
+    /// only production callers of that
+    /// function under `elastos/crates`: a fifth has to be added here.
+    ///
+    /// What this cannot show: a workspace member outside `elastos/crates`
+    /// (two live under `capsules/`; neither calls the function today), a call
+    /// split across lines, and a fifth file that fills a ceiling straight
+    /// from a manifest's capability list without calling the function at all.
+    #[test]
+    fn every_place_that_fills_a_ceiling_asks_the_one_bounds_function() {
+        for (file, source, fill) in [
+            (
+                "runtime.rs",
+                include_str!("runtime.rs"),
+                "handle.manifest.resource_authority_bounds(),",
+            ),
+            (
+                "supervisor.rs",
+                include_str!("supervisor.rs"),
+                "manifest_capabilities: manifest.resource_authority_bounds(),",
+            ),
+            (
+                "run_cmd.rs",
+                include_str!("run_cmd.rs"),
+                "let manifest_capabilities = manifest.resource_authority_bounds();",
+            ),
+            (
+                "capsule_cmd.rs",
+                include_str!("capsule_cmd.rs"),
+                "let manifest_capabilities = manifest.resource_authority_bounds();",
+            ),
+        ] {
+            let production = production_text(source);
+            assert_eq!(production.matches(fill).count(), 1, "{file}: {fill}");
+            for direct in ["manifest.capabilities", "permissions.storage"] {
+                assert!(!production.contains(direct), "{file} reads {direct}");
+            }
+        }
+
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        production_files(crates, &mut files);
+        let mut callers = Vec::new();
+        for file in files {
+            let text = production_text(&std::fs::read_to_string(&file).unwrap());
+            let calls = text.matches(".resource_authority_bounds()").count();
+            if calls > 0 {
+                let name = file.strip_prefix(crates).unwrap().to_string_lossy();
+                callers.push((name.into_owned(), calls));
+            }
+        }
+        callers.sort();
+        let expected = [
+            "elastos-server/src/capsule_cmd.rs",
+            "elastos-server/src/run_cmd.rs",
+            "elastos-server/src/runtime.rs",
+            "elastos-server/src/supervisor.rs",
+        ]
+        .map(|name| (name.to_string(), 1));
+        assert_eq!(callers, expected);
     }
 
     /// A temp data dir holding a stored Human record for `principal_id`.
@@ -1759,23 +3875,25 @@ mod tests {
     /// A5-S3a-2: a stored Agent owns UsersAI/self only; a Human owns no UsersAI root.
     #[test]
     fn a_stored_agent_is_scoped_to_its_own_usersai_root() {
-        let id = "agent:local:scoped";
-        let temp = stored_human_dir(id);
-        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
+        let root = crate::auth::valid_agent::ROOT;
         let (want, dir) = (format!("{root}/a.md"), Some(temp.path()));
         assert!(root.starts_with("localhost://UsersAI/"), "{root}");
         let scope = |uri: &str| scope_current_user_alias(uri, Some(id), dir);
         let not_area = |area: &str| format!("{area} is not this principal's root area");
         assert_eq!(scope("localhost://UsersAI/self/a.md").unwrap(), want);
         assert_eq!(scope(&want).unwrap(), want);
-        let human_root = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let human_root = format!("{}/a.md", crate::auth::valid_agent::USERS_ROOT);
         for uri in ["localhost://Users/self/a.md", &human_root] {
             assert_eq!(scope(uri).unwrap_err(), not_area("Users"));
         }
         let foreign = scope("localhost://UsersAI/000000000000000000000000/a.md").unwrap_err();
         assert!(foreign.contains("roots must use UsersAI/self"), "{foreign}");
-        let allows =
-            |bound: &str, r: &str| manifest_allows_resource(&[bound.into()], r, Some(id), dir);
+        let allows = |bound: &str, r: &str| {
+            manifest_allows_resource(&[bound.into()], r, "read", Some(id), dir)
+        };
         assert!(allows("localhost://UsersAI/self/*", &want));
         assert!(!allows("localhost://Users/self/*", &human_root));
         let (h, human) = ("person:local:h", stored_human_dir("person:local:h"));
@@ -1788,13 +3906,13 @@ mod tests {
     /// so the same id's Users root is refused with a data dir present.
     #[test]
     fn the_protected_path_refuses_a_stored_agent_the_users_root_of_its_id() {
-        let id = "agent:local:protected";
-        let temp = stored_human_dir(id);
-        crate::auth::tests::mint_agent_record(temp.path(), id, None);
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
         let mut ctx = bridge_context();
         ctx.principal_id = Some(id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
-        let path = format!("{}/a.md", crate::auth::principal_localhost_root(id));
+        let path = format!("{}/a.md", crate::auth::valid_agent::USERS_ROOT);
         let request = serde_json::json!({"path": path, "content": "x"});
         let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
         assert_eq!(refused["code"], "principal_context_required", "{refused}");
@@ -1854,9 +3972,10 @@ mod tests {
     /// UsersAI root storage instead of dispatching it.
     #[tokio::test]
     async fn usersai_root_storage_takes_the_protected_path() {
-        let id = "agent:local:protected-ai";
-        let temp = stored_human_dir(id);
-        let root = crate::auth::tests::mint_agent_record(temp.path(), id, None).localhost_root;
+        let id = crate::auth::valid_agent::ID;
+        let temp = tempfile::tempdir().unwrap();
+        crate::auth::valid_agent::plant(temp.path());
+        let root = crate::auth::valid_agent::ROOT;
         let mut ctx = bridge_context();
         ctx.principal_id = Some(id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
@@ -1865,7 +3984,7 @@ mod tests {
         let refused = protected_principal_root_resource_response(&ctx, "write", &request).unwrap();
         assert_eq!(refused["code"], "principal_context_required", "{refused}");
         let line = r#"{"id":31,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/a.md","operation":"read","token":"tok","body":{}}}"#;
-        let bounds = [format!("{root}/a.md")];
+        let bounds = any_action(vec![format!("{root}/a.md")]);
         let remote = handle_remote_request_with_audit_dir(
             line,
             "http://127.0.0.1:12345",
@@ -1956,6 +4075,249 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("localhost://Local/SharedByLocalUsersAndBots/Home/a.md")
         );
+    }
+
+    /// A read grant allows localhost read and refuses localhost write.
+    /// The required right is the one `resource_invoke_dispatch` took from the
+    /// localhost row, checked by `CapabilityManager::validate`.
+    #[tokio::test]
+    async fn a_read_grant_refuses_a_localhost_write() {
+        let ctx = bridge_context();
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/a.md";
+        let read = resource_invoke_dispatch(
+            &serde_json::json!({
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "body": {}
+            }),
+            None,
+            None,
+        )
+        .expect("localhost read reaches the capability check");
+        let write = resource_invoke_dispatch(
+            &serde_json::json!({
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "write",
+                "body": {"content": "page"}
+            }),
+            None,
+            None,
+        )
+        .expect("localhost write reaches the capability check");
+        assert_eq!(read.resource, write.resource);
+
+        let token = ctx.capability_manager.grant(
+            &ctx.capsule_id,
+            ResourceId::new(&read.resource),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        ctx.capability_manager
+            .validate(
+                &token,
+                &ctx.capsule_id,
+                read.required_action,
+                &ResourceId::new(&read.resource),
+                None,
+            )
+            .await
+            .expect("a read grant allows localhost read");
+        let refused = ctx
+            .capability_manager
+            .validate(
+                &token,
+                &ctx.capsule_id,
+                write.required_action,
+                &ResourceId::new(&write.resource),
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(elastos_runtime::capability::manager::ValidationError::WrongAction { .. })
+            ),
+            "a read grant refuses localhost write: {refused:?}"
+        );
+    }
+
+    fn b4r_documents(principal_id: &str) -> (tempfile::TempDir, BridgeContext, String) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        // No listed asks, so the manifest ceiling allows read and write. A
+        // plant that asks for Read is not refused here.
+        ctx.manifest_capabilities =
+            any_action(vec![format!("{}/Documents/*", protection.localhost_root)]);
+        (temp, ctx, protection.localhost_root)
+    }
+
+    fn b4r_names(root: &str, name: &str) -> (String, String) {
+        (
+            format!("localhost://Users/self/Documents/{name}"),
+            format!("{root}/Documents/{name}"),
+        )
+    }
+
+    fn b4r_path(temp: &tempfile::TempDir, scoped: &str) -> std::path::PathBuf {
+        let path = rooted_localhost_fs_path(temp.path(), scoped).expect("file-backed path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        path
+    }
+
+    async fn b4r_invoke(
+        ctx: &BridgeContext,
+        operation: &str,
+        uri: &str,
+        token: &str,
+        content: Option<&str>,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({});
+        if let Some(content) = content {
+            body["content"] = serde_json::Value::String(content.to_string());
+        }
+        let line = serde_json::json!({
+            "id": 7,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": operation,
+                "token": token,
+                "body": body,
+            }
+        })
+        .to_string();
+        handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers")
+    }
+
+    /// A read grant calling localhost write is `capability_denied` before the
+    /// file is created or changed. The manifest ceiling allows the call.
+    #[tokio::test]
+    async fn b4r_read_grant_on_localhost_write_is_refused_before_effect() {
+        let principal_id = "person:local:b4r-read-on-write";
+        let (temp, ctx, root) = b4r_documents(principal_id);
+        let (absent_uri, absent_scoped) = b4r_names(&root, "absent.txt");
+        let (present_uri, present_scoped) = b4r_names(&root, "present.txt");
+        let absent_path = b4r_path(&temp, &absent_scoped);
+        let present_path = b4r_path(&temp, &present_scoped);
+        let original = b"kept-bytes";
+        std::fs::write(&present_path, original).expect("seed");
+        assert!(!absent_path.exists());
+
+        let absent = b4r_invoke(
+            &ctx,
+            "write",
+            &absent_uri,
+            &bridge_token(&ctx, &absent_scoped, Action::Read),
+            Some("should-not-land"),
+        )
+        .await;
+        let absent_code = absent["response"]["code"].as_str();
+        assert_ne!(
+            absent_code,
+            Some("manifest_capability_denied"),
+            "manifest ceiling refused before the token check: {absent}"
+        );
+        assert_eq!(
+            absent_code,
+            Some("capability_denied"),
+            "read grant on localhost write is capability_denied before the effect; status={} file_exists={} response={absent}",
+            absent["response"]["result"]["status"].as_str().unwrap_or(""),
+            absent_path.exists(),
+        );
+        assert!(
+            !absent_path.exists(),
+            "a refused write does not create the file"
+        );
+
+        let present = b4r_invoke(
+            &ctx,
+            "write",
+            &present_uri,
+            &bridge_token(&ctx, &present_scoped, Action::Read),
+            Some("should-not-replace"),
+        )
+        .await;
+        assert_eq!(
+            present["response"]["code"].as_str(),
+            Some("capability_denied"),
+            "read grant on an existing file is capability_denied: {present}"
+        );
+        assert_eq!(
+            std::fs::read(&present_path).expect("pre-existing file remains"),
+            original,
+            "a refused write leaves the file bytes unchanged"
+        );
+
+        let granted = b4r_invoke(
+            &ctx,
+            "write",
+            &absent_uri,
+            &bridge_token(&ctx, &absent_scoped, Action::Write),
+            Some("landed"),
+        )
+        .await;
+        assert_eq!(
+            granted["response"]["result"]["status"], "ok",
+            "a write grant reaches storage: {granted}"
+        );
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                principal_id,
+                &root,
+                &absent_scoped,
+                &absent_path,
+            )
+            .expect("stored object"),
+            b"landed"
+        );
+    }
+
+    /// A write grant calling localhost read is `capability_denied`.
+    #[tokio::test]
+    async fn b4r_write_grant_on_localhost_read_is_refused() {
+        let (temp, ctx, root) = b4r_documents("person:local:b4r-write-on-read");
+        let (uri, scoped) = b4r_names(&root, "note.txt");
+        let path = b4r_path(&temp, &scoped);
+        let original = b"read-target";
+        std::fs::write(&path, original).expect("seed");
+
+        let response = b4r_invoke(
+            &ctx,
+            "read",
+            &uri,
+            &bridge_token(&ctx, &scoped, Action::Write),
+            None,
+        )
+        .await;
+        assert_ne!(
+            response["response"]["code"].as_str(),
+            Some("manifest_capability_denied"),
+            "manifest ceiling refused before the token check: {response}"
+        );
+        assert_eq!(
+            response["response"]["code"].as_str(),
+            Some("capability_denied"),
+            "write grant on localhost read is capability_denied: {response}"
+        );
+        assert_eq!(std::fs::read(&path).expect("file remains"), original);
+    }
+
+    /// Base `85f93f3b9` displays the webspace write right as the bytes `write`.
+    #[test]
+    fn b4r_webspace_write_required_right_is_unchanged_from_base() {
+        let right = provider_operation_action("webspace", "write")
+            .expect("webspace write has a required right");
+        assert_eq!(right.to_string().as_bytes(), b"write");
     }
 
     #[test]
@@ -2305,7 +4667,9 @@ mod tests {
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
-            &["localhost://Local/SharedByLocalUsersAndBots/Home/allowed/*".to_string()],
+            &any_action(vec![
+                "localhost://Local/SharedByLocalUsersAndBots/Home/allowed/*".to_string(),
+            ]),
             None,
         )
         .await
@@ -2314,6 +4678,115 @@ mod tests {
         assert_eq!(response["id"], 15);
         assert_eq!(response["response"]["type"], "error");
         assert_eq!(response["response"]["code"], "manifest_capability_denied");
+        // A manifest without asks is refused in the words it always was:
+        // the resource, and no action. The lab's conformance tests and any
+        // capsule that matches on the sentence depend on it.
+        assert_eq!(
+            response["response"]["message"],
+            "capsule manifest does not declare authority for \
+             localhost://Local/SharedByLocalUsersAndBots/Home/denied/a.md"
+        );
+    }
+
+    /// The attached bridge (a component run from the command line against a
+    /// running Runtime) holds a manifest's asks the same way, before it
+    /// sends anything. With one ask, read on a folder: a write there, and a
+    /// request to be granted the write, are each refused by the ceiling; the
+    /// request's action is written in upper case, and is judged as the
+    /// Runtime will read it. A listener the test owns stands in for the
+    /// Runtime: a refusal sends it nothing, and each control is received by
+    /// it, once, at the route it belongs to. The controls are the read
+    /// under the same ask (the request for it again in upper case), and
+    /// the same write under a ceiling that names no action.
+    #[tokio::test]
+    async fn the_attached_bridge_holds_a_capsule_with_asks_to_their_actions() {
+        let folder = "localhost://Local/SharedByLocalUsersAndBots/Home/allowed";
+        let read_only = vec![AuthorityBound {
+            resource: format!("{folder}/*"),
+            actions: Some(vec![elastos_common::AskAction::Read]),
+        }];
+        let any = any_action(vec![format!("{folder}/*")]);
+        let invoke = |operation: &str| {
+            format!(
+                r#"{{"id":15,"request":{{"type":"resource_invoke","uri":"{folder}/a.md","operation":"{operation}","token":"held","body":{{"content":[1],"append":false}}}}}}"#
+            )
+        };
+        let request = |action: &str| {
+            format!(
+                r#"{{"id":16,"request":{{"type":"request_capability","resource":"{folder}/a.md","action":"{action}"}}}}"#
+            )
+        };
+        // A listener this test owns stands in for the Runtime. It keeps the
+        // request line of everything it is sent and answers each with an
+        // error, so what reached it is counted and nothing is acted on.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = received.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut first = String::new();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                if reader.read_line(&mut first).is_ok() {
+                    seen.lock().unwrap().push(first.trim().to_string());
+                }
+                let refuse = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                let _ = stream.write_all(refuse.as_bytes());
+            }
+        });
+        let answer = |line: String, ceiling: Vec<AuthorityBound>| {
+            let address = address.clone();
+            async move {
+                let capsule = "test-capsule";
+                handle_remote_request(&line, &address, "client-token", capsule, &ceiling, None)
+                    .await
+            }
+        };
+        let reached = || received.lock().unwrap().clone();
+        let by_the_ceiling = |answer: &Result<serde_json::Value>| {
+            let code = answer
+                .as_ref()
+                .ok()
+                .map(|it| it["response"]["code"].clone());
+            code == Some(serde_json::json!("manifest_capability_denied"))
+        };
+
+        for line in [invoke("write"), request("WRITE")] {
+            let refused = answer(line.clone(), read_only.clone()).await;
+            assert!(by_the_ceiling(&refused), "{line}: {refused:?}");
+            let message = refused.unwrap()["response"]["message"].to_string();
+            assert!(
+                message.contains(&format!("to write {folder}/a.md")),
+                "{message}"
+            );
+        }
+        assert_eq!(reached(), Vec::<String>::new(), "a refusal sends nothing");
+        // Each control passes every check made before anything is sent: the
+        // listener receives exactly one request for it, an invoke at the
+        // provider route and a request at the capability route.
+        let controls = [
+            (invoke("read"), read_only.clone(), "/api/provider/"),
+            (
+                request("READ"),
+                read_only.clone(),
+                "/api/capability/request",
+            ),
+            (invoke("write"), any.clone(), "/api/provider/"),
+            (request("WRITE"), any, "/api/capability/request"),
+        ];
+        for (sent, (line, ceiling, route)) in controls.into_iter().enumerate() {
+            let went_on = answer(line.clone(), ceiling).await;
+            assert!(!by_the_ceiling(&went_on), "{line}: {went_on:?}");
+            let reached = reached();
+            assert_eq!(reached.len(), sent + 1, "{line}: {reached:?}");
+            let request_line = &reached[sent];
+            assert!(
+                request_line.starts_with("POST ") && request_line.contains(route),
+                "{line}: {request_line}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2323,7 +4796,7 @@ mod tests {
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
-            &["elastos://wallet/*".to_string()],
+            &any_action(vec!["elastos://wallet/*".to_string()]),
             None,
         )
         .await
@@ -2341,7 +4814,7 @@ mod tests {
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
-            &["elastos://wallet/*".to_string()],
+            &any_action(vec!["elastos://wallet/*".to_string()]),
             None,
         )
         .await
@@ -2365,7 +4838,7 @@ mod tests {
             "http://127.0.0.1:12345",
             "client-token",
             "test-capsule",
-            &[object_uri],
+            &any_action(vec![object_uri]),
             Some(principal_id),
             Some(temp.path()),
         )
@@ -2379,6 +4852,155 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("protected storage bridge"));
+    }
+
+    /// F4.3 (r3/r4, options §2.2): direct drive of the attached bridge entry,
+    /// not a real attached launch. A real launch needs a live operator
+    /// Runtime and a staged component capsule (costed in the facts); that
+    /// form is Sash's or Rong's definition question. With the `None` that
+    /// route 4's CLI entrances pass, a Users/self resource_invoke is refused
+    /// before dispatch as `invalid_resource_invoke`; with `Some(person)` the
+    /// protected-bridge refusal names the principal context. Neither reads nor
+    /// writes real data placed under the person's root.
+    #[tokio::test]
+    async fn an_attached_bridge_serves_no_principal_root() {
+        let principal_id = "person:local:active";
+        let temp = stored_human_dir(principal_id);
+        let object_uri = format!(
+            "{}/Documents/a.md",
+            crate::auth::principal_localhost_root(principal_id)
+        );
+        let disk = rooted_localhost_fs_path(temp.path(), &object_uri).unwrap();
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        std::fs::write(&disk, b"person's real data").unwrap();
+        let line = r#"{"id":13,"request":{"type":"resource_invoke","uri":"localhost://Users/self/Documents/a.md","operation":"read","token":"tok","body":{}}}"#;
+        let capabilities = any_action(vec![object_uri]);
+        let without_principal = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &capabilities,
+            None,
+            Some(temp.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(without_principal["id"], 13);
+        assert_eq!(without_principal["response"]["type"], "error");
+        assert_eq!(
+            without_principal["response"]["code"],
+            "invalid_resource_invoke"
+        );
+        assert_eq!(
+            without_principal["response"]["message"],
+            "localhost://Users/self requires a principal-scoped launch context"
+        );
+
+        let with_principal = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &capabilities,
+            Some(principal_id),
+            Some(temp.path()),
+        )
+        .await
+        // A dispatch error folds into the response so the code assertion, not
+        // an unwrap, is the row's observable failure.
+        .unwrap_or_else(|err| serde_json::json!({"dispatch_error": format!("{err:#}")}));
+        assert_eq!(
+            with_principal["response"]["code"], "principal_context_required",
+            "{with_principal}"
+        );
+        assert_eq!(
+            with_principal["response"]["message"],
+            "principal-root storage requires an in-runtime protected storage bridge"
+        );
+
+        assert_eq!(
+            std::fs::read(&disk).unwrap(),
+            b"person's real data",
+            "the person's file is not written"
+        );
+        for response in [&without_principal, &with_principal] {
+            assert!(
+                !response.to_string().contains("person's real data"),
+                "nothing from the person's root is returned: {response}"
+            );
+        }
+    }
+
+    /// S5-rem-f43-agent-id (rulings v4 R-B/R-C, route 4 fence part (b)): the
+    /// same direct drive of the attached bridge entry as F4.3, run once with a
+    /// stored agent's id. An agent's own root area takes the protected path, so
+    /// the request is refused by name; neither the agent's root nor the
+    /// location the id rule points at under `Users` is read, written or
+    /// returned. F4.3 keeps the `None` case: it is refused before a principal
+    /// is looked at, so an agent id adds nothing to it.
+    #[tokio::test]
+    async fn an_attached_bridge_serves_no_agent_root() {
+        let agent_id = crate::auth::valid_agent::ID;
+        // The id rule points at the same digest under `Users`; an agent's
+        // stored record points at its minted `UsersAI` root instead.
+        assert_eq!(
+            crate::auth::principal_localhost_root(agent_id),
+            crate::auth::valid_agent::USERS_ROOT
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let record = crate::auth::valid_agent::plant(temp.path());
+        assert_eq!(record.kind, crate::auth::PrincipalKind::Agent);
+        assert_eq!(record.localhost_root, crate::auth::valid_agent::ROOT);
+        let agent_uri = format!("{}/Documents/a.md", crate::auth::valid_agent::ROOT);
+        let id_rule_uri = format!("{}/Documents/a.md", crate::auth::valid_agent::USERS_ROOT);
+        let disk = rooted_localhost_fs_path(temp.path(), &agent_uri).unwrap();
+        std::fs::create_dir_all(disk.parent().unwrap()).unwrap();
+        std::fs::write(&disk, b"agent's real data").unwrap();
+        let id_rule_disk = rooted_localhost_fs_path(temp.path(), &id_rule_uri).unwrap();
+        std::fs::create_dir_all(id_rule_disk.parent().unwrap()).unwrap();
+        std::fs::write(&id_rule_disk, b"id-rule real data").unwrap();
+        let line = r#"{"id":14,"request":{"type":"resource_invoke","uri":"localhost://UsersAI/self/Documents/a.md","operation":"read","token":"tok","body":{}}}"#;
+        let capabilities = any_action(vec![agent_uri]);
+        let response = handle_remote_request_with_audit_dir(
+            line,
+            "http://127.0.0.1:12345",
+            "client-token",
+            "test-capsule",
+            &capabilities,
+            Some(agent_id),
+            Some(temp.path()),
+        )
+        .await
+        // A dispatch error folds into the response so the code assertion, not
+        // an unwrap, is the row's observable failure.
+        .unwrap_or_else(|err| serde_json::json!({"dispatch_error": format!("{err:#}")}));
+        assert_eq!(
+            response["response"]["code"], "principal_context_required",
+            "{response}"
+        );
+        assert_eq!(
+            response["response"]["message"],
+            "principal-root storage requires an in-runtime protected storage bridge"
+        );
+
+        assert_eq!(
+            std::fs::read(&disk).unwrap(),
+            b"agent's real data",
+            "the agent's file is not written"
+        );
+        assert_eq!(
+            std::fs::read(&id_rule_disk).unwrap(),
+            b"id-rule real data",
+            "the file at the id rule's location is not written"
+        );
+        for bytes in [b"agent's real data", b"id-rule real data"] {
+            let text = std::str::from_utf8(bytes).unwrap();
+            assert!(
+                !response.to_string().contains(text),
+                "nothing from either location is returned: {response}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2459,6 +5081,65 @@ mod tests {
         assert_eq!(response["id"], 10);
         assert_eq!(response["response"]["type"], "error");
         assert_eq!(response["response"]["code"], "not_capsule_kernel_abi");
+    }
+
+    #[tokio::test]
+    async fn bridge_request_at_capacity_retires_dead_grants_and_is_admitted() {
+        use elastos_runtime::capability::pending::{GrantDuration, Settler};
+        use elastos_runtime::capability::pending::{MAX_PENDING_PER_SESSION, MAX_PENDING_REQUESTS};
+        use elastos_runtime::capability::TokenConstraints;
+        let ctx = bridge_context();
+        let (store, manager) = (ctx.pending_store.clone(), ctx.capability_manager.clone());
+        let resource = ResourceId::new("localhost://Local/SharedByLocalUsersAndBots/Home/a.txt");
+        for n in 0..MAX_PENDING_REQUESTS {
+            let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
+            let id = elastos_runtime::session::SessionId::from_string(session.clone());
+            let request = store
+                .create_request(id, resource.clone(), Action::Read)
+                .await;
+            let once = TokenConstraints::new(0, false, None, Some(1));
+            let token = manager.grant(&session, resource.clone(), Action::Read, once, None);
+            let duration = GrantDuration::Session;
+            store
+                .grant_request(request.id.as_str(), token.clone(), duration)
+                .await
+                .unwrap();
+            let used = manager.validate(&token, &session, Action::Read, &resource, None);
+            used.await.expect("the once grant is used");
+        }
+        let newest = store
+            .list_requests()
+            .await
+            .iter()
+            .map(|r| r.requested_at.unix_secs)
+            .max();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while elastos_common::SecureTimestamp::now().unix_secs <= newest.unwrap() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the clock passed the newest second"
+            );
+            tokio::task::yield_now().await;
+        }
+        let line = r#"{"id":13,"request":{"type":"request_capability","resource":"localhost://Local/SharedByLocalUsersAndBots/Home/a.txt","action":"read"}}"#;
+        let task = tokio::spawn(async move { handle_request(line, &Some(ctx)).await });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let admitted = loop {
+            if let Some(request) = store.list_pending().await.first() {
+                break Some(request.id.to_string());
+            }
+            if task.is_finished() || std::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::task::yield_now().await;
+        };
+        let admitted = admitted.expect("the bridge admits a request once dead grants are retired");
+        store
+            .deny_request_by(&admitted, "test done", Settler::Shell)
+            .await
+            .unwrap();
+        let response = task.await.unwrap().expect("the bridge answers");
+        assert_eq!(response["response"]["message"], "test done");
     }
 
     #[tokio::test]
@@ -2551,6 +5232,107 @@ mod tests {
         );
     }
 
+    /// A manifest's asks at the bridge itself, with one ask: read on one
+    /// object. A write to it is refused by the ceiling, although the capsule
+    /// holds a write token for it, and nothing is written. A request to be
+    /// granted the write is refused before any prompt is made. A request for
+    /// the read is inside the ask and is put to the shell like any other:
+    /// the ask itself grants nothing, and when the shell says no the answer
+    /// is that no. The control is the same ask with write listed: the same
+    /// write goes through.
+    #[tokio::test]
+    async fn the_bridge_holds_a_capsule_with_asks_to_their_actions() {
+        use elastos_common::AskAction;
+        use elastos_runtime::capability::pending::Settler;
+        let temp = tempfile::tempdir().unwrap();
+        let principal_id = "person:local:active";
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        crate::auth::store_test_human_principal(temp.path(), principal_id);
+        let alias = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
+        let object_uri = format!(
+            "{}/.AppData/LocalHost/Chat/state.json",
+            protection.localhost_root
+        );
+        let asking = |actions: Vec<AskAction>| {
+            vec![AuthorityBound {
+                resource: object_uri.clone(),
+                actions: Some(actions),
+            }]
+        };
+        let write_line = |ctx: &BridgeContext| {
+            serde_json::json!({
+                "id": 21,
+                "request": {
+                    "type": "resource_invoke", "uri": alias, "operation": "write",
+                    "token": bridge_token(ctx, &object_uri, Action::Write),
+                    "body": {"content": b"chat state".to_vec(), "append": false}
+                }
+            })
+            .to_string()
+        };
+        let stored = rooted_localhost_fs_path(temp.path(), &object_uri).unwrap();
+
+        ctx.manifest_capabilities = asking(vec![AskAction::Read]);
+        let refused = handle_request(&write_line(&ctx), &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        assert_eq!(refused["response"]["code"], "manifest_capability_denied");
+        assert_eq!(
+            refused["response"]["message"],
+            format!("capsule manifest does not declare authority to write {object_uri}")
+        );
+        assert!(!stored.exists(), "nothing was written");
+
+        let request = |action: &str| {
+            format!(
+                r#"{{"id":31,"request":{{"type":"request_capability","resource":"{alias}","action":"{action}"}}}}"#
+            )
+        };
+        let store = ctx.pending_store.clone();
+        let refused = handle_request(&request("write"), &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        assert_eq!(refused["response"]["code"], "manifest_capability_denied");
+        assert_eq!(
+            refused["response"]["message"],
+            format!("capsule manifest does not declare authority to write {object_uri}")
+        );
+        assert!(store.list_pending().await.is_empty(), "no prompt was made");
+
+        let (line, asker) = (request("read"), ctx.clone());
+        let task = tokio::spawn(async move { handle_request(&line, &Some(asker)).await });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let put_to_the_shell = loop {
+            if let Some(request) = store.list_pending().await.first() {
+                break Some((request.id.to_string(), request.action));
+            }
+            if task.is_finished() || std::time::Instant::now() >= deadline {
+                break None;
+            }
+            tokio::task::yield_now().await;
+        };
+        let (id, action) = put_to_the_shell.expect("a request inside the ask reaches the shell");
+        assert_eq!(action, Action::Read);
+        store
+            .deny_request_by(&id, "the shell says no", Settler::Shell)
+            .await
+            .unwrap();
+        let answer = task.await.unwrap().expect("the bridge answers");
+        assert_eq!(answer["response"]["code"], "denied");
+        assert_eq!(answer["response"]["message"], "the shell says no");
+
+        ctx.manifest_capabilities = asking(vec![AskAction::Read, AskAction::Write]);
+        let written = handle_request(&write_line(&ctx), &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers");
+        assert_eq!(written["response"]["result"]["status"], "ok", "{written}");
+        assert!(stored.exists());
+    }
+
     #[tokio::test]
     async fn handle_request_uses_protected_principal_root_object_for_users_self_writes() {
         let temp = tempfile::tempdir().unwrap();
@@ -2566,7 +5348,7 @@ mod tests {
             "{}/.AppData/LocalHost/Chat/state.json",
             protection.localhost_root
         );
-        ctx.manifest_capabilities = vec![object_uri.clone()];
+        ctx.manifest_capabilities = any_action(vec![object_uri.clone()]);
         let write_token = bridge_token(&ctx, &object_uri, Action::Write);
         let write_line = serde_json::json!({
             "id": 21,
@@ -2631,10 +5413,10 @@ mod tests {
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
         crate::auth::store_test_human_principal(temp.path(), principal_id);
-        ctx.manifest_capabilities = vec![format!(
+        ctx.manifest_capabilities = any_action(vec![format!(
             "{}/.AppData/Agents/demo-agent/*",
             protection.localhost_root
-        )];
+        )]);
         let object_uri = format!(
             "{}/.AppData/Agents/demo-agent/tasks/task-1/journal",
             protection.localhost_root
@@ -2913,7 +5695,7 @@ mod tests {
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
         crate::auth::store_test_human_principal(temp.path(), principal_id);
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let object_uri = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
@@ -3020,7 +5802,7 @@ mod tests {
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
         crate::auth::store_test_human_principal(temp.path(), principal_id);
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let object_uri = format!("{root}/.AppData/Agents/demo-agent/tasks/task-1/journal");
@@ -3055,7 +5837,7 @@ mod tests {
         ctx.principal_id = Some(principal_id.to_string());
         ctx.data_dir = Some(temp.path().to_path_buf());
         crate::auth::store_test_human_principal(temp.path(), principal_id);
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let other = format!("{root}/Documents/note.txt");
@@ -3195,7 +5977,7 @@ mod tests {
     async fn a_folded_or_misspelled_agents_path_is_refused_before_storage() {
         let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let first = journal_write(
             &ctx,
             &format!("{root}/*"),
@@ -3253,7 +6035,7 @@ mod tests {
     async fn only_read_and_write_are_allowed_under_agents() {
         let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         journal_write(
@@ -3327,7 +6109,7 @@ mod tests {
     /// past the rule would fail to connect instead of returning a refusal.
     #[tokio::test]
     async fn the_attached_bridge_applies_the_agents_rule_before_http() {
-        let manifest = ["localhost://Users/self/*".to_string()];
+        let manifest = any_action(vec!["localhost://Users/self/*".to_string()]);
         let temp = stored_human_dir("person:local:journal-owner");
         let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
         let folder = "localhost://Users/self/.AppData/Agents/agent-host";
@@ -3420,7 +6202,7 @@ mod tests {
     #[tokio::test]
     async fn attached_bridge_refusals_are_audited() {
         let temp = stored_human_dir("person:local:journal-owner");
-        let manifest = ["localhost://Users/self/*".to_string()];
+        let manifest = any_action(vec!["localhost://Users/self/*".to_string()]);
         let journal = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
         for (id, operation, uri, token, refused) in [
             (91, "delete", journal, "tok", "operation_not_allowed"),
@@ -3487,7 +6269,7 @@ mod tests {
             "http://example.com:8080",
             "client-token",
             "test-capsule",
-            &["localhost://MyWebSite/*".to_string()],
+            &any_action(vec!["localhost://MyWebSite/*".to_string()]),
             Some("person:local:journal-owner"),
             Some(temp.path()),
         )
@@ -3546,7 +6328,7 @@ mod tests {
             &api_url,
             "client-token",
             "test-capsule",
-            &["localhost://MyWebSite/*".to_string()],
+            &any_action(vec!["localhost://MyWebSite/*".to_string()]),
             Some("person:local:journal-owner"),
             Some(temp.path()),
         )
@@ -3568,36 +6350,21 @@ mod tests {
     }
 
     /// An attached component's model run gets a Bus-shaped refusal from the
-    /// adapter, not the HTTP route's plain-text 403, and nothing is posted.
+    /// adapter before an HTTP call. The unreachable loopback address makes
+    /// any attempted dispatch fail this test instead of returning a refusal.
     #[tokio::test]
     async fn an_attached_component_model_run_gets_a_structured_refusal() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let api_url = format!("http://{}", listener.local_addr().unwrap());
-        let posted = Arc::new(AtomicUsize::new(0));
-        let seen = posted.clone();
-        tokio::spawn(async move {
-            // What POST /api/provider/model/<run op> answers.
-            let reply =
-                "principal_context_required: model runs require a principal-scoped launch context";
-            while let Ok((mut socket, _)) = listener.accept().await {
-                seen.fetch_add(1, Ordering::SeqCst);
-                let _ = socket.read(&mut [0u8; 16 * 1024]).await;
-                let head = format!("HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", reply.len());
-                let _ = socket.write_all(format!("{head}{reply}").as_bytes()).await;
-            }
-        });
+        let api_url = "http://127.0.0.1:0";
         let run_id = format!("run:sha256:{}", "a".repeat(64));
         for op in ["runs_create", "runs_get", "runs_events", "runs_cancel"] {
             let line = serde_json::json!({"id": 97, "request": {"type": "resource_invoke",
                 "uri": format!("elastos://model/{op}"), "operation": op, "token": "tok",
                 "body": {"run_id": run_id, "request_id": "model-v1:1:n", "offer_id": "m",
                     "operation": "text.generate", "input": {}}}});
-            let manifest = ["elastos://model/*".to_string()];
+            let manifest = ["elastos://model/*".into()];
             let response = handle_remote_request(
                 &line.to_string(),
-                &api_url,
+                api_url,
                 "client-token",
                 "test-capsule",
                 &manifest,
@@ -3608,11 +6375,6 @@ mod tests {
             let code = &response["response"]["code"];
             assert_eq!(code, "principal_context_required", "{op}: {response}");
         }
-        assert_eq!(
-            posted.load(Ordering::SeqCst),
-            0,
-            "a model run body was posted"
-        );
     }
 
     /// Inside the Agents area only read and write may be asked for. Anything
@@ -3621,7 +6383,7 @@ mod tests {
     async fn a_forbidden_agents_capability_request_is_refused_at_once() {
         let (_temp, mut ctx, _) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let started = std::time::Instant::now();
         for (id, action, resource) in [
             (
@@ -3665,7 +6427,7 @@ mod tests {
                 "http://127.0.0.1:12345",
                 "client-token",
                 "test-capsule",
-                &["localhost://Users/self/*".to_string()],
+                &any_action(vec!["localhost://Users/self/*".to_string()]),
                 Some("person:local:journal-owner"),
                 Some(_temp.path()),
             )
@@ -3755,8 +6517,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_provider_result_is_audited_as_an_error() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities =
-            vec!["localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec![
+            "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+        ]);
         ctx.provider_registry
             .register(Arc::new(FailingProvider))
             .await;
@@ -3800,9 +6563,18 @@ mod tests {
         let manifest: elastos_common::CapsuleManifest =
             serde_json::from_str(include_str!("../../../../examples/agent-host/capsule.json"))
                 .unwrap();
+        manifest
+            .validate()
+            .expect("the agent host manifest validates");
         assert_eq!(
             manifest.resource_authority_bounds(),
-            vec!["localhost://Users/self/.AppData/Agents/agent-host/*".to_string()]
+            vec![elastos_common::AuthorityBound {
+                resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
+                actions: Some(vec![
+                    elastos_common::AskAction::Write,
+                    elastos_common::AskAction::Read,
+                ]),
+            }]
         );
         let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
         ctx.manifest_capabilities = manifest.resource_authority_bounds();
@@ -3834,7 +6606,7 @@ mod tests {
                 "localhost://Users/self/.AppData/Agents",
                 "manifest_capability_denied",
             ),
-            (journal_self, "capability_denied"),
+            (journal_self, "manifest_capability_denied"),
         ] {
             for grant in &grants {
                 let line = serde_json::json!({
@@ -3871,8 +6643,8 @@ mod tests {
             };
             assert_eq!(asked["response"]["code"], expected, "{uri}");
         }
-        // No request can obtain a delete grant in the area any more. Even a
-        // Delete token minted directly is refused by the Agents rule when used.
+        // Delete is outside the ask's actions, so the manifest refuses the
+        // invoke. The provider sees no request.
         let delete = bridge_token(&ctx, &journal, Action::Delete);
         let line = serde_json::json!({
             "id": 70,
@@ -3886,7 +6658,7 @@ mod tests {
         })
         .to_string();
         let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
-        assert_eq!(response["response"]["code"], "operation_not_allowed");
+        assert_eq!(response["response"]["code"], "manifest_capability_denied");
         assert!(provider.requests().await.is_empty());
         assert!(journal_path(&temp, &journal).is_file());
         assert!(temp.path().join("Users").is_dir());
@@ -3942,7 +6714,7 @@ mod tests {
         let (_temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
         let state = format!("{root}/.AppData/LocalHost/Chat/state.json");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let uri = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
         let blind = journal_write(&ctx, &state, uri, b"one", serde_json::json!({})).await;
         assert_eq!(blind["response"]["result"]["status"], "ok");
@@ -3991,7 +6763,7 @@ mod tests {
         let (temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
         let root = crate::auth::principal_localhost_root("person:local:journal-owner");
         let state = format!("{root}/.AppData/LocalHost/Chat/state.json");
-        ctx.manifest_capabilities = vec![format!("{root}/*")];
+        ctx.manifest_capabilities = any_action(vec![format!("{root}/*")]);
         let uri = "localhost://Users/self/.AppData/LocalHost/Chat/state.json";
         for precondition in [
             serde_json::json!({ "create_only": true, "if_revision": "\"abc\"" }),
@@ -4191,8 +6963,9 @@ mod tests {
     #[tokio::test]
     async fn resource_invoke_enforces_manifest_capability_upper_bound() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities =
-            vec!["localhost://Local/SharedByLocalUsersAndBots/Home/allowed/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec![
+            "localhost://Local/SharedByLocalUsersAndBots/Home/allowed/*".to_string(),
+        ]);
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/denied/a.md";
@@ -4216,6 +6989,12 @@ mod tests {
         assert_eq!(response["id"], 34);
         assert_eq!(response["response"]["type"], "error");
         assert_eq!(response["response"]["code"], "manifest_capability_denied");
+        // The in-process path, for a manifest without asks: the sentence it
+        // has always been, word for word.
+        assert_eq!(
+            response["response"]["message"],
+            format!("capsule manifest does not declare authority for {uri}")
+        );
         assert!(
             provider.requests().await.is_empty(),
             "manifest-denied component imports must not reach the provider registry"
@@ -4225,7 +7004,7 @@ mod tests {
     #[tokio::test]
     async fn resource_wallet_status_is_bounded_and_non_principal_specific() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities = vec![WALLET_STATUS_RESOURCE.to_string()];
+        ctx.manifest_capabilities = any_action(vec![WALLET_STATUS_RESOURCE.to_string()]);
         let provider = Arc::new(CapturingWalletProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let token = bridge_token(&ctx, WALLET_STATUS_RESOURCE, Action::Read);
@@ -4259,7 +7038,7 @@ mod tests {
     #[tokio::test]
     async fn component_bridge_wallet_contract_fails_before_provider_invocation() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities = vec!["elastos://wallet/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec!["elastos://wallet/*".to_string()]);
         let provider = Arc::new(CapturingWalletProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
         let response = handle_component_resource_request(
@@ -4296,7 +7075,7 @@ mod tests {
     #[tokio::test]
     async fn resource_wallet_operations_fail_before_provider_invocation() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities = vec!["elastos://wallet/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec!["elastos://wallet/*".to_string()]);
         let provider = Arc::new(CapturingWalletProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
 
@@ -4341,7 +7120,7 @@ mod tests {
     #[tokio::test]
     async fn request_capability_rejects_wallet_authority_before_pending_capacity() {
         let mut ctx = bridge_context();
-        ctx.manifest_capabilities = vec!["elastos://wallet/*".to_string()];
+        ctx.manifest_capabilities = any_action(vec!["elastos://wallet/*".to_string()]);
         let pending_store = ctx.pending_store.clone();
         let response = handle_request(
             r#"{"id":35,"request":{"type":"request_capability","resource":"elastos://wallet/account/list","action":"read"}}"#,
@@ -4401,7 +7180,7 @@ mod tests {
             "{}/Documents/a.md",
             crate::auth::principal_localhost_root(principal_id)
         );
-        ctx.manifest_capabilities = vec![object_uri.clone()];
+        ctx.manifest_capabilities = any_action(vec![object_uri.clone()]);
         let read_token = bridge_token(&ctx, &object_uri, Action::Read);
         let line = serde_json::json!({
             "id": 23,
@@ -4511,7 +7290,7 @@ mod tests {
             crate::auth::store_test_human_principal(temp.path(), id);
         }
         ctx.data_dir = Some(temp.path().to_path_buf());
-        ctx.manifest_capabilities = vec!["elastos://model/*".to_string()];
+        ctx.manifest_capabilities = vec!["elastos://model/*".into()];
         let provider = Arc::new(OwnedRunsModelProvider::default());
         let registry = &ctx.provider_registry;
         registry
@@ -4617,5 +7396,171 @@ mod tests {
         let code = &response["response"]["code"];
         assert_eq!(code, "hosted_run_admin_only", "{response}");
         assert_eq!(provider.requests.lock().await.len(), 1);
+    }
+
+    /// The gateway walker keeps production code written after a `tests`
+    /// module, counts an inline call whose first argument starts right after
+    /// the paren, and still drops the module body (including a brace inside a
+    /// char literal).
+    #[test]
+    fn production_text_ignoring_cfg_test_keeps_code_after_a_tests_module() {
+        let source = "\
+fn production_before() {
+    issue_home_launch_token_at(\"before\");
+}
+
+#[cfg(test)]
+mod tests {
+    fn test_body() {
+        let brace = '{';
+        issue_home_launch_token_at(\"inside the module\");
+    }
+}
+
+pub async fn production_after() {
+    issue_home_launch_token_at(
+        \"after\",
+    );
+    issue_home_launch_token_at(\"after inline\");
+}
+";
+        let text = production_text_ignoring_cfg_test(source);
+        assert!(
+            !text.contains("inside the module"),
+            "the test module body is dropped: {text}"
+        );
+        assert!(
+            text.contains("production_after"),
+            "production code after the test module stays: {text}"
+        );
+        assert_eq!(
+            uses_outside_definitions(&text, "issue_home_launch_token_at(", true),
+            3,
+            "two production calls, one of them inline: {text}"
+        );
+    }
+
+    /// Shared detector 1 for the gateway fence cells: source pins over the
+    /// production text of `elastos/crates`. Each `tests` module is dropped by
+    /// brace match, `#[cfg(test)]` items and statement-level `#[cfg(test)]` are
+    /// dropped, and production code written after a test module stays in the
+    /// text. A call needle ending in `(` counts when it stands on a left
+    /// identifier boundary, including an inline call whose first argument
+    /// follows on the same line. These are REVIEW TRIGGERS, not proofs. A new
+    /// issuer or a new `HomeLaunchTokenContext::resolved` site turns this red
+    /// before it lands. A new accepting arm does not; the part (c) admission
+    /// row is that detector, and this pin is not an acceptance detector.
+    #[test]
+    fn gateway_launch_token_issuers_and_context_sites_hold_tree_wide() {
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_for_auth_grant("),
+            expected_counts(&[("elastos-server/src/api/auth_gateway.rs", 4)]),
+            "person Home launch issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_for_verified_grant("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 1),
+            ]),
+            "verified-grant issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_with_context("),
+            expected_counts(&[
+                ("elastos-server/src/api/gateway_home_token.rs", 1),
+                ("elastos-server/src/api/viewer_gateway.rs", 1),
+            ]),
+            "context issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_projection_launch_token_with_context("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 2),
+                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/api/gateway_home_runtime.rs", 3),
+            ]),
+            "projection issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_local_runtime_home_launch_token("),
+            expected_counts(&[
+                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/home_cmd.rs", 1),
+            ]),
+            "device authority issuer callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_launch_token_at("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 4)]),
+            "the one signing issuer's callers"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("HomeLaunchTokenContext::resolved("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 2),
+                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/api/gateway_home_system.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 4),
+                ("elastos-server/src/api/gateway_model_service.rs", 1),
+                ("elastos-server/src/api/gateway_transaction_effects.rs", 1),
+            ]),
+            "launch context construction sites"
+        );
+    }
+
+    /// Review-trigger pins for the gateway admission entrance. The front door's
+    /// one `require_gateway_launch_for` caller, the `require_home_token_context`
+    /// callers and the admission match arms are pinned, so a new entrance or a
+    /// new accepting arm is visible in review.
+    #[test]
+    fn gateway_admission_callers_and_match_arms_hold_tree_wide() {
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_gateway_launch_for("),
+            expected_counts(&[("elastos-server/src/api/gateway_frontdoor.rs", 1)]),
+            "front-door admission caller"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_home_token_context("),
+            expected_counts(&[
+                ("elastos-server/src/api/auth_gateway.rs", 3),
+                ("elastos-server/src/api/gateway_home_external_link.rs", 1),
+                ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
+                ("elastos-server/src/api/gateway_home_system.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 2),
+                ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
+                ("elastos-server/src/api/viewer_gateway.rs", 1),
+            ]),
+            "Home token context callers"
+        );
+        // Blast radius of the one helper: the direct callers and the front
+        // door's path through `require_gateway_launch_for`, which runs only
+        // when the request is not public, not sign-in, not a terminal ticket
+        // and not a runtime session.
+        assert_eq!(
+            production_counts_ignoring_cfg_test("require_gateway_launch("),
+            expected_counts(&[
+                ("elastos-server/src/api/gateway_home_token.rs", 1),
+                ("elastos-server/src/api/gateway_room.rs", 1),
+                ("elastos-server/src/api/gateway_site.rs", 1),
+            ]),
+            "direct require_gateway_launch callers (home token, room, site)"
+        );
+        let source = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_frontdoor.rs"),
+        )
+        .unwrap();
+        assert!(
+            source.contains("if !public && !sign_in && !ticket && !runtime_session {"),
+            "the front-door match keeps its four exclusions"
+        );
+        let start = source
+            .find("match gateway_home_token::require_gateway_launch_for(")
+            .expect("the front-door admission match");
+        let body = &source[start..];
+        let open = body.find('{').expect("the match block opens");
+        let end = cfg_test_item_end(&body[open..]);
+        let arms = body[open..open + end].matches("=>").count();
+        assert_eq!(arms, 4, "gateway admission match arms");
     }
 }

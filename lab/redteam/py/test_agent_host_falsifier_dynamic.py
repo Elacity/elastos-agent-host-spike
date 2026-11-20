@@ -25,6 +25,7 @@ Run: python3 -I -m unittest discover -s lab/redteam/py
 from __future__ import annotations
 
 import collections
+import importlib.util
 import os
 import posixpath
 import re
@@ -37,11 +38,16 @@ import tempfile
 import time
 import unittest
 from pathlib import Path, PurePosixPath
+from unittest import mock
 
 import falsifier_data
 
 
 REPO = Path(__file__).resolve().parents[3]
+_GIT_ENV_SPEC = importlib.util.spec_from_file_location(
+    "fixture_git_env", REPO / "scripts" / "fixture-git-env.py")
+fixture_git = importlib.util.module_from_spec(_GIT_ENV_SPEC)
+_GIT_ENV_SPEC.loader.exec_module(fixture_git)
 FINDINGS = REPO / "lab" / "redteam" / "findings"
 FALSIFIERS = "examples/agent-host/falsifiers.json"
 LIB = "examples/agent-host/src/lib.rs"
@@ -70,6 +76,7 @@ CHECK_TESTS = (
     "test_export_paths_follow_the_crate",
     "test_falsifier_skipped_apply_is_not_a_catch",
     "test_falsifier_zero_tests_are_not_a_pass",
+    "test_fixture_commit_ignores_the_callers_git_dir",
     "test_harness_errors_are_not_catches",
     "test_host_count_comes_from_the_document",
     "test_missing_name_is_rejected_without_the_duplicate_check",
@@ -794,6 +801,25 @@ def _install_finding_tests():
 class AgentHostDynamicChecks(unittest.TestCase):
     """The probe's own rules, on fixtures. They do not build the crate."""
 
+    def test_fixture_commit_ignores_the_callers_git_dir(self):
+        """A hook or ``rebase --exec`` exports GIT_DIR. The fixture commit stays in its own repo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            victim, pointed = fixture_git.victim_repo(Path(tmp) / "victim-root", untracked=("pin.txt",))
+            before = fixture_git.repo_state(victim)
+            config = fixture_git.shared_config(REPO)
+            repo = Path(tmp).resolve() / "repo"
+            repo.mkdir()
+            with mock.patch.dict(os.environ, pointed):
+                try:
+                    _commit_file(repo, "pin.txt", b"fixture\n")
+                except AssertionError as error:  # judged below, after the victim
+                    print(f"fixture commit failed: {error}", file=sys.stderr)
+            self.assertEqual(fixture_git.repo_state(victim), before, "a fixture git command wrote to GIT_DIR's repo")
+            log = subprocess.run(["git", "-C", str(repo), "log", "--format=%s"], capture_output=True,
+                                 text=True, env=fixture_git.fixture_git_env(tmp)).stdout
+            self.assertEqual(log, "pin\n", "the fixture repo lacks its one commit")
+            self.assertEqual(fixture_git.shared_config(REPO), config, "the checkout's shared git config changed")
+
     def test_host_count_comes_from_the_document(self):
         document = {"falsifiers": [
             {"id": "H1", "command": "host", "tests": ["tests::a"]},
@@ -1181,7 +1207,7 @@ def _run(case_cls):
 
 
 def _git(repo, *args):
-    env = git_env()
+    env = fixture_git.fixture_git_env(Path(repo).parent)
     proc = subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, env=env)
     if proc.returncode != 0:

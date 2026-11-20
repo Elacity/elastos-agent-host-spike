@@ -881,7 +881,7 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
                     .find(|entry| entry.principal_id == owner.principal_id)
                     .unwrap()
                     .role = crate::auth::RuntimePrincipalRole::Guest;
-                crate::auth::save_auth_state(dir.path(), &auth).unwrap();
+                crate::auth::save_auth_state(dir.path(), &auth, None).unwrap();
                 assert!(home_terminal_policy_allows(dir.path()));
             }
         }
@@ -1311,6 +1311,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),
@@ -1318,7 +1319,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1333,7 +1334,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
     );
     let _principal = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
     );
     let _session = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
@@ -1353,7 +1354,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payload["authority"]["signed_in"], true);
-    assert_eq!(payload["authority"]["principal_id"], context.principal_id);
+    assert_eq!(payload["authority"]["principal_id"], context.principal_id());
 }
 
 #[tokio::test]
@@ -1368,6 +1369,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),
@@ -1375,7 +1377,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1406,6 +1408,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
         "auth:home-cli-test",
         Some("proof:passkey:home-cli-test".to_string()),
         "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
     );
     crate::auth::store_session_grant(
         dir.path(),
@@ -1413,7 +1416,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
             schema: AuthSessionGrantV1::SCHEMA.to_string(),
             grant_id: context.grant_id.clone(),
             session_id: context.session_id.clone(),
-            principal_id: context.principal_id.clone(),
+            principal_id: context.principal_id().to_string(),
             proof_binding_id: context.proof_binding_id.clone().unwrap(),
             issued_at: now,
             expires_at: now + 300,
@@ -1428,7 +1431,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
     );
     let _principal = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
-        context.principal_id.clone(),
+        context.principal_id().to_string(),
     );
     let _session = EnvRestore::set(
         HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
@@ -1644,19 +1647,10 @@ async fn test_home_summary_reports_identity_and_launch_targets() {
     assert_eq!(system["route"], "/apps/system/");
     assert_eq!(system["attach_kind"], "iframe");
     assert_eq!(system["target_kind"], "app");
-    let services = targets
-        .iter()
-        .find(|target| target["target"] == "services")
-        .expect("services target");
-    assert_eq!(services["role"], "app");
-    assert_eq!(services["title"], "Services");
-    assert_eq!(
-        services["description"],
-        "Manage Browser Exit Node sharing and subscriptions."
+    assert!(
+        targets.iter().all(|target| target["target"] != "services"),
+        "Services is hidden until sharing moves into People"
     );
-    assert_eq!(services["route"], "/apps/services/");
-    assert_eq!(services["attach_kind"], "iframe");
-    assert_eq!(services["target_kind"], "app");
     assert!(targets
         .iter()
         .any(|target| target["target"] == "chat-room" && target["role"] == "app"));
@@ -1711,7 +1705,7 @@ async fn test_home_summary_reports_identity_and_launch_targets() {
     } else {
         assert!(
             browser.is_none(),
-            "Browser is hidden on hosts without a local Engine"
+            "Browser is hidden on unsupported platforms"
         );
     }
     assert!(targets
@@ -1763,13 +1757,6 @@ async fn test_home_summary_reports_identity_and_launch_targets() {
         targets
             .iter()
             .filter(|target| target["target"] == "inbox")
-            .count(),
-        1
-    );
-    assert_eq!(
-        targets
-            .iter()
-            .filter(|target| target["target"] == "services")
             .count(),
         1
     );
@@ -2329,6 +2316,7 @@ async fn services_contact_fixture(
             provider_requests: Arc::new(TokioMutex::new(Vec::new())),
             pending_capabilities: Arc::new(TokioMutex::new(HashMap::new())),
             capabilities_start_pending: false,
+            kept_launch_reads: runtime.kept_launch_reads.clone(),
         },
         send_failure: Arc::new(TokioMutex::new(String::new())),
     };
@@ -3225,6 +3213,7 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
         anonymous_dir.path(),
         receipt.clone(),
         anonymous.endpoint().as_ref(),
+        gateway_browser_internet::transport_fixture(),
     )
     .await
     .unwrap();
@@ -3268,9 +3257,14 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
         socket.read_to_end(&mut rest).await.unwrap();
         assert!(rest.is_empty());
     });
-    let attached = browser_attach_runtime_stream_path(left.path(), receipt, Some(&endpoint))
-        .await
-        .unwrap();
+    let attached = browser_attach_runtime_stream_path(
+        left.path(),
+        receipt,
+        Some(&endpoint),
+        gateway_browser_internet::transport_fixture(),
+    )
+    .await
+    .unwrap();
     let runtime_path = std::path::PathBuf::from(
         attached["adapter_ipc"]["runtime_stream_path"]
             .as_str()
@@ -4772,7 +4766,7 @@ async fn damaged_home_state_file_leaves_shell_and_summaries_answering() {
 }
 
 /// #447 N1: System → Appearance upload and reset never delete a damaged
-/// background image; both are refused with the notice that names it.
+/// background image; both are refused with a message that names the image.
 #[tokio::test]
 async fn damaged_background_image_survives_upload_and_reset() {
     let dir = tempfile::tempdir().unwrap();
@@ -4822,14 +4816,383 @@ async fn damaged_background_image_survives_upload_and_reset() {
         let text = String::from_utf8_lossy(&text);
         assert!(!status.is_success(), "{method}: {text}");
         assert!(
-            text.contains(&format!(
-                ".AppData/ElastOS/Home/{file} does not carry the label"
-            )),
+            text.contains("background image background-image.jpg could not be read"),
             "{method}: {text}"
+        );
+        assert!(
+            !text.contains(dir.path().to_string_lossy().as_ref()),
+            "{method}: the answer leaves out the data folder: {text}"
         );
         assert_eq!(std::fs::read(&path).unwrap(), damaged, "{method}");
         assert!(!uploaded.exists(), "{method}");
     }
+}
+
+const APPEARANCE_IMAGE_FOLDER: &str = ".AppData/ElastOS/Home/Appearance";
+
+fn appearance_image_folder(dir: &std::path::Path, principal_id: &str) -> std::path::PathBuf {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let uri = format!("{localhost_root}/{APPEARANCE_IMAGE_FOLDER}");
+    elastos_common::localhost::rooted_localhost_fs_path(dir, &uri).unwrap()
+}
+
+fn appearance_image_uri(principal_id: &str, file_name: &str) -> String {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    format!("{localhost_root}/{APPEARANCE_IMAGE_FOLDER}/{file_name}")
+}
+
+/// Seeds one protected background image under the authority's root. `damage`
+/// corrupts the stored envelope label, which is what the notice names.
+fn seed_protected_background_image(
+    dir: &std::path::Path,
+    principal_id: &str,
+    file_name: &str,
+    bytes: &[u8],
+    damage: bool,
+) -> std::path::PathBuf {
+    let folder = appearance_image_folder(dir, principal_id);
+    crate::auth::create_owner_only_dir_all(dir, &folder).unwrap();
+    let uri = appearance_image_uri(principal_id, file_name);
+    let path = folder.join(file_name);
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    crate::auth::write_principal_root_object(
+        dir,
+        principal_id,
+        &localhost_root,
+        &uri,
+        &path,
+        bytes,
+    )
+    .unwrap();
+    if damage {
+        let mut damaged = std::fs::read(&path).unwrap();
+        damaged[9] = 0xff;
+        std::fs::write(&path, &damaged).unwrap();
+    }
+    path
+}
+
+fn read_protected_background_image(
+    dir: &std::path::Path,
+    principal_id: &str,
+    file_name: &str,
+) -> Vec<u8> {
+    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let uri = appearance_image_uri(principal_id, file_name);
+    let path = appearance_image_folder(dir, principal_id).join(file_name);
+    crate::auth::read_principal_root_object(dir, principal_id, &localhost_root, &uri, &path)
+        .unwrap()
+}
+
+/// The names in the image folder, sorted, so a test can prove no temporary or
+/// extra image was left behind.
+fn appearance_image_names(dir: &std::path::Path, principal_id: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(appearance_image_folder(dir, principal_id))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+async fn upload_background_image(
+    app: &axum::Router,
+    token: &str,
+    content_type: &str,
+    body: &str,
+) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .method("POST")
+                .uri("/api/apps/system/appearance/background-image")
+                .header("x-elastos-home-token", token)
+                .header(CONTENT_TYPE, content_type)
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let text = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&text).into_owned())
+}
+
+/// An upload that names the current image, while a sibling of another format
+/// is damaged, is refused before anything is written: the current image keeps
+/// its bytes and the refusal names the damaged file.
+#[tokio::test]
+async fn same_name_image_upload_with_a_damaged_sibling_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let current = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"current image",
+        false,
+    );
+    let sibling = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.jpg",
+        b"damaged sibling",
+        true,
+    );
+    let current_before = std::fs::read(&current).unwrap();
+    let sibling_before = std::fs::read(&sibling).unwrap();
+
+    let (status, text) = upload_background_image(
+        &app,
+        &authority.system_token,
+        "image/png",
+        "replacement image",
+    )
+    .await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains("background image background-image.jpg could not be read"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert_eq!(std::fs::read(&current).unwrap(), current_before);
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"current image"
+    );
+    assert_eq!(std::fs::read(&sibling).unwrap(), sibling_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.jpg", "background-image.png"]
+    );
+}
+
+/// An upload whose destination is itself damaged is refused before the write,
+/// so the damaged image stays byte for byte rather than being replaced.
+#[tokio::test]
+async fn same_name_image_upload_over_a_damaged_image_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let damaged = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"damaged image",
+        true,
+    );
+    let damaged_before = std::fs::read(&damaged).unwrap();
+
+    let (status, text) = upload_background_image(
+        &app,
+        &authority.system_token,
+        "image/png",
+        "replacement image",
+    )
+    .await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains("background image background-image.png could not be read"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert_eq!(std::fs::read(&damaged).unwrap(), damaged_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.png"]
+    );
+}
+
+/// A same-name upload over a readable image succeeds: one image remains and
+/// it holds the new bytes.
+#[tokio::test]
+async fn same_name_image_upload_replaces_the_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"first image",
+        false,
+    );
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/png", "second image").await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let payload: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        payload["background_image_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("/api/apps/home/appearance/background-image?scope="),
+        "{text}"
+    );
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.png"]
+    );
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"second image"
+    );
+}
+
+/// An upload of another format while a sibling is damaged is refused before
+/// anything is written or removed: both images keep their bytes and the new
+/// name does not appear.
+#[tokio::test]
+async fn different_name_image_upload_with_a_damaged_sibling_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let current = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"current image",
+        false,
+    );
+    let sibling = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.jpg",
+        b"damaged sibling",
+        true,
+    );
+    let current_before = std::fs::read(&current).unwrap();
+    let sibling_before = std::fs::read(&sibling).unwrap();
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/webp", "new webp").await;
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        text.contains("background image background-image.jpg could not be read"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert_eq!(std::fs::read(&current).unwrap(), current_before);
+    assert_eq!(
+        read_protected_background_image(
+            dir.path(),
+            &authority.principal_id,
+            "background-image.png"
+        ),
+        b"current image"
+    );
+    assert_eq!(std::fs::read(&sibling).unwrap(), sibling_before);
+    assert_eq!(
+        appearance_image_names(dir.path(), &authority.principal_id),
+        ["background-image.jpg", "background-image.png"]
+    );
+}
+
+/// A GET of an image this process cannot open answers with the fixed sentence
+/// naming the image file. The read error carries the file path, which holds the
+/// data folder and the person id, so the answer must leave both out.
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_background_image_get_answers_only_the_file_name() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let path = seed_protected_background_image(
+        dir.path(),
+        &authority.principal_id,
+        "background-image.png",
+        b"locked image",
+        false,
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/home/appearance/background-image")
+                .header("x-elastos-home-token", authority.home_token.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(!status.is_success(), "{text}");
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert!(
+        !text.contains(&authority.principal_id),
+        "the answer leaves out the person id: {text}"
+    );
+    assert!(
+        text.contains("background image background-image.png could not be read"),
+        "{text}"
+    );
+}
+
+/// An upload whose image folder cannot be created answers one fixed sentence.
+/// The creation error names the folder, which holds the data folder and the
+/// person's root, so the answer leaves both out.
+#[tokio::test]
+async fn blocked_image_folder_upload_answers_one_fixed_sentence() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id);
+    let folder = appearance_image_folder(dir.path(), &authority.principal_id);
+    crate::auth::create_owner_only_dir_all(dir.path(), folder.parent().unwrap()).unwrap();
+    std::fs::write(&folder, b"not a folder").unwrap();
+
+    let (status, text) =
+        upload_background_image(&app, &authority.system_token, "image/png", "new image").await;
+    assert!(
+        !text.contains(dir.path().to_string_lossy().as_ref()),
+        "the answer leaves out the data folder: {text}"
+    );
+    assert!(
+        !text.contains(&authority.principal_id),
+        "the answer leaves out the person id: {text}"
+    );
+    assert_eq!(text, "background image could not be saved");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(std::fs::read(&folder).unwrap(), b"not a folder");
 }
 
 #[tokio::test]
@@ -4844,7 +5207,7 @@ async fn test_recovery_readiness_projects_unavailable_and_first_profile_fails_cl
     let mut auth_state = crate::auth::load_auth_state(dir.path()).unwrap();
     auth_state.principal_root_protections.clear();
     auth_state.principal_root_protections.push(protection);
-    crate::auth::save_auth_state(dir.path(), &auth_state).unwrap();
+    crate::auth::save_auth_state(dir.path(), &auth_state, None).unwrap();
     let before = file_snapshot(dir.path());
 
     for (path, token, origin) in [
@@ -5455,7 +5818,7 @@ async fn test_home_summary_and_events_include_browser_wallet_approvals() {
     let summary_json: serde_json::Value = serde_json::from_slice(&summary_body).unwrap();
     assert_eq!(summary_json["notifications"]["attention_count"], 1);
     assert_eq!(
-        summary_json["notifications"]["entries"][0]["title"],
+        home_entries_of_kind(&summary_json["notifications"], "wallet_approval_request")[0]["title"],
         "Transaction approval request"
     );
 
@@ -5495,6 +5858,27 @@ async fn test_system_updates_home_background_image() {
         crate::auth::store_test_principal_root_protection(dir.path(), &admin.principal_id);
     let guest_protection =
         crate::auth::store_test_principal_root_protection(dir.path(), &guest.principal_id);
+
+    // The host owns the read; neither opaque-frame provenance nor a System
+    // launch token grants it, even though System owns the upload.
+    for (origin, token) in [
+        ("null", admin.home_token.as_str()),
+        ("null", admin.system_token.as_str()),
+        ("http://localhost:61180", admin.system_token.as_str()),
+    ] {
+        let denied = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", origin)
+                    .uri("/api/apps/home/appearance/background-image")
+                    .header("x-elastos-home-token", token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
 
     let updated = app
         .clone()
@@ -5636,6 +6020,12 @@ async fn test_system_updates_home_background_image() {
             .and_then(|value| value.to_str().ok()),
         Some("image/png")
     );
+    // These response headers are separate from the authenticated host handoff.
+    assert_eq!(
+        image.headers()["cross-origin-resource-policy"],
+        "cross-origin"
+    );
+    assert_eq!(image.headers()["x-content-type-options"], "nosniff");
     let image_body = axum::body::to_bytes(image.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -5660,6 +6050,11 @@ async fn test_system_updates_home_background_image() {
             .and_then(|value| value.to_str().ok()),
         Some("image/jpeg")
     );
+    assert_eq!(
+        guest_image.headers()["cross-origin-resource-policy"],
+        "cross-origin"
+    );
+    assert_eq!(guest_image.headers()["x-content-type-options"], "nosniff");
     let guest_image_body = axum::body::to_bytes(guest_image.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -6085,7 +6480,7 @@ async fn system_community_membership_is_home_wide_and_requires_current_owner_aut
         .find(|entry| entry.principal_id == principal.principal_id)
         .unwrap();
     *current = principal;
-    crate::auth::save_auth_state(dir.path(), &auth).unwrap();
+    crate::auth::save_auth_state(dir.path(), &auth, None).unwrap();
     let response = app
         .oneshot(
             test_browser_request("localhost:61180", "null")
@@ -8636,6 +9031,207 @@ async fn test_home_browser_state_drops_unknown_targets() {
     assert_eq!(json["recent_targets"], json!(["people", "system"]));
 }
 
+/// Archive opens only from Library. A window, shortcut or recent entry an
+/// earlier release saved for it is dropped when Home loads its state, and
+/// Library can still open it.
+#[tokio::test]
+async fn test_home_drops_a_saved_archive_window_and_library_still_opens_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    write_test_browser_capsule(dir.path(), "archive-manager", "viewer", "Archive", None);
+    let localhost_root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let state_uri = format!("{localhost_root}/.AppData/ElastOS/Home/browser-state.json");
+    let state_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &state_uri).unwrap();
+    std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    crate::auth::write_principal_root_object(
+        dir.path(),
+        &authority.principal_id,
+        &localhost_root,
+        &state_uri,
+        &state_path,
+        &serde_json::to_vec(&json!({
+            "schema": "elastos.home.browser-state/v1",
+            "principal_id": authority.principal_id.clone(),
+            "localhost_root": localhost_root.clone(),
+            "layout": {
+                "desktop": {
+                    "archive-manager": { "x": 12, "y": 12 },
+                    "system": { "x": 18, "y": 18 }
+                },
+                "taskbar": ["archive-manager", "system"]
+            },
+            "session": {
+                "browser_context_id": "browser:test",
+                "windows": [
+                    { "target": "archive-manager", "active": true },
+                    { "target": "system", "active": false }
+                ]
+            },
+            "recent_targets": ["archive-manager", "system"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let get = |uri: &'static str| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri(uri)
+                .header("x-elastos-home-token", authority.home_token.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+
+    let loaded = get("/api/apps/home/state").await.unwrap();
+    assert_eq!(loaded.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(loaded.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let state: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        state["session"]["windows"],
+        json!([{ "target": "system", "active": false }])
+    );
+    assert_eq!(state["recent_targets"], json!(["system"]));
+    assert!(state["layout"]["desktop"].get("archive-manager").is_none());
+    assert_eq!(state["layout"]["taskbar"], json!(["system"]));
+
+    let summary = get("/api/apps/home/summary").await.unwrap();
+    assert_eq!(summary.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(summary.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let targets = summary["targets"].as_array().unwrap();
+    assert!(targets.iter().any(|target| target["target"] == "system"));
+    assert!(!targets
+        .iter()
+        .any(|target| target["target"] == "archive-manager"));
+    let catalog = capsule_catalog_summary(dir.path());
+    let archive = catalog
+        .capsules
+        .iter()
+        .find(|capsule| capsule.name == "archive-manager")
+        .unwrap();
+    assert!(
+        !archive.launchable,
+        "Marketplace must not offer Open for Archive"
+    );
+    assert!(home_launch_target(dir.path(), "archive-manager").is_some());
+}
+
+/// Services is hidden until sharing moves into People: it is not in the
+/// launcher, on the desktop or in Marketplace, and a window, shortcut or recent
+/// entry an earlier release saved for it is dropped when Home loads its state.
+#[tokio::test]
+async fn test_home_drops_a_saved_services_window_and_marketplace_does_not_list_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority_with_name(dir.path(), Some("admin"));
+    write_test_browser_capsule(dir.path(), SERVICES_CAPSULE_ID, "app", "Services", None);
+    let localhost_root = crate::auth::principal_localhost_root(&authority.principal_id);
+    let state_uri = format!("{localhost_root}/.AppData/ElastOS/Home/browser-state.json");
+    let state_path =
+        elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &state_uri).unwrap();
+    std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+    crate::auth::write_principal_root_object(
+        dir.path(),
+        &authority.principal_id,
+        &localhost_root,
+        &state_uri,
+        &state_path,
+        &serde_json::to_vec(&json!({
+            "schema": "elastos.home.browser-state/v1",
+            "principal_id": authority.principal_id.clone(),
+            "localhost_root": localhost_root.clone(),
+            "layout": {
+                "desktop": {
+                    "services": { "x": 12, "y": 12 },
+                    "system": { "x": 18, "y": 18 }
+                },
+                "taskbar": ["services", "system"]
+            },
+            "session": {
+                "browser_context_id": "browser:test",
+                "windows": [
+                    { "target": "services", "active": true },
+                    { "target": "system", "active": false }
+                ]
+            },
+            "recent_targets": ["services", "system"]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let get = |uri: &'static str| {
+        app.clone().oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri(uri)
+                .header("x-elastos-home-token", authority.home_token.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+
+    let loaded = get("/api/apps/home/state").await.unwrap();
+    assert_eq!(loaded.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(loaded.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let state: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        state["session"]["windows"],
+        json!([{ "target": "system", "active": false }])
+    );
+    assert_eq!(state["recent_targets"], json!(["system"]));
+    assert!(state["layout"]["desktop"].get("services").is_none());
+    assert_eq!(state["layout"]["taskbar"], json!(["system"]));
+
+    let summary = get("/api/apps/home/summary").await.unwrap();
+    assert_eq!(summary.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(summary.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let targets = summary["targets"].as_array().unwrap();
+    assert!(targets.iter().any(|target| target["target"] == "system"));
+    assert!(!targets.iter().any(|target| target["target"] == "services"));
+    assert!(
+        !capsule_catalog_summary(dir.path())
+            .capsules
+            .iter()
+            .any(|capsule| capsule.name == SERVICES_CAPSULE_ID),
+        "Marketplace must not list Services"
+    );
+
+    // A direct launch (a saved shortcut or old bookmark) cannot start Services,
+    // so Home issues no Services token for its request routes.
+    assert!(home_launch_target(dir.path(), SERVICES_CAPSULE_ID).is_none());
+    let (status, _) = home_test_post_json(
+        &app,
+        "/api/apps/home/launch",
+        &authority.home_token,
+        "http://localhost:61180",
+        json!({ "target": SERVICES_CAPSULE_ID }),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK);
+    // A bookmarked Services page is not served.
+    let page = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/apps/services/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn test_home_browser_state_defaults_preserve_malformed_state_and_refuse_overwrite() {
     let dir = tempfile::tempdir().unwrap();
@@ -8933,7 +9529,7 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
         &[CHAT_ROOM_CAPSULE_ID],
     )
     .expect("runtime launch grant validates for chat-room");
-    assert_eq!(grant_context.principal_id, authority.principal_id);
+    assert_eq!(grant_context.principal_id(), authority.principal_id);
 
     let summary = app
         .clone()
@@ -9782,9 +10378,10 @@ async fn test_private_engine_request_requires_share_before_inbox_approval() {
             .iter()
             .find(|entry| entry["kind"] == "service_access_request")
             .unwrap();
-        assert!(request["body"].as_str().unwrap().contains(
-            "Your Browser Engine is private. Share it in Services before approving this request."
-        ));
+        assert!(request["body"]
+            .as_str()
+            .unwrap()
+            .contains("Your Browser Engine is not shared, so this request cannot be approved."));
         let action = request["action_ref"]["action_id"]
             .as_str()
             .unwrap()
@@ -9798,7 +10395,7 @@ async fn test_private_engine_request_requires_share_before_inbox_approval() {
         .await;
         assert!(!status.is_success());
         assert!(
-            message.contains("Your Browser Engine is private. Share it in Services"),
+            message.contains("Your Browser Engine is not shared"),
             "{message}"
         );
         let (_, still_pending) =
@@ -9920,8 +10517,9 @@ async fn test_services_inbox_request_copy_matches_engine_or_exit_and_exact_appro
             entry["body"],
             format!("Alice wants to use {offer_name}. {approval_text}")
         );
-        assert_eq!(entry["source_app"], SERVICES_CAPSULE_ID);
-        assert_eq!(entry["action_ref"]["app"], SERVICES_CAPSULE_ID);
+        // Inbox owns the decision; Services is hidden, so nothing points at it.
+        assert_eq!(entry["source_app"], INBOX_CAPSULE_ID);
+        assert_eq!(entry["action_ref"]["app"], INBOX_CAPSULE_ID);
         assert_eq!(entry["action_ref"]["action_id"], action);
         assert_eq!(
             entry["id"],
@@ -10050,7 +10648,6 @@ async fn test_inbox_projects_approved_model_grant_outside_pending_counts() {
     assert_eq!(grants.len(), 1, "{inbox}");
     let grant = grants[0];
     assert_eq!(grant["id"], "service-access-grant:approved-model-1");
-    assert_eq!(grant["source_app"], SERVICES_CAPSULE_ID);
     assert_eq!(grant["title"], "Seed may use your AI model");
     assert_eq!(
         grant["body"],
@@ -10060,7 +10657,8 @@ async fn test_inbox_projects_approved_model_grant_outside_pending_counts() {
         grant["action_ref"]["action_id"],
         "service-deny-request:approved-model-1"
     );
-    assert_eq!(grant["action_ref"]["app"], SERVICES_CAPSULE_ID);
+    assert_eq!(grant["source_app"], INBOX_CAPSULE_ID);
+    assert_eq!(grant["action_ref"]["app"], INBOX_CAPSULE_ID);
     assert_eq!(grant["read"], true);
     assert_eq!(grant["severity"], "info");
     assert!(
@@ -10299,7 +10897,7 @@ async fn test_only_an_admin_approves_an_offer_its_listing_marks_hosted() {
             .find(|entry| entry.principal_id == bob.authority.principal_id)
             .unwrap()
             .role = role;
-        crate::auth::save_auth_state(right.path(), &auth).unwrap();
+        crate::auth::save_auth_state(right.path(), &auth, None).unwrap();
     };
 
     set_bob_role(crate::auth::RuntimePrincipalRole::Guest);
@@ -10615,6 +11213,7 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     .is_err());
     // Exercise the actual Browser summary caller with a consumer that has no local Engine.
     let mut consumer_state = test_state(left.path());
+    consumer_state.browser_internet = granted_browser_internet(left.path());
     consumer_state.provider_registry = Some(consumer_registry.clone());
     consumer_state.carrier_endpoint = Some(endpoint.clone());
     consumer_state.collaboration_discovery_service = Some(
@@ -10872,15 +11471,8 @@ fn p2a_i_b_local_model_offer_unshared_for_provider_without_stored_record() {
             "updated_at": 0,
             "local_offer_ids": [MODEL_LOCAL_OFFER],
         });
-        crate::auth::write_principal_root_object(
-            dir.path(),
-            principal_id,
-            &localhost_root,
-            &object_uri,
-            &path,
-            &serde_json::to_vec_pretty(&state).unwrap(),
-        )
-        .unwrap();
+        // Plant the legacy path; the provider id has no stored record.
+        std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["local_offer_ids"], json!([MODEL_LOCAL_OFFER]));
@@ -13109,7 +13701,7 @@ async fn gateway_context_resolves_a_person_stored_in_the_auth_store() {
         None,
         "grant:home-cli-test",
     );
-    assert_eq!(context.unwrap().principal_id, "person:home-cli-test");
+    assert_eq!(context.unwrap().principal_id(), "person:home-cli-test");
 }
 
 /// Proof-bound row (Rong 0344 L-1499-1): with a proof binding, the active
@@ -13148,7 +13740,7 @@ async fn gateway_context_checks_a_proof_bound_grant_in_the_auth_store() {
         .contains("auth session not found"));
     crate::auth::store_session_grant(auth.path(), grant).unwrap();
     let context = context_from().unwrap();
-    assert_eq!(context.principal_id, "person:home-cli-test");
+    assert_eq!(context.principal_id(), "person:home-cli-test");
     assert_eq!(
         context.proof_binding_id.as_deref(),
         Some("proof:passkey:home-cli-test")
@@ -13174,4 +13766,393 @@ async fn gateway_context_refuses_a_person_stored_only_in_the_runtime_dir() {
         .unwrap_err()
         .to_string()
         .contains("has no stored record"));
+}
+
+/// Posts as the Home shell (Home's own origin) and parses a JSON answer.
+async fn home_shared_content_post(
+    app: &axum::Router,
+    home_token: &str,
+    route: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .method("POST")
+                .uri(route)
+                .header("x-elastos-home-token", home_token)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    (
+        status,
+        serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body)),
+    )
+}
+
+/// Alice's Home gets a file her contact Bob linked in Community, straight
+/// from Bob's Home over Carrier: check, then one get per check id, under
+/// Home-shell authority only, and only the exact bytes of the linked CID.
+#[tokio::test]
+async fn home_shared_content_check_then_get_fetches_a_contacts_linked_file_once() {
+    const CHECK: &str = "/api/apps/home/shared-content/check";
+    const GET: &str = "/api/apps/home/shared-content/get";
+    let alice_dir = tempfile::tempdir().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice =
+        services_contact_fixture(alice_dir.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(bob_dir.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+
+    // Bob's Home holds the file; Alice's Home reaches it by Bob's device DID.
+    let bytes = vec![7u8; 1024];
+    let cid = crate::carrier::tests::raw_bytes_cid(&bytes);
+    let (_, bob_device_did) = elastos_identity::load_or_create_did(bob_dir.path()).unwrap();
+    let bob_home = crate::carrier::tests::start_content_holder_runtime_as(
+        ed25519_dalek::SigningKey::from_bytes(&bob.device_key.to_bytes()),
+        bob_device_did,
+        std::collections::BTreeMap::from([(String::new(), bytes.clone())]),
+        Arc::new(std::sync::Mutex::new(Vec::new())),
+        crate::carrier::tests::HolderBehavior::default(),
+    )
+    .await;
+    // Bob published the file, so his Home serves it to Alice.
+    bob_home.publish(&cid);
+    let alice_node_dir = tempfile::tempdir().unwrap();
+    let (alice_sk, alice_did) = elastos_identity::derive_did(&[203; 32]);
+    let alice_node = crate::carrier::start_isolated_carrier_node_with_registry(
+        &alice_sk,
+        &alice_did,
+        alice_node_dir.path().to_path_buf(),
+        Some(Arc::downgrade(&alice.registry)),
+    )
+    .await
+    .unwrap();
+    alice
+        .registry
+        .set_carrier_invoker(Arc::new(
+            crate::carrier::CarrierProviderInvoker::with_carrier_endpoint_and_registry(
+                alice_node.endpoint.clone(),
+                Arc::downgrade(&alice.registry),
+            ),
+        ))
+        .await;
+    alice_node
+        .memory_lookup
+        .add_endpoint_info(bob_home.addr.clone());
+    let received =
+        crate::carrier::tests::register_shared_content_receiver(&alice.registry, alice_dir.path())
+            .await;
+
+    // Community rows on Alice's Home: Bob links three files, Carol (not a
+    // contact) links one.
+    let port = crate::collaboration_product::test_chat_product_port(
+        alice_dir.path(),
+        "file-network",
+        "file-community",
+    );
+    let card =
+        |profile: &crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument| {
+            crate::room_service::RoomProfileCardView {
+                schema: "elastos.profile-card/v1".to_string(),
+                profile_id: profile.document().profile_did.clone(),
+                display_name: profile.document().display_name.clone(),
+                handle: None,
+                updated_at: profile.document().updated_at,
+            }
+        };
+    let carol = port.test_person_profile("Carol", None);
+    let post = |n: u8, sender: &crate::room_service::RoomProfileCardView, body: &str| {
+        crate::room_service::project_collaboration_text(
+            alice_dir.path(),
+            ("file-network", "file-community"),
+            &format!("sha256:{}", hex::encode([n; 32])),
+            sender,
+            body,
+            now_ts(),
+            crate::room_service::CollaborationTextOrigin::Incoming,
+        )
+        .unwrap()
+        .message_id
+        .unwrap()
+    };
+    let other_cid = crate::carrier::tests::raw_bytes_cid(b"a file Bob never had");
+    bob_home.publish(&other_cid);
+    let shared = post(
+        1,
+        &card(&bob.profile),
+        &format!("notes.bin · 1.0 KB · elastos://{cid}"),
+    );
+    let expiring = post(
+        2,
+        &card(&bob.profile),
+        &format!("old.bin · 20 bytes · elastos://{other_cid}"),
+    );
+    let from_carol = post(3, &card(&carol), &format!("see elastos://{cid}"));
+
+    let mut state = test_state(alice_dir.path());
+    state.collaboration_discovery_service = Some(alice.discovery_service.clone());
+    state.provider_registry = Some(alice.registry.clone());
+    state.collaboration_chat_product_port = Some(port);
+    let app = gateway_router(state);
+    let home_token = alice.authority.home_token.clone();
+    let chat_token = projection_launch_token_for_authority_context(
+        alice_dir.path(),
+        CHAT_ROOM_CAPSULE_ID,
+        &alice.authority,
+    );
+    let check = |cid: &str, message_id: &str| {
+        json!({
+            "schema": "elastos.home.shared-content.check/v1",
+            "app_token": chat_token,
+            "uri": format!("elastos://{cid}"),
+            "source": { "conversation_id": "file-community", "message_id": message_id },
+        })
+    };
+
+    // A message from someone who is not a contact: nothing to get.
+    let (status, body) =
+        home_shared_content_post(&app, &home_token, CHECK, check(&cid, &from_carol)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "not_contact");
+    assert_eq!(body["sender_display_name"], "Carol");
+    assert!(body.get("check_id").is_none());
+
+    // A CID the cited message does not carry is refused.
+    let (status, body) =
+        home_shared_content_post(&app, &home_token, CHECK, check(&other_cid, &shared)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Only Chat opens shared files; another app's source-less request is refused.
+    let documents_token = projection_launch_token_for_authority_context(
+        alice_dir.path(),
+        DOCUMENTS_CAPSULE_ID,
+        &alice.authority,
+    );
+    let mut own_file = check(&cid, &shared);
+    own_file.as_object_mut().unwrap().remove("source");
+    own_file["app_token"] = json!(documents_token);
+    let (status, body) = home_shared_content_post(&app, &home_token, CHECK, own_file).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body, "this app cannot open shared files");
+
+    // A pin that failed leaves a `repair_needed` receipt and no bytes here.
+    // That is not "local": check and get still go to Bob's Home.
+    let ensured = alice
+        .registry
+        .send_raw("content", &json!({ "op": "ensure", "cid": cid }))
+        .await
+        .unwrap();
+    let receipt = alice
+        .registry
+        .send_raw("content", &json!({ "op": "status", "cid": cid }))
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt["data"]["availability"]["status"], "repair_needed",
+        "{ensured} {receipt}"
+    );
+
+    // Bob is a contact. With no presence record the check says so, and get is
+    // still allowed.
+    let (status, body) =
+        home_shared_content_post(&app, &home_token, CHECK, check(&cid, &shared)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "sender_offline");
+    assert_eq!(body["sender_display_name"], "Bob");
+    assert_eq!(body["size_bytes"], 1024);
+    let check_id = body["check_id"].as_str().unwrap().to_string();
+
+    // Get is Home-shell authority only: the app's own token is refused, and
+    // the refusal does not spend the check.
+    let get = json!({ "check_id": check_id });
+    let (status, _) = home_shared_content_post(&app, &chat_token, GET, get.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(received.added.lock().unwrap().is_empty());
+
+    let (status, body) = home_shared_content_post(&app, &home_token, GET, get.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "state": "local" }));
+    assert_eq!(received.added.lock().unwrap().get(&cid), Some(&bytes));
+    assert!(received.pinned.lock().unwrap().contains(&cid));
+
+    // The check id is single-use.
+    let (status, _) = home_shared_content_post(&app, &home_token, GET, get).await;
+    assert_eq!(status, StatusCode::GONE);
+    // Now the file is here.
+    let (status, body) =
+        home_shared_content_post(&app, &home_token, CHECK, check(&cid, &shared)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["state"], "local");
+    assert!(body.get("check_id").is_none());
+
+    // A check id lasts 120 s.
+    let fresh_check = |app: axum::Router| {
+        let (home_token, request) = (home_token.clone(), check(&other_cid, &expiring));
+        async move {
+            let (status, body) = home_shared_content_post(&app, &home_token, CHECK, request).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["check_id"].as_str().unwrap().to_string()
+        }
+    };
+    let expired = fresh_check(app.clone()).await;
+    super::super::gateway_home_shared_content::age_shared_content_check_for_test(&expired, 120);
+    let (status, _) =
+        home_shared_content_post(&app, &home_token, GET, json!({ "check_id": expired })).await;
+    assert_eq!(status, StatusCode::GONE);
+    let live = fresh_check(app.clone()).await;
+    super::super::gateway_home_shared_content::age_shared_content_check_for_test(&live, 118);
+    // Redeemed: Bob's Home answers with bytes that are not this CID, so
+    // nothing is kept.
+    let (status, body) =
+        home_shared_content_post(&app, &home_token, GET, json!({ "check_id": live })).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "state": "mismatch" }));
+    assert!(!received.pinned.lock().unwrap().contains(&other_cid));
+
+    crate::carrier::tests::shutdown_test_carrier_node(bob_home.node).await;
+    crate::carrier::tests::shutdown_test_carrier_node(alice_node).await;
+}
+
+#[tokio::test]
+async fn a_published_file_is_served_only_to_the_publishers_contacts() {
+    let alice_dir = tempfile::tempdir().unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+    let carol_dir = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice =
+        services_contact_fixture(alice_dir.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(bob_dir.path(), "Bob", bus.clone(), network.clone()).await;
+    let carol = services_contact_fixture(carol_dir.path(), "Carol", bus, network.clone()).await;
+    accept_services_contact_pair(&alice, &bob);
+    let device = |fixture: &ServicesContactFixture| {
+        iroh::PublicKey::from_bytes(&fixture.device_key.verifying_key().to_bytes()).unwrap()
+    };
+    let read = |source: iroh::PublicKey, cid: String, network: Option<_>| {
+        let dir = bob_dir.path().to_path_buf();
+        async move {
+            crate::carrier::admit_carrier_peer_content_fetch(
+                &dir,
+                network,
+                &source,
+                &json!({ "cid": cid }),
+            )
+            .await
+            .is_ok()
+        }
+    };
+
+    // Bob published a file: his contact Alice gets it, Carol (no contact)
+    // does not, and nobody does without the contacts network.
+    let cid = crate::carrier::tests::raw_bytes_cid(b"a file Bob published");
+    crate::library::publish_cid_for_contacts_for_test(
+        bob_dir.path(),
+        &bob.authority.principal_id,
+        &cid,
+    );
+    assert!(read(device(&alice), cid.clone(), Some(&network)).await);
+    assert!(!read(device(&carol), cid.clone(), Some(&network)).await);
+    assert!(!read(device(&alice), cid.clone(), None).await);
+
+    // A file Bob received in Chat is pinned on his Home but published by
+    // nobody: never served, not even to a contact.
+    let received = crate::carrier::tests::raw_bytes_cid(b"a file Bob received");
+    assert!(!read(device(&alice), received, Some(&network)).await);
+
+    // Withdrawn: Alice no longer gets it.
+    crate::library::withdraw_cid_for_test(bob_dir.path(), &cid);
+    assert!(!read(device(&alice), cid, Some(&network)).await);
+}
+
+/// A stored passkey principal, so `active_passkey_principals` lists one.
+fn store_carrier_passkey_principal(data_dir: &std::path::Path) -> String {
+    let now = crate::auth::now_ts();
+    let rp_id = "elastos.elacitylabs.com";
+    let credential_id = "carrier-unresolved-root";
+    let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
+        elastos_runtime::auth::PasskeyWebAuthnBinding {
+            credential_id: credential_id.to_string(),
+            public_key: "carrier-unresolved-root-public-key".to_string(),
+            sign_count: 1,
+            user_verified: true,
+            origin: "https://elastos.elacitylabs.com".to_string(),
+            rp_id: rp_id.to_string(),
+            created_at: now,
+            last_used_at: now,
+            revoked_at: None,
+        },
+    );
+    let principal_id = crate::auth::passkey_credential_principal_id(rp_id, credential_id).unwrap();
+    crate::auth::upsert_principal_for_binding_as_role_named(
+        data_dir,
+        binding,
+        principal_id.clone(),
+        crate::auth::RuntimePrincipalRole::Admin,
+        Some("Carrier"),
+        now,
+    )
+    .unwrap();
+    principal_id
+}
+
+/// L1 from the R1 reviews: a listed principal whose stored root does not
+/// resolve is not a contact. The verified state is cached for the listing read,
+/// and the record read then finds a state that fails to load.
+#[test]
+fn an_unresolvable_principal_root_is_not_a_contact() {
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    elastos_identity::load_or_create_did(dir.path()).unwrap();
+    let principal_id = store_carrier_passkey_principal(dir.path());
+    let (trusted_key, _) = generate_keypair();
+    let network =
+        configured_discovery_network_profile_for_test(&trusted_key, "carrier-unresolved-root");
+    let (source_key, _) = generate_keypair();
+    let source = iroh::PublicKey::from_bytes(&source_key.verifying_key().to_bytes()).unwrap();
+    let principals = std::collections::BTreeSet::from([principal_id]);
+
+    // The record read must be the load that reuses the verified state.
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    let (hit_observed, resume) =
+        crate::auth::install_verified_auth_state_cache_hit_hook(dir.path());
+    let data_dir = dir.path().to_path_buf();
+    let loader = std::thread::spawn(move || {
+        crate::api::gateway::gateway_home_system::carrier_source_is_contact_of(
+            &data_dir,
+            &network,
+            &principals,
+            &source,
+        )
+    });
+    hit_observed
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the record read reused the verified state");
+    std::fs::write(
+        crate::auth::auth_state_path(dir.path()).unwrap(),
+        b"not auth state",
+    )
+    .unwrap();
+    resume.send(()).unwrap();
+    assert!(
+        !loader.join().unwrap(),
+        "a principal whose stored root does not resolve is not a contact"
+    );
 }

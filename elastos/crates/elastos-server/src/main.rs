@@ -57,6 +57,13 @@ const ELASTOS_VERSION: &str = env!("ELASTOS_VERSION");
 
 #[cfg(unix)]
 fn is_interactive_frontdoor_command(argv: &[String]) -> bool {
+    // The installer runs setup with stdin from /dev/null. Output on a terminal
+    // still means someone watches it, and Ctrl+C must stop it. Setup's writes
+    // already survive a killed process: locks are released and staging is
+    // removed by the next run.
+    if argv.first().is_some_and(|arg| arg == "setup") {
+        return std::io::stdout().is_terminal();
+    }
     if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return false;
     }
@@ -92,12 +99,25 @@ enum Commands {
     /// CID, or host a native provider (e.g. `custody-provider`) standalone
     Run {
         /// Capsule directory, or a native provider name or binary path
-        #[arg(required_unless_present = "cid")]
+        #[arg(required_unless_present_any = ["cid", "bundle"])]
         path: Option<PathBuf>,
 
         /// IPFS CID of the capsule to run
         #[arg(long, conflicts_with = "path")]
         cid: Option<String>,
+
+        /// CID of a bundle this Home's store holds (put there by
+        /// `stage-bundle`). The slot and its signature are checked again and
+        /// nothing is fetched. It is another path than `--cid` and cannot be
+        /// combined with it, with a folder or with a provider host. Like
+        /// `--cid`, it takes no capsule arguments: the first word after it
+        /// would be read as the folder.
+        #[arg(
+            long,
+            hide = true,
+            conflicts_with_all = ["path", "cid", "with", "carrier_addr"]
+        )]
+        bundle: Option<String>,
 
         /// Additional native provider to host, by name or binary path (repeatable)
         #[arg(long = "with", value_name = "NAME_OR_PATH")]
@@ -119,8 +139,8 @@ enum Commands {
         #[arg(short, long, default_value = "0.0.0.0:3000")]
         addr: String,
 
-        /// Storage directory
-        #[arg(long, default_value = "/tmp/elastos/storage")]
+        /// Storage directory (default: storage under the Home data directory)
+        #[arg(long, default_value_os_t = default_data_dir().join("storage"))]
         storage_path: PathBuf,
 
         /// Capsule directory to serve (web capsule or MicroVM)
@@ -433,6 +453,17 @@ enum Commands {
         key: Option<std::path::PathBuf>,
     },
 
+    /// Put a signed bundle into this Home's store of bundles named by CID
+    #[command(name = "stage-bundle", hide = true)]
+    StageBundle {
+        /// The bundle's folder
+        folder: std::path::PathBuf,
+        /// The publisher's signature file for the bundle's CID. Without it
+        /// the command only prints that CID, the text a publisher signs.
+        #[arg(long)]
+        signature: Option<std::path::PathBuf>,
+    },
+
     /// Start the public ElastOS edge for MyWebSite, publisher objects, and CID content
     #[command(hide = true)]
     Gateway {
@@ -452,6 +483,10 @@ enum Commands {
 
     /// Install Home
     Setup {
+        /// Turn on Browser on a supported Linux host (asks for administrator access)
+        #[arg(long, conflicts_with_all = ["profile", "with", "without", "list", "prerequisites_only", "media_tools_dir", "isolated"])]
+        browser: bool,
+
         /// Developer: install a named components.json profile instead of `home`
         #[arg(long, hide = true)]
         profile: Option<String>,
@@ -1345,7 +1380,7 @@ async fn run() -> anyhow::Result<()> {
     ) {
         match NOFILE_RAISE.get() {
             Some(Ok((before, after))) => {
-                tracing::info!("open-file soft limit {after} (was {before})")
+                tracing::debug!("open-file soft limit {after} (was {before})")
             }
             Some(Err(err)) => tracing::warn!("could not raise open-file limit: {err}"),
             None => {}
@@ -1373,10 +1408,14 @@ async fn run() -> anyhow::Result<()> {
         Commands::Run {
             path,
             cid,
+            bundle,
             with,
             carrier_addr,
             capsule_args,
         } => {
+            if let Some(bundle) = bundle {
+                return run_cmd::run_bundle(&bundle).await;
+            }
             return run_cmd::run_capsule(path, cid, with, carrier_addr, capsule_args).await;
         }
 
@@ -1510,6 +1549,35 @@ async fn run() -> anyhow::Result<()> {
             trust_cmd::run_sign_payload(domain, key)?;
         }
 
+        Commands::StageBundle {
+            folder,
+            signature: None,
+        } => {
+            let cid = elastos_server::stage_cmd::bundle_cid(&folder)?;
+            println!("{}", serde_json::json!({ "cid": cid }));
+        }
+
+        Commands::StageBundle {
+            folder,
+            signature: Some(signature),
+        } => {
+            // The Runtime is made as `run` makes it, so the keys asked here
+            // are the keys a start of this Home would ask.
+            let data_dir = default_data_dir();
+            let runtime = create_runtime(data_dir.join("storage")).await?;
+            let staged =
+                elastos_server::stage_cmd::stage_bundle(&runtime, &data_dir, &folder, &signature)
+                    .await?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "cid": staged.cid,
+                    "signer_did": staged.signer_did,
+                    "files_written": staged.files_written,
+                })
+            );
+        }
+
         Commands::PublishRelease {
             version,
             channel,
@@ -1579,6 +1647,7 @@ async fn run() -> anyhow::Result<()> {
         }
 
         Commands::Setup {
+            browser,
             profile,
             with,
             without,
@@ -1587,6 +1656,10 @@ async fn run() -> anyhow::Result<()> {
             media_tools_dir,
             isolated,
         } => {
+            if browser {
+                setup::enable_browser().await?;
+                return Ok(());
+            }
             if isolated {
                 setup::choose_isolated_collaboration()?;
             }
@@ -1980,6 +2053,7 @@ async fn serve_web_capsule(
         runtime,
         session_registry: infra.session_registry,
         capability_manager: infra.capability_manager,
+        capability_store: infra.capability_store,
         pending_store: infra.pending_store,
         namespace_store: Some(infra.namespace_store),
         provider_registry: Some(infra.provider_registry),
@@ -2288,7 +2362,11 @@ pub(crate) fn open_browser(url: &str) {
 pub(crate) async fn create_runtime(
     storage_path: impl AsRef<std::path::Path>,
 ) -> anyhow::Result<Runtime> {
-    let storage = Arc::new(LocalFSProvider::new(storage_path.as_ref().to_path_buf()).await?);
+    let path = storage_path.as_ref();
+    let storage = LocalFSProvider::new(path.to_path_buf())
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot open storage {}: {e}", path.display()))?;
+    let storage = Arc::new(storage);
 
     // Components have a dedicated provider; host-specific VM providers remain
     // behind the same Runtime compute contract.
@@ -2335,6 +2413,127 @@ pub(crate) async fn create_runtime(
 #[cfg(test)]
 mod tests {
     use super::verify_component_binary_with_data_dir;
+
+    /// `run --bundle <cid>` is its own path: it takes the CID and nothing
+    /// else, and cannot be combined with the fetch by `--cid`, with a
+    /// folder, with capsule arguments (the first would be read as the
+    /// folder) or with a provider host. Each of the others alone still
+    /// parses.
+    #[test]
+    fn run_bundle_cannot_be_combined_with_another_way_to_name_what_runs() {
+        use clap::Parser;
+        const CID: &str = "bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q";
+        let parsed = |args: &[&str]| super::Cli::try_parse_from(args);
+        let cli = parsed(&["elastos", "run", "--bundle", CID]).unwrap();
+        match cli.command {
+            Some(super::Commands::Run {
+                path: None,
+                cid: None,
+                bundle: Some(bundle),
+                capsule_args,
+                ..
+            }) => {
+                assert_eq!(bundle, CID);
+                assert!(capsule_args.is_empty());
+            }
+            _ => panic!("not a run by bundle"),
+        }
+        for refused in [
+            &["elastos", "run", "--bundle", CID, "--cid", CID][..],
+            &["elastos", "run", "some/folder", "--bundle", CID],
+            &["elastos", "run", "--bundle", CID, "--", "one"],
+            &["elastos", "run", "--bundle", CID, "--with", "did-provider"],
+            &[
+                "elastos",
+                "run",
+                "--bundle",
+                CID,
+                "--carrier-addr",
+                "127.0.0.1:1",
+            ],
+            &["elastos", "run", "--bundle"],
+        ] {
+            let error = parsed(refused)
+                .err()
+                .unwrap_or_else(|| panic!("{refused:?}"));
+            assert!(
+                matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::ArgumentConflict | clap::error::ErrorKind::InvalidValue
+                ),
+                "{refused:?}: {error}"
+            );
+        }
+        for alone in [
+            &["elastos", "run", "--cid", CID][..],
+            &["elastos", "run", "some/folder"],
+        ] {
+            assert!(parsed(alone).is_ok(), "{alone:?}");
+        }
+        assert!(parsed(&["elastos", "run"]).is_err());
+    }
+
+    /// G2 (r2/r3): the `run` and `capsule` parsers take no principal
+    /// argument. Both refuse `--agent-id` and `--principal-id` as unknown
+    /// arguments, before any launch code runs. `run --component` does not
+    /// exist at this head (a component launch is `run` on a component
+    /// folder), so this row makes no claim about a `--component` subparser.
+    ///
+    /// The trailing-argument half shows the one place such a word is accepted:
+    /// after `--`, `run` passes it to the capsule unchanged, and the host
+    /// takes no principal from it.
+    #[test]
+    fn run_and_capsule_refuse_a_principal_argument() {
+        use clap::Parser;
+        let parsed = |args: &[&str]| super::Cli::try_parse_from(args);
+        for refused in [
+            &[
+                "elastos",
+                "run",
+                "--agent-id",
+                "person:local:x",
+                "some/folder",
+            ][..],
+            &[
+                "elastos",
+                "run",
+                "--principal-id",
+                "person:local:x",
+                "some/folder",
+            ],
+            &["elastos", "capsule", "chat", "--agent-id", "person:local:x"],
+            &[
+                "elastos",
+                "capsule",
+                "chat",
+                "--principal-id",
+                "person:local:x",
+            ],
+        ] {
+            let error = parsed(refused)
+                .err()
+                .unwrap_or_else(|| panic!("{refused:?}"));
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{refused:?}: {error}"
+            );
+        }
+        let cli = parsed(&["elastos", "run", "some/folder", "--", "--agent-id", "x"]).unwrap();
+        match cli.command {
+            Some(super::Commands::Run {
+                path, capsule_args, ..
+            }) => {
+                assert_eq!(path, Some(std::path::PathBuf::from("some/folder")));
+                assert_eq!(
+                    capsule_args,
+                    ["--agent-id".to_string(), "x".to_string()],
+                    "after -- the word belongs to the capsule"
+                );
+            }
+            _ => panic!("not a run"),
+        }
+    }
 
     #[cfg(unix)]
     #[test]
@@ -2593,6 +2792,25 @@ mod tests {
     }
 
     #[test]
+    fn linux_browser_opt_in_is_an_explicit_setup_command() {
+        let cli = super::Cli::try_parse_from(["elastos", "setup", "--browser"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(super::Commands::Setup { browser: true, .. })
+        ));
+        for option in [
+            "--list",
+            "--isolated",
+            "--prerequisites-only",
+            "--profile=home",
+            "--with=browser",
+            "--without=browser",
+        ] {
+            assert!(super::Cli::try_parse_from(["elastos", "setup", "--browser", option]).is_err());
+        }
+    }
+
+    #[test]
     fn home_browser_cli_preserves_terminal_default_and_probe_options() {
         assert!(super::Cli::try_parse_from(["elastos"])
             .unwrap()
@@ -2629,6 +2847,12 @@ mod tests {
             assert_eq!(super::should_isolate_process_group(&args), !interactive);
         }
         assert!(super::should_isolate_process_group(&["serve".to_string()]));
+        // Installer setup has stdin from /dev/null; a watched terminal still
+        // keeps it in the foreground group so Ctrl+C stops it.
+        assert_eq!(
+            super::should_isolate_process_group(&["setup".to_string()]),
+            !std::io::stdout().is_terminal()
+        );
     }
 
     #[test]
@@ -2694,5 +2918,34 @@ mod tests {
         ] {
             assert!(super::Cli::try_parse_from(argv).is_err(), "{argv:?}");
         }
+    }
+
+    const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    /// The web-serve entry, called directly: through `run`, `serve` or
+    /// `share` an earlier parse of the same type would stop first. It
+    /// returns its own parse's error before it sets up any server.
+    #[tokio::test]
+    async fn serve_web_capsule_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            elastos_storage::providers::LocalFSProvider::new(directory.path().join("storage"))
+                .await
+                .unwrap();
+        let runtime = elastos_server::runtime::Runtime::with_providers_and_component(
+            std::sync::Arc::new(storage),
+            Vec::new(),
+            None,
+        );
+        let capsule = directory.path().join("capsule");
+        fs::create_dir_all(&capsule).unwrap();
+        fs::write(capsule.join("capsule.json"), PINNED).unwrap();
+        let error = super::serve_web_capsule(runtime, capsule, "127.0.0.1:0", false, None)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().starts_with("unknown field `cid`"),
+            "{error}"
+        );
     }
 }

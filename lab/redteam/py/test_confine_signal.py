@@ -31,7 +31,7 @@ import unittest
 from pathlib import Path
 
 import sbx
-from test_confine_mach import changed, require_resolved, sha256_file
+from test_confine_mach import changed, fixture_git, require_resolved, sha256_file
 
 # lab/redteam/py/<this> -> parents[3] is the repo root. Same rule as sbx.
 ROOT = Path(__file__).resolve().parents[3]
@@ -535,7 +535,7 @@ def _git(repo, *args):
         ],
         capture_output=True,
         text=True,
-        env=git_env(),
+        env=fixture_git.fixture_git_env(repo),
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
     if completed.returncode != 0:

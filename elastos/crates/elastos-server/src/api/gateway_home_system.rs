@@ -38,11 +38,11 @@ const HOME_BROWSER_EXIT_LOCAL_OFFER_ID: &str = "local:provider:browser-exit";
 const HOME_BROWSER_EXIT_PEER_SERVICE_URI: &str = "elastos://peer/browser-exit";
 const HOME_REMOTE_EXIT_SERVICE_KIND: &str = "remote_exit";
 pub(super) const PROFILE_REQUIRED_DISCOVERY_MESSAGE: &str =
-    "Save your Profile before turning on Discovery";
+    "Save your Profile before turning on Public";
 const PROFILE_REQUIRED_PEOPLE_CONTACTS_MESSAGE: &str =
     "Save your Profile before using People contacts";
 const PROFILE_REQUIRED_SERVICES_MESSAGE: &str =
-    "Save your Profile before using Services with other people";
+    "Save your Profile before sharing with other people";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ProfileRequiredError(&'static str);
@@ -172,6 +172,14 @@ pub(super) struct PeopleDiscoveryUpdateRequest {
 #[serde(deny_unknown_fields)]
 pub(super) struct PeopleDiscoveryRequestCreate {
     advertisement_id: String,
+}
+
+/// `POST /api/apps/people/contacts/request`: add someone by the DID they
+/// shared. Response `{status, display_name}`; see `contact_request_response`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct PeopleContactRequestCreate {
+    profile_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -549,6 +557,7 @@ pub(super) async fn people_summary(
         Some(port) => port.authorized_snapshot(now_ts()).await.ok(),
         None => None,
     };
+    let community_names = community_member_names_or_none(&state).await;
     match tokio::task::spawn_blocking(move || {
         let mut state = home_state(&data_dir);
         let contact_authority = load_configured_contact_authority_for_context(
@@ -569,6 +578,8 @@ pub(super) async fn people_summary(
             (discovery_service.as_ref(), contact_authority.as_ref())
         {
             let snapshot = authority.store.read_only_snapshot()?;
+            stamp_undeliverable_requests(&mut people, &snapshot, service, now)?;
+            stamp_community_names(&mut people, &snapshot, &community_names, now)?;
             configured_people_discovery_summary(
                 &service.read_only_status_from_snapshot(&snapshot, &authority.profile, now)?,
                 &contact_relationships(&snapshot, now),
@@ -577,9 +588,15 @@ pub(super) async fn people_summary(
         } else {
             unconfigured_people_discovery_summary()
         };
+        // The local Profile DID, so People can show "Your DID" and copy it.
+        // It is deliberately not part of `identity`, which never carries DIDs.
+        let profile_id = contact_authority
+            .as_ref()
+            .map(|authority| authority.profile.document().profile_did.clone());
         Ok::<_, anyhow::Error>(serde_json::json!({
             "schema": "elastos.people.summary/v1",
             "identity": identity.without_device_identity(),
+            "profile_id": profile_id,
             "people": people,
             "discovery": discovery,
         }))
@@ -658,11 +675,7 @@ pub(super) async fn people_discovery_request_create(
 ) -> Response {
     let advertisement_id = body.advertisement_id.trim().to_string();
     if advertisement_id.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "discovery advertisement id is required",
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, "Choose someone on Public to add.").into_response();
     }
     let summary = match configured_people_discovery_action(
         &state,
@@ -773,6 +786,176 @@ pub(super) async fn people_contact_remove(
     .into_response()
 }
 
+pub(super) async fn people_contact_request_create(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(body): Json<PeopleContactRequestCreate>,
+) -> Response {
+    let context =
+        match require_home_launch_token_context(&state.data_dir, &headers, PEOPLE_CAPSULE_ID) {
+            Ok(context) => context,
+            Err(err) => return home_error_response(err),
+        };
+    let Some(service) = state.collaboration_discovery_service.clone() else {
+        return (
+            StatusCode::CONFLICT,
+            "Contacts are unavailable on this Home.",
+        )
+            .into_response();
+    };
+    let data_dir = state.data_dir.clone();
+    let authority = match tokio::task::spawn_blocking({
+        let context = context.clone();
+        let service = service.clone();
+        move || load_configured_contact_authority_for_context(&data_dir, &context, Some(&service))
+    })
+    .await
+    {
+        Ok(Ok(Some(authority))) => authority,
+        Ok(Ok(None)) => {
+            return room_service_error_response(profile_required_error(
+                PROFILE_REQUIRED_PEOPLE_CONTACTS_MESSAGE,
+            ))
+        }
+        Ok(Err(err)) => return room_service_error_response(err),
+        Err(err) => return room_service_join_error_response(err),
+    };
+    let recipient = body.profile_id.trim().to_string();
+    let community_names = community_member_names_or_none(&state).await;
+    send_profile_contact_request_response(
+        &service,
+        &state,
+        &community_names,
+        &context,
+        &authority,
+        &recipient,
+    )
+    .await
+}
+
+/// Community names for presentation only: an unreadable source leaves the
+/// name unknown and never blocks the action.
+pub(super) async fn community_member_names_or_none(
+    state: &GatewayState,
+) -> std::collections::HashMap<String, String> {
+    match super::gateway_room::community_member_names(state, now_ts()).await {
+        Ok(names) => names,
+        Err(err) => {
+            tracing::warn!(error = %format!("{err:#}"), "Community names are unavailable");
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+/// Queues a request by Profile DID and answers with `contact_request_answer`.
+/// A refusal is a 400 or 409 whose body is the refusal's text, and never
+/// echoes the DID. The device DIDs this Home knows from Community, presence
+/// and signed posts, are refused like a contact's device DID.
+pub(super) async fn send_profile_contact_request_response(
+    service: &crate::collaboration_discovery_runtime::CollaborationDiscoveryService,
+    state: &GatewayState,
+    community_names: &std::collections::HashMap<String, String>,
+    context: &HomeLaunchTokenContext,
+    authority: &ConfiguredContactAuthority,
+    recipient_profile_did: &str,
+) -> Response {
+    let now = now_ts();
+    // The device check only adds a refusal; an unreadable Community store
+    // must not block a request by DID.
+    let mut seen_device_dids = Vec::new();
+    if let Some(port) = state.collaboration_presence_product_port.as_ref() {
+        match port.seen_device_dids(now) {
+            Ok(dids) => seen_device_dids.extend(dids),
+            Err(err) => {
+                tracing::warn!(error = %format!("{err:#}"), "contact request could not read Community presence")
+            }
+        }
+    }
+    if let Some(port) = state.collaboration_chat_product_port.as_ref() {
+        match port.community_device_dids(now) {
+            Ok(dids) => seen_device_dids.extend(dids),
+            Err(err) => {
+                tracing::warn!(error = %format!("{err:#}"), "contact request could not read Community posts")
+            }
+        }
+    }
+    // A Community node that refuses requests by DID is known before anything
+    // is queued, so the first request is refused like the later ones.
+    service
+        .check_profile_relay_support(authority.store.as_ref(), &authority.profile, now)
+        .await;
+    let outcome = match service
+        .send_profile_contact_request(
+            authority.store.as_ref(),
+            recipient_profile_did,
+            &seen_device_dids,
+            &authority.profile,
+            now,
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(err) => return room_service_error_response(err),
+    };
+    if let Err(err) = register_configured_contact_sync_for_context(service, context, authority, now)
+        .and_then(|()| {
+            service.wake_registered_sync(authority.store.as_ref(), &authority.profile, now)
+        })
+    {
+        return room_service_error_response(err);
+    }
+    // The signed name this Home holds: its contact store first, then the
+    // Community names Chat shows.
+    let display_name = if outcome
+        == crate::collaboration_discovery_runtime::ProfileContactRequestOutcome::OwnProfile
+    {
+        Ok(None)
+    } else {
+        authority
+            .store
+            .read_only_snapshot()
+            .and_then(|read| read.display_name_for(recipient_profile_did, now))
+    };
+    match display_name {
+        Ok(name) => contact_request_answer(
+            &outcome,
+            name.or_else(|| community_names.get(recipient_profile_did).cloned())
+                .as_deref(),
+        ),
+        Err(err) => room_service_error_response(err),
+    }
+}
+
+/// The answer to a contact request from People or a Chat card:
+/// `{status, message}`. `status` is `requested`, `already_requested`,
+/// `already_contact`, `pending_from_them` or `own_profile`; `message` is the
+/// text a person sees, naming them by the signed name this Home holds, if any.
+pub(super) fn contact_request_answer(
+    outcome: &crate::collaboration_discovery_runtime::ProfileContactRequestOutcome,
+    display_name: Option<&str>,
+) -> Response {
+    use crate::collaboration_discovery_runtime::ProfileContactRequestOutcome as Outcome;
+    let message = match (outcome, display_name) {
+        // A pending request is one fact; who sees it when is not something
+        // to act on.
+        (Outcome::Requested | Outcome::AlreadyRequested, _) => "Request sent.".to_string(),
+        (Outcome::AlreadyContact { .. }, Some(name)) => format!("{name} is already a contact."),
+        (Outcome::AlreadyContact { .. }, None) => "They're already a contact.".to_string(),
+        (Outcome::PendingFromThem { .. }, Some(name)) => {
+            format!("{name} already asked to connect. Open Inbox to answer.")
+        }
+        (Outcome::PendingFromThem { .. }, None) => {
+            "They already asked to connect. Open Inbox to answer.".to_string()
+        }
+        (Outcome::OwnProfile, _) => "That's your own DID.".to_string(),
+    };
+    Json(serde_json::json!({
+        "status": outcome.status(),
+        "message": message,
+    }))
+    .into_response()
+}
+
 fn configured_people_summary_from_contact_store(
     store: &crate::collaboration_contact_store::CollaborationContactStore,
 ) -> anyhow::Result<HomePeopleSummary> {
@@ -800,6 +983,7 @@ fn configured_people_summary_from_snapshot(
             profile_card: None,
             last_seen_at: None,
             reachable: None,
+            delivery_detail: None,
         })
         .collect::<Vec<_>>();
     // The complete People states, each projected from signed truth. Precedence
@@ -812,22 +996,25 @@ fn configured_people_summary_from_snapshot(
         .map(|contact| contact.remote_profile_did().to_string())
         .collect();
     for requested in read.outgoing_pending_requests(now)? {
-        if !seen.insert(requested.remote_profile_did.clone()) {
+        if !seen.insert(requested.recipient_profile_did.clone()) {
             continue;
         }
         contacts.push(HomePeopleContactSummary {
-            contact_id: home_people_contact_id(&requested.remote_profile_did),
-            remote_profile_did: Some(requested.remote_profile_did.clone()),
-            added_at: requested.occurred_at,
+            contact_id: home_people_contact_id(&requested.recipient_profile_did),
+            remote_profile_did: Some(requested.recipient_profile_did),
+            added_at: requested.created_at,
             conversation_id: None,
-            display_name: requested.display_name.clone(),
-            handle: requested.handle.clone(),
+            // Empty while this Home holds no signed Profile for them; People
+            // then shows the row as Request sent.
+            display_name: requested.display_name.unwrap_or_default(),
+            handle: requested.handle,
             relationship: "requested".to_string(),
             can_message: false,
             device_label: None,
             profile_card: None,
             last_seen_at: None,
             reachable: None,
+            delivery_detail: None,
         });
     }
     for removed in snapshot.removed() {
@@ -851,6 +1038,7 @@ fn configured_people_summary_from_snapshot(
             profile_card: None,
             last_seen_at: None,
             reachable: None,
+            delivery_detail: None,
         });
     }
     for declined in read.declined_relationships()? {
@@ -870,6 +1058,7 @@ fn configured_people_summary_from_snapshot(
             profile_card: None,
             last_seen_at: None,
             reachable: None,
+            delivery_detail: None,
         });
     }
     Ok(HomePeopleSummary {
@@ -888,8 +1077,9 @@ pub(super) struct ConfiguredContactAuthority {
 }
 
 /// Profile DID to (`contact` | `requested` | `pending`, direct conversation)
-/// from this principal's signed contact store. People absent from the map
-/// have no relationship yet; a store that cannot be read yields none.
+/// from this principal's signed contact store, over both request kinds. A
+/// removed or declined pair is absent like a stranger, because a new request
+/// may be sent to it; a store that cannot be read yields none.
 pub(super) type ContactRelationships =
     std::collections::HashMap<String, (&'static str, Option<String>)>;
 
@@ -897,29 +1087,24 @@ pub(super) fn contact_relationships(
     store: &crate::collaboration_contact_store::CollaborationContactReadSnapshot<'_>,
     now: u64,
 ) -> ContactRelationships {
-    let mut relationships = ContactRelationships::new();
-    if let Ok(requests) = store.pending_incoming_requests() {
-        for request in requests {
-            relationships.insert(
-                request.requester_profile_did().to_string(),
-                ("pending", None),
-            );
-        }
-    }
-    if let Ok(requests) = store.outgoing_pending_requests(now) {
-        for request in requests {
-            relationships.insert(request.remote_profile_did, ("requested", None));
-        }
-    }
-    if let Ok(snapshot) = store.snapshot() {
-        for contact in snapshot.contacts() {
-            relationships.insert(
-                contact.remote_profile_did().to_string(),
-                ("contact", Some(contact.conversation_id().to_string())),
-            );
-        }
-    }
+    use crate::collaboration_contact_store::CollaborationContactRelationship as Relationship;
+    let Ok(relationships) = store.relationships(now) else {
+        return ContactRelationships::new();
+    };
     relationships
+        .into_iter()
+        .filter_map(|(profile_did, relationship)| {
+            let conversation_id = match &relationship {
+                Relationship::Contact { conversation_id } => Some(conversation_id.clone()),
+                Relationship::PendingFromThem { .. } | Relationship::Requested => None,
+                Relationship::None
+                | Relationship::OwnProfile
+                | Relationship::Removed { .. }
+                | Relationship::Declined => return None,
+            };
+            Some((profile_did, (relationship.as_str(), conversation_id)))
+        })
+        .collect()
 }
 
 /// Adds this principal's durable pending contact requests to one Home/Inbox
@@ -1089,11 +1274,7 @@ where
     let presentation = match authenticated_presence_presentation_for_context(state, &context) {
         Ok(presentation) => presentation,
         Err(HomePresenceAuthenticationError::Denied) => {
-            return Err((
-                StatusCode::FORBIDDEN,
-                "People discovery authorization denied",
-            )
-                .into_response());
+            return Err((StatusCode::FORBIDDEN, "Public isn’t allowed here.").into_response());
         }
         Err(HomePresenceAuthenticationError::ProfileRequired) => {
             return Err((StatusCode::CONFLICT, PROFILE_REQUIRED_DISCOVERY_MESSAGE).into_response());
@@ -1101,7 +1282,7 @@ where
         Err(HomePresenceAuthenticationError::Internal) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "People discovery presentation is unavailable",
+                "Public isn’t available right now.",
             )
                 .into_response());
         }
@@ -1111,7 +1292,7 @@ where
         if require_configured {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "collaboration discovery is not configured",
+                "Public isn’t available on this Home.",
             )
                 .into_response());
         }
@@ -1184,31 +1365,24 @@ fn configured_people_discovery_summary(
             crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL.to_string(),
         )
     } else if !status.enabled() && remote_visibility_may_remain_until.is_some() {
-        let remaining = remote_visibility_remaining_seconds.expect("derived from deadline");
+        // The last listing outlives the switch until it expires; no countdown,
+        // since the person cannot act on the seconds.
         (
             "off_pending_expiry",
-            format!(
-                "Discovery is off on this Home. It stopped advertising locally, but may remain visible for another {remaining} seconds while withdrawal is unavailable.",
-            ),
+            "Public is off. You may stay listed for a few minutes.".to_string(),
         )
     } else if !status.enabled() {
-        ("off", "Discovery is off.".to_string())
+        ("off", "Public is off.".to_string())
     } else if status.connecting() {
-        (
-            "connecting",
-            "Discovery is connecting. People who are visible appear here in a few seconds."
-                .to_string(),
-        )
+        ("connecting", "Public is on.".to_string())
     } else if status.available() {
-        (
-            "visible",
-            "Discovery is on. Visibility lasts up to ten minutes, and both people must be visible at the same time."
-                .to_string(),
-        )
+        // The listing lasts ten minutes and renews while a signed-in session
+        // keeps this Profile's sync registered, so it reads as plain on.
+        ("visible", "Public is on.".to_string())
     } else {
         (
             "relay_unavailable",
-            "Discovery is temporarily unavailable. Runtime will retry.".to_string(),
+            "Public isn’t working right now. Your Home will try again.".to_string(),
         )
     };
     HomePeopleDiscoverySummary {
@@ -1237,7 +1411,7 @@ fn unconfigured_people_discovery_summary() -> HomePeopleDiscoverySummary {
         remote_visibility_may_remain_until: None,
         remote_visibility_remaining_seconds: None,
         status: "unconfigured".to_string(),
-        status_message: "Discovery isn’t available on this Home.".to_string(),
+        status_message: "Public isn’t available on this Home.".to_string(),
         discovered_count: 0,
         discovered_peers: Vec::new(),
         request_count: 0,
@@ -1328,10 +1502,7 @@ mod discovery_summary_tests {
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["request_count"], 1);
         assert!(json.get("requests").is_none());
-        assert!(json["status_message"]
-            .as_str()
-            .unwrap()
-            .contains("ten minutes"));
+        assert_eq!(json["status_message"], "Public is on.");
         assert_eq!(json["discovered_peers"][0]["advertisement_id"], "ad-123");
         assert!(json["discovered_peers"][0].get("peer_id").is_none());
     }
@@ -1412,10 +1583,10 @@ mod discovery_summary_tests {
         assert!(json["expires_at"].is_null());
         assert_eq!(json["remote_visibility_may_remain_until"], 700);
         assert_eq!(json["remote_visibility_remaining_seconds"], 600);
-        assert!(json["status_message"]
-            .as_str()
-            .unwrap()
-            .contains("another 600 seconds"));
+        assert_eq!(
+            json["status_message"],
+            "Public is off. You may stay listed for a few minutes."
+        );
     }
 
     #[test]
@@ -1457,10 +1628,7 @@ mod discovery_summary_tests {
 
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["status"], "connecting");
-        assert_eq!(
-            json["status_message"],
-            "Discovery is connecting. People who are visible appear here in a few seconds."
-        );
+        assert_eq!(json["status_message"], "Public is on.");
     }
 
     #[test]
@@ -1491,7 +1659,7 @@ mod discovery_summary_tests {
         assert_eq!(json["status"], "relay_unavailable");
         assert_eq!(
             json["status_message"],
-            "Discovery is temporarily unavailable. Runtime will retry."
+            "Public isn’t working right now. Your Home will try again."
         );
         assert_eq!(json["request_count"], 1);
         assert!(json.get("pending_request_count").is_none());
@@ -1949,12 +2117,12 @@ mod discovery_summary_tests {
 
         assert_eq!(fixture.store.snapshot().unwrap().contacts().len(), 1);
         let response_read = fixture.store.read_only_snapshot().unwrap();
-        let context = HomeLaunchTokenContext::for_test(
-            fixture.store.principal_id().to_string(),
-            "session".to_string(),
-            Some("proof".to_string()),
-            "grant".to_string(),
+        let principal = crate::auth::store_test_human_principal(
+            fixture.store.data_root(),
+            fixture.store.principal_id(),
         );
+        let context =
+            stored_passkey_principal_context(fixture.store.data_root(), &principal).unwrap();
         let authority = ConfiguredContactAuthority {
             profile: fixture.local_profile.clone(),
             store: fixture.store.clone(),
@@ -2101,6 +2269,7 @@ mod discovery_summary_tests {
             "session".to_string(),
             Some("proof".to_string()),
             "grant".to_string(),
+            crate::auth::PrincipalKind::Human,
         );
         assert!(home_services_peer_contacts_state_from_snapshot(&context, Some(&read)).is_err());
     }
@@ -2112,14 +2281,10 @@ mod discovery_summary_tests {
         fs::create_dir_all(&data_root).unwrap();
         fs::set_permissions(&data_root, fs::Permissions::from_mode(0o700)).unwrap();
         let principal_id = "person:local:legacy-people-ignore".to_string();
+        let record = crate::auth::store_test_human_principal(&data_root, &principal_id);
         let protection =
             crate::auth::store_test_principal_root_protection(&data_root, &principal_id);
-        let context = HomeLaunchTokenContext::for_test(
-            principal_id.clone(),
-            "session".to_string(),
-            Some("proof".to_string()),
-            "grant".to_string(),
-        );
+        let context = stored_passkey_principal_context(&data_root, &record).unwrap();
         let legacy_path = home_services_peer_contacts_path(&data_root, &context).unwrap();
         let legacy_state = HomeServicesPeerContactsState {
             schema: HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string(),
@@ -2168,6 +2333,7 @@ mod discovery_summary_tests {
                 profile_card: None,
                 last_seen_at: None,
                 reachable: None,
+                delivery_detail: None,
             }],
             service_offer_count: 0,
             service_offers: Vec::new(),
@@ -2195,11 +2361,79 @@ fn stamp_contact_reachability(
         let Some(profile_did) = contact.remote_profile_did.as_deref() else {
             continue;
         };
-        contact.reachable =
-            Some(snapshot.records().iter().any(|record| {
-                record.sender_profile_did() == profile_did && record.expires_at() > now
-            }));
+        contact.reachable = Some(profile_reachable(snapshot, profile_did, now));
     }
+}
+
+/// A waiting request to someone whose signed Profile this Home's contact
+/// store does not hold is named from Community, as Chat's card names them.
+fn stamp_community_names(
+    people: &mut HomePeopleSummary,
+    read: &crate::collaboration_contact_store::CollaborationContactReadSnapshot<'_>,
+    community_names: &std::collections::HashMap<String, String>,
+    now: u64,
+) -> anyhow::Result<()> {
+    for contact in &mut people.contacts {
+        if contact.relationship != "requested" {
+            continue;
+        }
+        let Some(did) = contact.remote_profile_did.as_deref() else {
+            continue;
+        };
+        let Some(name) = community_names.get(did) else {
+            continue;
+        };
+        if read.display_name_for(did, now)?.is_none() {
+            contact.display_name = name.clone();
+        }
+    }
+    Ok(())
+}
+
+/// While the Community node refuses the Profile-contact operations (it runs
+/// a release older than 0.8.0), each waiting request by DID says it can't
+/// be delivered. Requests bound to a Discovery listing use the v1 operations
+/// and keep their plain row. The outbox keeps retrying either way.
+fn stamp_undeliverable_requests(
+    people: &mut HomePeopleSummary,
+    read: &crate::collaboration_contact_store::CollaborationContactReadSnapshot<'_>,
+    service: &crate::collaboration_discovery_runtime::CollaborationDiscoveryService,
+    now: u64,
+) -> anyhow::Result<()> {
+    if !service.profile_contact_delivery_unavailable() {
+        return Ok(());
+    }
+    let waiting = read
+        .outgoing_pending_requests(now)?
+        .into_iter()
+        .filter(|request| request.addressed_by_did)
+        .map(|request| request.recipient_profile_did)
+        .collect::<std::collections::HashSet<_>>();
+    for contact in &mut people.contacts {
+        if contact.relationship == "requested"
+            && contact
+                .remote_profile_did
+                .as_deref()
+                .is_some_and(|did| waiting.contains(did))
+        {
+            contact.delivery_detail =
+                Some(crate::collaboration_discovery_runtime::PROFILE_CONTACT_UNDELIVERABLE_DETAIL);
+        }
+    }
+    Ok(())
+}
+
+/// Whether `profile_did` has an unexpired presence heartbeat right now: the
+/// one meaning of "reachable" for a contact.
+pub(super) fn profile_reachable(
+    snapshot: &crate::collaboration_presence::CollaborationPresenceSnapshot,
+    profile_did: &str,
+    now: u64,
+) -> bool {
+    snapshot
+        .records()
+        .iter()
+        .any(|record| record.sender_profile_did() == profile_did && record.expires_at() > now)
 }
 
 fn apply_profile_people_authority(
@@ -2269,6 +2503,7 @@ fn apply_services_peer_authority_from_snapshot(
                 profile_card: None,
                 last_seen_at: None,
                 reachable: None,
+                delivery_detail: None,
             })
         })
         .collect::<Vec<_>>();
@@ -2389,14 +2624,11 @@ pub(super) async fn services_summary(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
-    let context = match require_home_launch_token_binding(
-        &state.data_dir,
-        &headers,
-        &[SERVICES_CAPSULE_ID, MARKETPLACE_CAPSULE_ID],
-    ) {
-        Ok(binding) => binding.context,
-        Err(err) => return home_error_response(err),
-    };
+    let context =
+        match require_home_launch_token_context(&state.data_dir, &headers, SERVICES_CAPSULE_ID) {
+            Ok(context) => context,
+            Err(err) => return home_error_response(err),
+        };
     let data_dir = state.data_dir.clone();
     let discovery_service = state.collaboration_discovery_service.clone();
     let provider_registry = state.provider_registry.clone();
@@ -2669,7 +2901,7 @@ pub(super) async fn services_offer_update(
 fn home_services_selection_state_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/.AppData/ElastOS/Home/services-state.json",
-        crate::auth::principal_localhost_root(context.principal_id())
+        context.root().localhost_root()
     )
 }
 
@@ -2700,7 +2932,7 @@ fn home_services_default_selection_state(
     HomeServicesSelectionState {
         schema: HOME_SERVICES_STATE_SCHEMA.to_string(),
         principal_id: context.principal_id().to_string(),
-        localhost_root: crate::auth::principal_localhost_root(context.principal_id()),
+        localhost_root: context.root().localhost_root().to_string(),
         updated_at: 0,
         local_offer_ids: BTreeSet::new(),
         remote_offer_ids: BTreeSet::new(),
@@ -2718,10 +2950,9 @@ fn home_services_selection_state(
     if !path.is_file() {
         return Ok(default_state);
     };
-    let raw = match crate::auth::read_principal_root_object(
+    let raw = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &default_state.principal_id,
-        &default_state.localhost_root,
+        context.root(),
         &home_services_selection_state_uri(context),
         &path,
     ) {
@@ -2777,18 +3008,13 @@ fn home_save_services_selection_state(
     state: &HomeServicesSelectionState,
 ) -> anyhow::Result<()> {
     let path = home_services_selection_state_path(data_dir, context)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
     let raw = serde_json::to_vec_pretty(state)?;
     if raw.len() > HOME_SERVICES_STATE_MAX_BYTES {
         anyhow::bail!("Services state is too large");
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &state.principal_id,
-        &state.localhost_root,
+        context.root(),
         &home_services_selection_state_uri(context),
         &path,
         &raw,
@@ -2808,7 +3034,7 @@ fn home_state_write_error(err: anyhow::Error, path: &std::path::Path) -> anyhow:
 fn home_services_requests_state_uri(context: &HomeLaunchTokenContext) -> String {
     format!(
         "{}/.AppData/ElastOS/Home/services-requests.json",
-        crate::auth::principal_localhost_root(context.principal_id())
+        context.root().localhost_root()
     )
 }
 
@@ -2826,7 +3052,7 @@ fn home_services_default_requests_state(
     HomeServicesRequestsState {
         schema: HOME_SERVICES_REQUESTS_SCHEMA.to_string(),
         principal_id: context.principal_id().to_string(),
-        localhost_root: crate::auth::principal_localhost_root(context.principal_id()),
+        localhost_root: context.root().localhost_root().to_string(),
         updated_at: 0,
         requests: BTreeMap::new(),
         catalog_last_response_at: BTreeMap::new(),
@@ -2843,10 +3069,9 @@ fn home_services_requests_state(
     if !path.is_file() {
         return Ok(default_state);
     }
-    let raw = match crate::auth::read_principal_root_object(
+    let raw = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &default_state.principal_id,
-        &default_state.localhost_root,
+        context.root(),
         &home_services_requests_state_uri(context),
         &path,
     ) {
@@ -2879,18 +3104,13 @@ fn home_save_services_requests_state(
     state: &HomeServicesRequestsState,
 ) -> anyhow::Result<()> {
     let path = home_services_requests_state_path(data_dir, context)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
     let raw = serde_json::to_vec_pretty(state)?;
     if raw.len() > HOME_SERVICES_REQUESTS_MAX_BYTES {
         anyhow::bail!("Services requests state is too large");
     }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &state.principal_id,
-        &state.localhost_root,
+        context.root(),
         &home_services_requests_state_uri(context),
         &path,
         &raw,
@@ -3012,13 +3232,7 @@ pub(in crate::api::gateway) fn local_model_offer_is_shared(
             return false;
         }
     };
-    let context = HomeLaunchTokenContext::resolved(
-        root,
-        principal_id.to_string(),
-        String::new(),
-        None,
-        String::new(),
-    );
+    let context = HomeLaunchTokenContext::resolved(root, String::new(), None, String::new());
     home_services_local_model_shared(data_dir, &context).unwrap_or(false)
 }
 
@@ -3944,6 +4158,68 @@ fn home_services_remote_exit_id(display_name: &str, request_id: &str) -> String 
     }
 }
 
+/// The presence device DID of `context`'s accepted contact that speaks as the
+/// Carrier peer `source`, if any. Every Carrier service that serves only
+/// contacts asks this one question. A principal without a Profile has no
+/// contacts.
+fn accepted_contact_for_carrier_source(
+    data_dir: &std::path::Path,
+    network: &crate::collaboration_network::VerifiedCollaborationNetworkProfile,
+    context: &HomeLaunchTokenContext,
+    local_did: &str,
+    source: &iroh::PublicKey,
+) -> anyhow::Result<Option<String>> {
+    let Some(profile) = load_profile_authority_for_context(data_dir, context)? else {
+        return Ok(None);
+    };
+    let store = crate::collaboration_contact_store::CollaborationContactStore::new(
+        data_dir,
+        context.principal_id(),
+        &home_browser_localhost_root(context),
+        network.clone(),
+        &profile,
+        local_did,
+    )?;
+    Ok(store
+        .snapshot()?
+        .contacts()
+        .iter()
+        .find(|contact| {
+            crate::carrier::did_to_public_key(contact.remote_presence_device_did()) == Some(*source)
+        })
+        .map(|contact| contact.remote_presence_device_did().to_string()))
+}
+
+/// Whether the Carrier peer `source` is an accepted contact of any of
+/// `principals` on this Home: the people a published file is for. A store
+/// that cannot be read counts as no contact.
+pub(crate) fn carrier_source_is_contact_of(
+    data_dir: &std::path::Path,
+    network: &crate::collaboration_network::VerifiedCollaborationNetworkProfile,
+    principals: &std::collections::BTreeSet<String>,
+    source: &iroh::PublicKey,
+) -> bool {
+    let Ok(Some(local_did)) =
+        crate::collaboration_profile_authority::load_existing_device_did(data_dir)
+    else {
+        return false;
+    };
+    let Ok(records) = crate::auth::active_passkey_principals(data_dir) else {
+        return false;
+    };
+    passkey_principals_once(records)
+        .into_iter()
+        .filter(|(principal, _)| principals.contains(&principal.principal_id))
+        .any(|(principal, _)| {
+            let Some(context) = ctx_or_warn(data_dir, &principal, "carrier_source_is_contact_of")
+            else {
+                return false;
+            };
+            accepted_contact_for_carrier_source(data_dir, network, &context, &local_did, source)
+                .is_ok_and(|contact| contact.is_some())
+        })
+}
+
 /// One entry per principal from the active passkey records. A principal with
 /// several passkeys has one record per passkey but owns one set of service
 /// requests, so the grant loops must read it once. The flag is true only when
@@ -3977,7 +4253,6 @@ fn stored_passkey_principal_context(
         crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, &principal.principal_id)?;
     Ok(HomeLaunchTokenContext::resolved(
         root,
-        principal.principal_id.clone(),
         String::new(),
         Some(principal.proof_binding_id.clone()),
         String::new(),
@@ -4034,24 +4309,11 @@ pub(crate) fn authorize_home_service_exit(
                     && home_services_local_exit_shared(data_dir, &context)?,
                 "Exit grant is not active"
             );
-            let profile = load_profile_authority_for_context(data_dir, &context)?
-                .ok_or_else(|| anyhow::anyhow!("Exit profile authority unavailable"))?;
-            let store = crate::collaboration_contact_store::CollaborationContactStore::new(
-                data_dir,
-                context.principal_id(),
-                &home_browser_localhost_root(&context),
-                network.clone(),
-                &profile,
-                &local_did,
+            let contact = accepted_contact_for_carrier_source(
+                data_dir, network, &context, &local_did, source,
             )?;
             anyhow::ensure!(
-                store.snapshot()?.contacts().iter().any(
-                    |contact| crate::carrier::did_to_public_key(
-                        contact.remote_presence_device_did()
-                    ) == Some(*source)
-                        && record.requester_did.as_deref()
-                            == Some(contact.remote_presence_device_did())
-                ),
+                contact.is_some() && record.requester_did == contact,
                 "Exit requester is no longer an accepted contact"
             );
             let grant = crate::carrier::BrowserExitGrant {
@@ -4166,24 +4428,11 @@ pub(crate) fn authorize_home_service_engine(
                     && home_services_local_engine_shared(data_dir, &context)?,
                 "Engine grant is not active"
             );
-            let profile = load_profile_authority_for_context(data_dir, &context)?
-                .ok_or_else(|| anyhow::anyhow!("Engine profile authority unavailable"))?;
-            let store = crate::collaboration_contact_store::CollaborationContactStore::new(
-                data_dir,
-                context.principal_id(),
-                &home_browser_localhost_root(&context),
-                network.clone(),
-                &profile,
-                &local_did,
+            let contact = accepted_contact_for_carrier_source(
+                data_dir, network, &context, &local_did, source,
             )?;
             anyhow::ensure!(
-                store.snapshot()?.contacts().iter().any(
-                    |contact| crate::carrier::did_to_public_key(
-                        contact.remote_presence_device_did()
-                    ) == Some(*source)
-                        && record.requester_did.as_deref()
-                            == Some(contact.remote_presence_device_did())
-                ),
+                contact.is_some() && record.requester_did == contact,
                 "Engine requester is no longer an accepted contact"
             );
             let grant = crate::carrier::BrowserEngineGrant {
@@ -4483,24 +4732,11 @@ pub(crate) fn authorize_home_service_model(
                         || crate::api::any_hosted_model_shared(data_dir)),
                 "model grant is not active"
             );
-            let profile = load_profile_authority_for_context(data_dir, &context)?
-                .ok_or_else(|| anyhow::anyhow!("model profile authority unavailable"))?;
-            let store = crate::collaboration_contact_store::CollaborationContactStore::new(
-                data_dir,
-                context.principal_id(),
-                &home_browser_localhost_root(&context),
-                network.clone(),
-                &profile,
-                &local_did,
+            let contact = accepted_contact_for_carrier_source(
+                data_dir, network, &context, &local_did, source,
             )?;
             anyhow::ensure!(
-                store.snapshot()?.contacts().iter().any(
-                    |contact| crate::carrier::did_to_public_key(
-                        contact.remote_presence_device_did()
-                    ) == Some(*source)
-                        && record.requester_did.as_deref()
-                            == Some(contact.remote_presence_device_did())
-                ),
+                contact.is_some() && record.requester_did == contact,
                 "model requester is no longer an accepted contact"
             );
             let grant = super::ModelServiceGrant {
@@ -4965,7 +5201,7 @@ fn home_services_request_notification_copy(kind: &str, uri: &str) -> (&'static s
 }
 
 const PRIVATE_ENGINE_APPROVAL_COPY: &str =
-    "Your Browser Engine is private. Share it in Services before approving this request.";
+    "Your Browser Engine is not shared, so this request cannot be approved.";
 const HOSTED_MODEL_APPROVAL_COPY: &str =
     "Only an admin can approve use of this Home's hosted AI connection.";
 
@@ -5040,14 +5276,16 @@ pub(super) fn append_home_service_access_notifications(
             match home_services_local_engine_shared(data_dir, context) {
                 Ok(false) => PRIVATE_ENGINE_APPROVAL_COPY.to_string(),
                 Ok(true) => approval_effect.to_string(),
-                Err(_) => "Check Browser Engine sharing in Services before approval.".to_string(),
+                Err(_) => {
+                    "This Home could not check whether your Browser Engine is shared.".to_string()
+                }
             }
         } else {
             approval_effect.to_string()
         };
         notifications.entries.push(HomeNotificationEntrySummary {
             id,
-            source_app: SERVICES_CAPSULE_ID.to_string(),
+            source_app: INBOX_CAPSULE_ID.to_string(),
             kind: "service_access_request".to_string(),
             title: format!(
                 "{} requests your {service_noun}",
@@ -5058,7 +5296,7 @@ pub(super) fn append_home_service_access_notifications(
                 request.requester_display_name, request.service_display_name
             ),
             action_ref: Some(HomeNotificationActionSummary {
-                app: SERVICES_CAPSULE_ID.to_string(),
+                app: INBOX_CAPSULE_ID.to_string(),
                 action_id: format!("service-approve-request:{}", request.request_id),
             }),
             severity: "attention".to_string(),
@@ -5075,7 +5313,7 @@ pub(super) fn append_home_service_access_notifications(
             home_services_request_notification_copy(&request.service_kind, &request.service_uri);
         notifications.entries.push(HomeNotificationEntrySummary {
             id,
-            source_app: SERVICES_CAPSULE_ID.to_string(),
+            source_app: INBOX_CAPSULE_ID.to_string(),
             kind: "service_access_grant".to_string(),
             title: format!(
                 "{} may use your {service_noun}",
@@ -5086,7 +5324,7 @@ pub(super) fn append_home_service_access_notifications(
                 request.requester_display_name, request.service_display_name
             ),
             action_ref: Some(HomeNotificationActionSummary {
-                app: SERVICES_CAPSULE_ID.to_string(),
+                app: INBOX_CAPSULE_ID.to_string(),
                 action_id: format!("service-deny-request:{}", request.request_id),
             }),
             severity: "info".to_string(),
@@ -5741,6 +5979,10 @@ async fn home_realtime_snapshot(
         {
             people_signature.push(home_discovery_realtime_signature(&status));
         }
+        // Waiting requests by DID change their row text when this flips.
+        if service.profile_contact_delivery_unavailable() {
+            people_signature.push("profile-contact-undeliverable".to_string());
+        }
     }
     let services_signature = home_services_realtime_signature(&home_state.services);
     HomeRealtimeSnapshot {
@@ -6130,6 +6372,11 @@ pub(super) async fn home_active_shell_update(
     match home_save_active_shell(&state.data_dir, &context, input.active.trim()) {
         Ok(summary) => Json(summary).into_response(),
         Err(err) => {
+            if let Some(response) =
+                crate::api::gateway::protected_record_kept_elsewhere_response(&err)
+            {
+                return response;
+            }
             let text = err.to_string();
             let status = if text.contains("not a launchable shell") {
                 StatusCode::BAD_REQUEST
@@ -6488,10 +6735,9 @@ fn home_active_shell_state(
     }
     let principal_id = home_browser_principal_id(context);
     let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_active_shell_state_uri(context),
         &path,
     ) {
@@ -6552,13 +6798,9 @@ fn home_save_active_shell(
         anyhow::bail!("Home active shell state is too large");
     }
     let path = home_active_shell_state_path(data_dir, context)?;
-    if let Some(parent) = path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_active_shell_state_uri(context),
         &path,
         &bytes,
@@ -6575,7 +6817,7 @@ fn home_browser_principal_id(context: &HomeLaunchTokenContext) -> String {
 }
 
 fn home_browser_localhost_root(context: &HomeLaunchTokenContext) -> String {
-    crate::auth::principal_localhost_root(context.principal_id())
+    context.root().localhost_root().to_string()
 }
 
 fn home_desktop_uri(context: &HomeLaunchTokenContext) -> String {
@@ -6806,10 +7048,9 @@ fn home_browser_state(
     }
     let principal_id = home_browser_principal_id(context);
     let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_browser_state_uri(context),
         &path,
     ) {
@@ -6901,38 +7142,24 @@ fn warn_damaged_home_state(path: &std::path::Path, err: &anyhow::Error) {
     );
 }
 
-/// Saves a Home state file, refusing to replace one that is damaged: the
-/// refusal is the damage notice, which names the file and the action, and
-/// the file stays as it is until the person moves it out.
-fn write_home_state_object(
+/// Saves Home state and keeps the damaged-file refusal on the verified root.
+fn write_home_state_object_resolved(
     data_dir: &std::path::Path,
-    principal_id: &str,
-    localhost_root: &str,
+    resolved: &crate::auth::ResolvedPrincipalRoot,
     object_uri: &str,
     path: &std::path::Path,
     bytes: &[u8],
 ) -> anyhow::Result<()> {
     if path.is_file() {
-        if let Err(err) = crate::auth::read_principal_root_object(
-            data_dir,
-            principal_id,
-            localhost_root,
-            object_uri,
-            path,
-        ) {
+        if let Err(err) =
+            crate::auth::read_principal_root_object_resolved(data_dir, resolved, object_uri, path)
+        {
             if is_damaged_home_state(&err) {
                 return Err(err);
             }
         }
     }
-    crate::auth::write_principal_root_object(
-        data_dir,
-        principal_id,
-        localhost_root,
-        object_uri,
-        path,
-        bytes,
-    )
+    crate::auth::write_principal_root_object_resolved(data_dir, resolved, object_uri, path, bytes)
 }
 
 fn home_save_browser_state(
@@ -6958,13 +7185,9 @@ fn home_save_browser_state(
         anyhow::bail!("Home browser state is too large");
     }
     let path = home_browser_state_path(data_dir, context)?;
-    if let Some(parent) = path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_browser_state_uri(context),
         &path,
         &bytes,
@@ -7020,12 +7243,9 @@ pub(super) fn migrate_legacy_services_peer_contacts(
     if !legacy_path.is_file() {
         return Ok(());
     }
-    let principal_id = home_browser_principal_id(context);
-    let localhost_root = home_browser_localhost_root(context);
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &legacy_uri,
         &legacy_path,
     ) {
@@ -7048,13 +7268,9 @@ pub(super) fn migrate_legacy_services_peer_contacts(
         return Ok(());
     }
     state.schema = HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string();
-    if let Some(parent) = new_path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
-    crate::auth::write_principal_root_object(
+    crate::auth::write_principal_root_object_resolved(
         data_dir,
-        &principal_id,
-        &localhost_root,
+        context.root(),
         &home_services_peer_contacts_uri(context),
         &new_path,
         &serde_json::to_vec_pretty(&state)?,
@@ -7069,6 +7285,23 @@ fn home_services_peer_contacts_path(
 ) -> anyhow::Result<PathBuf> {
     rooted_localhost_fs_path(data_dir, &home_services_peer_contacts_uri(context))
         .ok_or_else(|| anyhow::anyhow!("invalid Services peer contacts state root"))
+}
+
+pub(super) fn browser_exit_contact_names(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    discovery_service: Option<
+        &crate::collaboration_discovery_runtime::CollaborationDiscoveryService,
+    >,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    // The existing read-only projection accepts only this principal's verified contacts.
+    Ok(
+        home_services_peer_contacts_state(data_dir, context, discovery_service)?
+            .contacts
+            .into_values()
+            .map(|contact| (contact.peer_id, contact.display_name))
+            .collect(),
+    )
 }
 
 fn home_services_peer_contacts_state(
@@ -7868,6 +8101,7 @@ pub(super) async fn system_community_membership_update(
 struct HomeBackgroundImageEntry {
     path: PathBuf,
     object_uri: String,
+    file_name: &'static str,
     content_type: &'static str,
     version: String,
 }
@@ -8016,10 +8250,9 @@ fn home_appearance_preferences(
         }
         Err(err) => return Err(err.into()),
     }
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_APPEARANCE_PREFERENCES_FILE),
         &path,
     ) {
@@ -8136,13 +8369,9 @@ fn home_save_appearance_preferences(
             anyhow::bail!("appearance preferences are too large");
         }
         let path = home_appearance_path(data_dir, context, HOME_APPEARANCE_PREFERENCES_FILE)?;
-        if let Some(parent) = path.parent() {
-            crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-        }
-        write_home_state_object(
+        write_home_state_object_resolved(
             data_dir,
-            &home_browser_principal_id(context),
-            &home_browser_localhost_root(context),
+            context.root(),
             &home_appearance_object_uri(context, HOME_APPEARANCE_PREFERENCES_FILE),
             &path,
             &bytes,
@@ -8204,6 +8433,7 @@ fn home_background_image_entry(
         return Ok(Some(HomeBackgroundImageEntry {
             path,
             object_uri: home_appearance_object_uri(context, file_name),
+            file_name,
             content_type,
             version,
         }));
@@ -8234,10 +8464,9 @@ fn home_background_overlay_settings(
     if !path.is_file() {
         return Ok(defaults);
     }
-    let bytes = match crate::auth::read_principal_root_object(
+    let bytes = match crate::auth::read_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_BACKGROUND_OVERLAY_FILE),
         &path,
     ) {
@@ -8268,22 +8497,53 @@ fn home_save_background_overlay(
     opacity: f64,
 ) -> anyhow::Result<HomeAppearanceSummary> {
     let path = home_appearance_path(data_dir, context, HOME_BACKGROUND_OVERLAY_FILE)?;
-    if let Some(parent) = path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
     let payload = serde_json::json!({
         "enabled": enabled,
         "opacity": home_clamp_background_overlay_opacity(opacity),
     });
-    write_home_state_object(
+    write_home_state_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, HOME_BACKGROUND_OVERLAY_FILE),
         &path,
         &serde_json::to_vec_pretty(&payload)?,
     )?;
     home_appearance_summary(data_dir, context)
+}
+
+/// One lock for this Home's background-image operations. Upload and reset hold
+/// it from the image check through the write or removal and the summary, so a
+/// reset cannot list an image, let an upload replace that same name, and then
+/// remove the new bytes. A process-wide lock also covers every data folder,
+/// which is more than the one-folder minimum.
+static HOME_BACKGROUND_IMAGE_MUTEX: std::sync::LazyLock<Mutex<()>> =
+    std::sync::LazyLock::new(|| Mutex::new(()));
+
+fn home_background_image_lock() -> anyhow::Result<std::sync::MutexGuard<'static, ()>> {
+    HOME_BACKGROUND_IMAGE_MUTEX
+        .lock()
+        .map_err(|_| anyhow::anyhow!("background image mutex poisoned"))
+}
+
+/// Points an image operation reaches in order. A test can hold a reset at
+/// `Checked` until an upload has reached `Replaced`, which proves the lock
+/// keeps the two operations apart. Production reaches them with
+/// `NoImageCheckpoint`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageOperationPoint {
+    Checked,
+    Replaced,
+    Removed,
+}
+
+trait ImageOperationCheckpoint {
+    fn reached(&mut self, point: ImageOperationPoint);
+}
+
+struct NoImageCheckpoint;
+
+impl ImageOperationCheckpoint for NoImageCheckpoint {
+    fn reached(&mut self, _point: ImageOperationPoint) {}
 }
 
 fn home_save_background_image(
@@ -8292,19 +8552,52 @@ fn home_save_background_image(
     file_name: &'static str,
     bytes: Vec<u8>,
 ) -> anyhow::Result<HomeAppearanceSummary> {
+    home_save_background_image_with(data_dir, context, file_name, bytes, &mut NoImageCheckpoint)
+}
+
+fn home_save_background_image_with(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    file_name: &'static str,
+    bytes: Vec<u8>,
+    checkpoint: &mut dyn ImageOperationCheckpoint,
+) -> anyhow::Result<HomeAppearanceSummary> {
+    let _guard = home_background_image_lock()?;
     let path = home_appearance_path(data_dir, context, file_name)?;
-    if let Some(parent) = path.parent() {
-        crate::auth::create_owner_only_dir_all(data_dir, parent)?;
-    }
-    remove_home_background_images(data_dir, context)?;
-    crate::auth::write_principal_root_object(
+    // Every existing image is read first, the destination name included, so a
+    // damaged one refuses the upload before anything is written: the bytes the
+    // Home shows now stay in place (#447).
+    let existing = home_background_image_paths_checked(data_dir, context)?;
+    checkpoint.reached(ImageOperationPoint::Checked);
+    // Crash points of this save, and what each leaves:
+    // - before the write: every existing image as it was.
+    // - while staging: one `.background-image.<format>.<16 hex>.tmp` file
+    //   beside the images. The 16 hex digits are random, no reader opens a
+    //   staged name, and its cleanup is best effort, so a leftover is never
+    //   served and is harmless.
+    // - a failed staging or rename: the shared write helper tries to remove
+    //   the temporary file and every existing image stays. That cleanup is
+    //   best effort, so the temporary file can remain.
+    // - after the rename and before the removal below: the new bytes under
+    //   the destination name beside any older image of another format. The
+    //   reader serves the first name that exists (png, then jpg, webp, gif),
+    //   so an older image can stay on screen until a later upload or reset
+    //   succeeds, and both then remove every other format under the image
+    //   lock.
+    // - a removal error: that older file stays, and the error names it.
+    // - a directory sync error after the rename: the new image is in place
+    //   but the upload answers an error. The shared write helper keeps that
+    //   error for every caller, so this route does not hide it.
+    crate::auth::write_principal_root_object_resolved(
         data_dir,
-        &home_browser_principal_id(context),
-        &home_browser_localhost_root(context),
+        context.root(),
         &home_appearance_object_uri(context, file_name),
         &path,
         &bytes,
     )?;
+    checkpoint.reached(ImageOperationPoint::Replaced);
+    home_remove_background_image_files(existing, Some(&path))?;
+    checkpoint.reached(ImageOperationPoint::Removed);
     home_appearance_summary(data_dir, context)
 }
 
@@ -8312,41 +8605,182 @@ fn home_reset_background_image(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<HomeAppearanceSummary> {
-    remove_home_background_images(data_dir, context)?;
+    home_reset_background_image_with(data_dir, context, &mut NoImageCheckpoint)
+}
+
+fn home_reset_background_image_with(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    checkpoint: &mut dyn ImageOperationCheckpoint,
+) -> anyhow::Result<HomeAppearanceSummary> {
+    let _guard = home_background_image_lock()?;
+    let existing = home_background_image_paths_checked(data_dir, context)?;
+    checkpoint.reached(ImageOperationPoint::Checked);
+    // A crash during the removal leaves the images it had not yet removed.
+    // A crash after the last removal leaves none. No reader step sees a
+    // partial image.
+    home_remove_background_image_files(existing, None)?;
+    checkpoint.reached(ImageOperationPoint::Removed);
     home_appearance_summary(data_dir, context)
 }
 
-/// Upload and reset replace the background, but never delete a damaged
-/// image: the refusal is the damage notice that names the file, as for every
-/// other Home state save (#447). Every image is checked before any is removed.
-fn remove_home_background_images(
+/// The one sentence each background-image route answers for an error that is
+/// not a deliberate answer. The full error stays in the log, because it can
+/// carry the data folder path and the person id.
+const BACKGROUND_IMAGE_SAVE_FAILED: &str = "background image could not be saved";
+const BACKGROUND_IMAGE_RESET_FAILED: &str = "background image could not be reset";
+const BACKGROUND_IMAGE_READ_FAILED: &str = "background image could not be read";
+
+/// An upload the route refuses before it touches any image. The text is one
+/// fixed sentence that names no path, so the route answers it as it stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackgroundImageRequestError(&'static str);
+
+impl std::fmt::Display for BackgroundImageRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for BackgroundImageRequestError {}
+
+fn background_image_request_error(message: &'static str) -> anyhow::Error {
+    BackgroundImageRequestError(message).into()
+}
+
+/// An image this process cannot read. The read error carries the data folder
+/// path, so the log keeps the full error and the answer names only the file.
+#[derive(Debug)]
+struct HomeBackgroundImageReadFailure {
+    file_name: &'static str,
+}
+
+impl std::fmt::Display for HomeBackgroundImageReadFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "background image {} could not be read",
+            self.file_name
+        )
+    }
+}
+
+impl std::error::Error for HomeBackgroundImageReadFailure {}
+
+/// Builds the answer for an image this process cannot read. Upload, reset and
+/// GET share this.
+fn home_background_image_read_failure(
+    file_name: &'static str,
+    path: &std::path::Path,
+    err: &anyhow::Error,
+) -> anyhow::Error {
+    tracing::warn!(
+        path = %path.display(),
+        error = %format!("{err:#}"),
+        "could not read a background image"
+    );
+    HomeBackgroundImageReadFailure { file_name }.into()
+}
+
+/// Answers one background-image route's error. A deliberate answer keeps its
+/// own text: the typed held-record refusal, the fixed upload validation
+/// sentences, and the unreadable-image sentence that names only the file.
+/// Every other error keeps its full text in the log, because it can carry the
+/// data folder path and the person id, and the client gets `sentence` with the
+/// status the error answers today.
+fn background_image_route_error(
+    err: anyhow::Error,
+    sentence: &'static str,
+    respond: fn(anyhow::Error) -> Response,
+) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
+    if err.downcast_ref::<BackgroundImageRequestError>().is_some()
+        || err
+            .downcast_ref::<HomeBackgroundImageReadFailure>()
+            .is_some()
+    {
+        return respond(err);
+    }
+    tracing::warn!(
+        error = %format!("{err:#}"),
+        "background image request failed"
+    );
+    let status = respond(err).status();
+    (status, sentence).into_response()
+}
+
+/// Reads every existing background image and returns the paths it found,
+/// refusing on any read error. Upload and reset call this before they write or
+/// remove anything, so an image this process cannot read refuses the operation
+/// before the image is replaced or removed (#447). The answer names only the
+/// image file: the read error carries the data folder path, so the log keeps
+/// the full error and the response does not.
+fn home_background_image_paths_checked(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<PathBuf>> {
     let mut paths = Vec::with_capacity(HOME_BACKGROUND_IMAGE_FILES.len());
     for &(file_name, _content_type) in HOME_BACKGROUND_IMAGE_FILES {
         let path = home_appearance_path(data_dir, context, file_name)?;
-        if path.is_file() {
-            if let Err(err) = crate::auth::read_principal_root_object(
-                data_dir,
-                &home_browser_principal_id(context),
-                &home_browser_localhost_root(context),
-                &home_appearance_object_uri(context, file_name),
-                &path,
-            ) {
-                if is_damaged_home_state(&err) {
-                    return Err(err);
-                }
-            }
+        if !path.is_file() {
+            continue;
+        }
+        if let Err(err) = crate::auth::read_principal_root_object_resolved(
+            data_dir,
+            context.root(),
+            &home_appearance_object_uri(context, file_name),
+            &path,
+        ) {
+            return Err(home_background_image_read_failure(file_name, &path, &err));
         }
         paths.push(path);
     }
+    Ok(paths)
+}
+
+/// Removes the listed image files except `keep`, the destination an upload
+/// has just written. Every removal is attempted, so one failing file does not
+/// leave the others behind. Each failure is logged and the first one is
+/// returned: the response names the file that stayed and whether the new image
+/// was already in place or the reset was incomplete.
+fn home_remove_background_image_files(
+    paths: Vec<PathBuf>,
+    keep: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let replaced = keep.is_some();
+    let mut first_failure: Option<String> = None;
     for path in paths {
-        match std::fs::remove_file(path) {
+        if keep == Some(path.as_path()) {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "could not remove an older background image"
+                );
+                if first_failure.is_none() {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    first_failure = Some(format!("{name}: {err}"));
+                }
+            }
         }
+    }
+    if let Some(failure) = first_failure {
+        if replaced {
+            anyhow::bail!("the new background image is in place, but an older image could not be removed ({failure})");
+        }
+        anyhow::bail!(
+            "the background image reset is incomplete; an image could not be removed ({failure})"
+        );
     }
     Ok(())
 }
@@ -8366,13 +8800,19 @@ fn parse_background_image_upload(
         "image/jpeg" => "background-image.jpg",
         "image/webp" => "background-image.webp",
         "image/gif" => "background-image.gif",
-        _ => anyhow::bail!("background image must be PNG, JPEG, WebP, or GIF"),
+        _ => {
+            return Err(background_image_request_error(
+                "background image must be PNG, JPEG, WebP, or GIF",
+            ))
+        }
     };
     if body.is_empty() {
-        anyhow::bail!("background image is empty");
+        return Err(background_image_request_error("background image is empty"));
     }
     if body.len() > HOME_BACKGROUND_IMAGE_MAX_BYTES {
-        anyhow::bail!("background image is larger than 5 MB");
+        return Err(background_image_request_error(
+            "background image is larger than 5 MB",
+        ));
     }
     Ok((file_name, body.to_vec()))
 }
@@ -8451,17 +8891,31 @@ pub(super) async fn system_background_image_update(
     let context =
         match require_home_launch_token_context(&state.data_dir, &headers, SYSTEM_CAPSULE_ID) {
             Ok(context) => context,
-            Err(err) => return system_error_response(err),
+            Err(err) => {
+                return background_image_route_error(
+                    err,
+                    BACKGROUND_IMAGE_SAVE_FAILED,
+                    system_error_response,
+                )
+            }
         };
 
     let upload = match parse_background_image_upload(&headers, &body) {
         Ok(upload) => upload,
-        Err(err) => return system_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_SAVE_FAILED,
+                system_error_response,
+            )
+        }
     };
 
     match home_save_background_image(&state.data_dir, &context, upload.0, upload.1) {
         Ok(summary) => Json(summary).into_response(),
-        Err(err) => system_error_response(err),
+        Err(err) => {
+            background_image_route_error(err, BACKGROUND_IMAGE_SAVE_FAILED, system_error_response)
+        }
     }
 }
 
@@ -8472,12 +8926,20 @@ pub(super) async fn system_background_image_reset(
     let context =
         match require_home_launch_token_context(&state.data_dir, &headers, SYSTEM_CAPSULE_ID) {
             Ok(context) => context,
-            Err(err) => return system_error_response(err),
+            Err(err) => {
+                return background_image_route_error(
+                    err,
+                    BACKGROUND_IMAGE_RESET_FAILED,
+                    system_error_response,
+                )
+            }
         };
 
     match home_reset_background_image(&state.data_dir, &context) {
         Ok(summary) => Json(summary).into_response(),
-        Err(err) => system_error_response(err),
+        Err(err) => {
+            background_image_route_error(err, BACKGROUND_IMAGE_RESET_FAILED, system_error_response)
+        }
     }
 }
 
@@ -8504,31 +8966,83 @@ pub(super) async fn home_background_image(
 ) -> Response {
     let context = match require_home_token_context(&state.data_dir, &headers) {
         Ok(context) => context,
-        Err(err) => return home_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     };
 
+    // The lock covers choosing and reading the image, so a read never sees a
+    // half-finished upload or reset. Nothing between these steps awaits.
+    let _guard = match home_background_image_lock() {
+        Ok(guard) => guard,
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
+    };
     let entry = match home_background_image_entry(&state.data_dir, &context) {
         Ok(Some(entry)) => entry,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(err) => return home_error_response(err),
+        Err(err) => {
+            return background_image_route_error(
+                err,
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     };
-    match crate::auth::read_principal_root_object(
-        &state.data_dir,
-        &home_browser_principal_id(&context),
-        &home_browser_localhost_root(&context),
-        &entry.object_uri,
-        &entry.path,
-    ) {
+    match home_background_image_bytes(&state.data_dir, &context, &entry) {
         Ok(bytes) => {
             let mut response = bytes.into_response();
-            response.headers_mut().insert(
+            let headers = response.headers_mut();
+            headers.insert(
                 axum::http::header::CONTENT_TYPE,
                 HeaderValue::from_static(entry.content_type),
             );
+            // Home owns this authenticated same-origin read and hands image
+            // bytes to the opaque GUI/System frames. CORP governs embedding;
+            // the Home token and browser provenance gates above own access.
+            headers.insert(
+                axum::http::HeaderName::from_static("cross-origin-resource-policy"),
+                HeaderValue::from_static("cross-origin"),
+            );
+            headers.insert(
+                axum::http::HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            );
             response
         }
-        Err(err) => home_error_response(anyhow::anyhow!(err)),
+        Err(err) => {
+            // The read error can carry the image path, which holds the person
+            // id. The log keeps the full error and the response names only the
+            // image file, as upload and reset do.
+            background_image_route_error(
+                home_background_image_read_failure(entry.file_name, &entry.path, &err),
+                BACKGROUND_IMAGE_READ_FAILED,
+                home_error_response,
+            )
+        }
     }
+}
+
+fn home_background_image_bytes(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+    entry: &HomeBackgroundImageEntry,
+) -> anyhow::Result<Vec<u8>> {
+    crate::auth::read_principal_root_object_resolved(
+        data_dir,
+        context.root(),
+        &entry.object_uri,
+        &entry.path,
+    )
 }
 
 #[cfg(test)]
@@ -8584,6 +9098,7 @@ mod home_realtime_tests {
             profile_card: None,
             last_seen_at: None,
             reachable: None,
+            delivery_detail: None,
         };
         let mut people = HomePeopleSummary {
             contact_count: 3,
@@ -8627,6 +9142,7 @@ mod home_realtime_tests {
                 profile_card: None,
                 last_seen_at: Some(20),
                 reachable: Some(true),
+                delivery_detail: None,
             }],
             ..HomePeopleSummary::default()
         };
@@ -8659,6 +9175,7 @@ mod home_realtime_tests {
                 profile_card: None,
                 last_seen_at: None,
                 reachable: None,
+                delivery_detail: None,
             }],
             ..HomePeopleSummary::default()
         };
@@ -9092,5 +9609,1344 @@ mod home_events_pacing_tests {
                 snapshots.load(Ordering::SeqCst)
             );
         }
+    }
+}
+
+/// R2 rows: the Home state surfaces read the root the context resolved, and a
+/// principal with no stored record is refused instead of served from the
+/// principal-id rule.
+#[cfg(test)]
+mod stored_root_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    fn state_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        (temp, data_dir)
+    }
+
+    fn assert_only_file_named(data_dir: &std::path::Path, expected: &std::path::Path) {
+        fn collect(dir: &std::path::Path, name: &std::ffi::OsStr, found: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    collect(&entry.path(), name, found);
+                } else if kind.is_file() && entry.file_name() == name {
+                    found.push(entry.path());
+                }
+            }
+        }
+        let mut found = Vec::new();
+        collect(data_dir, expected.file_name().unwrap(), &mut found);
+        assert_eq!(
+            found,
+            vec![expected.to_path_buf()],
+            "state file must stay only under the verified root"
+        );
+    }
+
+    fn verified_parent_device_context(
+        data_dir: &std::path::Path,
+        app: &str,
+    ) -> (HomeLaunchTokenContext, String) {
+        let parent = tempfile::tempdir().unwrap();
+        let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let parent_context =
+            super::super::gateway_home_token::local_home_launch_token_context(parent.path())
+                .unwrap();
+        let token = super::super::gateway_home_token::issue_home_launch_token_with_context(
+            parent.path(),
+            app,
+            &parent_context,
+        )
+        .unwrap();
+        let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+            data_dir, &token, &[app], parent_did.clone(), parent.path(),
+        ).unwrap();
+        (verified.context, parent_did)
+    }
+
+    #[test]
+    fn parent_signed_services_selection_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SERVICES_CAPSULE_ID);
+        let parent_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{parent_did}").as_bytes())[..12])
+        );
+        assert_eq!(context.root().localhost_root(), parent_root);
+        let mut state = home_services_default_selection_state(&context);
+        state.local_offer_ids.insert("parent-offer".to_string());
+        home_save_services_selection_state(&data_dir, &context, &state).unwrap();
+        let read = home_services_selection_state(&data_dir, &context).unwrap();
+        assert!(read.local_offer_ids.contains("parent-offer"));
+        let parent_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/services-state.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    /// A data directory and a launch context whose stored record is
+    /// quarantined after the context resolved its root.
+    fn quarantined_context() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        HomeLaunchTokenContext,
+    ) {
+        let (temp, data_dir) = state_dir();
+        crate::auth::r4_fixture::store(&data_dir, crate::auth::PrincipalKind::Human);
+        let root = crate::auth::ResolvedPrincipalRoot::resolve(
+            &data_dir,
+            &data_dir,
+            crate::auth::r4_fixture::ID,
+        )
+        .unwrap();
+        crate::auth::r4_fixture::set_kind(
+            &data_dir,
+            crate::auth::r4_fixture::ID,
+            crate::auth::PrincipalKind::Agent,
+            root.localhost_root(),
+        );
+        let context = HomeLaunchTokenContext::resolved(
+            root,
+            "session".to_string(),
+            None,
+            "grant".to_string(),
+        );
+        (temp, data_dir, context)
+    }
+
+    #[test]
+    fn a_refused_services_state_save_leaves_no_home_folder() {
+        let (_temp, data_dir, context) = quarantined_context();
+        let state = home_services_default_selection_state(&context);
+        let path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(!path.parent().unwrap().exists());
+        let error = home_save_services_selection_state(&data_dir, &context, &state)
+            .expect_err("a quarantined record is refused");
+        let text = format!("{error:#}");
+        assert!(text.starts_with("could not write "), "{text}");
+        assert!(
+            text.contains("quarantined agent record: agent kind binding mismatch"),
+            "{text}"
+        );
+        assert!(
+            !path.parent().unwrap().exists(),
+            "the refused save left its Home folder"
+        );
+    }
+
+    #[test]
+    fn a_refused_appearance_save_leaves_no_appearance_folder() {
+        let (_temp, data_dir, context) = quarantined_context();
+        let path =
+            home_appearance_path(&data_dir, &context, HOME_APPEARANCE_PREFERENCES_FILE).unwrap();
+        let appearance = path.parent().unwrap();
+        let home = appearance.parent().unwrap();
+        assert!(!home.exists());
+        let error = home_save_appearance_preferences(
+            &data_dir,
+            &context,
+            HomeAppearancePreferencesUpdate {
+                theme: Some("light".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("a quarantined record is refused");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("quarantined agent record: agent kind binding mismatch"),
+            "{text}"
+        );
+        assert!(
+            !appearance.exists(),
+            "the refused save left its Appearance folder"
+        );
+        assert!(!home.exists(), "the refused save left its Home folder");
+    }
+
+    #[test]
+    fn parent_signed_active_shell_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        let capsule_dir = data_dir.join("capsules/home-gui");
+        fs::create_dir_all(capsule_dir.join("browser")).unwrap();
+        fs::write(
+            capsule_dir.join("capsule.json"),
+            include_str!("../../../../../capsules/home-gui/capsule.json"),
+        )
+        .unwrap();
+        fs::write(capsule_dir.join("browser/index.html"), "Home fixture").unwrap();
+        fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({"external": {
+                "home-gui": {"install_path": "capsules/home-gui", "platforms": {}}
+            }, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+        home_save_active_shell(&data_dir, &context, HOME_GUI_SHELL_ID).unwrap();
+        assert_eq!(
+            home_active_shell_state(&data_dir, &context)
+                .unwrap()
+                .unwrap()
+                .active,
+            HOME_GUI_SHELL_ID
+        );
+        let parent_path = home_active_shell_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        assert_ne!(context.root().localhost_root(), child_root);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/active-shell.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    /// A person stored only in a parent auth directory, verified into this
+    /// Runtime through a parent-signed launch token. Returns the parent's
+    /// temporary directory, the person's record, and the verified context.
+    fn parent_store_services_person(
+        data_dir: &std::path::Path,
+    ) -> (
+        tempfile::TempDir,
+        crate::auth::PrincipalRecord,
+        HomeLaunchTokenContext,
+    ) {
+        use elastos_runtime::auth::AuthSessionGrantV1;
+
+        let parent = tempfile::tempdir().unwrap();
+        let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        let mut record = crate::auth::store_test_human_principal(
+            parent.path(),
+            "person:local:parent-store-services",
+        );
+        record.localhost_root = "localhost://Users/parent-stored-root".to_string();
+        let mut auth_state = crate::auth::load_auth_state(parent.path()).unwrap();
+        auth_state.principals[0].localhost_root = record.localhost_root.clone();
+        crate::auth::save_auth_state(parent.path(), &auth_state, None).unwrap();
+        let now = crate::auth::now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: "grant:parent-store-services".to_string(),
+            session_id: "auth:parent-store-services".to_string(),
+            principal_id: record.principal_id.clone(),
+            proof_binding_id: record.proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now + 600,
+            apps: vec![SERVICES_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(parent.path(), grant.clone()).unwrap();
+        let token = super::super::gateway_home_token::issue_home_launch_token_for_auth_grant(
+            parent.path(),
+            SERVICES_CAPSULE_ID,
+            &grant,
+        )
+        .unwrap();
+        let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
+            data_dir, &token, &[SERVICES_CAPSULE_ID], parent_did, parent.path(),
+        ).unwrap();
+        (parent, record, verified.context)
+    }
+
+    /// The launch context takes this person's root from the parent's store,
+    /// where their record is kept. This Runtime holds no protection for that
+    /// root, so the save is refused and the read answers the default.
+    #[test]
+    fn parent_auth_store_person_services_selection_is_refused_in_child() {
+        let (_temp, data_dir) = state_dir();
+        let (_parent, record, context) = parent_store_services_person(&data_dir);
+        assert_eq!(
+            context.root().localhost_root(),
+            "localhost://Users/parent-stored-root"
+        );
+        assert!(
+            crate::auth::stored_principal_record(&data_dir, &record.principal_id)
+                .unwrap()
+                .is_none()
+        );
+        let selection = home_services_default_selection_state(&context);
+        let stored_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        let error = home_save_services_selection_state(&data_dir, &context, &selection)
+            .expect_err("this Runtime holds no protection for the parent store's person");
+        let text = format!("{error:#}");
+        assert!(text.starts_with("could not write "), "{text}");
+        assert!(
+            text.ends_with("protected record is kept only on the Runtime this person signed in on"),
+            "{text}"
+        );
+        assert!(
+            !stored_path.exists(),
+            "the refused save wrote under the stored root"
+        );
+        assert!(
+            !stored_path.parent().unwrap().exists(),
+            "the refused save made the Home folder"
+        );
+        assert!(home_services_selection_state(&data_dir, &context)
+            .unwrap()
+            .local_offer_ids
+            .is_empty());
+        let formula_root = crate::auth::principal_localhost_root(&record.principal_id);
+        let formula_uri = format!("{formula_root}/.AppData/ElastOS/Home/services-state.json");
+        let formula_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &formula_uri).unwrap();
+        assert!(!formula_path.exists());
+    }
+
+    /// The same parent-stored person with test protection seeded on this
+    /// Runtime: the save seals the object under the stored root, and the read
+    /// returns the selection.
+    #[test]
+    fn parent_auth_store_person_services_selection_writes_sealed_with_protection_here() {
+        let (_temp, data_dir) = state_dir();
+        let (_parent, record, context) = parent_store_services_person(&data_dir);
+        crate::auth::store_test_principal_root_protection_for(
+            &data_dir,
+            &record.principal_id,
+            context.root().localhost_root(),
+        );
+        // One non-default field: a read that fails and answers the default
+        // would otherwise match a selection built from the same default.
+        let mut selection = home_services_default_selection_state(&context);
+        selection
+            .local_offer_ids
+            .insert("offer:r2-non-default".to_string());
+        home_save_services_selection_state(&data_dir, &context, &selection).unwrap();
+        let stored_path = home_services_selection_state_path(&data_dir, &context).unwrap();
+        assert!(
+            stored_path.is_file(),
+            "the save wrote under the stored root"
+        );
+        assert!(
+            stored_path.starts_with(data_dir.join("Users").join("parent-stored-root")),
+            "{}",
+            stored_path.display()
+        );
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&stored_path).unwrap()).unwrap();
+        assert_eq!(stored["schema"], "elastos.principal-root.object/v1");
+        let read = home_services_selection_state(&data_dir, &context).unwrap();
+        assert_eq!(
+            read.local_offer_ids.iter().cloned().collect::<Vec<_>>(),
+            ["offer:r2-non-default"]
+        );
+        assert_eq!(
+            serde_json::to_value(&read).unwrap(),
+            serde_json::to_value(&selection).unwrap()
+        );
+    }
+
+    #[test]
+    fn parent_signed_browser_state_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let updated = home_save_browser_state(
+            &data_dir,
+            &context,
+            HomeBrowserStateUpdate {
+                layout: Some(Some(serde_json::json!({"columns": 3}))),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.layout, Some(serde_json::json!({"columns": 3})));
+        assert_eq!(
+            home_browser_state(&data_dir, &context).unwrap().layout,
+            Some(serde_json::json!({"columns": 3}))
+        );
+        let parent_path = home_browser_state_path(&data_dir, &context).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/browser-state.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_peer_contacts_migration_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, HOME_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        let legacy_uri = legacy_home_services_peer_contacts_uri(&context);
+        let legacy_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &legacy_uri).unwrap();
+        crate::auth::create_owner_only_dir_all(&data_dir, legacy_path.parent().unwrap()).unwrap();
+        let legacy = HomeServicesPeerContactsState {
+            schema: LEGACY_HOME_SERVICES_PEER_CONTACTS_SCHEMA.to_string(),
+            principal_id: context.principal_id().to_string(),
+            localhost_root: context.root().localhost_root().to_string(),
+            updated_at: 7,
+            contacts: BTreeMap::new(),
+        };
+        crate::auth::write_principal_root_object_resolved(
+            &data_dir,
+            context.root(),
+            &legacy_uri,
+            &legacy_path,
+            &serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        migrate_legacy_services_peer_contacts(&data_dir, &context).unwrap();
+        let new_uri = home_services_peer_contacts_uri(&context);
+        let new_path = home_services_peer_contacts_path(&data_dir, &context).unwrap();
+        assert_only_file_named(&data_dir, &new_path);
+        let bytes = crate::auth::read_principal_root_object_resolved(
+            &data_dir,
+            context.root(),
+            &new_uri,
+            &new_path,
+        )
+        .unwrap();
+        let migrated: HomeServicesPeerContactsState = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(migrated.schema, HOME_SERVICES_PEER_CONTACTS_SCHEMA);
+        assert_eq!(migrated.updated_at, 7);
+        assert!(!legacy_path.exists());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/services-peer-contacts.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_appearance_preferences_stay_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        home_save_appearance_preferences(
+            &data_dir,
+            &context,
+            HomeAppearancePreferencesUpdate {
+                theme: Some("light".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            home_appearance_preferences(&data_dir, &context)
+                .unwrap()
+                .theme,
+            "light"
+        );
+        let parent_path =
+            home_appearance_path(&data_dir, &context, HOME_APPEARANCE_PREFERENCES_FILE).unwrap();
+        assert!(parent_path.is_file());
+        assert_only_file_named(&data_dir, &parent_path);
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri = format!("{child_root}/.AppData/ElastOS/Home/Appearance/preferences.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    #[test]
+    fn parent_signed_background_stays_under_parent_device_root() {
+        let (_temp, data_dir) = state_dir();
+        let (_, child_did) = elastos_identity::load_or_create_did(&data_dir).unwrap();
+        let (context, parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        assert_eq!(context.principal_id(), format!("device:{parent_did}"));
+        home_save_background_overlay(&data_dir, &context, true, 0.4).unwrap();
+        assert_eq!(
+            home_background_overlay_settings(&data_dir, &context).unwrap(),
+            (true, 0.4)
+        );
+        let overlay_path =
+            home_appearance_path(&data_dir, &context, HOME_BACKGROUND_OVERLAY_FILE).unwrap();
+        assert_only_file_named(&data_dir, &overlay_path);
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"parent image".to_vec(),
+        )
+        .unwrap();
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_only_file_named(&data_dir, &entry.path);
+        let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
+        assert_eq!(bytes, b"parent image");
+        home_reset_background_image(&data_dir, &context).unwrap();
+        assert!(!entry.path.exists());
+        let child_root = format!(
+            "localhost://Users/{}",
+            hex::encode(&Sha256::digest(format!("device:{child_did}").as_bytes())[..12])
+        );
+        let child_uri =
+            format!("{child_root}/.AppData/ElastOS/Home/Appearance/background-overlay.json");
+        let child_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&data_dir, &child_uri).unwrap();
+        assert!(!child_path.exists());
+    }
+
+    /// A second background image replaces the first: the success path leaves
+    /// exactly one image file, the one just saved.
+    #[test]
+    fn second_background_image_replaces_the_first() {
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"first image".to_vec(),
+        )
+        .unwrap();
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"second image".to_vec(),
+        )
+        .unwrap();
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.content_type, "image/jpeg");
+        let present: Vec<&str> = HOME_BACKGROUND_IMAGE_FILES
+            .iter()
+            .map(|(file_name, _)| *file_name)
+            .filter(|file_name| {
+                home_appearance_path(&data_dir, &context, file_name)
+                    .unwrap()
+                    .is_file()
+            })
+            .collect();
+        assert_eq!(present, ["background-image.jpg"]);
+        let bytes = home_background_image_bytes(&data_dir, &context, &entry).unwrap();
+        assert_eq!(bytes, b"second image");
+    }
+
+    #[test]
+    fn an_unstored_principal_is_refused_instead_of_served_from_the_id_rule_root() {
+        let (_temp, data_dir) = state_dir();
+        let principal_id = "person:local:no-stored-record";
+        let context = HomeLaunchTokenContext::for_test(
+            principal_id,
+            "session",
+            None,
+            "grant",
+            crate::auth::PrincipalKind::Human,
+        );
+        assert!(
+            crate::auth::principal_stored_localhost_root(Some(&data_dir), principal_id)
+                .unwrap_err()
+                .to_string()
+                .contains("has no stored record"),
+            "the fixture principal has no stored record"
+        );
+        // The id rule names a root this Home accepts, so a served result would
+        // prove the surface fell back to it.
+        let id_rule_root = crate::auth::principal_localhost_root(principal_id);
+        assert!(elastos_common::localhost::rooted_localhost_fs_path(
+            &data_dir,
+            &format!("{id_rule_root}/.AppData/ElastOS/Home/services-state.json"),
+        )
+        .is_some());
+        assert!(home_services_selection_state_path(&data_dir, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid Services state root"));
+        assert!(home_services_requests_state_path(&data_dir, &context).is_err());
+        assert!(home_active_shell_state_path(&data_dir, &context).is_err());
+    }
+
+    #[test]
+    fn a_stored_principal_keeps_todays_services_state_results() {
+        let (_temp, data_dir) = state_dir();
+        let principal_id = "person:local:stored-home-state";
+        let record = crate::auth::store_test_human_principal(&data_dir, principal_id);
+        let _protection =
+            crate::auth::store_test_principal_root_protection(&data_dir, principal_id);
+        let context = stored_passkey_principal_context(&data_dir, &record).unwrap();
+        let expected_path = elastos_common::localhost::rooted_localhost_fs_path(
+            &data_dir,
+            &format!(
+                "{}/.AppData/ElastOS/Home/services-state.json",
+                record.localhost_root
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            home_services_selection_state_path(&data_dir, &context).unwrap(),
+            expected_path,
+            "today's path is under the principal's stored root"
+        );
+        let default_state = home_services_selection_state(&data_dir, &context).unwrap();
+        assert_eq!(default_state.principal_id, principal_id);
+        assert_eq!(default_state.localhost_root, record.localhost_root);
+        let mut state = default_state;
+        state.updated_at = 12_345;
+        state
+            .local_offer_ids
+            .insert(crate::api::gateway::MODEL_LOCAL_OFFER.to_string());
+        home_save_services_selection_state(&data_dir, &context, &state).unwrap();
+        let reloaded = home_services_selection_state(&data_dir, &context).unwrap();
+        assert_eq!(reloaded.updated_at, 12_345);
+        assert!(reloaded
+            .local_offer_ids
+            .contains(crate::api::gateway::MODEL_LOCAL_OFFER));
+        assert_eq!(reloaded.localhost_root, record.localhost_root);
+        assert!(home_active_shell_state(&data_dir, &context)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            home_services_requests_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            record.localhost_root
+        );
+    }
+
+    /// R2 M1: an Agent's stored `UsersAI/` root reaches the default Services
+    /// states. A Human control cannot see this, because a Human's stored root
+    /// equals the principal-id rule's root. The expected root is the hand
+    /// literal of the shared valid agent id.
+    #[test]
+    fn a_stored_agent_root_reaches_the_services_default_states() {
+        let (_temp, data_dir) = state_dir();
+        let planted = crate::auth::valid_agent::plant(&data_dir);
+        let principal_id = planted.principal_id;
+        let expected_root = crate::auth::valid_agent::ROOT;
+        assert_eq!(
+            crate::auth::principal_stored_localhost_root(Some(&data_dir), &principal_id).unwrap(),
+            expected_root
+        );
+        let record = crate::auth::load_auth_state(&data_dir)
+            .unwrap()
+            .principals
+            .into_iter()
+            .find(|principal| principal.principal_id == principal_id)
+            .unwrap();
+        let context = stored_passkey_principal_context(&data_dir, &record).unwrap();
+        assert_eq!(context.root().localhost_root(), expected_root);
+        assert_eq!(
+            home_services_selection_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            expected_root
+        );
+        assert_eq!(
+            home_services_requests_state(&data_dir, &context)
+                .unwrap()
+                .localhost_root,
+            expected_root
+        );
+    }
+
+    /// An upload and a reset of the same name cannot interleave. The reset
+    /// waits, at its `Checked` point, until the upload reports `Replaced`;
+    /// with the image lock the upload cannot reach its write while the reset
+    /// holds the lock, so the reset either finishes first (the image stays) or
+    /// starts after the write (it removes that image). A reported success from
+    /// both, with the upload's new image gone after it ran second, fails.
+    #[test]
+    fn background_image_upload_and_reset_do_not_race() {
+        struct RaceState {
+            trace: Mutex<Vec<&'static str>>,
+            replaced: Mutex<bool>,
+            replaced_cv: std::sync::Condvar,
+        }
+        struct ResetCheckpoint {
+            state: Arc<RaceState>,
+        }
+        struct UploadCheckpoint {
+            state: Arc<RaceState>,
+        }
+        impl ImageOperationCheckpoint for ResetCheckpoint {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                match point {
+                    ImageOperationPoint::Checked => {
+                        self.state.trace.lock().unwrap().push("reset:checked");
+                        let deadline = Instant::now() + Duration::from_secs(1);
+                        let mut replaced = self.state.replaced.lock().unwrap();
+                        while !*replaced {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            if left.is_zero() {
+                                break;
+                            }
+                            replaced = self
+                                .state
+                                .replaced_cv
+                                .wait_timeout(replaced, left)
+                                .unwrap()
+                                .0;
+                        }
+                    }
+                    ImageOperationPoint::Replaced => {}
+                    ImageOperationPoint::Removed => {
+                        self.state.trace.lock().unwrap().push("reset:removed");
+                    }
+                }
+            }
+        }
+        impl ImageOperationCheckpoint for UploadCheckpoint {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                match point {
+                    ImageOperationPoint::Checked => {
+                        self.state.trace.lock().unwrap().push("upload:checked");
+                    }
+                    ImageOperationPoint::Replaced => {
+                        self.state.trace.lock().unwrap().push("upload:replaced");
+                        *self.state.replaced.lock().unwrap() = true;
+                        self.state.replaced_cv.notify_all();
+                    }
+                    ImageOperationPoint::Removed => {
+                        self.state.trace.lock().unwrap().push("upload:removed");
+                    }
+                }
+            }
+        }
+
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"first image".to_vec(),
+        )
+        .unwrap();
+        let state = Arc::new(RaceState {
+            trace: Mutex::new(Vec::new()),
+            replaced: Mutex::new(false),
+            replaced_cv: std::sync::Condvar::new(),
+        });
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let upload = {
+            let data_dir = data_dir.clone();
+            let context = context.clone();
+            let state = Arc::clone(&state);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                home_save_background_image_with(
+                    &data_dir,
+                    &context,
+                    "background-image.png",
+                    b"second image".to_vec(),
+                    &mut UploadCheckpoint { state },
+                )
+            })
+        };
+        let reset = {
+            let data_dir = data_dir.clone();
+            let context = context.clone();
+            let state = Arc::clone(&state);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                home_reset_background_image_with(
+                    &data_dir,
+                    &context,
+                    &mut ResetCheckpoint { state },
+                )
+            })
+        };
+        start.wait();
+        let uploaded = upload.join().unwrap();
+        let reset_done = reset.join().unwrap();
+        assert!(uploaded.is_ok(), "{uploaded:?}");
+        assert!(reset_done.is_ok(), "{reset_done:?}");
+        let trace = state.trace.lock().unwrap().clone();
+        let at = |event: &str| {
+            trace
+                .iter()
+                .position(|seen| *seen == event)
+                .unwrap_or_else(|| panic!("missing {event} in {trace:?}"))
+        };
+        assert!(at("upload:checked") < at("upload:replaced"));
+        assert!(at("upload:replaced") < at("upload:removed"));
+        assert!(at("reset:checked") < at("reset:removed"));
+        let upload_replaced_between_reset = at("reset:checked") < at("upload:replaced")
+            && at("upload:replaced") < at("reset:removed");
+        let reset_checked_between_upload = at("upload:checked") < at("reset:checked")
+            && at("reset:checked") < at("upload:replaced");
+        assert!(
+            !upload_replaced_between_reset && !reset_checked_between_upload,
+            "one operation ran between the steps of the other: {trace:?}"
+        );
+        let reset_ran_second = at("upload:replaced") < at("reset:checked");
+        let current = home_background_image_entry(&data_dir, &context).unwrap();
+        if reset_ran_second {
+            assert!(
+                current.is_none(),
+                "the reset that ran second must leave no image: {trace:?}"
+            );
+            assert!(
+                !home_appearance_path(&data_dir, &context, "background-image.png")
+                    .unwrap()
+                    .exists()
+            );
+        } else {
+            let entry = current.unwrap_or_else(|| {
+                panic!("the upload ran second and its image is gone: {trace:?}")
+            });
+            assert_eq!(
+                home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
+                b"second image",
+                "{trace:?}"
+            );
+        }
+    }
+
+    /// Writes one image file directly, without a save's removal of the other
+    /// names, so a row can hold two images at once.
+    fn seed_background_image(
+        data_dir: &std::path::Path,
+        context: &HomeLaunchTokenContext,
+        file_name: &'static str,
+        bytes: &[u8],
+    ) -> PathBuf {
+        let path = home_appearance_path(data_dir, context, file_name).unwrap();
+        crate::auth::write_principal_root_object_resolved(
+            data_dir,
+            context.root(),
+            &home_appearance_object_uri(context, file_name),
+            &path,
+            bytes,
+        )
+        .unwrap();
+        path
+    }
+
+    /// An image this process cannot read refuses the upload and the reset
+    /// before anything is written or removed: every file keeps its bytes.
+    #[test]
+    fn an_unreadable_background_image_survives_upload_and_reset() {
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        let png = seed_background_image(&data_dir, &context, "background-image.png", b"kept image");
+        let jpg =
+            seed_background_image(&data_dir, &context, "background-image.jpg", b"kept sibling");
+        std::fs::set_permissions(&png, fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&png).is_ok() {
+            std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600)).unwrap();
+            eprintln!(
+                "skipping an_unreadable_background_image_survives_upload_and_reset: a 000 file is readable here (running as root)"
+            );
+            return;
+        }
+        let upload = home_save_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"new image".to_vec(),
+        );
+        let reset = home_reset_background_image(&data_dir, &context);
+        // A refusing route keeps this file, so put its readable mode back. A
+        // route that removed it fails at the refusal checks below.
+        let _ = std::fs::set_permissions(&png, fs::Permissions::from_mode(0o600));
+        let upload_error = upload.expect_err("an unreadable image must refuse the upload");
+        let reset_error = reset.expect_err("an unreadable image must refuse the reset");
+        let principal_id = home_browser_principal_id(&context);
+        let data_folder = data_dir.to_string_lossy().into_owned();
+        for (route, error) in [("upload", &upload_error), ("reset", &reset_error)] {
+            let text = error.to_string();
+            assert!(
+                text.contains("background-image.png"),
+                "{route} refusal names the image file: {text}"
+            );
+            assert_eq!(
+                text, "background image background-image.png could not be read",
+                "{route} refusal is the fixed message"
+            );
+            assert!(
+                !text.contains(&data_folder),
+                "{route} refusal leaves out the data folder: {text}"
+            );
+            assert!(
+                !text.contains(&principal_id),
+                "{route} refusal leaves out the person's id: {text}"
+            );
+        }
+        let read = |path: &std::path::Path, file_name: &'static str| {
+            crate::auth::read_principal_root_object_resolved(
+                &data_dir,
+                context.root(),
+                &home_appearance_object_uri(&context, file_name),
+                path,
+            )
+            .unwrap()
+        };
+        assert_eq!(read(&png, "background-image.png"), b"kept image");
+        assert_eq!(read(&jpg, "background-image.jpg"), b"kept sibling");
+        let mut names: Vec<String> = std::fs::read_dir(png.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["background-image.jpg", "background-image.png"],
+            "neither route removed or added a file"
+        );
+    }
+
+    /// A save whose removal of an older image fails reports the failure, names
+    /// the file that stayed, and keeps the new image bytes.
+    #[test]
+    fn background_image_save_reports_a_failed_cleanup_and_keeps_the_new_image() {
+        struct ReadOnlyAfterReplace {
+            folder: PathBuf,
+        }
+        impl ImageOperationCheckpoint for ReadOnlyAfterReplace {
+            fn reached(&mut self, point: ImageOperationPoint) {
+                if point == ImageOperationPoint::Replaced {
+                    std::fs::set_permissions(&self.folder, fs::Permissions::from_mode(0o555))
+                        .unwrap();
+                }
+            }
+        }
+        let (_temp, data_dir) = state_dir();
+        let (context, _parent_did) = verified_parent_device_context(&data_dir, SYSTEM_CAPSULE_ID);
+        let png = seed_background_image(&data_dir, &context, "background-image.png", b"old image");
+        let jpg = seed_background_image(
+            &data_dir,
+            &context,
+            "background-image.jpg",
+            b"older sibling",
+        );
+        let folder = png.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = folder.join("root-probe");
+        let root_process = std::fs::File::create(&probe).is_ok();
+        let _ = std::fs::remove_file(&probe);
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        if root_process {
+            eprintln!(
+                "skipping background_image_save_reports_a_failed_cleanup_and_keeps_the_new_image: a read-only folder still accepts a new file (running as root)"
+            );
+            return;
+        }
+        let error = home_save_background_image_with(
+            &data_dir,
+            &context,
+            "background-image.png",
+            b"new image".to_vec(),
+            &mut ReadOnlyAfterReplace {
+                folder: folder.clone(),
+            },
+        )
+        .unwrap_err();
+        std::fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        let text = error.to_string();
+        assert!(text.contains("is in place"), "{text}");
+        assert!(
+            text.contains("background-image.jpg"),
+            "the answer names the file that stayed: {text}"
+        );
+        let entry = home_background_image_entry(&data_dir, &context)
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.content_type, "image/png", "the new image is served");
+        assert_eq!(
+            home_background_image_bytes(&data_dir, &context, &entry).unwrap(),
+            b"new image"
+        );
+        assert!(jpg.is_file(), "the older sibling stays");
+    }
+}
+
+/// R8c evidence rows for Profile update. `people_profile_update` (line 2521)
+/// first calls `require_profile_authority_passkey_binding` and then the
+/// private `update_profile_for_context` (line 8608); these rows call both.
+/// The child row expects the gate and the update to pass and the Profile to
+/// land under the parent root. For the parent device both refuse with
+/// `proof-bound passkey session required` today, before any write.
+#[cfg(test)]
+mod r8c_child_rows {
+    use super::super::r3_stored_root_tests::verified_parent_device_context;
+    use super::*;
+    use elastos_runtime::auth::{PasskeyWebAuthnBinding, ProofBinding};
+
+    fn update(
+        dir: &std::path::Path,
+        context: &HomeLaunchTokenContext,
+        root: &str,
+    ) -> Result<(), String> {
+        let gate =
+            crate::collaboration_profile_authority::require_profile_authority_passkey_binding(
+                dir,
+                &home_browser_principal_id(context),
+                context.proof_binding_id(),
+            );
+        let updated = update_profile_for_context(dir, context, "R8c Person");
+        let identity = match (gate, updated) {
+            (Ok(()), Ok(identity)) => identity,
+            (gate, updated) => {
+                let gate = gate.err().map(|err| format!("{err:#}"));
+                let updated = updated.err().map(|err| format!("{err:#}"));
+                return Err(format!(
+                    "route gate at line 2531: {gate:?}; update_profile_for_context: {updated:?}"
+                ));
+            }
+        };
+        let name = identity.profile.map(|profile| profile.display_name);
+        if name.as_deref() != Some("R8c Person") {
+            return Err(format!("Profile name after update: {name:?}"));
+        }
+        let path = home_profile_authority_path(dir, context).unwrap();
+        let uri = format!("{root}/.AppData/ElastOS/Profile/profile-authority.json");
+        if !path.is_file() || Some(path) != rooted_localhost_fs_path(dir, &uri) {
+            return Err(format!("Profile bytes are not at {uri}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
+    fn r8c_child_profile_update_passes_the_passkey_gate_and_writes_under_the_parent_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let (context, parent_root, _, _) =
+            verified_parent_device_context(dir.path(), PEOPLE_CAPSULE_ID);
+        assert_eq!(update(dir.path(), &context, &parent_root), Ok(()));
+        let roots = std::fs::read_dir(dir.path().join("Users")).unwrap().count();
+        assert_eq!(roots, 1, "only the parent root holds files");
+    }
+
+    #[test]
+    fn r8c_control_profile_update_writes_under_the_stored_persons_root() {
+        let dir = tempfile::tempdir().unwrap();
+        verified_parent_device_context(dir.path(), PEOPLE_CAPSULE_ID);
+        let now = now_ts();
+        let binding = ProofBinding::passkey_webauthn(PasskeyWebAuthnBinding {
+            credential_id: "r8c-control".to_string(),
+            public_key: "r8c-control-public-key".to_string(),
+            sign_count: 1,
+            user_verified: true,
+            origin: "https://elastos.elacitylabs.com".to_string(),
+            rp_id: "elastos.elacitylabs.com".to_string(),
+            created_at: now,
+            last_used_at: now,
+            revoked_at: None,
+        });
+        let record = crate::auth::upsert_principal_for_binding_as_role_named(
+            dir.path(),
+            binding,
+            "person:local:r8c-control".to_string(),
+            crate::auth::RuntimePrincipalRole::Admin,
+            Some("Stored Person"),
+            now,
+        )
+        .unwrap();
+        crate::auth::store_test_principal_root_protection(dir.path(), &record.principal_id);
+        let context = stored_passkey_principal_context(dir.path(), &record).unwrap();
+        assert_eq!(update(dir.path(), &context, &record.localhost_root), Ok(()));
+        let roots = std::fs::read_dir(dir.path().join("Users")).unwrap().count();
+        assert_eq!(roots, 1, "only the stored person's root holds files");
+    }
+}
+
+/// R8d evidence rows for Home saves and Profile update, for a parent passkey
+/// person on a child Runtime. Each save row calls a private function that the
+/// route uses, from the context of the person's verified launch token, then
+/// records the result, the whole child data directory and whether the file's
+/// bytes are the input. The route's own steps before that call do not run.
+///
+/// The Profile row: `people_profile_update` (line 2521) first calls
+/// `require_profile_authority_passkey_binding` with its own data directory
+/// (line 2532). For this person it returns there with 403 (line 2538) and
+/// never reaches the private `update_profile_for_context` (line 8608). The
+/// row calls the gate, the route, and then the private function directly.
+/// Its control is the R8c control row above.
+#[cfg(test)]
+mod r8d_passkey_rows {
+    use super::super::gateway_tests::r8d_passkey_rows::{
+        kept_elsewhere_refusal, passkey_person, refusal, KEPT_ELSEWHERE, PERSON, ROOT,
+    };
+    use super::*;
+    use crate::collaboration_profile_authority as authority;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
+        // F1, whether a second Runtime accepts Profile setup, is the change expected to flip this row.
+        let person = passkey_person(PEOPLE_CAPSULE_ID);
+        let child = person.child.path();
+        let proof = person.ctx.proof_binding_id();
+        // The token carries the passkey proof binding. The gate looks that
+        // binding up in the auth state of the data directory it is handed,
+        // which is the child's own, and the child stores no such binding.
+        let gate = authority::require_profile_authority_passkey_binding(
+            child,
+            &home_browser_principal_id(&person.ctx),
+            proof,
+        );
+        assert_eq!(refusal(gate).as_deref(), Some("proof binding not found"));
+        // The route itself, with a token the child's own key signed (see
+        // `route_headers`). It stops at the gate.
+        let request: PeopleProfileUpdateRequest =
+            serde_json::from_value(serde_json::json!({"display_name": "R8d Person"})).unwrap();
+        let answer = people_profile_update(
+            State(person.child_state()),
+            person.route_headers(PEOPLE_CAPSULE_ID),
+            Json(request),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), "proof binding not found");
+        // Not reached by the route for this person. Called directly, the
+        // private update refuses at its own call of the same gate
+        // (collaboration_profile_authority.rs:316).
+        let updated = update_profile_for_context(child, &person.ctx, "R8d Person");
+        assert_eq!(refusal(updated).as_deref(), Some("proof binding not found"));
+        // The same gate, handed the parent's data directory, accepts them.
+        let parent = person.parent.path();
+        let on_parent = authority::require_profile_authority_passkey_binding(parent, PERSON, proof);
+        assert_eq!(refusal(on_parent), None);
+        // The child holds what it held before and the parent's Profile is as
+        // it was.
+        person.assert_child_holds_only(&[]);
+        let kept = authority::load_profile_authority(parent, PERSON, ROOT).unwrap();
+        let name = kept.map(|profile| profile.document().display_name.clone());
+        assert_eq!(name.as_deref(), Some("Parent Person"));
+    }
+
+    /// Entry: `home_save_background_image` with the name
+    /// `background-image.png`. The child holds no protection for this
+    /// person's root, so the save is refused and creates nothing.
+    #[test]
+    fn r8d_child_background_image_save_for_the_passkey_person() {
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
+        let child = person.child.path();
+        let error = home_save_background_image(
+            child,
+            &person.ctx,
+            "background-image.png",
+            b"r8d child background image".to_vec(),
+        )
+        .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: `home_save_background_overlay` with opacity 0.4, which is not
+    /// the default. The child holds no protection for this person's root, so
+    /// the save is refused and creates nothing.
+    #[test]
+    fn r8d_child_background_overlay_save_for_the_passkey_person() {
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
+        let child = person.child.path();
+        let error = home_save_background_overlay(child, &person.ctx, true, 0.4)
+            .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        person.assert_child_holds_only(&[]);
+    }
+
+    /// A later image upload is refused the same way as the first, and the
+    /// child creates nothing.
+    #[test]
+    fn r8d_child_background_image_replace_for_the_passkey_person() {
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
+        let child = person.child.path();
+        for file_name in ["background-image.png", "background-image.jpg"] {
+            let error =
+                home_save_background_image(child, &person.ctx, file_name, b"r8d image".to_vec())
+                    .expect_err("the child holds no protection for this person");
+            assert_eq!(
+                kept_elsewhere_refusal(&error).as_deref(),
+                Some(KEPT_ELSEWHERE)
+            );
+        }
+        person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: `home_save_background_image` with a second name, on a child
+    /// that already holds an image saved before the held-root rule. The save
+    /// is refused before any image is removed, so the seeded image stays in
+    /// place byte for byte.
+    #[test]
+    fn r8d_child_refused_background_image_save_keeps_the_seeded_image() {
+        let person = passkey_person(SYSTEM_CAPSULE_ID);
+        let child = person.child.path();
+        let seeded = home_appearance_path(child, &person.ctx, "background-image.png").unwrap();
+        std::fs::create_dir_all(seeded.parent().unwrap()).unwrap();
+        std::fs::write(&seeded, b"seeded child image").unwrap();
+        let error = home_save_background_image(
+            child,
+            &person.ctx,
+            "background-image.jpg",
+            b"r8d image".to_vec(),
+        )
+        .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        assert_eq!(std::fs::read(&seeded).unwrap(), b"seeded child image");
+        let relative = seeded
+            .strip_prefix(child)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        person.assert_child_holds_only(&[relative.as_str()]);
+    }
+
+    /// Entry: `home_save_appearance_preferences` with one field set. The
+    /// child holds no protection for this person's root, so the save is
+    /// refused and creates nothing.
+    #[test]
+    fn r8d_child_appearance_preferences_save_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        let update: HomeAppearancePreferencesUpdate =
+            serde_json::from_value(serde_json::json!({"sounds": true})).unwrap();
+        let error = home_save_appearance_preferences(child, &person.ctx, update)
+            .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: `home_save_browser_state` with an empty update. The child
+    /// holds no protection for this person's root, so the save is refused
+    /// and creates nothing.
+    #[test]
+    fn r8d_child_browser_state_save_for_the_passkey_person() {
+        let person = passkey_person(HOME_CAPSULE_ID);
+        let child = person.child.path();
+        let update: HomeBrowserStateUpdate = serde_json::from_value(serde_json::json!({})).unwrap();
+        let error = home_save_browser_state(child, &person.ctx, update)
+            .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: the active-shell update route with the Home GUI shell. The
+    /// child lists that shell from an installed capsule fixture, so the save
+    /// reaches the held-root write. The child holds no protection for this
+    /// person's root, so the route answers 403 with the bare refusal text and
+    /// creates no state file or Home folder.
+    #[tokio::test(flavor = "current_thread")]
+    async fn r8d_child_active_shell_save_is_refused_for_the_passkey_person() {
+        let person = passkey_person(HOME_GUI_SHELL_ID);
+        let child = person.child.path();
+        let capsule_dir = child.join("capsules/home-gui");
+        std::fs::create_dir_all(capsule_dir.join("browser")).unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            include_str!("../../../../../capsules/home-gui/capsule.json"),
+        )
+        .unwrap();
+        std::fs::write(capsule_dir.join("browser/index.html"), "Home fixture").unwrap();
+        std::fs::write(
+            child.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({"external": {
+                "home-gui": {"install_path": "capsules/home-gui", "platforms": {}}
+            }, "capsules": {}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+        let request: HomeActiveShellUpdate =
+            serde_json::from_value(serde_json::json!({"active": HOME_GUI_SHELL_ID})).unwrap();
+        let answer = home_active_shell_update(
+            State(person.child_state()),
+            person.route_headers(HOME_GUI_SHELL_ID),
+            Json(request),
+        )
+        .await;
+        assert_eq!(answer.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), KEPT_ELSEWHERE);
+        person.assert_child_holds_only(&[
+            "capsules/home-gui/browser/index.html",
+            "capsules/home-gui/capsule.json",
+            "components.json",
+        ]);
+    }
+
+    /// Entry: `home_save_services_selection_state` with the person's default
+    /// state. This row calls the storage function directly; the route
+    /// `services_offer_update` calls it after it reads the Home state, checks
+    /// the offer and builds the state, and those steps do not run here. The
+    /// child holds no protection for this person's root, so the save is
+    /// refused and creates nothing.
+    /// `home_state_write_error` puts the file's path on top of the refusal,
+    /// so the row reads through that context.
+    #[test]
+    fn r8d_child_services_selection_save_for_the_passkey_person() {
+        let person = passkey_person(SERVICES_CAPSULE_ID);
+        let child = person.child.path();
+        let state = home_services_default_selection_state(&person.ctx);
+        let error = home_save_services_selection_state(child, &person.ctx, &state)
+            .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        person.assert_child_holds_only(&[]);
+    }
+
+    /// Entry: `home_save_services_requests_state` with the person's default
+    /// state. This row calls the storage function directly. By reading, no
+    /// route reaches this save for this person on a child today:
+    /// `home_services_sync_access_requests` returns with no known peer before
+    /// its save, and `home_services_record_access_decision` returns "service
+    /// request not found" before its save. The child holds no protection for
+    /// this person's root, so the save is refused and creates nothing.
+    #[test]
+    fn r8d_child_services_requests_save_for_the_passkey_person() {
+        let person = passkey_person(SERVICES_CAPSULE_ID);
+        let child = person.child.path();
+        let state = home_services_default_requests_state(&person.ctx);
+        let error = home_save_services_requests_state(child, &person.ctx, &state)
+            .expect_err("the child holds no protection for this person");
+        assert_eq!(
+            kept_elsewhere_refusal(&error).as_deref(),
+            Some(KEPT_ELSEWHERE)
+        );
+        person.assert_child_holds_only(&[]);
     }
 }

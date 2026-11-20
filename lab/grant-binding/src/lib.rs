@@ -263,7 +263,7 @@ impl Verifier {
                     window: 0,
                     window_start: 0,
                     window_effects: 0,
-                    session_bound: session_bound,
+                    session_bound,
                 },
                 ended: false,
             },
@@ -452,7 +452,7 @@ impl Verifier {
     pub(crate) fn resolve(&self, call: Call, handle: Handle) -> Result<GrantRecord, Refuse> {
         let bound = self.resolve_live(call, handle)?;
         #[rustfmt::skip]
-        let _ = {
+        {
             let mut expiry = bound.expiry;
             let mut parent = bound.parent;
             while let Some(handle) = parent {

@@ -31,9 +31,9 @@ fn guest_budget_ok(_ask: &BudgetAsk) -> bool {
 
 impl Verifier {
     /// Caps one agent's budget ask at `cap`, then records the granted amount
-    /// as that agent's own ceiling in one ledger lock. A binding refusal
-    /// stores nothing, and an ask above the cap is refused with the cap and
-    /// the asked amount.
+    /// as the ceiling of the grant the ask was admitted for, in one ledger
+    /// lock. A binding refusal stores nothing, and an ask above the cap is
+    /// refused with the cap and the asked amount.
     #[rustfmt::skip]
     pub fn admit_ask(
         &self,
@@ -49,14 +49,8 @@ impl Verifier {
                 asked: ask.amount,
             });
         }
-        let identity = self
-            .grants
-            .get(&request.handle)
-            .expect("resolved grant")
-            .record
-            .identity
-            .clone();
-        self.store_admitted_ceiling(Some(&identity), ask.amount);
+        let key = self.ceiling_key(request.handle);
+        self.store_admitted_ceiling(Some(&key), ask.amount);
         Ok(ask.amount)
     }
 }
@@ -115,7 +109,7 @@ fn model_over_budget_ask_is_refused() {
         .reserve(&call, &request, 1)
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
 }
 
 #[test]
@@ -172,7 +166,7 @@ fn model_admit_ask_on_a_sibling_instance_is_refused() {
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
 }
 
 #[test]
@@ -1122,7 +1116,7 @@ fn model_forged_append_does_not_replace_the_asked_amount() {
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
 }
 
 #[test]
@@ -1147,7 +1141,7 @@ fn model_forged_overwrite_does_not_replace_the_asked_amount() {
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
 }
 
 #[test]
@@ -1172,7 +1166,7 @@ fn model_forged_child_journal_does_not_replace_the_asked_amount() {
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
 }
 
 #[test]
@@ -1197,7 +1191,7 @@ fn model_forged_identity_does_not_replace_the_asked_amount() {
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
 }
 
 #[test]
@@ -1222,7 +1216,7 @@ fn model_forged_session_does_not_replace_the_asked_amount() {
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
 }
 
 #[test]
@@ -1249,7 +1243,7 @@ fn model_forged_instance_does_not_replace_the_asked_amount() {
         .reserve(&call, &super::guest(handle), 1)
         .expect_err("ceiling stays unset");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
 }
 
 #[test]
@@ -1272,7 +1266,7 @@ fn model_ask_stores_the_amount_under_the_callers_own_identity() {
         .reserve(&other_call, &super::guest(other_handle), 1)
         .expect_err("another agent has no ceiling");
     assert_eq!(untouched, crate::ledger::ReserveRefuse::NoCeiling);
-    assert_eq!(untouched.to_string(), "identity has no ceiling");
+    assert_eq!(untouched.to_string(), "grant has no ceiling");
     verifier
         .reserve(&call, &super::guest(handle), 4)
         .expect("hold the granted amount");
@@ -1343,4 +1337,72 @@ fn model_concurrent_asks_keep_each_agents_own_ceiling() {
             .release(&b_call, &super::guest(b_handle), b_held)
             .expect("release B's hold");
     }
+}
+
+#[test]
+fn model_asks_on_two_grants_of_one_identity_keep_separate_ceilings() {
+    let mut verifier = Verifier::new();
+    let first = verifier.register_instance("agent-1", "session-a");
+    let second = verifier.register_instance("agent-1", "session-b");
+    let first_handle = verifier
+        .bind_grant(first, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let second_handle = verifier
+        .bind_grant(second, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let first_call = verifier.open_call(first);
+    let second_call = verifier.open_call(second);
+    verifier
+        .admit_ask(&first_call, &super::guest(first_handle), BudgetAsk { amount: 4 }, 4)
+        .expect("first ask");
+    verifier
+        .admit_ask(&second_call, &super::guest(second_handle), BudgetAsk { amount: 9 }, 9)
+        .expect("second ask");
+    verifier
+        .reserve(&second_call, &super::guest(second_handle), 9)
+        .expect("the second grant holds its own nine");
+    verifier
+        .reserve(&first_call, &super::guest(first_handle), 4)
+        .expect("the first grant holds its own four");
+    let refusal = verifier
+        .reserve(&first_call, &super::guest(first_handle), 1)
+        .expect_err("the second grant's ceiling does not reach the first");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 4,
+            asked: 1,
+        }
+    );
+}
+
+#[test]
+fn model_ask_on_a_child_journal_records_the_issuing_grant() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", super::rights())
+        .expect("bind");
+    let call = verifier.open_call(instance);
+    let child = verifier
+        .create_child_journal(&call, &super::guest(handle), "UsersAI/agent-1/notes/child")
+        .expect("child journal");
+    verifier
+        .admit_ask(&call, &super::guest(child), BudgetAsk { amount: 4 }, 4)
+        .expect("ask on the child journal");
+    verifier
+        .reserve(&call, &super::guest(handle), 4)
+        .expect("the issuing grant holds the granted ask");
+    let refusal = verifier
+        .reserve(&call, &super::guest(handle), 1)
+        .expect_err("the issuing grant is at the ceiling");
+    assert_eq!(
+        refusal,
+        crate::ledger::ReserveRefuse::OverCeiling {
+            ceiling: 4,
+            held: 4,
+            asked: 1,
+        }
+    );
 }

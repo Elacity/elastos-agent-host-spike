@@ -56,7 +56,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
       - name: build Runtime, IPFS provider and localhost provider from this source
         timeout-minutes: 40
         run: |
@@ -259,6 +259,14 @@ jobs:
                   data = home / '.local/share/elastos'
                   (data / 'bin').mkdir(mode=0o700, parents=True)
                   (home / '.local/bin').mkdir(mode=0o700, parents=True)
+                  if role in ('holder', 'gateway'):
+                      # A seed, as production's content holders are (57627f88): an ordinary
+                      # Home's Carrier serves a publication only to the publisher's contacts,
+                      # and its raw CID routes need an authorized local session.
+                      seed = data
+                      for part in ('ElastOS', 'SystemServices', 'Publisher', 'artifacts'):
+                          seed = seed / part
+                          seed.mkdir(mode=0o700, exist_ok=True)
                   runtime = home / '.local/bin/elastos'
                   shutil.copyfile(accepted / 'elastos', runtime)
                   runtime.chmod(0o700)

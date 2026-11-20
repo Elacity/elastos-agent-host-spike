@@ -15,7 +15,7 @@ import {
 import {
   shellState,
   desktopObjects,
-  postToHome,
+  openWebLink,
   openModelsFromAgent,
   openAiProviderSettingsFromAgent,
   copyFromButton,
@@ -75,6 +75,8 @@ import {
   regenerateLastAgentTurn,
   updateJumpToLatestVisibility,
   ensureJumpToLatest,
+  followTranscriptToEnd,
+  jumpTranscriptToEnd,
   setStreamStatus,
   openCodeArtifact,
   refreshEmptyModelHint,
@@ -380,7 +382,7 @@ function trackComposerGeometry(durationMs) {
   cancelAnimationFrame(composerGeometryTrackRaf);
   const until = performance.now() + durationMs;
   const tick = () => {
-    syncComposerGeometry({ tracking: true });
+    syncComposerGeometry();
     composerGeometryTrackRaf = performance.now() < until ? requestAnimationFrame(tick) : 0;
   };
   composerGeometryTrackRaf = requestAnimationFrame(tick);
@@ -398,15 +400,16 @@ function toggleSidebarCollapsed() {
   setSidebarCollapsed(!collapsed);
 }
 
-let lastComposerGeometryKey = "";
+let lastComposerColumnKey = "";
+let lastComposerClearance = -1;
+/* During a turn the column stays put while the stream grows. */
+let composerColumnFrozen = false;
 let composerGeometryRoRaf = 0;
 let composerGeometrySyncing = false;
-let composerGeometryBurstAt = 0;
-let composerGeometryBurst = 0;
 
-/* `tracking`: a bounded per-frame follow of a CSS ease (the rail collapse);
-   it is not a ResizeObserver feedback loop, so the burst guard stands aside. */
-function syncComposerGeometry({ tracking = false } = {}) {
+/* `clearanceOnly`: during a turn only the stream's bottom clearance follows
+   the composer (a follow-up being typed grows it). */
+function syncComposerGeometry({ clearanceOnly = false } = {}) {
   const taskbar = document.querySelector(".taskbar");
   const main = document.querySelector(".agent-harness-main");
   if (!taskbar || !main || !document.body.classList.contains("agent-harness-active")) {
@@ -428,36 +431,36 @@ function syncComposerGeometry({ tracking = false } = {}) {
   if (composerGeometrySyncing) {
     return;
   }
-  if (!tracking) {
-    const now = performance.now();
-    if (now - composerGeometryBurstAt > 250) {
-      composerGeometryBurstAt = now;
-      composerGeometryBurst = 0;
-    }
-    composerGeometryBurst += 1;
-    if (composerGeometryBurst > 8) {
-      stopDockGeometryObserver();
-      return;
-    }
-  }
   const dock = taskbar.getBoundingClientRect();
-  const band = main.getBoundingClientRect();
-  /* Round to device pixels so left/right edges don’t drift by a subpixel. */
-  const dpr = window.devicePixelRatio || 1;
-  const snap = (n) => Math.round(n * dpr) / dpr;
-  const width = snap(dock.width);
-  const left = snap(dock.left - band.left);
   const clearance = Math.max(96, Math.round(window.innerHeight - dock.top));
-  const key = `${width}|${left}|${clearance}`;
-  if (key === lastComposerGeometryKey) {
+  let width = 0;
+  let left = 0;
+  let columnKey = lastComposerColumnKey;
+  if (!clearanceOnly) {
+    const band = main.getBoundingClientRect();
+    /* Round to device pixels so left/right edges don’t drift by a subpixel. */
+    const dpr = window.devicePixelRatio || 1;
+    const snap = (n) => Math.round(n * dpr) / dpr;
+    width = snap(dock.width);
+    left = snap(dock.left - band.left);
+    columnKey = `${width}|${left}`;
+  }
+  // Unchanged notifications are harmless. Keep observing future composer growth.
+  if (columnKey === lastComposerColumnKey && clearance === lastComposerClearance) {
     return;
   }
-  lastComposerGeometryKey = key;
   composerGeometrySyncing = true;
   const root = document.documentElement;
-  root.style.setProperty("--harness-composer-clearance", `${clearance}px`);
-  root.style.setProperty("--agent-column-width", `${width}px`);
-  root.style.setProperty("--agent-column-left", `${left}px`);
+  if (clearance !== lastComposerClearance) {
+    root.style.setProperty("--harness-composer-clearance", `${clearance}px`);
+    lastComposerClearance = clearance;
+  }
+  if (columnKey !== lastComposerColumnKey) {
+    root.style.setProperty("--agent-column-width", `${width}px`);
+    root.style.setProperty("--agent-column-left", `${left}px`);
+    lastComposerColumnKey = columnKey;
+  }
+  scrollStreamToEnd();
   requestAnimationFrame(() => {
     composerGeometrySyncing = false;
   });
@@ -472,15 +475,12 @@ function observeDockGeometry() {
     dockResizeObserver.disconnect();
   }
   dockResizeObserver = new ResizeObserver(() => {
-    if (turnBusy) {
-      return;
-    }
     if (composerGeometryRoRaf) {
       return;
     }
     composerGeometryRoRaf = requestAnimationFrame(() => {
       composerGeometryRoRaf = 0;
-      syncComposerGeometry();
+      syncComposerGeometry({ clearanceOnly: composerColumnFrozen });
     });
   });
   /* Observe the dock only. Watching `main` re-fired on every stream height
@@ -494,14 +494,11 @@ function stopDockGeometryObserver() {
   dockResizeObserver = null;
 }
 
-/** Suspend dock geometry work for the whole turn (stream growth). */
+/** For the whole turn the column stays put while the stream grows; the
+    clearance still follows the composer. */
 function setComposerGeometrySuspended(suspended) {
+  composerColumnFrozen = suspended;
   if (suspended) {
-    if (composerGeometryRoRaf) {
-      cancelAnimationFrame(composerGeometryRoRaf);
-      composerGeometryRoRaf = 0;
-    }
-    stopDockGeometryObserver();
     return;
   }
   observeDockGeometry();
@@ -569,21 +566,9 @@ function clearEmptyState() {
   document.querySelector(".agent-harness-empty")?.remove();
 }
 
-/** Pin the transcript to the end after layout settles (markdown/code can grow). */
+/** Appends preserve the reader's follow choice. */
 function scrollStreamToEnd() {
-  const scroller = streamScrollEl();
-  if (!scroller) {
-    return;
-  }
-  scroller.scrollTop = scroller.scrollHeight;
-  /* One follow-up frame is enough for layout settle. The old double-rAF
-     pin-every-call pattern stacked dozens of scroll writes per second during
-     live tokens and helped peg the Brave renderer at ~100% CPU. */
-  if (!turnBusy) {
-    requestAnimationFrame(() => {
-      scroller.scrollTop = scroller.scrollHeight;
-    });
-  }
+  followTranscriptToEnd(streamScrollEl());
 }
 
 function titleEl() {
@@ -1585,10 +1570,7 @@ export function bindAgentHarness() {
     const webLink = event.target.closest?.("[data-open-browser-url]");
     if (webLink) {
       event.preventDefault();
-      postToHome({
-        type: "home-agent:open-browser",
-        url: webLink.dataset.openBrowserUrl || "",
-      });
+      openWebLink(webLink.dataset.openBrowserUrl || "");
       return;
     }
     const copyCode = event.target.closest?.(".agent-md-copy");
@@ -1605,7 +1587,7 @@ export function bindAgentHarness() {
     }
     if (event.target.closest?.("[data-agent-jump-latest]")) {
       event.preventDefault();
-      scrollStreamToEnd();
+      jumpTranscriptToEnd(streamScrollEl());
       updateJumpToLatestVisibility();
       return;
     }

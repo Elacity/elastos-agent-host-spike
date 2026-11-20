@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // Source UI fixtures for #170. Installed journeys require the candidate receipt.
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve, relative, isAbsolute, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const playwrightModule = process.env.ELASTOS_PLAYWRIGHT_MODULE
-  ? await import(pathToFileURL(process.env.ELASTOS_PLAYWRIGHT_MODULE).href)
-  : createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url))("playwright");
-const { chromium } = playwrightModule.chromium ? playwrightModule : playwrightModule.default;
+// A DOM wait fails on a wrong page, not on a slow runner: same predicate, more time.
+const BROWSER_WAIT_TIMEOUT_MS = browserWaitTimeoutMs();
+const { chromium } = await importProductSmokePlaywright();
 const cid = `bafybei${"a".repeat(52)}`;
 const requests = [];
 const misses = [];
@@ -25,12 +25,24 @@ const cases = [
   { name: "invalid", author: "Untrusted publisher", signature: "invalid" },
   { name: "malformed", author: "Untrusted publisher", signature: { broken: true } },
   { name: "spoofed-state", author: "ElastOS", signature_state: "catalog-signature-verified" },
+  { name: "spoofed-did", author: "ElastOS", publisher_did: "ElastOS" },
+];
+// Marketplace lists only what Home can open or get: no services, Home views or helpers.
+const hidden = [
+  { name: "object-provider", role: "provider", launchable: false },
+  { name: "home-gui", role: "shell", launchable: true, launch_target: "home-gui" },
+  { name: "archive-manager", role: "viewer", launchable: false },
+  { name: "kubo", role: "content", launchable: false },
 ];
 function catalog() {
   return { model_catalog_state: catalogState, capsules: [
     ...cases.map(item => ({ ...item, title: `Fixture ${item.name}`, role: "app", type: "web-projection", cid,
-      source: "local", installed: false, launchable: false, trust_state: "cid-with-manifest-signature",
+      source: "local", installed: false, launchable: true, launch_target: item.name, trust_state: "cid-with-manifest-signature",
       signature_state: item.signature_state || "manifest-signature-declared", payment_state: "not-declared", drm_state: "unknown" })),
+    ...hidden.map(item => ({ ...item, title: `Fixture ${item.name}`, author: "elastos", installed: true })),
+    { name: "signed", title: "Fixture signed", author: "elastos", role: "app", installed: true, launchable: true,
+      launch_target: "signed", publisher_did: "did:key:zReleasePublisher", trust_state: "cid-without-manifest-signature",
+      signature_state: "no-manifest-signature", payment_state: "not-declared", drm_state: "unknown" },
     { name: "launchable", title: "Fixture launchable", author: "Publisher", role: "app", installed: true,
       launchable: true, launch_target: "launchable", trust_state: "local-dev", signature_state: "no-manifest-signature",
       payment_state: "provider", drm_state: "provider" },
@@ -45,7 +57,7 @@ const homeSummary = {
   authority: { signed_in: true, principal_id: "did:key:fixture", proof_binding_id: "fixture", session_id: "fixture" },
   identity: { display_name: "Fixture Home", recovery_readiness: { status: "ready" }, profile_readiness: { status: "ready" } },
   targets, active_shell: { active: "home-gui", candidates: [] },
-  appearance: { schema: "elastos.home.appearance/v1", revision: 0, theme: "dark", accent: "blue", accent_custom: "#4f7fff",
+  appearance: { schema: "elastos.home.appearance/v1", revision: 0, theme: "light", accent: "blue", accent_custom: "#4f7fff",
     dock_auto_hide: false, sounds: false, focus_mode: false, background_image_url: null,
     background_overlay_enabled: true, background_overlay_opacity: 0.55 },
   browser_state: { principal_id: "did:key:fixture", recent_targets: [], session: null,
@@ -82,8 +94,9 @@ const server = createServer(async (req, res) => {
           }
         });</script>`); return;
     }
-    if (url.pathname === "/fixture-app") { res.writeHead(200, { ...cors, "content-type": "text/html" }); res.end(`<p>Fixture launched</p><script>window.addEventListener('message',e=>{
+    if (url.pathname === "/fixture-app" || url.pathname === "/apps/wallet-metamask/") { res.writeHead(200, { ...cors, "content-type": "text/html" }); res.end(`<p>Fixture launched</p><script>window.uiPreferences=[];window.addEventListener('message',e=>{
         const m=e.data;
+        if(m.type==='elastos:ui-preference')window.uiPreferences.push(m.preferences);
         if(m.type==='elastos.documents.window-close.request/v1')parent.postMessage({type:'elastos.documents.window-close.result/v1',requestId:m.requestId,homeToken:m.homeToken,state:'terminal',ok:true,reason:'',sessionId:1},'*');
         if(m.type==='elastos.system.window-ready.request/v1')parent.postMessage({type:'elastos.system.window-ready.result/v1',requestId:m.requestId,homeToken:m.homeToken,documentNonce:'fixture-app'},'*');
         if(m.type==='elastos.system.window.request/v1')parent.postMessage({type:'elastos.system.window.result/v1',requestId:m.requestId,homeToken:m.homeToken,documentNonce:m.documentNonce,ok:true},'*');
@@ -93,7 +106,6 @@ const server = createServer(async (req, res) => {
       if (url.pathname === "/api/capsules/catalog") { json(catalog()); return; }
       if (url.pathname === "/api/capsules/interfaces") { json({ interfaces: [] }); return; }
       if (url.pathname === "/api/apps/home/state") { json({}); return; }
-      if (url.pathname === "/api/apps/services/summary") { json({ remote_offers: [], available_remote_offers: [] }); return; }
       if (url.pathname === "/api/provider/model/offers_list") { json({ offers: [], remote_services: [] }); return; }
       if (url.pathname === "/api/provider/object/list_runtime_custody") {
         json({ schema: "elastos.library.runtime-custody-listings/v1", listings: [], truncated: false }); return;
@@ -115,26 +127,47 @@ await new Promise(done => server.listen(0, "127.0.0.1", done));
 const origin = `http://127.0.0.1:${server.address().port}`;
 let browser;
 try {
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, ...productSmokeLaunchOptions() });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
   const pageErrors = []; page.on("pageerror", error => pageErrors.push(error.message));
   const frame = () => page.frames().find(f => f !== page.mainFrame());
+  // Home ignores a close click on a new window until the window's own close
+  // guard expires (capsules/home-gui/browser/shell-windows.js:711 writes
+  // data-close-guard-until, :766 compares it with the page clock). Wait for
+  // that value to pass instead of sleeping past it. A window that carries no
+  // attribute, or one that is not a number, counts as no guard, which is how
+  // the page reads it too.
+  const waitForCloseGuardExpired = async (windowSelector) => {
+    await frame().locator(windowSelector).waitFor();
+    await frame().waitForFunction((selector) => {
+      const node = document.querySelector(selector);
+      if (!node) return false;
+      const until = Number.parseFloat(node.dataset.closeGuardUntil || "0");
+      return !Number.isFinite(until) || until <= performance.now();
+    }, windowSelector, { timeout: BROWSER_WAIT_TIMEOUT_MS });
+  };
   await page.goto(origin);
   await frame().locator('.store-row[data-app="blank"]').waitFor();
   for (const item of cases) {
     const row = frame().locator(`.store-row[data-app="${item.name}"]`).first();
-    const expected = !item.author || item.author === "Unknown publisher" ? "Publisher unknown" : `Declared author · ${item.author}`;
-    assert.equal(await row.locator(".store-row-sub").textContent(), expected);
+    assert.equal(await row.locator(".store-row-sub").count(), 0, `${item.name} has no publisher line`);
     await row.focus(); await row.press("Enter");
-    assert.equal(await frame().locator(".modal-developer").textContent(), expected);
+    assert.equal(await frame().locator(".modal-developer").count(), 0, `${item.name} detail has no publisher line`);
     const text = await frame().locator("#detail-content").textContent();
-    assert.doesNotMatch(text, /Runtime-verified|Verified|Signed local|Supports payments|Uses protected content/);
+    assert.doesNotMatch(text, /Runtime-verified|Verified|Signed local|Supports payments|Uses protected content|Declared author|Publisher unknown|Upstream/);
     assert.match(text, /Publisher verification unavailable/);
-    assert.equal(await frame().locator('#detail-content [data-action="open"]').count(), 0);
     assert.equal(await frame().locator('#detail-content [data-action="install"]').count(), 0);
     await frame().locator("#detail-content").press("Escape");
     assert.equal(await row.evaluate(el => document.activeElement === el), true);
   }
+  for (const item of hidden) assert.equal(await frame().locator(`.store-row[data-app="${item.name}"]`).count(), 0, `${item.name} is not listed`);
+  const signed = frame().locator('.store-row[data-app="signed"]').first();
+  assert.equal(await signed.locator(".store-row-sub").textContent(), "Verified publisher");
+  await signed.click();
+  assert.equal(await frame().locator(".modal-developer").textContent(), "Verified publisher");
+  assert.equal(await frame().locator(".modal-developer").getAttribute("title"), "did:key:zReleasePublisher");
+  assert.match(await frame().locator("#detail-content").textContent(), /Release signature verified/);
+  await frame().locator("#detail-content").press("Escape");
   const launch = frame().locator('.store-row[data-app="launchable"]').first();
   await launch.click();
   assert.match(await frame().locator("#detail-content").textContent(), /Supports payments/);
@@ -157,6 +190,20 @@ try {
   await page.goto(`${origin}/?app=home-gui`);
   await frame().locator('body[data-home-status="ready"]').waitFor();
   assert.equal(await frame().locator("#control-centre-discovery").count(), 0);
+  const library = frame().locator('[data-kind="object"]').first();
+  await library.click({ button: "right" });
+  await frame().getByRole("menuitem", { name: "Show in Library" }).click();
+  await frame().locator('.window[data-target="library"]').waitFor();
+  const libraryApp = () => page.frames().find(f => f.url().includes("/fixture-app?target=library"));
+  for (let i = 0; !libraryApp() && i < 50; i++) await page.waitForTimeout(100);
+  for (const load of ["first load", "reload"]) {
+    if (load === "reload") await libraryApp().evaluate(() => location.reload());
+    await libraryApp().waitForFunction(() => window.uiPreferences?.some(p => p.theme === "light"), null, { timeout: BROWSER_WAIT_TIMEOUT_MS })
+      .catch(() => assert.fail(`Library window gets the light theme on ${load}`));
+  }
+  await waitForCloseGuardExpired('.window[data-target="library"]');
+  await frame().locator('.window[data-target="library"] [data-action="close"]').click();
+  await frame().locator('.window').waitFor({ state: 'detached' });
   await frame().locator("#desktop-shortcut-system").click({ button: "right" });
   assert.deepEqual(await frame().locator('#desktop-context-menu [role="menuitem"]').allTextContents(),
     ["Open System", "Rename", "Remove from Desktop", "Remove from Shelf"]);
@@ -165,7 +212,7 @@ try {
   assert.equal(await frame().locator("#desktop-shortcut-system .desktop-shortcut-title").textContent(), "Fixture shortcut");
   await frame().locator("#desktop-shortcut-system").press("Enter");
   await page.waitForFunction(() => window.calls.some(m => m.type === "home:launch-target" && m.target === "system"));
-  await page.waitForTimeout(2700); // Home protects a new window from the opening pointer's close click.
+  await waitForCloseGuardExpired('.window[data-target="system"]');
   await frame().locator('.window [data-action="close"]').first().click();
   await frame().locator('.window').waitFor({ state: 'detached' });
   const file = frame().locator('[data-kind="object"]').first();
@@ -176,8 +223,25 @@ try {
   assert.equal(await frame().locator(".desktop-shortcut-rename").count(), 0, "File edit shortcuts stay unavailable");
   await file.dblclick();
   await page.waitForFunction(() => window.calls.some(m => m.type === "home:launch-target" && m.target === "documents"));
-  await page.waitForTimeout(2700); // Home protects a new window from the opening pointer's close click.
+  await waitForCloseGuardExpired('.window[data-target="documents"]');
   await frame().locator('.window [data-action="close"]').first().click();
+  await frame().locator('.window').waitFor({ state: 'detached' });
+  // Wallet rail Connect: the host attaches the authorized connector; the rail closes so the window is not beneath it.
+  await frame().locator("#toolbar-wallet").click();
+  await frame().locator("#wallet-rail").waitFor({ state: "visible" });
+  await page.evaluate((homeOrigin) => document.querySelector("iframe").contentWindow.postMessage({
+    type: "home:gui-command", command: "attach-authorized-target",
+    descriptor: { schema: "elastos.home.authorized-target-attachment/v1", receipt_id: "fixture-metamask-receipt",
+      target: "wallet-metamask", title: "MetaMask", attach_kind: "iframe",
+      route: `/apps/wallet-metamask/?home_origin=${encodeURIComponent(homeOrigin)}#home_token=fixture-metamask` },
+  }, "*"), origin);
+  await frame().locator('.window[data-target="wallet-metamask"]').waitFor({ timeout: BROWSER_WAIT_TIMEOUT_MS })
+    .catch(() => assert.fail("Wallet rail Connect opens the MetaMask connector window"));
+  await frame().locator("#wallet-rail").waitFor({ state: "hidden", timeout: BROWSER_WAIT_TIMEOUT_MS })
+    .catch(() => assert.fail("Wallet rail closes when Connect opens the connector window"));
+  assert.equal(await frame().locator('.window[data-target="wallet-metamask"]').isVisible(), true, "Connector window is visible");
+  await waitForCloseGuardExpired('.window[data-target="wallet-metamask"]');
+  await frame().locator('.window[data-target="wallet-metamask"] [data-action="close"]').click();
   await frame().locator('.window').waitFor({ state: 'detached' });
   await frame().locator("#desktop").click({ button: "right", position: { x: 600, y: 400 } });
   assert.deepEqual(await frame().locator('#desktop-context-menu [role="menuitem"]').allTextContents(), ["Hide Desktop Icons", "Auto-arrange Icons", "Change Wallpaper…"]);
@@ -218,7 +282,7 @@ try {
   await frame().locator('#toolbar-control-centre').click();
   await frame().locator('#control-centre-system').press('Enter');
   await frame().locator('.window[data-target="system"]').waitFor();
-  await page.waitForTimeout(2700);
+  await waitForCloseGuardExpired('.window[data-target="system"]');
   await frame().locator('.window[data-target="system"] [data-action="close"]').click();
   await frame().locator('.window').waitFor({ state: 'detached' });
   assert.deepEqual(misses, [], "Visible UI stays on supported routes");

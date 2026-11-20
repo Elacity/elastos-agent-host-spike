@@ -54,19 +54,24 @@ def run(command, cwd, env, capture=False):
                           text=True).stdout
 
 
-def fetch_source(archive, url, digest):
+def fetch_source(archive, url, digest, env=None):
+    """Fetch one pinned source. ``env`` lets a test isolate these git calls.
+
+    ``None`` inherits this process's environment, as a production build does.
+    """
     if archive.name == f"x264-{X264_COMMIT}.tar.bz2":
         with tempfile.TemporaryDirectory(prefix=".x264-source-", dir=archive.parent) as temporary:
             git = ["git", "-C", temporary]
-            subprocess.run([*git, "init", "--bare", "--quiet"], check=True)
-            subprocess.run([*git, "fetch", "--quiet", "--depth=1", url, X264_COMMIT], check=True, timeout=60)
-            commit = subprocess.check_output([*git, "rev-parse", "FETCH_HEAD"], text=True).strip()
-            tree = subprocess.check_output([*git, "rev-parse", "FETCH_HEAD^{tree}"], text=True).strip()
+            subprocess.run([*git, "init", "--bare", "--quiet"], check=True, env=env)
+            subprocess.run([*git, "fetch", "--quiet", "--depth=1", url, X264_COMMIT], check=True, timeout=60,
+                           env=env)
+            commit = subprocess.check_output([*git, "rev-parse", "FETCH_HEAD"], text=True, env=env).strip()
+            tree = subprocess.check_output([*git, "rev-parse", "FETCH_HEAD^{tree}"], text=True, env=env).strip()
             if commit != X264_COMMIT or tree != X264_TREE:
                 raise ValueError("x264 source commit or tree differs from the pin")
             # Match the pinned archive bytes, independent of the server's archive generator.
             source = subprocess.check_output([*git, "-c", "tar.umask=0002", "archive", "--format=tar",
-                                              f"--prefix=x264-{X264_COMMIT}/", X264_COMMIT])
+                                              f"--prefix=x264-{X264_COMMIT}/", X264_COMMIT], env=env)
             archive.write_bytes(bz2.compress(source))
             verify_digest(archive, digest, archive.name)  # x264 archive, before use
     else:

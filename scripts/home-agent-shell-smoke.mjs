@@ -117,7 +117,8 @@ assert.ok(gateway.includes("gateway_assistant::principal_root_protected_object_i
 assert.ok(gatewayAssistant.includes("principal_root_protected_object_inventory("));
 assert.ok(gatewayWorkspace.includes('const RELATIVE_PATH: &str = ".AppData/ElastOS/Assistant/workspace-v2.json"'));
 assert.ok(gatewayWorkspace.includes('require_home_launch_token_context(&state.data_dir, &headers, "assistant")'));
-assert.ok(gatewayWorkspace.includes("write_protected_principal_root_object("));
+// R8: the workspace write takes the verified launch root, not an id and a root string.
+assert.ok(gatewayWorkspace.includes("write_protected_principal_root_object_resolved("));
 assert.ok(gatewayWorkspace.includes("#[serde(deny_unknown_fields)]"));
 assert.ok(harnessHost.includes("migrateLegacyWorkspaces(saved.legacy)"), "legacy sources enter the canonical workspace");
 assert.ok(harnessHost.includes("mergeWorkspaceDocuments(lastSnapshot || {}, local, remote || {})"), "conflicts retain both writers");
@@ -171,10 +172,18 @@ assert.ok(
 );
 assert.ok(
   agentStream.includes('data-open-browser-url="${href}"') &&
-    agentHarness.includes('type: "home-agent:open-browser"') &&
+    agentHarness.includes("openWebLink(webLink.dataset.openBrowserUrl") &&
+    harnessHost.includes('postToHome({ type: "home-agent:open-browser", url })') &&
     homeFace.includes('openTarget("browser", { query: { url } })') &&
     !agentStream.includes('target="_blank"'),
   "HTTP links use the source-pinned Home Browser handoff instead of capsule popups",
+);
+assert.ok(
+  homeFace.includes('postToAssistantFrame({ type: "home-agent:open-link", url: message.url })') &&
+    entry.includes('message?.type === "home-agent:open-link"') &&
+    harnessHost.includes('window.top.postMessage({ type: "home:open-external", url, homeToken }, origin)') &&
+    !capsuleScripts.some(([, source]) => /window\.open\(/.test(source)),
+  "without the Browser app an Assistant link goes through Home's link prompt, never a capsule popup",
 );
 assert.ok(!agentStream.includes("asHtml"), "appendMessage has no unused HTML option");
 assert.ok(!agentStream.includes("body.innerHTML = text"), "appendMessage has no raw HTML branch");

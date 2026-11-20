@@ -1,5 +1,9 @@
 use agent_conformance::{build, report};
-use std::{env, fs, path::Path, process};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process,
+};
 
 fn main() {
     let args: Vec<_> = env::args_os().collect();
@@ -20,9 +24,51 @@ fn main() {
         }
         process::exit(1);
     }
-    if args.len() != 5 {
+    if args.len() == 3 && args[1] == "--a14" {
+        // Read a written receipt back for the owner's command: every A14 row
+        // and its reasons, and a failing exit unless all of them pass.
+        let rows = fs::read(&args[2])
+            .map_err(|_| "could not read the receipt".to_owned())
+            .and_then(|receipt| report::a14_rows(&receipt));
+        match rows {
+            Ok(rows) => {
+                for row in &rows {
+                    let grade = if row.passed { "PASS" } else { "FAIL" };
+                    if row.reasons.is_empty() {
+                        println!("{} (A14) | {grade}", row.name);
+                    } else {
+                        println!("{} (A14) | {grade} | {}", row.name, row.reasons.join("; "));
+                    }
+                }
+                if rows.iter().all(|row| row.passed) {
+                    return;
+                }
+            }
+            Err(reason) => eprintln!("A14 rows: {reason}"),
+        }
+        process::exit(1);
+    }
+    if args.len() == 4 && args[1] == "--installed-binary-hash" {
+        // The record's binary hash for run.sh: the hash chain is checked the
+        // same way the receipt checks it, and only the hash is printed.
+        match report::read_installed_runtime(
+            Path::new(&args[2]),
+            Path::new(&args[3]),
+            report::release_platform(),
+        ) {
+            Ok(installed) => {
+                println!("{}", installed.binary_sha256);
+                return;
+            }
+            Err(reasons) => {
+                eprintln!("no installed binary hash record: {}", reasons.join("; "));
+                process::exit(1);
+            }
+        }
+    }
+    if args.len() != 5 && args.len() != 6 {
         eprintln!(
-            "versions receipt failure: expected inventory, results, Cargo status and receipt path"
+            "versions receipt failure: expected inventory, results, Cargo status and receipt path, and optionally the launch record path"
         );
         process::exit(1);
     }
@@ -38,11 +84,75 @@ fn main() {
     let output = read(&args[2], "results");
     let gaps = fs::read_to_string(build::lane().join("GAPS.md")).ok();
     let receipt = Path::new(&args[4]);
-    let result = report::write_run(
+    // Reviews name the commit they read, so they live outside that commit. A
+    // file inside the repository is still read and recorded, and cannot bind.
+    let reviews_path = env::var_os("AGENT_CONFORMANCE_REVIEWS");
+    let reviews = match &reviews_path {
+        None => None,
+        Some(path) => match fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<report::Review>>(&bytes).ok())
+        {
+            Some(reviews) => Some(reviews),
+            None => {
+                eprintln!("versions receipt failure: could not read reviews");
+                process::exit(1);
+            }
+        },
+    };
+    let reviews_file_failure = reviews_path
+        .and_then(|path| report::reviews_file_failure(Path::new(&path), &build::repository()));
+    // An installed Runtime is named by its binary and its data folder, because
+    // the installer can put the binary elsewhere. Neither given means no
+    // installed Runtime; there is no default, so a test never reads a real one.
+    let installed = match (
+        env::var_os("AGENT_CONFORMANCE_INSTALLED_BINARY"),
+        env::var_os("AGENT_CONFORMANCE_INSTALLED_DATA"),
+    ) {
+        (None, None) => None,
+        (Some(binary), Some(data)) => Some(report::read_installed_runtime(
+            Path::new(&binary),
+            Path::new(&data),
+            report::release_platform(),
+        )),
+        _ => {
+            eprintln!("versions receipt failure: an installed Runtime needs both its binary and its data folder");
+            process::exit(1);
+        }
+    };
+    // The suite's runner checks the tree before and after the tests and passes
+    // its result here. The Git identity above is checked again at this write.
+    let tree_check_failure = (env::var_os("AGENT_CONFORMANCE_TREE_DIRTY_DURING_RUN")
+        .as_deref()
+        .and_then(std::ffi::OsStr::to_str)
+        == Some("1"))
+    .then(|| "tree was dirty during the run".to_owned());
+    // The launch record file is run.sh's: it makes the file after the suite has
+    // exited and names its path on this command line. No test process is given
+    // it, and test output is never read as launch evidence.
+    let launch_record = match args.get(5) {
+        None => report::LaunchRecord::Missing,
+        Some(path) => report::LaunchRecord::read(Path::new(path)),
+    };
+    // The binary the suite was told to launch comes from run.sh's environment,
+    // never from test output. Unset means the suite built the checkout, and the
+    // installed-path row then fails.
+    let named_runtime = env::var_os(agent_conformance::runtime::RUNTIME_BINARY)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let result = report::write_bound_run(
         &listed,
         &output,
         inputs_ok && args[3] == "0",
         report::GitIdentity::read(&build::repository()),
+        report::Bound {
+            reviews: reviews.as_deref(),
+            reviews_file_failure,
+            tree_check_failure,
+            installed,
+            launch_record,
+            named_runtime,
+        },
         receipt,
         gaps.as_deref(),
     );

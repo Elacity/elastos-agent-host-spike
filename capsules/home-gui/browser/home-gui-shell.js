@@ -1,3 +1,4 @@
+import { focusOpenBrowserWindow } from "./shell-windows.js?v=home-20261101d";
 import {
   bindHomeGuiInteractions,
   attachAuthorizedHomeGuiTarget,
@@ -5,30 +6,39 @@ import {
   openHomeGuiTarget,
   relaunchHomeGuiWindowForToken,
   renewHomeGuiBrowserWindowAuthority,
-  renewHomeGuiChatWindowAuthority,
+  renewHomeGuiFrameAuthority,
   restoreHomeGuiSession,
   setHomeGuiMenuManifest,
   handleHomeGuiHomeNavigation,
   setHomeGuiMounted,
   showHomeGuiDesktop,
   syncHomeGuiProjection,
-} from "./home-gui.js?v=home-20260813a";
+} from "./home-gui.js?v=home-20261101d";
 import {
   acceptHomeBrowserContextId,
+  desktopBackdrop,
   hasHomeBrowserContextId,
   setHomeGuiLaunchToken,
-} from "./shell-core.js?v=home-20260813a";
+} from "./shell-core.js?v=home-20261101d";
 import {
   isTrustedHomeGuiMessage,
   projectHomeGuiAuthority,
-} from "./home-gui-authority.js?v=home-20260813a";
-import { FORM_FACTOR_EVENT, isPhone, relayKeyboardInset } from "./shell-form-factor.js?v=home-20260813a";
-import { applyHomeLinkStatus } from "./shell-link-status.js?v=home-20260813a";
+} from "./home-gui-authority.js?v=home-20261101d";
+import { FORM_FACTOR_EVENT, isPhone, relayKeyboardInset } from "./shell-form-factor.js?v=home-20261101d";
+import { applyHomeLinkStatus } from "./shell-link-status.js?v=home-20261101d";
+import { createHomeBackgroundImage } from "/apps/home/home-background-image.js?v=home-20261101d";
 
 const route = new URL(window.location.href);
 const fragment = new URLSearchParams(route.hash.replace(/^#/, ""));
 const homeToken = fragment.get("home_token") || "";
 const homeOrigin = route.searchParams.get("home_origin") || "";
+const backgroundImage = createHomeBackgroundImage({ homeOrigin, homeToken,
+  apply: (url) => {
+    if (!desktopBackdrop) return;
+    if (url) desktopBackdrop.style.setProperty("--desktop-wallpaper", `url("${url}")`);
+    else desktopBackdrop.style.removeProperty("--desktop-wallpaper");
+  },
+});
 const pendingRequests = new Map();
 const HOME_GUI_REQUEST_TIMEOUT_MS = 30_000;
 const consumedAuthorizedAttachmentReceipts = new Set();
@@ -134,6 +144,8 @@ async function applySummary(summary, options = {}) {
     homeGuiWasMounted: previous !== null,
     ...options,
   });
+  backgroundImage.update(summary?.authority?.signed_in === true
+    ? summary?.appearance?.background_image_url : "");
   await restoreSessionWhenReady();
   document.body.dataset.homeStatus = "ready";
 }
@@ -183,22 +195,26 @@ function handleGuiCommand(message) {
   if (command === "renew-browser-authority") {
     return handleBrowserAuthorityRenewalCommand(message);
   }
-  if (command === "renew-chat-authority") {
+  if (command === "renew-frame-authority") {
     if (!hasExactKeys(message, ["type", "command", "requestId", "homeToken", "launched", "expiresAt", "phase"])
       || !/^[A-Za-z0-9-]{1,64}$/.test(message.requestId)
       || !Number.isSafeInteger(message.expiresAt) || !["prepare", "commit"].includes(message.phase)) return false;
     const freshHomeToken = new URLSearchParams(new URL(message.launched?.route, homeOrigin).hash.slice(1)).get("home_token") || "";
     if (message.phase === "commit") {
-      const ok = renewHomeGuiChatWindowAuthority(message.homeToken, message.launched, homeOrigin);
-      postToHome({ type: "home:chat-authority-committed", requestId: message.requestId,
+      const ok = renewHomeGuiFrameAuthority(message.homeToken, message.launched, homeOrigin);
+      postToHome({ type: "home:frame-authority-committed", requestId: message.requestId,
         oldHomeToken: message.homeToken, freshHomeToken, ok });
       return ok;
     }
     const ok = message.expiresAt > Date.now()
-      && renewHomeGuiChatWindowAuthority(message.homeToken, message.launched, homeOrigin, false);
-    postToHome({ type: "home:chat-authority-renewed", requestId: message.requestId,
+      && renewHomeGuiFrameAuthority(message.homeToken, message.launched, homeOrigin, false);
+    postToHome({ type: "home:frame-authority-renewed", requestId: message.requestId,
       oldHomeToken: message.homeToken, freshHomeToken, ok });
     return ok;
+  }
+  if (command === "focus-browser") {
+    if (!hasExactKeys(message, ["type", "command"])) return false;
+    return focusOpenBrowserWindow();
   }
   if (command === "open-target") {
     return openHomeGuiTarget(message.target, { query: message.query || {} });

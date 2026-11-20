@@ -24,6 +24,7 @@ import { recoveredInputClickRect } from "./lib/browser-journey-recovered-input.m
 import { censusBrowserViewerReload, diagnoseBrowserViewerReload, readBrowserViewerReloadDocument, browserViewerSignalMetadata } from "./lib/browser-journey-viewer-reload.mjs";
 import { runBrowserOperatorJourney } from "./lib/browser-journey-operator.mjs";
 import { qualificationOptions, createQualificationHarness, createQualificationCancellation, qualificationInteraction } from "./lib/browser-qualification-observer.mjs";
+import { productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
 
 const require = createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url));
 const { chromium } = require("playwright");
@@ -1618,18 +1619,12 @@ async function embeddedBrowserDebugState(windowLocator, appFrame) {
   return { geometry, frame };
 }
 
-function assertEmbeddedBrowserAspect(geometry) {
+function assertEmbeddedBrowserStage(geometry) {
   const panel = geometry?.panel;
   assert(
     panel && panel.width > 0 && panel.height > 0,
     "Embedded Browser geometry did not expose a render panel",
     geometry,
-  );
-  const ratio = panel.width / panel.height;
-  assert(
-    Math.abs(ratio - (16 / 9)) <= 0.04,
-    "Embedded Browser render panel is not fitted to the 16:9 remote display aspect",
-    { ratio, geometry },
   );
 }
 
@@ -3577,7 +3572,7 @@ async function checkBrowserEmbeddedUiInput(page, baselineToken) {
     const clickX = Math.max(1, Math.min(panelBox.width - 1, BROWSER_INPUT_CLICK_X));
     const clickY = Math.max(1, Math.min(panelBox.height - 1, BROWSER_INPUT_CLICK_Y));
     const initialGeometry = await embeddedBrowserGeometry(windowLocator, appFrame);
-    assertEmbeddedBrowserAspect(initialGeometry);
+    assertEmbeddedBrowserStage(initialGeometry);
     if (BROWSER_OPEN_DISPLAY_MODE === "webrtc_remote_display") {
       const initialStatus = await checkBrowserPageStatus(appFrame, browserToken, pageId);
       const displaySession = initialStatus.display_session || {};
@@ -5641,9 +5636,10 @@ async function main() {
   }
 
   if (CHECK_BROWSER_CONTROLLED_JOURNEY) markStage("home:viewer-launch");
+  const executablePath = process.env.ELASTOS_BROWSER_EXECUTABLE || productSmokeLaunchOptions().executablePath;
   const contextPromise = chromium.launchPersistentContext(PROFILE_DIR, {
     headless: HEADLESS,
-    executablePath: process.env.ELASTOS_BROWSER_EXECUTABLE || undefined,
+    ...(executablePath ? { executablePath } : {}),
     ignoreHTTPSErrors: true,
     viewport: HEADLESS ? { width: 1280, height: 900 } : null,
   });

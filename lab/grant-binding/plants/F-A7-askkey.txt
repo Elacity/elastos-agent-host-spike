@@ -2,16 +2,16 @@ id: F-A7-askkey
 file: src/ask.rs
 test: ask::model_forged_identity_does_not_retarget_the_ceiling
 --- old
-        self.store_admitted_ceiling(Some(&identity), ask.amount);
+        self.store_admitted_ceiling(Some(&key), ask.amount);
 --- new
-        self.store_admitted_ceiling(
-            Some(
-            request
-                .forged_identity
-                .as_deref()
-                .filter(|forged| self.grants.values().any(|grant| grant.record.identity == *forged))
-                .unwrap_or(&identity),
-            ),
-            ask.amount,
-        );
+        let other = if request.forged_identity.is_some() {
+            self.grants
+                .keys()
+                .copied()
+                .find(|handle| *handle != request.handle)
+                .map(|handle| self.ceiling_key(handle))
+        } else {
+            None
+        };
+        self.store_admitted_ceiling(other.as_deref().or(Some(&key)), ask.amount);
 --- end

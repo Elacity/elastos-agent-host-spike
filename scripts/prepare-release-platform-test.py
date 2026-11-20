@@ -18,6 +18,9 @@ import unittest
 from unittest.mock import patch
 
 
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 SOURCE = Path(__file__).resolve().parent.parent
 # A synthetic platform-scoped helper exercises omission and lock admission.
 LINUX_ONLY = {"linux-fixture-helper"}
@@ -78,6 +81,16 @@ elif args[:2]==['source','fetch-file']:
 else: raise AssertionError(args)
 """.replace('NATIVE_BYTES', (bytes(header)+os.environ['ELASTOS_RELEASE_VERSION'].encode()).hex())
         output.write_text(cli); output.chmod(0o755)
+'''
+# A loaded rustup can still be writing after grep has seen the first target.
+MOCK_RUSTUP_SLOW = r'''#!/usr/bin/env python3
+import sys, time
+if sys.argv[1:] != ["target", "list", "--installed"]:
+    raise SystemExit("unexpected rustup arguments: %r" % (sys.argv[1:],))
+print("aarch64-apple-darwin", flush=True)
+time.sleep(0.2)
+for index in range(2000):
+    print(f"synthetic-target-{index:04d}")
 '''
 MOCK_MEDIA_BUILD = r'''#!/usr/bin/env python3
 import argparse, hashlib, json, os, pathlib, struct
@@ -290,7 +303,7 @@ class PrepareWorkerTest(unittest.TestCase):
         # platform headers and local licence pins instead of upstream downloads.
         inventory_path = scripts / "release-upstream-recipes.json"
         inventory = json.loads(inventory_path.read_text())
-        for name in ("node", "turnserver", "python3", "debugfs", "crosvm"):
+        for name in ("node", "turnserver", "python3", "debugfs", "crosvm", "vhost-device-vsock"):
             for platform, info in external[name]["platforms"].items():
                 binary = scripts / (name + "-" + platform + ".fixture")
                 native_header = bytearray(64)
@@ -349,7 +362,7 @@ class PrepareWorkerTest(unittest.TestCase):
         (mock / "ldd").write_text('#!/bin/sh\necho "libc.so.6 => resolved"\n')
         for path in mock.iterdir():
             path.chmod(0o755)
-        self.env = {**os.environ, "PATH": str(mock) + os.pathsep + os.environ["PATH"],
+        self.env = {**fixture_git.fixture_git_env(self.root), "PATH": str(mock) + os.pathsep + os.environ["PATH"],
                     "CARGO_TARGET_DIR": str(self.root / "native-cache"), "CARGO_BUILD_JOBS": "4",
                     "MOCK_TARGET": str(self.root / "resolved-cache"),
                     "MOCK_LOG": str(self.root / "cargo.log"),
@@ -384,6 +397,14 @@ class PrepareWorkerTest(unittest.TestCase):
                     self.assertNotIn("strategy", info)
                 if host == "Darwin":
                     self.assertIn("browser-vz-engine-supervisor-darwin-arm64", (self.root / "sign.log").read_text())
+                if setup == "linux-arm64":
+                    self.assertIn("browser-vz-engine-supervisor", manifest["external"])
+                    supervisor = manifest["external"]["browser-vz-engine-supervisor"]["platforms"][setup]
+                    self.assertGreater(supervisor["size"], 0)
+                    calls = [json.loads(line) for line in (self.root / "cargo.log").read_text().splitlines()]
+                    self.assertTrue(any("browser-vz-engine-supervisor" in call["args"] and
+                                        "aarch64-unknown-linux-musl" in call["args"] for call in calls))
+                    self.assertNotIn("browser-vz-engine-supervisor-linux-arm64", (self.root / "sign.log").read_text())
 
     def test_browser_vz_signing_failure_preserves_absent_output(self):
         output, result = self.prepare(env={**self.env, "FAIL_SIGN": "1"})
@@ -409,7 +430,7 @@ class PrepareWorkerTest(unittest.TestCase):
                              ("git", "config", "gc.autoDetach", "false")])
         commands.extend([("git", "add", "."), ("git", "commit", "-m", message)])
         for command in commands:
-            result = self.command(*command)
+            result = self.command(*command, env=fixture_git.fixture_git_env(self.root))
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def prepare(self, name="prepared", env=None, version="0.7.1", reuse_support=None):
@@ -419,6 +440,21 @@ class PrepareWorkerTest(unittest.TestCase):
                               "--version", version, "--output", str(output), *reuse, env=env)
         self.assertEqual(list(self.root.glob(".release-platform.*")), [], "temporary sibling leaked")
         return output, result
+
+    def test_prepare_ignores_the_callers_git_dir(self):
+        """The product script reads the fixture checkout, not an exported GIT_DIR."""
+        with tempfile.TemporaryDirectory() as scratch:
+            victim, pointed = fixture_git.victim_repo(scratch)
+            os.utime(victim / "tracked.txt", (1, 1))  # so a leaked status would rewrite its index
+            before = fixture_git.repo_state(victim)
+            with patch.dict(os.environ, pointed):
+                self.setUp()  # a second fixture, with the hostile variables in the process environment
+            config = fixture_git.shared_config(self.repo)
+            output, result = self.prepare()
+            self.assertEqual(fixture_git.repo_state(victim), before, "a prepare git command wrote to GIT_DIR's repo")
+            self.assertEqual(fixture_git.shared_config(self.repo), config, "the fixture's shared git config changed")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((output / "platform-input.json").is_file())
 
     def test_browser_image_is_required_before_build_and_reuse_retains_it(self):
         template_path = self.repo / "components.json"
@@ -1009,6 +1045,26 @@ class PrepareWorkerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Output already exists", result.stderr)
         self.assertTrue(output.is_symlink())
+
+    def install_rustup_stand_in(self, body):
+        path = self.root / "mock/rustup"
+        path.write_text(body)
+        path.chmod(0o755)
+
+    def test_installed_target_survives_rustup_writing_after_the_match(self):
+        self.install_rustup_stand_in(MOCK_RUSTUP_SLOW)
+        output, result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((output / "platform-input.json").is_file())
+
+    def test_unreadable_installed_target_list_names_the_reason(self):
+        self.install_rustup_stand_in('#!/bin/sh\nexit 17\n')
+        output, result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not list installed Rust targets", result.stderr)
+        self.assertFalse(output.exists())
+        calls = [json.loads(line)["args"][0] for line in (self.root / "cargo.log").read_text().splitlines()]
+        self.assertNotIn("build", calls)
 
     def test_three_platform_inputs_admit_with_resolved_cache_and_linux_audit(self):
         for name in LINUX_ONLY:

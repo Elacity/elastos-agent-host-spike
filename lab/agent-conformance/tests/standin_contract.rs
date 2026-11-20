@@ -66,22 +66,25 @@ fn standin_matches_ra1_fields() {
     let query = standin
         .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in returns the shell scope list");
-    for list in [&plain, &query] {
-        assert_keys(
-            list,
-            &["capabilities", "scope"],
-            "the stand-in did the work: the shell body carries scope and capabilities",
-        );
-        assert_eq!(
-            list["scope"], LIVE_SCOPE,
-            "the stand-in did the work: the shell body marks all_sessions_live"
-        );
-        assert_eq!(
-            list["capabilities"],
-            json!([]),
-            "the stand-in did the work: the shell lists no grant before any seed"
-        );
-    }
+    assert_eq!(
+        plain,
+        json!({ "capabilities": [] }),
+        "the stand-in did the work: the plain shell body is its own session, with no scope key"
+    );
+    assert_keys(
+        &query,
+        &["capabilities", "scope"],
+        "the stand-in did the work: the shell scope body carries scope and capabilities",
+    );
+    assert_eq!(
+        query["scope"], LIVE_SCOPE,
+        "the stand-in did the work: the shell scope body marks all_sessions_live"
+    );
+    assert_eq!(
+        query["capabilities"],
+        json!([]),
+        "the stand-in did the work: the shell scope list is empty before any seed"
+    );
 
     let empty_client = standin
         .get_capability_list(
@@ -143,8 +146,8 @@ fn standin_matches_ra1_fields() {
     );
 
     let shell = standin
-        .get_capability_list(Caller::Shell, None)
-        .expect("the stand-in returns the seeded shell list");
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
+        .expect("the stand-in returns the seeded shell scope list");
     assert_eq!(
         request_ids(&shell),
         BTreeSet::from(["req-live".to_owned()]),
@@ -900,7 +903,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
     );
 
     let both_live = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists both live grants before the cancel");
     assert_eq!(
         request_ids(&both_live),
@@ -975,7 +978,7 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
     );
 
     let after_cancel = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the live grants after the cancel");
     assert_eq!(
         request_ids(&after_cancel),
@@ -1396,7 +1399,7 @@ fn standin_refuses_a_content_bundle_at_the_admission_seam() {
         .get_capsules(Caller::Shell)
         .expect("the stand-in lists the app instance");
     let grants_before = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the app grant");
 
     let content = SignedBundle::content();
@@ -1441,7 +1444,7 @@ fn standin_refuses_a_content_bundle_at_the_admission_seam() {
         Ok(body) => panic!("a content CID must not launch: {body}"),
     }
     let grants_after = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the grants after the refusal");
     assert_eq!(
         grants_after, grants_before,
@@ -1494,7 +1497,7 @@ fn assert_admission_refused(standin: &mut StandIn, shared: &SignedBundle, reason
         .get_capsules(Caller::Shell)
         .expect("the stand-in lists the capsules before");
     let grants_before = standin
-        .get_capability_list(Caller::Shell, None)
+        .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the grants before");
     let refused = standin.admit_resident(
         shared.path(),
@@ -1518,7 +1521,7 @@ fn assert_admission_refused(standin: &mut StandIn, shared: &SignedBundle, reason
     );
     assert_eq!(
         standin
-            .get_capability_list(Caller::Shell, None)
+            .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
             .expect("the stand-in lists the grants after"),
         grants_before,
         "the refused admission minted no grant"
@@ -1681,7 +1684,7 @@ fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() 
         Ok(json!({ "valid": true })),
         "the stand-in admits an ask at the cap"
     );
-    // The 4096 above consumed the identity's budget, so a later ask on the
+    // The 4096 above consumed this grant's budget, so a later ask on the
     // same grant is refused by the reserve and leaves the grant live.
     let later_ask = standin.post_capability_validate(owner, &json!({ "request_id": request_id }));
     assert_eq!(
@@ -1761,17 +1764,18 @@ fn standin_admission_admits_a_granted_ask_within_budget_and_refuses_one_above() 
         BTreeSet::from([request_id.clone(), once_id.clone()]),
         "the refused ask leaves the once grant live and unspent"
     );
-    // The session ceiling is filled by the cap use above, so the once grant's
-    // own ask is refused by the reserve and spends nothing.
+    // Each grant keeps its own ceiling, so the first grant's cap use does not
+    // fill the once grant's ceiling: the once grant's ask at the cap is
+    // admitted on its own ceiling and spends it.
     assert_eq!(
         standin.post_capability_validate(owner, &json!({ "request_id": once_id, "amount": 4096 })),
-        Err((403, "reservation exceeds the ceiling".to_owned())),
-        "the once grant's ask is refused once the session ceiling is filled"
+        Ok(json!({ "valid": true })),
+        "the once grant's ask at the cap is admitted on its own ceiling"
     );
     assert_eq!(
         live(&standin),
-        BTreeSet::from([request_id.clone(), once_id.clone()]),
-        "the refused ask leaves the once grant live and unspent"
+        BTreeSet::from([request_id.clone()]),
+        "the admitted ask spends the once grant and leaves the first grant live"
     );
 
     // The spend order shows where nothing holds the ceiling: a second session

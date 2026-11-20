@@ -337,11 +337,14 @@ def assert_setup_order():
         main.index("install_app_capsules\n"),
         main.index("install_browser_runtime_helpers\n"),
         main.index("stamp_source_home_capsule_artifacts_manifest\n"),
+        main.index("prepare_source_home_setup\n"),
         main.index('python3 "${ROOT}/scripts/components-release-integrity-check.py"'),
+        main.index("start_browser_runtime_turn\n"),
     ]
     if positions != sorted(positions):
         raise AssertionError(
-            "components.json mutators must finish before the final capsule stamp and integrity check"
+            "source-home component, capsule and Runtime setup must finish before the integrity check, "
+            "and the integrity check must finish before Browser TURN starts"
         )
     install_function = setup.split("install_content_publish_backend() {", 1)[1].split(
         "\n}\n\necho \"[setup-source-home] repo:", 1
@@ -393,8 +396,10 @@ def run_smoke():
         raise AssertionError(
             "components.json must install Elacity Player from its capsule tree"
         )
-    if "elacity-player" not in source_components["profiles"]["home"]["components"]:
-        raise AssertionError("profile home must include Elacity Player")
+    # Protected content ships after 0.8.0: a release Home installs the Player
+    # only with `setup --with`; a source Home may still carry it.
+    if "elacity-player" in source_components["profiles"]["home"]["components"]:
+        raise AssertionError("profile home must not include Elacity Player in 0.8.0")
 
     with tempfile.TemporaryDirectory() as temp:
         temp_root = Path(temp)

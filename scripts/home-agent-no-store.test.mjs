@@ -26,7 +26,9 @@ test("the Assistant manifest grants no store operation", () => {
   );
 });
 
-test("the Assistant page only asks Home to open Marketplace", () => {
+// Upstream 4b5a4604 (2.0): a web link the user confirms opens through Home, which checks the
+// page's Home token. That is the only other thing the page asks of Home.
+test("the Assistant page only asks Home to open Marketplace or a confirmed web link", () => {
   const routes = new Set();
   const invokes = new Set();
   const messages = new Set();
@@ -45,5 +47,5 @@ test("the Assistant page only asks Home to open Marketplace", () => {
     );
   }
   assert.deepEqual([...invokes], ["elastos.assistant.model content.retention"]);
-  assert.deepEqual([...messages].sort(), ["home:app-ready", "home:open-target"]);
+  assert.deepEqual([...messages].sort(), ["home:app-ready", "home:open-external", "home:open-target"]);
 });

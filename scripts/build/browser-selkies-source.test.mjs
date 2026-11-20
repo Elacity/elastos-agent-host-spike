@@ -10,8 +10,65 @@ import test from 'node:test';
 const vendor = fileURLToPath(new URL('../../third-party/selkies', import.meta.url));
 const helper = fileURLToPath(new URL('./prepare-browser-selkies.py', import.meta.url));
 const builderPath = fileURLToPath(new URL('./build-browser-vm-rootfs.sh', import.meta.url));
+const fixtureGitEnvPath = fileURLToPath(new URL('../fixture-git-env.py', import.meta.url));
 const builder = readFileSync(builderPath, 'utf8');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+
+// The same rule the Python fixtures load: no inherited GIT_* variable, no user config.
+function fixtureEnv(root) {
+  const result = spawnSync('python3', ['-c', `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location('fixture_git_env', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.fixture_git_env(sys.argv[2])))
+`, fixtureGitEnvPath, root], { encoding: 'utf8', timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+function fixtureGit(args, env) {
+  const result = spawnSync('git', args, { encoding: 'utf8', timeout: 5000, env });
+  assert.equal(result.status, 0, result.stderr);
+  return result;
+}
+
+// The fixture git the provenance and builder tests run. The GIT_DIR isolation
+// test calls these same functions, so a change here reaches that test.
+function initOuterCheckout(outer) {
+  fixtureGit(['init', '-q', outer], fixtureEnv(outer));
+}
+
+function stageBuilderRepo(repo, scratch) {
+  for (const args of [['init', '-q', repo], ['-C', repo, 'add', '.']]) {
+    fixtureGit(args, fixtureEnv(scratch));
+  }
+}
+
+function cleanEnv() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+  return env;
+}
+
+function victimState(repo) {
+  const env = cleanEnv();
+  const head = spawnSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8', env }).stdout.trim();
+  return {
+    head,
+    index: createHash('sha256').update(readFileSync(join(repo, '.git/index'))).digest('hex'),
+    config: readFileSync(join(repo, '.git/config')).toString(),
+    files: ['tracked.txt', 'untracked.txt'].map(name => readFileSync(join(repo, name)).toString()),
+  };
+}
+
+function sharedConfig(checkout) {
+  const result = spawnSync('git',
+    ['-C', checkout, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    { encoding: 'utf8', env: cleanEnv() });
+  assert.equal(result.status, 0, result.stderr);
+  return readFileSync(join(result.stdout.trim(), 'config')).toString();
+}
 
 function run(root, out) {
   const result = spawnSync('python3', [helper, '--vendor', root, ...(out ? ['--out-dir', out] : [])],
@@ -38,8 +95,7 @@ test('builder installs local Selkies with dependency and index access disabled',
 test('offline provenance check and patches pass; prepared media bytes match the builder contract', () => {
   fixture((root, out) => {
     // Operators can put output under a checkout. Patch only the build copy.
-    const outer = join(out, '..');
-    assert.equal(spawnSync('git', ['init', '-q', outer]).status, 0);
+    initOuterCheckout(join(out, '..'));
     const result = run(root, out);
     assert.equal(result.status, 0, result.stderr);
     const media = readFileSync(join(out, 'src/selkies_gstreamer/gstwebrtc_app.py'));
@@ -123,10 +179,7 @@ test('builder rejects changed source before Cargo or guest network work', () => 
       mkdirSync(join(repo, name, '..'), { recursive: true });
       cpSync(join(sourceRoot, name), join(repo, name));
     }
-    for (const args of [['init', '-q', repo], ['-C', repo, 'add', '.']]) {
-      const result = spawnSync('git', args, { encoding: 'utf8', timeout: 5000 });
-      assert.equal(result.status, 0, result.stderr);
-    }
+    stageBuilderRepo(repo, join(out, '..'));
 
     writeFileSync(join(repo, 'third-party/selkies/upstream/setup.cfg'), 'changed source');
     const bin = join(repo, 'bin');
@@ -170,4 +223,41 @@ test('a rehashed patch that stops applying still fails', () => {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /patch does not apply/);
   });
+});
+
+test('the fixture git these tests run leaves a caller GIT_DIR repository unchanged', () => {
+  const checkout = fileURLToPath(new URL('../..', import.meta.url));
+  const scratch = mkdtempSync(join(tmpdir(), 'selkies-git-isolation-'));
+  try {
+    const victim = join(scratch, 'victim');
+    mkdirSync(victim, { recursive: true });
+    writeFileSync(join(victim, 'tracked.txt'), 'victim\n');
+    writeFileSync(join(victim, 'untracked.txt'), 'victim untracked\n');
+    const env = fixtureEnv(scratch);
+    fixtureGit(['init', '-q', victim], env);
+    fixtureGit(['-C', victim, 'add', 'tracked.txt'], env);
+    fixtureGit(['-C', victim, '-c', 'user.name=Victim', '-c', 'user.email=victim@example.invalid',
+      'commit', '-q', '-m', 'victim'], env);
+    const before = victimState(victim);
+    const config = sharedConfig(checkout);
+    process.env.GIT_DIR = join(victim, '.git');
+    process.env.GIT_WORK_TREE = victim;
+    const repo = join(scratch, 'repo');
+    try {
+      // The functions the provenance and builder tests call, under the hostile variables.
+      initOuterCheckout(scratch);
+      mkdirSync(join(repo, 'scripts/build'), { recursive: true });
+      writeFileSync(join(repo, 'README.md'), 'repo\n');
+      stageBuilderRepo(repo, scratch);
+    } finally {
+      delete process.env.GIT_DIR;
+      delete process.env.GIT_WORK_TREE;
+    }
+    assert.deepEqual(victimState(victim), before, "a fixture git command wrote to GIT_DIR's repo");
+    // A redirected git init leaves GIT_DIR's bytes alone, so check the fixture got the repository.
+    assert.ok(existsSync(join(scratch, '.git/HEAD')), "the outer checkout's git init went to GIT_DIR's repo");
+    const staged = spawnSync('git', ['-C', repo, 'ls-files'], { encoding: 'utf8', env: fixtureEnv(scratch) });
+    assert.equal(staged.stdout, 'README.md\n', "the builder repo's git init or add went to GIT_DIR's repo");
+    assert.deepEqual(sharedConfig(checkout), config, "the checkout's shared git config changed");
+  } finally { rmSync(scratch, { recursive: true, force: true }); }
 });

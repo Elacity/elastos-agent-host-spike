@@ -8,7 +8,7 @@ use elastos_common::browser_protocol::{BrowserOperatorRequest, BrowserRefInput};
 use elastos_runtime::capability::pending::PendingRequestStore;
 use elastos_runtime::capability::{
     Action, CapabilityManager, CapabilityStore, CapabilityToken, GrantDuration, ResourceId,
-    TokenConstraints,
+    Settler, TokenConstraints,
 };
 use elastos_runtime::primitives::{
     audit::AuditLog, metrics::MetricsManager, time::SecureTimestamp,
@@ -55,6 +55,108 @@ struct Admission {
     release_pending: bool,
     receipts: BTreeMap<String, serde_json::Value>,
     bindings: BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+impl BrowserOperatorService {
+    /// An admission's request record, and how its token validates now.
+    pub(crate) async fn admission_for_test(
+        &self,
+        id: &str,
+    ) -> (
+        elastos_runtime::capability::pending::PendingCapabilityRequest,
+        Result<(), elastos_runtime::capability::manager::ValidationError>,
+    ) {
+        let request = self.pending.get_request(id).await.unwrap();
+        let records = self.records.lock().await;
+        let record = &records[id];
+        let token = record.token.as_ref().unwrap();
+        let session = record.session.id.as_str();
+        let resource = resource(&record.page_id, id);
+        let validated = self
+            .capabilities
+            .validate(token, session, Action::Write, &resource, None);
+        (request, validated.await)
+    }
+
+    /// Fills this service's store with `count` once grants that have not
+    /// expired, each used once: records whose tokens can no longer validate.
+    /// Each record is for the page's `input` and its token is minted for the
+    /// operator resource, as `approve_admission` mints it.
+    pub(crate) async fn seed_spent_grants_for_test(&self, count: usize) {
+        use elastos_runtime::capability::pending::MAX_PENDING_PER_SESSION;
+        for n in 0..count {
+            let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
+            let id = elastos_runtime::session::SessionId::from_string(session.clone());
+            let page = format!("p{n}");
+            let target = ResourceId::new(format!("elastos://browser/pages/{page}/input"));
+            let request = self.pending.create_request(id, target, Action::Write);
+            let request = request.await;
+            let epoch = self.capabilities.current_epoch();
+            let once = TokenConstraints::new(epoch, false, None, Some(1));
+            let hour = Some(elastos_common::SecureTimestamp::after_secs(3600));
+            let token_resource = resource(&page, request.id.as_str());
+            let token = self.capabilities.grant(
+                &session,
+                token_resource.clone(),
+                Action::Write,
+                once,
+                hour,
+            );
+            let stored = self.pending.grant_request(
+                request.id.as_str(),
+                token.clone(),
+                GrantDuration::Session,
+            );
+            stored.await.unwrap();
+            let used =
+                self.capabilities
+                    .validate(&token, &session, Action::Write, &token_resource, None);
+            used.await.unwrap();
+        }
+    }
+
+    /// The service's request store (test-only).
+    pub(crate) fn pending_for_test(&self) -> &PendingRequestStore {
+        &self.pending
+    }
+
+    /// The service's capability manager (test-only).
+    pub(crate) fn capabilities_for_test(&self) -> &CapabilityManager {
+        &self.capabilities
+    }
+
+    /// A production-shaped live grant: the record is for the page's `input`,
+    /// the token is minted for `.../operator/{id}` in the same session and
+    /// unused, as `approve_admission` mints it. Returns the record id and token.
+    pub(crate) async fn seed_live_grant_for_test(
+        &self,
+        session: &str,
+        page: &str,
+    ) -> (String, CapabilityToken) {
+        let target = ResourceId::new(format!("elastos://browser/pages/{page}/input"));
+        let request = self
+            .pending
+            .create_request(
+                elastos_runtime::session::SessionId::from_string(session.to_owned()),
+                target,
+                Action::Write,
+            )
+            .await;
+        let token_resource = resource(page, request.id.as_str());
+        let token = self.capabilities.grant(
+            session,
+            token_resource,
+            Action::Write,
+            TokenConstraints::new(self.capabilities.current_epoch(), false, None, Some(1)),
+            Some(elastos_common::SecureTimestamp::after_secs(60)),
+        );
+        self.pending
+            .grant_request(request.id.as_str(), token.clone(), GrantDuration::Session)
+            .await
+            .unwrap();
+        (request.id.to_string(), token)
+    }
 }
 
 pub(crate) fn register_browser_operator_sessions(
@@ -332,15 +434,15 @@ pub(in crate::api::gateway) async fn request_admission(
         return failure(StatusCode::TOO_MANY_REQUESTS, "operator_requests_busy");
     }
     service.pending.cleanup_old(60).await;
-    let pending = service
-        .pending
-        .create_request_with_reason(
-            session.id.clone(),
-            ResourceId::new(format!("elastos://browser/pages/{page_id}/input")),
-            Action::Write,
-            request.reason.clone(),
-        )
-        .await;
+    let pending = crate::api::handlers::capability::create_request_retiring(
+        &service.pending,
+        &service.capabilities,
+        session.id.clone(),
+        ResourceId::new(format!("elastos://browser/pages/{page_id}/input")),
+        Action::Write,
+        request.reason.clone(),
+    )
+    .await;
     if !pending.is_pending() {
         return failure(StatusCode::TOO_MANY_REQUESTS, "operator_requests_busy");
     }
@@ -605,12 +707,22 @@ pub(in crate::api::gateway) async fn revoke_admission(
         };
         record.phase = "revoked";
         if let Some(token) = &record.token {
-            service
+            if service
                 .capabilities
                 .revoke(*token.id(), "Browser owner revoked admission")
-                .await;
+                .await
+                .is_err()
+            {
+                return failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "revocation_persistence_failed",
+                );
+            }
         }
-        service.pending.revoke_request(&id).await;
+        service
+            .pending
+            .revoke_request_by(&id, "Revoked by user", Settler::Shell)
+            .await;
         record.release_pending
     };
     if !release_pending {
@@ -665,8 +777,17 @@ pub(in crate::api::gateway) async fn return_page_to_owner(
             service
                 .capabilities
                 .revoke(*token.id(), "Browser owner reclaimed input")
+                .await
+                .map_err(|_| {
+                    failure(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "revocation_persistence_failed",
+                    )
+                })?;
+            service
+                .pending
+                .revoke_request_by(&id, "Revoked by user", Settler::Shell)
                 .await;
-            service.pending.revoke_request(&id).await;
         }
 
         engine_input(
@@ -802,12 +923,26 @@ pub(in crate::api::gateway) async fn operator_input(
     if !accepted {
         record.phase = "revoked";
         if let Some(token) = &record.token {
-            service
+            if service
                 .capabilities
                 .revoke(*token.id(), "Browser input outcome uncertain")
-                .await;
+                .await
+                .is_err()
+            {
+                return failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "revocation_persistence_failed",
+                );
+            }
         }
-        service.pending.revoke_request(&input.admission_id).await;
+        service
+            .pending
+            .revoke_request_by(
+                &input.admission_id,
+                "Browser input outcome uncertain",
+                Settler::Runtime,
+            )
+            .await;
     }
     drop(records);
     if !accepted {

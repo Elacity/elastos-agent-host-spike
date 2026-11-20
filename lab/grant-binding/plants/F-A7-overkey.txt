@@ -2,15 +2,16 @@ id: F-A7-overkey
 file: src/ask.rs
 test: ask::model_forged_overwrite_does_not_retarget_the_ceiling
 --- old
-        self.store_admitted_ceiling(Some(&identity), ask.amount);
+        self.store_admitted_ceiling(Some(&key), ask.amount);
 --- new
         let other = if request.forged_overwrite {
             self.grants
-                .values()
-                .find(|grant| grant.record.identity != identity)
-                .map(|grant| grant.record.identity.clone())
+                .keys()
+                .copied()
+                .find(|handle| *handle != request.handle)
+                .map(|handle| self.ceiling_key(handle))
         } else {
             None
         };
-        self.store_admitted_ceiling(other.as_deref().or(Some(&identity)), ask.amount);
+        self.store_admitted_ceiling(other.as_deref().or(Some(&key)), ask.amount);
 --- end

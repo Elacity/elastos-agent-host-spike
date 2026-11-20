@@ -22,7 +22,7 @@ pub fn lane_dir() -> PathBuf {
 /// out and nothing is read: each caller decides what a listed file that is
 /// gone from the work tree, or a falsifier runner's backup, means for it.
 pub fn lane_paths(lane: &Path) -> Vec<String> {
-    let output = Command::new("git")
+    let output = git_without_inherited_vars()
         .args([
             "ls-files",
             "-z",
@@ -55,6 +55,36 @@ const LANE_SOURCE_ENTRIES: &[&str] = &[
     "capsule",
     "tools",
 ];
+
+/// `git` with no inherited `GIT_*` variable. git ignores the working directory
+/// when GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR or
+/// GIT_OBJECT_DIRECTORY is set, as it is inside hooks and `git rebase --exec`.
+pub fn git_without_inherited_vars() -> Command {
+    let mut command = Command::new("git");
+    for (key, _) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
+/// `git` in `root`, a test's temporary directory, for its own fixture
+/// repository: no inherited `GIT_*` variable, discovery stops at `root`, and
+/// no system or user git config is read (`HOME` is `root`).
+pub fn fixture_git(root: &Path) -> Command {
+    let mut command = git_without_inherited_vars();
+    command
+        .current_dir(root)
+        .env(
+            "GIT_CEILING_DIRECTORIES",
+            root.parent().expect("a temp dir has a parent"),
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", root)
+        .env_remove("XDG_CONFIG_HOME");
+    command
+}
 
 /// A temporary directory removed when the handle is dropped, so a test leaves
 /// nothing behind.

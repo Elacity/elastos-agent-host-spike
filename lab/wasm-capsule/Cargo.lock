@@ -136,10 +136,10 @@ name = "capsule-identity"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "elastos-bundle-identity",
  "elastos-common",
  "elastos-identity",
  "hex",
- "rustix",
  "serde_json",
  "sha2",
 ]
@@ -357,8 +357,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "elastos-bundle-identity"
+version = "2.0.1"
+dependencies = [
+ "elastos-common",
+ "rustix",
+ "sha2",
+]
+
+[[package]]
 name = "elastos-common"
-version = "0.8.0"
+version = "2.0.1"
 dependencies = [
  "hex",
  "libc",
@@ -370,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "elastos-identity"
-version = "0.8.0"
+version = "2.0.1"
 dependencies = [
  "aes-gcm",
  "anyhow",

@@ -2,6 +2,6 @@ id: F-A7-askstub
 file: src/ask.rs
 test: ask::model_admitted_ask_sets_the_ceiling
 --- old
-        self.store_admitted_ceiling(Some(&identity), ask.amount);
+        self.store_admitted_ceiling(Some(&key), ask.amount);
 --- new
 --- end

@@ -227,36 +227,41 @@ pub(crate) fn presence_resource(scope: &PresenceScope, mode: PresenceMode) -> Re
     ))
 }
 
-fn object_uri(principal_id: &str) -> String {
-    format!(
+fn object_uri(data_dir: &std::path::Path, principal_id: &str) -> anyhow::Result<String> {
+    Ok(format!(
         "{}/{PRESENCE_GRANT_OBJECT}",
-        crate::auth::principal_localhost_root(principal_id)
-    )
+        crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+            .map_err(|err| anyhow::anyhow!(err))?
+    ))
 }
 
 fn object_path(
     data_dir: &std::path::Path,
     principal_id: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
-    elastos_common::localhost::rooted_localhost_fs_path(data_dir, &object_uri(principal_id))
-        .ok_or_else(|| anyhow::anyhow!("invalid Community presence grant root"))
+    elastos_common::localhost::rooted_localhost_fs_path(
+        data_dir,
+        &object_uri(data_dir, principal_id)?,
+    )
+    .ok_or_else(|| anyhow::anyhow!("invalid Community presence grant root"))
 }
 
-fn empty_file(principal_id: &str) -> PresenceGrantFile {
-    PresenceGrantFile {
+fn empty_file(data_dir: &std::path::Path, principal_id: &str) -> anyhow::Result<PresenceGrantFile> {
+    Ok(PresenceGrantFile {
         schema: PRESENCE_GRANT_SCHEMA.to_string(),
         principal_id: principal_id.to_string(),
-        localhost_root: crate::auth::principal_localhost_root(principal_id),
+        localhost_root: crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+            .map_err(|err| anyhow::anyhow!(err))?,
         grants: Vec::new(),
         requests: Vec::new(),
-    }
+    })
 }
 
 fn load_file(data_dir: &std::path::Path, principal_id: &str) -> anyhow::Result<PresenceGrantFile> {
     let path = object_path(data_dir, principal_id)?;
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(empty_file(principal_id))
+            return empty_file(data_dir, principal_id)
         }
         Err(error) => return Err(error).context("could not inspect Community presence grant"),
         Ok(metadata) if !metadata.is_file() => {
@@ -264,12 +269,13 @@ fn load_file(data_dir: &std::path::Path, principal_id: &str) -> anyhow::Result<P
         }
         Ok(_) => {}
     }
-    let localhost_root = crate::auth::principal_localhost_root(principal_id);
+    let localhost_root = crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+        .map_err(|err| anyhow::anyhow!(err))?;
     let raw = crate::auth::read_principal_root_object(
         data_dir,
         principal_id,
         &localhost_root,
-        &object_uri(principal_id),
+        &object_uri(data_dir, principal_id)?,
         &path,
     )?;
     if raw.len() > MAX_PRESENCE_GRANT_BYTES {
@@ -303,8 +309,9 @@ fn save_file(
     crate::auth::write_principal_root_object(
         data_dir,
         principal_id,
-        &crate::auth::principal_localhost_root(principal_id),
-        &object_uri(principal_id),
+        &crate::auth::principal_stored_localhost_root(Some(data_dir), principal_id)
+            .map_err(|err| anyhow::anyhow!(err))?,
+        &object_uri(data_dir, principal_id)?,
         &path,
         &raw,
     )
@@ -436,7 +443,10 @@ pub(crate) async fn presence_grant(
         authority
             .manager
             .revoke(*token.id(), "profile changed")
-            .await;
+            .await
+            .unwrap_or_else(
+                |error| tracing::error!(%error, "Presence revocation persistence failed"),
+            );
         authority.forget(&grant.token_id);
         drop_grant(data_dir, principal_id, &grant.token_id);
         return None;
@@ -557,7 +567,10 @@ pub(crate) async fn own_presence_operation_authorized(
             authority
                 .manager
                 .revoke(*token.id(), "profile changed")
-                .await;
+                .await
+                .unwrap_or_else(
+                    |error| tracing::error!(%error, "Presence revocation persistence failed"),
+                );
         }
         false
     } else {
@@ -597,7 +610,7 @@ pub(crate) async fn set_presence_grant(
         authority
             .manager
             .revoke(token_id, "community presence changed")
-            .await;
+            .await?;
         authority.forget(&current.token_id);
     }
     file.grants.retain(|grant| &grant.scope != scope);
@@ -679,24 +692,160 @@ mod tests {
     use super::*;
     use elastos_runtime::primitives::audit::AuditEvent;
 
-    /// A5-S3c-0b, presence: a stored Agent's presence grant file names its
-    /// own UsersAI root. Expected-fail: the id rule. Flipped by A5-S3c-3a.
+    /// A5-S3c-0b: the presence grant file names the stored Agent root.
     #[test]
-    #[ignore = "expected-fail until A5-S3c-3a"]
     fn a_stored_agents_presence_grant_file_is_under_its_usersai_root() {
-        let data_dir = tempfile::tempdir().unwrap();
-        let id = "person:local:s3c-agent-presence";
-        crate::auth::store_test_human_principal(data_dir.path(), id);
-        crate::auth::tests::mint_agent_record(data_dir.path(), id, None);
-        let root = crate::auth::principal_stored_localhost_root(Some(data_dir.path()), id).unwrap();
-        assert!(root.starts_with("localhost://UsersAI/"), "{root}");
-        let file = load_file(data_dir.path(), id).unwrap();
-        assert_eq!(file.localhost_root, root);
-        assert!(
-            object_uri(id).starts_with(&format!("{root}/")),
-            "{}",
-            object_uri(id)
+        use crate::auth::r4_fixture::{AGENT_ID, AGENT_ROOT};
+        let data_dir = r6_grant_home(crate::auth::PrincipalKind::Agent, false);
+        let file = load_file(data_dir.path(), AGENT_ID).unwrap();
+        assert_eq!(file.localhost_root, AGENT_ROOT);
+        assert_eq!(
+            object_uri(data_dir.path(), AGENT_ID).unwrap(),
+            format!("{AGENT_ROOT}/{PRESENCE_GRANT_OBJECT}")
         );
+    }
+
+    fn r6_grant_home(kind: crate::auth::PrincipalKind, existing: bool) -> tempfile::TempDir {
+        use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT};
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), kind);
+        let root = if kind == crate::auth::PrincipalKind::Agent {
+            AGENT_ROOT
+        } else {
+            HUMAN_ROOT
+        };
+        let id = crate::auth::r4_fixture::principal_id(kind);
+        crate::auth::store_test_principal_root_protection_for(dir.path(), id, root);
+        if existing {
+            let path = elastos_common::localhost::rooted_localhost_fs_path(
+                dir.path(),
+                &format!("{root}/{PRESENCE_GRANT_OBJECT}"),
+            )
+            .unwrap();
+            crate::auth::create_owner_only_dir_all(dir.path(), path.parent().unwrap()).unwrap();
+            let file = PresenceGrantFile {
+                schema: PRESENCE_GRANT_SCHEMA.into(),
+                principal_id: id.into(),
+                localhost_root: root.into(),
+                grants: vec![],
+                requests: vec![PresenceRequest {
+                    scope: scope(),
+                    status: PresenceStatus::Requested,
+                    at: 7,
+                }],
+            };
+            let uri = format!("{root}/{PRESENCE_GRANT_OBJECT}");
+            crate::auth::write_principal_root_object(
+                dir.path(),
+                id,
+                root,
+                &uri,
+                &path,
+                &serde_json::to_vec(&file).unwrap(),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn r6_grant_object_uri_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_grant_home(kind, false);
+            assert_eq!(
+                object_uri(dir.path(), crate::auth::r4_fixture::principal_id(kind)).unwrap(),
+                format!("{root}/{PRESENCE_GRANT_OBJECT}")
+            );
+        }
+        let missing = r6_grant_home(crate::auth::PrincipalKind::Human, false);
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        assert!(object_uri(missing.path(), ID)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+    #[test]
+    fn r6_grant_empty_file_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_grant_home(kind, false);
+            let file = empty_file(dir.path(), crate::auth::r4_fixture::principal_id(kind)).unwrap();
+            assert_eq!(file.localhost_root, root);
+            assert!(file.grants.is_empty() && file.requests.is_empty());
+        }
+        let missing = r6_grant_home(crate::auth::PrincipalKind::Human, false);
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        assert!(empty_file(missing.path(), ID)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+    #[test]
+    fn r6_grant_load_file_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_grant_home(kind, true);
+            let file = load_file(dir.path(), crate::auth::r4_fixture::principal_id(kind)).unwrap();
+            assert_eq!(file.localhost_root, root);
+            assert!(matches!(file.requests[0].status, PresenceStatus::Requested));
+        }
+        let missing = r6_grant_home(crate::auth::PrincipalKind::Human, true);
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        assert!(load_file(missing.path(), ID)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
+    }
+    #[test]
+    fn r6_grant_save_file_uses_stored_kind() {
+        use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
+        for (kind, root) in [
+            (crate::auth::PrincipalKind::Agent, AGENT_ROOT),
+            (crate::auth::PrincipalKind::Human, HUMAN_ROOT),
+        ] {
+            let dir = r6_grant_home(kind, false);
+            let mut file =
+                empty_file(dir.path(), crate::auth::r4_fixture::principal_id(kind)).unwrap();
+            file.requests.push(PresenceRequest {
+                scope: scope(),
+                status: PresenceStatus::Requested,
+                at: 7,
+            });
+            save_file(
+                dir.path(),
+                crate::auth::r4_fixture::principal_id(kind),
+                &file,
+            )
+            .unwrap();
+            assert_eq!(
+                load_file(dir.path(), crate::auth::r4_fixture::principal_id(kind))
+                    .unwrap()
+                    .localhost_root,
+                root
+            );
+            assert!(
+                object_path(dir.path(), crate::auth::r4_fixture::principal_id(kind))
+                    .unwrap()
+                    .starts_with(dir.path().join(root.strip_prefix("localhost://").unwrap()))
+            );
+        }
+        let missing = r6_grant_home(crate::auth::PrincipalKind::Human, false);
+        let file = empty_file(missing.path(), ID).unwrap();
+        crate::auth::r4_fixture::remove(missing.path(), ID);
+        assert!(save_file(missing.path(), ID, &file)
+            .unwrap_err()
+            .to_string()
+            .contains("has no stored record"));
     }
 
     const ME: &str = "did:key:zMe";
@@ -710,6 +859,7 @@ mod tests {
         }
         let principal = "person:local:presence-grant-test".to_string();
         for person in [principal.as_str(), SECOND, OTHER] {
+            crate::auth::store_test_human_principal(temp.path(), person);
             crate::auth::store_test_principal_root_protection(temp.path(), person);
         }
         (temp, principal)
@@ -961,7 +1111,7 @@ mod tests {
         // Another person's token is refused for this person.
         let file = load_file(data, &principal).unwrap();
         let other = OTHER;
-        let mut forged = empty_file(other);
+        let mut forged = empty_file(data, other).unwrap();
         forged.grants = file.grants.clone();
         save_file(data, other, &forged).unwrap();
         assert_eq!(gate(&authority, data, other, ME, runtime, 5).await, None);
@@ -1023,7 +1173,8 @@ mod tests {
         authority
             .manager()
             .revoke(*held_token(data, &principal).id(), "test")
-            .await;
+            .await
+            .unwrap();
         assert_eq!(
             gate(&authority, data, &principal, ME, runtime, 30).await,
             None
@@ -1182,7 +1333,7 @@ mod tests {
                 data,
                 &principal,
                 &crate::auth::principal_localhost_root(&principal),
-                &object_uri(&principal),
+                &object_uri(data, &principal).unwrap(),
                 &path,
                 &serde_json::to_vec(&value).unwrap(),
             )

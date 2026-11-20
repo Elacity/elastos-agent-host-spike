@@ -51,3 +51,6 @@ libc = "0.2"
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tempfile = "3.10"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(elastos_unsupported_os_check)"] }

@@ -19,7 +19,7 @@
 # ~30 unrelated binaries and 33 app capsules for the full-home topology.
 # Direct `cargo build` of just the 4 workspaces this role needs instead.
 # Base images are pinned to their multi-arch index digests (amd64 CI, arm64 dev).
-FROM rust:1.91-bookworm@sha256:c1e5f19e773b7878c3f7a805dd00a495e747acbdc76fb2337a4ebf0418896b33 AS builder
+FROM rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS builder
 
 ARG APP_UID=10001
 ARG APP_GID=10001
@@ -72,9 +72,12 @@ kubo_tarball="kubo_${KUBO_VERSION}_linux-${TARGETARCH}.tar.gz"
 kubo_url="https://dist.ipfs.tech/kubo/${KUBO_VERSION}/${kubo_tarball}"
 # The same release tarball is mirrored on GitHub; the original pin below
 # verifies either route before extraction. A bad checksum fails this RUN.
-if ! curl -fsSL --connect-timeout 15 --max-time 90 --retry 2 --retry-all-errors --retry-delay 5 --retry-max-time 200 -o "/tmp/${kubo_tarball}" "${kubo_url}"; then
+# On 8 Nov 2026 the primary route timed out and the mirror returned 502. Both
+# routes get the cargo-audit budget: a retry budget of 300 s that a running
+# transfer can overrun by up to --max-time 120; two routes stay under 15 min.
+if ! curl -fsSL --connect-timeout 20 --max-time 120 --retry 8 --retry-all-errors --retry-max-time 300 -o "/tmp/${kubo_tarball}" "${kubo_url}"; then
     rm -f "/tmp/${kubo_tarball}"
-    curl -fsSL --connect-timeout 15 --max-time 90 --retry 2 --retry-all-errors --retry-delay 5 --retry-max-time 200 -o "/tmp/${kubo_tarball}" \
+    curl -fsSL --connect-timeout 20 --max-time 120 --retry 8 --retry-all-errors --retry-max-time 300 -o "/tmp/${kubo_tarball}" \
         "https://github.com/ipfs/kubo/releases/download/${KUBO_VERSION}/${kubo_tarball}"
 fi
 echo "${kubo_sha256}  /tmp/${kubo_tarball}" | sha256sum -c -

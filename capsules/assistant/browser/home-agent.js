@@ -1,3 +1,5 @@
+import { createHomeNavigationClient } from "/apps/home/home-navigation-client.js";
+import { onHomeTokenChanged, setHomeGuiLaunchToken } from "./harness-host.js";
 import { selectLiveOffer } from "./agent-live.js";
 import { selectSession, renderSessions } from "./agent-sessions.js";
 import { validModelCid } from "./model-selection.js";
@@ -21,6 +23,8 @@ import { bindAssistantModes } from "./assistant-modes.js";
                       home-agent:close             user asks to leave from inside (Home, Esc)
                       home-agent:open-viewer       artifact to show in Documents
                       home-agent:open-browser      web link to open in Browser
+     Home → capsule   home-agent:open-link {url}   this Home has no Browser app: ask Home's
+                                                  link prompt for that same address
 
    Copy goes to Home itself (the top document), not to Home GUI: this frame is
    opaque-sandboxed with no clipboard permission, so Home writes the text after
@@ -48,6 +52,7 @@ import {
   getHomeGuiLaunchToken,
   homeOrigin,
   bindHomeCopy,
+  openWebLinkThroughHomePrompt,
 } from "./harness-host.js";
 import { createHomeMessageGate } from "./home-agent-gate.js";
 
@@ -170,6 +175,11 @@ window.addEventListener("message", (event) => {
     return;
   }
   const message = event.data;
+  if (message?.type === "home-agent:open-link") {
+    // Not gated with the room: only a link this document just asked about.
+    openWebLinkThroughHomePrompt(typeof message.url === "string" ? message.url : "");
+    return;
+  }
   if (!message || typeof message !== "object" || !HOME_MESSAGE_TYPES.has(message.type)) {
     return;
   }
@@ -193,12 +203,17 @@ document.addEventListener(
   true,
 );
 
-const homeClipboard = createHomeClipboardClient({
+const clipboardOptions = () => ({
   targetId: "assistant",
   homeOrigin: homeOrigin(),
   homeToken: getHomeGuiLaunchToken(),
 });
+const homeClipboard = createHomeClipboardClient(clipboardOptions());
 homeClipboard.start();
+onHomeTokenChanged(token => homeClipboard.setHomeToken(token));
+createHomeNavigationClient({ homeToken: getHomeGuiLaunchToken(), homeOrigin: homeOrigin(),
+  target: "assistant", onHomeToken: setHomeGuiLaunchToken });
+
 
 /* A copy Home would refuse for its size is refused here, by name, before Home
    is asked to confirm it. */

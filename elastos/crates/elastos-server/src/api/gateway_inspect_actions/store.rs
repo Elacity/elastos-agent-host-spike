@@ -5,12 +5,22 @@ use super::binding::inspect_action_request_binding;
 use crate::esp_binding::EspRequestBinding;
 
 pub(super) const INSPECT_ACTION_SCHEMA: &str = "elastos.inspect.action-request/v1";
+/// Kind of an Inspector action request; the only kind the Inbox can approve.
+pub(super) const INSPECT_ACTION_KIND: &str = "inspect_action";
+/// Kind of a pending agent plan: a record of an exact plan with no effect.
+pub(super) const AGENT_PLAN_KIND: &str = "agent_plan";
 const INSPECT_ACTIONS_DIR: &str = "inspect-actions";
 static INSPECT_ACTION_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn default_record_kind() -> String {
+    INSPECT_ACTION_KIND.to_string()
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct InspectActionRequestRecord {
     pub(super) schema: String,
+    #[serde(default = "default_record_kind")]
+    pub(super) kind: String,
     pub(super) request_id: String,
     pub(super) principal_id: String,
     pub(super) session_id: String,
@@ -38,26 +48,50 @@ pub(super) fn pending_inspect_action_requests(
     Ok(records
         .into_iter()
         .filter(|record| record.status == "pending" && record.principal_id == principal_id)
-        .map(|record| {
-            serde_json::json!({
-                "schema": record.schema,
-                "request_id": record.request_id,
-                "id": record.id,
-                "operation": record.operation,
-                "plan": record.plan,
-                "request_binding": record.request_binding.unwrap_or_else(|| inspect_action_request_binding(
-                    &record.request_id,
-                    &record.principal_id,
-                    &record.id,
-                    &record.operation,
-                    &record.plan,
-                    &record.request,
-                )),
-                "status": record.status,
-                "created_at": record.created_at,
-            })
-        })
+        .filter_map(pending_request_view)
         .collect())
+}
+
+/// One pending request as the Inbox reads it. An agent plan carries the stored
+/// step and a binding recomputed from the stored fields, so a plan that changed
+/// after storing shows its new hash. A plan whose binding would be cut is
+/// refused rather than shown in part.
+fn pending_request_view(record: InspectActionRequestRecord) -> Option<serde_json::Value> {
+    let agent_plan = record.kind == AGENT_PLAN_KIND;
+    if !agent_plan && record.kind != INSPECT_ACTION_KIND {
+        return None;
+    }
+    let current = inspect_action_request_binding(
+        &record.request_id,
+        &record.principal_id,
+        &record.id,
+        &record.operation,
+        &record.plan,
+        &record.request,
+    );
+    let binding = if agent_plan {
+        if current.truncated {
+            return None;
+        }
+        current
+    } else {
+        record.request_binding.clone().unwrap_or(current)
+    };
+    let mut view = serde_json::json!({
+        "schema": record.schema,
+        "kind": record.kind,
+        "request_id": record.request_id,
+        "id": record.id,
+        "operation": record.operation,
+        "plan": record.plan,
+        "request_binding": binding,
+        "status": record.status,
+        "created_at": record.created_at,
+    });
+    if agent_plan {
+        view["steps"] = serde_json::json!([record.request]);
+    }
+    Some(view)
 }
 
 pub(super) fn read_inspect_action_record(
@@ -77,6 +111,9 @@ pub(super) fn claim_pending_inspect_action_record(
 ) -> anyhow::Result<InspectActionRequestRecord> {
     let _guard = inspect_action_store_lock()?;
     let mut record = read_inspect_action_record_unlocked(data_dir, request_id)?;
+    if record.kind != INSPECT_ACTION_KIND {
+        anyhow::bail!("Inspector action request has a different kind");
+    }
     if record.status != "pending" {
         anyhow::bail!("Inspector action request is not pending");
     }
@@ -174,6 +211,7 @@ mod tests {
     fn pending_record(request_id: &str) -> InspectActionRequestRecord {
         InspectActionRequestRecord {
             schema: INSPECT_ACTION_SCHEMA.to_string(),
+            kind: INSPECT_ACTION_KIND.to_string(),
             request_id: request_id.to_string(),
             principal_id: "person:test".to_string(),
             session_id: "session:test".to_string(),
@@ -229,5 +267,45 @@ mod tests {
                 .status,
             "approving"
         );
+    }
+
+    #[test]
+    fn inspector_claim_selects_inspect_action_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = pending_record("agent-plan-test");
+        plan.kind = AGENT_PLAN_KIND.to_string();
+        plan.request_binding = Some(inspect_action_request_binding(
+            &plan.request_id,
+            &plan.principal_id,
+            &plan.id,
+            &plan.operation,
+            &plan.plan,
+            &plan.request,
+        ));
+        write_inspect_action_record(dir.path(), &plan).unwrap();
+
+        assert!(claim_pending_inspect_action_record(
+            dir.path(),
+            &plan.request_id,
+            &plan.principal_id,
+            "denied",
+            2,
+        )
+        .is_err());
+        let stored = read_inspect_action_record(dir.path(), &plan.request_id).unwrap();
+        assert_eq!(stored.status, "pending");
+        assert_eq!(stored.updated_at, 1);
+
+        let action = pending_record("inspect-action-test");
+        write_inspect_action_record(dir.path(), &action).unwrap();
+        let claimed = claim_pending_inspect_action_record(
+            dir.path(),
+            &action.request_id,
+            &action.principal_id,
+            "denied",
+            2,
+        )
+        .unwrap();
+        assert_eq!(claimed.status, "denied");
     }
 }

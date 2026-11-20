@@ -248,6 +248,7 @@ impl SharedHomeDelivery {
                             ProviderCarrierRoute::PeerDid {
                                 peer_did: peer.clone(),
                                 timeout_ms: Some(HOME_DELIVERY_TIMEOUT.as_millis() as u64),
+                                reply_wait_ms: None,
                             },
                         ),
                     }),
@@ -970,6 +971,12 @@ mod tests {
             std::fs::set_permissions(&fixture.data_root, std::fs::Permissions::from_mode(0o700))
                 .unwrap();
         }
+        if crate::auth::stored_principal_record(&fixture.data_root, PRESENCE_PRINCIPAL)
+            .unwrap()
+            .is_none()
+        {
+            crate::auth::store_test_human_principal(&fixture.data_root, PRESENCE_PRINCIPAL);
+        }
         crate::auth::store_test_principal_root_protection(&fixture.data_root, PRESENCE_PRINCIPAL);
         let mut seed = fixture.device_key.to_bytes();
         seed[0] ^= 0xa5;
@@ -1253,6 +1260,7 @@ mod tests {
                 granted_presence_driver(&fixture, core.clone(), carrier.clone()).await;
             let first = queued_presence(&fixture, &port, "first-person").await;
             let second = "person:local:second-presence";
+            crate::auth::store_test_human_principal(&fixture.data_root, second);
             crate::auth::store_test_principal_root_protection(&fixture.data_root, second);
             let (key, _) = generate_keypair();
             let profile = crate::collaboration_profile_authority::signed_profile_document_for_test(

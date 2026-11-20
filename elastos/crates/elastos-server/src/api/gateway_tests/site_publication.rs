@@ -175,7 +175,7 @@ fn test_advertised_gateway_urls_for_wildcard_bind_starts_with_loopback() {
 }
 
 #[tokio::test]
-async fn test_landing_page_200() {
+async fn test_landing_page_is_plain_home_page() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(dir.path());
     let app = gateway_router(state);
@@ -186,11 +186,23 @@ async fn test_landing_page_200() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
+    let content_type = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(content_type.starts_with("text/html"), "{content_type}");
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("ElastOS Gateway"));
+    assert!(text.contains("This is an ElastOS Home. No public website is available here."));
+    assert!(text.contains(r#"<a href="https://elastos.elacitylabs.com/">About ElastOS</a>"#));
+    assert!(!text.contains(GATEWAY_VERSION));
+    assert!(!text.contains("/s/"));
+    assert!(!text.contains("healthz"));
+    assert!(!text.contains("<script"));
 }
 
 #[tokio::test]
@@ -287,6 +299,7 @@ async fn test_cid_without_trailing_slash_redirects() {
 #[tokio::test]
 async fn test_ipfs_cid_root_serves_raw_file_without_redirect() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     let (state, _holder) =
         verified_store_state(dir.path(), &[(TEST_CIDV1, "", b"raw-binary")]).await;
     let app = gateway_router(state);
@@ -317,6 +330,7 @@ async fn test_ipfs_cid_root_serves_raw_file_without_redirect() {
 #[tokio::test]
 async fn test_ipfs_cid_root_serves_directory_index_when_cid_is_not_a_file() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     let (state, _holder) = verified_store_state(
         dir.path(),
         &[(TEST_CIDV1, "index.html", b"<html>ok</html>")],
@@ -350,6 +364,7 @@ async fn test_ipfs_cid_root_serves_directory_index_when_cid_is_not_a_file() {
 #[tokio::test]
 async fn test_cid_file_fetches_through_content_provider() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     let state = content_test_state(dir.path()).await;
     let app = gateway_router(state);
 
@@ -379,6 +394,7 @@ async fn test_cid_file_fetches_through_content_provider() {
 #[tokio::test]
 async fn test_content_cid_root_fetches_raw_file_through_content_provider() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     let state = content_test_state(dir.path()).await;
     let app = gateway_router(state);
 
@@ -481,6 +497,7 @@ fn literal_route(prefix: &[&str], path: &str) -> String {
 #[tokio::test]
 async fn gateway_serves_literal_file_paths_exactly_on_every_cid_route() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     write_bundle_site_head(dir.path());
     let paths = elastos_common::test_fixtures::literal_content_paths();
     let expected = |path: &str| format!("content of {path:?}").into_bytes();
@@ -527,6 +544,7 @@ async fn gateway_serves_literal_file_paths_exactly_on_every_cid_route() {
 async fn gateway_reads_ask_the_local_store_for_at_most_the_gateway_file_limit() {
     let limit = MAX_GATEWAY_FILE_SIZE as u64;
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     write_bundle_site_head(dir.path());
     let over = vec![b'x'; MAX_GATEWAY_FILE_SIZE + 1];
     let (state, _holder, store) = local_store_state(
@@ -562,6 +580,7 @@ async fn gateway_reads_ask_the_local_store_for_at_most_the_gateway_file_limit() 
 #[tokio::test]
 async fn gateway_serves_cid_content_only_from_the_verified_local_store() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     write_bundle_site_head(dir.path());
     let (state, holder) = verified_store_state(dir.path(), &[]).await;
     let app = gateway_router(state);
@@ -596,6 +615,7 @@ async fn gateway_serves_cid_content_only_from_the_verified_local_store() {
 #[tokio::test]
 async fn gateway_never_serves_entries_in_the_cache_directory() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     // Entries in the cache directory itself, the layout earlier releases wrote.
     let unverified = b"unverified cache entry";
     std::fs::write(dir.path().join(format!("{TEST_CIDV1}.raw")), unverified).unwrap();
@@ -625,6 +645,7 @@ async fn gateway_never_serves_entries_in_the_cache_directory() {
 #[tokio::test]
 async fn test_traversal_400() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     let state = test_state(dir.path());
     let app = gateway_router(state);
 
@@ -644,6 +665,7 @@ async fn test_traversal_400() {
 #[tokio::test]
 async fn test_missing_file_404() {
     let dir = tempfile::tempdir().unwrap();
+    serve_as_seed(dir.path());
     let (state, _holder) =
         verified_store_state(dir.path(), &[(TEST_CIDV1, "index.html", b"<html></html>")]).await;
     let app = gateway_router(state);
@@ -1489,4 +1511,92 @@ async fn test_active_site_head_prefers_bundle_cid() {
         .await
         .unwrap();
     assert_eq!(&body[..], b"<html>published bundle</html>");
+}
+
+#[tokio::test]
+async fn an_ordinary_home_serves_its_local_store_over_http_only_to_its_own_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, _holder) =
+        verified_store_state(dir.path(), &[(TEST_CIDV1, "", b"a file Bob shared")]).await;
+    let app = gateway_router(state);
+    let authority = passkey_authority_with_name(dir.path(), Some("owner"));
+    let token = app_token_for_authority(dir.path(), LIBRARY_CAPSULE_ID, &authority);
+    let routes = [
+        format!("/content/{TEST_CIDV1}"),
+        format!("/ipfs/{TEST_CIDV1}"),
+        format!("/s/{TEST_CIDV1}/index.html"),
+    ];
+
+    // Published, then no longer shared: a read without a session gets
+    // nothing either way, since sharing happens over Carrier with contacts.
+    crate::library::publish_cid_for_contacts_for_test(dir.path(), "did:key:z6MkOwner", TEST_CIDV1);
+    for path in &routes {
+        let (status, body) = gateway_get(&app, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        assert_ne!(body, b"a file Bob shared", "{path}");
+    }
+    crate::library::withdraw_cid_for_test(dir.path(), TEST_CIDV1);
+    for path in &routes {
+        let (status, _) = gateway_get(&app, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+    // This Home's own apps still read what it holds: from their opaque frame
+    // the browser preflights the token header first, then reads.
+    let preflight = |path: String, method: &'static str| {
+        app.clone().oneshot(
+            Request::builder()
+                .method("OPTIONS")
+                .uri(path)
+                .header("host", "localhost:61180")
+                .header("origin", "null")
+                .header("access-control-request-method", method)
+                .header("access-control-request-headers", "x-elastos-home-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let allowed = preflight(format!("/content/{TEST_CIDV1}"), "GET")
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        allowed
+            .headers()
+            .get("access-control-allow-origin")
+            .unwrap(),
+        "null"
+    );
+    assert_eq!(
+        allowed
+            .headers()
+            .get("access-control-allow-methods")
+            .unwrap(),
+        "GET, HEAD",
+        "a content read is advertised as a read only"
+    );
+    let refused = preflight(format!("/content/{TEST_CIDV1}"), "POST")
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let read = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .uri(format!("/content/{TEST_CIDV1}"))
+                .header("x-elastos-home-token", token.clone())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::OK);
+    assert_eq!(
+        read.headers().get("access-control-allow-origin").unwrap(),
+        "null",
+        "the opaque frame may read the answer"
+    );
+    let body = axum::body::to_bytes(read.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"a file Bob shared");
 }

@@ -23,6 +23,7 @@ is the plant.
 """
 
 import hashlib
+import importlib.util
 import os
 import re
 import shutil
@@ -37,6 +38,10 @@ import sbx
 
 # lab/redteam/py/<this> -> parents[3] is the repo root. Same rule as sbx.
 ROOT = Path(__file__).resolve().parents[3]
+_GIT_ENV_SPEC = importlib.util.spec_from_file_location(
+    "fixture_git_env", ROOT / "scripts" / "fixture-git-env.py")
+fixture_git = importlib.util.module_from_spec(_GIT_ENV_SPEC)
+_GIT_ENV_SPEC.loader.exec_module(fixture_git)
 
 CC = "/usr/bin/cc"
 SERVICE = "com.apple.system.logger"
@@ -1077,7 +1082,7 @@ class MachLookupRules(unittest.TestCase):
                 ],
                 capture_output=True,
                 text=True,
-                env=git_env(),
+                env=fixture_git.fixture_git_env(repo),
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             return completed.stdout.strip()

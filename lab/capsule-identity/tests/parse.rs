@@ -105,4 +105,11 @@ fn parse_shares_the_one_claim_check() {
             "the parse holds {copy:?}, a copy of the claim check:\n{parse}"
         );
     }
+    // The form itself has one definition, the Runtime's `cid_form`, which a
+    // manifest's pins are checked by too. The claim check calls it once and
+    // the library decodes no base32 of its own.
+    let claim = library_item(&code, "fn lab_cid_digits(");
+    assert_eq!(claim.matches("cid_form(claimed)").count(), 1, "{claim}");
+    assert_eq!(code.matches("cid_form(").count(), 1);
+    assert!(!code.contains("decode_base32"), "a second decoder");
 }

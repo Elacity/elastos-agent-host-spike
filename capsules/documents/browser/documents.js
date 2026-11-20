@@ -4,6 +4,8 @@ const state = {
   homeToken: new URLSearchParams(window.location.hash.replace(/^#/, "")).get("home_token") || "",
   initialDocDid: new URLSearchParams(window.location.search).get("doc") || "",
   initialCid: new URLSearchParams(window.location.search).get("cid") || "",
+  // A shared file's stated name: its title and default save name only.
+  initialName: sharedFileName(new URLSearchParams(window.location.search).get("name")),
   initialLibraryObjectUri:
     new URLSearchParams(window.location.search).get("objectUri") ||
     new URLSearchParams(window.location.search).get("object_uri") ||
@@ -15,6 +17,8 @@ const state = {
   current: null,
   currentSessionId: 0,
   dirty: false,
+  // "Save automatically"; Home remembers the person's choice (off by default).
+  autosave: false,
   workspaceView: "write",
   inspectorView: "preview",
   sidebarCollapsed: false,
@@ -26,11 +30,19 @@ const state = {
 // address. Decided once here; the current address may change later.
 const DOCUMENTS_INSIDE_HOME = window.top !== window && !!state.homeToken;
 const homeOrigin = new URLSearchParams(window.location.search).get("home_origin") || "";
-const homeNavigation = createHomeNavigationClient({ homeToken: state.homeToken, homeOrigin });
+const homeNavigation = createHomeNavigationClient({ homeToken: state.homeToken, homeOrigin, target: "documents",
+  onHomeToken(token) { state.homeToken = token; },
+});
 const DOCUMENTS_WINDOW_CLOSE_REQUEST_TYPE =
   "elastos.documents.window-close.request/v1";
 const DOCUMENTS_WINDOW_CLOSE_RESULT_TYPE =
   "elastos.documents.window-close.result/v1";
+const DOCUMENTS_PREFERENCES_REQUEST_TYPE =
+  "elastos.documents.preferences.request/v1";
+const DOCUMENTS_PREFERENCES_SET_TYPE =
+  "elastos.documents.preferences.set/v1";
+const DOCUMENTS_PREFERENCES_TYPE =
+  "elastos.documents.preferences/v1";
 
 const elements = {
   documentsShell: document.getElementById("documents-shell"),
@@ -38,13 +50,15 @@ const elements = {
   sidebarSearch: document.getElementById("sidebar-search"),
   titleInput: document.getElementById("title-input"),
   sidebarToggle: document.getElementById("sidebar-toggle"),
+  sidebarShow: document.getElementById("sidebar-show"),
   saveButton: document.getElementById("save-button"),
+  saveToLibrary: document.getElementById("save-to-library"),
+  autosaveToggle: document.getElementById("autosave-toggle"),
   saveAsButton: document.getElementById("save-as-button"),
-  publishButton: document.getElementById("publish-button"),
-  unpublishButton: document.getElementById("unpublish-button"),
   deleteButton: document.getElementById("delete-button"),
   statusRow: document.getElementById("status-row"),
   statusText: document.getElementById("status-text"),
+  statusAction: document.getElementById("status-action"),
   findBar: document.getElementById("find-bar"),
   findInput: document.getElementById("find-input"),
   findCount: document.getElementById("find-count"),
@@ -56,7 +70,6 @@ const elements = {
   preview: document.getElementById("preview"),
   previewPanel: document.getElementById("preview-panel"),
   outlinePanel: document.getElementById("outline-panel"),
-  historyPanel: document.getElementById("history-panel"),
   newButton: document.getElementById("new-document"),
   modeWrite: document.getElementById("mode-write"),
   modeSplit: document.getElementById("mode-split"),
@@ -65,7 +78,6 @@ const elements = {
   modeRead: document.getElementById("mode-read"),
   panePreview: document.getElementById("pane-preview"),
   paneOutline: document.getElementById("pane-outline"),
-  paneHistory: document.getElementById("pane-history"),
   shareShell: document.getElementById("share-shell"),
   shareSidebar: document.getElementById("share-sidebar"),
   shareSidebarMeta: document.getElementById("share-sidebar-meta"),
@@ -88,7 +100,6 @@ const elements = {
 };
 
 let autosaveTimerId = 0;
-let statusClearTimerId = 0;
 let saveInFlight = null;
 let autosaveQueued = false;
 let queuedSaveTarget = null;
@@ -309,16 +320,6 @@ function renderMarkdownDocument(source, options) {
   };
 }
 
-function shortCid(cid) {
-  if (!cid) {
-    return "";
-  }
-  if (cid.length <= 18) {
-    return cid;
-  }
-  return cid.slice(0, 10) + "…" + cid.slice(-6);
-}
-
 function documentUri(docDid) {
   return docDid ? "localhost://ElastOS/Documents/" + docDid : "";
 }
@@ -336,6 +337,28 @@ function documentIdentity(document) {
   return "draft";
 }
 
+// The same rule as Home's sharedFileName (home-external-link.js, which names
+// the Runtime limit it follows): no path separators, control characters or
+// leading dots, at most 200 UTF-8 bytes, cut before the extension.
+function sharedFileName(value) {
+  if (typeof value !== "string" || /[/\\]/.test(value)) return "";
+  const name = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/^[.\s]+/, "").trimEnd();
+  const encoder = new TextEncoder();
+  const bytes = (text) => encoder.encode(text).length;
+  if (bytes(name) <= 200) return name;
+  const dot = name.lastIndexOf(".");
+  const extension = dot > 0 && bytes(name.slice(dot)) <= 16 ? name.slice(dot) : "";
+  let stem = "";
+  let used = bytes(extension);
+  for (const character of extension ? name.slice(0, dot) : name) {
+    used += bytes(character);
+    if (used > 200) break;
+    stem += character;
+  }
+  stem = stem.replace(/[\s.]+$/, "");
+  return stem ? stem + extension : "";
+}
+
 function baseName(uri) {
   const clean = String(uri || "").replace(/\/+$/, "");
   const name = clean.split("/").pop() || "Document";
@@ -344,21 +367,6 @@ function baseName(uri) {
   } catch (_error) {
     return name;
   }
-}
-
-function formatBytes(bytes) {
-  const value = Number(bytes || 0);
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB"];
-  let amount = value;
-  let unitIndex = 0;
-  while (amount >= 1024 && unitIndex < units.length - 1) {
-    amount /= 1024;
-    unitIndex += 1;
-  }
-  return (unitIndex === 0 ? String(amount) : amount.toFixed(amount >= 10 ? 1 : 2)) + " " + units[unitIndex];
 }
 
 function looksLikeTextContent(contentType, buffer) {
@@ -417,10 +425,14 @@ function isDraftDocument(document) {
   return !!document && !document.doc_did && !isLibraryFileProjection(document);
 }
 
+let draftSerial = 0;
+
 function createDraftDocument() {
+  draftSerial += 1;
   return {
     doc_did: "",
     document_uri: "",
+    draft_key: "draft-" + draftSerial,
     title: "",
     file_name: "",
     working_copy_uri: "",
@@ -428,48 +440,105 @@ function createDraftDocument() {
     created_at: 0,
     updated_at: 0,
     latest_published_cid: null,
-    publish_history: [],
   };
 }
 
-function formatTime(timestamp) {
+// A list row's title: the document's title, or a plain file's name, without a
+// .md or .txt ending, the same rule for both.
+function listTitle(item) {
+  const title = String(item.title || "").trim();
+  return title.replace(/\.(md|txt)$/i, "") || title || "Untitled";
+}
+
+// The folder a file sits in, when that is a folder inside Documents.
+function listFolder(item) {
+  const parts = String(item.file_name || "").split("/");
+  return parts.length > 1 ? parts[parts.length - 2] : "";
+}
+
+// When a row last changed, short: "Today 4:41 PM", "Yesterday", "Oct 26"
+// (with the year when it is not this year).
+function shortTime(timestamp, now = new Date()) {
   if (!timestamp) {
     return "";
   }
-  return new Date(timestamp * 1000).toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const date = new Date(timestamp * 1000);
+  const startOfDay = (value) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const daysAgo = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
+  if (daysAgo === 0) {
+    return "Today " + date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  }
+  if (daysAgo === 1) {
+    return "Yesterday";
+  }
+  return date.toLocaleDateString(undefined, date.getFullYear() === now.getFullYear()
+    ? { month: "short", day: "numeric" }
+    : { month: "short", day: "numeric", year: "numeric" });
 }
 
 function preferredWorkspaceView(view) {
   return view === "read" ? "read" : view === "split" ? "split" : "write";
 }
 
-function clearStatusTimer() {
-  if (statusClearTimerId) {
-    window.clearTimeout(statusClearTimerId);
-    statusClearTimerId = 0;
-  }
-}
-
-function scheduleStatusClear(delay = 1600) {
-  clearStatusTimer();
-  statusClearTimerId = window.setTimeout(() => {
-    if (!state.dirty) {
-      clearStatus();
-    }
-  }, delay);
-}
-
 function clearStatus() {
-  clearStatusTimer();
   elements.statusText.textContent = "";
-  elements.statusText.className = "status-text";
   elements.statusRow.classList.add("hidden");
+  elements.statusAction.classList.add("hidden");
+}
+
+// A Library file whose save failed (most often because it changed in another
+// window) can be reloaded from what is stored, here or from its list row.
+function libraryFileSaveFailed() {
+  return isLibraryFileProjection(state.current) && state.dirty &&
+    saveRecovery?.phase === "library" && isCurrentSessionTarget(saveRecovery.target);
+}
+
+async function loadSavedLibraryVersion() {
+  const current = state.current;
+  if (!isLibraryFileProjection(current)) {
+    return;
+  }
+  const confirmed = await confirmInCapsule({
+    title: "Load the saved version?",
+    message: "Your edits to " + (current.file_name || "this file") + " will be lost.",
+    confirmLabel: "Load saved version",
+    danger: true,
+  });
+  if (!confirmed || state.current !== current) {
+    return;
+  }
+  unsavedDocuments.delete(unsavedKey(current));
+  state.dirty = false;
+  await loadLibraryObject(current.library_object_uri).catch((error) => {
+    showError(readableDocumentsError(error, "This file could not be opened."));
+  });
+}
+
+// Save as copy for a Library file: the edits become a new file in Documents,
+// through the same import Chat attachments use, and that copy opens.
+async function saveLibraryFileCopy(fileName) {
+  const target = { sessionId: state.currentSessionId, identity: documentIdentity(state.current) };
+  const name = String(fileName || "").trim() || suggestedDuplicateFileName(state.current) || "Copy.txt";
+  const requestedTitle = elements.titleInput.value;
+  const requestedBody = elements.editor.value;
+  const response = await documentsProviderApi("import_chat_attachment", {
+    attachment_id: "copy-" + window.crypto.randomUUID(),
+    file_name: name,
+    mime: /\.md$/i.test(name) ? "text/markdown" : "text/plain",
+    body: requestedBody,
+  });
+  const copy = requireSavedWorkingCopy(response.document);
+  upsertDocumentListItem(copy);
+  renderDocumentsList();
+  if (!isCurrentDocumentTarget(target)) return;
+  // As ordinary Save As: edits typed while the copy saved stay here, unsaved.
+  if (elements.titleInput.value !== requestedTitle || elements.editor.value !== requestedBody) {
+    showError("Copy saved. Newer edits are kept in this document.");
+    return;
+  }
+  // The edits now live in the copy; the original file keeps what is stored.
+  replaceCurrentDocument(copy);
+  renderCurrentDocument();
 }
 
 function clearAutosaveTimer() {
@@ -519,6 +588,7 @@ function isCurrentDocumentTarget(target) {
 function scheduleAutosave() {
   clearAutosaveTimer();
   if (
+    !state.autosave ||
     !state.current ||
     state.mode !== "shell" ||
     !state.dirty ||
@@ -528,15 +598,200 @@ function scheduleAutosave() {
     return;
   }
   autosaveTimerId = window.setTimeout(() => {
-    void saveCurrent({ quiet: true, autosave: true }).catch((error) => {
+    void saveCurrent({ autosave: true }).catch((error) => {
       reportSaveFailure(error, "Autosave failed.");
     });
   }, 900);
 }
 
+function applyAutosavePreference(enabled) {
+  state.autosave = enabled === true;
+  if (elements.autosaveToggle) {
+    elements.autosaveToggle.setAttribute("aria-checked", String(state.autosave));
+  }
+  scheduleAutosave();
+}
+
+function toggleAutosavePreference() {
+  const enabled = !state.autosave;
+  applyAutosavePreference(enabled);
+  if (state.homeToken && window.parent !== window) {
+    window.parent.postMessage({ type: DOCUMENTS_PREFERENCES_SET_TYPE, homeToken: state.homeToken, autosave: enabled }, "*");
+  }
+}
+
+function requestAutosavePreference() {
+  if (state.homeToken && window.parent !== window) {
+    window.parent.postMessage({ type: DOCUMENTS_PREFERENCES_REQUEST_TYPE, homeToken: state.homeToken }, "*");
+  }
+}
+
+function handleAutosavePreferenceMessage(data) {
+  if (!hasExactKeys(data, ["type", "homeToken", "autosave"]) ||
+      data.type !== DOCUMENTS_PREFERENCES_TYPE ||
+      data.homeToken !== state.homeToken ||
+      typeof data.autosave !== "boolean") {
+    return false;
+  }
+  applyAutosavePreference(data.autosave);
+  return true;
+}
+
+function unsavedDocumentName() {
+  return elements.titleInput.value.trim() || state.current?.file_name || "Untitled";
+}
+
+// Unsaved edits ask before they leave the editor: Save keeps them, Don't save
+// drops them, Cancel stays. Resolves true when the caller may go on.
+async function resolveUnsavedChanges() {
+  if (!state.current || !state.dirty) return true;
+  const sessionId = state.currentSessionId;
+  clearAutosaveTimer();
+  const choice = await chooseInCapsule({
+    title: "Save changes to " + unsavedDocumentName() + "?",
+    message: "Your changes will be lost if you don't save them.",
+    confirmLabel: "Save",
+    secondaryLabel: "Don't save",
+    defaultFocus: "cancel",
+  });
+  if (sessionId !== state.currentSessionId) return false;
+  if (choice === "secondary") return true;
+  if (choice !== "confirm") {
+    scheduleAutosave();
+    return false;
+  }
+  try {
+    await saveCurrent();
+  } catch (error) {
+    reportSaveFailure(error, "Save failed.");
+    return false;
+  }
+  return sessionId === state.currentSessionId && !state.dirty;
+}
+
+// Unsaved documents this window holds while another one is open, keyed by
+// document. Switching documents, New and opening a file keep the text here
+// instead of asking; switching back brings it back. Only closing the window,
+// Lock and sign-out ask, since only they would lose it.
+const unsavedDocuments = new Map();
+
+function unsavedKey(document) {
+  if (!document) return "";
+  return isDraftDocument(document) ? "draft:" + (document.draft_key || "") : documentIdentity(document);
+}
+
+function listItemUnsavedKey(item) {
+  if (item.draft_key) return "draft:" + item.draft_key;
+  return item.library_object_uri ? "library:" + item.library_object_uri : "document:" + item.doc_did;
+}
+
+function hasUnsavedDocuments() {
+  return (state.dirty && !!state.current && !state.current.shared) || unsavedDocuments.size > 0;
+}
+
+// Keeps the open document's unsaved text just before another replaces it.
+function keepUnsavedCurrent() {
+  const current = state.current;
+  if (!current || !state.dirty || current.shared) return;
+  unsavedDocuments.set(unsavedKey(current), {
+    document: { ...current, title: elements.titleInput.value, body: elements.editor.value },
+    savedWorkingCopy: savedWorkingCopy ? { ...savedWorkingCopy } : null,
+    saveRecovery: saveRecovery && isCurrentSessionTarget(saveRecovery.target) ? { ...saveRecovery } : null,
+  });
+}
+
+// Before leaving a document: a new one still being created finishes first,
+// so it is not created twice; with Save automatically on and no save under
+// way, the document saves now, as it would have anyway. A save under way for
+// a stored document finishes on its own (reconcileKeptAfterSave).
+async function prepareToLeaveCurrent() {
+  if (saveInFlight && isDraftDocument(state.current)) {
+    await saveInFlight.catch(() => {});
+  }
+  if (!saveInFlight && state.autosave && state.dirty && state.current && !state.current.shared) {
+    await saveCurrent({ autosave: true }).catch((error) => {
+      reportSaveFailure(error, "Autosave failed.");
+    });
+  }
+}
+
+// A save that finishes after its document was left: the kept text is saved
+// if it is what was sent, or else now builds on the saved revision.
+function reconcileKeptAfterSave(identity, persistedDocument, requestedTitle, requestedBody) {
+  const kept = unsavedDocuments.get(identity);
+  if (!kept) {
+    return;
+  }
+  if (kept.document.body === requestedBody && kept.document.title === requestedTitle) {
+    unsavedDocuments.delete(identity);
+  } else {
+    kept.document = { ...kept.document, revision: persistedDocument.revision };
+    kept.savedWorkingCopy = { ...persistedDocument };
+    kept.saveRecovery = null;
+  }
+  renderDocumentsList();
+}
+
+// Brings back a document's unsaved text, keeping the open one's first.
+function restoreUnsavedDocument(key) {
+  const kept = unsavedDocuments.get(key);
+  if (!kept) return false;
+  keepUnsavedCurrent();
+  unsavedDocuments.delete(key);
+  replaceCurrentDocument({ ...kept.document });
+  savedWorkingCopy = kept.savedWorkingCopy;
+  if (kept.saveRecovery) {
+    saveRecovery = { ...kept.saveRecovery,
+      target: { sessionId: state.currentSessionId, identity: documentIdentity(state.current) } };
+  }
+  state.mode = "shell";
+  elements.shareShell.classList.add("hidden");
+  elements.documentsShell.classList.remove("hidden");
+  renderCurrentDocument();
+  setDirty(true);
+  scheduleAutosave();
+  return true;
+}
+
+async function openKeptDraft(draftKey) {
+  await prepareToLeaveCurrent();
+  restoreUnsavedDocument("draft:" + draftKey);
+}
+
+function unsavedDocumentNames() {
+  const names = state.dirty && state.current && !state.current.shared ? [unsavedDocumentName()] : [];
+  for (const kept of unsavedDocuments.values()) {
+    names.push(kept.document.title.trim() || kept.document.file_name || "Untitled");
+  }
+  return names;
+}
+
+// Save all, from closing the window: the open document, then each kept one.
+// Stops at the first that does not save, which stays open with its text.
+async function saveAllUnsaved() {
+  // Edits made while a save runs, in any document, are saved too: close only
+  // when nothing in the window is left unsaved. Each round saves one document.
+  for (let round = 0; round < 100; round += 1) {
+    if (state.dirty && state.current && !state.current.shared) {
+      await saveCurrent();
+      continue;
+    }
+    const key = unsavedDocuments.keys().next().value;
+    if (key === undefined) {
+      return true;
+    }
+    restoreUnsavedDocument(key);
+  }
+  return !hasUnsavedDocuments();
+}
+
 function reportSaveFailure(error, fallback) {
   if (error?.documentsTarget && !isCurrentDocumentTarget(error.documentsTarget)) return;
-  setStatus(readableDocumentsError(error, fallback), "warning");
+  showError(readableDocumentsError(error, fallback));
+  if (libraryFileSaveFailed()) {
+    elements.statusAction.textContent = "Load saved version";
+    elements.statusAction.classList.remove("hidden");
+  }
 }
 
 function canAnnounceHomeChrome() {
@@ -552,7 +807,6 @@ function buildHomeMenuManifest() {
           { label: "New Document", cmd: "file-new-document" },
           { label: "Save", cmd: "file-save" },
           { label: "Save As", cmd: "file-save-as" },
-          { label: "Publish", cmd: "file-publish" },
           { label: "Delete Document", cmd: "file-delete-document" },
           { label: "Close Window", cmd: "__close-window" },
         ],
@@ -627,7 +881,7 @@ function activateMarkdownLink(event) {
     if (state.mode === "share") {
       elements.shareSubtitle.textContent = message;
     } else {
-      setStatus(message, "warning");
+      showError(message);
     }
     return;
   }
@@ -707,8 +961,6 @@ function openContextMenu(x, y, docDid) {
     actions.push({ action: "duplicate", label: "Duplicate" });
     if (documentItem.latest_published_cid) {
       actions.push({ action: "unpublish", label: "Unpublish" });
-    } else {
-      actions.push({ action: "publish", label: "Publish" });
     }
     actions.push({ action: "delete", label: "Delete", danger: true });
   }
@@ -933,6 +1185,10 @@ function syncEditorMutation() {
 }
 
 function setTaskLineChecked(lineNumber, checked) {
+  if (state.current?.shared) {
+    refreshPreviewFromEditor();
+    return;
+  }
   const lines = String(elements.editor.value || "").replace(/\r\n/g, "\n").split("\n");
   if (lineNumber < 0 || lineNumber >= lines.length) {
     return;
@@ -949,6 +1205,7 @@ function setTaskLineChecked(lineNumber, checked) {
 }
 
 function toggleTaskAtCursor() {
+  if (state.current?.shared) return;
   const source = String(elements.editor.value || "");
   const selectionStart = elements.editor.selectionStart || 0;
   const selectionEnd = elements.editor.selectionEnd || selectionStart;
@@ -983,8 +1240,21 @@ function sortDocuments() {
   });
 }
 
+// A shared file shows the reading view and Save to Library only; every other
+// document gets Write, Split and Save back.
+function setSharedChrome(shared) {
+  elements.modeWrite.classList.toggle("hidden", shared);
+  elements.modeSplit.classList.toggle("hidden", shared);
+  elements.saveButton.classList.toggle("hidden", shared);
+  elements.saveToLibrary.classList.toggle("hidden", !shared);
+  if (shared) {
+    setWorkspaceView("read");
+  }
+}
+
 function setWorkspaceView(view) {
-  state.workspaceView = preferredWorkspaceView(view);
+  // A shared read-only file has the reading view only.
+  state.workspaceView = state.current?.shared ? "read" : preferredWorkspaceView(view);
   if (state.workspaceView === "read") {
     setInspectorView("preview");
   }
@@ -1003,33 +1273,24 @@ function setWorkspaceView(view) {
 function setSidebarCollapsed(collapsed) {
   state.sidebarCollapsed = !!collapsed;
   elements.documentsShell.dataset.sidebarCollapsed = state.sidebarCollapsed ? "true" : "false";
-  const label = state.sidebarCollapsed ? "Show list" : "Hide list";
-  elements.sidebarToggle.setAttribute("aria-label", label);
-  elements.sidebarToggle.title = label;
-  elements.sidebarToggle.setAttribute("aria-expanded", String(!state.sidebarCollapsed));
 }
 
 function setInspectorView(view) {
-  state.inspectorView = view === "outline" ? "outline" : view === "history" ? "history" : "preview";
+  state.inspectorView = view === "outline" ? "outline" : "preview";
   elements.previewPanel.classList.toggle("hidden", state.inspectorView !== "preview");
   elements.outlinePanel.classList.toggle("hidden", state.inspectorView !== "outline");
-  elements.historyPanel.classList.toggle("hidden", state.inspectorView !== "history");
   elements.panePreview.classList.toggle("active", state.inspectorView === "preview");
   elements.paneOutline.classList.toggle("active", state.inspectorView === "outline");
-  elements.paneHistory.classList.toggle("active", state.inspectorView === "history");
   if (!elements.findBar.classList.contains("hidden")) {
     updateFindMatches({ preserveIndex: true });
   }
 }
 
-function setStatus(message, type) {
-  clearStatusTimer();
-  const text = type === "warning"
-    ? readableDocumentsError(message, "Documents action could not be completed.")
-    : String(message || "");
-  elements.statusText.textContent = text;
-  elements.statusText.className = "status-text" + (type === "warning" ? " warning" : "");
-  elements.statusRow.classList.toggle("hidden", !text);
+// The line under the title carries errors only; saving and other progress stay
+// quiet (the Save button and the list's "unsaved" marker show the dirty state).
+function showError(message) {
+  elements.statusText.textContent = readableDocumentsError(message, "Documents action could not be completed.");
+  elements.statusRow.classList.remove("hidden");
 }
 
 function setDirty(dirty) {
@@ -1037,37 +1298,17 @@ function setDirty(dirty) {
   const hasCurrent = !!state.current;
   const hasPersistedCurrent = hasCurrent && !isDraftDocument(state.current);
   const isLibraryFile = isLibraryFileProjection(state.current);
-  elements.saveButton.disabled = !hasCurrent || !state.dirty;
-  elements.saveAsButton.disabled = !hasPersistedCurrent || isLibraryFile;
-  elements.publishButton.disabled = !hasCurrent || isLibraryFile;
-  elements.unpublishButton.disabled = !hasPersistedCurrent || isLibraryFile || !state.current.latest_published_cid;
+  elements.saveButton.disabled = !hasCurrent || !state.dirty || !!state.current.shared;
+  // The Save button itself shows that this document has unsaved changes.
+  const unsaved = !elements.saveButton.disabled;
+  elements.saveButton.classList.toggle("has-unsaved", unsaved);
+  elements.saveButton.title = unsaved ? "Save (unsaved changes)" : "Save";
+  elements.saveAsButton.disabled = !hasPersistedCurrent;
   elements.deleteButton.disabled = !hasPersistedCurrent || isLibraryFile;
-  if (hasCurrent && state.dirty) {
-    setStatus("Unsaved local changes.", "warning");
-  } else if (hasCurrent) {
+  if (hasCurrent && !state.dirty) {
     clearStatus();
   }
   renderDocumentsList();
-}
-
-function renderHistory() {
-  elements.historyPanel.innerHTML = "";
-  const revisions = state.current && Array.isArray(state.current.publish_history)
-    ? [...state.current.publish_history].reverse()
-    : [];
-  if (!revisions.length) {
-    elements.historyPanel.innerHTML = '<div class="sidebar-note">No published revisions yet.</div>';
-    return;
-  }
-  revisions.forEach((revision, index) => {
-    const item = window.document.createElement("div");
-    item.className = "history-item";
-    item.innerHTML =
-      '<span class="history-kicker">Revision ' + escapeHtml(String(revisions.length - index)) + "</span>" +
-      '<span class="history-title">' + escapeHtml(shortCid(revision.cid)) + "</span>" +
-      '<span class="history-meta">' + escapeHtml(formatTime(revision.published_at)) + "</span>";
-    elements.historyPanel.appendChild(item);
-  });
 }
 
 function renderOutline(outline) {
@@ -1107,21 +1348,24 @@ function renderCurrentDocument() {
     elements.titleInput.disabled = true;
     elements.editor.value = "";
     elements.editor.disabled = true;
+    setSharedChrome(false);
     elements.preview.innerHTML = '<div class="empty-state">Create or open a document.</div>';
-    renderHistory();
     renderOutline([]);
-    setStatus("No document selected.");
+    clearStatus();
     setDirty(false);
     return;
   }
 
+  const shared = !!state.current.shared;
   elements.titleInput.disabled = isLibraryFileProjection(state.current);
+  elements.titleInput.readOnly = shared;
   elements.editor.disabled = false;
+  elements.editor.readOnly = shared;
+  setSharedChrome(shared);
   elements.titleInput.value = state.current.title;
   elements.editor.value = state.current.body;
   refreshPreviewFromEditor();
 
-  renderHistory();
   clearStatus();
   setDirty(false);
 }
@@ -1129,7 +1373,12 @@ function renderCurrentDocument() {
 function renderDocumentsList() {
   elements.documentsList.innerHTML = "";
   const query = state.filterQuery.trim().toLowerCase();
-  const visibleDocuments = state.documents.filter((item) => {
+  // New documents kept unsaved in this window list first, until saved.
+  const keptDrafts = [...unsavedDocuments.values()]
+    .filter((kept) => isDraftDocument(kept.document))
+    .map((kept) => ({ draft_key: kept.document.draft_key, title: kept.document.title.trim() || "Untitled",
+      file_name: "", updated_at: 0 }));
+  const visibleDocuments = [...keptDrafts, ...state.documents].filter((item) => {
     if (!query) {
       return true;
     }
@@ -1140,30 +1389,46 @@ function renderDocumentsList() {
     return;
   }
 
+  const currentKey = state.current ? state.current.library_object_uri || state.current.doc_did : "";
   visibleDocuments.forEach((item) => {
     const button = window.document.createElement("button");
     button.type = "button";
     const classes = ["document-list-item"];
-    if (item.latest_published_cid) {
-      classes.push("published");
-    }
-    if (state.current && state.current.doc_did === item.doc_did) {
+    const isCurrent = !!currentKey && currentKey === (item.library_object_uri || item.doc_did);
+    if (isCurrent) {
       classes.push("active");
     }
     button.className = classes.join(" ");
-    button.dataset.docDid = item.doc_did;
-    const dirtyMarker = state.current && state.current.doc_did === item.doc_did && state.dirty ? " • unsaved" : "";
-    const publishedIcon = item.latest_published_cid
-      ? '<span class="document-list-published-icon" aria-label="Published" title="Published"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"></path><path d="m7 9 5-5 5 5"></path><path d="M5 16v4h14v-4"></path></svg></span>'
-      : "";
+    if (item.draft_key) {
+      button.dataset.draftKey = item.draft_key;
+    } else if (item.library_object_uri) {
+      button.dataset.objectUri = item.library_object_uri;
+    } else {
+      button.dataset.docDid = item.doc_did;
+    }
+    const unsaved = (isCurrent && state.dirty) || unsavedDocuments.has(listItemUnsavedKey(item));
+    const meta = [listFolder(item), shortTime(item.updated_at)].filter(Boolean).join(" · ");
+    if (item.file_name) {
+      button.title = item.file_name;
+    }
     button.innerHTML =
-      '<span class="document-list-title-row"><span class="document-list-title">' + escapeHtml(item.title) + "</span>" + publishedIcon + "</span>" +
-      '<span class="document-list-meta">' + escapeHtml(item.file_name + dirtyMarker) + "</span>" +
-      '<span class="document-list-row"><span class="document-list-updated">' + escapeHtml(formatTime(item.updated_at)) + '</span></span>';
-    button.addEventListener("click", () => selectDocument(item.doc_did));
+      '<span class="document-list-title-row"><span class="document-list-title">' + escapeHtml(listTitle(item)) + "</span>" +
+      (unsaved ? '<span class="document-list-unsaved" role="img" aria-label="Unsaved changes" title="Unsaved changes"></span>' : "") +
+      "</span>" +
+      (meta ? '<span class="document-list-meta">' + escapeHtml(meta) + "</span>" : "");
+    button.addEventListener("click", () => item.draft_key
+      ? openKeptDraft(item.draft_key)
+      : item.library_object_uri
+        ? selectLibraryFile(item.library_object_uri)
+        : selectDocument(item.doc_did));
     elements.documentsList.appendChild(button);
   });
 }
+
+// Every Documents request ends within this deadline, so a save that never
+// answers fails, keeps the edits (a later Save checks what was stored), and
+// frees a Lock or sign-out that waits on it.
+const DOCUMENTS_REQUEST_DEADLINE_MS = 20_000;
 
 async function documentsApi(path, options) {
   const request = { method: "GET", ...(options || {}) };
@@ -1174,19 +1439,30 @@ async function documentsApi(path, options) {
   if (request.body && !request.headers["content-type"]) {
     request.headers["content-type"] = "application/json";
   }
-  const response = await fetch(path, request);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || "Documents request failed");
+  const controller = new AbortController();
+  const deadline = window.setTimeout(() => controller.abort(), DOCUMENTS_REQUEST_DEADLINE_MS);
+  try {
+    const response = await fetch(path, { ...request, signal: controller.signal });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || "Documents request failed");
+    }
+    if (response.status === 204) {
+      return null;
+    }
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      return await response.json();
+    }
+    return await response.text();
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error("Documents did not answer in time. Your edits are kept.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(deadline);
   }
-  if (response.status === 204) {
-    return null;
-  }
-  const contentType = response.headers.get("content-type") || "";
-  if (contentType.includes("application/json")) {
-    return response.json();
-  }
-  return response.text();
 }
 
 async function documentsProviderApi(op, payload) {
@@ -1267,9 +1543,23 @@ function startDraftDocument(options) {
   }
 }
 
+// Documents' own objects, then plain .md and .txt files in the Documents
+// folder that have none (made in Library, say); those open as Library files
+// and are known by their URI only (no doc_did, which a new draft also lacks).
+function summaryListItems(summary) {
+  const files = (summary.files || []).map((file) => ({
+    library_object_uri: file.uri,
+    title: file.name,
+    file_name: file.path,
+    updated_at: file.updated_at,
+    latest_published_cid: null,
+  }));
+  return [...(summary.documents || []), ...files];
+}
+
 async function loadSummary() {
   const summary = await documentsProviderApi("summary");
-  state.documents = summary.documents || [];
+  state.documents = summaryListItems(summary);
   sortDocuments();
   renderDocumentsList();
   if (state.initialIntent === "new") {
@@ -1292,8 +1582,8 @@ async function loadSummary() {
       await selectDocument(requested.doc_did);
       setWorkspaceView(preferredWorkspaceView(state.initialView));
     } else {
-      elements.documentsShell.classList.add("hidden");
-      await loadPublishedRevisionMode(requestedCid);
+      await loadSharedFile(requestedCid);
+      setWorkspaceView(preferredWorkspaceView(state.initialView));
     }
     return;
   }
@@ -1307,7 +1597,7 @@ async function loadSummary() {
       renderDocumentsList();
       renderCurrentDocument();
       elements.preview.innerHTML = '<div class="error-state">Document not found. Nothing opened.</div>';
-      setStatus("Document not found: " + requestedUri + ". Nothing opened.", "warning");
+      showError("Document not found: " + requestedUri + ". Nothing opened.");
     }
     state.initialDocDid = "";
     return;
@@ -1323,10 +1613,15 @@ async function loadSummary() {
 async function loadLibraryObject(uri) {
   const sequence = ++documentSelectionSequence;
   const sessionId = state.currentSessionId;
+  const title = elements.titleInput.value;
+  const body = elements.editor.value;
   const response = await libraryObjectApi("read", { uri });
-  if (sequence !== documentSelectionSequence || sessionId !== state.currentSessionId) return;
+  // Edits made while the file was read stay; the file does not replace them.
+  if (sequence !== documentSelectionSequence || sessionId !== state.currentSessionId ||
+      title !== elements.titleInput.value || body !== elements.editor.value) return;
   const object = response.object || {};
   const name = object.name || baseName(object.uri || uri);
+  keepUnsavedCurrent();
   replaceCurrentDocument({
     doc_did: "",
     document_uri: object.uri || uri,
@@ -1340,12 +1635,95 @@ async function loadLibraryObject(uri) {
     created_at: object.created_at || 0,
     updated_at: object.modified_at || 0,
     latest_published_cid: null,
-    publish_history: [],
   });
   renderDocumentsList();
   renderCurrentDocument();
-  setStatus("Opened from Library.");
-  scheduleStatusClear();
+}
+
+// A file shared in Chat opens in the normal layout as a read-only copy; Save
+// to Library keeps a private copy. Documents shows the content and the file
+// name the Chat post states, if any: no CID,
+// address, type or size. Home opens Documents for a shared file only after it
+// read the bytes as text (home-external-link.js), so the bytes are the file.
+async function readSharedText(cid) {
+  // Home serves stored content only to its own apps, so the read carries the
+  // launch token like every other Documents request.
+  const response = await fetch("/content/" + encodeURIComponent(cid), {
+    cache: "no-store",
+    headers: { "x-elastos-home-token": state.homeToken },
+  });
+  if (!response.ok) {
+    throw new Error("This shared file could not be opened.");
+  }
+  const buffer = await response.arrayBuffer();
+  if (!looksLikeTextContent(response.headers.get("content-type") || "", buffer)) {
+    throw new Error("Documents can open text files only.");
+  }
+  return new TextDecoder("utf-8").decode(buffer);
+}
+
+async function loadSharedFile(cid) {
+  const sessionId = state.currentSessionId;
+  let body;
+  try {
+    body = await readSharedText(cid);
+  } catch (error) {
+    if (sessionId !== state.currentSessionId) return;
+    replaceCurrentDocument(null);
+    renderDocumentsList();
+    renderCurrentDocument();
+    showError(readableDocumentsError(error, "This shared file could not be opened."));
+    return;
+  }
+  if (sessionId !== state.currentSessionId) return;
+  replaceCurrentDocument({ ...createDraftDocument(), title: state.initialName || "Shared file", body, shared: true, shared_cid: cid });
+  renderDocumentsList();
+  renderCurrentDocument();
+}
+
+// The default name for a saved shared file: .md and .txt stay, anything else
+// becomes a .txt file, since Documents keeps text only.
+function sharedSaveFileName(title) {
+  return sharedFileName(/\.(md|txt)$/i.test(title) ? title : title + ".txt");
+}
+
+// Save to Library keeps the shared file under its own name in the Documents
+// folder, through the same import Chat attachments use; saving the same file
+// again opens the copy already kept.
+async function saveSharedCopy() {
+  const shared = state.current;
+  if (!shared?.shared) return;
+  const sessionId = state.currentSessionId;
+  const fileName = sharedSaveFileName(shared.title);
+  const response = await documentsProviderApi("import_chat_attachment", {
+    attachment_id: "shared-" + shared.shared_cid,
+    file_name: fileName,
+    mime: /\.md$/i.test(fileName) ? "text/markdown" : "text/plain",
+    body: shared.body,
+  });
+  if (sessionId !== state.currentSessionId) return;
+  const document = requireSavedWorkingCopy(response.document);
+  replaceCurrentDocument(document);
+  upsertDocumentListItem(document);
+  renderDocumentsList();
+  renderCurrentDocument();
+}
+
+async function selectLibraryFile(uri) {
+  if (state.current && state.current.library_object_uri === uri) {
+    // The open file's own row reloads it only after its save failed.
+    if (libraryFileSaveFailed()) {
+      await loadSavedLibraryVersion();
+    }
+    return;
+  }
+  await prepareToLeaveCurrent();
+  if (restoreUnsavedDocument("library:" + uri)) {
+    return;
+  }
+  await loadLibraryObject(uri).catch((error) => {
+    showError(readableDocumentsError(error, "This file could not be opened."));
+  });
 }
 
 async function openChatAttachment(payload) {
@@ -1355,16 +1733,7 @@ async function openChatAttachment(payload) {
   }
   state.pendingChatAttachmentId = attachmentId;
   try {
-    if (state.current && state.dirty) {
-      const confirmed = await confirmInCapsule({
-        title: "Discard changes?",
-        message: "Open this Chat attachment without saving the current draft?",
-        confirmLabel: "Discard",
-      });
-      if (!confirmed) {
-        throw new Error("Opening cancelled in Documents.");
-      }
-    }
+    await prepareToLeaveCurrent();
     resetPendingSaveIntent();
     const mime = String(payload && payload.mimeType ? payload.mimeType : "application/octet-stream");
     if (!isTextMimeType(mime)) {
@@ -1382,19 +1751,21 @@ async function openChatAttachment(payload) {
     if (!document || !document.doc_did) {
       throw new Error("Documents could not import this file.");
     }
-    if (state.current && state.current.doc_did === document.doc_did && !state.dirty) {
+    if (state.current && state.current.doc_did === document.doc_did) {
       return true;
     }
     state.mode = "shell";
     elements.shareShell.classList.add("hidden");
     elements.documentsShell.classList.remove("hidden");
+    if (restoreUnsavedDocument("document:" + document.doc_did)) {
+      return true;
+    }
+    keepUnsavedCurrent();
     replaceCurrentDocument(document);
     upsertDocumentListItem(document);
     renderDocumentsList();
     renderCurrentDocument();
     setWorkspaceView(preferredWorkspaceView(state.initialView));
-    setStatus("Opened the Chat attachment.");
-    scheduleStatusClear();
     return true;
   } finally {
     state.pendingChatAttachmentId = "";
@@ -1422,23 +1793,35 @@ function sendChatAttachmentOpenResult({ attachmentId, ok, message }) {
 
 async function selectDocument(docDid, options) {
   const sequence = ++documentSelectionSequence;
-  const sessionId = state.currentSessionId;
-  const title = elements.titleInput.value;
-  const body = elements.editor.value;
   const force = !!(options && options.force);
-  if (state.current && state.current.doc_did !== docDid && state.dirty) {
-    const confirmed = await confirmInCapsule({
-      title: "Discard changes?",
-      message: "Open another document without saving this draft?",
-      confirmLabel: "Discard",
-    });
-    if (!confirmed || sequence !== documentSelectionSequence || sessionId !== state.currentSessionId) {
+  const sameDocument = !!state.current && state.current.doc_did === docDid;
+  // Clicking the open document keeps the editor as it is. An explicit reload,
+  // or opening the stored copy after a save conflict, replaces the text here,
+  // so it asks first; any other switch keeps the unsaved text in this window.
+  const storedCopyWanted = sameDocument && state.dirty &&
+    saveRecovery?.target.sessionId === state.currentSessionId;
+  if (sameDocument && !force && !storedCopyWanted) {
+    return;
+  }
+  const replacesText = sameDocument && state.dirty;
+  if (replacesText) {
+    const sessionBeforePrompt = state.currentSessionId;
+    const proceed = await resolveUnsavedChanges();
+    if (!proceed || sequence !== documentSelectionSequence || sessionBeforePrompt !== state.currentSessionId) {
+      return;
+    }
+  } else {
+    await prepareToLeaveCurrent();
+    if (sequence !== documentSelectionSequence) {
+      return;
+    }
+    if (restoreUnsavedDocument("document:" + docDid)) {
       return;
     }
   }
-  if (!force && state.current && state.current.doc_did === docDid && !state.dirty) {
-    return;
-  }
+  const sessionId = state.currentSessionId;
+  const title = elements.titleInput.value;
+  const body = elements.editor.value;
   resetPendingSaveIntent();
   const response = await documentsProviderApi("get", { doc_did: docDid }).catch((error) => {
     if (sequence !== documentSelectionSequence || sessionId !== state.currentSessionId) return null;
@@ -1447,6 +1830,9 @@ async function selectDocument(docDid, options) {
   if (sequence !== documentSelectionSequence || sessionId !== state.currentSessionId ||
       title !== elements.titleInput.value || body !== elements.editor.value) return;
   requireSavedWorkingCopy(response.document, docDid);
+  if (!replacesText) {
+    keepUnsavedCurrent();
+  }
   replaceCurrentDocument(response.document);
   upsertDocumentListItem(response.document);
   renderDocumentsList();
@@ -1454,16 +1840,8 @@ async function selectDocument(docDid, options) {
 }
 
 async function createDocument(title) {
-  if (state.current && state.dirty) {
-    const confirmed = await confirmInCapsule({
-      title: "Discard changes?",
-      message: "Create a new document without saving this draft?",
-      confirmLabel: "Discard",
-    });
-    if (!confirmed) {
-      return;
-    }
-  }
+  await prepareToLeaveCurrent();
+  keepUnsavedCurrent();
   startDraftDocument({ focusTitle: !title, focusEditor: !!title });
   if (title) {
     elements.titleInput.value = title;
@@ -1472,11 +1850,19 @@ async function createDocument(title) {
   clearStatus();
 }
 
-function applySavedDocumentState(persistedDocument, saveTarget, requestedTitle, requestedBody, successMessage, options) {
-  const quiet = !!(options && options.quiet);
-  if (!isCurrentDocumentTarget(saveTarget)) return;
+function applySavedDocumentState(persistedDocument, saveTarget, requestedTitle, requestedBody) {
+  if (!isCurrentDocumentTarget(saveTarget)) {
+    reconcileKeptAfterSave(saveTarget.identity, persistedDocument, requestedTitle, requestedBody);
+    return;
+  }
   const libraryProjection = isLibraryFileProjection(persistedDocument);
-  if (!libraryProjection) {
+  if (libraryProjection) {
+    const listItem = state.documents.find((item) => item.library_object_uri === persistedDocument.library_object_uri);
+    if (listItem) {
+      listItem.updated_at = persistedDocument.updated_at;
+      sortDocuments();
+    }
+  } else {
     upsertDocumentListItem(persistedDocument);
   }
   renderDocumentsList();
@@ -1497,18 +1883,11 @@ function applySavedDocumentState(persistedDocument, saveTarget, requestedTitle, 
   updateDocumentsNavigation(persistedDocument);
   if (changedDuringSave) {
     refreshPreviewFromEditor();
-    renderHistory();
     setDirty(true);
     scheduleAutosave();
     return;
   }
   renderCurrentDocument();
-  if (quiet) {
-    clearStatus();
-    return;
-  }
-  setStatus(successMessage);
-  scheduleStatusClear();
 }
 
 function requireSavedWorkingCopy(document, expectedId) {
@@ -1522,7 +1901,7 @@ function requireSavedWorkingCopy(document, expectedId) {
 }
 
 async function saveCurrent(options) {
-  if (!state.current) return;
+  if (!state.current || state.current.shared) return;
   const saveTarget = {
     sessionId: state.currentSessionId,
     identity: documentIdentity(state.current),
@@ -1537,15 +1916,27 @@ async function saveCurrent(options) {
   }
   let saveDocument = { ...state.current };
   const baseline = { ...(savedWorkingCopy || saveDocument) };
-  const quiet = !!options?.quiet;
   clearAutosaveTimer();
   const requestedTitle = elements.titleInput.value;
   const requestedBody = elements.editor.value;
-  if (!quiet) {
-    setStatus("Saving…");
-  }
   saveInFlight = (async () => {
     if (isLibraryFileProjection(saveDocument)) {
+      // A write whose reply was lost (or timed out) may have landed. Check the
+      // stored file before writing again, as ordinary saves do.
+      if (saveRecovery?.phase === "library" && isCurrentDocumentTarget(saveRecovery.target)) {
+        const recovery = saveRecovery;
+        const stored = await libraryObjectApi("read", { uri: saveDocument.library_object_uri });
+        if (!isCurrentDocumentTarget(saveTarget)) return;
+        const storedObject = stored?.object || {};
+        const storedBody = base64ToUtf8(stored?.data || "");
+        if (storedObject.revision && storedBody === recovery.body) {
+          saveDocument = { ...saveDocument, revision: storedObject.revision };
+        } else if (storedObject.revision !== recovery.revision) {
+          throw new Error("The file changed since you opened it. Your edits are kept here.");
+        }
+        saveRecovery = null;
+      }
+      saveRecovery = { target: { ...saveTarget }, phase: "library", revision: saveDocument.revision, body: requestedBody };
       const response = await libraryObjectApi("write", {
         uri: saveDocument.library_object_uri,
         data: utf8ToBase64(requestedBody),
@@ -1563,7 +1954,7 @@ async function saveCurrent(options) {
         body: requestedBody,
         mime: object.mime || saveDocument.mime,
         updated_at: object.modified_at || saveDocument.updated_at,
-      }, saveTarget, requestedTitle, requestedBody, "Saved to Library.", options);
+      }, saveTarget, requestedTitle, requestedBody);
       return;
     }
     if (saveRecovery && isCurrentDocumentTarget(saveRecovery.target)) {
@@ -1580,7 +1971,7 @@ async function saveCurrent(options) {
         if (choice === "confirm") {
           const response = await documentsProviderApi("summary", {});
           if (!isCurrentDocumentTarget(saveTarget)) return;
-          state.documents = response.documents;
+          state.documents = summaryListItems(response);
           renderDocumentsList();
           throw new Error("Your draft is kept. Select the stored document to check it, or choose Save to create a copy.");
         }
@@ -1591,7 +1982,7 @@ async function saveCurrent(options) {
         if (!isCurrentDocumentTarget(saveTarget)) return;
         const observed = requireSavedWorkingCopy(response.document, recovery.base.doc_did);
         if (observed.title === recovery.title && observed.body === recovery.body) {
-          applySavedDocumentState(observed, saveTarget, recovery.inputTitle, recovery.body, "Saved document confirmed.", options);
+          applySavedDocumentState(observed, saveTarget, recovery.inputTitle, recovery.body);
           return;
         }
         if (observed.revision !== recovery.base.revision ||
@@ -1613,6 +2004,9 @@ async function saveCurrent(options) {
       savedWorkingCopy = { ...saveDocument };
       saveTarget.identity = documentIdentity(state.current);
       updateDocumentsNavigation(saveDocument);
+      // Listed from now on, so its text stays reachable if the save below fails.
+      upsertDocumentListItem(saveDocument);
+      renderDocumentsList();
     }
     requireSavedWorkingCopy(saveDocument);
     saveRecovery = {
@@ -1630,7 +2024,7 @@ async function saveCurrent(options) {
     if (persisted.title !== (requestedTitle.trim() || "Untitled") || persisted.body !== requestedBody) {
       throw new Error("Save result could not be confirmed. Your edits are kept.");
     }
-    applySavedDocumentState(persisted, saveTarget, requestedTitle, requestedBody, "Saved.", options);
+    applySavedDocumentState(persisted, saveTarget, requestedTitle, requestedBody);
   })();
   try {
     await saveInFlight;
@@ -1648,7 +2042,7 @@ async function saveCurrent(options) {
         saveRecovery?.target.sessionId !== state.currentSessionId &&
         pendingHomeWindowCloseTarget?.sessionId !== state.currentSessionId
       ) {
-        void saveCurrent({ quiet: true, autosave: true }).catch((error) => {
+        void saveCurrent({ autosave: true }).catch((error) => {
           reportSaveFailure(error, "Autosave failed.");
         });
       }
@@ -1657,11 +2051,14 @@ async function saveCurrent(options) {
 }
 
 function openSaveAsModal() {
-  if (!state.current || isDraftDocument(state.current) || isLibraryFileProjection(state.current)) {
+  if (!state.current || isDraftDocument(state.current)) {
     return;
   }
   elements.saveAsTitleInput.value = elements.titleInput.value || state.current.title || "";
-  elements.saveAsFileInput.value = state.current.file_name || "";
+  // A Library file is saved as a copy beside the others in Documents.
+  elements.saveAsFileInput.value = isLibraryFileProjection(state.current)
+    ? suggestedDuplicateFileName(state.current)
+    : state.current.file_name || "";
   elements.saveAsModal.classList.add("open");
   elements.saveAsModal.setAttribute("aria-hidden", "false");
   window.setTimeout(() => elements.saveAsTitleInput.focus(), 10);
@@ -1739,7 +2136,7 @@ async function requestHomeWindowCloseDecision(closeTarget) {
       resumeAutosaveForHomeWindowClose(autosaveSuspension);
       return { ok: false, reason: "stale_request" };
     }
-    if (!state.dirty) {
+    if (!hasUnsavedDocuments()) {
       resumeAutosaveForHomeWindowClose(autosaveSuspension);
       return { ok: true, reason: "" };
     }
@@ -1748,7 +2145,7 @@ async function requestHomeWindowCloseDecision(closeTarget) {
     resumeAutosaveForHomeWindowClose(autosaveSuspension);
     return { ok: false, reason: "stale_request" };
   }
-  if (!state.dirty) {
+  if (!hasUnsavedDocuments()) {
     resumeAutosaveForHomeWindowClose(autosaveSuspension);
     return { ok: true, reason: "" };
   }
@@ -1756,11 +2153,15 @@ async function requestHomeWindowCloseDecision(closeTarget) {
     resumeAutosaveForHomeWindowClose(autosaveSuspension);
     return { ok: false, reason: "stale_request" };
   }
+  // One question for every unsaved document in this window.
+  const names = unsavedDocumentNames();
   const decision = await chooseInCapsule({
-    title: "Save changes before closing?",
-    message: "Save this document, discard your edits, or keep the window open.",
-    confirmLabel: "Save",
-    secondaryLabel: "Discard",
+    title: names.length === 1
+      ? "Save changes to " + names[0] + "?"
+      : "Save changes to " + names.length + " documents?",
+    message: "Your changes will be lost if you don't save them.",
+    confirmLabel: names.length === 1 ? "Save" : "Save all",
+    secondaryLabel: "Don't save",
     defaultFocus: "cancel",
   });
   if (!sameHomeWindowCloseTarget(closeTarget)) {
@@ -1775,12 +2176,9 @@ async function requestHomeWindowCloseDecision(closeTarget) {
     return { ok: false, reason: "cancelled" };
   }
   try {
-    await saveCurrent();
-    if (!sameHomeWindowCloseTarget(closeTarget)) {
-      resumeAutosaveForHomeWindowClose(autosaveSuspension);
-      return { ok: false, reason: "stale_request" };
-    }
-    if (state.dirty) {
+    // Saving every document switches between them on purpose, so the window's
+    // own session check does not apply here.
+    if (!(await saveAllUnsaved())) {
       resumeAutosaveForHomeWindowClose(autosaveSuspension);
       return { ok: false, reason: "save_incomplete" };
     }
@@ -1843,13 +2241,16 @@ async function handleHomeWindowCloseRequest(event) {
 }
 
 async function saveAsCurrent(title, fileName) {
-  if (!state.current || isDraftDocument(state.current) || isLibraryFileProjection(state.current)) {
+  if (!state.current || isDraftDocument(state.current)) {
+    return;
+  }
+  if (isLibraryFileProjection(state.current)) {
+    await saveLibraryFileCopy(fileName);
     return;
   }
   const target = { sessionId: state.currentSessionId, identity: documentIdentity(state.current) };
   const requestedTitle = elements.titleInput.value;
   const requestedBody = elements.editor.value;
-  setStatus("Creating new document…");
   const response = await documentsProviderApi("save_as", {
     doc_did: state.current.doc_did,
     title: title || null,
@@ -1861,43 +2262,13 @@ async function saveAsCurrent(title, fileName) {
   if (elements.titleInput.value !== requestedTitle || elements.editor.value !== requestedBody) {
     upsertDocumentListItem(response.document);
     renderDocumentsList();
-    setStatus("Copy saved. Newer edits are kept in this document.", "warning");
+    showError("Copy saved. Newer edits are kept in this document.");
     return;
   }
   replaceCurrentDocument(response.document);
   upsertDocumentListItem(response.document);
   renderDocumentsList();
   renderCurrentDocument();
-  setStatus("New document created.");
-  scheduleStatusClear();
-}
-
-async function publishCurrent() {
-  if (!state.current) {
-    return;
-  }
-  if (isLibraryFileProjection(state.current)) {
-    setStatus("Publish Library files from Library.", "warning");
-    return;
-  }
-  try {
-    if (state.dirty || isDraftDocument(state.current)) {
-      await saveCurrent();
-    }
-    if (isDraftDocument(state.current)) {
-      throw new Error("Save the document before publishing.");
-    }
-    setStatus("Publishing…");
-    await documentsProviderApi("publish", {
-      doc_did: state.current.doc_did,
-    });
-    await selectDocument(state.current.doc_did, { force: true });
-    setStatus("Published.");
-    scheduleStatusClear();
-  } catch (error) {
-    console.error("documents publish failed", error);
-    setStatus(readableDocumentsError(error, "Publish failed."), "warning");
-  }
 }
 
 async function unpublishCurrent() {
@@ -1910,16 +2281,13 @@ async function unpublishCurrent() {
     return;
   }
   try {
-    setStatus("Unpublishing…");
     await documentsProviderApi("unpublish", {
       doc_did: state.current.doc_did,
     });
     await selectDocument(state.current.doc_did, { force: true });
-    setStatus("Unpublished.");
-    scheduleStatusClear();
   } catch (error) {
     console.error("documents unpublish failed", error);
-    setStatus(readableDocumentsError(error, "Unpublish failed."), "warning");
+    showError(readableDocumentsError(error, "Unpublish failed."));
   }
 }
 
@@ -1939,19 +2307,19 @@ async function requestDeleteCurrent() {
     return;
   }
   try {
-    setStatus("Deleting…");
     await documentsProviderApi("delete", { doc_did: deletedDocDid });
     state.documents = state.documents.filter((document) => document.doc_did !== deletedDocDid);
+    // A deleted document keeps no unsaved text; whatever is open now (another
+    // document, perhaps with edits) stays as it is.
+    unsavedDocuments.delete("document:" + deletedDocDid);
     if (state.current && state.current.doc_did === deletedDocDid) {
       replaceCurrentDocument(createDraftDocument());
+      renderCurrentDocument();
     }
     renderDocumentsList();
-    renderCurrentDocument();
-    setStatus("Deleted.");
-    scheduleStatusClear();
   } catch (error) {
     console.error("documents delete failed", error);
-    setStatus(readableDocumentsError(error, "Document could not be deleted."), "warning");
+    showError(readableDocumentsError(error, "Document could not be deleted."));
   }
 }
 
@@ -1968,32 +2336,30 @@ function suggestedDuplicateFileName(document) {
   return fileName.slice(0, -ext.length) + " copy" + ext;
 }
 
-async function ensureContextDocumentSelected() {
-  if (!contextMenuDocDid) {
+async function ensureContextDocumentSelected(docDid) {
+  if (!docDid) {
     return null;
   }
-  if (!state.current || state.current.doc_did !== contextMenuDocDid) {
-    await selectDocument(contextMenuDocDid);
+  if (!state.current || state.current.doc_did !== docDid) {
+    await selectDocument(docDid);
   }
-  return state.current;
+  return state.current?.doc_did === docDid ? state.current : null;
 }
 
 async function runContextMenuAction(action) {
+  // Closing the menu forgets its row, so the row's document is taken first.
+  const docDid = contextMenuDocDid;
   closeContextMenu();
   if (action === "new") {
     await createDocument("");
     return;
   }
-  const current = await ensureContextDocumentSelected();
+  const current = await ensureContextDocumentSelected(docDid);
   if (!current) {
     return;
   }
   if (action === "duplicate") {
     await saveAsCurrent((current.title || "Untitled document") + " copy", suggestedDuplicateFileName(current));
-    return;
-  }
-  if (action === "publish") {
-    await publishCurrent();
     return;
   }
   if (action === "unpublish") {
@@ -2017,9 +2383,6 @@ function handleHomeMenuCommand(command) {
       break;
     case "file-save-as":
       openSaveAsModal();
-      break;
-    case "file-publish":
-      void publishCurrent();
       break;
     case "file-delete-document":
       void requestDeleteCurrent();
@@ -2070,11 +2433,25 @@ function wireShellEvents() {
       reportSaveFailure(error, "Save failed.");
     });
   });
+  elements.autosaveToggle.addEventListener("click", toggleAutosavePreference);
+  elements.saveToLibrary.addEventListener("click", () => {
+    void saveSharedCopy().catch((error) => {
+      reportSaveFailure(error, "Save failed.");
+    });
+  });
   elements.saveAsButton.addEventListener("click", openSaveAsModal);
-  elements.publishButton.addEventListener("click", publishCurrent);
-  elements.unpublishButton.addEventListener("click", unpublishCurrent);
+  elements.statusAction.addEventListener("click", () => {
+    void loadSavedLibraryVersion();
+  });
   elements.deleteButton.addEventListener("click", requestDeleteCurrent);
-  elements.sidebarToggle.addEventListener("click", () => setSidebarCollapsed(!state.sidebarCollapsed));
+  elements.sidebarToggle.addEventListener("click", () => {
+    setSidebarCollapsed(true);
+    elements.sidebarShow.focus({ preventScroll: true });
+  });
+  elements.sidebarShow.addEventListener("click", () => {
+    setSidebarCollapsed(false);
+    elements.sidebarToggle.focus({ preventScroll: true });
+  });
   wireMoreMenu();
   elements.sidebarSearch.addEventListener("input", () => {
     state.filterQuery = elements.sidebarSearch.value || "";
@@ -2089,7 +2466,6 @@ function wireShellEvents() {
   elements.findClose.addEventListener("click", closeFindBar);
   elements.panePreview.addEventListener("click", () => setInspectorView("preview"));
   elements.paneOutline.addEventListener("click", () => setInspectorView("outline"));
-  elements.paneHistory.addEventListener("click", () => setInspectorView("history"));
   elements.preview.addEventListener("change", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLInputElement) || !target.classList.contains("task-checkbox")) {
@@ -2151,7 +2527,7 @@ function wireShellEvents() {
         } catch (error) {
           console.error("documents open chat attachment failed", error);
           const message = readableDocumentsError(error, "Could not open Chat attachment.");
-          setStatus(message, "warning");
+          showError(message);
           sendChatAttachmentOpenResult({
             attachmentId: data.attachmentId,
             ok: false,
@@ -2168,6 +2544,10 @@ function wireShellEvents() {
       void handleHomeWindowCloseRequest(event);
       return;
     }
+    if (data && typeof data === "object" && data.type === DOCUMENTS_PREFERENCES_TYPE) {
+      handleAutosavePreferenceMessage(data);
+      return;
+    }
     if (!data || typeof data !== "object" || data.type !== "elastos:menu-command" || typeof data.cmd !== "string") {
       return;
     }
@@ -2181,7 +2561,7 @@ function wireShellEvents() {
     try {
       await saveAsCurrent(title, fileName);
     } catch (error) {
-      setStatus(error.message || "Save as failed.", "warning");
+      showError(error.message || "Save as failed.");
     }
   });
   document.addEventListener("keydown", async (event) => {
@@ -2223,7 +2603,7 @@ function wireShellEvents() {
     }
   });
   window.addEventListener("beforeunload", (event) => {
-    if (!state.dirty) {
+    if (!hasUnsavedDocuments()) {
       return;
     }
     event.preventDefault();
@@ -2268,13 +2648,14 @@ async function loadShellMode() {
   setInspectorView("preview");
   wireShellEvents();
   announceHomeChrome();
+  requestAutosavePreference();
   try {
     await loadSummary();
   } catch (error) {
     elements.documentsList.innerHTML = "";
     const message = readableDocumentsError(error, "Documents could not be loaded.");
     elements.preview.innerHTML = '<div class="error-state">' + escapeHtml(message) + "</div>";
-    setStatus(message, "warning");
+    showError(message);
   }
 }
 
@@ -2311,20 +2692,15 @@ function setSharePreview(title, markdown, subtitle, pills) {
   });
 }
 
-async function loadShareBundle(options) {
-  const basePath = options && options.basePath ? options.basePath : "";
-  const sourceUri = options && options.sourceUri ? options.sourceUri : "";
-  const rawCid = options && options.rawCid ? String(options.rawCid || "").trim() : "";
-  const allowRawCidFallback = !!(options && options.allowRawCidFallback && rawCid);
+// Outside Home, a published revision's folder: its files, read relative to
+// this page, each linked by ?file=.
+async function loadShareMode() {
   state.mode = "share";
   elements.shareShell.classList.remove("hidden");
-
-  const params = new URLSearchParams(window.location.search);
-  const requestedFile = (options && options.file) || params.get("file");
-
+  const requestedFile = new URLSearchParams(window.location.search).get("file");
   try {
-    const files = await loadJson(basePath + "_files.json");
-    const shareMeta = await loadJson(basePath + "_share.json").catch(() => null);
+    const files = await loadJson("_files.json");
+    const shareMeta = await loadJson("_share.json").catch(() => null);
     if (!Array.isArray(files) || files.length === 0) {
       throw new Error("Shared revision has no documents.");
     }
@@ -2339,37 +2715,18 @@ async function loadShareBundle(options) {
     files.forEach((file) => {
       const link = document.createElement("a");
       link.className = "share-doc-link" + (file === activeFile ? " active" : "");
-      if (DOCUMENTS_INSIDE_HOME) {
-        // Inside Home a navigation would replace the Documents frame (and
-        // drop its Home token), so the chosen file opens in place.
-        link.setAttribute("role", "link");
-        link.tabIndex = 0;
-        const open = (event) => {
-          if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") {
-            return;
-          }
-          event.preventDefault();
-          void loadShareBundle({ ...options, file });
-        };
-        link.addEventListener("click", open);
-        link.addEventListener("keydown", open);
-      } else {
-        const linkParams = new URLSearchParams(window.location.search);
-        linkParams.set("file", file);
-        link.href = window.location.pathname + "?" + linkParams.toString();
-      }
+      const linkParams = new URLSearchParams(window.location.search);
+      linkParams.set("file", file);
+      link.href = window.location.pathname + "?" + linkParams.toString();
       link.innerHTML =
         '<span class="share-doc-title">' + escapeHtml(file.replace(/\.md$/i, "")) + "</span>" +
         '<span class="share-doc-meta">' + escapeHtml(file) + "</span>";
       elements.shareDocList.appendChild(link);
     });
 
-    const markdown = await loadText(basePath + encodeURIComponent(activeFile));
+    const markdown = await loadText(encodeURIComponent(activeFile));
     const title = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || activeFile.replace(/\.md$/i, "");
     const pills = [];
-    if (sourceUri) {
-      pills.push({ label: "Revision", value: sourceUri });
-    }
     if (shareMeta && shareMeta.share_id) {
       pills.push({ label: "Document", value: shareMeta.share_id });
     }
@@ -2377,85 +2734,9 @@ async function loadShareBundle(options) {
       pills.push({ label: "Version", value: String(shareMeta.version) });
     }
     setSharePreview(title, markdown, "Immutable shared revision.", pills);
-    return;
   } catch (error) {
-    if (allowRawCidFallback) {
-      try {
-        await loadRawCidMode(rawCid, sourceUri);
-        return;
-      } catch (fallbackError) {
-        elements.sharePreview.innerHTML = '<div class="error-state">' + escapeHtml(readableDocumentsError(fallbackError, "Shared content could not be loaded.")) + "</div>";
-        return;
-      }
-    }
     elements.sharePreview.innerHTML = '<div class="error-state">' + escapeHtml(readableDocumentsError(error, "Shared document could not be loaded.")) + "</div>";
   }
-}
-
-async function loadRawCidMode(cid, sourceUri) {
-  const cleanCid = String(cid || "").trim();
-  if (!cleanCid) {
-    throw new Error("This shared file link is incomplete.");
-  }
-  state.mode = "share";
-  elements.shareShell.classList.remove("hidden");
-  elements.shareSidebar.classList.add("hidden");
-  elements.shareSidebarMeta.textContent = "";
-  elements.shareDocList.innerHTML = "";
-
-  const contentPath = "/content/" + encodeURIComponent(cleanCid);
-  const response = await fetch(contentPath, { cache: "no-store" });
-  if (!response.ok) {
-    throw new Error("Could not load " + contentPath);
-  }
-  const contentType = response.headers.get("content-type") || "application/octet-stream";
-  const buffer = await response.arrayBuffer();
-  const pills = [
-    { label: "Content", value: sourceUri || "elastos://" + cleanCid },
-    { label: "Type", value: contentType },
-    { label: "Size", value: formatBytes(buffer.byteLength) },
-  ];
-  if (looksLikeTextContent(contentType, buffer)) {
-    const markdown = new TextDecoder("utf-8").decode(buffer);
-    const title = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim() || shortCid(cleanCid);
-    setSharePreview(title, markdown, "Shared file.", pills);
-    return;
-  }
-
-  document.title = shortCid(cleanCid) + " · Documents";
-  elements.shareTitle.textContent = shortCid(cleanCid);
-  elements.shareSubtitle.textContent = "Shared binary file.";
-  elements.shareTopline.innerHTML = "";
-  pills.forEach((pill) => {
-    const span = document.createElement("span");
-    span.className = "share-token";
-    span.innerHTML = "<strong>" + escapeHtml(pill.label) + "</strong><span>" + escapeHtml(pill.value) + "</span>";
-    elements.shareTopline.appendChild(span);
-  });
-  const download = document.createElement("a");
-  download.className = "action-primary";
-  download.href = contentPath;
-  download.download = cleanCid;
-  download.textContent = "Download content";
-  elements.sharePreview.innerHTML = '<div class="empty-document"><h2>Binary file</h2><p>This link points to a file that Documents cannot preview.</p></div>';
-  elements.sharePreview.querySelector(".empty-document").appendChild(download);
-}
-
-async function loadShareMode() {
-  await loadShareBundle({ basePath: "", sourceUri: "" });
-}
-
-async function loadPublishedRevisionMode(cid) {
-  const cleanCid = String(cid || "").trim();
-  if (!cleanCid) {
-    throw new Error("This published document link is incomplete.");
-  }
-  await loadShareBundle({
-    basePath: "/s/" + encodeURIComponent(cleanCid) + "/",
-    sourceUri: "elastos://" + cleanCid,
-    rawCid: cleanCid,
-    allowRawCidFallback: true,
-  });
 }
 
 function loadLockedMode() {
@@ -2467,7 +2748,7 @@ function loadLockedMode() {
   elements.shareTitle.textContent = "Open Documents from Home";
   elements.shareSubtitle.textContent = "Documents needs a Home launch to edit local markdown.";
   elements.sharePreview.innerHTML =
-    '<div class="empty-document"><h2>Documents is ready.</h2><p>Open it from Home to create, edit, or publish documents.</p></div>';
+    '<div class="empty-document"><h2>Documents is ready.</h2><p>Open it from Home to create or edit documents.</p></div>';
 }
 
 (async function init() {

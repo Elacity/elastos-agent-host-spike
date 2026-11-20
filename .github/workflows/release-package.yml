@@ -71,7 +71,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REPOSITORY" == Elacity/elastos-runtime ]] \
+          [[ "$GITHUB_REPOSITORY" == elastos/elastos-runtime ]] \
             || { echo 'The canonical builder repository is required' >&2; exit 1; }
           [[ "$GITHUB_REF" == refs/heads/develop ]] \
             || { echo 'The develop builder ref is required' >&2; exit 1; }
@@ -112,6 +112,8 @@ jobs:
     env:
       SOURCE_TREE: ${{ needs.admit.outputs.source_tree }}
       RELEASE_PLATFORM: aarch64-darwin
+      # Cargo and its C dependencies target macOS 11.0, not the runner SDK.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -135,7 +137,7 @@ jobs:
           echo "RELEASE_ROOT=$root" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown,aarch64-apple-darwin
       - name: prepare hosted capacity and native tools
         timeout-minutes: 20
@@ -182,6 +184,7 @@ jobs:
             [[ "$(jq -r '[.source.commit, .source.tree, .platform, .version] | join(" ")' "$inputs/$name/platform-input.json")" \
               == "$SOURCE_COMMIT $SOURCE_TREE aarch64-darwin $version" ]]
             [[ "$(HOME="$RELEASE_ROOT/home" "$inputs/$name/artifacts/elastos-aarch64-darwin" --version 2>&1)" == "elastos $version" ]]
+            python3 -I -S scripts/release-platform-input.py macos-floor --floor 11.0 "$inputs/$name/artifacts/elastos-aarch64-darwin"
           done
           [[ "$(git rev-parse HEAD)/$(git rev-parse 'HEAD^{tree}')" == "$SOURCE_COMMIT/$SOURCE_TREE" ]]
           [[ -z "$(git status --porcelain=v1 --untracked-files=all)" ]]
@@ -406,7 +409,7 @@ jobs:
           echo "RELEASE_ROOT=$root" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
           targets: wasm32-unknown-unknown,${{ matrix.target }}
       - name: install host prerequisites
         timeout-minutes: 15
@@ -439,9 +442,13 @@ jobs:
             [[ ! -e "$CARGO_TARGET_DIR" && ! -L "$CARGO_TARGET_DIR" && ! -e "$CARGO_BUILD_BUILD_DIR" && ! -L "$CARGO_BUILD_BUILD_DIR" ]]
             reuse=()
             [[ "$name" == N ]] || reuse=(--reuse-support "$inputs/N")
-            # Browser is Mac-only until #90: Linux builds take no image input.
+            # ARM64 Linux (Jetson) and the Mac ship the same admitted guest
+            # archive from this run's inputs; x86-64 Linux takes no image.
+            image=()
+            [[ "$name" != N || "$RELEASE_PLATFORM" != aarch64-linux ]] \
+              || image=(--browser-vm-image-cid "$BROWSER_IMAGE_CID" --browser-vm-image-sha256 "$BROWSER_IMAGE_SHA256" --browser-vm-image-size "$BROWSER_IMAGE_SIZE")
             HOME="$RELEASE_ROOT/home" scripts/prepare-release-platform.sh \
-              --version "$version" --output "$inputs/$name" ${reuse[@]+"${reuse[@]}"}
+              --version "$version" --output "$inputs/$name" ${reuse[@]+"${reuse[@]}"} ${image[@]+"${image[@]}"}
             python3 -I -S scripts/release-platform-input.py verify "$inputs/$name" > /dev/null
             rm -rf "$CARGO_TARGET_DIR" "$CARGO_BUILD_BUILD_DIR"
           done
@@ -531,7 +538,7 @@ jobs:
           [[ ! -e "$SEED_TARGET" ]]
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
       - name: build Runtime N and the IPFS provider in a fresh Cargo directory
         timeout-minutes: 60
         env:

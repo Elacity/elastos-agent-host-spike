@@ -12,8 +12,9 @@ seccomp part is a generated allow list and a recorded wallet Linux run in which
 the refused calls answer the filter's own marker. The did caller uses the same
 path. The file-row installer is the one Linux launch: it installs the Landlock
 ruleset and then the seccomp filter, and the one record carries a Landlock step.
-The file row of "The contract on Linux" passes for did and wallet on one recorded
-host, named in "The file row". The model provider has no Linux run yet.
+The file row of "The contract on Linux" passes for did, wallet and the model
+provider on the recorded aarch64 host named in "The file row", and on GitHub's
+x86-64 runner.
 `confine.sb` stays each provider's one oracle. The contract is shared, so its
 Linux mapping is written once here, beside the one contract check (P10). The
 Linux policy that the Runtime would generate from the same approved declared
@@ -76,7 +77,39 @@ their storage, and without `unlink` wallet's init fails. The same run dropped
 `access`, which glibc also calls there, and every journey still passed, so it is
 not admitted. The storage row is shared, so did and the model also receive
 `unlink`, though only wallet failed without it; each already holds `unlinkat`,
-which does the same thing.
+which does the same thing. The model also admits `epoll_wait` on x86-64, the
+older form of `epoll_pwait`: a logging filter named it (run 42448113772), and with
+it dropped alone both model journeys failed (run 42454795461).
+
+The model's record replace needs `rename` and `renameat`: `runs_create` writes
+a run through `std::fs::rename`, which calls libc `rename`. glibc's `rename` is
+the `rename` call on x86-64 and `renameat` on aarch64, where the kernel has no
+`rename`. The shared storage row names only `renameat2`, so before these two
+rows the replace answered `EACCES`, Rust read that as `PermissionDenied`, and
+the provider answered `journal_access_denied` at `runs_create`. Each
+architecture admits only the form it has, and the rows stay in the model's own
+runtime set, so did's program is unchanged. The wallet's `save_store` calls the
+same libc `rename`, and the wallet's own runtime set names both forms too, so
+wallet's launch list is did's plus its own form: `rename` on x86-64, `renameat`
+on aarch64. Each architecture's program equals its checked-in golden under
+`tests/`, and `seccomp_wallet_program_adds_only_the_store_replace` checks that
+one difference; WP258 removes the wallet rows and both fail.
+
+TODO, x86-64 drop-one not yet run: the model's runtime calls `epoll_create1`,
+`epoll_ctl`, `epoll_pwait`, `eventfd2`, `exit`, `flock`, `geteuid` and `rseq`
+were each refused alone only on aarch64 (model-drop1/aarch64-af92d32f*.log). On
+x86-64 the model journeys pass with them, which shows the list is enough there,
+not that each call is needed there. The same holds for the seven shared
+`LAUNCH_ESSENTIALS` entries below and for the model's five argument-checked
+rules (`clone`, `socketpair`, `fcntl`, `prlimit64`, `futex`). Each needs a run on
+GitHub's x86-64 runner that refuses it alone and runs the three `linux_model_*`
+tests (and the did and wallet journeys for a launch entry). `munmap` is a stated
+exception, not a measured need, so a green drop-one would not remove it. The
+x86-64-only rows (`epoll_wait`, `arch_prctl`, `poll`, `mkdir`, `unlink`)
+and the x86-64 loader entries already have that run (42454795461). `rename`
+postdates that run. The failing `runs_create` answer named it and, on aarch64,
+`renameat`; no drop-one covers either yet. The next Linux receipt must show
+the nine model answers with them and fail at `runs_create` without them.
 
 The head forms (`(version 1)`, `(deny default)`) and the deny forms grant
 nothing, so they take no row and add no syscall. An allow form with no row is a
@@ -186,20 +219,69 @@ caller alone, because the journey runs the probe only when the provider is
 wallet. In that 31 Oct run the did caller also stopped earlier, at the
 `fchmodat` block recorded below, which is since resolved.
 
-The wallet run requires `init` `ok`, one read-only wallet call `ok`, a
-`wallet-key.hex` of 64 hex digits and a newline under `STORAGE_ROOT`, no profile
-written, and the named sibling `seccomp-outside-write` outside `STORAGE_ROOT`
-absent after the run. The file evidence is those named fixture paths; a seccomp
-filter carries syscall policy, not path policy, so no run claims a general file
-boundary.
+The wallet run requires `init` `ok` with the launch's own config; `status` `ok`
+naming `wallet-provider`, with storage and managed wallets configured and each
+of its five counts zero; then twenty-nine answers under the filter through
+`wallet_standin_linux_only_operations` and `assert_suite_outcomes`, which are
+the cases of `WALLET_LINUX_ONLY_CASES`: `create_managed_account` `ok` with the
+new account, `list_accounts`, `rename_account`, `set_default_account` and
+`default_account` answering the stored default; the EVM and ERC-1271 proof
+calls, `link_verified_account` for the proof account, the Bitcoin challenge and
+BIP322 proof, the approved and rejected approval requests with their signing
+and listing, the connector link with its handoff, completion and Chain outcome,
+the protected-content rights request, both recovery exports and imports, and
+`revoke_account`; `shutdown` last. Three cases answer more than once because the
+journey needs more than one stored effect: `challenge` twice for the EOA and
+ERC-1271 proofs, `request_approval` three times for the approved, rejected and
+connector requests, and `link_verified_account` twice. Every answer is asserted
+exactly: its response schema and protocol version, and the handler's own fields,
+including the managed key's address, the stored label, the default account, each
+proof hash, the approval status transitions, the transaction handoff, the
+recovered account labels, and the managed signature, which recovers from the
+signed message to that account's address. It also requires a `wallet-key.hex` of
+64 hex digits and a newline under `STORAGE_ROOT`, no profile written, and the
+named sibling `seccomp-outside-write` outside `STORAGE_ROOT` absent after the
+run. The file evidence is those named fixture paths; a seccomp filter carries
+syscall policy, not path policy, so no run claims a general file boundary.
 
-The did run requires its permitted operations under the filter, through
-`did_standin_permitted_operations` and `assert_suite_outcomes` against the
-permitted prefix of `DID_SUITE_CASES`: `init` `ok`, `get_did` `ok` with a
-`did:key:` value, `resolve` `ok` on that DID, `set_nickname` `ok`, `get_nickname`
-returning `Confined`, and `get_persona_did` `ok`. Its `STORAGE_ROOT/seccomp-inside-write`
-fixture must equal `b"did seccomp journey fixture\n"`, the encrypted nickname
-`did/nickname.enc` must keep the bytes `set_nickname` wrote, and the named sibling
+The effectful calls write their store. `save_store` replaces `wallet-state.json`
+by writing a staging file beside it and calling `std::fs::rename`, which is the
+Linux `rename` call on x86-64 and `renameat` on aarch64; the shared storage row
+maps to `renameat2` alone, so the wallet's own runtime set admits the replace
+beside it. The number table's empty cell drops the other architecture's form, so
+each launch list holds exactly its own form and `wallet.admits` refuses the
+other. A run that removed both rows from the wallet's set failed both
+`seccomp_wallet_program_equals_its_golden_copy` and
+`seccomp_wallet_program_adds_only_the_store_replace`, and no other test changed
+colour. With the rows present every operation in the table answers `ok` under
+the filter, so every Linux cell of `../wallet-provider/CONFINEMENT.md` cites this
+journey and none stays `designed, not enforced`. The file row is separate: its
+launch adds Landlock and needs ABI 5, and its recorded run is the one "The file
+row" names.
+
+On 2026-11-13 the same wallet journey ran on `elastos-bvm`, a Lima virtual
+machine on the Mac: `aarch64`, Debian, kernel `6.1.0-49-cloud-arm64`, 8 cores,
+unprivileged. The run passed all twenty-nine answers, the `init` key file, the
+absent outside sibling and the mode read, and it printed
+`launcher marker: before -22, after -13`, so `create_managed_account` replaced
+the store under the filter. The earlier runs in this section used
+`spark1.local`; this one adds no host status and no grant. That kernel reports
+Landlock ABI 2, below the ABI 5 the file row needs, so the file row's launch is
+refused there and its evidence stays the run "The file row" records on kernel
+`7.0.0-42-generic` with ABI 8.
+
+The did run requires all ten did operations under the filter. The six file-state
+calls go through `did_standin_permitted_operations` and `assert_suite_outcomes`
+against the permitted prefix of `DID_SUITE_CASES`: `init` `ok`, `get_did` `ok`
+with a `did:key:` value, `resolve` `ok` on that DID, `set_nickname` `ok`,
+`get_nickname` returning `Confined`, and `get_persona_did` `ok`. The journey then
+drives `sign_chat_message`, `verify` on the payload and signature it just
+answered, `verify_did_recovery` with a well-formed request whose signature is not
+hex (which the provider answers `invalid_signature`), and `shutdown`, through
+`did_standin_linux_only_operations` and `DID_LINUX_ONLY_CASES`. Its
+`STORAGE_ROOT/seccomp-inside-write` fixture must equal
+`b"did seccomp journey fixture\n"`, the encrypted nickname `did/nickname.enc`
+must keep the bytes `set_nickname` wrote, and the named sibling
 `seccomp-outside-write` outside `STORAGE_ROOT` must be absent. The did suite's
 file-denial cases stay in the B3 and C0 journeys, because a seccomp filter cannot
 make them fail. Both callers create the fixed-byte fixture before their
@@ -209,10 +291,11 @@ that one comparison for both providers with a changed inside file, a changed
 fixed-byte fixture and a present outside sibling.
 
 The list each journey asserts about itself: its `provider` field is the name it
-asked for, and its `program` equals the program built the same way for wallet.
-That equality follows from the two committed declared-rights files declaring the
-same two rights and the same two `platform-baseline` ids with identical rule text,
-so a difference would be a per-provider widening and the assertion fails on it.
+asked for, and each program equals the one built from its own allow list. The
+two committed declared-rights files declare the same two rights and the same two
+`platform-baseline` ids with identical rule text, so did's list equals wallet's
+apart from wallet's own store-replace form; the journey requires exactly that
+difference, so any further per-provider widening fails the assertion.
 
 The earlier did run measured `LAUNCH_ESSENTIALS` on its own binary, entry by entry,
 by dropping each entry alone from the whole list and reading what then failed. All
@@ -233,11 +316,13 @@ failed with `the confined provider must return the stored nickname` and
 addition was removed. The block is now resolved in did's store instead:
 `save_nickname_with_device_key` creates `nickname.enc` at 0600 and sets the mode
 on the open file, so `fchmodat` stays out of every list.
-`linux_did_journey_runs_under_the_seccomp_allow_list` passes under the same
+`linux_did_journey_runs_under_the_seccomp_allow_list` passed under the same
 policy as wallet's on aarch64 (receipt
 `~/Sparks/office/evidence/b4-x86/pr1548-6241445e-aarch64.log`) and on x86_64
-(this PR's CI). It is lab stand-in evidence on those hosts, not Runtime
-acceptance.
+(this PR's CI) while it drove the six file-state calls. It now drives all ten
+did operations, and the ten-call run on the host "The file row" names is the
+evidence for the ten Linux cells of `../did-provider/CONFINEMENT.md`. It is lab
+stand-in evidence on those hosts, not Runtime acceptance.
 
 The current journey also compares the key's final bytes with the bytes captured
 immediately after `init`. The key check requires the trailing newline.
@@ -443,20 +528,26 @@ is decided here. `install_landlock` is the one kernel caller of that order.
 
 ## The file row
 
-The file row passes for `wallet-provider` and `did-provider` on one recorded host,
-under the lab stand-in. This is not the Runtime, and it does not count toward
-B4-R. `linux` stays out of `DECLARED_CONFINED_OS`: the model provider has no Linux
-run, and the departures under "What this does not cover" stay open too.
+The file row passes for `wallet-provider`, `did-provider` and `model-provider` on
+the recorded aarch64 host and on GitHub's x86-64 runner, under the lab stand-in.
+This is not the Runtime, and it does not count toward B4-R. `linux` stays out of
+`DECLARED_CONFINED_OS`: the departures under "What this does not cover" stay open,
+and B4's Linux cells are credited per architecture and boundary, not flipped.
 
     host: linux/aarch64, Ubuntu 24.04.5 in UTM, kernel 7.0.0-42-generic, Landlock ABI 8
     rustc 1.91.0, binary sha256 e567baad76790ac298a9aa951cb6689a4de0d31c58b97409e92076eeef127160
-    cargo test --locked (capsules/wallet-provider), umask 022: 438 passed, 109 passed in tests/confine.rs
+    cargo test --locked (capsules/wallet-provider), umask 022: 438 passed, 109 passed in tests/confine.rs (did and wallet)
+    cargo test --locked --test confine at the model leg's head: 114 passed (did, wallet and model);
+      receipt ~/Sparks/office/evidence/b4-x86/pr1549-42900e7c-aarch64.log
+    x86-64, GitHub ubuntu-24.04, kernel 7.0.0-1017-azure: the same 114 passed (run 42456977016)
 
 Every control call succeeded, and under the ruleset the two inside calls and the
 read of the bound executable succeeded while the other six answered `EACCES` (13).
-The outside effect was refused by the kernel for both providers and created
-nothing. Wallet's `Init` is that effect. did's `Init` records the root and writes
-nothing, so its first write is.
+The outside effect was refused by the kernel for each provider and created
+nothing. Wallet's `Init` is that effect. The did caller first plants the root's
+`nickname.enc` beneath `STORAGE_PARENT`; did's outside `Init`, holding the
+fixture device key, is refused when it reads that file, and its write to the
+same path is refused as the returned effect.
 
 ### The bound-executable right
 
@@ -503,6 +594,10 @@ bytes. All 109 passed afterwards.
 | Drop `TRUNCATE` from the `STORAGE_ROOT` row | `linux_did_file_row_is_refused_outside_storage_root` | The second `set_nickname` answers `Permission denied (os error 13)`: replacing a file is a truncation, which the oracle's `file-write*` grants |
 | did's store chmods by path, not through its open file | `linux_did_journey_runs_under_the_seccomp_allow_list` | `fchmodat` is refused, so `get_nickname` answers `not_set` |
 
+The did caller now also requires the outside `Init` read refused. The
+skip-install plant therefore reaches that assertion before the write it reached
+in the run above, and that added assertion has not been run on the host yet.
+
 The last one is why did needs no wider policy. `save_nickname_with_device_key`
 creates the file with mode 0600 and calls `fchmod` on the open file, so
 `fchmodat` stays out of did's list and the bytes never sit under wider bits.
@@ -515,10 +610,15 @@ against each binary on this host; the run shows only that they are enough for bo
 providers on this distribution. Other distributions may keep them elsewhere, in
 which case the start is refused rather than unconfined.
 
+The `libm.so.6` entry goes only to providers that map it: `landlock_loader_paths`
+appends `LIBM_LANDLOCK_LOADER_PATHS` for those in `LIBM_LOADER_USERS`. That is the
+model and the wallet on aarch64, where the wallet's start exits 127 without it, and
+the model alone on x86-64 (run 42454795461). did never carries it.
+
 Two departures from "The frame" below stay open, so this row is lab evidence and
 not the designed policy:
 
-- **The loader.** This dynamic build needs its interpreter and three libraries,
+- **The loader.** This dynamic build needs its interpreter and library rules,
   where the frame allows no library rule. With the interpreter executable and
   `execve` on the list, a compromised provider could run a file it can read, such
   as one from its own `STORAGE_ROOT`, through the interpreter. That program runs
@@ -803,6 +903,17 @@ oracle text rather than the Linux policy:
 `profile_denies_network`. `linux` joins `DECLARED_CONFINED_OS` only when the
 Linux counterparts exist and pass, and the gate then holds Linux to them (027).
 Until then, adding `linux` fails the gate on purpose.
+
+The model provider's three Linux tests are `linux_model_journey_runs_under_the_seccomp_allow_list`,
+`linux_model_file_row_is_refused_outside_storage_root` and
+`linux_model_filter_admits_threads_and_refuses_new_processes`. The model's filter
+writes some Linux ABI values out, because it is built on macOS too, and
+`linux_abi_constants_match_libc` checks them against libc on Linux. The model's
+literal allow list for each architecture, which
+`seccomp_model_program_lets_run_exactly_the_listed_calls` compares with the
+numbers its program lets run, and the forbidden-call table are checked against
+`libc::SYS_*` on the Linux host of each architecture by
+`model_syscall_lists_match_libc`.
 
 Today `sandbox_gate` requires `/usr/bin/sandbox-exec`, and
 `sandbox_gate_fails_instead_of_skipping_on_a_declared_os` explicitly expects

@@ -61,6 +61,7 @@ async fn direct_api_route_fixture() -> DirectApiRouteFixture {
             authority.session_id.clone(),
             Some(authority.proof_binding_id.clone()),
             authority.grant_id.clone(),
+            crate::auth::PrincipalKind::Human,
         ),
     )
     .unwrap();

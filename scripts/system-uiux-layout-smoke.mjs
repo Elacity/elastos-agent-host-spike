@@ -2,13 +2,13 @@
 
 import {
   assert,
-  brave,
   chromium,
   jsonResponse,
   makeAppearanceRecord,
   makeSystemSummary,
   startSystemFixtureServer,
 } from "./system-uiux-fixture.mjs";
+import { productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
 import { assertPhoneDrawer } from "./lib/phone-drawer-assert.mjs";
 
 function appearanceRecord() {
@@ -232,6 +232,86 @@ async function readControlMetrics(frame, selector) {
   }, selector);
 }
 
+// The models view fetches /api/capsules/catalog and /api/capsules/interfaces
+// together when it becomes visible, and aborts both when the tab changes
+// (capsules/system/browser/model-management.js load() and stopRead()). A tab
+// change before they answer reports them as net::ERR_ABORTED request failures,
+// so let the pair answer before the smoke activates the next tab.
+const MODELS_REQUESTS = ["/api/capsules/catalog", "/api/capsules/interfaces"];
+// This fixture answers /api/capsules/interfaces with an empty registry
+// (scripts/system-uiux-fixture.mjs), while bindMethods() requires five methods
+// for this capsule, so load() takes its catch path and renders this fixed
+// message (capsules/system/browser/model-management.js). Two 2xx answers plus
+// this exact text is the settled state; any other text, or a missing or
+// non-2xx answer, is a failure rather than a settled view.
+// This wait only lets the layout check leave the Models tab after its two
+// requests have finished. It does not prove the Models view works: any error
+// on load()'s catch path shows this same text. Whether models load and bind
+// is not this layout smoke's job.
+const MODELS_SETTLED_TEXT =
+  "Models are unavailable. Check your connection and trusted catalog, then retry.";
+const MODELS_SETTLE_LIMIT_MS = 5_000;
+
+// Register the listener before the models tab opens, because the view starts
+// both requests as it becomes visible and their response events can arrive
+// before the tab click settles.
+function watchModelsResponses(page) {
+  const answers = [];
+  const listener = (response) => {
+    const path = new URL(response.url()).pathname;
+    if (MODELS_REQUESTS.includes(path)) {
+      answers.push({ path, status: response.status() });
+    }
+  };
+  page.on("response", listener);
+  return { answers, stop: () => page.off("response", listener) };
+}
+
+function modelsStatusText(frame) {
+  return frame.evaluate(() => {
+    const status = document.querySelector(
+      '[data-model-management] [role="status"]',
+    );
+    return status ? status.textContent : null;
+  });
+}
+
+async function waitForModelsSettled(frame, answers) {
+  const statusOf = (path) =>
+    answers.filter((answer) => answer.path === path).at(-1)?.status ?? null;
+  const succeeded = () =>
+    MODELS_REQUESTS.every((path) => {
+      const status = statusOf(path);
+      return status !== null && status >= 200 && status < 300;
+    });
+  const deadline = Date.now() + MODELS_SETTLE_LIMIT_MS;
+  let statusText = await modelsStatusText(frame);
+  while (Date.now() < deadline) {
+    if (statusText === MODELS_SETTLED_TEXT && succeeded()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    statusText = await modelsStatusText(frame);
+  }
+  const seen = {
+    statusText,
+    responses: MODELS_REQUESTS.map((path) => ({
+      path,
+      status: statusOf(path),
+    })),
+  };
+  assert(
+    statusText === MODELS_SETTLED_TEXT,
+    `Models view status text was ${JSON.stringify(statusText)} instead of ${JSON.stringify(MODELS_SETTLED_TEXT)}`,
+    seen,
+  );
+  assert(
+    succeeded(),
+    "Models view requests were not both answered with a 2xx status",
+    seen,
+  );
+}
+
 async function assertScenario(page, width, height, screenshotPath) {
   await page.setViewportSize({ width, height });
   await page.goto(page.url(), { waitUntil: "networkidle" });
@@ -241,8 +321,23 @@ async function assertScenario(page, width, height, screenshotPath) {
     await ensureSidebarVisible(frame);
   }
 
-  for (const tab of ["account", "personalization", "shell", "security", "catalog", "about"]) {
-    await activateTab(frame, tab);
+  const tabs = ["account", "personalization", "shell", "security", "models", "about"];
+  const sidebarTabs = await frame.evaluate(() =>
+    [...document.querySelectorAll(".settings-sidebar-item")].map((node) => node.dataset.settings));
+  assert(sidebarTabs.join() === tabs.join(), "System sidebar tabs changed", { sidebarTabs });
+  for (const tab of tabs) {
+    if (tab !== "models") {
+      await activateTab(frame, tab);
+      continue;
+    }
+    // Watch the two response events before the tab opens the view.
+    const models = watchModelsResponses(page);
+    try {
+      await activateTab(frame, "models");
+      await waitForModelsSettled(frame, models.answers);
+    } finally {
+      models.stop();
+    }
   }
   await ensureSidebarVisible(frame);
   await frame.fill("#settings-search", "dock");
@@ -326,6 +421,55 @@ async function assertScenario(page, width, height, screenshotPath) {
   await frame.locator("body").screenshot({ path: screenshotPath });
 }
 
+// Closing the file picker refocuses the hidden file input. In a short window
+// the input sits below the fold; focusing it must not scroll the settings
+// container (which is overflow: hidden, so the content would stay shifted).
+async function assertFileInputFocusKeepsLayout(page) {
+  await page.setViewportSize({ width: 1280, height: 620 });
+  await page.goto(page.url(), { waitUntil: "networkidle" });
+  const frame = await waitForSystemFrame(page);
+  await activateTab(frame, "personalization");
+  const shift = await frame.evaluate(() => {
+    const container = document.querySelector(".settings-container");
+    const content = document.querySelector(".settings-content-container");
+    const sidebar = document.querySelector(".settings-sidebar");
+    const input = document.querySelector("#background-input");
+    if (
+      !(container instanceof HTMLElement) ||
+      !(content instanceof HTMLElement) ||
+      !(sidebar instanceof HTMLElement) ||
+      !(input instanceof HTMLElement)
+    ) {
+      throw new Error("missing settings container, content, sidebar or #background-input");
+    }
+    content.scrollTo({ top: 0, left: 0 });
+    const before = {
+      containerScrollTop: container.scrollTop,
+      contentScrollTop: content.scrollTop,
+      sidebarTop: sidebar.getBoundingClientRect().top,
+    };
+    input.focus();
+    return {
+      before,
+      after: {
+        containerScrollTop: container.scrollTop,
+        contentScrollTop: content.scrollTop,
+        sidebarTop: sidebar.getBoundingClientRect().top,
+      },
+      focused: document.activeElement === input,
+      inputPosition: getComputedStyle(input).position,
+    };
+  });
+  assert(shift.focused, "System background file input did not take focus", shift);
+  assert(
+    shift.after.containerScrollTop === shift.before.containerScrollTop &&
+      shift.after.contentScrollTop === shift.before.contentScrollTop &&
+      Math.abs(shift.after.sidebarTop - shift.before.sidebarTop) < 0.5,
+    "Focusing the hidden background file input scrolls the System content",
+    shift,
+  );
+}
+
 // Phone stage: the menu button sits on the leading edge, on the same line as
 // the page title, as a 44 px target.
 async function assertPhoneTitleRow(page, screenshotPath) {
@@ -385,7 +529,7 @@ async function main() {
   try {
     browser = await chromium.launch({
       headless: true,
-      executablePath: brave,
+      ...productSmokeLaunchOptions(),
     });
     const page = await browser.newPage({
       viewport: { width: 1280, height: 900 },
@@ -413,6 +557,7 @@ async function main() {
     await assertScenario(page, 1280, 900, desktopScreenshot);
     await assertScenario(page, 640, 900, narrowScreenshot);
     await assertPhoneTitleRow(page, phoneScreenshot);
+    await assertFileInputFocusKeepsLayout(page);
 
     assert(
       server.requestFailures.length === 0,
@@ -429,6 +574,10 @@ async function main() {
       "System layout smoke hit console errors",
       consoleErrors,
     );
+    // Every failed request stays a failure here, including net::ERR_ABORTED.
+    // The smoke never cancels catalogue or interface requests itself: it waits
+    // for the models view to settle (waitForModelsSettled) before changing tabs
+    // or navigating, so an abort means something outside this smoke aborted.
     assert(
       failedRequests.length === 0,
       "System layout smoke hit failed requests",

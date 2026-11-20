@@ -7,14 +7,36 @@ lab/agent-conformance/run.sh
 ```
 
 The command uses cached dependencies, the pinned Rust toolchain and its
-`wasm32-unknown-unknown` target and the macOS `shasum` tool. Reserve 12 GiB for
-builds plus 2 GiB free. The
+`wasm32-unknown-unknown` target and the system's `sha256sum` or `shasum` tool.
+Reserve 12 GiB for builds plus 2 GiB free. The
 lease procedure is in [scripts/README.md](../../scripts/README.md#local-pre-push-gate).
 The command prints typed `version identity: {...}` observations above one table
 from Cargo's test inventory and result lines. Native records identify `elastos`
 and `localhost-provider` by SHA-256. Probe records carry the component SHA-256
 and complete bundle lab CID, with separate `build_only` and `launched` kinds.
-Cargo's `--show-output` supplies these records from this invocation. The existing
+The suite runs first. After it has exited, the command checks that no process
+it started for the suite is still alive: each suite command runs in its own
+process group, and a surviving member stops the record with the note
+`a process started for the suite is still alive`. Only then, and only when an
+installed Runtime is named by `AGENT_CONFORMANCE_INSTALLED_BINARY` and
+`AGENT_CONFORMANCE_INSTALLED_DATA`, it makes a new private folder outside the
+lane target and outside every path the suite was given, hashes the binary,
+launches it once with `--version` under a throwaway Home and a 30-second
+limit, and hashes it again. Only when the launch exited 0 and printed a
+version, and both hashes equal the installed record's binary hash, does it
+write one record `path=<canonical path> sha256=<hash> answer=<first line>` with
+mode 0600 into that folder, through a temporary name in the same folder and a
+rename. No record file exists anywhere before that moment; a failed step leaves
+none and the report is named no record. The folder's path never enters a test
+process, no library function writes a record, and the report is given the path
+on its command line after the suite. The command prints the record's contents
+into its receipt output and removes the folder once the report has read it. The
+report reads launch evidence from that record alone, never from Cargo's output.
+Limit: the liveness check covers the process group each suite command was
+started in. A process that leaves its group before the check can still act
+unseen; the record then rests on the launch above, not on the absence of such a
+process. The
+existing
 build helpers hash the native binaries; the staging path names the exact probe
 manifest and payload through `capsule_identity::checked_bundle`.
 `ok` becomes PASS. `ignored, blocked: <reason>` becomes BLOCKED with each
@@ -144,8 +166,8 @@ the retained-root marker. Their exact edits and named tests are in
 Task 003 adds these rows to the same table:
 
 - `ungranted_effect_is_refused`: runs the read build against the ready fixture operator. Requires a nonzero exit and the lifecycle error `Internal("capsule manifest does not declare authority for localhost://Public/agent-conformance-ungranted/outside-fixture.txt")` inside the Runtime's component-failure wrapper.
-- `ungranted_network_is_refused`: the manifest declares `elastos://net/stream`. The request is pending, and the fixture denies it with `fixture denies unlisted elastos://net/stream`. Provider execution stays outside this row.
-- `undeclared_network_manifest_is_refused`: stages the same probe bundle with a manifest whose capabilities omit `elastos://net/stream`. The manifest refuses the request, and its reason names that resource: `Internal("capsule manifest does not declare authority for elastos://net/stream")`. No fixture denial and no grant are involved.
+- `declared_network_manifest_is_refused`: a probe manifest that declares `elastos://net/stream` is refused at validation with `app capsules cannot request system-only backend capability "elastos://net/stream"; use the product/provider contract instead`. The row calls that validation through the lab library and attempts no launch. The shipped probe manifest, with its one Public capability, is accepted.
+- `undeclared_network_manifest_is_refused`: stages the shipped probe bundle, whose manifest does not declare `elastos://net/stream`. The manifest refuses the request, and its reason names that resource: `Internal("capsule manifest does not declare authority for elastos://net/stream")`. No fixture denial and no grant are involved.
 - `default_activation_refuses_without_selector`: runs the default build and requires the AC-002-ARGS unavailable reason through the guest lifecycle.
 - `ungranted_model_call_is_refused`: BLOCKED (RT3), with the Runtime change in GAPS.md.
 - `operator_storage_is_under_throwaway_home`: BLOCKED (AC-006-STORAGE), with the Runtime change in GAPS.md. The lane performs no reads through that Runtime-owned path.
@@ -163,9 +185,10 @@ the bytes. Bundle-CID admission stays separate.
 
 The earlier no-operator rows stop before the storage constructor. The new live
 rows reach the existing AC-006-STORAGE exception, recorded in GAPS.md. The
-ungranted read stays outside the Public pattern. The manifest declares
-`elastos://net/stream`, the fixture denies that pending request, and provider
-execution stays outside that row. The guest returns the Bus error,
+ungranted read stays outside the Public pattern. The manifest declares only
+`localhost://Public/agent-conformance-grants/*`; a manifest that declares
+`elastos://net/stream` is refused at validation, so this lab no longer shows a
+pending network request for the fixture to deny. The guest returns the Bus error,
 and the harness requires both the nonzero exit and the exact reason. An
 unexpected grant returns success without any provider invoke, causing the
 refusal test to fail while keeping the probe free of real effects. Every live
@@ -251,12 +274,192 @@ The no-operator tests exercise manifest dispatch before payload loading; their
 default component identity comes from the live default journey.
 
 `versions_receipt (A14)` passes only with complete, valid, consistent identities
-and a successful exclusive write. Missing or malformed values and Git query
+and a successful exclusive write. The receipt keeps the suite's Runtime
+identity as `runtime_sha256` beside `runtime_path`, which is absent when the
+suite built its own Runtime, and the installed-path row compares both.
+Missing or malformed values and Git query
 failures produce an incomplete receipt with explicit reasons and a failing
 command. A write refusal names its cause, including `AlreadyExists` or
 `NotFound`, and fails the command. Exclusive creation preserves prior receipts
 and symlink targets. A report-build failure stops before suite execution and
 retains its build output; the command cannot issue a receipt without its writer.
+
+`review_binding (A14)` passes only when `AGENT_CONFORMANCE_REVIEWS` names a
+JSON list of `{reviewer, verdict, commit}` entries, at least one, each with
+verdict `pass` and the exact commit the receipt's `repository` names, and the
+tree is clean at every check: before the suite, after it, and when the report
+is written. `run.sh` performs the first two checks and passes their result to
+the report; a dirty answer at either one leaves this row FAIL with
+`tree was dirty during the run`. The commit the report records is read at the
+last check, so the row still does not show that the results came from that
+tree: a change made and undone between two checks is not seen. Reviews
+live outside the commit they read, so the file must be outside the repository.
+The report resolves the path first, links included and a relative path from
+the current directory: a file that is inside the work tree, or is named in a
+folder inside it, leaves the row FAIL with
+`reviews file is inside the repository`. An untracked file there also makes the
+tree dirty; a tracked or ignored one does not, which is why the place itself is
+checked. The receipt records
+`reviews`, `review_status` (`bound` or `unbound`) and `review_failures`. An
+unreadable or malformed reviews file fails the command; an unbound review
+leaves this row FAIL without changing `command_success`, so CI still reports
+unreviewed candidates. A14 needs every A14 row to pass. The report checks only
+that each review names this commit; who reviewed, and whether two model
+families did, stays with the reviewer list.
+
+**A14 threat model.** The code at the reviewed commit — the suite, its tests,
+`run.sh` and the report — is trusted, because each review names that exact
+commit and the tree must be clean before the suite, after it, and when the
+report is written. An A14 row must not pass by accident, by a test that
+misbehaves, or by anything the suite run leaves behind. Identity lines from the
+suite's own output are trusted on that same basis: the reviewed code prints
+them at the spawn point, and a test that deliberately rewrote one would have to
+be written into the reviewed commit. A deliberate change
+written into the reviewed commit is outside this model: review binding is what
+covers it. Same-user code cannot be fenced off without operating-system
+isolation, which this tool does not claim.
+
+`staged_bundle (A14)` passes when the suite launched at least one bundle and
+the receipt names it. The bundles are the ones the suite stages from this
+checkout in a throwaway Home: the conformance probe for each effect, and with
+`--agent-host` the real agent-host capsule built from `examples/agent-host`.
+The receipt records `staged_bundles` (the lab CID of each launched bundle, also
+in `probes`), `staged_bundle_status` (`recorded` or `missing`) and
+`staged_bundle_failures`. An installed bundle does not exist yet: an installed
+Runtime's `components.json` records release capsules by name with a SHA-256
+and a CID, and neither the probe nor agent-host is among them, so there is no
+installed record to compare a staged bundle with. The row is therefore named
+for what it is, and it says nothing about what is installed.
+
+`installed_runtime (A14)` appears only when an installed Runtime is given, by
+two variables together: `AGENT_CONFORMANCE_INSTALLED_BINARY` names its binary
+and `AGENT_CONFORMANCE_INSTALLED_DATA` its data folder (the installer can put
+the binary elsewhere, so both are named). The report reads the binary, and from
+the data folder `installation/release-head.json`, `installation/release.json`
+and `components.json`, and checks the hash chain for this machine's platform:
+the release head names the SHA-256 of `release.json`, which names the SHA-256
+of the binary and of `components.json`. It also requires the release's source
+commit to be the commit the receipt's `repository` records, the same commit
+`review_binding` binds the reviews to; another commit fails the row with both
+commits named, and so does an absent repository commit. The receipt then
+records `installed_runtime` (the installed binary path as given, version,
+platform, source commit and the three hashes), `installed_runtime_status`
+(`matched` or `unmatched`) and `installed_runtime_failures`. A file that cannot be read is named in the
+failures (`could not read release.json`), as is each hash that differs
+(`binary does not match the release`). Each of the four files is opened without
+following a symbolic link at its final name and must be a regular file, as the
+Runtime itself requires of them: a link there fails the row with its own reason
+(`release.json is a symbolic link`). The folders above those names are not
+checked, so a link in a parent folder is followed. An unmatched Runtime is
+recorded as `null`. Like an unbound review, an unmatched chain leaves this row
+FAIL without changing `command_success`, so a receipt backs A14 only when every
+A14 row reads PASS. Naming one variable without the other fails the command. With
+neither, the receipt has no installed Runtime row or field. There is no default
+location: the report never looks for an installation on its own.
+
+This row covers records only: the installed binary, `release-head.json`,
+`release.json` and `components.json` agree with each other and name this
+repository commit. It does not check signatures, so it shows which release the
+installed bytes belong to, not that the release is genuine. The suite does not
+run on the installed data folder. It does not check the hash of the bundle the
+demo ran.
+
+`installed_runtime_ran (A14)` appears beside it and passes only when two
+records agree. The first is the suite's own Runtime identity: the suite must
+have been told to launch a named binary (`AGENT_CONFORMANCE_RUNTIME_BINARY`
+set), and the one Runtime identity it printed must name a path that resolves to
+`installed_runtime.binary_path` with a SHA-256 equal to
+`installed_runtime.binary_sha256`; the receipt keeps that path as
+`runtime_path` beside `runtime_sha256`. The second is the launch record:
+`run.sh` wrote exactly one record to the private folder it made and passed to
+the report. `run.sh` made that record only after the suite had exited and its
+liveness check had found no surviving suite process, and only after it had
+hashed the installed binary, launched it once, seen it answer, and hashed it
+again; both hashes match `installed_runtime.binary_sha256`, and the record
+names a path that resolves to `installed_runtime.binary_path`. The record
+folder lies outside every path the suite was given, its path is never given to
+a test process, no library function writes a record, and no record file
+existed while the suite ran, so no test process is handed the record or its
+path. `run.sh` builds the report before the suite in a folder the suite can
+write: it hashes that binary then, hashes it again after the suite, and
+refuses a difference with `reporter changed during the suite: <first> <now>`;
+it runs a copy of the verified bytes from a folder no test process was given,
+and that same copy grades the receipt after the suite, so the rows the owner
+sees come from bytes no test process could write. A test that misbehaves, or
+anything the suite run leaves behind, therefore cannot make this line pass by
+accident. Review binding covers a deliberate change written into the reviewed
+commit; a same-user process cannot be fenced off without operating-system
+isolation, which this tool does not claim. The identity line the suite prints
+when the binary is named comes before any launch and is not a record, and no
+test's own output is read as one. What this does not show: nothing sees the
+bytes the operating system executed. The liveness check
+covers the process group each suite command was started in; a process that
+leaves its group before the check can still act unseen, and the row then rests
+on the two records above, not on the absence of such a process. The receipt
+records `installed_binary_launch_status`
+(`run_sh_launched_installed_path_hash_matched` or
+`not_run_sh_launched_installed_path_hash_matched`),
+`installed_binary_launch_failures`, and `runtime_data_folder`, which states that
+the Runtime under test ran with a throwaway data folder the suite created, not
+the installed data folder. A report named no record file fails the row with
+`no launch record file`; an empty file with
+`run.sh wrote no launch record for the installed path`; more than one record
+with `run.sh wrote <N> launch records; exactly one is required`; a record of a
+path that is not the installed path with
+`run.sh launched <path>, not the installed binary <path>`; a difference in
+hash names both hashes; and an installed Runtime whose chain did not match
+leaves nothing to compare. A record whose fields `run.sh` does not write fails
+the row with `malformed launch record`. An unset variable fails it with
+`the suite was not told to launch a named binary (AGENT_CONFORMANCE_RUNTIME_BINARY
+unset); it builds the checkout, so its launches are not the installed binary`;
+a variable naming another file with
+`the suite was told to launch <path>, not the installed binary <path>`; a suite
+identity with no path with
+`the suite recorded no named Runtime path; it built its own Runtime`; an
+identity naming another path with
+`the suite recorded Runtime path <path>, not the installed binary <path>`; and
+a different hash with
+`the suite recorded Runtime SHA-256 <hash>, installed binary is <hash>`.
+Identity lines are
+still read from the whole test output, which cannot say which test printed a
+line, so a run that names two different Runtime hashes fails
+`versions_receipt` with `conflicting elastos SHA-256`, and two different Runtime
+paths fail it with `conflicting elastos path`; neither is launch evidence, and
+the installed-path row fails too with `the suite recorded conflicting Runtime
+identities; not every one names the installed binary`. This
+row says nothing about behaviour on the installed data folder: that folder is
+never used by a run.
+
+`AGENT_CONFORMANCE_RUNTIME_BINARY` names a binary for the suite to launch
+instead of building one. The suite hashes the named binary again immediately
+before every launch; when the bytes differ from
+the first hash it does not launch them, prints
+`given Runtime changed: first hashed <first>, <now> immediately before a launch; not launched`
+and the run fails. This does not show a swap made between that hash and the
+operating system starting the process, or what a started Runtime then starts by
+itself. The harness writes no record. The installed-path row reads this
+variable: without it the suite builds the checkout's Runtime, and that row
+fails. When no installed Runtime was given the receipt has no such
+row. Only the Runtime is given; the
+localhost provider, the probe and every Home the Runtime runs in still come
+from the checkout, so the installation's data folder is never used by a run.
+
+A receipt with reviews and an installed Runtime on macOS, from the repository
+root on a clean tree, with the reviews file kept outside the repository:
+
+```bash
+AGENT_CONFORMANCE_REVIEWS="$HOME/a14-reviews.json" \
+AGENT_CONFORMANCE_INSTALLED_BINARY="$HOME/.local/bin/elastos" \
+AGENT_CONFORMANCE_INSTALLED_DATA="$HOME/Library/Application Support/elastos" \
+AGENT_CONFORMANCE_RUNTIME_BINARY="$HOME/.local/bin/elastos" \
+lab/agent-conformance/run.sh
+```
+
+`demo.sh`, described under "The owner's one command", sets these four and
+checks the result.
+
+On Linux the data folder is `$HOME/.local/share/elastos`, or
+`$XDG_DATA_HOME/elastos` when that is set.
 
 `identity_status` describes identity coverage. `suite_outcome` describes the
 Cargo rows, including FAIL and BLOCKED; `command_success` combines both gates.
@@ -265,9 +468,10 @@ only typed identity fields and graded test rows for the receipt. Child captures,
 HTTP bodies and environment dumps stay outside that data model. Synthetic
 receipt fixtures stay inside ignored throwaway roots and supply zero live proof.
 
-After a successful command, only the small receipt remains in its run directory.
-The table is inside that receipt. Keep it through candidate review, then remove
-the receipt and its empty directory. Failed commands retain Cargo output and
+After a successful command, only the small receipt remains in the folder
+`run.sh` made for it, outside the suite's temporary folder. The table is inside
+that receipt. Keep it through candidate review, then remove the receipt and its
+empty directory. Failed commands retain Cargo output and
 failed Homes under the existing review-and-remove rule. Generated native
 binaries, WASM, receipts and synthetic fixtures remain ignored.
 
@@ -290,8 +494,7 @@ once with scope `shell` at the operator's loopback port, then services pending
 requests during the existing process collection loop. Resource, action and
 reason must match an entry in `fixtures/grants.json` exactly. The entry supplies
 `once` or `session`; this fixture selects `once`. Every other request receives
-`fixture denies unlisted read`; a pending `elastos://net/stream` request
-receives `fixture denies unlisted elastos://net/stream`. An ambiguous match
+`fixture denies unlisted read`. An ambiguous match
 denies the whole pending snapshot with a reason. A consumed entry also refuses
 a later matching request.
 
@@ -330,9 +533,9 @@ Runtime contract gap.
 
 The new selectors share the existing probe source, manifest, build staging,
 import checks and two-build SHA-256 checks. The manifest declares
-`localhost://Public/agent-conformance-grants/*` and `elastos://net/stream`.
-The ungranted read stays outside the Public pattern. The fixture denies the
-pending network request, and provider execution stays outside that row.
+`localhost://Public/agent-conformance-grants/*`. The ungranted read stays
+outside the Public pattern. A declared `elastos://net/stream` is refused at
+validation, so provider execution stays outside every row.
 `Public` is the file-backed fixture root. The controller writes the seed
 through Runtime before the guest runs; Runtime owns the stored representation. The guest expects its bytes independently of the
 seed fixture and keeps them inside the capsule.
@@ -346,6 +549,73 @@ F-report-b changes SKIPPED to PASS and fails the report test. The controller,
 callback and guest comparison falsifiers are listed beside these in
 `falsifiers.json`. Restore each mutation before running the next one.
 
+
+## The owner's one command
+
+From the repository root, on a clean tree at the reviewed commit:
+
+```bash
+lab/agent-conformance/demo.sh "$HOME/a14-reviews.json"
+```
+
+Ready before typing it:
+
+- the Runtime installed: the binary at `~/.local/bin/elastos` and the data
+  folder at `~/Library/Application Support/elastos` (on Linux
+  `~/.local/share/elastos`). `AGENT_CONFORMANCE_INSTALLED_BINARY` and
+  `AGENT_CONFORMANCE_INSTALLED_DATA` name other places;
+- a reviews file outside the repository: a JSON list of
+  `{"reviewer": "...", "verdict": "pass", "commit": "<the 40-character commit checked out>"}`;
+- this checkout at that commit with nothing changed or untracked;
+- everything `run.sh` needs: cached dependencies, the pinned Rust toolchain
+  with its `wasm32-unknown-unknown` target, `sha256sum` or `shasum`, the build
+  space named at the top of this file and the shared heavy-build lease. It
+  needs no network and no model server.
+
+The command says which of the binary, the data folder and the reviews file is
+missing, and refuses a tree that is not clean. It then runs `run.sh` with the
+installed binary as the Runtime the suite launches. After the suite, `run.sh`
+prints every A14 row with its reasons through `report --a14 <receipt>`, using
+the reporter copy it verified and keeps outside every path the suite was
+given; this command reads that result and runs no reporter of its own. It
+copies the receipt folder to
+`${ELASTOS_DEMO_RECEIPTS:-$HOME/elastos-demo-receipts}/<UTC time>/` with its
+own output as `demo-output.log`, and prints that path. It exits 0 only when
+the suite passed and every A14 row reads PASS; the receipt folder is kept
+either way. The receipt is written to its own folder, made after the suite
+outside every path the suite was given. It writes nothing under the install
+paths: the installed binary is
+launched where it is, the suite's throwaway Homes are under this lane's
+`target`, and the record launch's throwaway Home is under the temporary folder
+this command checked. Before anything runs it works out where the receipts
+folder and its temporary folder (`TMPDIR`, else `/tmp`) really are, links
+resolved, and stops with a message if either is inside the installed data
+folder or the folder holding the installed binary.
+
+What each A14 row means:
+
+| Row | PASS means |
+| --- | --- |
+| `versions_receipt` | the receipt names the commit, the Runtime and provider hashes and every launched probe the rows needed |
+| `review_binding` | every review in the file passed and names the commit checked out, on a clean tree, and the file is outside the repository |
+| `staged_bundle` | the receipt names the lab CID of each bundle the suite staged and launched |
+| `installed_runtime` | the installed binary and `components.json` have the hashes its `release.json` names, `release-head.json` names that `release.json`, and the release names this repository commit; its records are read, its data folder did not run |
+| `installed_runtime_ran` | the suite was told a named binary whose canonical path is the installed binary, and the Runtime identity it recorded names that path with the installed binary's SHA-256; `run.sh` hashed the report it built before the suite, hashed it again after the suite and its liveness check, refused a change, and ran a copy of the verified bytes; it made the record after that, hashed the installed binary, launched it once and saw it answer, and hashed it again; both hashes match the installed record, and exactly one record names the installed path; nothing shows the bytes the operating system then executed |
+
+What the receipt does not prove:
+
+- that the release is genuine: no signature is verified, only hashes;
+- anything about an installed bundle: none exists yet, and the bundles are
+  staged from this checkout, as are the localhost provider
+  (`localhost_provider_sha256`) and the probe. The installed data folder is
+  read for the hash chain and is not what the suite runs on;
+- that the reviews are independent or by whom: the row checks only the commit
+  and the verdict each review states;
+- that the rows came from the reviewed tree: the tree is checked clean before
+  the suite, after it, and when the report is written; a change made and undone
+  between two checks is not seen;
+- capsule isolation: the rows remain process isolation, and the BLOCKED rows
+  stay blocked.
 
 ## Bounded preparation and credential evidence
 
@@ -400,7 +670,7 @@ before claiming their M1 results.
 Task 004 adds the agent-memory rows to the same Cargo-derived table:
 
 - `agent_cannot_read_human_space_without_grant`: the existing read feature asks for `Users/self` and requires the Runtime's principal-context refusal. This is the current unbound CLI's refusal half.
-- `ungranted_memory_write_is_refused`: the new memory-write feature requests authority through the Bus and requires the Runtime's manifest refusal.
+- `ungranted_memory_write_is_refused`: BLOCKED (UsersAI binding; AC-002-ARGS). The memory-write probe retains its exact manifest-refusal assertion. Today's unbound CLI launch receives a principal-context refusal before the manifest check. A verified Agent launch must first prove a granted write, then prove the missing-authority refusal.
 - `no_policy_file_does_not_mean_allow`: one in-manifest read receives zero controller decisions when `fixtures/no-policy.json` is absent. The natural pending-request refusal must arrive within 40 seconds. A harness timeout fails.
 - `agent_memory_under_own_principal`, `agent_cannot_read_other_agent_memory`, and `agent_can_read_human_space_with_grant`: BLOCKED (UsersAI binding; AC-002-ARGS). GAPS.md names the Runtime changes and the future checks. These rows supply zero principal-isolation evidence today.
 - `real_agent_host_journal_under_usersai_principal`: BLOCKED (UsersAI binding), the P7 gap in the default table. Forced with `--ignored`, it reads the real manifest and requires every capability under `UsersAI/self`; agent-host moves its journal when the Runtime binding lands.
@@ -422,13 +692,15 @@ that exists only in `tests/agent_host.rs`, still reads `NOT RUN` from it.
 `fixtures/no-policy.json` stays absent. A build failure, unrelated error,
 SKIPPED or BLOCKED result cannot catch a falsifier.
 
-F-ac2-human and F-ac2-write change the respective probe activation to succeed
-without its Bus refusal. Each named refusal test must fail, then pass when the
-original probe bytes are restored. All mutations remain inside fixtures or the
-one probe. This list uses the `agent-conformance` command. An ignored test,
-or a test that exists only in `tests/agent_host.rs`, still reads `NOT RUN`
-from it. The existing report records every launched variant's
-component SHA-256 and complete bundle lab CID.
+F-ac2-human changes the human-read probe activation to succeed without its
+Bus refusal. Its named refusal test must fail, then pass when the original
+probe bytes are restored. F-ac2-write is retired under `UsersAI binding;
+AC-002-ARGS` until `ungranted_memory_write_is_refused` is live with a passing
+granted-write control. Its exact mutation is kept in `falsifiers.json`.
+Both mutations stay in the probe. The active list uses the
+`agent-conformance` command. An ignored test, or a test that exists only in
+`tests/agent_host.rs`, reads `NOT RUN` from it. The existing report records
+every launched variant's component SHA-256 and complete bundle lab CID.
 
 ## Fake host-file refusal (M1 A8)
 
@@ -504,10 +776,15 @@ the line names the retained `target/home-*`. Passing journeys remove their own
 Homes after capture, source and report checks. The census tool's scratch Home
 is removed after its captures join the existing credential-check inventory.
 
-The grant result is currently `BLOCKED(AC-021-GRANTS)`: the fixture shell sees
-its own grants. `run_leaves_no_live_grant` stays an ignored table row until
-Runtime supplies the global live-grant contract in GAPS.md. F-cleanup-grant
-waits for that contract. F-cleanup-temp and F-cleanup-process run the existing
+The grant result is `pending:0 grants:0` when the scoped view holds no live
+grant, and `pending:0 grants:BLOCKED(AC-021-GRANTS:leftover)` while live grants
+that this run's fixture minted stay after client exit. The census asks the
+shell-only live view (`?scope=all_sessions_live`) and compares each live id with
+the fixture's own minted set; a live id the run did not mint fails as a foreign
+or stale grant. This lane performs zero revocations, so the blocked line
+reports the real AC-021 gap rather than a cleaned fixture.
+`run_leaves_no_live_grant` stays an ignored table row. F-cleanup-grant waits
+for that row. F-cleanup-temp and F-cleanup-process run the existing
 `granted_read_succeeds` test; both must fail for their planted reason, then
 pass after restoration. Other cleanup falsifiers exercise the port check,
 pending and scope grading, capture inventory, earlier-run detection and table
@@ -597,9 +874,11 @@ After collection, the controller checks pending requests while the operator
 is alive. Its shell-owned pending control proves the live census call can
 refuse a leftover and is then denied. The final empty-pending check precedes
 operator group stop, root census, API-port closure and the empty `tmp/` check.
-Cross-session live grants remain `BLOCKED(AC-021-GRANTS)` and give zero passing
-credit. Resident cancellation stays RT4; this row covers the pending-request
-point only. GAPS.md defines the cleanup visibility limits.
+The census asks the shell-only live view. The controller performs no
+revocation, so a run's grants stay live and the line reports
+`BLOCKED(AC-021-GRANTS:leftover)`; an unmarked view reports
+`BLOCKED(AC-021-GRANTS)`. Resident cancellation stays RT4; this row covers the
+pending-request point only. GAPS.md defines the cleanup visibility limits.
 
 F-cancel-sibling cancels both first requests and must fail the sibling check.
 F-cancel-reason changes the delivered reason. F-cancel-retry bypasses later
@@ -631,7 +910,9 @@ empty. A further two-second quiet window polls the same list; five seconds is
 the maximum permitted window. The existing cleanup path then checks the
 operator and both client roots through its lsof implementation, checks the
 closed API port and empty `tmp/` directories, and checks captures for fixture
-credentials. Live grants remain `BLOCKED(AC-021-GRANTS)`.
+credentials. The cleanup path performs no revocation and keeps the run's
+grants, so its live-grant census reports
+`BLOCKED(AC-021-GRANTS:leftover)`.
 
 Read the single checked `kill settlement:` line for both child statuses,
 signal, kill time, first barrier time, overlap, elapsed times, quiet duration,
@@ -742,6 +1023,6 @@ These `standin_` rows are this stand-in, and a PASS there gives the Runtime no A
 
 ## Content capsule named by its CID (M2 exit (e), PH6)
 
-- `requires_cid_is_refused_today` stages the viewer probe through the staging route and records the refusal the manifest reader gives now (`unknown field cid`). It goes red when the Runtime reads `requires[].cid`.
-- `the_plain_staged_probe_is_still_a_bundle` is the control: the same manifest with only `requires[0].cid` removed passes the same check, so the refusal is that key alone.
+- `a_viewer_that_pins_its_content_is_staged_and_named` stages the viewer probe, whose manifest pins the content bundle's CID in `requires[]`, through the staging route. The one bundle check names it; the same manifest without the pin gets another name; a pin written in capitals is refused with the Runtime reader's own text (`pin_form_invalid`). It launches nothing: no launch reads a pin yet.
+- `the_plain_staged_probe_is_still_a_bundle` is the control: the same manifest with only `requires[0].cid` removed passes the same check.
 - No ignored journey exists. A real journey for AC-M2E-CONTENT-CID needs a probe effect that opens the content and checks its bytes, a content registration path in the throwaway Home, a negative case that asserts the Runtime's own CID-mismatch refusal, and entry through the route. GAPS.md lists all four with the Runtime change. The deleted ignored journeys accepted any failed exit, so they could not test the CID rule.

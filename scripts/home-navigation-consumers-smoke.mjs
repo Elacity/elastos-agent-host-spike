@@ -34,6 +34,7 @@ export async function exerciseNavigationConsumers(makeClient) {
     homeNavigation: client("library"),
     providerApi: async (_op, { uri }) => ({ object: { uri, kind: "directory" }, objects: [] }),
     cacheFolderListing: () => ({}), setObjects() {}, setStatus() {}, setFolderStatus() {}, renderAll() {}, runInitialObjectAction() {},
+    rootStateStale: false,
     isDirectory: object => object?.kind === "directory",
   });
   vm.runInContext(selectionFunction(read("capsules/library/browser/src/app.js"), "loadCurrentFolder"), library);
@@ -152,7 +153,8 @@ export async function exerciseNavigationConsumers(makeClient) {
   vm.runInContext(bridge[0], chat);
   chat.globalThis.elastosChatNavigation({ conversation_id: "direct:sha256:conversation-b" });
   assert.deepEqual(reports["chat-room"], { conversation_id: "direct:sha256:conversation-b" });
-  assert.equal(chat.currentQuery.conversation_id, "direct:sha256:conversation-b", "Reconnect must use the settled Chat selection");
+  // The shared client retains this query for renewal; chat-room-reconnect.test.mjs
+  // exercises the real client and checks its launch request.
   chat.globalThis.elastosChatNavigation({});
   assert.deepEqual(reports["chat-room"], {}, "explicit default retained direct selection");
   chat.globalThis.elastosChatNavigation({ conversation_id: "direct:sha256:conversation-b" });

@@ -22,6 +22,9 @@ SPEC = importlib.util.spec_from_file_location(
 )
 packager = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(packager)
+git_env_spec = importlib.util.spec_from_file_location("fixture_git_env", Path(__file__).with_name("fixture-git-env.py"))
+fixture_git = importlib.util.module_from_spec(git_env_spec)
+git_env_spec.loader.exec_module(fixture_git)
 FILES = ("rootfs.ext4", "vmlinux", "initrd", "browser-vm-rootfs-manifest.json")
 
 
@@ -308,12 +311,12 @@ class GuestInputIdentityTest(unittest.TestCase):
     def test_only_guest_inputs_and_recipe_options_invalidate_reuse(self):
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
-            subprocess.run(["git", "init", "--quiet", root], check=True)
+            subprocess.run(["git", "init", "--quiet", root], check=True, env=fixture_git.fixture_git_env(root))
             for name in guest_inputs.REQUIRED_FILES:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"guest input fixture")
-            subprocess.run(["git", "-C", root, "add", "."], check=True)
+            subprocess.run(["git", "-C", root, "add", "."], check=True, env=fixture_git.fixture_git_env(root))
             before = guest_inputs.identity(root=root)["sha256"]
             runtime = root / "elastos/crates/elastos-server/src/setup.rs"
             runtime.parent.mkdir(parents=True)

@@ -16,7 +16,7 @@ pub use evaluator::PolicyEvaluator;
 #[allow(unused_imports)]
 pub use manager::CapabilityManager;
 #[allow(unused_imports)]
-pub use pending::{GrantDuration, PendingRequestStore, RequestStatus};
+pub use pending::{GrantDuration, PendingRequestStore, RequestStatus, Settler};
 #[allow(unused_imports)]
 pub use policy::{
     AutoGrantVerifier, DecisionId, GrantProposal, PolicyDecision, PolicyOutcome, PolicyRule,

@@ -70,6 +70,27 @@ async fn caller_capsule_catalog_summary(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
 ) -> CapsuleCatalogResponse {
+    let mut catalog = caller_capsule_catalog_rows(state, context).await;
+    // A publisher is named only for an installed package whose row matches a
+    // record of the installed signed release; any failure names none.
+    let data_dir = state.data_dir.clone();
+    let signers =
+        tokio::task::spawn_blocking(move || crate::setup::installed_release_signers(&data_dir))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|signers| signers)
+            .unwrap_or_else(|error| {
+                tracing::debug!("installed release publishers unavailable: {error:#}");
+                Default::default()
+            });
+    read_model::project_release_publishers(&mut catalog, &signers);
+    catalog
+}
+
+async fn caller_capsule_catalog_rows(
+    state: &GatewayState,
+    context: &HomeLaunchTokenContext,
+) -> CapsuleCatalogResponse {
     // Home may have started offline without its pinned catalogue; Local AI's
     // read retries it, and otherwise reports it unavailable.
     if let Err(error) = crate::setup::retry_model_catalog(&state.data_dir).await {
@@ -1140,6 +1161,7 @@ mod tests {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: data_dir.path().to_path_buf(),
             data_dir: data_dir.path().to_path_buf(),
@@ -1407,13 +1429,16 @@ mod tests {
             "expected the first-party development capsule set to be visible"
         );
 
-        for platform in ["linux-arm64", "linux-amd64"] {
-            // Where Browser is unavailable it is absent, not merely unlaunchable.
-            assert!(
-                !read_model::capsule_catalog_summary_for(data_dir.path(), platform)
+        for (platform, browser_listed) in [("linux-arm64", true), ("linux-amd64", false)] {
+            // Linux ARM64 lists Browser so opening it shows the setup command.
+            // Linux AMD64 has no supported Browser Engine and keeps it absent.
+            assert_eq!(
+                read_model::capsule_catalog_summary_for(data_dir.path(), platform)
                     .capsules
                     .iter()
-                    .any(|capsule| capsule.name == "browser")
+                    .any(|capsule| capsule.name == "browser"),
+                browser_listed,
+                "Browser catalog visibility on {platform}"
             );
         }
         let catalog = read_model::capsule_catalog_summary_for(data_dir.path(), "darwin-arm64");
@@ -1434,8 +1459,16 @@ mod tests {
                 crate::protected_content_runtime::protected_content_enabled(data_dir.path())
                     || *name != crate::protected_content_runtime::ELACITY_PLAYER_CAPSULE_ID
             })
+            // WalletConnect stays out until an operator pins its config.
+            .filter(|name| *name != WALLET_WALLETCONNECT_CAPSULE_ID)
+            // Services is hidden until sharing moves into People.
+            .filter(|name| *name != SERVICES_CAPSULE_ID)
             .collect::<BTreeSet<_>>();
         assert_eq!(catalog_names, expected);
+        assert!(active_names.contains(WALLET_WALLETCONNECT_CAPSULE_ID));
+        assert!(!catalog_names.contains(WALLET_WALLETCONNECT_CAPSULE_ID));
+        assert!(active_names.contains(SERVICES_CAPSULE_ID));
+        assert!(!catalog_names.contains(SERVICES_CAPSULE_ID));
         assert!(!catalog_names.contains("bus-v1-conformance"));
 
         let catalog_interface_count = catalog
@@ -1459,7 +1492,6 @@ mod tests {
             "browser",
             "wallet",
             "inbox",
-            "services",
             SYSTEM_CAPSULE_ID,
             "library",
             "documents",
@@ -1959,6 +1991,7 @@ mod tests {
             collaboration_presence_product_port: None,
             carrier_endpoint: None,
             collaboration_discovery_service: None,
+            browser_internet: Default::default(),
             identity_manager: Arc::new(std::sync::OnceLock::new()),
             cache_dir: data_dir.path().to_path_buf(),
             data_dir: data_dir.path().to_path_buf(),

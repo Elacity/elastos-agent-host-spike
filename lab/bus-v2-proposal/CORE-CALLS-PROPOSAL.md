@@ -4,6 +4,38 @@ Pinned commit: 1cc3e47b9dcd965d003c504ac79d027b4f2a0d15
 
 LAB DRAFT for Sash and Anders. This file is the proposal. It stays in the lab. It is design input for M1 checks A3, A5, A7 and B2, and it leaves those checks open.
 
+## 0. What this proposes
+
+This section states each core-call proposal once; section 7 holds its evidence.
+
+### A3. Agent identity
+
+propose: the agent DID is a separate DID, not the person principal person:local:. Name: agent principal. Inputs: the verified agent identity. Refusal: an identity that is not the bound agent principal. Owner: Runtime. A3 stays open.
+Evidence: section 7, A3.
+
+propose: the owned journal root moves to that agent principal's UsersAI path. Name: owned journal root. Inputs: the agent principal. Refusal: a root that is not under that principal. Owner: Runtime. A3 stays open.
+Evidence: section 7, A3.
+
+### A4. Model operations
+
+propose: the model operation uses the hosted-effect socket, and the five model operations stay on the remote model service behind that socket. Name: hosted model call. Inputs: the granted effect request. Refusal: a call the Runtime did not grant. Owner: Runtime model service. A4 stays open.
+Evidence: section 7, A4.
+
+### A5. Grant handle
+
+propose: the Bus v2 host-side handle is an opaque handle, and the guest does not read its binding. Name: grant handle. Inputs: the verified agent identity, the session, the capsule instance, and the owned storage root. Refusal: an unknown handle. Owner: Runtime. A5 stays open.
+Evidence: section 7, A5.
+
+### A7. Usage reservation
+
+propose: the Runtime reserves one bounded usage amount before each dispatch, a cancellation releases the unused hold, and an uncertain outcome keeps the hold until a measured settle, because a due timeout records the uncertainty and keeps the hold. Name: usage reservation. Inputs: the admitted ceiling and the dispatch. Refusal: a reserve above the ceiling. Owner: Runtime. A7 stays open.
+Evidence: section 7, A7.
+
+### B2. Typed operations
+
+propose: the contract names are run, child, init, hosted, and journal-append. Name: typed operation. Inputs: the granted ask. Refusal: an ask the grant does not carry. Owner: the contract. B2 stays open.
+Evidence: section 7, B2.
+
 ## 1. Agent identity
 
 This section is design input for A3. A3 stays open. This section cites no lab/grant-binding test.
@@ -1873,8 +1905,8 @@ Section 1 shows the guest names `Users/self`. local_person_principal_id builds `
 
 Is the agent DID the person principal (person:local:), or a separate DID? Does the owned journal root stay on the launching person's Users/self path, or move to the agent principal's UsersAI path?
 
-propose: the agent DID is a separate DID, not the person principal person:local:. Name: agent principal. Inputs: the verified agent identity. Refusal: an identity that is not the bound agent principal. Owner: Runtime. A3 stays open.
-propose: the owned journal root moves to that agent principal's UsersAI path. Name: owned journal root. Inputs: the agent principal. Refusal: a root that is not under that principal. Owner: Runtime. A3 stays open.
+Proposal: section 0, A3, agent principal.
+Proposal: section 0, A3, owned journal root.
 
 Section 3 shows the cited functions return the token string as the grant id. grant-id is a string. Those functions do not show a separate handle table.
 
@@ -1930,13 +1962,13 @@ Section 3 shows the cited functions return the token string as the grant id. gra
 
 Is the Bus v2 host-side handle the token string, or an opaque handle whose binding the guest does not read?
 
-propose: the Bus v2 host-side handle is an opaque handle, and the guest does not read its binding. Name: grant handle. Inputs: the verified agent identity, the session, the capsule instance, and the owned storage root. Refusal: an unknown handle. Owner: Runtime. A5 stays open.
+Proposal: section 0, A5, grant handle.
 
 Section 4 keeps the hosted-effect path apart from the direct URL path and leaves A4 open. The names in that section are propose_hosted, effect_request, runtime_hosted_socket, MODEL_OPERATIONS, handle, and forward. The five strings section 4 lists are `offers_list`, `runs_create`, `runs_get`, `runs_events`, and `runs_cancel`.
 
 Which path does the model operation use: the hosted-effect socket, or the five model operations on the remote model service?
 
-propose: the model operation uses the hosted-effect socket, and the five model operations stay on the remote model service behind that socket. Name: hosted model call. Inputs: the granted effect request. Refusal: a call the Runtime did not grant. Owner: Runtime model service. A4 stays open.
+Proposal: section 0, A4, hosted model call.
 
 Section 5 shows the guest writes zeros, the journal check is room for history, the concurrency check counts non-terminal runs, the slot stores a time, and the usage function refuses an empty report. Section 5 states the account A7 asks for and cites no lab/grant-binding test.
 
@@ -2025,7 +2057,7 @@ reserve, model_reserve_over_the_ceiling_is_refused, and model_reported_usage_doe
 
 What unit does the Runtime reserve before each dispatch, and does a cancellation or an uncertain outcome release that hold?
 
-propose: the Runtime reserves one bounded usage amount before each dispatch, a cancellation releases the unused hold, and an uncertain outcome keeps the hold until a measured settle, because a due timeout records the uncertainty and keeps the hold. Name: usage reservation. Inputs: the admitted ceiling and the dispatch. Refusal: a reserve above the ceiling. Owner: Runtime. A7 stays open.
+Proposal: section 0, A7, usage reservation.
 
 Open question for A7 (Rong I-1369-b): with no verifier deadline on the propose line, an uncertain hold ends only on a measured settle, so a provider that never reports would pin that budget for the grant's life. Proposal: the Runtime ends an uncertain hold at grant end or revoke and charges it in full, the same rule as session holds, which are settled at end or revoke and never refunded. The lab does not implement this. A7 stays open.
 
@@ -2115,7 +2147,7 @@ The Operation enum names Append, Overwrite, and ChildJournal. None of those vari
 
 Which typed operation names does the contract use for run, for child, for init, for hosted, and for journal-append?
 
-propose: the contract names are run, child, init, hosted, and journal-append. Name: typed operation. Inputs: the granted ask. Refusal: an ask the grant does not carry. Owner: the contract. B2 stays open.
+Proposal: section 0, B2, typed operation.
 
 This section asks these questions and does not answer them.
 
