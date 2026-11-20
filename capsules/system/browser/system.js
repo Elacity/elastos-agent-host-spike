@@ -5,6 +5,7 @@ import {
 } from "./esp-projections.mjs";
 import { createHomeClipboardClient } from "/apps/home/home-clipboard-client.js?v=home-20260726a";
 import { createHomeBackgroundImage } from "/apps/home/home-background-image.js?v=home-20261101d";
+import { bindAgents } from "./agents-section.js";
 
 const errorNode = document.querySelector(".system-error");
 const backgroundInput = document.querySelector("#background-input");
@@ -174,6 +175,7 @@ const SETTINGS_SEARCH_KEYWORDS = Object.freeze({
   shell: ["shell", "desktop", "terminal", "home gui", "home cli"],
   security: ["security", "recovery", "access", "guest", "inspection", "technical"],
   models: ["models", "use", "keep", "preparation", "provider", "openrouter", "venice", "key", "ai provider"],
+  agents: ["agent", "agents", "create"],
   about: ["about", "device", "version", "source", "channel", "network", "did", "update", "publisher", "changes"],
 });
 const ALLOWED_SETTINGS_TABS = new Set(Object.keys(SETTINGS_SEARCH_KEYWORDS));
@@ -193,6 +195,7 @@ const backgroundImage = createHomeBackgroundImage({
   onError: () => showBackgroundStatus("Home could not load the image. Close System and open it to retry.", "error"),
 });
 
+let loadAgents = () => {};
 boot().catch((error) => {
   console.error("system boot failed", error);
   showError(error);
@@ -207,6 +210,11 @@ async function boot() {
   configureSettingsTabs();
   configureSettingsSearch();
   activateSettingsTab(requestedSettingsTab || "account");
+  loadAgents = bindAgents(document, (path, init = {}) => fetchJson(path, {
+    ...init,
+    headers: shellHeaders(init.body ? { "content-type": "application/json" } : {}),
+  })).load;
+  if (document.querySelector('.settings-content[data-settings="agents"].active')) loadAgents();
   configureAppearanceEditor();
   configureAppearancePreferences();
   configureGuestAccess();
@@ -352,6 +360,7 @@ function activateSettingsTab(settings) {
   if (container) {
     container.scrollTop = 0;
   }
+  if (tab === "agents") loadAgents();
   syncSearchHit(tab);
 }
 
