@@ -1765,9 +1765,14 @@ pub(crate) mod tests {
     /// Two calls that return the same vector mean the tree's names and bytes
     /// did not change. Any part of the tree the walk cannot read fails the
     /// caller by name: a census that skips a subtree cannot prove a claim
-    /// about the whole tree.
+    /// about the whole tree. A root that does not exist yet is an empty tree
+    /// (callers snapshot a root before anything is written there); every
+    /// error inside an existing tree still fails.
     pub(crate) fn tree_hashes(dir: &std::path::Path) -> Vec<(String, String)> {
         use sha2::{Digest, Sha256};
+        if !dir.exists() {
+            return Vec::new();
+        }
         fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
             let entries = std::fs::read_dir(dir)
                 .unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()));
