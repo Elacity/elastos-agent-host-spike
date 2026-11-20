@@ -13003,6 +13003,23 @@ pub(crate) mod valid_agent {
             .find(|principal| principal.principal_id == ID)
             .expect("planted agent is stored")
     }
+
+    /// A valid stored agent whose owner is an existing test person.
+    pub(crate) fn plant_for_owner(data_dir: &Path, owner_id: &str) -> PrincipalRecord {
+        assert!(stored_principal_record(data_dir, owner_id)
+            .unwrap()
+            .is_some());
+        let mut record = super::test_agent_record(ID);
+        record.owner = Some(owner_id.to_string());
+        super::insert_principal_into_auth_file(data_dir, &record);
+        let state = load_auth_state(data_dir).expect("planted agent auth state loads");
+        assert!(super::quarantine_reason(&state, ID).is_none());
+        state
+            .principals
+            .into_iter()
+            .find(|principal| principal.principal_id == ID)
+            .expect("planted agent is stored")
+    }
 }
 
 #[cfg(test)]

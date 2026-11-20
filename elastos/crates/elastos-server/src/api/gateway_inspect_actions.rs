@@ -434,58 +434,139 @@ pub(super) fn approve_agent_plan_request(
     Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
 
-/// Dispatch only the stored, freshly checked step. The claim is persisted
-/// before the provider call, so a stopped process leaves an unknown outcome.
+/// Claim the stored step, audit the claim, then let its settlement outlive the
+/// Inbox request. A stopped process still leaves a one-way claim.
 pub(super) async fn dispatch_approved_agent_plan(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
     request_id: &str,
 ) -> anyhow::Result<String> {
-    let registry = state
+    state
         .provider_registry
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("agent plan provider registry unavailable"))?;
-    let mut record = store::claim_approved_agent_plan_for_dispatch(
+    let record = match store::claim_approved_agent_plan_for_dispatch(
         &state.data_dir,
         request_id,
         context.principal_id(),
         now_ts(),
-    )?;
-    let scheme = record.request["scheme"].as_str().unwrap_or_default();
-    let mut body = record.request["request"].clone();
-    body.as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("claimed agent plan body is invalid"))?
-        .insert("op".to_string(), serde_json::json!(record.operation));
-    let response = match registry.send_raw(scheme, &body).await {
-        Ok(response) => response,
-        Err(err) => serde_json::json!({"status": "error", "message": err.to_string()}),
+    ) {
+        Ok(record) => record,
+        Err(err) => {
+            if err.to_string().contains("binding or gate changed") {
+                let record = read_inspect_action_record(&state.data_dir, request_id)?;
+                append_agent_plan_dispatch_audit(&state.data_dir, &record, "stale")?;
+            }
+            return Err(err);
+        }
     };
-    record.status = if response.get("status").and_then(serde_json::Value::as_str) == Some("ok") {
-        "completed"
-    } else {
-        "failed"
+    let data_dir = state.data_dir.clone();
+    if let Err(err) = append_agent_plan_dispatch_audit(&data_dir, &record, "started") {
+        settle_agent_plan_dispatch(
+            &data_dir,
+            record,
+            "unknown",
+            serde_json::json!({"status": "unknown", "code": "claim_audit_error"}),
+        )?;
+        return Err(err);
     }
-    .to_string();
-    record.result = Some(response);
+    let task = tokio::spawn(async move {
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            crate::resource_bridge::dispatch_agent_plan_step(
+                &record.request_id,
+                &record.principal_id,
+                record.requester_id.as_deref().unwrap_or_default(),
+                &record.id,
+                &record.session_id,
+                &data_dir,
+                &record.request,
+            ),
+        )
+        .await;
+        let (status, result) = match response {
+            Ok(response)
+                if response["type"] == "resource_result"
+                    && response["result"]["status"] == "ok" =>
+            {
+                ("completed", response["result"].clone())
+            }
+            Ok(response) if response["code"] == "provider_error" => (
+                "unknown",
+                serde_json::json!({"status": "unknown", "code": "provider_transport_error"}),
+            ),
+            Ok(response) if response["type"] == "resource_result" => (
+                "failed",
+                serde_json::json!({"status": "error", "code": "provider_result_error"}),
+            ),
+            Ok(response) => (
+                "refused",
+                serde_json::json!({"status": "refused", "code": response["code"].as_str().unwrap_or("authority_refused")}),
+            ),
+            Err(_) => (
+                "unknown",
+                serde_json::json!({"status": "unknown", "code": "provider_timeout"}),
+            ),
+        };
+        settle_agent_plan_dispatch(&data_dir, record, status, result)
+    });
+    task.await
+        .map_err(|err| anyhow::anyhow!("agent plan settlement task failed: {err}"))?
+}
+
+fn settle_agent_plan_dispatch(
+    data_dir: &FsPath,
+    mut record: InspectActionRequestRecord,
+    status: &str,
+    result: serde_json::Value,
+) -> anyhow::Result<String> {
+    record.status = status.to_string();
+    record.result = Some(result);
     record.updated_at = now_ts();
-    write_inspect_action_record(&state.data_dir, &record)?;
+    write_inspect_action_record(data_dir, &record)?;
+    append_agent_plan_dispatch_audit(data_dir, &record, status)?;
+    Ok(format!("Agent plan dispatch {status}."))
+}
+
+fn append_agent_plan_dispatch_audit(
+    data_dir: &FsPath,
+    record: &InspectActionRequestRecord,
+    status: &str,
+) -> anyhow::Result<()> {
+    let event_type = match status {
+        "started" => "agent_plan.dispatch.started",
+        "completed" => "agent_plan.dispatch.completed",
+        "failed" => "agent_plan.dispatch.failed",
+        "refused" => "agent_plan.dispatch.refused",
+        "stale" => "agent_plan.dispatch.stale",
+        _ => "agent_plan.dispatch.unknown",
+    };
     append_provider_effect_audit(
-        &state.data_dir,
+        data_dir,
         ProviderEffectAuditInput {
             capsule_id: &record.id,
-            event_type: if record.status == "completed" {
-                "agent_plan.dispatch.completed"
-            } else {
-                "agent_plan.dispatch.failed"
-            },
+            event_type,
             principal_id: &record.principal_id,
             session_id: &record.session_id,
-            request_id,
-            result: &record.status,
-            reason: "Owner-approved agent plan dispatched through Runtime",
+            request_id: &record.request_id,
+            result: status,
+            reason: if status == "started" {
+                "Owner-approved agent plan claimed by Runtime"
+            } else {
+                "Owner-approved agent plan settled by Runtime"
+            },
         },
-    )?;
-    Ok(format!("Agent plan dispatch {}.", record.status))
+    )
+}
+
+#[cfg(test)]
+pub(in crate::api::gateway) fn rebind_agent_plan_for_test(
+    data_dir: &FsPath,
+    request_id: &str,
+) -> anyhow::Result<()> {
+    let mut record = read_inspect_action_record(data_dir, request_id)?;
+    record.request_binding = agent_plan::agent_plan_request_binding(&record);
+    write_inspect_action_record(data_dir, &record)
 }
 
 pub(crate) fn agent_plan_result_for_requester(
@@ -505,7 +586,10 @@ pub(crate) fn agent_plan_result_for_requester(
     {
         anyhow::bail!("agent plan result belongs to a different requester or activation");
     }
-    if !matches!(record.status.as_str(), "completed" | "failed") {
+    if !matches!(
+        record.status.as_str(),
+        "completed" | "failed" | "refused" | "unknown"
+    ) {
         anyhow::bail!("agent plan has no settled result");
     }
     let binding = record

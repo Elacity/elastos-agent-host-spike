@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::local_http::LoopbackHttpBaseUrl;
@@ -320,6 +320,112 @@ pub struct BridgeContext {
     /// instead of waiting out the shell's polls; it records that it left for
     /// the stop, and the activation's own end then denies the request.
     pub stop: Option<Arc<ActivationStopFlag>>,
+}
+
+/// The admitted context that submitted a plan stays available until its one
+/// claim. A process restart loses it and safely refuses an approved record.
+struct AgentPlanDispatchAuthority {
+    owner_id: String,
+    context: BridgeContext,
+}
+
+static AGENT_PLAN_DISPATCH_AUTHORITIES: OnceLock<
+    Mutex<HashMap<String, AgentPlanDispatchAuthority>>,
+> = OnceLock::new();
+
+fn plan_authorities() -> &'static Mutex<HashMap<String, AgentPlanDispatchAuthority>> {
+    AGENT_PLAN_DISPATCH_AUTHORITIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn retain_agent_plan_dispatch_authority(
+    request_id: &str,
+    owner_id: &str,
+    context: &BridgeContext,
+) -> Result<()> {
+    let mut authorities = plan_authorities()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("agent plan authority lock is poisoned"))?;
+    authorities.insert(
+        request_id.to_string(),
+        AgentPlanDispatchAuthority {
+            owner_id: owner_id.to_string(),
+            context: context.clone(),
+        },
+    );
+    Ok(())
+}
+
+pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
+    if let Ok(mut authorities) = plan_authorities().lock() {
+        authorities.retain(|_, held| held.context.capsule_id != capsule_id);
+    }
+}
+
+/// Submit an approved stored step through the same normalization, authority
+/// checks and dispatch as an agent's ordinary resource invoke.
+pub(crate) async fn dispatch_agent_plan_step(
+    request_id: &str,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+    data_dir: &Path,
+    step: &serde_json::Value,
+) -> serde_json::Value {
+    let held = plan_authorities()
+        .lock()
+        .ok()
+        .and_then(|mut authorities| authorities.remove(request_id));
+    let Some(held) = held else {
+        return resource_error_response("admission_missing", "agent plan admission is unavailable");
+    };
+    let ctx = held.context;
+    if held.owner_id != owner_id
+        || ctx.principal_id.as_deref() != Some(requester_id)
+        || ctx.capsule_id != capsule_id
+        || ctx.session_id != session_id
+        || ctx.data_dir.as_deref() != Some(data_dir)
+    {
+        return resource_error_response("admission_mismatch", "agent plan admission changed");
+    }
+    let scheme = step["scheme"].as_str().unwrap_or_default();
+    let operation = step["operation"].as_str().unwrap_or_default();
+    let body = &step["request"];
+    let uri = match build_capability_resource(scheme, operation, body) {
+        Ok(uri) => uri,
+        Err(_) => return resource_error_response("invalid_step", "agent plan step is invalid"),
+    };
+    let request = serde_json::json!({"uri": uri, "operation": operation, "body": body});
+    let dispatch = match resource_invoke_dispatch(
+        &request,
+        ctx.principal_id.as_deref(),
+        ctx.data_dir.as_deref(),
+    ) {
+        Ok(dispatch) if dispatch.scheme == scheme && dispatch.operation == operation => dispatch,
+        Ok(_) => return resource_error_response("invalid_step", "agent plan step is invalid"),
+        Err(_) => {
+            return resource_error_response(
+                "invalid_resource_invoke",
+                "agent plan resource invoke was refused",
+            )
+        }
+    };
+    // Approval grants exactly the resource and action derived by the bridge.
+    // The bridge still validates the token and every other authority at send.
+    let token = ctx.capability_manager.grant(
+        &ctx.capsule_id,
+        ResourceId::new(&dispatch.resource),
+        dispatch.required_action,
+        elastos_runtime::capability::TokenConstraints::default(),
+        None,
+    );
+    let request = serde_json::json!({
+        "uri": uri,
+        "operation": operation,
+        "body": body,
+        "token": encode_bridge_capability_token(&token),
+    });
+    authorize_and_dispatch_resource_invoke(&request, &ctx).await
 }
 
 /// Spawn a resource bridge handler for a microVM capsule.
@@ -872,13 +978,21 @@ fn submit_agent_plan_response(
         plan,
         now,
     ) {
-        Ok(record) => serde_json::json!({
-            "type": "resource_result",
-            "result": {
-                "status": "ok",
-                "data": record,
-            },
-        }),
+        Ok(record) => {
+            let request_id = record["request_id"].as_str().unwrap_or_default();
+            if let Err(err) =
+                retain_agent_plan_dispatch_authority(request_id, &owner_id, bridge_ctx)
+            {
+                return resource_error_response("submit_agent_plan_refused", &err.to_string());
+            }
+            serde_json::json!({
+                "type": "resource_result",
+                "result": {
+                    "status": "ok",
+                    "data": record,
+                },
+            })
+        }
         Err(err) => resource_error_response("submit_agent_plan_refused", &err.to_string()),
     }
 }

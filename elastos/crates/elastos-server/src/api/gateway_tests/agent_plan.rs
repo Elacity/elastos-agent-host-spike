@@ -7,6 +7,16 @@ use super::*;
 use crate::api::gateway::submit_pending_agent_plan;
 use std::path::Path;
 
+static PLAN_REGISTRIES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<ProviderRegistry>>>,
+> = std::sync::OnceLock::new();
+
+fn plan_registries(
+) -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<ProviderRegistry>>>
+{
+    PLAN_REGISTRIES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 fn agent_plan_state(dir: &Path) -> GatewayState {
     GatewayState {
         provider_registry: None,
@@ -45,7 +55,12 @@ impl Provider for AgentPlanProvider {
     ) -> Result<serde_json::Value, ProviderError> {
         self.calls.lock().await.push(request.clone());
         if request["hang"] == true {
-            std::future::pending::<()>().await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        if request["transport_error"] == true {
+            return Err(ProviderError::Provider(
+                "private provider diagnostic".to_string(),
+            ));
         }
         Ok(json!({"status": "ok", "data": {"observed": request}}))
     }
@@ -62,6 +77,11 @@ async fn agent_plan_dispatch_state(
             calls: calls.clone(),
         }))
         .await;
+    plan_registries()
+        .lock()
+        .unwrap()
+        .entry(dir.to_path_buf())
+        .or_insert_with(|| registry.clone());
     state.provider_registry = Some(registry);
     (state, calls)
 }
@@ -110,7 +130,7 @@ fn submit(
     plan: serde_json::Value,
     now: u64,
 ) -> serde_json::Value {
-    submit_pending_agent_plan(
+    let record = submit_pending_agent_plan(
         dir,
         owner,
         requester,
@@ -119,7 +139,51 @@ fn submit(
         &plan,
         now,
     )
-    .unwrap()
+    .unwrap();
+    if let Some(registry) = plan_registries().lock().unwrap().get(dir).cloned() {
+        let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+        let manager = Arc::new(elastos_runtime::capability::CapabilityManager::new(
+            Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+            audit.clone(),
+            Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+        ));
+        let ctx = crate::resource_bridge::BridgeContext {
+            provider_registry: registry,
+            capability_manager: manager,
+            pending_store: Arc::new(
+                elastos_runtime::capability::pending::PendingRequestStore::new(audit),
+            ),
+            capsule_id: "capsule:agent-host".to_string(),
+            session_id: "session:agent-1".to_string(),
+            principal_id: Some(requester.to_string()),
+            manifest_capabilities: (if requester == "agent:narrow" {
+                vec!["elastos://did/*"]
+            } else {
+                vec![
+                    "elastos://availability/*",
+                    "localhost://UsersAI/*",
+                    "localhost://Users/*",
+                ]
+            })
+            .into_iter()
+            .map(|resource| elastos_common::AuthorityBound {
+                resource: resource.to_string(),
+                actions: None,
+            })
+            .collect(),
+            data_dir: Some(dir.to_path_buf()),
+            launch: None,
+            model_token_ceiling: Some(16),
+            stop: None,
+        };
+        crate::resource_bridge::retain_agent_plan_dispatch_authority(
+            record["request_id"].as_str().unwrap(),
+            owner,
+            &ctx,
+        )
+        .unwrap();
+    }
+    record
 }
 
 fn approve_body(
@@ -562,8 +626,8 @@ async fn a15r_approve_a_writing_step_needs_a_fresh_passkey() {
     assert!(body.contains("passkey step-up"), "{body}");
     assert_eq!(read_record(dir.path(), request_id)["status"], "pending");
 
-    // A fresh passkey bound to this request approves the write step and
-    // nothing runs here.
+    // A fresh passkey approves the card; the protected-root bridge then
+    // refuses this synthetic agent, which has no stored principal root.
     let fresh = step_up_token_for_app_context(
         dir.path(),
         INBOX_CAPSULE_ID,
@@ -578,10 +642,10 @@ async fn a15r_approve_a_writing_step_needs_a_fresh_passkey() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(body.contains("Agent plan dispatch completed"), "{body}");
+    assert!(body.contains("Agent plan dispatch refused"), "{body}");
     let record = read_record(dir.path(), request_id);
-    assert_eq!(record["status"], "completed");
-    assert_eq!(record["result"]["status"], "ok");
+    assert_eq!(record["status"], "refused");
+    assert_eq!(record["result"]["status"], "refused");
 }
 
 #[tokio::test]
@@ -707,6 +771,140 @@ async fn a15r_dispatch_once_stored_body_receipt_and_audit() {
     assert!(audit.signature.is_some());
 }
 
+async fn approve_plan_for_row(
+    dir: &Path,
+    state: GatewayState,
+    requester: &str,
+    plan: serde_json::Value,
+) -> (String, serde_json::Value) {
+    let app = gateway_router(state);
+    let owner = passkey_authority(dir);
+    let token = app_token_for_authority(dir, INBOX_CAPSULE_ID, &owner);
+    let created = submit(dir, &owner.principal_id, requester, plan, 190);
+    let request_id = created["request_id"].as_str().unwrap();
+    let card = owner_card(&app, &token, request_id).await;
+    let passkey = step_up_token_for_app_context(
+        dir,
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({"request_id": request_id}),
+    );
+    let (status, body) = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &card["request_binding"], Some(&passkey)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    (request_id.to_string(), read_record(dir, request_id))
+}
+
+#[tokio::test]
+async fn a15r_cross_person_zero_provider_calls() {
+    // A approves the exact card. The bridge's principal-root rule refuses B.
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let b = passkey_authority_with_name_role(
+        dir.path(),
+        Some("B"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    let a = passkey_authority(dir.path());
+    let agent = crate::auth::valid_agent::plant_for_owner(dir.path(), &a.principal_id);
+    let b_uri = format!(
+        "{}/Documents/notes.md",
+        crate::auth::principal_localhost_root(&b.principal_id)
+    );
+    let b_file = elastos_common::localhost::rooted_localhost_fs_path(dir.path(), &b_uri).unwrap();
+    std::fs::create_dir_all(b_file.parent().unwrap()).unwrap();
+    std::fs::write(&b_file, b"B's original note").unwrap();
+    let (id, record) = approve_plan_for_row(
+        dir.path(),
+        state,
+        &agent.principal_id,
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": b_uri,
+            "content": [99, 104, 97, 110, 103, 101]
+        }}]}),
+    )
+    .await;
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["result"]["code"], "invalid_resource_invoke");
+    assert!(calls.lock().await.is_empty());
+    assert_eq!(std::fs::read(&b_file).unwrap(), b"B's original note");
+    assert!(crate::auth::load_auth_state(dir.path())
+        .unwrap()
+        .audit
+        .iter()
+        .any(|event| {
+            event.event_type == "agent_plan.dispatch.refused"
+                && event.challenge_id.as_deref() == Some(id.as_str())
+        }));
+}
+
+#[tokio::test]
+async fn a15r_protected_root_zero_provider_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let agent = crate::auth::valid_agent::plant(dir.path());
+    let created = submit(
+        dir.path(),
+        crate::auth::valid_agent::OWNER_ID,
+        &agent.principal_id,
+        json!({"steps": [{"scheme": "localhost", "operation": "write", "request": {
+            "path": "localhost://UsersAI/self/Documents/plan.md",
+            "content": [112, 108, 97, 110], "create_only": true
+        }}]}),
+        191,
+    );
+    let id = created["request_id"].as_str().unwrap();
+    set_approved(dir.path(), id);
+    super::gateway_inspect_actions::dispatch_approved_agent_plan(
+        &state,
+        &dispatch_context(crate::auth::valid_agent::OWNER_ID),
+        id,
+    )
+    .await
+    .unwrap();
+    let record = read_record(dir.path(), id);
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(
+        record["result"]["code"],
+        "principal_root_protection_required"
+    );
+    assert!(calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_manifest_ceiling_zero_provider_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let (_, record) = approve_plan_for_row(dir.path(), state, "agent:narrow", read_plan()).await;
+    assert_eq!(record["status"], "refused", "{record}");
+    assert_eq!(record["result"]["code"], "manifest_capability_denied");
+    assert!(calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_transport_error_is_unknown_and_redacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let (_, record) = approve_plan_for_row(
+        dir.path(),
+        state,
+        "agent:requester",
+        json!({"steps": [{"scheme": "availability", "operation": "status", "request": {
+            "transport_error": true
+        }}]}),
+    )
+    .await;
+    assert_eq!(calls.lock().await.len(), 1);
+    assert_eq!(record["status"], "unknown");
+    assert_eq!(record["result"]["code"], "provider_transport_error");
+    assert!(!record.to_string().contains("private provider diagnostic"));
+}
+
 #[tokio::test]
 async fn a15r_unapproved_zero_provider_calls() {
     let dir = tempfile::tempdir().unwrap();
@@ -732,7 +930,7 @@ async fn a15r_unapproved_zero_provider_calls() {
 }
 
 #[tokio::test]
-async fn a15r_replay_zero_after_restart_and_unknown_claim() {
+async fn a15r_replay_zero_after_restart_and_cancelled_request() {
     let dir = tempfile::tempdir().unwrap();
     let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
     let created = submit(
@@ -788,6 +986,16 @@ async fn a15r_replay_zero_after_restart_and_unknown_claim() {
     .expect("provider reached after durable claim");
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if !read_record(dir.path(), unknown_id)["result"].is_null() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached settlement completes after request cancellation");
     assert!(
         super::gateway_inspect_actions::dispatch_approved_agent_plan(
             &restarted, &context, unknown_id
@@ -795,8 +1003,14 @@ async fn a15r_replay_zero_after_restart_and_unknown_claim() {
         .await
         .is_err()
     );
-    assert_eq!(read_record(dir.path(), unknown_id)["status"], "dispatching");
-    assert!(read_record(dir.path(), unknown_id)["result"].is_null());
+    assert_eq!(read_record(dir.path(), unknown_id)["status"], "completed");
+    assert!(!read_record(dir.path(), unknown_id)["result"].is_null());
+    let audit = crate::auth::load_auth_state(dir.path()).unwrap().audit;
+    assert!(audit.iter().any(|event| {
+        event.event_type == "agent_plan.dispatch.started"
+            && event.challenge_id.as_deref() == Some(unknown_id)
+            && event.signature.is_some()
+    }));
     assert_eq!(calls.lock().await.len(), 2);
     assert!(calls_after_restart.lock().await.is_empty());
 }
@@ -843,5 +1057,33 @@ async fn a15r_stale_zero_after_binding_or_gate_change() {
             .await
             .is_err()
     );
+    assert!(calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_current_gate_recheck_refuses_rebound_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+    let created = submit(
+        dir.path(),
+        "person:owner",
+        "agent:requester",
+        read_plan(),
+        198,
+    );
+    let id = created["request_id"].as_str().unwrap();
+    set_approved(dir.path(), id);
+    let mut record = read_record(dir.path(), id);
+    record["plan"]["operation"] = json!("changed");
+    write_record(dir.path(), id, &record);
+    super::gateway_inspect_actions::rebind_agent_plan_for_test(dir.path(), id).unwrap();
+    let refused = super::gateway_inspect_actions::dispatch_approved_agent_plan(
+        &state,
+        &dispatch_context("person:owner"),
+        id,
+    )
+    .await;
+    assert!(refused.is_err());
+    assert_eq!(read_record(dir.path(), id)["status"], "stale");
     assert!(calls.lock().await.is_empty());
 }
