@@ -371,7 +371,7 @@ pub(super) async fn inbox_action(
     match dispatch_inbox_action(&state, &launch, &context, &authority, &action).await {
         Ok(message) => {
             let result = inspect_action_request_id_from_action(&action.action_id)
-                .map(|request_id| inspect_action_result_receipt(&state.data_dir, request_id))
+                .map(|id| inspect_action_result_receipt(&state.data_dir, id))
                 .transpose();
             match result {
                 Ok(result) => Json(InboxActionResponse { message, result }).into_response(),
@@ -594,18 +594,25 @@ async fn dispatch_inbox_action(
         .await;
     }
     if let Some(request_id) = action_id.strip_prefix("agent-plan-approve-request:") {
+        if state.provider_registry.is_none() {
+            anyhow::bail!("agent plan provider registry unavailable");
+        }
         let card = action
             .request_binding
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("agent plan approval requires the card binding"))?;
-        return super::gateway_inspect_actions::approve_agent_plan_request(
+        super::gateway_inspect_actions::approve_agent_plan_request(
             state,
             launch,
             context,
             request_id,
             card,
             action.step_up_token.as_deref(),
-        );
+        )?;
+        return super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            state, context, request_id,
+        )
+        .await;
     }
     if let Some(request_id) = action_id.strip_prefix("inspect-approve-request:") {
         let Some(step_up_token) = action.step_up_token.as_deref() else {

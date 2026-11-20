@@ -7,15 +7,15 @@ The `read` and `network` builds request one ungranted resource and return the
 Runtime refusal through the Bus. [GAPS.md](GAPS.md) records the remaining
 selector, model-call and storage-containment blockers.
 
-From the repository root, run:
+From `lab/agent-conformance`, run:
 
 ```sh
-cargo fmt --manifest-path lab/agent-conformance/Cargo.toml -- --check
+cargo fmt -- --check
 CARGO_NET_OFFLINE=true \
-CARGO_TARGET_DIR="$PWD/lab/agent-conformance/target/host" \
-CARGO_BUILD_BUILD_DIR="$PWD/lab/agent-conformance/target/host-build" \
+CARGO_TARGET_DIR="$PWD/target/host" \
+CARGO_BUILD_BUILD_DIR="$PWD/target/host-build" \
 RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 \
-cargo test --locked --manifest-path lab/agent-conformance/Cargo.toml -- --nocapture
+cargo test --locked -- --nocapture
 ```
 
 Use the repository's shared heavy-build lease for the test command. Reserve

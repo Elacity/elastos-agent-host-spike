@@ -8,8 +8,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::local_http::LoopbackHttpBaseUrl;
@@ -326,6 +326,266 @@ pub struct BridgeContext {
     /// instead of waiting out the shell's polls; it records that it left for
     /// the stop, and the activation's own end then denies the request.
     pub stop: Option<Arc<ActivationStopFlag>>,
+}
+
+/// The admitted context that submitted a plan stays available until its one
+/// claim. A process restart loses it and safely refuses an approved record.
+struct AgentPlanDispatchAuthority {
+    owner_id: String,
+    context: BridgeContext,
+    scheme: String,
+    operation: String,
+    body_hash: Vec<u8>,
+}
+
+static AGENT_PLAN_DISPATCH_AUTHORITIES: OnceLock<
+    Mutex<HashMap<String, AgentPlanDispatchAuthority>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+type AgentPlanOneUseTokens = Mutex<HashMap<String, (Arc<CapabilityManager>, CapabilityToken)>>;
+
+#[cfg(test)]
+static AGENT_PLAN_ONE_USE_TOKENS: OnceLock<AgentPlanOneUseTokens> = OnceLock::new();
+
+#[cfg(test)]
+pub(crate) async fn own_root_token_replay_refused_for_test(request_id: &str) -> bool {
+    let token = AGENT_PLAN_ONE_USE_TOKENS
+        .get()
+        .and_then(|tokens| tokens.lock().unwrap().remove(request_id));
+    let Some((manager, token)) = token else {
+        return false;
+    };
+    token.constraints().max_uses() == Some(1)
+        && manager
+            .validate(
+                &token,
+                token.capsule(),
+                token.action(),
+                token.resource(),
+                None,
+            )
+            .await
+            .is_err()
+}
+
+fn plan_authorities() -> &'static Mutex<HashMap<String, AgentPlanDispatchAuthority>> {
+    AGENT_PLAN_DISPATCH_AUTHORITIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn retain_agent_plan_dispatch_authority(
+    request_id: &str,
+    owner_id: &str,
+    context: &BridgeContext,
+    step: &serde_json::Value,
+) -> Result<()> {
+    let body_hash = Sha256::digest(serde_json::to_vec(&step["request"])?).to_vec();
+    let mut authorities = plan_authorities()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("agent plan authority lock is poisoned"))?;
+    authorities.insert(
+        request_id.to_string(),
+        AgentPlanDispatchAuthority {
+            owner_id: owner_id.to_string(),
+            context: context.clone(),
+            scheme: step["scheme"].as_str().unwrap_or_default().to_string(),
+            operation: step["operation"].as_str().unwrap_or_default().to_string(),
+            body_hash,
+        },
+    );
+    Ok(())
+}
+
+pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
+    if let Ok(mut authorities) = plan_authorities().lock() {
+        authorities.retain(|_, held| held.context.capsule_id != capsule_id);
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn grant_agent_plan_capability_for_test(
+    request_id: &str,
+    step: &serde_json::Value,
+) {
+    let (manager, store, capsule_id, principal_id, data_dir) = {
+        let authorities = plan_authorities().lock().unwrap();
+        let held = authorities.get(request_id).unwrap();
+        (
+            held.context.capability_manager.clone(),
+            held.context.pending_store.clone(),
+            held.context.capsule_id.clone(),
+            held.context.principal_id.clone(),
+            held.context.data_dir.clone(),
+        )
+    };
+    let scheme = step["scheme"].as_str().unwrap();
+    let operation = step["operation"].as_str().unwrap();
+    let body = &step["request"];
+    let uri = build_capability_resource(scheme, operation, body).unwrap();
+    let dispatch = resource_invoke_dispatch(
+        &serde_json::json!({"uri": uri, "operation": operation, "body": body}),
+        principal_id.as_deref(),
+        data_dir.as_deref(),
+    )
+    .unwrap();
+    let resource = ResourceId::new(&dispatch.resource);
+    let pending = store
+        .create_request(
+            elastos_runtime::session::SessionId(capsule_id.clone()),
+            resource.clone(),
+            dispatch.required_action,
+        )
+        .await;
+    let token = manager.grant(
+        &capsule_id,
+        resource,
+        dispatch.required_action,
+        elastos_runtime::capability::TokenConstraints::default(),
+        None,
+    );
+    store
+        .grant_request(
+            pending.id.as_str(),
+            token,
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .unwrap();
+}
+
+#[cfg(test)]
+pub(crate) fn narrow_agent_plan_manifest_for_test(request_id: &str) {
+    let mut authorities = plan_authorities().lock().unwrap();
+    authorities
+        .get_mut(request_id)
+        .unwrap()
+        .context
+        .manifest_capabilities = vec![AuthorityBound {
+        resource: "elastos://did/*".to_string(),
+        actions: None,
+    }];
+}
+
+/// Submit an approved stored step through the same normalization, authority
+/// checks and dispatch as an agent's ordinary resource invoke.
+pub(crate) async fn dispatch_agent_plan_step(
+    request_id: &str,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+    data_dir: &Path,
+    step: &serde_json::Value,
+) -> serde_json::Value {
+    let held = plan_authorities()
+        .lock()
+        .ok()
+        .and_then(|mut authorities| authorities.remove(request_id));
+    let Some(held) = held else {
+        return resource_error_response("admission_missing", "agent plan admission is unavailable");
+    };
+    let ctx = held.context;
+    if held.owner_id != owner_id
+        || ctx.principal_id.as_deref() != Some(requester_id)
+        || ctx.capsule_id != capsule_id
+        || ctx.session_id != session_id
+        || ctx.data_dir.as_deref() != Some(data_dir)
+    {
+        return resource_error_response("admission_mismatch", "agent plan admission changed");
+    }
+    let scheme = step["scheme"].as_str().unwrap_or_default();
+    let operation = step["operation"].as_str().unwrap_or_default();
+    let body = &step["request"];
+    if scheme != held.scheme
+        || operation != held.operation
+        || Sha256::digest(serde_json::to_vec(body).unwrap_or_default()).as_slice() != held.body_hash
+    {
+        return resource_error_response("admission_mismatch", "agent plan step changed");
+    }
+    match acting_agent_owner(data_dir, requester_id) {
+        Ok(current_owner) if current_owner == owner_id => {}
+        _ => return resource_error_response("agent_inactive", "agent can no longer dispatch"),
+    }
+    let uri = match build_capability_resource(scheme, operation, body) {
+        Ok(uri) => uri,
+        Err(_) => return resource_error_response("invalid_step", "agent plan step is invalid"),
+    };
+    let request = serde_json::json!({"uri": uri, "operation": operation, "body": body});
+    let dispatch = match resource_invoke_dispatch(
+        &request,
+        ctx.principal_id.as_deref(),
+        ctx.data_dir.as_deref(),
+    ) {
+        Ok(dispatch) if dispatch.scheme == scheme && dispatch.operation == operation => dispatch,
+        Ok(_) => return resource_error_response("invalid_step", "agent plan step is invalid"),
+        Err(_) => {
+            return resource_error_response(
+                "invalid_resource_invoke",
+                "agent plan resource invoke was refused",
+            )
+        }
+    };
+    let own_root = crate::auth::principal_stored_localhost_root(Some(data_dir), requester_id)
+        .ok()
+        .is_some_and(|root| {
+            dispatch.scheme == "localhost"
+                && (dispatch.resource == root || dispatch.resource.starts_with(&format!("{root}/")))
+        });
+    let token = if own_root {
+        // The retained record binds this one-use grant to its exact approved
+        // scheme, operation and body hash; the bridge consumes it on send.
+        let token = ctx.capability_manager.grant(
+            &ctx.capsule_id,
+            ResourceId::new(&dispatch.resource),
+            dispatch.required_action,
+            elastos_runtime::capability::TokenConstraints::new(0, false, None, Some(1)),
+            None,
+        );
+        #[cfg(test)]
+        AGENT_PLAN_ONE_USE_TOKENS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .insert(
+                request_id.to_string(),
+                (ctx.capability_manager.clone(), token.clone()),
+            );
+        token
+    } else {
+        let mut granted = None;
+        for request in ctx.pending_store.list_requests().await {
+            if request.session_id.0 != ctx.capsule_id {
+                continue;
+            }
+            let Some(token) = request.granted_token() else {
+                continue;
+            };
+            if token.action() == dispatch.required_action
+                && ResourceId::new(&dispatch.resource).matches(token.resource())
+                && ctx
+                    .capability_manager
+                    .can_still_validate_for_caller(token, &ctx.capsule_id)
+                    .await
+            {
+                granted = Some(token.clone());
+                break;
+            }
+        }
+        let Some(token) = granted else {
+            return resource_error_response(
+                "needs_admin_grant",
+                "agent needs an admin capability grant for this resource",
+            );
+        };
+        token
+    };
+    let request = serde_json::json!({
+        "uri": uri,
+        "operation": operation,
+        "body": body,
+        "token": encode_bridge_capability_token(&token),
+    });
+    authorize_and_dispatch_resource_invoke(&request, &ctx).await
 }
 
 #[derive(Clone)]
@@ -974,6 +1234,21 @@ fn submit_agent_plan_response(
         Ok(owner_id) => owner_id,
         Err(err) => return resource_error_response("submit_agent_plan_refused", &err.to_string()),
     };
+    if let Some(request_id) = plan.get("request_id").and_then(serde_json::Value::as_str) {
+        return match crate::api::gateway::agent_plan_result_for_requester(
+            data_dir,
+            request_id,
+            &owner_id,
+            requester_id,
+            &bridge_ctx.capsule_id,
+            &bridge_ctx.session_id,
+        ) {
+            Ok(receipt) => serde_json::json!({
+                "type": "resource_result", "result": {"status": "ok", "data": receipt},
+            }),
+            Err(err) => resource_error_response("agent_plan_result_refused", &err.to_string()),
+        };
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -987,13 +1262,24 @@ fn submit_agent_plan_response(
         plan,
         now,
     ) {
-        Ok(record) => serde_json::json!({
-            "type": "resource_result",
-            "result": {
-                "status": "ok",
-                "data": record,
-            },
-        }),
+        Ok(record) => {
+            let request_id = record["request_id"].as_str().unwrap_or_default();
+            if let Err(err) = retain_agent_plan_dispatch_authority(
+                request_id,
+                &owner_id,
+                bridge_ctx,
+                &record["request"],
+            ) {
+                return resource_error_response("submit_agent_plan_refused", &err.to_string());
+            }
+            serde_json::json!({
+                "type": "resource_result",
+                "result": {
+                    "status": "ok",
+                    "data": record,
+                },
+            })
+        }
         Err(err) => resource_error_response("submit_agent_plan_refused", &err.to_string()),
     }
 }
@@ -7081,8 +7367,8 @@ mod tests {
         assert_eq!(outcomes, vec!["error".to_string()]);
     }
 
-    /// The Agent Host as shipped: its own manifest, and only the two grants it
-    /// asks for. Neither can delete `.AppData`, the person's root, or the journal.
+    /// The shipped Agent Host asks for two journal grants and one plan submit
+    /// grant. These grants cannot delete `.AppData`, the root, or the journal.
     #[tokio::test]
     async fn the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root() {
         let manifest: elastos_common::CapsuleManifest =
@@ -7093,13 +7379,19 @@ mod tests {
             .expect("the agent host manifest validates");
         assert_eq!(
             manifest.resource_authority_bounds(),
-            vec![elastos_common::AuthorityBound {
-                resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
-                actions: Some(vec![
-                    elastos_common::AskAction::Write,
-                    elastos_common::AskAction::Read,
-                ]),
-            }]
+            vec![
+                elastos_common::AuthorityBound {
+                    resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
+                    actions: Some(vec![
+                        elastos_common::AskAction::Write,
+                        elastos_common::AskAction::Read,
+                    ]),
+                },
+                elastos_common::AuthorityBound {
+                    resource: "elastos://inspect/submit_agent_plan".to_string(),
+                    actions: Some(vec![elastos_common::AskAction::Write]),
+                },
+            ]
         );
         let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
         ctx.manifest_capabilities = manifest.resource_authority_bounds();
@@ -7835,12 +8127,12 @@ mod tests {
         serde_json::from_slice(&std::fs::read(path).expect("stored record")).unwrap()
     }
 
-    /// The probe Agent Host's manifest as it is on disk, unsigned; only its
-    /// ceiling is read here.
+    /// The shipped Agent Host manifest as it is on disk; the bridge checks
+    /// its exact resource ceiling.
     fn submit_plan_host_manifest() -> elastos_common::CapsuleManifest {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/components/a5-launch-probe/capsule.json");
-        serde_json::from_slice(&std::fs::read(path).expect("probe test manifest")).unwrap()
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host/capsule.json");
+        serde_json::from_slice(&std::fs::read(path).expect("Agent Host manifest")).unwrap()
     }
 
     /// The submitted plan: one exact typed step plus whatever the row adds.
@@ -7877,7 +8169,7 @@ mod tests {
         .to_string()
     }
 
-    /// The probe Agent Host's bridge over `data_dir`, acting as `principal`.
+    /// The Agent Host bridge over `data_dir`, acting as `principal`.
     async fn submit_plan_bridge(
         data_dir: &Path,
         principal: &str,
@@ -8022,6 +8314,92 @@ mod tests {
         assert!(
             ctx.pending_store.list_pending().await.is_empty(),
             "a submission asks for no grant"
+        );
+        let query = serde_json::json!({"request_id": request_id});
+        let pending = submit_with_write(&ctx, 78, &query).await;
+        assert_eq!(pending["response"]["code"], "agent_plan_result_refused");
+        let mut settled = stored.clone();
+        settled["status"] = serde_json::json!("completed");
+        settled["result"] = serde_json::json!({"status": "ok", "data": {"done": true}});
+        std::fs::write(
+            home.path()
+                .join("inspect-actions")
+                .join(format!("{request_id}.json")),
+            serde_json::to_vec_pretty(&settled).unwrap(),
+        )
+        .unwrap();
+        let receipt = submit_with_write(&ctx, 79, &query).await;
+        assert_eq!(
+            receipt["response"]["result"]["data"]["request_binding"],
+            *binding
+        );
+        assert_eq!(
+            receipt["response"]["result"]["data"]["dispatch_result"]["data"]["done"],
+            true
+        );
+        let mut other_activation = ctx.clone();
+        other_activation.session_id = "different-session".to_string();
+        let refused = submit_with_write(&other_activation, 80, &query).await;
+        assert_eq!(refused["response"]["code"], "agent_plan_result_refused");
+    }
+
+    #[tokio::test]
+    #[ignore = "reads Agent Host preview bytes; run examples/agent-host/run-e2e.sh"]
+    async fn a15r_june_plan_stores_and_shows_the_document_step_bytes() {
+        let Some((home, ctx, provider, _requester, owner)) = submit_agent_plan_context().await
+        else {
+            return assert_refused_without_agents_built().await;
+        };
+        let proposed = std::fs::read(std::path::PathBuf::from(
+            std::env::var_os("A15R_PREVIEW_STEP_PATH")
+                .expect("Agent Host preview step path from run-e2e.sh"),
+        ))
+        .expect("Agent Host preview step bytes");
+        let step: serde_json::Value =
+            serde_json::from_slice(&proposed).expect("Agent Host serialized step");
+        // This shape is the product contract. The bytes above come from the
+        // planner itself, so a planner-only shape change fails this row.
+        assert_eq!(
+            step,
+            serde_json::json!({
+                "scheme": "localhost",
+                "operation": "write",
+                "request": {
+                    "path": "localhost://Users/self/Documents/note.txt",
+                    "content": b"three lines",
+                },
+            })
+        );
+        assert_eq!(serde_json::to_vec(&step).unwrap(), proposed);
+        let plan = serde_json::json!({"steps": [step]});
+        let response = submit_with_write(&ctx, 81, &plan).await;
+        let data = &response["response"]["result"]["data"];
+        assert_eq!(data["status"], "pending", "{response}");
+        let request_id = data["request_id"].as_str().unwrap();
+        let stored = read_submit_record(home.path(), request_id);
+        assert_eq!(serde_json::to_vec(&stored["request"]).unwrap(), proposed);
+        let cards = crate::api::gateway::inbox_request_entries_for_test(
+            home.path(),
+            &owner,
+            Some(&home.owner.proof_binding_id),
+            crate::auth::PrincipalKind::Human,
+        )
+        .await;
+        let (_, kind, body) = cards
+            .iter()
+            .find(|(_, kind, _)| kind == "agent_plan")
+            .unwrap();
+        assert_eq!(kind, "agent_plan");
+        let shown = body
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("Step 1: ")
+            .unwrap();
+        assert_eq!(shown.as_bytes(), proposed);
+        assert!(
+            provider.requests().await.is_empty(),
+            "preview has no effect"
         );
     }
 
