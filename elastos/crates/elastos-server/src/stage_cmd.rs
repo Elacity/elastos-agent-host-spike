@@ -678,8 +678,10 @@ mod tests {
         // the slot it wrote); the start by CID makes one, of each slot; agent
         // admission makes two (the installed Agent Host at creation, and the
         // launch folder, walked once and loaded from that walk); an install
-        // makes one, of the folder it wrote, for its record.
-        assert_eq!(walks, 8, "the walks the server makes");
+        // makes one, of the folder it wrote, for its record; and the folder
+        // gate makes two (the folder a start loads, and the by-CID slot it
+        // accepts).
+        assert_eq!(walks, 10, "the walks the server makes");
         assert_eq!(of_a_start, 1, "the one walk under what is left");
     }
 }
