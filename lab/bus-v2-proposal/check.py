@@ -23,7 +23,8 @@ DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
 # A prose backtick span that looks like code is a claim: the same line must
 # hold a path:line citation. These marks, a dotted chain and a keyword are code
 # shapes. A plain identifier and a file name are not.
-CODE_MARKS = ("::", "->", "=", "(", ")")
+CODE_MARKS = ("::", "->", "=", "(", ")", "[", "]", "+", "*", "&", "|", "%", "^")
+SPACED_OPERATOR = re.compile(r"\s[-/<>]\s")
 DOTTED_CHAIN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
 FILE_NAME = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}")
 FILE_EXTENSIONS = frozenset(
@@ -445,17 +446,23 @@ def commit_exists(root, sha):
 
 
 def _spans(text):
+    """Return CommonMark code span contents from matching backtick runs."""
     spans = []
-    cursor = 0
-    while True:
-        opened = text.find("`", cursor)
-        if opened < 0:
-            return spans
-        closed = text.find("`", opened + 1)
-        if closed < 0:
-            return spans
-        spans.append(text[opened + 1:closed])
-        cursor = closed + 1
+    runs = list(re.finditer(r"`+", text))
+    opener = 0
+    while opener < len(runs):
+        closer = opener + 1
+        while closer < len(runs) and len(runs[closer].group()) != len(runs[opener].group()):
+            closer += 1
+        if closer == len(runs):
+            opener += 1
+            continue
+        content = re.sub(r"\r\n?|\n", " ", text[runs[opener].end():runs[closer].start()])
+        if content.startswith(" ") and content.endswith(" ") and not content.isspace():
+            content = content[1:-1]
+        spans.append(content)
+        opener = closer + 1
+    return spans
 
 
 def _pinned_lines(root, sha, rel):
@@ -1446,7 +1453,7 @@ def _file_name(span):
 
 def code_shaped(span):
     """True when SPAN looks like code rather than one identifier or file name."""
-    if any(mark in span for mark in CODE_MARKS):
+    if any(mark in span for mark in CODE_MARKS) or SPACED_OPERATOR.search(span):
         return True
     if _file_name(span):
         return False
@@ -1475,10 +1482,12 @@ def code_span_refusals(text):
         if kind != TEXT or _indent_width(lines[index]) > 3:
             continue
         spans = _spans(visible)
-        if any(CITATION.fullmatch(span) for span in spans):
+        if any((match := CITATION.fullmatch(span)) and match.group("start")
+               for span in spans):
             continue
         for span in spans:
-            if CITATION.fullmatch(span) is None and code_shaped(span):
+            match = CITATION.fullmatch(span)
+            if (match is None or match.group("start") is None) and code_shaped(span):
                 refusals.append(
                     "refuse: line %d has a code-shaped span and no path:line "
                     "citation: `%s`" % (index + 1, span)
@@ -1513,7 +1522,7 @@ def problems(root):
         for span in _spans(text):
             match = CITATION.fullmatch(span)
             if match is None:
-                # Deliberate: only path:line backtick spans are citations.
+                # Deliberate: only recognized backtick locations are checked.
                 continue
             reason = _refusal(root, match, sha)
             if reason is not None:
