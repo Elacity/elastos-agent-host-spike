@@ -1202,6 +1202,7 @@ impl Supervisor {
                     capability_manager: cap_mgr.clone(),
                     pending_store: pending.clone(),
                     capsule_id: format!("vm-{}", name),
+                    session_id: format!("vm-{}", name),
                     principal_id: principal_id
                         .map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
                     manifest_capabilities: manifest.resource_authority_bounds(),

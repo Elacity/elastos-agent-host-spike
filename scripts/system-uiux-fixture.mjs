@@ -139,6 +139,7 @@ export function inertSystemApiResponse(pathname) {
   if (pathname === "/api/apps/system/community/presence") {
     return { schema: "elastos.community-presence/v1", configured: false, joined: false, community_presence: null };
   }
+  if (pathname === "/api/apps/system/agents") return { agents: [] };
   if (pathname === "/api/apps/system/ai-provider") {
     return {
       hosted_external_https: "paused",
