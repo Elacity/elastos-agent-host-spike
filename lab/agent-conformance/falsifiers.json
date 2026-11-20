@@ -1614,6 +1614,22 @@
       "tests": [
         "declared_network_manifest_is_refused"
       ]
+    },
+    {
+      "id": "F-ac-u10-s9",
+      "title": "remove the requested read from the fixture manifest asks",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/common/signed_bundle.rs",
+          "old": "const REQUESTED_ACTIONS: &[&str] = &[\"read\", \"write\"];",
+          "new": "const REQUESTED_ACTIONS: &[&str] = &[\"write\"];"
+        }
+      ],
+      "tests": [
+        "fixture_writer_declares_the_requested_read"
+      ]
     }
   ]
 }

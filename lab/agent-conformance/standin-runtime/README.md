@@ -2,6 +2,8 @@
 
 This value is the lab stand-in for the shell-only view of every session's live grants. The real route can replace it later because the JSON matches (M1-R).
 
+The conformance fixture writer records each journey ask on `capsule.json` as a Runtime manifest ask: one resource and its actions, with `capabilities` removed so that list is the one ceiling. `asks.json` stays in the signed bytes while the stand-in still reads that file. A shell grant remains the decision; an ask is only the maximum.
+
 `StandIn::get_capability_list` answers `GET /api/capability/list`. `scope: None` is the plain route. `scope: Some("all_sessions_live")` is `GET /api/capability/list?scope=all_sessions_live`. The caller is `Shell` or `Client { session_id }`, a method argument for the authenticated session. It is not a JSON field.
 
 A shell caller with the plain route receives a body whose only key is `capabilities`; it holds the shell session's own live grants, exactly as the real handler lists the caller's session, and is empty when that session holds none. A shell caller with `scope: Some("all_sessions_live")` receives a body whose keys are `scope` and `capabilities`. `scope` is `all_sessions_live`. Each entry's keys are `request_id`, `session_id`, `resource`, `action`, `duration` and `granted_at`. Entries are sorted by `session_id`, then `request_id`.

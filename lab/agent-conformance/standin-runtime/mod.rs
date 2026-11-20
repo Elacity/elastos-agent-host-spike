@@ -2958,6 +2958,10 @@ fn stop_reason(body: &Value) -> Result<&str, (u16, String)> {
 }
 
 #[cfg(test)]
+#[path = "../tests/common/manifest_asks.rs"]
+mod manifest_asks;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
@@ -3082,10 +3086,9 @@ mod tests {
         );
     }
 
-    /// Replaces the fixture's `asks.json` with exactly `asks`, in that order,
-    /// before the bundle is signed. A test that needs another declared set
-    /// gives it here; the committed file stays the fixture the other lanes
-    /// read.
+    /// Replaces the fixture's asks with exactly `asks`, in that order, before
+    /// the bundle is signed. The manifest gets the typed rows. `asks.json`
+    /// keeps the same pairs for the stand-in that still reads that file.
     fn declare_asks(root: &Path, asks: &[(&str, &str)]) {
         let listed = asks
             .iter()
@@ -3097,6 +3100,7 @@ mod tests {
             serde_json::to_vec_pretty(&file).expect("encode the fixture asks"),
         )
         .expect("write the fixture asks");
+        super::manifest_asks::write_typed_manifest_asks(root, asks);
     }
 
     /// A fresh Ed25519 test key. Nothing writes it or keeps a seed.

@@ -10,7 +10,7 @@ mod signed_bundle;
 
 use agent_conformance::standin_runtime::{Caller, Life, StandIn, Start};
 use serde_json::{json, Value};
-use signed_bundle::{SignedBundle, SHARED_NAME};
+use signed_bundle::{write_typed_manifest_asks, SignedBundle, SHARED_NAME};
 use std::collections::BTreeSet;
 
 const LIVE_SCOPE: &str = "all_sessions_live";
@@ -1041,6 +1041,29 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
     );
 }
 
+/// The fixture writer puts the requested read on the manifest ask.
+#[test]
+fn fixture_writer_declares_the_requested_read() {
+    let shared = SignedBundle::new();
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(shared.path().join("capsule.json")).expect("read capsule.json"),
+    )
+    .expect("parse capsule.json");
+    assert!(
+        manifest.get("capabilities").is_none(),
+        "the fixture writer leaves capabilities out so asks are the one ceiling"
+    );
+    let asks: Vec<elastos_common::ManifestAsk> =
+        serde_json::from_value(manifest["asks"].clone()).expect("asks are typed manifest asks");
+    let declared = asks.iter().any(|ask| {
+        ask.resource == SHARED_RESOURCE && ask.actions.contains(&elastos_common::AskAction::Read)
+    });
+    assert!(
+        declared,
+        "the fixture writer declares read on {SHARED_RESOURCE}: {asks:?}"
+    );
+}
+
 /// M1 check B2. The signed bundle declares one ask: a read of `ASK_RESOURCE`.
 const ASK_RESOURCE: &str = "localhost://Users/self/.AppData/Agents/agent-host/tasks";
 /// A path under `ASK_RESOURCE`. No ask names it.
@@ -1048,7 +1071,9 @@ const ASK_PATH: &str = "localhost://Users/self/.AppData/Agents/agent-host/tasks/
 /// A path outside `ASK_RESOURCE`. No ask names it.
 const OTHER_PATH: &str = "localhost://Users/self/.AppData/Agents/agent-host/other/journal";
 
-/// Replaces the fixture's `asks.json` with exactly `asks`, before signing.
+/// Replaces the fixture's asks with exactly `asks`, before signing. The
+/// manifest gets the typed rows. `asks.json` keeps the same pairs for the
+/// stand-in that still reads that file.
 fn declare_asks(shared: &SignedBundle, asks: &[(&str, &str)]) {
     let listed = asks
         .iter()
@@ -1060,6 +1085,7 @@ fn declare_asks(shared: &SignedBundle, asks: &[(&str, &str)]) {
         serde_json::to_vec_pretty(&file).expect("encode the fixture asks"),
     )
     .expect("write the fixture asks");
+    write_typed_manifest_asks(shared.path(), asks);
 }
 
 /// One admitted, launched and started guest, driven only through the routes.
