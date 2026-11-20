@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
 use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
-use crate::resource_bridge::LaunchContent;
+use crate::model_budget::{AgentKey, ModelBudget};
+use crate::resource_bridge::{BridgePrincipal, LaunchContent};
 use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
@@ -217,6 +218,13 @@ enum LaunchMode {
     Detached,
 }
 
+/// One admitted agent's model identity and ceiling for one activation.
+#[derive(Clone)]
+struct AgentModelCeiling {
+    ceiling: u64,
+    key: AgentKey,
+}
+
 /// The main ElastOS runtime
 pub struct Runtime {
     // Keep the storage provider alive for runtime/lifecycle ownership even
@@ -242,7 +250,9 @@ pub struct Runtime {
     /// entry is not an admitted agent. Present, including 0, is the ceiling
     /// admission recorded and passed into the start. The manifest is not
     /// read again for this number.
-    bridge_model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
+    bridge_model_token_ceilings: Arc<StdRwLock<HashMap<String, AgentModelCeiling>>>,
+    model_budget: Arc<ModelBudget>,
+    model_offer_bounds: Arc<StdRwLock<HashMap<String, crate::resource_bridge::ModelOfferBound>>>,
     /// The capability store and manager a detached activation's end settles
     /// through, set with the provider registry. `None` is a Runtime with no
     /// capability plane (the CLI): an ending there has nothing to settle.
@@ -373,7 +383,7 @@ struct ActivationContextHeld {
     component: Arc<ComponentProvider>,
     registry: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
     manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
-    model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
+    model_token_ceilings: Arc<StdRwLock<HashMap<String, AgentModelCeiling>>>,
     activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
     /// The launch contents, by capsule id: a content launch's program reads
     /// its content from here until its end, and no other activation does.
@@ -762,6 +772,8 @@ impl Runtime {
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
+            model_budget: Arc::new(ModelBudget::new()),
+            model_offer_bounds: Arc::new(StdRwLock::new(HashMap::new())),
             instance_authority: StdRwLock::new(None),
             activation_stops: Arc::default(),
             launch_contents: Arc::default(),
@@ -784,6 +796,8 @@ impl Runtime {
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
+            model_budget: Arc::new(ModelBudget::new()),
+            model_offer_bounds: Arc::new(StdRwLock::new(HashMap::new())),
             instance_authority: StdRwLock::new(None),
             activation_stops: Arc::default(),
             launch_contents: Arc::default(),
@@ -820,6 +834,8 @@ impl Runtime {
             let host_data_dir = data_dir.clone();
             let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
             let host_model_token_ceilings = self.bridge_model_token_ceilings.clone();
+            let host_model_budget = self.model_budget.clone();
+            let host_model_offer_bounds = self.model_offer_bounds.clone();
             let host_activation_stops = self.activation_stops.clone();
             let host_launch_contents = self.launch_contents.clone();
             let host_handle = tokio::runtime::Handle::current();
@@ -841,11 +857,18 @@ impl Runtime {
                     .unwrap_or_else(|it| it.into_inner())
                     .get(capsule_id)
                     .cloned();
-                let model_token_ceiling = host_model_token_ceilings
+                let model_admission = host_model_token_ceilings
                     .read()
                     .unwrap_or_else(|it| it.into_inner())
                     .get(capsule_id)
-                    .copied();
+                    .cloned();
+                let model_token_ceiling = model_admission.as_ref().map(|held| held.ceiling);
+                let model_budget =
+                    model_admission.map(|held| crate::resource_bridge::ModelDispatchBudget {
+                        agent: held.key,
+                        account: host_model_budget.clone(),
+                        offers: host_model_offer_bounds.clone(),
+                    });
                 // The stop this activation was asked for, if any: the bridge's
                 // wait loop leaves a long capability wait through it.
                 let stop = host_activation_stops
@@ -858,11 +881,17 @@ impl Runtime {
                     capability_manager: host_cap_mgr.clone(),
                     pending_store: host_pending.clone(),
                     capsule_id: capsule_id.to_string(),
+                    // The provider minted this id for the one activation, so
+                    // the Runtime session is the activation, taken here from
+                    // the Runtime's own hostcall and never from the Bus
+                    // identity field the guest reads.
+                    session_id: capsule_id.to_string(),
                     principal_id: principal_id.map(ToOwned::to_owned),
                     manifest_capabilities,
                     data_dir: Some(host_data_dir.clone()),
                     launch,
                     model_token_ceiling,
+                    model_budget,
                     stop,
                 };
                 let response = host_handle
@@ -1009,7 +1038,7 @@ impl Runtime {
         self.run_signer(
             path,
             args,
-            principal_id,
+            (principal_id, None),
             None,
             LaunchMode::Bounded,
             (|_| {}, |_| {}),
@@ -1033,7 +1062,7 @@ impl Runtime {
         self.run_signer(
             path,
             args,
-            None,
+            (None, None),
             None,
             LaunchMode::Bounded,
             (before_folder_walk, after_folder_walk),
@@ -1050,11 +1079,12 @@ impl Runtime {
         path: &Path,
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+        grant_name: Option<&str>,
     ) -> Result<(CapsuleHandle, Signer)> {
         self.run_signer(
             path,
             args,
-            principal_id,
+            (principal_id, grant_name),
             None,
             LaunchMode::Detached,
             (|_| {}, |_| {}),
@@ -1103,12 +1133,25 @@ impl Runtime {
     ) -> Result<(CapsuleHandle, Signer)> {
         let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
         let ceiling = admission.model_token_ceiling();
+        let model_admission = AgentModelCeiling {
+            ceiling,
+            key: AgentKey::from_admission(&admission),
+        };
+        if ceiling > 0 {
+            self.model_budget
+                .open(&model_admission.key, ceiling)
+                .map_err(|refusal| {
+                    ElastosError::InvalidManifest(format!(
+                        "model budget admission refused: {refusal:?}"
+                    ))
+                })?;
+        }
         let (manifest, entrypoint) = admission.into_parts();
         self.run_signer(
             path,
             args,
-            Some(actor),
-            Some((manifest, entrypoint, ceiling)),
+            (Some(actor), None),
+            Some((manifest, entrypoint, model_admission)),
             mode,
             (|_| {}, |_| {}),
         )
@@ -1123,14 +1166,15 @@ impl Runtime {
         &self,
         path: &Path,
         args: Vec<String>,
-        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
-        admitted: Option<(CapsuleManifest, Vec<u8>, u64)>,
+        launch: (Option<BridgePrincipal>, Option<&str>),
+        admitted: Option<(CapsuleManifest, Vec<u8>, AgentModelCeiling)>,
         mode: LaunchMode,
         walk_hooks: (
             impl FnOnce(&Path) + Send,
             impl FnOnce(&CheckedBundle) + Send,
         ),
     ) -> Result<(CapsuleHandle, Signer)> {
+        let (principal_id, grant_name) = launch;
         let (before_folder_walk, after_folder_walk) = walk_hooks;
         let admitted_launch = admitted.is_some();
         if !admitted_launch {
@@ -1141,9 +1185,9 @@ impl Runtime {
             )
             .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
         }
-        let (manifest, walked, admitted_ceiling) = match admitted {
-            Some((manifest, entrypoint, ceiling)) => {
-                (Some(manifest), Some(entrypoint), Some(ceiling))
+        let (manifest, walked, admitted_model) = match admitted {
+            Some((manifest, entrypoint, model_admission)) => {
+                (Some(manifest), Some(entrypoint), Some(model_admission))
             }
             None => (None, None, None),
         };
@@ -1192,9 +1236,14 @@ impl Runtime {
         if let Some(start) = &folder_start {
             manifest = start.manifest.clone();
         }
+        if grant_name.is_some_and(|name| manifest.name != name) {
+            return Err(ElastosError::InvalidManifest(
+                "launch grant mismatch".into(),
+            ));
+        }
 
-        if let Some(ceiling) = admitted_ceiling {
-            if manifest.resources.model_token_ceiling() != ceiling {
+        if let Some(model_admission) = &admitted_model {
+            if manifest.resources.model_token_ceiling() != model_admission.ceiling {
                 return Err(ElastosError::InvalidManifest(
                     "the model-token ceiling is the one admission recorded".into(),
                 ));
@@ -1313,7 +1362,7 @@ impl Runtime {
             &mut handle,
             args,
             principal_id.map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
-            admitted_ceiling,
+            admitted_model,
             mode,
         )
         .await?;
@@ -1784,7 +1833,7 @@ impl Runtime {
             .unwrap_or_else(|err| err.into_inner());
         let mut held: Vec<_> = ceilings
             .iter()
-            .map(|(id, ceiling)| (id.clone(), *ceiling))
+            .map(|(id, admission)| (id.clone(), admission.ceiling))
             .collect();
         held.sort();
         held
@@ -1871,7 +1920,7 @@ impl Runtime {
             .read()
             .unwrap_or_else(|it| it.into_inner())
             .get(id)
-            .copied();
+            .map(|admission| admission.ceiling);
         let stop = self
             .activation_stops
             .read()
@@ -1904,7 +1953,7 @@ impl Runtime {
         handle: &mut CapsuleHandle,
         args: Vec<String>,
         principal_id: Option<String>,
-        model_token_ceiling: Option<u64>,
+        model_admission: Option<AgentModelCeiling>,
         mode: LaunchMode,
     ) -> Result<()> {
         let detached_component =
@@ -1918,7 +1967,7 @@ impl Runtime {
         let held = detached_component
             .as_ref()
             .map(|component| ActivationContextHeld::new(self, handle, component.clone()));
-        self.hold_launch_context(handle, principal_id.clone(), model_token_ceiling)
+        self.hold_launch_context(handle, principal_id.clone(), model_admission)
             .await;
 
         // Set args on handle before starting
@@ -1960,7 +2009,7 @@ impl Runtime {
         &self,
         handle: &CapsuleHandle,
         principal_id: Option<String>,
-        model_token_ceiling: Option<u64>,
+        model_admission: Option<AgentModelCeiling>,
     ) {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.insert(
@@ -1968,11 +2017,11 @@ impl Runtime {
                 handle.manifest.resource_authority_bounds(),
             );
         }
-        if let Some(ceiling) = model_token_ceiling {
+        if let Some(admission) = model_admission {
             self.bridge_model_token_ceilings
                 .write()
                 .unwrap_or_else(|err| err.into_inner())
-                .insert(handle.id.0.clone(), ceiling);
+                .insert(handle.id.0.clone(), admission);
         }
         if handle.manifest.is_component_capsule() {
             if let Some(component) = &self.component_provider {
@@ -2972,11 +3021,13 @@ pub(crate) mod tests {
             .write()
             .unwrap()
             .insert(id.clone(), handle.manifest.resource_authority_bounds());
-        runtime
-            .bridge_model_token_ceilings
-            .write()
-            .unwrap()
-            .insert(id.clone(), 7);
+        runtime.bridge_model_token_ceilings.write().unwrap().insert(
+            id.clone(),
+            AgentModelCeiling {
+                ceiling: 7,
+                key: AgentKey::for_test("agent:v2:ended"),
+            },
+        );
 
         let held = ActivationContextHeld::new(&runtime, &handle, component);
         let mut filled = runtime.context_left_for_test(&id).await;
@@ -3769,10 +3820,14 @@ pub(crate) mod tests {
         assert_eq!(handle.manifest.name, "installed-folder");
 
         let (_handle, signer) = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .expect("the route starts an installed folder");
         assert_eq!(signer, Signer::Key { did });
+        assert!(runtime
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, Some("another-capsule"))
+            .await
+            .is_err());
     }
 
     /// A folder signed by a trusted key that no install recorded and no
@@ -3889,7 +3944,7 @@ pub(crate) mod tests {
             .expect_err("the CLI refuses a folder no install recorded")
             .to_string();
         let route = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .map(|_| ())
             .expect_err("the route refuses a folder no install recorded")
@@ -3961,7 +4016,7 @@ pub(crate) mod tests {
             .expect_err("the CLI refuses it")
             .to_string();
         let route = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .map(|_| ())
             .expect_err("the route refuses it")
@@ -4925,11 +4980,13 @@ pub(crate) mod tests {
             capability_manager: capability_manager.clone(),
             pending_store: pending_store.clone(),
             capsule_id: b_session.clone(),
+            session_id: b_session.clone(),
             principal_id: Some(agents[1].clone()),
             manifest_capabilities: manifest.resource_authority_bounds(),
             data_dir: Some(data_dir.clone()),
             launch: None,
             model_token_ceiling: None,
+            model_budget: None,
             stop: None,
         };
         let line = serde_json::json!({

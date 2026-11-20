@@ -277,6 +277,7 @@ fn notification_action_uses_inbox_review(action_id: &str) -> bool {
         "wallet-review-request:",
         "capability-approve-request:",
         "inspect-approve-request:",
+        "agent-plan-approve-request:",
         "wallet-price-http-approve:",
         "chat-open-direct:",
         "service-approve-request:",

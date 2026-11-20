@@ -735,6 +735,8 @@ pub(crate) struct AgentView {
     pub(crate) agent_host: Option<AgentHostPackage>,
     pub(crate) created_at: u64,
     pub(crate) retired_at: Option<u64>,
+    // Read-only. The activate route is what changes it.
+    pub(crate) active: bool,
 }
 
 fn view(agent: &StoredAgent) -> AgentView {
@@ -744,6 +746,7 @@ fn view(agent: &StoredAgent) -> AgentView {
         agent_host: agent.record.agent_host_package.clone(),
         created_at: agent.record.created_at,
         retired_at: agent.record.retired_at,
+        active: agent.active,
     }
 }
 
