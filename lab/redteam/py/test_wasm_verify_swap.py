@@ -277,6 +277,12 @@ def cargo_env(root):
     env["RUST_TEST_THREADS"] = "2"
     env["RUST_BACKTRACE"] = "0"
     env["REDTEAM_BUNDLE_DIR"] = str(root / "bundle")
+    # The temp copy is built to observe behaviour (is the swapped module refused?),
+    # not to lint it. CI exports RUSTFLAGS=-D warnings, and the planted copy has
+    # an unused import and variable by construction, so the build failed before the
+    # test could report "accepted swap:". Lints on the real crate run in CI clippy.
+    env.pop("RUSTFLAGS", None)
+    env.pop("CARGO_ENCODED_RUSTFLAGS", None)
     return env
 
 
