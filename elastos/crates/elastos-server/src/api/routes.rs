@@ -11,6 +11,7 @@ use axum::{
 use elastos_runtime::primitives::audit::{AuditLog, TrustLevel};
 use serde::{Deserialize, Serialize};
 
+use crate::resource_bridge::BridgePrincipal;
 use crate::runtime::Runtime;
 
 const SERVER_VERSION: &str = env!("ELASTOS_VERSION");
@@ -104,16 +105,16 @@ pub async fn launch_capsule(
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     let path = std::path::Path::new(&req.path);
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
-    let (launcher, admission) = match req.agent_id.as_deref() {
-        None => (
-            principal_from_launch_request(
+    let (launcher, admission, grant_name) = match req.agent_id.as_deref() {
+        None => {
+            let (launcher, grant_name) = principal_from_launch_request(
                 data_dir.as_deref(),
                 path,
                 req.principal_id,
                 req.launch_grant,
-            )?,
-            None,
-        ),
+            )?;
+            (launcher, None, grant_name)
+        }
         Some(agent_id) => {
             let data_dir = data_dir.as_deref().ok_or((
                 StatusCode::BAD_REQUEST,
@@ -142,7 +143,7 @@ pub async fn launch_capsule(
                     .map(crate::resource_bridge::BridgePrincipal::principal_str),
                 agent_id,
             )?;
-            (launcher, Some(admission))
+            (launcher, Some(admission), None)
         }
     };
     // An admitted agent launch starts through the one entry that may hand the
@@ -156,7 +157,7 @@ pub async fn launch_capsule(
         Some(admission) => runtime.start_local_admitted(path, vec![], admission).await,
         None => {
             runtime
-                .start_local_with_signer(path, vec![], launcher)
+                .start_local_with_signer(path, vec![], launcher, grant_name.as_deref())
                 .await
         }
     };
@@ -261,18 +262,20 @@ fn principal_from_capsule_name(
     Ok(Some(principal))
 }
 
+type LaunchGrantBinding = (Option<BridgePrincipal>, Option<String>);
+
 fn principal_from_launch_request(
     data_dir: Option<&std::path::Path>,
     capsule_dir: &std::path::Path,
     principal_id: Option<String>,
     launch_grant: Option<String>,
-) -> Result<Option<crate::resource_bridge::BridgePrincipal>, (StatusCode, String)> {
+) -> Result<LaunchGrantBinding, (StatusCode, String)> {
     reject_raw_launch_principal_id(principal_id.as_deref())?;
     let launch_grant = launch_grant
         .map(|grant| grant.trim().to_string())
         .filter(|grant| !grant.is_empty());
     if launch_grant.is_none() {
-        return Ok(None);
+        return Ok((None, None));
     }
     if data_dir.is_none() {
         return Err((
@@ -281,12 +284,13 @@ fn principal_from_launch_request(
         ));
     }
     let capsule_name = launch_capsule_name(capsule_dir)?;
-    principal_from_capsule_name(data_dir, &capsule_name, launch_grant)
+    let principal = principal_from_capsule_name(data_dir, &capsule_name, launch_grant)?;
+    Ok((principal, Some(capsule_name)))
 }
 
 fn launch_capsule_name(capsule_dir: &std::path::Path) -> Result<String, (StatusCode, String)> {
     let manifest_path = capsule_dir.join("capsule.json");
-    let bytes = std::fs::read(&manifest_path).map_err(|err| {
+    let bytes = elastos_common::capsule_manifest_file::read(&manifest_path).map_err(|err| {
         (
             StatusCode::BAD_REQUEST,
             format!("read capsule manifest for launch grant: {err}"),
@@ -426,7 +430,7 @@ pub(crate) mod tests {
         let principal =
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, None).unwrap();
 
-        assert_eq!(principal, None);
+        assert_eq!(principal, (None, None));
     }
 
     #[test]
@@ -482,9 +486,10 @@ pub(crate) mod tests {
             gateway::issue_home_launch_token_with_context(dir.path(), "chat-wasm", &context)
                 .unwrap();
 
-        let principal =
+        let (principal, name) =
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, Some(grant))
                 .unwrap();
+        assert_eq!(name.as_deref(), Some("chat-wasm"));
 
         assert_eq!(
             principal
@@ -941,7 +946,7 @@ pub(crate) mod tests {
         pub(crate) data_dir: std::path::PathBuf,
         runtime: Arc<Runtime>,
         audit_log: Arc<AuditLog>,
-        pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        pub(crate) pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
         /// The same token store the manager holds: the live view's own input.
         capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
@@ -1475,6 +1480,14 @@ pub(crate) mod tests {
             }
             grants.abort();
             launched
+        }
+
+        pub(crate) async fn launched_instance_id(&self, agent_id: &str) -> String {
+            let launched = self.launch_with_grants(agent_id).await.unwrap().0;
+            assert_eq!(launched.status, crate::runtime::CAPSULE_STARTING);
+            let ended = self.wait_ended(&launched.id).await;
+            assert_eq!(ended.cause.as_deref(), Some("completed"));
+            launched.id
         }
 
         /// Waits until the registry records this activation's end, and returns

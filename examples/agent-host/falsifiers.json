@@ -2319,6 +2319,22 @@
    "tests": [
     "tests::no_test_only_item_sits_above_the_export"
    ]
+  },
+  {
+   "id": "F-AH11a",
+   "title": "a grant refusal is not written into the journal",
+   "command": "host",
+   "expect": "caught",
+   "edits": [
+    {
+     "file": "src/lib.rs",
+     "old": "    journal.events.push(grant_refusal);",
+     "new": "    let _ = (journal, grant_refusal);"
+    }
+   ],
+   "tests": [
+    "tests::a_dropped_grant_reason_is_visible"
+   ]
   }
  ]
 }

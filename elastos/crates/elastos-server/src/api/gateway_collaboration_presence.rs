@@ -493,6 +493,7 @@ pub(super) fn community_presence_request_notification(
         severity: "attention".to_string(),
         read: false,
         created_at: issued_at,
+        ..Default::default()
     })
 }
 

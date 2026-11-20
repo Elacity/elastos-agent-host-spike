@@ -208,6 +208,7 @@ pub(super) fn append_hosted_route_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at: route.requested_at,
+            ..Default::default()
         });
     }
 }
@@ -248,6 +249,7 @@ pub(super) fn append_wallet_approval_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at: request.created_at,
+            ..Default::default()
         });
     }
 }
@@ -296,6 +298,7 @@ pub(super) fn append_runtime_capability_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at: request.requested_at,
+            ..Default::default()
         });
     }
 }
@@ -403,6 +406,7 @@ fn parse_inbox_action_request(
         Ok(InboxActionRequest {
             action_id,
             step_up_token: None,
+            request_binding: None,
         })
     } else {
         Err("unsupported inbox action content type".to_string())
@@ -588,6 +592,20 @@ async fn dispatch_inbox_action(
             request_id,
         )
         .await;
+    }
+    if let Some(request_id) = action_id.strip_prefix("agent-plan-approve-request:") {
+        let card = action
+            .request_binding
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("agent plan approval requires the card binding"))?;
+        return super::gateway_inspect_actions::approve_agent_plan_request(
+            state,
+            launch,
+            context,
+            request_id,
+            card,
+            action.step_up_token.as_deref(),
+        );
     }
     if let Some(request_id) = action_id.strip_prefix("inspect-approve-request:") {
         let Some(step_up_token) = action.step_up_token.as_deref() else {
