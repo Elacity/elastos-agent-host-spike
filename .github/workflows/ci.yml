@@ -662,6 +662,8 @@ jobs:
           # The B3 R-DIFF rows read the pinned lab reference with `git show d0dd5693:...`, so this job needs history.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
       - name: configure Rust compile cache
         if: env.CI_USE_CACHE == 'true'
         uses: ./.github/actions/rust-compile-cache
@@ -699,6 +701,10 @@ jobs:
           ELASTOS_TEST_DECRYPT_PROVIDER_BIN: ${{ github.workspace }}/capsules/protected-content-decrypt-provider/target/release/protected-content-decrypt-provider
           ELASTOS_TEST_CUSTODY_PROVIDER_BIN: ${{ github.workspace }}/capsules/custody-provider/target/release/custody-provider
         run: cargo test --locked -p elastos-server --lib --features prototype-agents
+      - name: Agent Host real guest and joined planner rows
+        env:
+          RUST_TEST_THREADS: '2'
+        run: ./examples/agent-host/run-e2e.sh
       # B4-R slice 4: the same named rows run here and in source-home-macos.
       # `--exact` plus the one-passed guard rejects a filter that selects nothing.
       - name: B4-R named localhost decision tests

@@ -1,0 +1,121 @@
+{
+  "schema": "elastos.capsule/v1",
+  "version": "0.1.0",
+  "name": "standin-swap-provider",
+  "description": "Lab stand-in for a third-party swap provider.",
+  "author": "lab",
+  "role": "provider",
+  "type": "native-provider",
+  "runtime_abi": "elastos.provider-stdio/v1",
+  "bus_contract": null,
+  "wit_world_sha256": null,
+  "execution": "native-provider",
+  "projections": [],
+  "entrypoint": "provider-entry",
+  "requires": [],
+  "provides": "elastos://standin-swap/*",
+  "authority": {
+    "reason": "Declares the stand-in swap operations. A declaration grants nothing.",
+    "capabilities": [
+      {
+        "resource": "elastos://standin-swap/*",
+        "actions": [
+          "read",
+          "write"
+        ],
+        "operations": [
+          "quote",
+          "lock",
+          "claim",
+          "refund",
+          "status"
+        ]
+      }
+    ],
+    "audit_events": [
+      "swap.operation"
+    ],
+    "rights": []
+  },
+  "capabilities": [],
+  "interfaces": [
+    {
+      "id": "lab.swap.provider",
+      "version": "0.1.0",
+      "description": "Declared operations. Descriptors are not grants.",
+      "methods": [
+        {
+          "id": "quote",
+          "description": "Return a quote.",
+          "risk": "read",
+          "approval": "runtime_policy",
+          "audit": "summary",
+          "resource": "elastos://standin-swap/*",
+          "operation": "quote",
+          "input_schema": null,
+          "output_schema": null
+        },
+        {
+          "id": "lock",
+          "description": "Approve the lock before the provider continues.",
+          "risk": "write",
+          "approval": "user",
+          "audit": "event",
+          "resource": "elastos://standin-swap/*",
+          "operation": "lock",
+          "input_schema": null,
+          "output_schema": null
+        },
+        {
+          "id": "claim",
+          "description": "Claim a locked swap.",
+          "risk": "write",
+          "approval": "runtime_policy",
+          "audit": "event",
+          "resource": "elastos://standin-swap/*",
+          "operation": "claim",
+          "input_schema": null,
+          "output_schema": null
+        },
+        {
+          "id": "refund",
+          "description": "Refund a locked swap.",
+          "risk": "write",
+          "approval": "runtime_policy",
+          "audit": "event",
+          "resource": "elastos://standin-swap/*",
+          "operation": "refund",
+          "input_schema": null,
+          "output_schema": null
+        },
+        {
+          "id": "status",
+          "description": "Read swap status.",
+          "risk": "read",
+          "approval": "runtime_policy",
+          "audit": "summary",
+          "resource": "elastos://standin-swap/*",
+          "operation": "status",
+          "input_schema": null,
+          "output_schema": null
+        }
+      ]
+    }
+  ],
+  "resources": {
+    "memory_mb": 64,
+    "cpu_shares": 100,
+    "gpu": false
+  },
+  "permissions": {
+    "host_process": false,
+    "guest_network": false,
+    "storage": [],
+    "messaging": []
+  },
+  "microvm": null,
+  "providers": null,
+  "icon": null,
+  "viewer": null,
+  "signature": "tRLpzD+MdPH7BBSLgK9OPxHGDoMVxIBCCzI0jkLi4RN02KdvYGP773e4UiIGVisgXBjJw32kwae8OOKsdF3eAA=="
+}
