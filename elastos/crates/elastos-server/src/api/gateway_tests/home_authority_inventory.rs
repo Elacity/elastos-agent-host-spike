@@ -256,7 +256,7 @@ fn rows() -> Vec<AuthorityRow> {
             "full_recovery_bundle_import_inner",
             "require_home_launch_token_binding",
             1,
-            "runtime-admin:require_active_passkey_principal_for_context+runtime_wallet_authority",
+            "runtime-admin:require_active_passkey_principal_for_context+runtime_wallet_authority; conditional did via recovery_kit_import_inner -> verify_did_recovery_import_proof",
         ),
         row(
             AUTH,
@@ -312,7 +312,7 @@ fn rows() -> Vec<AuthorityRow> {
             "home_launch",
             "require_home_launch_token_context",
             1,
-            "app-grant:OPEN P2-4 follow-up",
+            "app-grant:OPEN P2-4 follow-up; conditional model+peer via Inbox services sync",
         ),
         row(
             FRONTDOOR,
@@ -501,7 +501,7 @@ fn rows() -> Vec<AuthorityRow> {
             "home_launch",
             "require_carried_home_launch_token",
             1,
-            "app-grant:list not resolved: counted; target grant verified",
+            "app-grant:list not resolved: counted; target grant verified; conditional model+peer via Inbox services sync",
         ),
         row(
             HOME_SYSTEM,
@@ -607,7 +607,7 @@ fn rows() -> Vec<AuthorityRow> {
         row(AUTH, "passkey_revoke_inner", "require_auth_home_or_system_context", 1,
             "runtime-admin:revoke_passkey_for_actor"),
         row(AUTH, "recovery_kit_import_inner", "require_auth_home_or_system_context", 1,
-            "runtime-admin:active passkey principal+request binding"),
+            "runtime-admin:active passkey principal+request binding; conditional did via verify_did_recovery_import_proof"),
         row(AUTH, "recovery_status_inner", "require_auth_home_or_system_context", 1,
             "runtime-admin:active passkey principal"),
         row(AUTH, "revoke_session", "require_auth_home_or_system_context", 1,
@@ -621,7 +621,7 @@ fn rows() -> Vec<AuthorityRow> {
         row(HOME_CONNECTOR, "home_wallet_connector_evm_link_challenge", "require_home_wallet_connector_authority", 1,
             "delegates:wallet via connector authority"),
         row(HOME_CONNECTOR, "home_wallet_connector_evm_link_verify", "require_home_wallet_connector_authority", 1,
-            "delegates:wallet via connector authority"),
+            "delegates:wallet via connector authority; conditional chain via erc1271_is_valid_signature"),
         row(HOME_CONNECTOR, "home_wallet_connector_bitcoin_link_challenge", "require_home_wallet_connector_authority", 1,
             "delegates:wallet via connector authority"),
         row(HOME_CONNECTOR, "home_wallet_connector_bitcoin_link_verify", "require_home_wallet_connector_authority", 1,
@@ -649,6 +649,261 @@ fn rows() -> Vec<AuthorityRow> {
         row(VIEWER, "viewer_library_roots_get", "require_library_object_viewer_context", 1,
             "app-grant:list not resolved: counted; archive-manager guard"),
     ]
+}
+
+// This is a bounded source check, not a proof that a conditional branch runs.
+// Keep the names in the needles assembled at run time, so this test's own text
+// cannot supply a production call to the source scan.
+struct ProviderFunction {
+    file: String,
+    name: String,
+    code: String,
+    raw: String,
+}
+
+fn provider_functions() -> (Vec<ProviderFunction>, BTreeMap<String, Vec<usize>>) {
+    let mut functions = Vec::new();
+    let mut by_name: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (file, raw) in source::production_sources() {
+        if !file.starts_with("elastos-server/src/") {
+            continue;
+        }
+        let code = source::code_only(&raw);
+        for (at, _) in code.match_indices(&["f", "n "].concat()) {
+            if at > 0
+                && (code.as_bytes()[at - 1].is_ascii_alphanumeric()
+                    || code.as_bytes()[at - 1] == b'_')
+            {
+                continue;
+            }
+            let start = at + 3;
+            let end = start
+                + code[start..]
+                    .bytes()
+                    .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                    .count();
+            if end == start || !matches!(code.as_bytes().get(end), Some(b'(' | b'<')) {
+                continue;
+            }
+            let Some(open) = code[end..].find(['{', ';']).map(|offset| end + offset) else {
+                continue;
+            };
+            if code.as_bytes()[open] != b'{' {
+                continue;
+            }
+            let mut depth = 0;
+            let mut close = None;
+            for (offset, byte) in code.as_bytes()[open..].iter().enumerate() {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(open + offset + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(close) = close else { continue };
+            let name = code[start..end].to_string();
+            let index = functions.len();
+            functions.push(ProviderFunction {
+                file: file.clone(),
+                name: name.clone(),
+                code: code[open..close].to_string(),
+                raw: raw[open..close].to_string(),
+            });
+            by_name.entry(name).or_default().push(index);
+        }
+    }
+    (functions, by_name)
+}
+
+fn provider_literal(argument: &str) -> Option<String> {
+    let literal = argument.trim().strip_prefix('"')?;
+    let value = literal.split_once('"')?.0;
+    (!value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
+    .then(|| value.to_string())
+}
+
+fn provider_calls(function: &ProviderFunction) -> (Vec<String>, BTreeSet<String>) {
+    let mut schemes = Vec::new();
+    let mut callees = BTreeSet::new();
+    let bytes = function.code.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if !(bytes[at].is_ascii_alphabetic() || bytes[at] == b'_') {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        at += 1;
+        while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
+            at += 1;
+        }
+        let name = &function.code[start..at];
+        let open = at
+            + bytes[at..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_whitespace())
+                .count();
+        if bytes.get(open) != Some(&b'(') {
+            continue;
+        }
+        let send = ["send", "_raw"].concat();
+        let data = ["provider", "_data"].concat();
+        let invoke = ["invoke", "_provider"].concat();
+        if name == send || name == invoke || name == data || name.ends_with(&format!("_{data}")) {
+            let end = call_end(&function.code, open);
+            let raw_call = &function.raw[start..end];
+            let args = call_arguments(raw_call);
+            let scheme = if name == send {
+                args.first().and_then(|arg| provider_literal(arg))
+            } else if name == invoke {
+                let code_call = &function.code[start..end];
+                code_call
+                    .find("target:")
+                    .and_then(|offset| provider_literal(&raw_call[offset + "target:".len()..]))
+            } else {
+                args.get(1).and_then(|arg| provider_literal(arg))
+            };
+            if let Some(scheme) = scheme {
+                schemes.push(scheme);
+            }
+        }
+        callees.insert(name.to_string());
+    }
+    (schemes, callees)
+}
+
+fn walk_provider_reach(
+    functions: &[ProviderFunction],
+    by_name: &BTreeMap<String, Vec<usize>>,
+    index: usize,
+    depth: usize,
+    path: &mut Vec<usize>,
+    found: &mut BTreeMap<String, String>,
+) {
+    if path.contains(&index) {
+        return;
+    }
+    path.push(index);
+    let function = &functions[index];
+    let (schemes, callees) = provider_calls(function);
+    for scheme in schemes {
+        let chain = path
+            .iter()
+            .map(|at| functions[*at].name.as_str())
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        found
+            .entry(scheme)
+            .or_insert_with(|| format!("{chain} ({})", function.file));
+    }
+    if depth < 4 {
+        for name in callees {
+            let Some(candidates) = by_name.get(&name) else {
+                continue;
+            };
+            let local: Vec<_> = candidates
+                .iter()
+                .copied()
+                .filter(|at| functions[*at].file == function.file)
+                .collect();
+            let next = if local.len() == 1 {
+                Some(local[0])
+            } else if local.is_empty() && candidates.len() == 1 {
+                Some(candidates[0])
+            } else {
+                None
+            };
+            if let Some(next) = next {
+                walk_provider_reach(functions, by_name, next, depth + 1, path, found);
+            }
+        }
+    }
+    path.pop();
+}
+
+fn provider_reach_exceptions(
+) -> BTreeMap<(&'static str, &'static str, &'static str), (&'static str, &'static str)> {
+    // Each entry is (row key, scheme, "not reached because ...").
+    BTreeMap::from([(
+        (
+            "elastos-server/src/api/viewer_gateway.rs",
+            "viewer_library_roots_get",
+            "require_library_object_viewer_context",
+        ),
+        (
+            "content",
+            "not reached because this route fixes op to roots; the shared Library handler reaches content only for Repair",
+        ),
+    )])
+}
+
+#[test]
+fn every_home_authority_row_names_mechanical_provider_reach() {
+    let (functions, by_name) = provider_functions();
+    let exceptions = provider_reach_exceptions();
+    let mut checked = 0;
+    let mut used_exceptions = 0;
+    let mut missing = Vec::new();
+    let rows = rows();
+    for row in &rows {
+        let candidates = by_name
+            .get(row.function)
+            .expect("row function in production source");
+        let index = *candidates
+            .iter()
+            .find(|at| functions[**at].file == row.file)
+            .unwrap_or_else(|| {
+                panic!("missing production function {}::{}", row.file, row.function)
+            });
+        let mut found = BTreeMap::new();
+        walk_provider_reach(&functions, &by_name, index, 0, &mut Vec::new(), &mut found);
+        for (scheme, chain) in found {
+            checked += 1;
+            if row
+                .authority
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+                .any(|word| word == scheme)
+            {
+                continue;
+            }
+            match exceptions.get(&(row.file, row.function, row.gate)) {
+                Some((excepted, reason))
+                    if *excepted == scheme && reason.starts_with("not reached because ") =>
+                {
+                    used_exceptions += 1;
+                }
+                _ => missing.push(format!(
+                    "{}::{} [{}] omits {scheme}: {chain}",
+                    row.file, row.function, row.gate
+                )),
+            }
+        }
+    }
+    assert_eq!(
+        used_exceptions,
+        exceptions.len(),
+        "stale provider reach exception"
+    );
+    println!(
+        "Home provider reach: {} rows, {} schemes found mechanically, {} exceptions",
+        rows.len(),
+        checked,
+        used_exceptions
+    );
+    assert!(
+        missing.is_empty(),
+        "authority labels omit provider schemes:\n{}",
+        missing.join("\n")
+    );
 }
 
 fn call_end(text: &str, open: usize) -> usize {
