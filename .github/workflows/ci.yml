@@ -517,9 +517,24 @@ jobs:
           cargo test --locked --test effects cancelled_instance_settles_with_reason_sibling_completes
           cargo test --locked --test effects killed_worker_settlement_recorded_without_retry
           cargo test --locked --test effects two_instances_overlap_with_separate_grants
+      - name: stand-in sibling rule falsifier rows
+        working-directory: lab/agent-conformance
+        run: |
+          set -euo pipefail
+          for name in \
+            grants::tests::overlap_sibling_read_must_be_new_in_its_session \
+            grants::tests::cancel_refuses_retries_and_unexpected_requests \
+            grants::tests::kill_sibling_read_must_be_new_in_its_session
+          do
+            log="${RUNNER_TEMP}/standin-${name//:/_}.log"
+            cargo test --locked --test effects "$name" -- --exact | tee "$log"
+            grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
+              || { echo "::error::${name} selected no test or failed"; exit 1; }
+          done
       - name: plan approval tests
         working-directory: lab/plan-approval
         run: |
+          cargo fmt -- --check
           cargo test --locked
           python3 -I falsify.py
       - name: model-provider process tests build
