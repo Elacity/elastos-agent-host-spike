@@ -1,7 +1,7 @@
-"""Static honesty probe over the merged agent-host falsifiers and asks.
+"""Static honesty probe over the merged agent-host falsifiers and manifest asks.
 
 The agent-host re-score rests on examples/agent-host/falsifiers.json. This
-probe reads that file, asks.json and the files the edits name. It does not
+probe reads that file, capsule.json and the files the edits name. It does not
 run cargo and it does not apply a mutation to the repository. It checks:
 
 - falsifiers.json parses with the strict reader, each entry has its fields,
@@ -9,8 +9,8 @@ run cargo and it does not apply a mutation to the repository. It checks:
 - every ``caught`` entry names at least one test;
 - every edit's old text is found exactly once, each file's edits applied in
   order on the updated text, the way falsify.py's Mutation applies them;
-- asks.json has its closed schema, and every ask a known kind and an allowed
-  resource pattern.
+- capsule.json has its closed schema, and every ask has known actions and an
+  allowed resource pattern.
 
 Whether a named test exists is task 004's check. This probe does not lex
 Rust and does not walk falsify.py's AST.
@@ -60,6 +60,9 @@ FIELDS = (("id", str), ("title", str), ("command", str), ("expect", str),
 # The declaration's schema, and the kinds proposal_kind in src/lib.rs accepts.
 ASKS_SCHEMA = "elastos.agent-host.asks/v1"
 ASK_KINDS = ("read", "edit", "restore", "run", "child", "init", "hosted", "journal-append")
+CAPSULE_SCHEMA = "elastos.capsule/v1"
+MANIFEST_KEYS = set("schema name version description author role type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources".split())
+MANIFEST_ACTIONS = {"read", "write", "execute", "message", "delete", "admin"}
 PRINCIPAL_MARKER = "<principal>"
 
 Problem = collections.namedtuple("Problem", "rule entry file reason")
@@ -75,7 +78,7 @@ PROBES = (
     "test_falsifiers_json_parses_and_ids_are_unique",
     "test_every_caught_falsifier_lists_at_least_one_test",
     "test_every_edit_old_string_occurs_exactly_once",
-    "test_asks_json_conforms_to_schema",
+    "test_manifest_asks_conforms_to_schema",
     "test_source_pin_matches_snapshot",
     "test_clean_report_pins_commit_and_merge",
     "test_probe_refusal_reasons",
@@ -307,14 +310,99 @@ def ask_reason(ask):
     return None
 
 
-def probe(read):
+def manifest_resource_reason(resource):
+    """Match the manifest resource boundary in the current agent-host parser."""
+    if not isinstance(resource, str):
+        return "asks resource type"
+    if not resource:
+        return "asks resource empty"
+    if any(char.isspace() and char not in "\x1c\x1d\x1e\x1f" for char in resource):
+        return "asks whitespace"
+    if not resource.startswith("localhost://"):
+        return ask_reason({"kind": "read", "resource": resource}) or "asks url"
+    path = resource[len("localhost://"):]
+    if not path.startswith("Users/self/"):
+        return ask_reason({"kind": "read", "resource": path}) or "asks users path"
+    rest = path[len("Users/self/"):]
+    if rest in ("", "*"):
+        return None
+    if "users/" in rest.lower():
+        return "asks users path"
+    if rest.endswith("/*"):
+        body = rest[:-2]
+    elif rest.endswith("/"):
+        body = rest[:-1]
+    else:
+        return "asks literal directory"
+    if not body:
+        return None
+    return ask_reason({"kind": "read", "resource": body + "/"})
+
+
+def manifest_asks_problems(read):
+    """Check the live capsule manifest's closed asks declaration."""
+    def problem(entry, reason):
+        return Problem("asks", entry, "capsule.json", reason)
+
+    document, reason = _document(read, "capsule.json")
+    if reason is not None:
+        return [problem("", reason)]
+    if not isinstance(document, dict):
+        return [problem("", "asks root")]
+    if any(key not in MANIFEST_KEYS for key in document):
+        return [problem("", "asks unknown field")]
+    if "schema" not in document:
+        return [problem("", "asks schema missing")]
+    if document["schema"] != CAPSULE_SCHEMA:
+        return [problem("", "asks schema unsupported")]
+    if "asks" not in document:
+        return [problem("", "asks list missing")]
+    asks = document["asks"]
+    if not isinstance(asks, list):
+        return [problem("", "asks list type")]
+    if not asks:
+        return [problem("", "asks empty")]
+    problems = []
+    for at, ask in enumerate(asks):
+        entry = f"ask {at}"
+        if not isinstance(ask, dict):
+            problems.append(problem(entry, "asks entry"))
+            continue
+        if any(key not in ("resource", "actions") for key in ask):
+            problems.append(problem(entry, "asks entry field"))
+            continue
+        actions = ask.get("actions")
+        if actions is None:
+            problems.append(problem(entry, "asks kind missing"))
+        elif not isinstance(actions, list):
+            problems.append(problem(entry, "asks kind type"))
+        elif not actions:
+            problems.append(problem(entry, "asks actions empty"))
+        elif any(not isinstance(action, str) for action in actions):
+            problems.append(problem(entry, "asks kind type"))
+        elif "unspecified" in actions:
+            problems.append(problem(entry, "asks kind unspecified"))
+        elif any(action not in MANIFEST_ACTIONS for action in actions):
+            problems.append(problem(entry, "asks kind unknown"))
+        elif len(actions) != len(set(actions)):
+            problems.append(problem(entry, "asks duplicate action"))
+        if "resource" not in ask:
+            problems.append(problem(entry, "asks resource missing"))
+        else:
+            resource_reason = manifest_resource_reason(ask["resource"])
+            if resource_reason is not None:
+                problems.append(problem(entry, resource_reason))
+    return problems
+
+
+def probe(read, *, legacy_asks=False):
     """Every rule over one tree: (the well-formed entries, {rule: problems})."""
     entries, parsed = falsifier_entries(read)
     return entries, {
         "parse": parsed,
         "caught": caught_without_tests(entries),
         "anchor": anchor_problems(entries, read),
-        "asks": asks_problems(read),
+        "asks": asks_problems(read) if legacy_asks else manifest_asks_problems(read),
     }
 
 
@@ -497,16 +585,22 @@ class AgentHostFalsifierHonesty(unittest.TestCase):
         self.assertEqual(planted(with_entries(entries))["anchor"], [Problem(
             "anchor", first["id"], outside, "the file is outside the repository")])
 
-    def test_asks_json_conforms_to_schema(self):
+    def test_manifest_asks_conforms_to_schema(self):
         self.assert_clean("asks")
-        document = merged_document("asks.json")
-        document["asks"][0]["kind"] = "unspecified"
-        self.assertEqual(planted({"asks.json": json.dumps(document).encode()})["asks"], [Problem(
-            "asks", "ask 0", "asks.json", "kind 'unspecified' is not a known kind")])
+        document = merged_document("capsule.json")
+        original = document["asks"][0]["actions"]
+        self.assertTrue(original)
+        document["asks"][0]["actions"] = ["unspecified"]
+        self.assertEqual(planted({"capsule.json": json.dumps(document).encode()})["asks"], [Problem(
+            "asks", "ask 0", "capsule.json", "asks kind unspecified")])
+        document["asks"][0]["actions"] = original
+        document["asks"][0]["resource"] = "localhost://Users/other/private/*"
+        self.assertEqual(planted({"capsule.json": json.dumps(document).encode()})["asks"], [Problem(
+            "asks", "ask 0", "capsule.json", "asks users path")])
 
     def test_source_pin_matches_snapshot(self):
         snapshot = merged_base()[0]
-        for name in ("falsifiers.json", "asks.json"):
+        for name in ("falsifiers.json", "capsule.json"):
             self.assertIsNotNone(snapshot.files.get(f"examples/agent-host/{name}"),
                                  f"{name} was not read")
         commit = snapshot.commit
@@ -579,6 +673,10 @@ GOOD_SELFTEST = {"id": "ST2", "title": "selftest", "command": "selftest", "expec
                  "edits": [{"file": "falsify.py", "old": "return True", "new": "return False"}],
                  "tests": ["a case"]}
 GOOD_ASKS = {"schema": ASKS_SCHEMA, "asks": [{"kind": "read", "resource": "<principal>/"}]}
+GOOD_MANIFEST = {"schema": CAPSULE_SCHEMA, "asks": [{
+    "resource": "localhost://Users/self/.AppData/Agents/agent-host/*",
+    "actions": ["write", "read"],
+}]}
 
 
 def tree(entries=(GOOD_HOST, GOOD_SELFTEST), **changed):
@@ -596,7 +694,7 @@ def tree(entries=(GOOD_HOST, GOOD_SELFTEST), **changed):
 
 def problems_in(files, rule=None):
     """The problems every rule finds in a fixture tree, or one rule's."""
-    _entries, found = probe(overlay(nothing, files))
+    _entries, found = probe(overlay(nothing, files), legacy_asks=True)
     return found[rule] if rule else [problem for problems in found.values() for problem in problems]
 
 
@@ -961,7 +1059,7 @@ class ProbeControls(unittest.TestCase):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_bytes(data)
                 snapshot = falsifier_data.Snapshot(root, run=run)
-                _entries, problems = probe(lambda name: snapshot.read_relative(base, name))
+                _entries, problems = probe(lambda name: snapshot.read_relative(base, name), legacy_asks=True)
                 return problems, report_text(snapshot, problems)
 
         for label, asks_bytes, reason in (
@@ -1127,7 +1225,7 @@ class ProbeControls(unittest.TestCase):
                 snapshot = falsifier_data.Snapshot(root, run=run)
                 with patch.object(Path, "read_bytes", guard):
                     _entries, problems = probe(
-                        lambda name: snapshot.read_relative(base, name))
+                        lambda name: snapshot.read_relative(base, name), legacy_asks=True)
                 text = report_text(snapshot, problems)
             self.assertEqual(len(lookups), 1, lookups)
             for spec in specs:
@@ -1209,9 +1307,13 @@ class ProbeControls(unittest.TestCase):
         commit_a, commit_b = "a" * 40, "b" * 40
         head = commit_a
         prefix = "examples/agent-host/"
+        good = tree()
+        good["capsule.json"] = json.dumps(GOOD_MANIFEST).encode()
+        bad = tree()
+        bad["capsule.json"] = b"{}"
         commits = {
             commit: {prefix + name: data for name, data in files.items()}
-            for commit, files in ((commit_a, tree()), (commit_b, tree(asks=b"{}")))
+            for commit, files in ((commit_a, good), (commit_b, bad))
         }
         paths = {REPO / path for path in commits[commit_a]}
         real_is_file, real_read_bytes = Path.is_file, Path.read_bytes
@@ -1269,7 +1371,7 @@ class ProbeControls(unittest.TestCase):
             # alone cannot detect a new snapshot taken after the probes.
             changed = Snapshot()
             _entries, problems = probe(changed.read)
-            self.assertEqual(problems["asks"], [Problem("asks", "", "asks.json", "schema is missing")])
+            self.assertEqual(problems["asks"], [Problem("asks", "", "capsule.json", "asks schema missing")])
             self.assertEqual(pin_problems(changed.files, changed.commit,
                                          committed_bytes(changed.commit, changed.files, changed.run).get), [])
 
@@ -1279,7 +1381,7 @@ class ProbeControls(unittest.TestCase):
         self.assertNotIn(commit_b, text)
         self.assertIn("problems by rule: parse 0, caught 0, anchor 0, asks 0", text)
         self.assertIn("files read that differ from HEAD: 0 of 4", text)
-        for path, data in commits[commit_a].items():
+        for path, data in verified[0].files.items():
             self.assertIn(f"{path} {digest(data)}", text)
 
     def test_new_finding_fails_gate(self):

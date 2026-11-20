@@ -490,6 +490,46 @@ jobs:
 
   # The lab stand-in is a separate cargo project, outside the elastos workspace.
   # Without this job, tests/standin_contract.rs can stop compiling without a red check.
+  lab-gates:
+    name: lab-gates
+    runs-on: macos-15
+    timeout-minutes: 120
+    needs: fork-gate
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - name: install wasm-capsule lab toolchain
+        run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+      - name: grant-binding gate
+        working-directory: lab/grant-binding
+        run: |
+          cargo fetch --locked
+          cargo fmt -- --check
+          cargo test --locked --offline
+      - name: capsule-identity gate
+        working-directory: lab/capsule-identity
+        run: |
+          cargo fetch --locked
+          cargo fmt -- --check
+          RUST_TEST_THREADS=2 cargo test --locked --offline
+      - name: wasm-capsule gate
+        working-directory: lab/wasm-capsule
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
+      - name: bus-v2-proposal gate
+        working-directory: lab/bus-v2-proposal
+        run: |
+          python3 -I check.py
+          python3 -I -m unittest discover -s tests
+      - name: full red-team suite
+        working-directory: lab/redteam
+        run: |
+          python3 -I -m unittest discover -s py
+
   lab-standin:
     name: lab-standin
     runs-on: ubuntu-24.04
@@ -1937,7 +1977,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-gates, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
     steps:
       - name: every job passed or was skipped by its own guard
         env:

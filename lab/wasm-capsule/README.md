@@ -282,7 +282,7 @@ F-WC3-LANE-FILES-QUOTED, task 029; counted in "## Falsifiers").
 
 ### Why the tests live in the root package
 
-The lane gate `cargo test --locked --manifest-path lab/wasm-capsule/Cargo.toml`
+The lane gate `(cd lab/wasm-capsule && cargo test --locked)`
 runs only the root package `capsule` (there is no `--workspace`), so a test
 inside `tools/` would never run in the gate. So every named test is in
 `tests/`, and `capsule` reaches the tools crate through a dev-dependency. The
