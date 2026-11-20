@@ -324,9 +324,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_inactive_custody_provider",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
-            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -614,9 +614,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_availability_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
-            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -624,9 +624,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_chain_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
-            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["ProviderBr", "idge::spawn; separate verified spawn via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -634,9 +634,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_ipfs_provider_plane_with_role",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
-            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via register_ipfs_provider_plane through ProviderPlane::register"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -996,6 +996,14 @@ fn handoffs() -> Vec<Handoff> {
             check: ["verify_component_", "binary(\"shell\""].concat(),
         },
         Handoff {
+            file: "elastos-server/src/serve_cmd.rs",
+            function: "shell_capsule_command",
+            call: "command",
+            caller_file: "elastos-server/src/main.rs",
+            caller_function: "serve_web_capsule",
+            check: ["verify_component_", "binary(\"shell\""].concat(),
+        },
+        Handoff {
             file: "elastos-server/src/server_infra.rs",
             function: "spawn_browser_local_exit",
             call: "command",
@@ -1062,6 +1070,191 @@ fn handoffs() -> Vec<Handoff> {
     ]
 }
 
+/// Direct production callers for rows whose binary check can be in a caller.
+/// An absent check records the value of that caller's path to the spawn.
+struct CallerPath {
+    row_file: &'static str,
+    row_function: &'static str,
+    caller_file: &'static str,
+    caller_function: &'static str,
+    check: Option<String>,
+}
+
+fn caller_paths() -> Vec<CallerPath> {
+    let infra = "elastos-server/src/server_infra.rs";
+    let host = "elastos-server/src/provider_host.rs";
+    let runtime = "elastos-server/src/protected_content_runtime.rs";
+    vec![
+        CallerPath {
+            row_file: runtime,
+            row_function: "register_inactive_custody_provider",
+            caller_file: infra,
+            caller_function: "setup_server_infrastructure_impl",
+            check: Some(["verify_provider_", "binary(\"custody-provider\""].concat()),
+        },
+        CallerPath {
+            row_file: runtime,
+            row_function: "register_inactive_custody_provider",
+            caller_file: host,
+            caller_function: "register",
+            check: None,
+        },
+        CallerPath {
+            row_file: runtime,
+            row_function: "register_protect_provider",
+            caller_file: infra,
+            caller_function: "setup_server_infrastructure_impl",
+            check: Some(
+                [
+                    "verify_provider_",
+                    "binary(\"protected-content-protect-provider\"",
+                ]
+                .concat(),
+            ),
+        },
+        CallerPath {
+            row_file: runtime,
+            row_function: "register_protected_content_decrypt_provider",
+            caller_file: infra,
+            caller_function: "setup_server_infrastructure_impl",
+            check: Some(
+                [
+                    "verify_provider_",
+                    "binary(\"protected-content-decrypt-provider\"",
+                ]
+                .concat(),
+            ),
+        },
+        CallerPath {
+            row_file: infra,
+            row_function: "register_availability_provider_plane",
+            caller_file: infra,
+            caller_function: "setup_server_infrastructure_impl",
+            check: Some(["verify_provider_", "binary(\"availability-provider\""].concat()),
+        },
+        CallerPath {
+            row_file: infra,
+            row_function: "register_availability_provider_plane",
+            caller_file: host,
+            caller_function: "register",
+            check: None,
+        },
+        CallerPath {
+            row_file: infra,
+            row_function: "register_chain_provider_plane",
+            caller_file: host,
+            caller_function: "register",
+            check: None,
+        },
+        CallerPath {
+            row_file: infra,
+            row_function: "register_ipfs_provider_plane_with_role",
+            caller_file: infra,
+            caller_function: "setup_server_infrastructure_impl",
+            check: Some(
+                [
+                    "resolve_verified_native_provider_",
+                    "binary(\"ipfs-provider\"",
+                ]
+                .concat(),
+            ),
+        },
+        CallerPath {
+            row_file: infra,
+            row_function: "register_ipfs_provider_plane_with_role",
+            caller_file: infra,
+            caller_function: "register_ipfs_provider_plane",
+            check: None,
+        },
+    ]
+}
+
+fn production_callers(
+    sources: &BTreeMap<String, String>,
+    function: &str,
+) -> BTreeSet<(String, String)> {
+    let mut found = BTreeSet::new();
+    for (file, text) in sources {
+        if !file.starts_with("elastos-server/src/") {
+            continue;
+        }
+        let code = source::code_only(text);
+        for (at, _) in code.match_indices(function) {
+            let before = &code[..at];
+            if before
+                .as_bytes()
+                .last()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                || before.trim_end().ends_with("fn")
+                || !code[at + function.len()..].trim_start().starts_with('(')
+            {
+                continue;
+            }
+            let caller = source::enclosing_fn(&code, at);
+            if !caller.is_empty() {
+                found.insert((file.clone(), caller));
+            }
+        }
+    }
+    found
+}
+
+fn assert_caller_paths(sources: &BTreeMap<String, String>) {
+    let paths = caller_paths();
+    for row in paths
+        .iter()
+        .map(|path| (path.row_file, path.row_function))
+        .collect::<BTreeSet<_>>()
+    {
+        let listed: BTreeSet<_> = paths
+            .iter()
+            .filter(|path| (path.row_file, path.row_function) == row)
+            .map(|path| {
+                (
+                    path.caller_file.to_string(),
+                    path.caller_function.to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            production_callers(sources, row.1),
+            listed,
+            "production callers changed for {}::{}",
+            row.0,
+            row.1
+        );
+        let column = columns()
+            .into_iter()
+            .find(|column| (column.file, column.function) == row)
+            .unwrap();
+        let all_checked = paths
+            .iter()
+            .filter(|path| (path.row_file, path.row_function) == row)
+            .all(|path| path.check.is_some());
+        assert_eq!(
+            column.trust_root == "components-json-in-data-dir",
+            all_checked,
+            "weakest caller path changed for {}::{}",
+            row.0,
+            row.1
+        );
+    }
+    for path in paths.iter().filter(|path| path.check.is_some()) {
+        let check = path.check.as_ref().unwrap();
+        let text = &sources[path.caller_file];
+        let code = source::code_only(text);
+        assert!(
+            text.match_indices(check.as_str())
+                .any(|(at, _)| source::enclosing_fn(&code, at) == path.caller_function),
+            "caller check changed in {}::{} for {}::{}",
+            path.caller_file,
+            path.caller_function,
+            path.row_file,
+            path.row_function
+        );
+    }
+}
+
 #[test]
 fn trust_columns_cover_each_loader_and_bind_to_source() {
     let listed = rows();
@@ -1109,10 +1302,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "empty source evidence: {:?}",
             (column.file, column.function, column.call)
         );
+        let expression = column.evidence.split(';').next().unwrap();
         assert!(
-            text.match_indices(column.evidence.as_str()).any(|(at, _)| {
+            text.match_indices(expression).any(|(at, _)| {
                 source::enclosing_fn(&code, at) == column.function
-                    && code[at..at + column.evidence.len()]
+                    && code[at..at + expression.len()]
                         .chars()
                         .any(|ch| !ch.is_whitespace())
             }),
@@ -1147,10 +1341,14 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
 
     // Each handoff row records caller input, and the check it names stays in
     // the named caller.
+    let handoffs = handoffs();
     let mut handed = BTreeSet::new();
-    for handoff in &handoffs() {
+    for handoff in &handoffs {
         let key = (handoff.file, handoff.function, handoff.call);
-        assert!(handed.insert(key), "duplicate handoff key: {key:?}");
+        assert!(
+            handed.insert((key, handoff.caller_file, handoff.caller_function)),
+            "duplicate handoff caller: {key:?}"
+        );
         assert!(overlay.contains(&key), "handoff lacks overlay row: {key:?}");
         let column = columns
             .iter()
@@ -1170,6 +1368,29 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             handoff.caller_function
         );
     }
+    for row in handoffs
+        .iter()
+        .map(|handoff| (handoff.file, handoff.function, handoff.call))
+        .collect::<BTreeSet<_>>()
+    {
+        let listed: BTreeSet<_> = handoffs
+            .iter()
+            .filter(|handoff| (handoff.file, handoff.function, handoff.call) == row)
+            .map(|handoff| {
+                (
+                    handoff.caller_file.to_string(),
+                    handoff.caller_function.to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            production_callers(&sources, row.1),
+            listed,
+            "production callers changed for handoff {row:?}"
+        );
+    }
+
+    assert_caller_paths(&sources);
 
     // Count each expression in the functions with several loader sites. A
     // matching expression elsewhere in the same function cannot stand in for
@@ -1262,6 +1483,16 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
 }
 
 #[test]
+fn new_unchecked_production_caller_turns_caller_path_red() {
+    let mut sources = source::production_sources();
+    let file = "elastos-server/src/server_infra.rs";
+    sources.get_mut(file).unwrap().push_str(
+        "\nfn planted_caller(registry: &std::sync::Arc<elastos_runtime::provider::ProviderRegistry>, path: &std::path::Path) { let _ = elastos_server::protected_content_runtime::register_protect_provider(registry, path); }\n",
+    );
+    assert!(std::panic::catch_unwind(|| assert_caller_paths(&sources)).is_err());
+}
+
+#[test]
 fn trust_column_counts_and_chokepoint_queue() {
     let columns = columns();
     let count = |field: fn(&TrustColumn) -> &str| {
@@ -1288,15 +1519,15 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&19));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&15));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&58));
+    assert_eq!(roots.get("none"), Some(&62));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&9));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&22));
+    assert_eq!(times.get("at-every-start"), Some(&18));
     assert_eq!(times.get("at-install-only"), Some(&10));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&58));
+    assert_eq!(times.get("never"), Some(&62));
     assert_eq!(to_gate, 42);
 }
