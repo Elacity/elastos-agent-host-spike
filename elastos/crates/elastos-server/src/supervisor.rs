@@ -793,10 +793,13 @@ impl Supervisor {
     ) -> Result<(PathBuf, elastos_common::CapsuleManifest)> {
         let capsule_dir = self.ensure_capsule(name).await?;
         let manifest_path = capsule_dir.join("capsule.json");
-        let manifest_data = tokio::fs::read_to_string(&manifest_path)
-            .await
-            .with_context(|| format!("reading capsule.json for '{name}'"))?;
-        let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_data)
+        let manifest_data = tokio::task::spawn_blocking(move || {
+            elastos_common::capsule_manifest_file::read(&manifest_path)
+        })
+        .await
+        .context("reading capsule.json task")?
+        .with_context(|| format!("reading capsule.json for '{name}'"))?;
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&manifest_data)
             .with_context(|| format!("parsing capsule.json for '{name}'"))?;
         Ok((capsule_dir, manifest))
     }
@@ -1202,6 +1205,7 @@ impl Supervisor {
                     capability_manager: cap_mgr.clone(),
                     pending_store: pending.clone(),
                     capsule_id: format!("vm-{}", name),
+                    session_id: format!("vm-{}", name),
                     principal_id: principal_id
                         .map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
                     manifest_capabilities: manifest.resource_authority_bounds(),

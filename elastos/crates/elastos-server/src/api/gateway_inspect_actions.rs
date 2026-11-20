@@ -15,6 +15,42 @@ use store::{
     InspectActionRequestRecord, AGENT_PLAN_KIND, INSPECT_ACTION_KIND, INSPECT_ACTION_SCHEMA,
 };
 
+/// The one entry point an agent's Bus submission uses: write the pending
+/// agent plan record and return it. The record's principal is the owner, so
+/// it is the owner's to read and decide; the agent is its requester. Every
+/// identity is the caller's Runtime context; the submitted plan cannot name
+/// one. Nothing here runs a step.
+pub(crate) fn submit_pending_agent_plan(
+    data_dir: &FsPath,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+    plan: &serde_json::Value,
+    now: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let context = agent_plan::AgentPlanContext {
+        principal_id: owner_id,
+        requester_id,
+        capsule_id,
+        session_id,
+    };
+    let record = agent_plan::create_pending_agent_plan_record(data_dir, &context, plan, now)?;
+    Ok(serde_json::json!({
+        "schema": INSPECT_ACTION_SCHEMA,
+        "status": "pending",
+        "request_id": record.request_id,
+        "id": record.id,
+        "operation": record.operation,
+        "request": record.request,
+        "plan": record.plan,
+        "request_binding": record.request_binding,
+        "principal_id": record.principal_id,
+        "requester_id": record.requester_id,
+        "created_at": record.created_at,
+    }))
+}
+
 pub(super) async fn gateway_inspect_action_request(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
@@ -92,13 +128,14 @@ pub(super) fn append_inspect_action_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at,
+            ..Default::default()
         });
     }
 }
 
-/// One Inbox card for a pending agent plan: every stored step, the gate preview
-/// and the full binding hash. No approve action exists yet, so the card carries
-/// none.
+/// One Inbox card for a pending agent plan: every stored step, the gate preview,
+/// the full binding hash and the exact binding the click sends back. The owner
+/// alone approves it; a writing step says it needs a fresh passkey.
 fn append_agent_plan_notification(
     notifications: &mut HomeNotificationsSummary,
     request: &serde_json::Value,
@@ -141,7 +178,11 @@ fn append_agent_plan_notification(
         kind: AGENT_PLAN_KIND.to_string(),
         title: format!("Agent plan for {target}"),
         body: lines.join("\n"),
-        action_ref: None,
+        action_ref: Some(HomeNotificationActionSummary {
+            app: INBOX_CAPSULE_ID.to_string(),
+            action_id: format!("agent-plan-approve-request:{request_id}"),
+        }),
+        request_binding: request.get("request_binding").cloned(),
         severity: "attention".to_string(),
         read: false,
         created_at,
@@ -358,6 +399,39 @@ pub(super) async fn approve_inspect_action_request(
         },
     )?;
     anyhow::bail!(message);
+}
+
+/// Approve the exact card the owner saw: owner alone, one fresh passkey, one claim.
+pub(super) fn approve_agent_plan_request(
+    state: &GatewayState,
+    launch: &RequiredHomeLaunchToken,
+    context: &HomeLaunchTokenContext,
+    request_id: &str,
+    card_binding: &serde_json::Value,
+    step_up_token: Option<&str>,
+) -> anyhow::Result<String> {
+    store::claim_pending_agent_plan_for_owner(
+        &state.data_dir,
+        request_id,
+        context.principal_id(),
+        context.root().kind() == Some(crate::auth::PrincipalKind::Human),
+        card_binding,
+        now_ts(),
+        |record| {
+            let token = step_up_token.ok_or_else(|| {
+                anyhow::anyhow!("fresh passkey is required to approve an agent plan")
+            })?;
+            consume_passkey_step_up_token(
+                &state.data_dir,
+                token,
+                launch,
+                180,
+                "agent_plan.approve",
+                &serde_json::json!({ "request_id": record.request_id }),
+            )
+        },
+    )?;
+    Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
 
 pub(super) fn deny_inspect_action_request(
@@ -635,6 +709,7 @@ async fn create_inspect_action_request(
         kind: INSPECT_ACTION_KIND.to_string(),
         request_id,
         principal_id: context.principal_id().to_string(),
+        requester_id: None,
         session_id: context.session_id().to_string(),
         id: id.to_string(),
         operation: operation.to_string(),
@@ -738,13 +813,16 @@ mod tests {
     }
 
     const PLAN_PRINCIPAL: &str = "person:owner";
+    const PLAN_REQUESTER: &str = "agent:v2:planrequester";
     const PLAN_CAPSULE: &str = "capsule:agent-host";
+    const PLAN_SESSION: &str = "session:agent-1";
 
     fn plan_context() -> agent_plan::AgentPlanContext<'static> {
         agent_plan::AgentPlanContext {
             principal_id: PLAN_PRINCIPAL,
+            requester_id: PLAN_REQUESTER,
             capsule_id: PLAN_CAPSULE,
-            session_id: "session:agent-1",
+            session_id: PLAN_SESSION,
         }
     }
 
@@ -772,7 +850,12 @@ mod tests {
             None,
             "status",
             ["elastos://availability/status".to_string()],
-            &stored_step(request),
+            &serde_json::json!({
+                "owner": PLAN_PRINCIPAL,
+                "requester": PLAN_REQUESTER,
+                "session": PLAN_SESSION,
+                "step": stored_step(request),
+            }),
         )
     }
 
@@ -805,7 +888,18 @@ mod tests {
         let card = &cards[0];
         assert_eq!(card.kind, AGENT_PLAN_KIND);
         assert_eq!(card.id, format!("agent-plan-request:{}", record.request_id));
-        assert!(card.action_ref.is_none());
+        assert_eq!(
+            card.action_ref
+                .as_ref()
+                .map(|action| action.action_id.as_str()),
+            Some(format!("agent-plan-approve-request:{}", record.request_id).as_str()),
+            "the owner's card carries the one approve action"
+        );
+        assert_eq!(
+            card.request_binding.as_ref(),
+            Some(&serde_json::json!(expected)),
+            "the card carries the exact binding its click sends back"
+        );
         assert_eq!(expected.sha256.len(), 64);
         assert!(card.body.contains(&expected.sha256), "{}", card.body);
         assert!(

@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
 use crate::model_budget::{AgentKey, ModelBudget};
-use crate::resource_bridge::LaunchContent;
+use crate::resource_bridge::{BridgePrincipal, LaunchContent};
 use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
 use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
@@ -881,6 +881,11 @@ impl Runtime {
                     capability_manager: host_cap_mgr.clone(),
                     pending_store: host_pending.clone(),
                     capsule_id: capsule_id.to_string(),
+                    // The provider minted this id for the one activation, so
+                    // the Runtime session is the activation, taken here from
+                    // the Runtime's own hostcall and never from the Bus
+                    // identity field the guest reads.
+                    session_id: capsule_id.to_string(),
                     principal_id: principal_id.map(ToOwned::to_owned),
                     manifest_capabilities,
                     data_dir: Some(host_data_dir.clone()),
@@ -1033,7 +1038,7 @@ impl Runtime {
         self.run_signer(
             path,
             args,
-            principal_id,
+            (principal_id, None),
             None,
             LaunchMode::Bounded,
             (|_| {}, |_| {}),
@@ -1057,7 +1062,7 @@ impl Runtime {
         self.run_signer(
             path,
             args,
-            None,
+            (None, None),
             None,
             LaunchMode::Bounded,
             (before_folder_walk, after_folder_walk),
@@ -1074,11 +1079,12 @@ impl Runtime {
         path: &Path,
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+        grant_name: Option<&str>,
     ) -> Result<(CapsuleHandle, Signer)> {
         self.run_signer(
             path,
             args,
-            principal_id,
+            (principal_id, grant_name),
             None,
             LaunchMode::Detached,
             (|_| {}, |_| {}),
@@ -1144,7 +1150,7 @@ impl Runtime {
         self.run_signer(
             path,
             args,
-            Some(actor),
+            (Some(actor), None),
             Some((manifest, entrypoint, model_admission)),
             mode,
             (|_| {}, |_| {}),
@@ -1160,7 +1166,7 @@ impl Runtime {
         &self,
         path: &Path,
         args: Vec<String>,
-        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+        launch: (Option<BridgePrincipal>, Option<&str>),
         admitted: Option<(CapsuleManifest, Vec<u8>, AgentModelCeiling)>,
         mode: LaunchMode,
         walk_hooks: (
@@ -1168,6 +1174,7 @@ impl Runtime {
             impl FnOnce(&CheckedBundle) + Send,
         ),
     ) -> Result<(CapsuleHandle, Signer)> {
+        let (principal_id, grant_name) = launch;
         let (before_folder_walk, after_folder_walk) = walk_hooks;
         let admitted_launch = admitted.is_some();
         if !admitted_launch {
@@ -1191,21 +1198,23 @@ impl Runtime {
             }
             None => {
                 let manifest_path = path.join("capsule.json");
-                let manifest_data =
-                    tokio::fs::read_to_string(&manifest_path)
-                        .await
-                        .map_err(|e| {
-                            if e.kind() == std::io::ErrorKind::NotFound {
-                                ElastosError::InvalidManifest(format!(
-                                    "capsule.json not found in {}",
-                                    path.display()
-                                ))
-                            } else {
-                                ElastosError::Io(e)
-                            }
-                        })?;
+                let manifest_data = tokio::task::spawn_blocking(move || {
+                    elastos_common::capsule_manifest_file::read(&manifest_path)
+                })
+                .await
+                .map_err(|err| ElastosError::Io(std::io::Error::other(err)))?
+                .map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        ElastosError::InvalidManifest(format!(
+                            "capsule.json not found in {}",
+                            path.display()
+                        ))
+                    } else {
+                        ElastosError::Io(e)
+                    }
+                })?;
                 let manifest: CapsuleManifest =
-                    serde_json::from_str(&manifest_data).map_err(|e| {
+                    serde_json::from_slice(&manifest_data).map_err(|e| {
                         ElastosError::InvalidManifest(format!(
                             "Failed to parse capsule.json: {}",
                             e
@@ -1228,6 +1237,11 @@ impl Runtime {
         };
         if let Some(start) = &folder_start {
             manifest = start.manifest.clone();
+        }
+        if grant_name.is_some_and(|name| manifest.name != name) {
+            return Err(ElastosError::InvalidManifest(
+                "launch grant mismatch".into(),
+            ));
         }
 
         if let Some(model_admission) = &admitted_model {
@@ -3808,10 +3822,14 @@ pub(crate) mod tests {
         assert_eq!(handle.manifest.name, "installed-folder");
 
         let (_handle, signer) = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .expect("the route starts an installed folder");
         assert_eq!(signer, Signer::Key { did });
+        assert!(runtime
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, Some("another-capsule"))
+            .await
+            .is_err());
     }
 
     /// A folder signed by a trusted key that no install recorded and no
@@ -3928,7 +3946,7 @@ pub(crate) mod tests {
             .expect_err("the CLI refuses a folder no install recorded")
             .to_string();
         let route = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .map(|_| ())
             .expect_err("the route refuses a folder no install recorded")
@@ -4000,7 +4018,7 @@ pub(crate) mod tests {
             .expect_err("the CLI refuses it")
             .to_string();
         let route = runtime
-            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .start_local_with_signer(&capsule_dir, Vec::new(), None, None)
             .await
             .map(|_| ())
             .expect_err("the route refuses it")
@@ -4964,6 +4982,7 @@ pub(crate) mod tests {
             capability_manager: capability_manager.clone(),
             pending_store: pending_store.clone(),
             capsule_id: b_session.clone(),
+            session_id: b_session.clone(),
             principal_id: Some(agents[1].clone()),
             manifest_capabilities: manifest.resource_authority_bounds(),
             data_dir: Some(data_dir.clone()),
