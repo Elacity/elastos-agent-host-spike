@@ -946,7 +946,7 @@ pub(crate) mod tests {
         pub(crate) data_dir: std::path::PathBuf,
         runtime: Arc<Runtime>,
         audit_log: Arc<AuditLog>,
-        pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        pub(crate) pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
         /// The same token store the manager holds: the live view's own input.
         capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
@@ -1480,6 +1480,14 @@ pub(crate) mod tests {
             }
             grants.abort();
             launched
+        }
+
+        pub(crate) async fn launched_instance_id(&self, agent_id: &str) -> String {
+            let launched = self.launch_with_grants(agent_id).await.unwrap().0;
+            assert_eq!(launched.status, crate::runtime::CAPSULE_STARTING);
+            let ended = self.wait_ended(&launched.id).await;
+            assert_eq!(ended.cause.as_deref(), Some("completed"));
+            launched.id
         }
 
         /// Waits until the registry records this activation's end, and returns
