@@ -8144,37 +8144,20 @@ export!(AgentHost);
 #[cfg(test)]
 const RENDERING_FORMAT: u16 = 2;
 
-/// The declared per-step asks, compiled in from `asks.json` in this lane. The
-/// file is an auditable declaration, not the policy check: the Runtime
-/// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime
-/// manifest and retires into that one place when the Runtime defines per-step
-/// asks (P10). It is read by this module's tests only, so the shipped guest
-/// keeps no new production path.
+/// The signed manifest. Its `asks` are this guest's maximum.
 #[cfg(test)]
-const ASKS_JSON: &str = include_str!("../asks.json");
+const MANIFEST_JSON: &str = include_str!("../capsule.json");
 
 #[cfg(test)]
-const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
+const CAPSULE_SCHEMA: &str = "elastos.capsule/v1";
+
+#[cfg(test)]
+const MANIFEST_KEYS: &str = " schema name version description author role type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources ";
 
 /// The one marker a declared pattern may hold: the user-namespace root,
 /// `Users/<one name>`. The declaration names no person and no host path.
 #[cfg(test)]
 const PRINCIPAL_MARKER: &str = "<principal>";
-
-/// The one principal a declared pattern may name. The guest names only
-/// `Users/self`, which the Runtime scopes to the launching person, so the
-/// declaration covers that person and no other `Users/<name>`.
-#[cfg(test)]
-const LAUNCHING_PRINCIPAL: &str = "Users/self";
-
-/// One declared ask: a proposal kind and the resource pattern after
-/// `localhost://` that it may name.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Ask {
-    kind: ProposalKind,
-    pattern: String,
-}
 
 /// The declared name of one kind. The match has no wildcard, so a new
 /// `ProposalKind` does not compile until it is named here or marked as the
@@ -8323,8 +8306,7 @@ fn secret_shaped(text: &str) -> bool {
 
 /// The one rule for a declared resource pattern: it names a resource and no
 /// URL, host path, routed `Users/` path, secret, or misplaced marker. The
-/// first match names its cause. `parse_asks` and the declaration test use
-/// this same function, so the rule has one copy.
+/// first match names its cause. The manifest parser uses this for its path.
 #[cfg(test)]
 fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
     let lower = pattern.to_ascii_lowercase();
@@ -8383,23 +8365,52 @@ fn ask_resource_refusal(pattern: &str) -> Option<&'static str> {
     None
 }
 
-/// Parse the declaration with its closed shape: only `schema` and `asks`,
-/// only `kind` and `resource` in each ask, and no repeated key. Each refusal
-/// names its own cause; a kind the guest cannot propose, the `unspecified`
-/// placeholder, and a forbidden resource value each have their own reason.
 #[cfg(test)]
-fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManifestDeclaredAsk {
+    resource: String,
+    actions: Vec<String>,
+}
+
+#[cfg(test)]
+fn manifest_resource_refusal(resource: &str) -> Option<&'static str> {
+    let Some(path) = resource.strip_prefix("localhost://") else {
+        return ask_resource_refusal(resource).or(Some("asks url"));
+    };
+    let Some(rest) = path.strip_prefix("Users/self/") else {
+        return ask_resource_refusal(path).or(Some("asks users path"));
+    };
+    if rest.is_empty() || rest == "*" {
+        return None;
+    }
+    if rest.to_ascii_lowercase().contains("users/") {
+        return Some("asks users path");
+    }
+    let Some(body) = rest.strip_suffix("/*").or_else(|| rest.strip_suffix('/')) else {
+        return Some("asks literal directory");
+    };
+    if body.is_empty() {
+        return None;
+    }
+    ask_resource_refusal(&format!("{body}/"))
+}
+
+#[cfg(test)]
+fn parse_manifest_asks(text: &str) -> Result<Vec<ManifestDeclaredAsk>, &'static str> {
     let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "asks json")?;
     if repeated_object_key(text).is_some() {
         return Err("asks duplicate field");
     }
     let document = document.as_object().ok_or("asks root")?;
-    if document.keys().any(|key| key != "schema" && key != "asks") {
+    if document
+        .keys()
+        .any(|key| !MANIFEST_KEYS.contains(&format!(" {key} ")))
+    {
         return Err("asks unknown field");
     }
     let schema = document.get("schema").ok_or("asks schema missing")?;
     let schema = schema.as_str().ok_or("asks schema type")?;
-    if schema != ASKS_SCHEMA {
+    if schema != CAPSULE_SCHEMA {
         return Err("asks schema unsupported");
     }
     let entries = document.get("asks").ok_or("asks list missing")?;
@@ -8410,82 +8421,58 @@ fn parse_asks(text: &str) -> Result<Vec<Ask>, &'static str> {
     let mut asks = Vec::with_capacity(entries.len());
     for entry in entries {
         let entry = entry.as_object().ok_or("asks entry")?;
-        if entry.keys().any(|key| key != "kind" && key != "resource") {
+        if entry
+            .keys()
+            .any(|key| key != "resource" && key != "actions")
+        {
             return Err("asks entry field");
         }
-        let kind = entry.get("kind").ok_or("asks kind missing")?;
-        let kind = kind.as_str().ok_or("asks kind type")?;
-        if kind == "unspecified" {
-            return Err("asks kind unspecified");
+        let actions = entry.get("actions").ok_or("asks kind missing")?;
+        let actions = actions.as_array().ok_or("asks kind type")?;
+        if actions.is_empty() {
+            return Err("asks actions empty");
         }
-        let kind = proposal_kind(kind).ok_or("asks kind unknown")?;
-        let pattern = entry.get("resource").ok_or("asks resource missing")?;
-        let pattern = pattern.as_str().ok_or("asks resource type")?;
-        if pattern.is_empty() {
+        let mut words = Vec::with_capacity(actions.len());
+        for action in actions {
+            let action = action.as_str().ok_or("asks kind type")?;
+            if action == "unspecified" {
+                return Err("asks kind unspecified");
+            }
+            if !matches!(
+                action,
+                "read" | "write" | "execute" | "message" | "delete" | "admin"
+            ) {
+                return Err("asks kind unknown");
+            }
+            if words.iter().any(|word| word == action) {
+                return Err("asks duplicate action");
+            }
+            words.push(action.to_string());
+        }
+        let resource = entry.get("resource").ok_or("asks resource missing")?;
+        let resource = resource.as_str().ok_or("asks resource type")?;
+        if resource.is_empty() {
             return Err("asks resource empty");
         }
-        if pattern.chars().any(char::is_whitespace) {
+        if resource.chars().any(char::is_whitespace) {
             return Err("asks whitespace");
         }
-        if let Some(reason) = ask_resource_refusal(pattern) {
+        if let Some(reason) = manifest_resource_refusal(resource) {
             return Err(reason);
         }
-        asks.push(Ask {
-            kind,
-            pattern: pattern.to_string(),
+        asks.push(ManifestDeclaredAsk {
+            resource: resource.to_string(),
+            actions: words,
         });
     }
     Ok(asks)
 }
 
-/// The declaration, parsed once from the compiled-in file. Immutable after
-/// that parse, so it holds no per-session state. Keep a malformed declaration's
-/// reason so every reader fails with that reason (fail closed, P11).
 #[cfg(test)]
-static DECLARED_ASKS: std::sync::LazyLock<Result<Vec<Ask>, &'static str>> =
-    std::sync::LazyLock::new(|| parse_asks(ASKS_JSON));
-
-#[cfg(test)]
-fn require_parsed_asks<'a>(parsed: &'a Result<Vec<Ask>, &'static str>) -> &'a [Ask] {
+fn require_parsed_asks<'a, T>(parsed: &'a Result<Vec<T>, &'static str>) -> &'a [T] {
     parsed
         .as_deref()
         .unwrap_or_else(|reason| panic!("{reason}"))
-}
-
-#[cfg(test)]
-fn declared_asks() -> &'static [Ask] {
-    require_parsed_asks(&DECLARED_ASKS)
-}
-
-/// The one root a declared pattern names: the pattern with `<principal>`
-/// expanded to the launching person, and its trailing `/` dropped so the
-/// directory itself is the prefix. `ask_covers` gives this root to
-/// `resource_covers`, so "under this pattern" has one boundary rule (P10).
-#[cfg(test)]
-fn ask_pattern_root(pattern: &str) -> String {
-    let expanded = match pattern.strip_prefix(PRINCIPAL_MARKER) {
-        Some(tail) => format!("{LAUNCHING_PRINCIPAL}{tail}"),
-        None => pattern.to_string(),
-    };
-    expanded.trim_end_matches('/').to_string()
-}
-
-/// Whether one declared ask's pattern covers a proposed resource. The
-/// pattern's root is expanded once and `resource_covers` decides the
-/// boundary, so a sibling such as `ProjectsX` stays outside `Projects` (P10).
-#[cfg(test)]
-fn ask_covers(ask: &Ask, resource: &str) -> bool {
-    resource
-        .strip_prefix("localhost://")
-        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))
-}
-
-/// The declaration's answer for one proposal. `Unspecified` matches nothing.
-#[cfg(test)]
-fn declared_ask(kind: ProposalKind, resource: &str) -> bool {
-    declared_asks()
-        .iter()
-        .any(|ask| ask.kind == kind && ask_covers(ask, resource))
 }
 
 /// Test-only HTTP client and loopback mock server for the Sparks model.
@@ -19903,13 +19890,11 @@ mod tests {
         assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
     }
 
-    // The manifest `asks` are this guest's maximum. `asks.json` stays as the
-    // lane-local list the parser checks. Each proposal kind the guest can
-    // name is observed in the scenarios. Each observed resource is the
-    // resource that scenario passed.
+    // The manifest `asks` are this guest's maximum. Each proposal kind the
+    // guest can name is observed in the scenarios.
 
     fn asks_document(entries: &str) -> String {
-        format!(r#"{{"schema":"{ASKS_SCHEMA}","asks":[{entries}]}}"#)
+        format!(r#"{{"schema":"{CAPSULE_SCHEMA}","asks":[{entries}]}}"#)
     }
 
     /// Every proposal the existing scenarios record, as (kind, resource). A
@@ -19960,86 +19945,79 @@ mod tests {
         out
     }
 
-    /// The declaration carries no URL scheme, no host path, no routed
-    /// `Users/` path, no secret-shaped value, and no forbidden field. Every
-    /// entry names a kind the guest can propose.
+    /// The manifest permits a localhost `Users/self` ceiling. These cases
+    /// refuse other schemes, host paths, user routes, secrets, and extra fields.
     #[test]
     fn asks_declare_no_urls_secrets_or_users_paths() {
-        let parsed = parse_asks(ASKS_JSON);
+        let parsed = parse_manifest_asks(MANIFEST_JSON);
         assert!(parsed.is_ok(), "the declaration parses: {parsed:?}");
         let asks = parsed.unwrap();
         assert!(!asks.is_empty(), "the declaration declares an ask");
         for ask in &asks {
-            let name = ask_kind_name(ask.kind).expect("every ask has a proposable kind");
-            assert_eq!(proposal_kind(name), Some(ask.kind));
-            assert_eq!(
-                ask_resource_refusal(&ask.pattern),
-                None,
-                "{name} ask names a forbidden resource: {:?}",
-                ask.pattern
-            );
+            assert_eq!(manifest_resource_refusal(&ask.resource), None, "{ask:?}");
+            assert!(!ask.actions.is_empty(), "{ask:?}");
         }
         // A forbidden field is refused with its own reason, and so is each
         // forbidden value.
         for (text, reason) in [
             (
-                asks_document(r#"{"kind":"read","resource":"<principal>/","secret":"x"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"<principal>/","secret":"x"}"#),
                 "asks entry field",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"https://api.example.com/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"https://api.example.com/"}"#),
                 "asks url",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"file:/tmp/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"file:/tmp/"}"#),
                 "asks url scheme",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"data:text/plain,x/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"data:text/plain,x/"}"#),
                 "asks url scheme",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Git+SSH.v1-local:repo/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Git+SSH.v1-local:repo/"}"#),
                 "asks url scheme",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"127.0.0.1:8080/v1/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"127.0.0.1:8080/v1/"}"#),
                 "asks host route",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"[::1]:8080/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"[::1]:8080/"}"#),
                 "asks host route",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"/tmp/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"/tmp/"}"#),
                 "asks absolute host path",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"~/tmp/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"~/tmp/"}"#),
                 "asks home host path",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"tmp\\projects/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"tmp\\projects/"}"#),
                 "asks backslash host path",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models/./"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models/./"}"#),
                 "asks current directory",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models/../"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models/../"}"#),
                 "asks parent directory",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Users/self/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Users/self/"}"#),
                 "asks users path",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models/sk-live-abc/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models/sk-live-abc/"}"#),
                 "asks secret",
             ),
         ] {
-            assert_eq!(parse_asks(&text), Err(reason), "{text}");
+            assert_eq!(parse_manifest_asks(&text), Err(reason), "{text}");
         }
     }
 
@@ -20052,170 +20030,183 @@ mod tests {
             ("[]".to_string(), "asks root"),
             ("1".to_string(), "asks root"),
             (
-                r#"{"schema":"elastos.agent-host.asks/v1"}"#.to_string(),
+                r#"{"schema":"elastos.capsule/v1"}"#.to_string(),
                 "asks list missing",
             ),
             (
-                r#"{"asks":[{"kind":"read","resource":"<principal>/"}]}"#.to_string(),
+                r#"{"asks":[{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}]}"#.to_string(),
                 "asks schema missing",
             ),
             (
-                r#"{"schema":1,"asks":[{"kind":"read","resource":"<principal>/"}]}"#.to_string(),
+                r#"{"schema":1,"asks":[{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}]}"#.to_string(),
                 "asks schema type",
             ),
             (
-                r#"{"schema":"wrong","asks":[{"kind":"read","resource":"<principal>/"}]}"#
+                r#"{"schema":"wrong","asks":[{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}]}"#
                     .to_string(),
                 "asks schema unsupported",
             ),
             (
                 format!(
-                    r#"{{"schema":"{ASKS_SCHEMA}","asks":[{{"kind":"read","resource":"<principal>/"}}],"extra":1}}"#
+                    r#"{{"schema":"{CAPSULE_SCHEMA}","asks":[{{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}}],"extra":1}}"#
                 ),
                 "asks unknown field",
             ),
             (
-                format!(r#"{{"schema":"{ASKS_SCHEMA}","asks":{{}}}}"#),
+                format!(r#"{{"schema":"{CAPSULE_SCHEMA}","asks":{{}}}}"#),
                 "asks list type",
             ),
             (asks_document(""), "asks empty"),
             (asks_document("1"), "asks entry"),
             (
-                asks_document(r#"{"kind":"read","resource":"<principal>/","extra":1}"#),
+                asks_document(r#"{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*","extra":1}"#),
                 "asks entry field",
             ),
             (
-                asks_document(r#"{"resource":"<principal>/"}"#),
+                asks_document(r#"{"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}"#),
                 "asks kind missing",
             ),
             (
-                asks_document(r#"{"kind":1,"resource":"<principal>/"}"#),
+                asks_document(r#"{"actions":1,"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}"#),
                 "asks kind type",
             ),
             (
-                asks_document(r#"{"kind":"unknown","resource":"<principal>/"}"#),
+                asks_document(r#"{"actions":["unknown"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}"#),
                 "asks kind unknown",
             ),
             (
-                asks_document(r#"{"kind":"unspecified","resource":"<principal>/"}"#),
+                asks_document(r#"{"actions":["unspecified"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}"#),
                 "asks kind unspecified",
             ),
-            (asks_document(r#"{"kind":"read"}"#), "asks resource missing"),
             (
-                asks_document(r#"{"kind":"read","resource":1}"#),
+                asks_document(r#"{"actions":[],"resource":"<principal>/"}"#),
+                "asks actions empty",
+            ),
+            (
+                asks_document(r#"{"actions":["write","read","write"],"resource":"<principal>/"}"#),
+                "asks duplicate action",
+            ),
+            (
+                asks_document(r#"{"actions":["read"]}"#),
+                "asks resource missing",
+            ),
+            (
+                asks_document(r#"{"actions":["read"],"resource":1}"#),
                 "asks resource type",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":""}"#),
+                asks_document(r#"{"actions":["read"],"resource":""}"#),
                 "asks resource empty",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models /"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models /"}"#),
                 "asks whitespace",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"https://api.example.com/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"https://api.example.com/"}"#),
                 "asks url",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"file:/tmp/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"file:/tmp/"}"#),
                 "asks url scheme",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"data:text/plain,x/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"data:text/plain,x/"}"#),
                 "asks url scheme",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Git+SSH.v1-local:repo/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Git+SSH.v1-local:repo/"}"#),
                 "asks url scheme",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"127.0.0.1:8080/v1/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"127.0.0.1:8080/v1/"}"#),
                 "asks host route",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"[::1]:8080/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"[::1]:8080/"}"#),
                 "asks host route",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"/tmp/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"/tmp/"}"#),
                 "asks absolute host path",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"~/tmp/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"~/tmp/"}"#),
                 "asks home host path",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"tmp\\projects/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"tmp\\projects/"}"#),
                 "asks backslash host path",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models/./"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models/./"}"#),
                 "asks current directory",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models/../"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models/../"}"#),
                 "asks parent directory",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Users/self/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Users/self/"}"#),
                 "asks users path",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models/sk-live-abc/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models/sk-live-abc/"}"#),
                 "asks secret",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"<principal>/<principal>/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"<principal>/<principal>/"}"#),
                 "asks repeated marker",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"<principal>Models/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"<principal>Models/"}"#),
                 "asks marker tail",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"<principal>/Projects"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"<principal>/Projects"}"#),
                 "asks marker directory",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"<principal>"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"<principal>"}"#),
                 "asks marker directory",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models/<principal>/"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models/<principal>/"}"#),
                 "asks misplaced marker",
             ),
             (
-                asks_document(r#"{"kind":"read","resource":"Models"}"#),
+                asks_document(r#"{"actions":["read"],"resource":"Models"}"#),
                 "asks literal directory",
             ),
             (
                 format!(
-                    r#"{{"schema":"{ASKS_SCHEMA}","schema":"{ASKS_SCHEMA}","asks":[{{"kind":"read","resource":"<principal>/"}}]}}"#
+                    r#"{{"schema":"{CAPSULE_SCHEMA}","schema":"{CAPSULE_SCHEMA}","asks":[{{"actions":["read"],"resource":"localhost://Users/self/.AppData/Agents/agent-host/*"}}]}}"#
                 ),
                 "asks duplicate field",
             ),
             (
                 asks_document(
-                    r#"{"kind":"read","resource":"<principal>/","resource":"<principal>/"}"#,
+                    r#"{"actions":["read"],"resource":"<principal>/","resource":"<principal>/"}"#,
                 ),
                 "asks duplicate field",
             ),
             (
                 asks_document(
-                    r#"{"kind":"read","\u0072esource":"<principal>/","resource":"<principal>/"}"#,
+                    r#"{"actions":["read"],"\u0072esource":"<principal>/","resource":"<principal>/"}"#,
                 ),
                 "asks duplicate field",
             ),
         ] {
-            assert_eq!(parse_asks(&text), Err(reason), "{text}");
+            assert_eq!(parse_manifest_asks(&text), Err(reason), "{text}");
         }
     }
 
     #[test]
     fn malformed_compiled_declaration_keeps_its_parser_reason() {
         let declaration = std::sync::LazyLock::new(|| {
-            parse_asks(include_str!("../tests/fixtures/asks-unspecified.json"))
+            parse_manifest_asks(
+                r#"{"schema":"elastos.capsule/v1","asks":[{"resource":"localhost://Users/self/.AppData/Agents/agent-host/*","actions":["unspecified"]}]}"#,
+            )
         });
         // Every access retains the parser reason, including after a failed
         // reader. An empty list would let reverse coverage pass vacuously.
@@ -20345,24 +20336,40 @@ mod tests {
     /// The one manifest row: its resource and the actions on that resource.
     fn manifest_journal_ask() -> (String, Vec<String>) {
         let capsule: serde_json::Value =
-            serde_json::from_str(include_str!("../capsule.json")).expect("capsule.json parses");
+            serde_json::from_str(MANIFEST_JSON).expect("capsule.json parses");
         assert!(
             capsule.get("capabilities").is_none(),
             "the manifest maximum is asks"
         );
-        let asks = capsule["asks"].as_array().expect("the manifest lists asks");
+        let asks = parse_manifest_asks(MANIFEST_JSON)
+            .unwrap_or_else(|reason| panic!("the manifest asks are refused: {reason}"));
         assert_eq!(asks.len(), 1, "the manifest lists one ask");
-        let resource = asks[0]["resource"]
-            .as_str()
-            .expect("an ask names a resource")
-            .to_string();
-        let actions = asks[0]["actions"]
-            .as_array()
-            .expect("an ask lists actions")
-            .iter()
-            .map(|action| action.as_str().expect("an action is a string").to_string())
-            .collect();
-        (resource, actions)
+        let ask = &asks[0];
+        (ask.resource.clone(), ask.actions.clone())
+    }
+
+    #[test]
+    fn the_manifest_ask_refuses_an_unknown_field() {
+        let parsed = parse_manifest_asks(MANIFEST_JSON);
+        assert!(parsed.is_ok(), "the manifest asks parse: {parsed:?}");
+        let text = MANIFEST_JSON.replacen(
+            "\"actions\": [\"write\", \"read\"]",
+            "\"actions\": [\"write\", \"read\"], \"note\": \"extra\"",
+            1,
+        );
+        assert_eq!(parse_manifest_asks(&text).err(), Some("asks entry field"));
+    }
+
+    #[test]
+    fn a_manifest_ask_lists_each_action_once() {
+        let asks = parse_manifest_asks(MANIFEST_JSON)
+            .unwrap_or_else(|reason| panic!("the manifest asks are refused: {reason}"));
+        for ask in &asks {
+            let mut seen = std::collections::BTreeSet::new();
+            for action in &ask.actions {
+                assert!(seen.insert(action.as_str()), "{action} is listed twice");
+            }
+        }
     }
 
     /// A pattern that ends in `/*` covers a longer resource under that
@@ -20445,72 +20452,58 @@ mod tests {
         );
     }
 
-    /// The lane-local journal row names this capsule's own root, the same root
-    /// the manifest ask names. A sibling agent's journal stays outside that row.
+    /// The signed row names this capsule's own root. A sibling agent's
+    /// journal stays outside it.
     #[test]
     fn the_journal_ask_is_the_capsules_own_root() {
         let (resource, _) = manifest_journal_ask();
         let own_root = resource
             .strip_suffix('*')
             .expect("the ask resource ends with a directory wildcard");
-        let journal = declared_asks()
-            .iter()
-            .find(|ask| ask.kind == ProposalKind::JournalAppend)
-            .expect("the lane-local list names the journal append");
-        let declared = format!(
-            "localhost://{}",
-            journal.pattern.replacen(PRINCIPAL_MARKER, "Users/self", 1)
+        assert_eq!(
+            own_root,
+            "localhost://Users/self/.AppData/Agents/agent-host/"
         );
-        assert_eq!(declared, own_root);
         assert!(
-            !declared_ask(
-                ProposalKind::JournalAppend,
-                "localhost://Users/self/.AppData/Agents/other-agent/tasks/t/journal"
+            !journal_manifest_ask_fits(
+                &resource,
+                &["write", "read"],
+                "localhost://Users/self/.AppData/Agents/other-agent/tasks/t/journal",
+                "write"
             ),
             "the journal row names this capsule's own root"
         );
     }
 
-    /// `<principal>` is the one person the guest launches as. The declaration
-    /// covers that person's resources and no other `Users/<name>`.
+    /// The guest's production journal path stays inside its signed ask.
     #[test]
     fn a_declared_ask_names_only_the_launching_principal() {
-        assert!(declared_ask(
-            ProposalKind::Read,
-            "localhost://Users/self/Documents/note.txt"
-        ));
-        assert!(!declared_ask(
-            ProposalKind::Read,
-            "localhost://Users/other/Documents/note.txt"
-        ));
-        assert!(!declared_ask(
-            ProposalKind::Init,
-            "localhost://Users/other/Projects/demo"
+        let (pattern, actions) = manifest_journal_ask();
+        let root = pattern.strip_suffix("/*").expect("a directory ask");
+        let own = journal_resource("agent-host", "t").expect("the guest journal path");
+        assert!(actions.iter().any(|action| action == "read"));
+        assert_eq!(
+            own,
+            "localhost://Users/self/.AppData/Agents/agent-host/tasks/t/journal"
+        );
+        assert!(resource_covers(root, &own));
+        assert!(!resource_covers(
+            root,
+            "localhost://Users/other/.AppData/Agents/agent-host/tasks/t/journal",
         ));
     }
 
-    /// A declared pattern covers only at a path boundary: `ProjectsX` stays
-    /// outside `Projects`, and `ModelsX` stays outside `Models`. The shipped
-    /// declaration still covers the resources the scenarios above observe.
+    /// The production path boundary check covers a child journal path.
     #[test]
     fn a_declared_pattern_covers_only_at_a_path_boundary() {
-        let run = Ask {
-            kind: ProposalKind::Run,
-            pattern: format!("{PRINCIPAL_MARKER}/Projects"),
-        };
-        assert!(!ask_covers(&run, "localhost://Users/self/ProjectsX/a"));
-        let models = Ask {
-            kind: ProposalKind::Hosted,
-            pattern: "Models/".to_string(),
-        };
-        assert!(!ask_covers(&models, "localhost://ModelsX/a"));
-        assert!(declared_ask(
-            ProposalKind::Run,
-            "localhost://Users/self/Projects/demo"
-        ));
-        assert!(declared_ask(
-            ProposalKind::Hosted,
-            "localhost://Models/compaction"
+        let (pattern, actions) = manifest_journal_ask();
+        let root = pattern.strip_suffix("/*").expect("a directory ask");
+        let own = journal_resource("agent-host", "t").expect("the guest journal path");
+        assert!(actions.iter().any(|action| action == "write"));
+        assert!(resource_covers(root, &own));
+        assert!(!resource_covers(
+            root,
+            "localhost://Users/self/.AppData/Agents/agent-hostX/tasks/t/journal",
         ));
     }
 
