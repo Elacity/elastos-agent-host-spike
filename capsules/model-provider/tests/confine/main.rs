@@ -4833,7 +4833,7 @@ fn platform_baseline_rules_stay_narrow() {
     // separate grants. This list is independent of the declaration fixture.
     fn measured_model_file_form(line: &str) -> bool {
         if [
-            r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#,
+            r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#,
             r#"(allow file-read* (literal (param "MODEL")))"#,
             r#"(allow file-read* (literal "/dev/urandom"))"#,
             r#"(allow file-read* file-write-data (literal "/dev/null"))"#,

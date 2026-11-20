@@ -28,8 +28,9 @@ pub(super) static RIGHTS: &[RightRow] = &[
     RightRow {
         id: "model-gpu",
         rules: &[
-            // macOS probe X4: the observed Metal bundle metadata read.
-            r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#,
+            // X4 measured AGXMetalG17X on M5. The AGXMetal bundle family is
+            // the narrowest rule that also starts the engine on other Apple GPUs.
+            r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#,
             // macOS probe X5: the pinned engine initializes Metal at gpu_layers 0.
             r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
             // macOS probe X6: the only measured compiler service name.

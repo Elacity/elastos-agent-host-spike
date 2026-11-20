@@ -98,12 +98,13 @@ mod tests {
             for (index, _) in line
                 .match_indices("(literal ")
                 .chain(line.match_indices("(subpath "))
+                .chain(line.match_indices("(regex "))
             {
                 let argument = line[index..].split_once(' ').unwrap().1;
                 let end = if argument.starts_with("(param ") {
                     argument.find("))").unwrap() + 1
                 } else {
-                    argument.find(')').unwrap()
+                    argument[1..].find('"').unwrap() + 2
                 };
                 arguments.push(&argument[..end]);
             }
@@ -173,10 +174,10 @@ mod tests {
                     expected,
                     "{name} path parameters"
                 );
-                // The measured fixed paths. A new quoted path fails this equality.
+                // The fixed paths and one GPU family regex. Another path fails this equality.
                 assert_eq!(
                     literals,
-                    BTreeSet::from(["/dev/null", "/dev/urandom", "/System/Library/Extensions/AGXMetalG17X.bundle", "/usr/lib"]),
+                    BTreeSet::from(["/dev/null", "/dev/urandom", "/usr/lib", r"^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"]),
                     "{name} fixed paths"
                 );
             } else {
@@ -209,7 +210,7 @@ mod tests {
         assert_eq!(
             row.rules,
             [
-                r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#,
+                r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#,
                 r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
                 r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
             ]
@@ -229,6 +230,36 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn model_gpu_path_refuses_non_agx_system_bundles() {
+        use regex_automata::meta::Regex;
+
+        let rule = super::super::rights_table::RIGHTS
+            .iter()
+            .find(|row| row.id == "model-gpu")
+            .unwrap()
+            .rules[0];
+        let pattern = rule
+            .strip_prefix("(allow file-read* (regex \"")
+            .and_then(|rule| rule.strip_suffix("\"))"))
+            .expect("model-gpu must use one regex read rule");
+        let regex = Regex::new(pattern).expect("model-gpu regex must compile");
+        for path in [
+            "/System/Library/Extensions/AGXMetalG17X.bundle",
+            "/System/Library/Extensions/AGXMetalG13X.bundle/Contents/Info.plist",
+        ] {
+            assert!(regex.is_match(path), "AGXMetal bundle refused: {path}");
+        }
+        for path in [
+            "/System/Library/Extensions/Other.bundle",
+            "/System/Library/Extensions/IOGraphicsFamily.kext",
+            "/System/Library/Extensions/AGXMetalG17X.bundle-extra",
+            "/System/Library/Extensions/AGXMetalG17X.bundle-other/Contents",
+        ] {
+            assert!(!regex.is_match(path), "non-AGX path admitted: {path}");
+        }
     }
 
     #[rustfmt::skip]

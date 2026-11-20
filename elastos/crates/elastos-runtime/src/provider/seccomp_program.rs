@@ -17,7 +17,8 @@ const NUMBERS: &str = concat!(
     "renameat:-:38 renameat2:316:276 rseq:334:293 rt_sigaction:13:134 socketpair:53:199 statx:332:291 ",
     "sysinfo:99:179 uname:63:160 unlink:87:- unlinkat:263:35 write:1:64 writev:20:66 ",
     "clone:56:220 clone3:435:435 ",
-    // Linux probe seccomp rows; absent arm64 cells have no syscall on that ABI.
+    // Linux probe rows. The measured x86-only dup2, getpgrp, and readlink
+    // have no AArch64 syscall or libc::SYS_* constant; '-' excludes each there.
     "accept4:288:242 bind:49:200 connect:42:203 dup2:33:- getpgrp:111:- getpid:39:172 getsockopt:55:209 kill:62:129 listen:50:201 pipe2:293:59 readlink:89:- recvfrom:45:207 rt_sigprocmask:14:135 sendto:44:206 setpgid:109:154 socket:41:198 waitid:247:95",
 );
 
@@ -135,8 +136,8 @@ mod tests {
     fn model_whole_goldens_match_reviewed_pins() {
         use sha2::{Digest as _, Sha256};
         for (golden, expected) in [
-            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-x86_64.golden").as_slice(), "fe85718ec6ee3f930e5eb00d1789c52a0093b85c5501050a0573abe72b1eab1a"),
-            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-aarch64.golden").as_slice(), "7bc5b726c2bc0e49b720703a52aa29fffc245d20af0ff603477296619c8c7a1c"),
+            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-x86_64.golden").as_slice(), "4fae5d0743d35c1650c6453d6f5bc9541ce67fb4237a99563dd9cafef8bcaf6a"),
+            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-aarch64.golden").as_slice(), "4debc431452131f50261d7fd2a9561503fcb6f9b934222770a35862c5271530c"),
         ] {
             assert_eq!(format!("{:x}", Sha256::digest(golden)), expected);
         }
@@ -227,7 +228,7 @@ mod tests {
     fn model_golden_at_pin_d0dd5693_drops_rename_pairs() {
         const POST_PIN: &[&str] = &[
             "rename", "renameat", "accept4", "bind", "connect", "dup2", "getpgrp", "getpid",
-            "getsockopt", "kill", "listen", "pipe2", "readlink", "recvfrom", "rt_sigprocmask",
+            "getsockopt", "listen", "pipe2", "readlink", "recvfrom", "rt_sigprocmask",
             "sendto", "setpgid", "waitid",
         ];
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../..");

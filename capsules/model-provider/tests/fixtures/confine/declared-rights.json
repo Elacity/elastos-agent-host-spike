@@ -18,7 +18,7 @@
     {
       "id": "model-gpu",
       "rules": [
-        "(allow file-read* (subpath \"/System/Library/Extensions/AGXMetalG17X.bundle\"))",
+        "(allow file-read* (regex \"^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\\.bundle(/.*)?$\"))",
         "(allow iokit-open-user-client (iokit-user-client-class \"AGXDeviceUserClient\") (iokit-user-client-class \"IOSurfaceRootUserClient\"))",
         "(allow mach-lookup (global-name \"com.apple.MTLCompilerService\"))"
       ]

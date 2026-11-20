@@ -145,7 +145,7 @@ fn build_for_arch(
                     ))
                 }
                 // macOS probe X4's Metal bundle, X5 and X6 have no Linux path decision.
-                r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#
+                r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#
                 | r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#
                 | r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#
                     if matches!(provider, RuntimeProviderId::Model) => {}
@@ -357,7 +357,7 @@ mod tests {
                     for form in claim["rules"].as_array().unwrap() {
                         let form = form.as_str().unwrap();
                         let Some(mask) = masks.get(form).copied() else {
-                            assert!(form.starts_with("(allow iokit-open") || form.starts_with("(allow mach-lookup") || form == r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#, "lab form has no mask: {form}");
+                            assert!(form.starts_with("(allow iokit-open") || form.starts_with("(allow mach-lookup") || form == r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#, "lab form has no mask: {form}");
                             continue;
                         };
                         if mask == 0 {

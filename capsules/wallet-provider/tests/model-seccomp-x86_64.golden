@@ -139,7 +139,7 @@
 0x0020 0  0 0x00000010  # load
 0x0045 0  1 0x00010000  # CLONE_THREAD
 0x0006 0  0 0x7fff0000  # allow
-0x0015 0  1 0x00004111  # measured vfork flags
+0x0015 0  1 0x00004111  # arg0 == 0x4111 (measured vfork flags)
 0x0006 0  0 0x7fff0000  # allow
 0x0006 0  0 0x0005000d  # deny
 0x0015 0  4 0x00000035  # SYS_socketpair

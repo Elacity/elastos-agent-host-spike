@@ -26,8 +26,9 @@
 ;; Journal: one grant covers the run records under the journal root.
 (allow file-read* file-write* (subpath (param "STORAGE_ROOT")))
 
-;; macOS probe X5, X6, and the X4 /System read for the Metal bundle.
-(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))
+;; X4 measured AGXMetalG17X on M5. The AGXMetal bundle family is the narrowest
+;; rule that also starts the engine on other Apple GPUs; X5 and X6 stay exact.
+(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))
 (allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))
 (allow mach-lookup (global-name "com.apple.MTLCompilerService"))
 ;; Probe X2 and proposal rows 2, 4 and 5: process and artifact inputs.

@@ -7518,7 +7518,7 @@ const MODEL_ROOT_READ_RULE: &str = r#"(allow file-read-data (literal "/"))"#;
 fn measured_model_form(form: &str) -> bool {
     if [
         MODEL_ROOT_READ_RULE,
-        r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#,
+        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#,
         r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
         r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
         "(allow process-fork)",
@@ -7578,7 +7578,7 @@ const PINNED_RULES: &[(&str, &str)] = &[
     (STARTUP_RULES[0], "startup-root-directory"),
     (STARTUP_RULES[1], "startup-sysctl"),
     (
-        r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#,
+        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9]+\.bundle(/.*)?$"))"#,
         "model-gpu",
     ),
     (
@@ -12368,7 +12368,7 @@ fn model_syscall_lists_match_libc() {
         };
     }
     let libc_forbidden = libc_numbers! {
-        SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_kexec_load,
+        SYS_kill, SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_kexec_load,
         SYS_kexec_file_load, SYS_init_module, SYS_finit_module, SYS_bpf, SYS_mount, SYS_umount2,
         SYS_pivot_root, SYS_unshare, SYS_setns, SYS_keyctl, SYS_add_key, SYS_request_key,
         SYS_perf_event_open, SYS_userfaultfd,
@@ -15779,9 +15779,16 @@ fn linux_model_filter_admits_threads_and_refuses_new_processes() {
 fn linux_abi_constants_match_libc() {
     assert_eq!(LINUX_ENOSYS, libc::ENOSYS as u32);
     assert_eq!(LINUX_CLONE_THREAD, libc::CLONE_THREAD as u32);
+    // glibc exposes these values as the clone signal and the two fcntl commands.
+    assert_eq!(
+        LINUX_MEASURED_VFORK,
+        libc::SIGCHLD as u32 | libc::CLONE_VFORK as u32 | libc::CLONE_VM as u32
+    );
     assert_eq!(LINUX_AF_UNIX, libc::AF_UNIX as u32);
     assert_eq!(LINUX_F_GETFD, libc::F_GETFD as u32);
     assert_eq!(LINUX_F_DUPFD_CLOEXEC, libc::F_DUPFD_CLOEXEC as u32);
+    assert_eq!(LINUX_F_GETFL, libc::F_GETFL as u32);
+    assert_eq!(LINUX_F_SETFL, libc::F_SETFL as u32);
     assert_eq!(
         LINUX_FUTEX_CMD_MASK,
         !(libc::FUTEX_PRIVATE_FLAG | libc::FUTEX_CLOCK_REALTIME) as u32

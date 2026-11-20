@@ -138,7 +138,7 @@ mod tests {
             let (row, next) = (lines[index].trim(), lines[index + 1].trim());
             if !row.starts_with("0x0015") || !next.starts_with("0x0006") || !next.contains("0x7fff0000") { continue; }
             let Some(name) = row.split("# SYS_").nth(1).map(str::trim) else { continue };
-            if ["clone", "clone3", "socketpair", "fcntl", "prlimit64", "futex"].contains(&name) { panic!("{name} is an argument-checked thread call, not an unconditional allow"); }
+            if ["clone", "clone3", "socketpair", "fcntl", "prlimit64", "futex", "socket"].contains(&name) { panic!("{name} is an argument-checked call, not an unconditional allow"); }
             names.insert(name.to_string());
         }
         names
