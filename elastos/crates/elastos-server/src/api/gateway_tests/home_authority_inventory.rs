@@ -459,14 +459,14 @@ fn rows() -> Vec<AuthorityRow> {
             "require_viewer_library_launch_context",
             "require_home_viewer_launch_token_context",
             1,
-            "app-grant:OPEN; conditional: admits Home when the name resolves to home",
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule",
         ),
         row(
             VIEWER,
             "require_viewer_bound_launch_token_context",
             "require_home_projection_launch_token_context",
             1,
-            "app-grant:OPEN; conditional: admits Home when the name resolves to home",
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule",
         ),
         row(
             SUPERVISOR,
@@ -633,19 +633,19 @@ fn rows() -> Vec<AuthorityRow> {
         row(VIEWER, "require_documents_viewer_context", "require_viewer_library_launch_context", 1,
             "app-grant:list not resolved: counted; documents viewer guard"),
         row(VIEWER, "require_library_object_viewer_context", "require_viewer_library_launch_context", 1,
-            "app-grant:OPEN; conditional: admits Home when viewer resolves to home"),
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule"),
         row(VIEWER, "require_viewer_bound_launch_token_context", "require_viewer_library_launch_context", 1,
-            "app-grant:OPEN; conditional: admits Home when viewer resolves to home"),
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule"),
         row(VIEWER, "viewer_content", "require_viewer_bound_launch_token_context", 1,
-            "app-grant:OPEN; conditional: admits Home when viewer resolves to home"),
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule"),
         row(VIEWER, "viewer_library_summary", "require_viewer_library_launch_context", 1,
-            "app-grant:OPEN; conditional: admits Home when viewer resolves to home"),
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule"),
         row(VIEWER, "viewer_storage_target", "require_viewer_bound_launch_token_context", 1,
-            "app-grant:OPEN; conditional: admits Home when viewer resolves to home"),
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule"),
         row(VIEWER, "viewer_library_object_get", "require_library_object_viewer_context", 1,
-            "app-grant:OPEN; conditional: admits Home when viewer resolves to home"),
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule"),
         row(VIEWER, "viewer_library_object_post", "require_library_object_viewer_context", 1,
-            "app-grant:OPEN; conditional: admits Home when viewer resolves to home"),
+            "app-own: actor equals URL viewer; Home refused by is_viewer_capsule"),
         row(VIEWER, "viewer_library_roots_get", "require_library_object_viewer_context", 1,
             "app-grant:list not resolved: counted; archive-manager guard"),
     ]
@@ -719,6 +719,49 @@ fn provider_functions() -> (Vec<ProviderFunction>, BTreeMap<String, Vec<usize>>)
         }
     }
     (functions, by_name)
+}
+
+#[test]
+fn viewer_route_rows_pin_capsule_check_before_token() {
+    let (functions, _) = provider_functions();
+    let viewer_file = ["elastos-server/src/api/", "viewer_gateway.rs"].concat();
+    let check = ["is_", "viewer_capsule"].concat();
+    let sites = [
+        (
+            ["viewer_", "library_summary"].concat(),
+            ["require_viewer_", "library_launch_context"].concat(),
+        ),
+        (
+            ["viewer_", "content"].concat(),
+            ["require_viewer_", "bound_launch_token_context"].concat(),
+        ),
+        (
+            ["viewer_", "storage_target"].concat(),
+            ["require_viewer_", "bound_launch_token_context"].concat(),
+        ),
+        (
+            ["require_library_", "object_viewer_context"].concat(),
+            ["require_viewer_", "library_launch_context"].concat(),
+        ),
+    ];
+    for (name, token) in sites {
+        let function = functions
+            .iter()
+            .find(|function| function.file == viewer_file && function.name == name)
+            .unwrap_or_else(|| panic!("missing viewer gate {name}"));
+        let check_at = function
+            .code
+            .find(&format!("{check}("))
+            .unwrap_or_else(|| panic!("{name} lost {check}"));
+        let token_at = function
+            .code
+            .find(&format!("{token}("))
+            .unwrap_or_else(|| panic!("{name} lost {token}"));
+        assert!(
+            check_at < token_at,
+            "{name} checks token before viewer capsule"
+        );
+    }
 }
 
 fn provider_literal(argument: &str) -> Option<String> {
@@ -1126,7 +1169,7 @@ fn every_home_admitting_route_has_an_authority_row() {
         let class = row.authority.split(':').next().unwrap();
         assert!(matches!(
             class,
-            "home-own" | "runtime-admin" | "delegates" | "app-grant"
+            "home-own" | "runtime-admin" | "delegates" | "app-grant" | "app-own"
         ));
         *classes.entry(class).or_insert(0usize) += 1;
         calls += row.count;
