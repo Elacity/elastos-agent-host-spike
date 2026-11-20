@@ -28,6 +28,8 @@ use sha2::Digest;
 
 const AVAILABILITY_RECEIPT_SCHEMA: &str = "elastos.content.availability.receipt/v1";
 const AVAILABILITY_RECEIPT_DOMAIN: &str = "elastos.content.availability.receipt.v1";
+pub const MAX_FETCH_RECEIPT_ATTEMPTS: u8 = 8;
+const MAX_FETCH_REASON_CODE_LEN: usize = 32;
 const AVAILABILITY_DASHBOARD_SCHEMA: &str = "elastos.content.availability.dashboard/v1";
 const CONTENT_ADMISSION_DOMAIN: &str = "elastos.content.admission.v1";
 const CONTENT_ACCOUNTING_SCHEMA: &str = "elastos.content.accounting/v1";
@@ -5955,6 +5957,138 @@ pub struct SignedAvailabilityReceipt {
     pub signer_did: String,
 }
 
+/// One bounded attempt to fetch the requested CID from an authenticated peer.
+/// The caller records `verified` only after checking the received bytes against
+/// that CID. `time` is Unix time in seconds. This type carries facts, not the
+/// fetched content or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FetchReceipt {
+    requested_cid: String,
+    peer_did: String,
+    bytes_received: u64,
+    verified: bool,
+    result: FetchResult,
+    attempt: u8,
+    time: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "reason_code", rename_all = "kebab-case")]
+pub enum FetchResult {
+    Ok,
+    RefusedCorrupt,
+    Failed(FetchFailureReason),
+}
+
+/// Closed reason codes keep peer-provided error text and secrets out of receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchFailureReason {
+    Timeout,
+    PeerUnavailable,
+    PeerRefused,
+    Transport,
+    InvalidResponse,
+    ResponseTooLarge,
+}
+
+impl FetchFailureReason {
+    const fn code(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::PeerUnavailable => "peer_unavailable",
+            Self::PeerRefused => "peer_refused",
+            Self::Transport => "transport",
+            Self::InvalidResponse => "invalid_response",
+            Self::ResponseTooLarge => "response_too_large",
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchReceiptWire {
+    requested_cid: String,
+    peer_did: String,
+    bytes_received: u64,
+    verified: bool,
+    result: FetchResult,
+    attempt: u8,
+    time: u64,
+}
+
+impl FetchReceipt {
+    pub fn new(
+        requested_cid: &str,
+        peer_did: &str,
+        bytes_received: u64,
+        verified: bool,
+        result: FetchResult,
+        attempt: u8,
+        time: u64,
+    ) -> Result<Self, String> {
+        let cid = cid::Cid::try_from(requested_cid)
+            .map_err(|_| "fetch receipt requires a valid requested CID".to_string())?;
+        if cid.to_string() != requested_cid {
+            return Err("fetch receipt requires a canonical requested CID".into());
+        }
+        elastos_identity::decode_did_key(peer_did)
+            .map_err(|_| "fetch receipt requires a valid peer DID".to_string())?;
+        if !(1..=MAX_FETCH_RECEIPT_ATTEMPTS).contains(&attempt) {
+            return Err("fetch receipt attempt exceeds the request limit".into());
+        }
+        if time == 0 {
+            return Err("fetch receipt requires a time".into());
+        }
+        match &result {
+            FetchResult::Ok if !verified || bytes_received == 0 => {
+                return Err("successful fetch requires verified bytes".into());
+            }
+            FetchResult::RefusedCorrupt if verified || bytes_received == 0 => {
+                return Err("corrupt fetch requires unverified bytes".into());
+            }
+            FetchResult::Failed(_) if verified => {
+                return Err("failed fetch cannot be verified".into());
+            }
+            FetchResult::Failed(reason) if reason.code().len() > MAX_FETCH_REASON_CODE_LEN => {
+                return Err("fetch failure reason exceeds the code limit".into());
+            }
+            _ => {}
+        }
+        Ok(Self {
+            requested_cid: requested_cid.into(),
+            peer_did: peer_did.into(),
+            bytes_received,
+            verified,
+            result,
+            attempt,
+            time,
+        })
+    }
+
+    pub fn encode_canonical(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn decode_canonical(encoded: &[u8]) -> Result<Self, String> {
+        let wire: FetchReceiptWire =
+            serde_json::from_slice(encoded).map_err(|err| err.to_string())?;
+        let receipt = Self::new(
+            &wire.requested_cid,
+            &wire.peer_did,
+            wire.bytes_received,
+            wire.verified,
+            wire.result,
+            wire.attempt,
+            wire.time,
+        )?;
+        if receipt.encode_canonical().map_err(|err| err.to_string())? != encoded {
+            return Err("fetch receipt is not canonically encoded".into());
+        }
+        Ok(receipt)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ContentRepairTask {
     schema: String,
@@ -9267,6 +9401,131 @@ mod tests {
     use tokio::sync::Mutex;
 
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+
+    fn fetch_receipt(result: FetchResult, verified: bool, attempt: u8) -> FetchReceipt {
+        let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
+        FetchReceipt::new(
+            TEST_CID,
+            &peer_did,
+            42,
+            verified,
+            result,
+            attempt,
+            1_700_000_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fetch_receipt_canonical_round_trip() {
+        for (result, verified, status) in [
+            (FetchResult::Ok, true, "ok"),
+            (FetchResult::RefusedCorrupt, false, "refused-corrupt"),
+            (
+                FetchResult::Failed(FetchFailureReason::Timeout),
+                false,
+                "failed",
+            ),
+        ] {
+            let receipt = fetch_receipt(result, verified, 1);
+            let encoded = receipt.encode_canonical().unwrap();
+            assert_eq!(FetchReceipt::decode_canonical(&encoded).unwrap(), receipt);
+            assert_eq!(
+                serde_json::from_slice::<Value>(&encoded).unwrap()["result"]["status"],
+                status
+            );
+            let mut padded = encoded.clone();
+            padded.push(b' ');
+            assert!(FetchReceipt::decode_canonical(&padded).is_err());
+        }
+    }
+
+    #[test]
+    fn fetch_receipt_refuses_unknown_fields() {
+        let receipt = fetch_receipt(FetchResult::Failed(FetchFailureReason::Timeout), false, 1);
+        let mut value = serde_json::to_value(receipt).unwrap();
+        value["token"] = json!("secret");
+        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+        value.as_object_mut().unwrap().remove("token");
+        value["result"]["peer_message"] = json!("secret");
+        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn fetch_receipt_caps_attempts_and_reason_codes() {
+        assert!(FetchReceipt::new(
+            TEST_CID,
+            &elastos_identity::derive_did(&[7; 32]).1,
+            42,
+            true,
+            FetchResult::Ok,
+            MAX_FETCH_RECEIPT_ATTEMPTS + 1,
+            1_700_000_000,
+        )
+        .is_err());
+        assert!(FetchReceipt::new(
+            TEST_CID,
+            &elastos_identity::derive_did(&[7; 32]).1,
+            42,
+            true,
+            FetchResult::Ok,
+            0,
+            1_700_000_000,
+        )
+        .is_err());
+        assert!(FetchReceipt::new(
+            TEST_CID,
+            &elastos_identity::derive_did(&[7; 32]).1,
+            42,
+            true,
+            FetchResult::Ok,
+            MAX_FETCH_RECEIPT_ATTEMPTS,
+            1_700_000_000,
+        )
+        .is_ok());
+        for reason in [
+            FetchFailureReason::Timeout,
+            FetchFailureReason::PeerUnavailable,
+            FetchFailureReason::PeerRefused,
+            FetchFailureReason::Transport,
+            FetchFailureReason::InvalidResponse,
+            FetchFailureReason::ResponseTooLarge,
+        ] {
+            assert!(reason.code().len() <= MAX_FETCH_REASON_CODE_LEN);
+        }
+        let mut value = serde_json::to_value(fetch_receipt(FetchResult::Ok, true, 1)).unwrap();
+        value["attempt"] = json!(MAX_FETCH_RECEIPT_ATTEMPTS + 1);
+        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn fetch_receipt_refuses_token_like_peer_facts() {
+        let token = "sk_live_peer_token_1234567890abcdef";
+        let mut value = serde_json::to_value(fetch_receipt(
+            FetchResult::Failed(FetchFailureReason::Transport),
+            false,
+            1,
+        ))
+        .unwrap();
+        value["result"]["reason_code"] = json!(token);
+        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+        assert!(FetchReceipt::new(
+            TEST_CID,
+            token,
+            42,
+            false,
+            FetchResult::Failed(FetchFailureReason::Transport),
+            1,
+            1_700_000_000,
+        )
+        .is_err());
+        let safe = fetch_receipt(FetchResult::Failed(FetchFailureReason::Transport), false, 1)
+            .encode_canonical()
+            .unwrap();
+        assert!(!safe
+            .windows(token.len())
+            .any(|window| window == token.as_bytes()));
+    }
 
     fn signed_test_availability_receipt(cid: &str, legacy: bool) -> Value {
         let (signing_key, _) = elastos_runtime::signature::generate_keypair();
