@@ -21,10 +21,10 @@ PRODUCT_PACKAGE = re.compile(
 )
 SOURCE_MARKERS = {
     "protected-content": re.compile(r"protected[-_]content", re.IGNORECASE),
-    "ddrm": re.compile(r"\bddrm\b", re.IGNORECASE),
-    "dkms": re.compile(r"\bdkms\b", re.IGNORECASE),
+    "ddrm": re.compile(r"(?<![A-Za-z0-9])ddrm(?![A-Za-z0-9])", re.IGNORECASE),
+    "dkms": re.compile(r"(?<![A-Za-z0-9])dkms(?![A-Za-z0-9])", re.IGNORECASE),
     **{
-        name: re.compile(rf"\b{name.replace('-', '[-_]')}\b", re.IGNORECASE)
+        name: re.compile(rf"(?<![A-Za-z0-9]){name.replace('-', '[-_]')}(?![A-Za-z0-9])", re.IGNORECASE)
         for name in (
             "custody-provider", "rights-provider", "key-provider",
             "decrypt-provider", "protect-provider", "drm-provider",
