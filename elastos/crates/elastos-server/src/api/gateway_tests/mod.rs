@@ -1151,14 +1151,13 @@ mod browser_reconciliation;
 mod collaboration_presence;
 mod content_sandbox;
 mod documents;
-mod home_authority_inventory;
-
 mod esp;
 mod frontdoor;
 #[path = "../gateway_browser_route_tests.rs"]
 mod gateway_browser_route_tests;
 mod gba;
 mod home_agent;
+mod home_authority_inventory;
 mod home_system;
 mod inbox_audit_rows;
 mod inspect;
