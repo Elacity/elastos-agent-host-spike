@@ -13,6 +13,7 @@ use uuid::Uuid;
 use elastos_common::{CapsuleManifest, ElastosError, Result};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 
+use super::check_entrypoint_file;
 use crate::capability::CapabilityManager;
 use crate::primitives::audit::{AuditLog, StopReason, TrustLevel};
 use crate::primitives::metrics::MetricsManager;
@@ -162,6 +163,8 @@ impl CapsuleManager {
                 manifest.capsule_type
             )));
         }
+
+        check_entrypoint_file(path, &manifest.entrypoint).await?;
 
         // Generate unique ID
         let capsule_id = CapsuleId::new();
@@ -346,9 +349,12 @@ mod tests {
         CapsuleId as CommonCapsuleId, CapsuleStatus, CapsuleType, Permissions, ResourceLimits,
     };
     use elastos_compute::CapsuleInfo as ComputeCapsuleInfo;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Mock compute provider for testing
-    struct MockComputeProvider;
+    struct MockComputeProvider {
+        loads: Arc<AtomicUsize>,
+    }
 
     #[async_trait::async_trait]
     impl ComputeProvider for MockComputeProvider {
@@ -357,6 +363,7 @@ mod tests {
         }
 
         async fn load(&self, _path: &Path, manifest: CapsuleManifest) -> Result<CapsuleHandle> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
             Ok(CapsuleHandle {
                 id: CommonCapsuleId::new(format!("handle-{}", uuid::Uuid::new_v4())),
                 manifest,
@@ -386,8 +393,11 @@ mod tests {
         }
     }
 
-    fn create_test_manager() -> CapsuleManager {
-        let compute = Arc::new(MockComputeProvider);
+    fn create_test_manager_with_loads() -> (CapsuleManager, Arc<AtomicUsize>) {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let compute = Arc::new(MockComputeProvider {
+            loads: loads.clone(),
+        });
         let store = Arc::new(CapabilityStore::new());
         let audit_log = Arc::new(AuditLog::new());
         let metrics = Arc::new(MetricsManager::new());
@@ -397,7 +407,14 @@ mod tests {
             metrics.clone(),
         ));
 
-        CapsuleManager::new(compute, capability_manager, metrics, audit_log)
+        (
+            CapsuleManager::new(compute, capability_manager, metrics, audit_log),
+            loads,
+        )
+    }
+
+    fn create_test_manager() -> CapsuleManager {
+        create_test_manager_with_loads().0
     }
 
     #[tokio::test]
@@ -456,6 +473,26 @@ mod tests {
             asks: Vec::new(),
             signature: None,
         }
+    }
+
+    #[tokio::test]
+    async fn capsule_manager_refuses_folder_entrypoint_before_compute_load() {
+        let (manager, loads) = create_test_manager_with_loads();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("main.wasm")).unwrap();
+
+        let error = manager
+            .launch_local(dir.path(), create_test_manifest(), TrustLevel::Untrusted)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Entrypoint main.wasm is not a regular file"),
+            "{error}"
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+        assert!(manager.list_running().await.is_empty());
     }
 
     #[tokio::test]

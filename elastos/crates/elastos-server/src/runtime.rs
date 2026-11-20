@@ -15,6 +15,7 @@ use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFO
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
+use elastos_runtime::capsule::check_entrypoint_file;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
 
@@ -171,30 +172,6 @@ pub struct RunningCapsuleInfo {
     pub cause: Option<String>,
     /// When the activation ended; `None` while it is starting or running.
     pub ended_at: Option<std::time::Instant>,
-}
-
-/// Refuses an entrypoint that is on disk but is not a regular file inside the
-/// capsule directory: a link that leads out of it, or a pipe, device or
-/// folder in its place. Nothing is opened here (`metadata` does not open the
-/// file), so a pipe cannot block the launch. An entrypoint that is absent is
-/// left to the launch path, which reports it in its own words.
-async fn check_entrypoint_file(capsule_dir: &Path, entrypoint: &str) -> Result<()> {
-    let refused =
-        |why: &str| ElastosError::InvalidManifest(format!("Entrypoint {entrypoint} {why}"));
-    let Ok(file) = tokio::fs::canonicalize(capsule_dir.join(entrypoint)).await else {
-        return Ok(());
-    };
-    let dir = tokio::fs::canonicalize(capsule_dir)
-        .await
-        .map_err(ElastosError::Io)?;
-    if !file.starts_with(&dir) {
-        return Err(refused("leads out of the capsule directory"));
-    }
-    let kind = tokio::fs::metadata(&file).await.map_err(ElastosError::Io)?;
-    if !kind.is_file() {
-        return Err(refused("is not a regular file"));
-    }
-    Ok(())
 }
 
 /// Which unsigned local capsules the Runtime admits.
