@@ -1,8 +1,10 @@
 id: H6-stage
 file: elastos/crates/elastos-server/src/stage_cmd.rs
-test: hook6_stage_bundle_exists_and_starts_nothing_today
+test: hook6_stage_writes_the_slot_and_run_starts_by_fingerprint_today
+note: staging gains a start call; the comment is not the tripwire
 --- old
-//! Staging starts nothing; a later start checks the slot again and trusts
+    after_walk();
 --- new
-//! Staging starts no guest; a later start checks the slot again and trusts
+    after_walk();
+    let _started = runtime.run_by_bundle(&bundle);
 --- end

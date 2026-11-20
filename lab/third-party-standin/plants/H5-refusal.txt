@@ -1,8 +1,9 @@
 id: H5-refusal
-file: elastos/crates/elastos-server/src/api/handlers/provider.rs
-test: hook5_user_approval_is_not_read_from_the_manifest_today
+file: elastos/crates/elastos-server/src/provider_resource.rs
+test: hook5_provider_operation_actions_are_the_known_set_today
+note: the digest arm of the operation-to-action map
 --- old
-            format!("Unsupported provider operation action mapping: {scheme}/{op}"),
+            "digest" => Some(Action::Read),
 --- new
-            format!("Unmapped provider operation action mapping: {scheme}/{op}"),
+            "digest" => Some(Action::Write),
 --- end

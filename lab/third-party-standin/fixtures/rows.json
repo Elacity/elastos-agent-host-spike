@@ -5,6 +5,10 @@
       "state": "missing-today"
     },
     {
+      "id": "H1-sites",
+      "state": "missing-today"
+    },
+    {
       "id": "H1b",
       "state": "open"
     },
@@ -27,6 +31,12 @@
     {
       "id": "H6",
       "state": "open"
+    },
+    {
+      "id": "declared-limits",
+      "state": "open",
+      "owner": "the P2-10 hook slices",
+      "title": "declared limits are descriptive today"
     },
     {
       "id": "network-right",

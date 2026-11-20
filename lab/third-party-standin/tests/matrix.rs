@@ -2,13 +2,12 @@
 //!
 //! Each today-row asserts the behaviour this tree has now, so the lab is
 //! green. A later slice that builds the hook makes that row fail, and the
-//! row is then flipped. `p2_10_matrix_wanted` states the wanted behaviour
-//! and is red today.
+//! row is then flipped. `p2_10_matrix_wanted` names the wanted behaviour.
+//! Where no API can express that behaviour yet, the row says so and is red.
 //!
-//! Provider calls go through `ProviderRegistry::route` (`route_with_options`).
-//! That is the registry's normal route. It reaches `Provider::handle` only
-//! after it has a provider. These tests do not call the raw provider send
-//! on a product provider.
+//! The calls that reach a provider use `ProviderRegistry::route` on
+//! `MarkerProvider`, a test double. That route runs no capability check.
+//! The lab therefore proves nothing about the server's capability gate.
 
 mod common;
 
@@ -19,8 +18,11 @@ use elastos_runtime::provider::{ProviderError, ProviderRegistry, ResourceAction}
 use serde_json::Value;
 
 use common::{
-    answer, app_name, assert_base58_vectors, item_body, join, load_manifest, scheme, server_file,
-    user_approval_method, verify_signed, walk_text_files, MarkerProvider,
+    action_variant_counts, answer, app_name, assert_base58_vectors, call_inventory,
+    call_with_last_arg, const_expression, field_reads, ident_inventory, item_body, join,
+    load_manifest, manifest_struct_fields, provides_readers, register_signature_returns_nothing,
+    registration_sites, repo_call_inventory, scheme, server_file, sites_json, user_approval_method,
+    validate_fns_mention, verify_signed, walk_text_files, MarkerProvider,
 };
 
 fn rows_table() -> Value {
@@ -158,7 +160,8 @@ fn fixtures_declare_the_hook_surfaces() {
 ///
 /// Today: `ProviderRegistry::register` takes a provider, not a manifest.
 /// `registry.rs` does not name `CapsuleManifest`. A request for the stand-in
-/// URI through `ProviderRegistry::route` is `NoProvider` for scheme `elastos`.
+/// URI through `ProviderRegistry::route` on an empty registry is `NoProvider`
+/// for scheme `elastos`. The sites row watches the real registration code.
 #[tokio::test]
 async fn hook1_provider_scheme_from_manifest_is_missing_today() {
     let manifest = load_manifest("provider");
@@ -191,6 +194,31 @@ async fn hook1_provider_scheme_from_manifest_is_missing_today() {
     }
 }
 
+/// H1 sites. A new production registration, or a new production reader of the
+/// manifest `provides` field, is the moment this row is flipped with H1.
+#[test]
+fn hook1_registration_and_provides_sites_are_the_known_set_today() {
+    let registrations = registration_sites();
+    assert!(
+        registrations.iter().any(|site| {
+            site.file.ends_with("server_infra.rs")
+                && site.function == "register_content_plane"
+                && site.label == join(&["reg", "ister"])
+                && site.count == 1
+        }),
+        "register_content_plane still registers one provider"
+    );
+    let readers = provides_readers();
+    assert!(
+        readers.iter().any(|site| {
+            site.file.ends_with("elastos-common/src/manifest.rs") && site.function == "validate"
+        }),
+        "CapsuleManifest::validate reads provides"
+    );
+    expect_sites("registration", sites_json(&registrations));
+    expect_sites("provides_readers", sites_json(&readers));
+}
+
 /// H1b. Duplicate scheme registration. Lane: B3.
 ///
 /// The row is OPEN. `ProviderRegistry::register` replaces a scheme a
@@ -205,6 +233,11 @@ async fn hook1_provider_scheme_from_manifest_is_missing_today() {
 /// answers.
 #[tokio::test]
 async fn hook1b_duplicate_scheme_registration_replaces_the_first_today() {
+    let registry_src = server_file("elastos/crates/elastos-runtime/src/provider/registry.rs");
+    assert!(
+        register_signature_returns_nothing(&registry_src),
+        "register returns nothing, so it cannot refuse a second call"
+    );
     let registry = ProviderRegistry::new();
     let first = Arc::new(MarkerProvider {
         scheme: "content",
@@ -234,23 +267,25 @@ async fn hook1b_duplicate_scheme_registration_replaces_the_first_today() {
 /// Wanted: an app that declares wallet methods may use the bridge. The
 /// gateway names the app from the launch.
 ///
-/// Today: `browser_app_wallet_bridge` admits the fixed browser capsule id.
+/// Today: every production use of the fixed browser capsule id in the wallet
+/// bridge file and the provider-proxy file is the known set. A new use is a
+/// new door.
 #[test]
-fn hook2_wallet_bridge_admits_a_fixed_browser_id_today() {
-    let source = server_file("elastos/crates/elastos-server/src/api/gateway_browser_wallet.rs");
-    let fn_name = join(&["fn browser_app_", "wallet_bridge"]);
-    let body = item_body(&source, &fn_name);
-    let admit = join(&["require_runtime_", "wallet_authority"]);
-    let browser = join(&["BROWSER_", "CAPSULE_", "ID"]);
-    assert!(body.contains(&admit), "bridge asks the wallet authority");
+fn hook2_wallet_bridge_browser_capsule_uses_are_the_known_set_today() {
+    let ident = join(&["BROWSER_", "CAPSULE_", "ID"]);
+    let bridge = "elastos/crates/elastos-server/src/api/gateway_browser_wallet.rs";
+    let proxy = "elastos/crates/elastos-server/src/api/gateway_provider_proxy.rs";
+    let mut uses = ident_inventory(bridge, &ident);
+    uses.extend(ident_inventory(proxy, &ident));
+    uses.sort();
     assert!(
-        body.contains(&format!("&[{browser}]")),
-        "bridge admits the fixed browser capsule id"
+        uses.iter().any(|site| {
+            site.function == join(&["browser_app_", "wallet_bridge"]) && site.count == 1
+        }),
+        "the bridge admits the fixed browser capsule id once"
     );
-    assert!(
-        !body.contains(&scheme()),
-        "bridge does not read the stand-in app"
-    );
+    assert!(uses.iter().all(|site| site.label != scheme()));
+    expect_sites("h2_browser_capsule_id", sites_json(&uses));
 }
 
 /// H3. Typed chain reads for declared methods and chains. Lane: U10.
@@ -259,21 +294,30 @@ fn hook2_wallet_bridge_admits_a_fixed_browser_id_today() {
 /// with a log range cap for every caller, and without the Browser internet
 /// consent.
 ///
-/// Today: `browser_wallet_read` requires the Browser internet permission
-/// before any read.
+/// Today: `browser_wallet_read` calls the internet gate with `request_missing`
+/// false, and the reads file does not read the manifest fields the hook needs.
 #[test]
-fn hook3_chain_reads_require_browser_internet_permission_today() {
-    let source =
-        server_file("elastos/crates/elastos-server/src/api/gateway_browser_wallet_reads.rs");
-    let fn_name = join(&["fn browser_", "wallet_read("]);
-    let body = item_body(&source, &fn_name);
-    let gate = join(&["Browser internet permission", " is required"]);
+fn hook3_chain_read_internet_gate_is_the_known_call_today() {
+    let reads = "elastos/crates/elastos-server/src/api/gateway_browser_wallet_reads.rs";
+    let gate = join(&["effect_for_", "authority"]);
+    let calls = call_with_last_arg(reads, &gate);
     assert!(
-        body.contains(&gate),
-        "chain reads require the browser internet permission"
+        calls.iter().any(|site| {
+            site.function == join(&["browser_", "wallet_read"])
+                && site.label.ends_with("(false)")
+                && site.count == 1
+        }),
+        "the read calls the internet gate once and does not request a missing grant"
     );
-    assert!(body.contains("eth_getLogs") || source.contains("eth_getLogs"));
-    assert!(!source.contains(&scheme()));
+    let mut manifest_fields = field_reads(reads, "asks");
+    manifest_fields.extend(field_reads(reads, &join(&["input_", "schema"])));
+    manifest_fields.sort();
+    assert!(
+        manifest_fields.is_empty(),
+        "chain reads do not read manifest asks or input_schema: {manifest_fields:?}"
+    );
+    expect_sites("h3_internet_gate", sites_json(&calls));
+    expect_sites("h3_manifest_fields", sites_json(&manifest_fields));
 }
 
 /// H4. App-owned Carrier topics. Lane: P2-9.
@@ -281,25 +325,37 @@ fn hook3_chain_reads_require_browser_internet_permission_today() {
 /// Wanted: a topic pattern under the app's own name, a message size limit,
 /// and a sender id derived from the launch and the topic.
 ///
-/// Today: carrier uses one wire maximum for every caller and does not read
-/// a manifest topic pattern.
+/// Today: one wire maximum is the value production code uses, and carrier
+/// does not read a manifest topic pattern.
 #[test]
-fn hook4_carrier_message_limit_is_one_constant_today() {
-    let source = server_file("elastos/crates/elastos-server/src/carrier.rs");
-    let constant = join(&[
-        "const GOSSIP_WIRE",
-        "_MESSAGE_MAX_BYTES: usize = 192 * 1024;",
-    ]);
-    assert!(
-        source.contains(&constant),
+fn hook4_carrier_wire_limit_uses_are_the_known_set_today() {
+    let carrier = "elastos/crates/elastos-server/src/carrier.rs";
+    let name = join(&["GOSSIP_WIRE_", "MESSAGE_MAX_BYTES"]);
+    let expression = const_expression(carrier, &name);
+    assert_eq!(
+        expression, "192 * 1024",
         "one wire maximum for every caller"
     );
-    let topic_pattern = join(&["topic", "_pattern"]);
+    let uses = ident_inventory(carrier, &name);
     assert!(
-        !source.contains(&topic_pattern),
-        "carrier.rs has no manifest topic pattern"
+        uses.iter()
+            .any(|site| site.function == "serialize_gossip_wire_message"),
+        "the serializer enforces the wire maximum"
     );
-    assert!(!source.contains(&scheme()));
+    let topic = join(&["topic_", "pattern"]);
+    let readers = ident_inventory(carrier, &topic);
+    assert!(
+        readers.is_empty(),
+        "carrier has no production reader of a manifest topic pattern"
+    );
+    expect_sites(
+        "h4_wire_limit",
+        serde_json::json!({
+            "expression": expression,
+            "uses": sites_json(&uses),
+            "topic_pattern": sites_json(&readers),
+        }),
+    );
 }
 
 /// H5. User approval for an operation marked approval: user.
@@ -309,57 +365,149 @@ fn hook4_carrier_message_limit_is_one_constant_today() {
 /// Wanted: that operation asks the user with the manifest prompt, and the
 /// answer is kept and can be revoked.
 ///
-/// Today: the provider proxy maps an operation through the fixed action map
-/// and refuses an unmapped operation with a fixed sentence. It does not read
-/// the manifest approval mode.
+/// Today: the operation-to-action map is the known set of actions, and neither
+/// the proxy nor the map reads the manifest approval mode.
 #[test]
-fn hook5_user_approval_is_not_read_from_the_manifest_today() {
-    let source = server_file("elastos/crates/elastos-server/src/api/handlers/provider.rs");
-    let refusal = join(&["Unsupported provider operation", " action mapping"]);
-    let action_map = join(&["provider_", "operation_action"]);
+fn hook5_provider_operation_actions_are_the_known_set_today() {
+    let map_file = "elastos/crates/elastos-server/src/provider_resource.rs";
+    let proxy_file = "elastos/crates/elastos-server/src/api/handlers/provider.rs";
+    let map = join(&["provider_", "operation_action"]);
+    let actions = action_variant_counts(map_file, &map);
+    assert!(actions.get("Read").copied().unwrap_or(0) > 0);
+    assert!(actions.get("Write").copied().unwrap_or(0) > 0);
+    let callers = repo_call_inventory(&map);
     assert!(
-        source.contains(&refusal),
-        "unmapped operations use a fixed sentence"
+        callers.iter().any(|site| site.function == "provider_proxy"),
+        "the proxy decides the action through the map"
     );
+    let mode = join(&["Affordance", "ApprovalMode"]);
+    let mut approval = ident_inventory(map_file, &mode);
+    approval.extend(ident_inventory(proxy_file, &mode));
+    approval.extend(field_reads(map_file, "approval"));
+    approval.extend(field_reads(proxy_file, "approval"));
+    approval.sort();
     assert!(
-        source.contains(&action_map),
-        "the proxy uses the fixed action map"
+        approval.is_empty(),
+        "the action map does not read the manifest approval mode: {approval:?}"
     );
-    let approval_mode = join(&["Affordance", "ApprovalMode"]);
-    assert!(!source.contains(&approval_mode));
-    assert!(!source.contains(&scheme()));
+    expect_sites(
+        "h5_actions",
+        serde_json::json!({
+            "variants": actions,
+            "callers": sites_json(&callers),
+            "approval_readers": sites_json(&approval),
+        }),
+    );
 }
 
 /// H6. Install a signed outside bundle by fingerprint. Lane: P2-2.
 /// The row is OPEN.
 ///
-/// What exists: `stage_bundle` in `stage_cmd.rs` writes a signed bundle into
-/// the store and starts nothing. `run_bundle` in `run_cmd.rs` starts a bundle
-/// the store already holds, by its fingerprint. This crate does not depend
-/// on the server, so it cannot call either function. Neither file registers
-/// a provider from a manifest `provides` field.
+/// What exists: `stage_bundle_observed` writes the checked bundle into the
+/// slot and does not start it. `run_bundle` starts a bundle the store already
+/// holds, by its fingerprint. This crate does not depend on the server, so
+/// it cannot call either function.
 ///
 /// Wanted: the signed stand-in installs by its fingerprint and its scheme
 /// answers, with no Runtime source edit that names the app.
 #[test]
-fn hook6_stage_bundle_exists_and_starts_nothing_today() {
-    let stage = server_file("elastos/crates/elastos-server/src/stage_cmd.rs");
-    let run = server_file("elastos/crates/elastos-server/src/run_cmd.rs");
-    let starts_nothing = join(&["Staging starts ", "nothing"]);
-    let stage_fn = join(&["pub async fn stage_", "bundle("]);
-    let run_fn = join(&["pub async fn run_", "bundle("]);
-    assert!(stage.contains(&starts_nothing));
-    assert!(stage.contains(&stage_fn));
-    assert!(run.contains(&run_fn));
-    let registry_type = join(&["Provider", "Registry"]);
-    assert!(!stage.contains(&registry_type));
-    assert!(!run.contains(&scheme()));
+fn hook6_stage_writes_the_slot_and_run_starts_by_fingerprint_today() {
+    let stage = "elastos/crates/elastos-server/src/stage_cmd.rs";
+    let run = "elastos/crates/elastos-server/src/run_cmd.rs";
+    let write_slot = join(&["write_", "slot"]);
+    let run_by = join(&["run_by_", "bundle"]);
+    let mut calls = call_inventory(stage, &write_slot);
+    calls.extend(call_inventory(stage, &run_by));
+    calls.extend(call_inventory(run, &run_by));
+    calls.sort();
+    assert!(
+        calls.iter().any(|site| {
+            site.function == join(&["stage_bundle_", "observed"])
+                && site.label == write_slot
+                && site.count == 1
+        }),
+        "staging writes the slot once"
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|site| site.function != join(&["stage_bundle_", "observed"])
+                || site.label != run_by),
+        "staging does not start the bundle"
+    );
+    assert!(
+        calls.iter().any(|site| {
+            site.function == join(&["run_", "bundle"]) && site.label == run_by && site.count == 1
+        }),
+        "run starts a stored bundle by its fingerprint"
+    );
     let cargo = common::read_text(&common::manifest_dir().join("Cargo.toml"));
     let server_dep = join(&["elastos-", "server"]);
     assert!(
         !cargo.contains(&server_dep),
         "this crate does not depend on the server"
     );
+    expect_sites("h6_stage_and_run", sites_json(&calls));
+}
+
+/// Declared log range and topic message limit. OPEN. Owner: the P2-10 hook
+/// slices. The values live in interface `input_schema`. That schema is
+/// discoverability metadata. No manifest field enforces the numbers.
+#[test]
+fn hook_declared_limits_are_descriptive_today() {
+    let table = rows_table();
+    let row = table["rows"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["id"] == "declared-limits")
+        .expect("declared-limits row");
+    assert_eq!(row["state"], "open");
+    assert_eq!(row["owner"], "the P2-10 hook slices");
+
+    let manifest_path = common::fixture("app").join("capsule.json");
+    let value: Value = serde_json::from_str(&common::read_text(&manifest_path)).expect("app json");
+    let keys = limit_keys();
+    let mut hits = Vec::new();
+    collect_keys(&value, &keys, &mut Vec::new(), &mut hits);
+    assert!(!hits.is_empty(), "the fixture declares the limits");
+    assert!(
+        hits.iter()
+            .all(|path| path.split('.').any(|part| part == "input_schema")),
+        "limits live under input_schema, found {hits:?}"
+    );
+
+    let mut absurd = value.clone();
+    set_schema_const(&mut absurd, &keys[0], 9_999_999);
+    set_schema_const(&mut absurd, &keys[1], 0);
+    set_schema_const(&mut absurd, &keys[3], 99_999_999);
+    let manifest: elastos_common::CapsuleManifest =
+        serde_json::from_value(absurd).expect("absurd limits are still a manifest");
+    manifest
+        .validate()
+        .expect("input_schema limits are not enforced");
+
+    let manifest_rs = "elastos/crates/elastos-common/src/manifest.rs";
+    let fields = manifest_struct_fields(manifest_rs);
+    assert!(
+        fields
+            .iter()
+            .any(|field| field == "CapsuleManifest.provides"),
+        "struct fields were read: {fields:?}"
+    );
+    for key in &keys {
+        assert!(
+            !fields
+                .iter()
+                .any(|field| field.ends_with(&format!(".{key}"))),
+            "no manifest field is named {key}"
+        );
+        let mentions = validate_fns_mention(manifest_rs, key);
+        assert!(
+            mentions.is_empty(),
+            "validate functions do not read {key}: {mentions:?}"
+        );
+    }
 }
 
 /// Provider network right: named hosts, and loopback. Lane: B3 follow-up
@@ -395,25 +543,45 @@ fn runtime_sources_do_not_name_the_stand_in() {
     );
 }
 
+/// A following item is not absorbed into the body.
+#[test]
+fn item_body_stops_before_the_next_item() {
+    let source = "\
+fn kept() {\n    let value = 1;\n}\n\
+pub fn next_fn() {}\n\
+pub async fn next_async() {}\n\
+impl Next {}\n\
+mod next_mod {}\n\
+use next::Item;\n\
+static NEXT: i32 = 1;\n\
+trait NextTrait {}\n";
+    let body = item_body(source, "fn kept()");
+    assert!(body.contains("let value"));
+    for later in [
+        "next_fn",
+        "next_async",
+        "impl Next",
+        "next_mod",
+        "use next",
+        "NEXT",
+        "NextTrait",
+    ] {
+        assert!(!body.contains(later), "body absorbed {later}: {body}");
+    }
+}
+
 /// Wanted behaviour for every hook. Red today. Ignored so the lab stays
-/// green. Run it with `--ignored` and keep the output.
+/// green. A row is red with an explicit missing-behaviour message when no
+/// API can express it. It does not pass on a weaker stand-in.
 #[tokio::test]
 #[ignore]
 async fn p2_10_matrix_wanted() {
     let mut red = Vec::new();
 
-    let registry = ProviderRegistry::new();
-    let quote = format!("elastos://{}/quote", scheme());
-    let sweep = format!("elastos://{}/sweep", scheme());
-    let quote_result = registry
-        .route(&quote, "lab-caller", ResourceAction::Read, None)
-        .await;
-    let sweep_result = registry
-        .route(&sweep, "lab-caller", ResourceAction::Read, None)
-        .await;
-    if quote_result.is_err() || sweep_result.is_ok() {
-        red.push("H1 provider scheme from the manifest");
-    }
+    // No API registers a provider from a verified manifest after user
+    // approval bound to the bundle content id, and none refuses an operation
+    // the manifest did not declare.
+    red.push("H1 wanted: registered from the verified manifest only after user approval bound to the bundle CID, and an undeclared operation is refused: no API yet");
 
     let duplicate = ProviderRegistry::new();
     duplicate
@@ -428,53 +596,26 @@ async fn p2_10_matrix_wanted() {
             marker: "second-holder",
         }))
         .await;
-    let who = duplicate
-        .route("content://kept", "lab-caller", ResourceAction::Read, None)
-        .await
-        .map(answer);
-    if who.as_deref().ok() != Some(b"first-holder".as_slice()) {
-        red.push("H1b duplicate scheme registration");
+    let registry_src = server_file("elastos/crates/elastos-runtime/src/provider/registry.rs");
+    if register_signature_returns_nothing(&registry_src) {
+        red.push(
+            "H1b wanted: the second registration is refused: no API yet (register returns nothing)",
+        );
+    } else {
+        red.push("H1b wanted: the second registration is refused: register can return a value, so assert that refusal; this row stays red until that assertion is written");
     }
 
-    let wallet = server_file("elastos/crates/elastos-server/src/api/gateway_browser_wallet.rs");
-    let bridge = item_body(&wallet, &join(&["fn browser_app_", "wallet_bridge"]));
-    let browser_only = format!("&[{}]", join(&["BROWSER_", "CAPSULE_", "ID"]));
-    if bridge.contains(&browser_only) {
-        red.push("H2 wallet bridge for an app that is not the browser");
-    }
-
-    let reads =
-        server_file("elastos/crates/elastos-server/src/api/gateway_browser_wallet_reads.rs");
-    let read_fn = item_body(&reads, &join(&["fn browser_", "wallet_read("]));
-    if read_fn.contains(&join(&["Browser internet permission", " is required"])) {
-        red.push("H3 typed chain reads");
-    }
-
-    let carrier = server_file("elastos/crates/elastos-server/src/carrier.rs");
-    if !carrier.contains(&join(&["topic", "_pattern"])) {
-        red.push("H4 app-owned carrier topics");
-    }
-
-    let proxy = server_file("elastos/crates/elastos-server/src/api/handlers/provider.rs");
-    if !proxy.contains(&join(&["Affordance", "ApprovalMode"])) {
-        red.push("H5 user approval from the manifest");
-    }
-
-    let stage = server_file("elastos/crates/elastos-server/src/stage_cmd.rs");
-    let installed = !stage.contains(&join(&["Staging starts ", "nothing"]));
-    let scheme_answers = registry
-        .route(&quote, "lab-caller", ResourceAction::Read, None)
-        .await
-        .is_ok();
-    if !installed || !scheme_answers {
-        red.push("H6 install a signed bundle by fingerprint");
-    }
+    red.push("H2 wanted: an app that is not the Browser may use the wallet bridge: no API yet");
+    red.push("H3 wanted: the Runtime answers only the methods and chains the app declares, with a log range cap, and without the Browser internet consent: no API yet");
+    red.push("H4 wanted: a topic pattern under the app name, a message size limit, and a sender id from the launch and the topic: no API yet");
+    red.push("H5 wanted: an operation marked approval user asks with the manifest prompt, and the answer is kept and can be revoked: no API yet");
+    red.push("H6 wanted: the stand-in bundle is staged by fingerprint and started with no Runtime source edit: no API yet");
 
     let named = walk_text_files(&common::repo_root().join("elastos/crates"))
         .into_iter()
         .any(|(_, text)| text.contains(&scheme()));
     if named {
-        red.push("no-name tripwire");
+        red.push("no-name tripwire: a Runtime source names the stand-in");
     }
 
     let waiting = rows_table()["rows"]
@@ -494,4 +635,71 @@ async fn p2_10_matrix_wanted() {
         red.len(),
         red.join("; ")
     );
+}
+
+fn expect_sites(section: &str, live: Value) {
+    let path = common::manifest_dir().join("fixtures/production-sites.json");
+    let file: Value = serde_json::from_str(&common::read_text(&path))
+        .unwrap_or_else(|err| panic!("production site inventory: {err}"));
+    let expected = &file[section];
+    assert_eq!(
+        &live,
+        expected,
+        "{section} inventory changed\nlive {}\nexpected {}",
+        serde_json::to_string_pretty(&live).unwrap_or_default(),
+        serde_json::to_string_pretty(expected).unwrap_or_default()
+    );
+}
+
+fn limit_keys() -> Vec<String> {
+    vec![
+        join(&["from_", "block"]),
+        join(&["to_", "block"]),
+        join(&["topic_", "pattern"]),
+        join(&["max_message_", "bytes"]),
+    ]
+}
+
+fn collect_keys(value: &Value, keys: &[String], path: &mut Vec<String>, hits: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                path.push(key.clone());
+                if keys.iter().any(|wanted| wanted == key) {
+                    hits.push(path.join("."));
+                }
+                collect_keys(child, keys, path, hits);
+                path.pop();
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                path.push(index.to_string());
+                collect_keys(child, keys, path, hits);
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn set_schema_const(value: &mut Value, key: &str, number: i64) {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key(key) {
+                if let Some(slot) = map.get_mut(key).and_then(|child| child.as_object_mut()) {
+                    slot.insert("const".to_string(), Value::from(number));
+                }
+            }
+            for child in map.values_mut() {
+                set_schema_const(child, key, number);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                set_schema_const(child, key, number);
+            }
+        }
+        _ => {}
+    }
 }
