@@ -1492,13 +1492,13 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n",
-     "new": ""
+     "file": "capsule.json",
+     "old": "      \"actions\": [\"write\", \"read\"]\n",
+     "new": "      \"actions\": [\"write\"]\n"
     }
    ],
    "tests": [
-    "tests::a_declared_ask_names_only_the_launching_principal"
+    "tests::the_two_journal_requests_fit_the_manifest_asks"
    ]
   },
   {
@@ -1508,9 +1508,9 @@
    "expect": "survives",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},\n    {\"kind\": \"read\", \"resource\": \"Archive/\"},"
+     "file": "capsule.json",
+     "old": "    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\", \"read\"]\n    }",
+     "new": "    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\", \"read\"]\n    },\n    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\"]\n    }"
     }
    ],
    "tests": [
@@ -1525,9 +1525,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
-     "new": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},\n    {\"kind\": \"unspecified\", \"resource\": \"<principal>/\"},"
+     "file": "capsule.json",
+     "old": "      \"actions\": [\"write\", \"read\"]",
+     "new": "      \"actions\": [\"write\", \"read\", \"unspecified\"]"
     }
    ],
    "tests": [
@@ -1575,9 +1575,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/agent-host/\"}",
-     "new": "    {\"kind\": \"journal-append\", \"resource\": \"<principal>/.AppData/Agents/\"}"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://Users/self/.AppData/Agents/*"
     }
    ],
    "tests": [
@@ -1586,14 +1586,14 @@
   },
   {
    "id": "F-AH3h",
-   "title": "the principal marker matches any Users/<name> again",
+   "title": "the guest journal path names another principal",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        Some(tail) => format!(\"{LAUNCHING_PRINCIPAL}{tail}\"),",
-     "new": "        Some(tail) => format!(\"Users{tail}\"),"
+     "old": "const JOURNAL_ROOT: &str = \"localhost://Users/self/.AppData/Agents/\";",
+     "new": "const JOURNAL_ROOT: &str = \"localhost://Users/other/.AppData/Agents/\";"
     }
    ],
    "tests": [
@@ -1602,14 +1602,14 @@
   },
   {
    "id": "F-AH3i",
-   "title": "a declared pattern is matched with a plain prefix test",
+   "title": "the journal boundary check accepts a plain prefix",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        .is_some_and(|path| resource_covers(&ask_pattern_root(&ask.pattern), path))",
-     "new": "        .is_some_and(|path| path.starts_with(&ask_pattern_root(&ask.pattern)))"
+     "old": "                .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1 && !host_path(object)))",
+     "new": "                .is_some_and(|rest| rest.len() > 1 && !host_path(object)))"
     }
    ],
    "tests": [
@@ -1655,9 +1655,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://api.example.com/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "https://api.example.com/"
     }
    ],
    "tests": [
@@ -1671,9 +1671,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"Models/sk-live-abc/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://Users/self/.AppData/Agents/agent-host/sk-live-abc/*"
     }
    ],
    "tests": [
@@ -1687,9 +1687,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"read\", \"resource\": \"<principal>/\"},",
-     "new": "    {\"kind\": \"read\", \"resource\": \"Users/self/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://Users/other/.AppData/Agents/agent-host/*"
     }
    ],
    "tests": [
@@ -1703,9 +1703,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"run\", \"resource\": \"<principal>/Projects/\"},",
-     "new": "    {\"kind\": \"run\", \"resource\": \"/tmp/projects/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "/tmp/projects/"
     }
    ],
    "tests": [
@@ -1719,9 +1719,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"https://example.invalid/\", \"resource\": \"Models/\"},"
+     "file": "capsule.json",
+     "old": "\"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\"",
+     "new": "\"resource\": \"https://example.invalid/\", \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\""
     }
    ],
    "tests": [
@@ -1784,7 +1784,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if document.keys().any(|key| key != \"schema\" && key != \"asks\") {\n        return Err(\"asks unknown field\");\n    }",
+     "old": "    if document\n        .keys()\n        .any(|key| !MANIFEST_KEYS.contains(&format!(\" {key} \")))\n    {\n        return Err(\"asks unknown field\");\n    }",
      "new": "    if false {\n        return Err(\"asks unknown field\");\n    }"
     }
    ],
@@ -1800,7 +1800,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "    if schema != ASKS_SCHEMA {\n        return Err(\"asks schema unsupported\");\n    }",
+     "old": "    if schema != CAPSULE_SCHEMA {\n        return Err(\"asks schema unsupported\");\n    }",
      "new": "    if false {\n        return Err(\"asks schema unsupported\");\n    }"
     }
    ],
@@ -1864,7 +1864,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if entry.keys().any(|key| key != \"kind\" && key != \"resource\") {\n            return Err(\"asks entry field\");\n        }",
+     "old": "        if entry\n            .keys()\n            .any(|key| key != \"resource\" && key != \"actions\")\n        {\n            return Err(\"asks entry field\");\n        }",
      "new": "        if false {\n            return Err(\"asks entry field\");\n        }"
     }
    ],
@@ -1874,14 +1874,14 @@
   },
   {
    "id": "F-AH3p10",
-   "title": "an unknown kind is read as a read ask",
+   "title": "an unknown manifest action is accepted",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        let kind = proposal_kind(kind).ok_or(\"asks kind unknown\")?;",
-     "new": "        let kind = proposal_kind(kind).unwrap_or(ProposalKind::Read);"
+     "old": "            if !matches!(\n                action,\n                \"read\" | \"write\" | \"execute\" | \"message\" | \"delete\" | \"admin\"\n            ) {\n                return Err(\"asks kind unknown\");\n            }",
+     "new": "            if false {\n                return Err(\"asks kind unknown\");\n            }"
     }
    ],
    "tests": [
@@ -1896,8 +1896,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        let pattern = entry.get(\"resource\").ok_or(\"asks resource missing\")?;",
-     "new": "        let pattern = entry.get(\"resource\").unwrap_or(&serde_json::Value::Null);"
+     "old": "        let resource = entry.get(\"resource\").ok_or(\"asks resource missing\")?;",
+     "new": "        let resource = entry.get(\"resource\").unwrap_or(&serde_json::Value::Null);"
     }
    ],
    "tests": [
@@ -1912,7 +1912,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if pattern.chars().any(char::is_whitespace) {\n            return Err(\"asks whitespace\");\n        }",
+     "old": "        if resource.chars().any(char::is_whitespace) {\n            return Err(\"asks whitespace\");\n        }",
      "new": "        if false {\n            return Err(\"asks whitespace\");\n        }"
     }
    ],
@@ -2041,7 +2041,7 @@
     {
      "file": "src/lib.rs",
      "old": "    let schema = schema.as_str().ok_or(\"asks schema type\")?;",
-     "new": "    let schema = schema.as_str().unwrap_or(ASKS_SCHEMA);"
+     "new": "    let schema = schema.as_str().unwrap_or(CAPSULE_SCHEMA);"
     }
    ],
    "tests": [
@@ -2066,14 +2066,14 @@
   },
   {
    "id": "F-AH3p22",
-   "title": "a missing kind loses its reason",
+   "title": "a missing manifest actions field loses its reason",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        let kind = entry.get(\"kind\").ok_or(\"asks kind missing\")?;",
-     "new": "        let kind = entry.get(\"kind\").unwrap_or(&serde_json::Value::Null);"
+     "old": "        let actions = entry.get(\"actions\").ok_or(\"asks kind missing\")?;",
+     "new": "        let actions = entry.get(\"actions\").unwrap_or(&serde_json::Value::Null);"
     }
    ],
    "tests": [
@@ -2082,14 +2082,14 @@
   },
   {
    "id": "F-AH3p23",
-   "title": "a non-string kind is read as a read ask",
+   "title": "a non-array manifest actions field is read as read",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        let kind = kind.as_str().ok_or(\"asks kind type\")?;",
-     "new": "        let kind = kind.as_str().unwrap_or(\"read\");"
+     "old": "        let actions = actions.as_array().ok_or(\"asks kind type\")?;",
+     "new": "        let fallback = vec![serde_json::Value::String(\"read\".to_string())];\n        let actions = actions.as_array().unwrap_or(&fallback);"
     }
    ],
    "tests": [
@@ -2098,14 +2098,14 @@
   },
   {
    "id": "F-AH3p24",
-   "title": "the unspecified placeholder loses its own refusal reason",
+   "title": "the unspecified manifest action loses its own refusal reason",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if kind == \"unspecified\" {\n            return Err(\"asks kind unspecified\");\n        }",
-     "new": "        if false {\n            return Err(\"asks kind unspecified\");\n        }"
+     "old": "            if action == \"unspecified\" {\n                return Err(\"asks kind unspecified\");\n            }",
+     "new": "            if false {\n                return Err(\"asks kind unspecified\");\n            }"
     }
    ],
    "tests": [
@@ -2114,14 +2114,14 @@
   },
   {
    "id": "F-AH3p25",
-   "title": "a non-string resource is read as the shared model namespace",
+   "title": "a non-string resource is read as the journal resource",
    "command": "host",
    "expect": "caught",
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        let pattern = pattern.as_str().ok_or(\"asks resource type\")?;",
-     "new": "        let pattern = pattern.as_str().unwrap_or(\"Models/\");"
+     "old": "        let resource = resource.as_str().ok_or(\"asks resource type\")?;",
+     "new": "        let resource = resource.as_str().unwrap_or(\"localhost://Users/self/.AppData/Agents/agent-host/*\");"
     }
    ],
    "tests": [
@@ -2136,7 +2136,7 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "        if pattern.is_empty() {\n            return Err(\"asks resource empty\");\n        }",
+     "old": "        if resource.is_empty() {\n            return Err(\"asks resource empty\");\n        }",
      "new": "        if false {\n            return Err(\"asks resource empty\");\n        }"
     }
    ],
@@ -2279,9 +2279,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"file:/tmp/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "file:/tmp/"
     }
    ],
    "tests": [
@@ -2295,9 +2295,9 @@
    "expect": "caught",
    "edits": [
     {
-     "file": "asks.json",
-     "old": "    {\"kind\": \"hosted\", \"resource\": \"Models/\"},",
-     "new": "    {\"kind\": \"hosted\", \"resource\": \"data:text/plain,x/\"},"
+     "file": "capsule.json",
+     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "new": "data:text/plain,x/"
     }
    ],
    "tests": [
