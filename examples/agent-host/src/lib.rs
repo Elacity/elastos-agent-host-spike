@@ -11410,12 +11410,27 @@ mod tests {
         assert!(project_tree_hash(&[("/tmp/style.css", "body{}")]).is_none());
         assert!(project_tree_hash(&[]).is_none());
         let signer = include_str!("../../../elastos/crates/elastos-server/src/runtime.rs");
-        // The Runtime hashes admitted component bytes, and reads the file
-        // only when those bytes were not already taken. The old comment
-        // ("Compute content hash (hash the entrypoint file)") left in d5d568375.
-        assert!(signer.contains(
-            "Hash the entrypoint: the bytes already read for a component, the file otherwise."
-        ));
+        let rule_at = signer
+            .find(
+                "Hash the entrypoint: the bytes already read for a component, the file otherwise.",
+            )
+            .expect("entrypoint hash rule");
+        let verify_at = signer[rule_at..]
+            .find("Verify signature; the matched trusted key names the signer.")
+            .expect("signature check after the entrypoint hash");
+        let rule = &signer[rule_at..rule_at + verify_at];
+        assert!(
+            rule.contains("Some(bytes) => hash_content(bytes),"),
+            "a component admission hashes the entrypoint bytes already read"
+        );
+        assert!(
+            rule.contains("let entrypoint_path = path.join(&manifest.entrypoint);"),
+            "any other admission hashes the entrypoint file"
+        );
+        assert!(
+            rule.contains("hash_content(&tokio::fs::read(&entrypoint_path)"),
+            "the entrypoint file is the hashed bytes"
+        );
     }
 
     #[test]
