@@ -1487,6 +1487,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         || text.contains("auth session is not active")
         || text.contains("auth session not found")
         || text.contains("belongs to a different principal")
+        || text.contains("agent plan is approved by its owner")
     {
         StatusCode::FORBIDDEN
     } else if profile_required.is_some()
@@ -1500,6 +1501,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         || text.contains("is not pending")
         || text.contains("is no longer pending")
         || text.contains("changed before Inbox approval")
+        || text.contains("card binding")
         || text.contains("service access request")
     {
         StatusCode::BAD_REQUEST
