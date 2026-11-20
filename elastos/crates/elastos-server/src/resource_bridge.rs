@@ -7391,6 +7391,10 @@ mod tests {
                     resource: "elastos://inspect/submit_agent_plan".to_string(),
                     actions: Some(vec![elastos_common::AskAction::Write]),
                 },
+                elastos_common::AuthorityBound {
+                    resource: "localhost://UsersAI/self/Documents/*".to_string(),
+                    actions: Some(vec![elastos_common::AskAction::Write]),
+                },
             ]
         );
         let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
@@ -8365,7 +8369,7 @@ mod tests {
                 "scheme": "localhost",
                 "operation": "write",
                 "request": {
-                    "path": "localhost://Users/self/Documents/note.txt",
+                    "path": "localhost://UsersAI/self/Documents/note.txt",
                     "content": b"three lines",
                 },
             })
