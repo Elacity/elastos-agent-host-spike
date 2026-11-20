@@ -1,0 +1,28 @@
+id: F-A5-exphome
+file: src/lib.rs
+test: ledger::model_home_expiry_bind_leaves_the_standing_grant
+--- old
+        let expiry = self.pending_expiry.take();
+        self.pending_once = false;
+        let session_bound = self.pending_session;
+        self.pending_session = false;
+        let record = self
+            .registry
+            .get(&instance)
+            .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
+--- new
+        self.pending_once = false;
+        let session_bound = self.pending_session;
+        self.pending_session = false;
+        let record = self
+            .registry
+            .get(&instance)
+            .ok_or(Refuse::UnknownInstance)?;
+        if record.identity == "home" {
+            return Err(Refuse::HomeMint);
+        }
+        let expiry = self.pending_expiry.take();
+--- end
