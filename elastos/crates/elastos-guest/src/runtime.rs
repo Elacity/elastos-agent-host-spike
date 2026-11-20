@@ -195,8 +195,15 @@ impl RuntimeClient {
                 Ok(file) => {
                     #[cfg(not(target_os = "wasi"))]
                     {
-                        use std::os::fd::AsRawFd;
-                        let fd = file.as_raw_fd();
+                        #[cfg(unix)]
+                        let fd = {
+                            use std::os::fd::AsRawFd;
+                            file.as_raw_fd()
+                        };
+                        // No Unix descriptor exists on this host; the stub
+                        // reports that through the warning path below.
+                        #[cfg(not(unix))]
+                        let fd = -1;
                         if let Err(e) = Self::configure_serial_raw_fd(fd) {
                             eprintln!(
                                 "[elastos-guest] warning: failed to configure raw serial mode on {}: {}",
@@ -239,26 +246,40 @@ impl RuntimeClient {
     /// Configure a serial device fd for raw mode (no echo, no line discipline).
     /// Must be called on a fd that stays open — Linux resets TTY settings
     /// when all fds to the device close.
+    ///
+    /// Hosts without Unix tty ioctls have no descriptor to configure, so they
+    /// return `Unsupported` instead of claiming the device is in raw mode.
     #[cfg(not(target_os = "wasi"))]
     fn configure_serial_raw_fd(fd: i32) -> io::Result<()> {
-        unsafe {
-            let mut termios: libc::termios = std::mem::zeroed();
-            if libc::tcgetattr(fd, &mut termios) != 0 {
-                return Err(io::Error::last_os_error());
+        #[cfg(unix)]
+        {
+            unsafe {
+                let mut termios: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(fd, &mut termios) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::cfmakeraw(&mut termios);
+                // On real UART-backed ttys, raw mode is not enough by itself:
+                // keep the receiver enabled and ignore modem-control gating so
+                // host→guest traffic on the Carrier serial port is actually read.
+                termios.c_cflag |= libc::CREAD | libc::CLOCAL;
+                termios.c_cc[libc::VMIN] = 1;
+                termios.c_cc[libc::VTIME] = 0;
+                if libc::tcsetattr(fd, libc::TCSANOW, &termios) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let _ = libc::tcflush(fd, libc::TCIOFLUSH);
             }
-            libc::cfmakeraw(&mut termios);
-            // On real UART-backed ttys, raw mode is not enough by itself:
-            // keep the receiver enabled and ignore modem-control gating so
-            // host→guest traffic on the Carrier serial port is actually read.
-            termios.c_cflag |= libc::CREAD | libc::CLOCAL;
-            termios.c_cc[libc::VMIN] = 1;
-            termios.c_cc[libc::VTIME] = 0;
-            if libc::tcsetattr(fd, libc::TCSANOW, &termios) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            let _ = libc::tcflush(fd, libc::TCIOFLUSH);
+            Ok(())
         }
-        Ok(())
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "raw serial terminal setup is unsupported on this platform",
+            ))
+        }
     }
 
     /// Execute an SDK request via HTTP API to the running runtime.
@@ -669,19 +690,30 @@ impl RuntimeClient {
 
     #[cfg(not(target_os = "wasi"))]
     fn serial_write_line(file: &mut std::fs::File, json: &str) -> io::Result<()> {
-        use std::os::fd::AsRawFd;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
 
-        file.write_all(json.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.flush()?;
+            file.write_all(json.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.flush()?;
 
-        unsafe {
-            let fd = file.as_raw_fd();
-            if libc::isatty(fd) == 1 {
-                let _ = libc::tcdrain(fd);
+            unsafe {
+                let fd = file.as_raw_fd();
+                if libc::isatty(fd) == 1 {
+                    let _ = libc::tcdrain(fd);
+                }
             }
+            Ok(())
         }
-        Ok(())
+        #[cfg(not(unix))]
+        {
+            let _ = (file, json);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "raw serial line write is unsupported on this platform",
+            ))
+        }
     }
 
     /// Send a request to the runtime and wait for response
@@ -914,9 +946,9 @@ mod tests {
     #[cfg(feature = "serde")]
     use super::*;
     use std::io::Cursor;
-    #[cfg(all(feature = "serde", not(target_os = "wasi")))]
+    #[cfg(all(feature = "serde", not(target_os = "wasi"), unix))]
     use std::io::{BufRead, Write};
-    #[cfg(all(feature = "serde", not(target_os = "wasi")))]
+    #[cfg(all(feature = "serde", not(target_os = "wasi"), unix))]
     use std::os::fd::FromRawFd;
     #[cfg(all(feature = "serde", not(target_os = "wasi")))]
     use std::sync::Mutex;
@@ -1066,7 +1098,7 @@ mod tests {
         restore_env("ELASTOS_TOKEN", old_token);
     }
 
-    #[cfg(all(feature = "serde", not(target_os = "wasi")))]
+    #[cfg(all(feature = "serde", not(target_os = "wasi"), unix))]
     #[test]
     fn test_runtime_client_two_calls_over_tty_serial() {
         let _guard = ENV_LOCK.lock().unwrap();
@@ -1195,7 +1227,7 @@ mod tests {
     // directly without needing a full runtime process.
     // ------------------------------------------------------------------
 
-    #[cfg(all(feature = "serde", not(target_os = "wasi")))]
+    #[cfg(all(feature = "serde", not(target_os = "wasi"), unix))]
     fn fifo_test_dir(label: &str) -> std::path::PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1213,7 +1245,7 @@ mod tests {
         dir
     }
 
-    #[cfg(all(feature = "serde", not(target_os = "wasi")))]
+    #[cfg(all(feature = "serde", not(target_os = "wasi"), unix))]
     fn mkfifo_for_test(path: &std::path::Path) {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
@@ -1232,7 +1264,7 @@ mod tests {
     /// Opens both FIFOs RDWR on the host side to anchor them, so subsequent
     /// one-directional opens by `channel_from_fifos` don't block. Caller must
     /// keep the returned handles alive for the duration of the test.
-    #[cfg(all(feature = "serde", not(target_os = "wasi")))]
+    #[cfg(all(feature = "serde", not(target_os = "wasi"), unix))]
     fn anchor_fifos(
         request_path: &std::path::Path,
         response_path: &std::path::Path,
@@ -1295,7 +1327,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "serde", not(target_os = "wasi")))]
+    #[cfg(all(feature = "serde", not(target_os = "wasi"), unix))]
     #[test]
     fn channel_from_fifos_round_trip() {
         use std::io::Read as _;
