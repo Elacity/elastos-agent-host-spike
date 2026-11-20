@@ -76,9 +76,10 @@ PROVIDER_MANIFEST = REPO / "capsules" / "model-provider" / "Cargo.toml"
 # and its audit member's tests live behind that flag. The agent-conformance
 # crate needs no argument: its `default-members` already select its `probe`
 # member. two-capsule-run, useful-task and plan-approval need no argument
-# either. The stand-in file lab/agent-conformance/standin-runtime/mod.rs is a
-# recovery target ahead of the pending WP move, not a twentieth
-# agent-conformance list edit.
+# either. lab/agent-conformance/standin-runtime/mod.rs and
+# lab/agent-conformance/tests/common/signed_bundle.rs are recovery targets.
+# The list edits both: the stand-in file in F-ac-u10-s10 and F-ac-u10-s11,
+# and signed_bundle.rs in F-ac-u10-s9.
 PROVIDER_CRATES = {
     "provider": (PROVIDER_MANIFEST, ()),
     "did": (REPO / "capsules" / "did-provider" / "Cargo.toml", ()),
@@ -326,20 +327,21 @@ def load(path=DATA):
 # - examples/agent-host/falsifiers.json: asks.json, falsify.py and src/lib.rs,
 #   all under examples/agent-host, which this runner's own search restores, so
 #   the tuple needs no line for it.
-# - lab/agent-conformance/falsifiers.json: the 19 files its entries edit,
+# - lab/agent-conformance/falsifiers.json: the 20 files its entries edit,
 #   named here relative to its own folder lab/agent-conformance:
 #   fixtures/granted-bytes.txt, fixtures/grants.json, fixtures/home-source.txt,
 #   fixtures/host-key-read.txt, fixtures/instance-grants.json,
 #   fixtures/operator-api-host.txt, fixtures/parallel-tasks.txt,
 #   probe/capsule.json, probe/src/lib.rs, src/census.rs, src/harness.rs,
-#   src/report.rs, tests/artifact.rs, tests/common/grants.rs,
-#   tests/common/mod.rs, tests/common/operator.rs, tests/common/probe.rs,
-#   tests/effects.rs and tests/runtime.rs. Its values are
-#   `../../lab/agent-conformance/...`, relative to examples/agent-host, the
-#   folder the runner resolves every list's edit against, so recovery finds
-#   each of these files under lab/agent-conformance.
-#   standin-runtime/mod.rs is a recovery target ahead of the pending WP move.
-#   The list still edits these 19 files; that line is not a twentieth edit.
+#   src/report.rs, standin-runtime/mod.rs, tests/artifact.rs,
+#   tests/common/grants.rs, tests/common/mod.rs, tests/common/probe.rs,
+#   tests/common/signed_bundle.rs, tests/effects.rs and tests/runtime.rs.
+#   Its values are `../../lab/agent-conformance/...`, relative to
+#   examples/agent-host, the folder the runner resolves every list's edit
+#   against, so recovery finds each of these files under lab/agent-conformance.
+#   tests/common/signed_bundle.rs is the file F-ac-u10-s9 edits, so a killed
+#   run restores that plant. tests/common/operator.rs stays a recovery target;
+#   no current entry edits it.
 # A killed run therefore restores an exact file instead of leaving a weakened
 # confinement test, profile or fixture behind.
 PROVIDER_TARGETS = (
@@ -403,6 +405,7 @@ PROVIDER_TARGETS = (
     "lab/agent-conformance/tests/common/mod.rs",
     "lab/agent-conformance/tests/common/operator.rs",
     "lab/agent-conformance/tests/common/probe.rs",
+    "lab/agent-conformance/tests/common/signed_bundle.rs",
     "lab/agent-conformance/tests/effects.rs",
     "lab/agent-conformance/tests/runtime.rs",
 )
@@ -2139,10 +2142,12 @@ def a_killed_provider_edit_is_recovered():
     tests/verify.rs, tools/build, tools/src/bin/bundle.rs,
     tools/src/bundle.rs, tools/src/lib.rs, tools/src/receipt.rs,
     tools/src/run.rs, tools/src/verify.rs, tools/src/lab_name.rs and audit
-    Cargo.toml, INTERFACE.md and src/lib.rs, and agent-conformance's 19 edit
-    targets all come back in either startup mode, and so does
-    lab/agent-conformance/standin-runtime/mod.rs. That stand-in line is the
-    recovery target ahead of the pending WP move, not a twentieth list edit.
+    Cargo.toml, INTERFACE.md and src/lib.rs, and agent-conformance's edit
+    targets all come back in either startup mode, including
+    lab/agent-conformance/standin-runtime/mod.rs and
+    lab/agent-conformance/tests/common/signed_bundle.rs. The list edits both:
+    the stand-in file in F-ac-u10-s10 and F-ac-u10-s11, and signed_bundle.rs
+    in F-ac-u10-s9.
     The mission commands two-capsule-run, useful-task and plan-approval are
     crate-table rows. Foreign backups, including
     both providers' confinement documents, each harness's support neighbour,
@@ -2159,11 +2164,13 @@ def a_killed_provider_edit_is_recovered():
     # capsule-identity's .gitignore, README.md,
     # src/lib.rs, tests/common/mod.rs and fixtures/wc001-core/capsule.json,
     # the bundle identity crate's src/lib.rs,
-    # the wasm lab's edit and run-log files, and agent-conformance's 19 edit
+    # the wasm lab's edit and run-log files, and agent-conformance's edit
     # targets are named here, not read from the table, so a target dropped
-    # from PROVIDER_TARGETS is caught. The stand-in
-    # lab/agent-conformance/standin-runtime/mod.rs is named here as well, ahead
-    # of the pending WP move, and it is not a twentieth list edit. The mission
+    # from PROVIDER_TARGETS is caught. That includes
+    # lab/agent-conformance/standin-runtime/mod.rs, which F-ac-u10-s10 and
+    # F-ac-u10-s11 edit, and
+    # lab/agent-conformance/tests/common/signed_bundle.rs, which F-ac-u10-s9
+    # edits. The mission
     # commands two-capsule-run, useful-task and plan-approval are crate-table
     # rows, not targets. Their original bytes are written in the
     # isolated tree, never read from the real lab or crates.
@@ -2220,6 +2227,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../lab/agent-conformance/tests/common/mod.rs",
                  "../../lab/agent-conformance/tests/common/operator.rs",
                  "../../lab/agent-conformance/tests/common/probe.rs",
+                 "../../lab/agent-conformance/tests/common/signed_bundle.rs",
                  "../../lab/agent-conformance/tests/effects.rs",
                  "../../lab/agent-conformance/tests/runtime.rs")
     entry = {"id": "MP01+MP02+MP05+MP12+MP15+MP16+MP23",
@@ -2296,10 +2304,18 @@ os.kill(os.getpid(), signal.SIGKILL)
                 target.read_bytes() == b"foreign mutation\n"
                 and target.with_name(target.name + BACKUP_SUFFIX).read_bytes() == b"foreign original\n"
                 for target in foreign_targets)
+            signed_bundle = here / "../../lab/agent-conformance/tests/common/signed_bundle.rs"
+            signed_bundle_restored = (
+                signed_bundle.read_bytes() == b"original bytes\n"
+                and not signed_bundle.with_name(signed_bundle.name + BACKUP_SUFFIX).exists())
             print(f"self-test: provider {mode} restart: exit={code}, restored={restored}, "
                   f"foreign kept={foreign_kept}, "
+                  f"lab/agent-conformance/tests/common/signed_bundle.rs"
+                  f" restored={signed_bundle_restored}, "
                   f"lab/agent-conformance/standin-runtime/mod.rs"
                   f" capsules/wallet-provider/tests/common/profile_generator.rs")
+            if not signed_bundle_restored:
+                ok = False
             if code != 0 or not restored or not foreign_kept:
                 ok = False
                 continue

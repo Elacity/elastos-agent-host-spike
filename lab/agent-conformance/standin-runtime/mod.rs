@@ -1633,11 +1633,11 @@ impl StandIn {
     /// compare. The launch names the instance from the row's checked manifest
     /// name. A launch adds one `Starting` instance and no grant.
     ///
-    /// Those bytes carry the asks too (M1 check B2). Any changed byte, the
-    /// `asks.json` bytes included, leaves the bundle under a new lab CID, so
-    /// this walk's `check_name` refuses it with the row's name and no ask is
-    /// read from a bundle other than the one admitted. A refusal keeps the
-    /// launch, its instance and its grants out.
+    /// Those bytes carry the asks too (M1 check B2). Any changed byte, a
+    /// typed ask in `capsule.json` included, leaves the bundle under a new
+    /// lab CID, so this walk's `check_name` refuses it with the row's name
+    /// and no ask is read from a bundle other than the one admitted. A
+    /// refusal keeps the launch, its instance and its grants out.
     pub fn post_capsules(
         &mut self,
         caller: Caller<'_>,

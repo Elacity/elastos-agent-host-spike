@@ -1234,26 +1234,50 @@ fn standin_refuses_to_launch_a_bundle_whose_signed_asks_changed() {
         Ok(()),
         "the stand-in admits the bundle whose signed asks declare the read"
     );
-    let asks = shared.path().join("asks.json");
-    let mut bytes = std::fs::read(&asks).expect("read asks.json");
-    let at = bytes
-        .windows(ASK_RESOURCE.len())
-        .position(|window| window == ASK_RESOURCE.as_bytes())
-        .expect("the signed asks name the declared resource");
-    bytes[at] ^= 0x01;
-    std::fs::write(&asks, &bytes).expect("change the declared resource in asks.json");
+    let manifest_path = shared.path().join("capsule.json");
+    let asks_path = shared.path().join("asks.json");
+    let asks_before = std::fs::read(&asks_path).expect("read asks.json");
+    let text = std::fs::read_to_string(&manifest_path).expect("read capsule.json");
+    assert_eq!(
+        text.matches(ASK_RESOURCE).count(),
+        1,
+        "the typed manifest ask names the declared resource once"
+    );
+    let changed_resource = format!("{ASK_RESOURCE}/later");
+    let changed = text.replacen(ASK_RESOURCE, &changed_resource, 1);
+    let manifest: elastos_common::CapsuleManifest =
+        serde_json::from_str(&changed).expect("the changed manifest parses");
+    manifest
+        .validate()
+        .expect("a changed typed ask still validates");
+    assert!(
+        manifest.asks.iter().any(|ask| {
+            ask.resource == changed_resource
+                && ask.actions.contains(&elastos_common::AskAction::Read)
+        }),
+        "the mutation changes the typed ask resource and keeps its read: {:?}",
+        manifest.asks
+    );
+    std::fs::write(&manifest_path, &changed).expect("change the declared resource in capsule.json");
+    assert_eq!(
+        std::fs::read(&asks_path).expect("read asks.json"),
+        asks_before,
+        "asks.json stays as signed; the changed ask is the typed manifest ask"
+    );
     let body = json!({ "cid": claimed });
     let launch = standin.post_capsules(Caller::Shell, &body);
     let expected = capsule_identity::Refusal::NameMismatch {
         actual: capsule_identity::lab_cid(shared.path())
-            .expect("the walk names the bundle with the changed asks"),
+            .expect("the walk names the bundle with the changed manifest ask"),
         claimed: claimed.clone(),
     }
     .to_string();
-    // Every changed byte leaves the bundle under a new lab CID, so the
-    // signature's name check refuses the launch here (B1's reason). No
-    // instance starts carrying the admitted asks, which is what the request
-    // route's check needs; the launch never reaches the asks compare.
+    // The changed bytes are the typed ask's resource in capsule.json.
+    // asks.json is unchanged. Every changed byte leaves the bundle under a
+    // new lab CID, so the signature's name check refuses the launch here
+    // (B1's reason). No instance starts carrying the admitted asks, which is
+    // what the request route's check needs; the launch never reaches the
+    // asks compare.
     assert!(
         matches!(&launch, Err((403, reason)) if reason == &expected),
         "the stand-in refuses changed bytes at launch with the B1 name-mismatch reason: {launch:?}"
