@@ -4,5 +4,5 @@ test: link::model_unknown_hex_escape_is_refused
 --- old
     metadata_names(manifest).iter().any(|name| name == "grant-binding")
 --- new
-    true
+    false
 --- end

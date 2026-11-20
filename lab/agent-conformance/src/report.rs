@@ -260,11 +260,7 @@ impl Evidence {
             ) {
                 text.push_str(" | cleanup census, lab half of A10/A11/A12; cancel and kill-worker have separate journey rows");
             }
-            if matches!(
-                name.as_str(),
-                "two_instances_overlap_with_separate_grants"
-                    | "instance_grant_does_not_authorise_sibling"
-            ) {
+            if name == "two_instances_overlap_with_separate_grants" {
                 text.push_str(" | ");
                 text.push_str(INSTANCE_GRANTS_SCOPE);
             }
@@ -357,7 +353,6 @@ fn required_effects(test: &str) -> &'static [&'static str] {
             "instance-2",
         ],
         "two_instances_overlap_with_separate_grants"
-        | "instance_grant_does_not_authorise_sibling"
         | "cancelled_instance_settles_with_reason_sibling_completes"
         | "killed_worker_settlement_recorded_without_retry" => &["instance-1", "instance-2"],
         "host_key_read_is_refused" => &["host-key-read"],
