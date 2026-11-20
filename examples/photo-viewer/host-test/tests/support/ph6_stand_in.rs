@@ -8,7 +8,9 @@ use capsule_bundle::{
     admit_staged_for_stand_in, bind_content_stand_in, load, select_stand_in_dependencies,
     Installed, Loaded, Refusal, SignedClaim, TrustPolicy,
 };
-use capsule_v1_host_test::{admission, Bridge, StandInBinding, STAND_IN_TEST_PRINCIPAL};
+use capsule_v1_host_test::{
+    validate_component_imports, Bridge, StandInBinding, STAND_IN_TEST_PRINCIPAL,
+};
 use elastos_common::CapsuleManifest;
 use serde_json::Value;
 
@@ -180,7 +182,7 @@ pub async fn open_content_stand_in(
         .bytes
         .get(entrypoint)
         .ok_or_else(|| before_run("imports", format!("staged core has no {entrypoint}")))?;
-    admission::validate_component_imports(wasm).map_err(|reason| before_run("imports", reason))?;
+    validate_component_imports(wasm).map_err(|reason| before_run("imports", reason))?;
     let manifest: CapsuleManifest = serde_json::from_slice(&core.bytes["capsule.json"])
         .map_err(|reason| before_run("manifest", reason))?;
     manifest

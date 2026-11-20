@@ -850,6 +850,9 @@ fn completed_browser_account_access_approval(
     let account_id = "wallet:eip155:20:0x1111111111111111111111111111111111111111";
     let address = "0x1111111111111111111111111111111111111111";
     let payload_hash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    // One clock reading orders created/completed/expiry without a step
+    // between the three stamps.
+    let now = crate::auth::now_ts();
     let payload = json!({
         "schema": "elastos.browser.account-access-request/v1",
         "permission": "eth_accounts",
@@ -888,9 +891,9 @@ fn completed_browser_account_access_approval(
         "reason": "Browser origin requests exact account access",
         "payload": payload,
         "payload_hash": payload_hash,
-        "created_at": crate::auth::now_ts().saturating_sub(1),
-        "expires_at": crate::auth::now_ts().saturating_add(600),
-        "completed_at": crate::auth::now_ts(),
+        "created_at": now.saturating_sub(1),
+        "expires_at": now.saturating_add(600),
+        "completed_at": now,
         "signed_result": {
             "schema": "elastos.browser.account-access-result/v1",
             "request_id": request_id,
@@ -9102,6 +9105,76 @@ async fn test_browser_account_access_status_returns_only_exact_origin_bound_gran
 }
 
 #[tokio::test]
+async fn test_browser_account_access_status_reads_the_clock_once_under_a_step() {
+    // The clock steps 60 s forward between the request-grant check and the
+    // completed-result grant check. Both checks must consume one value: the
+    // grant, 60 s inside its ceiling, stays valid.
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let browser_token = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("localhost:61180"));
+    headers.insert("origin", HeaderValue::from_static("null"));
+    headers.insert(
+        "x-elastos-home-token",
+        HeaderValue::from_str(&browser_token).unwrap(),
+    );
+    let launch =
+        require_home_launch_token_binding(dir.path(), &headers, &[BROWSER_CAPSULE_ID]).unwrap();
+    let runtime_authority = runtime_wallet_authority(dir.path(), &launch).unwrap();
+    let request_id = "wallet-approval:browser-consent-clock";
+    let first = crate::auth::now_ts();
+    let grant_expires_at = first.saturating_add(60);
+    let exact = completed_browser_account_access_approval(
+        runtime_authority.verified_context(),
+        request_id,
+        grant_expires_at,
+    );
+    let provider = MockWalletProvider {
+        challenges: TokioMutex::default(),
+        bitcoin_challenges: TokioMutex::default(),
+        accounts: TokioMutex::default(),
+        approvals: TokioMutex::new(vec![exact]),
+        defaults: TokioMutex::default(),
+    };
+    let app = gateway_router(wallet_test_state_with_provider(dir.path(), provider).await);
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("page_url", "https://dapp.example/connect")
+        .append_pair("origin", "https://dapp.example")
+        .finish();
+    let clock = crate::test_clock::arm(first, first.saturating_add(60));
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .uri(format!(
+                    "/api/apps/browser/wallet/approvals/{request_id}?{query}"
+                ))
+                .header("x-elastos-home-token", browser_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reads = crate::test_clock::reads();
+    drop(clock);
+    assert_eq!(
+        reads, 1,
+        "the account-access completion must read the clock once"
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status["status"], "completed");
+    assert_eq!(status["account_access"]["permission"], "eth_accounts");
+    assert_eq!(
+        status["account_access"]["grant_expires_at"].as_u64(),
+        Some(grant_expires_at)
+    );
+}
+
+#[tokio::test]
 async fn test_browser_readiness_denial_precedes_profile_and_launch_effects() {
     for (readiness_data, reason) in [
         (
@@ -10208,6 +10281,74 @@ async fn test_browser_operator_admission_at_capacity_retires_spent_grants() {
         (status, body["status"].clone()),
         (StatusCode::OK, json!("pending")),
         "operator admission retires spent grants at capacity and admits the request"
+    );
+}
+
+/// A production-shaped live admission record is kept at capacity: its token
+/// names `.../operator/{id}` while its record names the page's `input`.
+#[tokio::test]
+async fn test_browser_operator_admission_at_capacity_keeps_a_live_grant() {
+    use elastos_runtime::capability::pending::MAX_PENDING_REQUESTS;
+    use elastos_runtime::capability::{Action, RequestStatus, ResourceId, Settler};
+    use elastos_runtime::primitives::audit::AuditLog;
+    use elastos_runtime::session::{SessionRegistry, SessionType};
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = Arc::new(SessionRegistry::new(Arc::new(AuditLog::new())));
+    let service = register_browser_operator_sessions(dir.path(), sessions.clone());
+    let operator = sessions.create_session(SessionType::Capsule, None).await;
+    let (live, token) = service
+        .seed_live_grant_for_test(operator.id.as_str(), "page-1")
+        .await;
+    service
+        .seed_spent_grants_for_test(MAX_PENDING_REQUESTS - 1)
+        .await;
+    let seeded = elastos_common::SecureTimestamp::now().unix_secs;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while elastos_common::SecureTimestamp::now().unix_secs <= seeded {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the clock passed the seeded second"
+        );
+        tokio::task::yield_now().await;
+    }
+    let app = gateway_router(browser_engine_attached_test_state(dir.path()).await);
+    let uri = "/api/apps/browser/pages/page-1/operator-requests";
+    let request = json!({"schema":"elastos.browser.operator-request/v1","document_generation":"a".repeat(32),"actions":["click"],"duration_ms":30000,"max_actions":1,"reason":"Click control"});
+    let (status, body) = operator_request(app, "POST", uri, &operator.token, None, request).await;
+    assert_eq!(
+        (status, body["status"].clone()),
+        (StatusCode::OK, json!("pending")),
+        "the new admission is admitted after the spent grants are retired"
+    );
+
+    let record = service
+        .pending_for_test()
+        .get_request(&live)
+        .await
+        .expect("capacity cleanup keeps the live operator grant's record");
+    assert!(
+        record.is_granted(),
+        "the live operator grant is still granted at capacity"
+    );
+    let resource = ResourceId::new(format!("elastos://browser/pages/page-1/operator/{live}"));
+    let valid = service
+        .capabilities_for_test()
+        .validate(&token, operator.id.as_str(), Action::Write, &resource, None)
+        .await;
+    valid.expect("the live operator grant's token still validates");
+
+    service
+        .pending_for_test()
+        .revoke_request_by(&live, "Revoked by user", Settler::Shell)
+        .await;
+    let record = service
+        .pending_for_test()
+        .get_request(&live)
+        .await
+        .expect("revocation by request id still finds the record");
+    assert!(
+        matches!(record.status, RequestStatus::Denied { .. }),
+        "revocation by request id marks the record denied"
     );
 }
 

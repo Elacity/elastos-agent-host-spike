@@ -5857,13 +5857,14 @@ mod tests {
     }
 
     fn grant_room_authorization(data: &Path) -> RoomSessionAuthorization {
+        let now = now_ts();
         let authorization = RoomSessionAuthorization {
             principal_id: "person:local:room".into(),
             session_id: "auth:room".into(),
             proof_binding_id: Some("proof:room".into()),
             grant_id: "grant:room".into(),
             authority_actor: "home".into(),
-            expires_at: now_ts() + 300,
+            expires_at: now.saturating_add(300),
         };
         crate::auth::store_session_grant(
             data,
@@ -5873,7 +5874,7 @@ mod tests {
                 session_id: authorization.session_id.clone(),
                 proof_binding_id: authorization.proof_binding_id.clone().unwrap(),
                 grant_id: authorization.grant_id.clone(),
-                issued_at: now_ts(),
+                issued_at: now,
                 expires_at: authorization.expires_at,
                 apps: vec!["home".into()],
             },
@@ -6092,7 +6093,6 @@ mod tests {
             long_grant.expires_at = now_ts() + 24 * 60 * 60;
             crate::auth::renew_session_grant(data.path(), long_grant.clone()).unwrap();
             authorization.expires_at = long_grant.expires_at;
-            let before = now_ts();
             let full = start(
                 data.path(),
                 "did:key:z6room",
@@ -6102,8 +6102,18 @@ mod tests {
                 &authorization,
             )
             .unwrap();
-            assert!(full.expires_at >= before + SESSION_TTL_SECS);
-            assert!(full.expires_at <= now_ts() + SESSION_TTL_SECS);
+            // Compare against the session's own stamp rather than a second
+            // wall-clock read: a backward clock step must not turn the 12 h
+            // expiry into an assertion failure.
+            let paths = storage_paths(data.path()).unwrap();
+            let state = load_state(&paths).unwrap();
+            let session = state
+                .sessions
+                .iter()
+                .find(|session| session.token == full.token)
+                .expect("renewed room session");
+            assert_eq!(full.expires_at, session.expires_at);
+            assert_eq!(session.expires_at, session.last_seen_at + SESSION_TTL_SECS);
             if configured {
                 assert_eq!(
                     resolve_configured_collaboration_principal_session(

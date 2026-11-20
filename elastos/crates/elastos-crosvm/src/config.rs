@@ -424,6 +424,7 @@ mod tests {
                 memory_mb: 256,
                 cpu_shares: 100,
                 gpu: false,
+                model_tokens: None,
             },
             permissions: Default::default(),
             microvm: Some(MicroVmConfig {

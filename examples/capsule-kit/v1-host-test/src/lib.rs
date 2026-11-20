@@ -1,7 +1,7 @@
 //! The host-test harness every Bus v1 component capsule of the capsule kit
 //! shares (kit item A2): a fake Runtime bridge behind the Bus hostcall, a run
-//! of the built component in the Runtime's own `ComponentProvider`, a copy of
-//! the Runtime's admission import check, and a fuel runner.
+//! of the built component in the Runtime's own `ComponentProvider`, the
+//! Runtime's own admission import check, and a fuel runner.
 //!
 //! Moved here from `examples/photo-viewer/host-test/tests/component.rs`. Each
 //! capsule's own `host-test/tests/component.rs` keeps its fixtures and tests.
@@ -24,15 +24,6 @@ pub use stand_in::{dispatch, record_loaded_instance, STAND_IN_TEST_PRINCIPAL};
 
 #[cfg(test)]
 mod stand_in_tests;
-
-/// The imports `elastos-server/src/component.rs:6-12` allows.
-pub const ALLOWED_BUS_IMPORTS: &[&str] = &[
-    "elastos:bus/types@1.0.0",
-    "elastos:bus/runtime@1.0.0",
-    "elastos:bus/identity@1.0.0",
-    "elastos:bus/capabilities@1.0.0",
-    "elastos:bus/providers@1.0.0",
-];
 
 // --- fake Runtime bridge ---------------------------------------------------------
 
@@ -292,106 +283,12 @@ pub fn imports_and_exports(component: &Path) -> (Vec<String>, Vec<String>) {
 }
 
 // --- the Runtime's admission import check -----------------------------------------
-
-// Copied from `elastos-server/src/component.rs` (private there) when that file
-// was at Wasmtime 36, so that the artifact passes the import check Runtime ran
-// before launch. Since the Runtime moved to Wasmtime 48 this copy reads the
-// component with the same parser version (two calls changed with it) but is
-// NOT the Runtime's check any more: the Runtime's now also caps what the
-// compiler is asked to do (the number of functions, the size of a function
-// body, the locals of a function, the canonical functions), and this copy
-// has none of those caps. Replacing the copy with a call into the Runtime is
-// kit item A2.
-pub mod admission {
-    use super::ALLOWED_BUS_IMPORTS;
-    use wasmparser::{ComponentTypeRef, Encoding, Parser, Payload};
-
-    const FORBIDDEN_AUTHORITY_MARKERS: &[&str] = &[
-        "wasi",
-        "env",
-        "preopen",
-        "socket",
-        "sock",
-        "fifo",
-        "fd_",
-        "path_",
-        "http",
-        "tcp",
-        "udp",
-        "ELASTOS_API",
-        "ELASTOS_TOKEN",
-        "ELASTOS_CARRIER_FIFOS",
-        "_carrier",
-    ];
-
-    pub fn validate_component_imports(bytes: &[u8]) -> Result<(), String> {
-        let mut saw_root_header = false;
-        for payload in Parser::new(0).parse_all(bytes) {
-            match payload.map_err(|err| format!("failed to parse component entrypoint: {err}"))? {
-                Payload::Version { encoding, .. } if !saw_root_header => {
-                    saw_root_header = true;
-                    if encoding != Encoding::Component {
-                        return Err("component entrypoint must be a WebAssembly component".into());
-                    }
-                }
-                Payload::ComponentImportSection(section) => {
-                    for import in section {
-                        let import = import.map_err(|err| err.to_string())?;
-                        let name = import.name.name;
-                        if name.starts_with("import-type-") {
-                            if !matches!(import.ty, ComponentTypeRef::Type(_)) {
-                                return Err(format!("generated type import {name} must be a type"));
-                            }
-                            continue;
-                        }
-                        if name == "import-func-run" {
-                            if !matches!(import.ty, ComponentTypeRef::Func(_)) {
-                                return Err("generated run import must be a function".into());
-                            }
-                            continue;
-                        }
-                        if !ALLOWED_BUS_IMPORTS.contains(&name) {
-                            return Err(format!("component import {name:?} is not allowed"));
-                        }
-                        if !matches!(import.ty, ComponentTypeRef::Instance(_)) {
-                            return Err(format!("component import {name:?} must be an instance"));
-                        }
-                    }
-                }
-                Payload::ImportSection(section) => {
-                    for import in section.into_imports() {
-                        let import = import.map_err(|err| err.to_string())?;
-                        validate_core_import(import.module, import.name)?;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if !saw_root_header {
-            return Err("component entrypoint is empty".into());
-        }
-        Ok(())
-    }
-
-    fn validate_core_import(module: &str, name: &str) -> Result<(), String> {
-        let lower = format!("{module}::{name}").to_ascii_lowercase();
-        if FORBIDDEN_AUTHORITY_MARKERS
-            .iter()
-            .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
-        {
-            return Err(format!("core import \"{module}::{name}\" is forbidden"));
-        }
-        if ALLOWED_BUS_IMPORTS.contains(&module) {
-            return Ok(());
-        }
-        if module.is_empty()
-            && (name == "$imports" || name.bytes().all(|byte| byte.is_ascii_digit()))
-        {
-            return Ok(());
-        }
-        Err(format!("core import \"{module}::{name}\" is not allowed"))
-    }
-}
+//
+// The check is the Runtime's own (`elastos/crates/elastos-server/src/component.rs`),
+// exported at the crate root of elastos-server so this harness can call it (kit
+// item A2). There is no copy here: the copy drifted — it never gained the parse
+// caps — so a component the Runtime refuses could pass these host tests.
+pub use elastos_server::{validate_component_imports, ALLOWED_BUS_IMPORTS};
 
 // --- fuel measurement ---------------------------------------------------------------
 //
@@ -545,5 +442,37 @@ pub mod measure {
         };
         let used = fuel - store.get_fuel().unwrap();
         (outcome, used)
+    }
+}
+
+// --- one owner ----------------------------------------------------------------------
+
+#[cfg(test)]
+mod admission_owner_tests {
+    type Check = fn(&[u8]) -> Result<(), String>;
+
+    #[test]
+    fn the_kit_calls_the_runtimes_admission_check_not_a_copy() {
+        assert!(
+            std::ptr::fn_addr_eq(
+                crate::validate_component_imports as Check,
+                elastos_server::validate_component_imports as Check,
+            ),
+            "capsule-v1-host-test's admission check is not \
+             elastos-server::validate_component_imports: a local copy of the \
+             Runtime's admission check is back in the kit (kit item A2)"
+        );
+    }
+
+    #[test]
+    fn the_kit_reads_the_runtimes_import_table() {
+        assert!(
+            std::ptr::eq(
+                crate::ALLOWED_BUS_IMPORTS as *const [&str],
+                elastos_server::ALLOWED_BUS_IMPORTS as *const [&str],
+            ),
+            "capsule-v1-host-test's ALLOWED_BUS_IMPORTS is not the Runtime's \
+             table: a second allowlist is back in the kit (kit item A2)"
+        );
     }
 }

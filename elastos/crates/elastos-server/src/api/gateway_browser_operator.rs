@@ -81,33 +81,81 @@ impl BrowserOperatorService {
 
     /// Fills this service's store with `count` once grants that have not
     /// expired, each used once: records whose tokens can no longer validate.
+    /// Each record is for the page's `input` and its token is minted for the
+    /// operator resource, as `approve_admission` mints it.
     pub(crate) async fn seed_spent_grants_for_test(&self, count: usize) {
         use elastos_runtime::capability::pending::MAX_PENDING_PER_SESSION;
         for n in 0..count {
             let session = format!("spent-{}", n / MAX_PENDING_PER_SESSION);
             let id = elastos_runtime::session::SessionId::from_string(session.clone());
-            let target = ResourceId::new(format!("elastos://browser/pages/p{n}/input"));
-            let request = self
-                .pending
-                .create_request(id, target.clone(), Action::Write);
+            let page = format!("p{n}");
+            let target = ResourceId::new(format!("elastos://browser/pages/{page}/input"));
+            let request = self.pending.create_request(id, target, Action::Write);
             let request = request.await;
             let epoch = self.capabilities.current_epoch();
             let once = TokenConstraints::new(epoch, false, None, Some(1));
             let hour = Some(elastos_common::SecureTimestamp::after_secs(3600));
-            let token =
-                self.capabilities
-                    .grant(&session, target.clone(), Action::Write, once, hour);
+            let token_resource = resource(&page, request.id.as_str());
+            let token = self.capabilities.grant(
+                &session,
+                token_resource.clone(),
+                Action::Write,
+                once,
+                hour,
+            );
             let stored = self.pending.grant_request(
                 request.id.as_str(),
                 token.clone(),
                 GrantDuration::Session,
             );
             stored.await.unwrap();
-            let used = self
-                .capabilities
-                .validate(&token, &session, Action::Write, &target, None);
+            let used =
+                self.capabilities
+                    .validate(&token, &session, Action::Write, &token_resource, None);
             used.await.unwrap();
         }
+    }
+
+    /// The service's request store (test-only).
+    pub(crate) fn pending_for_test(&self) -> &PendingRequestStore {
+        &self.pending
+    }
+
+    /// The service's capability manager (test-only).
+    pub(crate) fn capabilities_for_test(&self) -> &CapabilityManager {
+        &self.capabilities
+    }
+
+    /// A production-shaped live grant: the record is for the page's `input`,
+    /// the token is minted for `.../operator/{id}` in the same session and
+    /// unused, as `approve_admission` mints it. Returns the record id and token.
+    pub(crate) async fn seed_live_grant_for_test(
+        &self,
+        session: &str,
+        page: &str,
+    ) -> (String, CapabilityToken) {
+        let target = ResourceId::new(format!("elastos://browser/pages/{page}/input"));
+        let request = self
+            .pending
+            .create_request(
+                elastos_runtime::session::SessionId::from_string(session.to_owned()),
+                target,
+                Action::Write,
+            )
+            .await;
+        let token_resource = resource(page, request.id.as_str());
+        let token = self.capabilities.grant(
+            session,
+            token_resource,
+            Action::Write,
+            TokenConstraints::new(self.capabilities.current_epoch(), false, None, Some(1)),
+            Some(elastos_common::SecureTimestamp::after_secs(60)),
+        );
+        self.pending
+            .grant_request(request.id.as_str(), token.clone(), GrantDuration::Session)
+            .await
+            .unwrap();
+        (request.id.to_string(), token)
     }
 }
 

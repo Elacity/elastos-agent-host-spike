@@ -423,6 +423,26 @@ pub(in crate::api) fn issue_home_projection_launch_token_with_context(
     )
 }
 
+/// Test seam: the same projection issuer with the issue time supplied, so a
+/// test can issue two tokens from one clock reading instead of racing the
+/// wall clock between them.
+#[cfg(test)]
+pub(crate) fn issue_home_projection_launch_token_with_context_at(
+    data_dir: &std::path::Path,
+    selected_resource: &str,
+    executable_actor: &str,
+    context: &HomeLaunchTokenContext,
+    issued_at: u64,
+) -> anyhow::Result<String> {
+    issue_home_launch_token_at(
+        data_dir,
+        &HomeLaunchContext::projection(selected_resource, executable_actor),
+        context,
+        issued_at,
+        None,
+    )
+}
+
 fn issue_home_launch_token_at(
     data_dir: &std::path::Path,
     launch_context: &HomeLaunchContext,
@@ -1917,30 +1937,37 @@ mod tests {
     fn projection_token_binds_resource_actor_and_unique_launch() {
         let data_dir = tempfile::tempdir().unwrap();
         let context = local_home_launch_token_context(data_dir.path()).unwrap();
-        let first = issue_home_projection_launch_token_with_context(
+        // One clock reading for both issues: two wall-clock reads can straddle
+        // a second boundary and give the tokens different `iat` values.
+        let issued_at = now_ts();
+        let first = issue_home_projection_launch_token_with_context_at(
             data_dir.path(),
             "gba-ucity",
             "gba-emulator",
             &context,
+            issued_at,
         )
         .unwrap();
-        let second = issue_home_projection_launch_token_with_context(
+        let second = issue_home_projection_launch_token_with_context_at(
             data_dir.path(),
             "gba-ucity",
             "gba-emulator",
             &context,
+            issued_at,
         )
         .unwrap();
         let first_envelope = decode_launch_token(&first);
         let second_envelope = decode_launch_token(&second);
-        assert_eq!(
-            first_envelope.payload.launch_context.authority_actor,
-            HOME_CAPSULE_ID
-        );
-        assert_eq!(
-            first_envelope.payload.launch_context.executable_actor,
-            "gba-emulator"
-        );
+        for envelope in [&first_envelope, &second_envelope] {
+            assert_eq!(
+                envelope.payload.launch_context.authority_actor,
+                HOME_CAPSULE_ID
+            );
+            assert_eq!(
+                envelope.payload.launch_context.executable_actor,
+                "gba-emulator"
+            );
+        }
         assert_eq!(first_envelope.payload.iat, second_envelope.payload.iat);
         assert_ne!(
             first_envelope.payload.launch_id,

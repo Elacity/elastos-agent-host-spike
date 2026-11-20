@@ -14,11 +14,20 @@
 // Everything it touches comes in through `env` (the window in a browser), so
 // the tests can drive it with a fake fetch and a fake document.
 
+// The launch token reader and the header name have one owner in the kit,
+// examples/capsule-kit/surface/page-client.js: the page ships that file's bytes
+// (script-src 'self' serves only this folder), and its surface test pins them.
+// The client imports `cut` from the sibling docs-render.js, so the page ships
+// that owner's bytes too. This page imports only `launchToken`; `launchPath`
+// stays here because only this page reads the photo set.
+import { TOKEN_HEADER, launchToken } from "./page-client.js";
+
+export { TOKEN_HEADER, launchToken };
+
 export const PLAYLIST_ROUTE = "/api/viewers/image-viewer/launch/output/playlist.json";
 export const CONTENT_ROUTE = "/api/viewers/image-viewer/launch/content/";
 export const LAUNCH_CONTENT = "elastos://launch/content/";
 export const PLAYLIST_SCHEMA = "elastos.photo-viewer.playlist/v1";
-export const TOKEN_HEADER = "x-elastos-home-token";
 
 // The same bounds the photo-viewer core applies (examples/photo-viewer/src/lib.rs).
 export const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
@@ -27,11 +36,6 @@ export const MIN_DURATION_MS = 1000;
 export const MAX_DURATION_MS = 60000;
 export const DEFAULT_DURATION_MS = 5000;
 const MAX_MESSAGE_CHARS = 200;
-
-/** The launch token from `#home_token=...`, or "". */
-export function launchToken(hash) {
-  return new URLSearchParams(String(hash || "").replace(/^#/, "")).get("home_token") || "";
-}
 
 /**
  * The path of a picture in the launched set, from its `uri`: the plain path

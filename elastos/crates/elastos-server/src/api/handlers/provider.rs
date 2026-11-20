@@ -229,8 +229,7 @@ async fn enforce_capability(
 
     let resource_id = ResourceId::new(resource);
 
-    // Use the token's own action — the shell granted it for this purpose.
-    // The provider capsule enforces fine-grained action checks.
+    // The token must grant this operation's required right.
     cap_mgr
         .validate(
             &token,

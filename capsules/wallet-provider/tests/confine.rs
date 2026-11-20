@@ -12312,6 +12312,16 @@ fn wallet_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
     parse_seccomp_golden(text)
 }
 
+/// The checked-in golden copy of did's final program for `audit_arch`.
+fn did_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
+    let text = match audit_arch {
+        0xc000_003e => include_str!("did-seccomp-x86_64.golden"),
+        0xc000_00b7 => include_str!("did-seccomp-aarch64.golden"),
+        other => panic!("no golden did program for audit architecture {other:#x}"),
+    };
+    parse_seccomp_golden(text)
+}
+
 /// One checked-in golden program's lines, read as four plain integers and the
 /// comment: `code jt jf k  # comment`. A line that does not carry that shape is
 /// a panic, not a skipped line.
@@ -12437,6 +12447,27 @@ fn seccomp_wallet_program_equals_its_golden_copy() {
             &program,
             wallet_seccomp_golden(arch),
         );
+    }
+}
+
+/// Did's final program uses its own rights and the lab builder on both
+/// architectures. The wallet relation test checks that did omits only the
+/// wallet's store-replace call. The committed copies pin all four fields of
+/// every instruction independently of the Runtime renderer.
+#[test]
+fn seccomp_did_program_equals_its_golden_copy() {
+    let host = seccomp_probe_list(DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = seccomp_probe_list_for_arch(DID_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
+        if arch == host.audit_arch {
+            assert_eq!(
+                program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        assert_program_equals_golden(DID_PROVIDER, arch_name, &program, did_seccomp_golden(arch));
     }
 }
 
@@ -15925,9 +15956,10 @@ const MODEL_INLINE_HEADING: &str = "## The model provider's inline profile";
 /// every refusal of its reader names it.
 const BRIDGE_SOURCE_PATH: &str = "elastos/crates/elastos-runtime/src/provider/bridge.rs";
 
-/// The attribute line that starts the bridge's test module. The production
-/// region is cut before the first line equal to this text.
+/// The two lines that start the bridge's test module. Earlier test-only
+/// helpers also use the attribute, so the region is cut only at this pair.
 const TEST_MODULE_ATTRIBUTE: &str = "#[cfg(test)]";
+const TEST_MODULE_DECLARATION: &str = "mod tests {";
 
 /// The one declaration each `tests/confine.rs` file holds the OSes its
 /// confinement tests exercise in. The two files are two test binaries, so no
@@ -16992,26 +17024,31 @@ fn read_bridge_source() -> Result<String, String> {
     fs::read_to_string(&path).map_err(|err| format!("{BRIDGE_SOURCE_PATH} must be readable: {err}"))
 }
 
-/// The production region of a Rust source: the text before its first top-level
-/// `#[cfg(test)]` line, or a refusal that names `source_name` when that line is
-/// absent.
+/// The production region of a Rust source: the text before its top-level
+/// `#[cfg(test)]` / `mod tests {` pair, or a refusal that names `source_name`
+/// when that pair is absent.
 ///
-/// A line that carries the attribute after indentation belongs to a nested
-/// module and is not the top-level one, so it does not cut the region. A source
-/// with no top-level test module is a refusal, never a silent read of the whole
-/// file, because a whole-file read would let a test's own launch answer for the
-/// shipped policy.
+/// An attribute on a test-only helper or in a nested module does not cut the
+/// region. A source with no top-level test module is a refusal, never a silent
+/// read of the whole file, because a whole-file read would let a test's own
+/// launch answer for the shipped policy.
 fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a str, String> {
     let mut cut = 0;
-    for line in source.split_inclusive('\n') {
-        if line.trim_end_matches(['\n', '\r']) == TEST_MODULE_ATTRIBUTE {
+    let mut lines = source.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.trim_end_matches(['\n', '\r']) == TEST_MODULE_ATTRIBUTE
+            && lines
+                .peek()
+                .is_some_and(|next| next.trim_end_matches(['\n', '\r']) == TEST_MODULE_DECLARATION)
+        {
             return Ok(&source[..cut]);
         }
         cut += line.len();
     }
     Err(format!(
-        "{source_name} must hold one top-level line {TEST_MODULE_ATTRIBUTE} that starts its test \
-         module; found none, so its production region cannot be cut"
+        "{source_name} must hold one top-level {TEST_MODULE_ATTRIBUTE} / \
+         {TEST_MODULE_DECLARATION} pair that starts its test module; found none, so its \
+         production region cannot be cut"
     ))
 }
 
@@ -24469,15 +24506,16 @@ fn model_inline_profile_check_refuses_each_bad_section() {
         rust_production_region(BRIDGE_SOURCE_PATH, &inline.did_document)
             .expect_err("a source with no test module must be refused"),
         format!(
-            "{BRIDGE_SOURCE_PATH} must hold one top-level line {TEST_MODULE_ATTRIBUTE} that starts \
-             its test module; found none, so its production region cannot be cut"
+            "{BRIDGE_SOURCE_PATH} must hold one top-level {TEST_MODULE_ATTRIBUTE} / \
+             {TEST_MODULE_DECLARATION} pair that starts its test module; found none, so its \
+             production region cannot be cut"
         ),
         "a source with no test module is a refusal that names the file"
     );
     assert!(
-        !inline
-            .region
-            .contains(&format!("\n{TEST_MODULE_ATTRIBUTE}")),
+        !inline.region.contains(&format!(
+            "\n{TEST_MODULE_ATTRIBUTE}\n{TEST_MODULE_DECLARATION}"
+        )),
         "the production region must stop before the test module"
     );
 

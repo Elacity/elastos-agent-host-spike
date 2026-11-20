@@ -1220,6 +1220,410 @@ mod tests {
         assert!(!csp.contains("frame-ancestors"));
     }
 
+    // KT2 A5: the kit's browser stand-in (`examples/capsule-kit/surface/stand-in.mjs`)
+    // serves an app document with the headers Runtime sends. This pins the
+    // stand-in's header map, read out of its source line by line, to the
+    // response the production path builds; a drift on either side fails here
+    // naming the header. A plant may point `KT2_STAND_IN` at a copy.
+    const STAND_IN_TEST_HOST: &str = "localhost:61180";
+    const STAND_IN_DOCUMENT: &str = "index.html";
+
+    fn stand_in_source_path() -> PathBuf {
+        std::env::var_os("KT2_STAND_IN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../examples/capsule-kit/surface/stand-in.mjs")
+            })
+    }
+
+    fn stand_in_line_index(lines: &[&str], wanted: &str, context: &str) -> usize {
+        lines
+            .iter()
+            .position(|line| line.trim() == wanted)
+            .unwrap_or_else(|| panic!("{context}: no line `{wanted}`"))
+    }
+
+    /// One JavaScript string literal, without escapes (the stand-in has none).
+    fn stand_in_string(expression: &str, context: &str) -> String {
+        let expression = expression.trim();
+        let quote = expression
+            .chars()
+            .next()
+            .filter(|quote| matches!(quote, '"' | '\''))
+            .unwrap_or_else(|| panic!("{context}: expected a quoted string, got `{expression}`"));
+        let body = expression
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+            .unwrap_or_else(|| panic!("{context}: unterminated string `{expression}`"));
+        assert!(
+            !body.contains('\\') && !body.contains(quote),
+            "{context}: unsupported escape in `{expression}`"
+        );
+        body.to_string()
+    }
+
+    /// `"key": value,` from one line of a literal object map.
+    fn stand_in_entry(line: &str) -> (&str, &str) {
+        let line = line.trim().trim_end_matches(',');
+        let (key, value) = line
+            .split_once(':')
+            .unwrap_or_else(|| panic!("stand-in map line `{line}`: expected `\"key\": value`"));
+        (key.trim(), value.trim())
+    }
+
+    fn stand_in_quoted_entries(body: &str, entries: &mut Vec<(String, String)>, context: &str) {
+        for entry in body.split(',') {
+            let (key, value) = stand_in_entry(entry);
+            entries.push((
+                stand_in_string(key, context),
+                stand_in_string(value, context),
+            ));
+        }
+    }
+
+    /// A template literal: plain text plus `${origin}` and `${request.headers.host}`.
+    fn stand_in_template(expression: &str, origin: &str, host: &str, context: &str) -> String {
+        let expression = expression.trim();
+        let body = expression
+            .strip_prefix('`')
+            .and_then(|rest| rest.strip_suffix('`'))
+            .unwrap_or_else(|| {
+                panic!("{context}: expected a template literal, got `{expression}`")
+            });
+        let mut out = String::new();
+        let mut at = 0;
+        while at < body.len() {
+            if body.as_bytes()[at] == b'$' && body.as_bytes().get(at + 1) == Some(&b'{') {
+                let end = body[at..]
+                    .find('}')
+                    .map(|offset| at + offset)
+                    .unwrap_or_else(|| panic!("{context}: unterminated `${{`"));
+                match body[at + 2..end].trim() {
+                    "origin" => out.push_str(origin),
+                    "request.headers.host" => out.push_str(host),
+                    other => {
+                        panic!("{context}: unknown template expression `${{{other}}}`")
+                    }
+                }
+                at = end + 1;
+            } else {
+                let ch = body[at..].chars().next().unwrap();
+                out.push(ch);
+                at += ch.len_utf8();
+            }
+        }
+        out
+    }
+
+    /// `types[name.split(".").pop()]` for the served document.
+    fn stand_in_types_lookup(lines: &[&str], document: &str) -> String {
+        let line = lines
+            .iter()
+            .find(|line| line.trim().starts_with("const types = {"))
+            .unwrap_or_else(|| panic!("stand-in: no `const types = {{` declaration"));
+        let object = line
+            .trim()
+            .strip_prefix("const types = {")
+            .and_then(|rest| rest.strip_suffix("};"))
+            .unwrap_or_else(|| panic!("stand-in `types`: expected a one-line object, got `{line}`"))
+            .trim();
+        let extension = document
+            .rsplit('.')
+            .next()
+            .unwrap_or_else(|| panic!("stand-in document `{document}` has no extension"));
+        for entry in object.split(',') {
+            let (key, value) = entry
+                .split_once(':')
+                .unwrap_or_else(|| panic!("stand-in `types` entry `{entry}`: no `:`"));
+            let key = key.trim();
+            if key == extension {
+                return stand_in_string(value, &format!("stand-in `types` `{key}`"));
+            }
+        }
+        panic!("stand-in `types` has no `{extension}` entry")
+    }
+
+    /// An object the served header map is built from is written only where it is
+    /// declared. Anywhere in the stand-in, `name[...] =`, `name.x =`, a bare
+    /// `name =`, `delete name...` or `Object.assign(name` fails here by name, so
+    /// the pin cannot read one value while another is served.
+    fn stand_in_never_mutated(lines: &[&str], name: &str, context: &str) {
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+        let declaration = format!("const {name} =");
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            let bytes = trimmed.as_bytes();
+            let mut from = 0;
+            while let Some(found) = trimmed[from..].find(name) {
+                let at = from + found;
+                from = at + name.len();
+                let before = at.checked_sub(1).map(|i| bytes[i]);
+                if matches!(before, Some(c) if word(c) || c == b'.') {
+                    continue;
+                }
+                if matches!(bytes.get(from), Some(&c) if word(c)) {
+                    continue;
+                }
+                let head = trimmed[..at].trim_end();
+                let mutated_by_prefix =
+                    head.ends_with("delete") || head.ends_with("Object.assign(");
+                // Skip one `[...]` or `.ident` after the name, then look for a lone `=`.
+                let mut rest = trimmed[from..].trim_start();
+                if let Some(after) = rest.strip_prefix('[') {
+                    rest = after
+                        .split_once(']')
+                        .map(|(_, tail)| tail)
+                        .unwrap_or("")
+                        .trim_start();
+                } else if let Some(after) = rest.strip_prefix('.') {
+                    let end = after.bytes().position(|c| !word(c)).unwrap_or(after.len());
+                    rest = after[end..].trim_start();
+                }
+                let assigned =
+                    rest.starts_with('=') && !rest.starts_with("==") && !rest.starts_with("=>");
+                let is_declaration = trimmed.starts_with(&declaration) && head == "const";
+                assert!(
+                    is_declaration || !(assigned || mutated_by_prefix),
+                    "{context}: stand-in line {} `{trimmed}` writes `{name}` after its declaration; \
+                     the pin reads the declared value",
+                    index + 1
+                );
+            }
+        }
+    }
+
+    fn stand_in_spread(
+        lines: &[&str],
+        name: &str,
+        entries: &mut Vec<(String, String)>,
+        context: &str,
+    ) {
+        stand_in_never_mutated(lines, name, context);
+        let opener = format!("const {name} = {{");
+        let start = lines
+            .iter()
+            .position(|line| line.trim().starts_with(&opener))
+            .unwrap_or_else(|| panic!("{context}: spread `...{name}` has no `{opener}`"));
+        let line = lines[start].trim();
+        let body = line.strip_prefix(&opener).unwrap();
+        if let Some(inline) = body.strip_suffix("};") {
+            stand_in_quoted_entries(inline, entries, context);
+            return;
+        }
+        let end = start
+            + lines[start + 1..]
+                .iter()
+                .position(|line| line.trim() == "};")
+                .unwrap_or_else(|| panic!("{context}: `{name}` has no closing `}};`"))
+            + 1;
+        for line in &lines[start + 1..end] {
+            let (key, value) = stand_in_entry(line);
+            entries.push((
+                stand_in_string(key, context),
+                stand_in_string(value, context),
+            ));
+        }
+    }
+
+    fn stand_in_header_map(source: &str, origin: &str, host: &str) -> Vec<(String, String)> {
+        let lines: Vec<&str> = source.lines().collect();
+        let start = stand_in_line_index(&lines, "const headers = {", "stand-in header map");
+        let end = start
+            + lines[start + 1..]
+                .iter()
+                .position(|line| line.trim() == "};")
+                .unwrap_or_else(|| panic!("stand-in header map: no closing `}};`"))
+            + 1;
+        let mut entries = Vec::new();
+        for line in &lines[start + 1..end] {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix("...") {
+                let name = name.trim_end_matches(',').trim();
+                stand_in_spread(&lines, name, &mut entries, "stand-in header map");
+                continue;
+            }
+            let (key, value) = stand_in_entry(line);
+            let key = stand_in_string(key, &format!("stand-in map key `{key}`"));
+            let context = format!("stand-in header `{key}`");
+            let value = if value == "types[name.split(\".\").pop()]" {
+                stand_in_never_mutated(&lines, "types", &context);
+                stand_in_types_lookup(&lines, STAND_IN_DOCUMENT)
+            } else if value.starts_with('`') {
+                stand_in_template(value, origin, host, &context)
+            } else {
+                stand_in_string(value, &context)
+            };
+            entries.push((key, value));
+        }
+
+        // The document's CSP is assigned into the same map right after it.
+        let assignment = "headers[\"content-security-policy\"] =";
+        let mut index = stand_in_line_index(&lines, assignment, "stand-in header map") + 1;
+        let mut csp = String::new();
+        loop {
+            let line = lines
+                .get(index)
+                .unwrap_or_else(|| panic!("stand-in content-security-policy: no closing `;`"))
+                .trim();
+            let (piece, done) = if let Some(piece) = line.strip_suffix('+') {
+                (piece, false)
+            } else if let Some(piece) = line.strip_suffix(';') {
+                (piece, true)
+            } else {
+                panic!("stand-in content-security-policy line `{line}`: expected `+` or `;`");
+            };
+            csp.push_str(&stand_in_template(
+                piece,
+                origin,
+                host,
+                "stand-in content-security-policy",
+            ));
+            index += 1;
+            if done {
+                break;
+            }
+        }
+        entries.push(("content-security-policy".to_string(), csp));
+        stand_in_headers_written_once(&lines, start, assignment);
+        stand_in_origin_and_setters(&lines);
+        entries
+    }
+
+    /// `origin` feeds the served CSP: the stand-in declares it on exactly one line,
+    /// as the template the pin substitutes, and never writes it again. The stand-in
+    /// never calls `setHeader`, `appendHeader` or `setHeaders`, which would add a
+    /// header to the document that the map does not show.
+    fn stand_in_origin_and_setters(lines: &[&str]) {
+        let origin = "const origin = `http://${request.headers.host}`;";
+        let declared = lines
+            .iter()
+            .filter(|line| line.trim().starts_with("const origin ="))
+            .count();
+        assert_eq!(
+            declared, 1,
+            "stand-in: `const origin =` appears {declared} times; it must be exactly one"
+        );
+        assert!(
+            lines.iter().any(|line| line.trim() == origin),
+            "stand-in: `origin` is not declared as `{origin}`"
+        );
+        stand_in_never_mutated(lines, "origin", "stand-in origin");
+        if let Some((index, line)) = lines.iter().enumerate().find(|(_, line)| {
+            ["setHeader", "appendHeader", "setHeaders"]
+                .iter()
+                .any(|setter| line.contains(setter))
+        }) {
+            panic!(
+                "stand-in line {} `{}` sets a header outside the map; served headers go only through it",
+                index + 1,
+                line.trim()
+            );
+        }
+    }
+
+    /// The map read above is the one served: from `const headers = {` to
+    /// `response.writeHead(200, headers);`, the stand-in names its `headers`
+    /// variable only in the literal, the one CSP assignment and that call. Any
+    /// other write to the map, or a different map handed to `writeHead`, fails
+    /// here by name, so the pin cannot miss a later change.
+    fn stand_in_headers_written_once(lines: &[&str], start: usize, assignment: &str) {
+        let served = "response.writeHead(200, headers);";
+        let end = start
+            + lines[start..]
+                .iter()
+                .position(|line| line.trim() == served)
+                .unwrap_or_else(|| panic!("stand-in: no `{served}` after its header map"));
+        let assignments = lines[start..=end]
+            .iter()
+            .filter(|line| line.trim().starts_with(assignment))
+            .count();
+        assert_eq!(
+            assignments, 1,
+            "stand-in: `{assignment}` appears {assignments} times before `{served}`; the pin \
+             reads one, so it must be exactly one"
+        );
+        for (offset, line) in lines[start..=end].iter().enumerate() {
+            let trimmed = line.trim();
+            if offset == 0 || trimmed == served || trimmed.starts_with(assignment) {
+                continue;
+            }
+            let bytes = trimmed.as_bytes();
+            let mut from = 0;
+            while let Some(found) = trimmed[from..].find("headers") {
+                let at = from + found;
+                let before = at.checked_sub(1).map(|i| bytes[i]);
+                let after = bytes.get(at + "headers".len()).copied();
+                let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+                let names_the_map = !matches!(before, Some(c) if word(c) || c == b'.')
+                    && !matches!(after, Some(c) if word(c));
+                assert!(
+                    !names_the_map,
+                    "stand-in line {}: `{trimmed}` names the served header map outside its \
+                     literal, its CSP assignment and `{served}`",
+                    start + offset + 1
+                );
+                from = at + "headers".len();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stand_in_headers_match_the_served_browser_capsule_headers() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_test_browser_capsule(data_dir.path(), "stand-in-pin", "Stand-in pin", "app");
+        let response = serve_browser_capsule_path(
+            data_dir.path(),
+            &test_request_headers(),
+            "stand-in-pin",
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let origin = format!("http://{STAND_IN_TEST_HOST}");
+        let source = fs::read_to_string(stand_in_source_path()).unwrap();
+        let stand_in = stand_in_header_map(&source, &origin, STAND_IN_TEST_HOST);
+
+        let served = response.headers();
+        for (name, value) in &stand_in {
+            let served_value = served.get(name.as_str()).unwrap_or_else(|| {
+                let names: Vec<&str> = served.keys().map(|name| name.as_str()).collect();
+                panic!(
+                    "stand-in header `{name}` is not served by the browser capsule response; \
+                     response headers: {names:?}"
+                )
+            });
+            assert_eq!(
+                served_value.as_bytes(),
+                value.as_bytes(),
+                "stand-in header `{name}` differs from the served header"
+            );
+        }
+
+        let stand_in_names: Vec<&str> = stand_in.iter().map(|(name, _)| name.as_str()).collect();
+        let mut unique = stand_in_names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            stand_in_names.len(),
+            unique.len(),
+            "stand-in header map has duplicate names: {stand_in_names:?}"
+        );
+        let extra: Vec<&str> = served
+            .keys()
+            .map(|name| name.as_str())
+            .filter(|name| !stand_in_names.contains(name))
+            .collect();
+        assert!(
+            extra.is_empty(),
+            "browser capsule response serves headers the stand-in lacks: {extra:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn browser_capsule_assets_cannot_follow_symlinks_outside_capsule_root() {

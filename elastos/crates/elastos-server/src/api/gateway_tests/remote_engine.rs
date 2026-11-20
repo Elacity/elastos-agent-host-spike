@@ -225,13 +225,14 @@ async fn remote_engine_launch_response(
         .unwrap();
     let (trusted, _) = generate_keypair();
     let network = configured_discovery_network_profile_for_test(&trusted, "remote-engine-binding");
+    let now = now_ts();
     let grant = crate::carrier::BrowserEngineGrant {
         provider_principal_id: "provider".into(),
         requester_principal_id: "consumer".into(),
         requester_endpoint: iroh::SecretKey::from_bytes(&[45; 32]).public(),
         grant_id: "grant:remote-engine".into(),
-        revision: now_ts(),
-        expires_at: now_ts() + 3600,
+        revision: now,
+        expires_at: now.saturating_add(3600),
         execution_allowed: true,
     };
     let generation = format!("sha256:{}", "c".repeat(64));
@@ -305,13 +306,14 @@ async fn remote_engine_preparation_replay_close_and_late_input_keep_exact_native
         .unwrap();
     let (trusted, _) = generate_keypair();
     let network = configured_discovery_network_profile_for_test(&trusted, "remote-engine-binding");
+    let now = now_ts();
     let grant = crate::carrier::BrowserEngineGrant {
         provider_principal_id: "provider".into(),
         requester_principal_id: "consumer".into(),
         requester_endpoint: iroh::SecretKey::from_bytes(&[45; 32]).public(),
         grant_id: "grant:remote-engine".into(),
-        revision: now_ts(),
-        expires_at: now_ts() + 3600,
+        revision: now,
+        expires_at: now.saturating_add(3600),
         execution_allowed: true,
     };
     let generation = format!("sha256:{}", "c".repeat(64));

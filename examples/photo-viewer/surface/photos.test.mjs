@@ -25,6 +25,7 @@ import { fakeDocument as kitDocument, response } from "../../capsule-kit/surface
 
 const TOKEN = "launch-token-for-this-frame";
 const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+const fileBytes = (path) => readFileSync(new URL(path, import.meta.url));
 
 const IDS = ["photo", "caption", "status", "skipped", "skipped-title", "previous", "pause", "next"];
 const fakeDocument = () => kitDocument(IDS);
@@ -102,6 +103,18 @@ test("the token comes from the fragment only", () => {
   assert.equal(launchToken(`#home_token=${TOKEN}`), TOKEN);
   assert.equal(launchToken("#other=1"), "");
   assert.equal(launchToken(""), "");
+});
+
+test("the shipped client matches the kit owner", () => {
+  // One owner: examples/capsule-kit/surface/page-client.js. The page ships a
+  // copy (script-src 'self' serves its own folder) and this pins the bytes.
+  assert.deepEqual(fileBytes("./browser/page-client.js"), fileBytes("../../capsule-kit/surface/page-client.js"));
+});
+
+test("the client's renderer copy matches the kit owner", () => {
+  // page-client.js imports `cut` from the sibling docs-render.js, so the page
+  // ships that owner's bytes too, pinned here.
+  assert.deepEqual(fileBytes("./browser/docs-render.js"), fileBytes("../../capsule-kit/surface/docs-render.js"));
 });
 
 test("it renders only playlist items, in position order", async () => {

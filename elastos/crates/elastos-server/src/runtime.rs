@@ -2,19 +2,149 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use tokio::sync::RwLock;
 
-use crate::bundle_admission::{self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal};
+use crate::bundle_admission::{self, AcceptedSignature, BundleKind, BundleRefusal};
 use crate::resource_bridge::LaunchContent;
-use elastos_bundle_identity::{checked_bundle_within, Budget, LabCid};
+use elastos_bundle_identity::{checked_bundle_within, Budget, CheckedBundle, LabCid};
 use elastos_common::{AuthorityBound, CapsuleManifest, CapsuleType, ElastosError, Result};
-use elastos_compute::providers::{BridgeHostcall, ComponentProvider};
+use elastos_compute::providers::{BridgeHostcall, ComponentProvider, STOPPED_BEFORE_RUN};
 use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
+
+/// The status of an activation that answered `starting` and whose worker has
+/// not yet reported that the guest entered `run`.
+pub const CAPSULE_STARTING: &str = "starting";
+/// The status of an activation whose guest entered `run`.
+pub const CAPSULE_RUNNING: &str = "running";
+/// The status of an activation that ended.
+pub const CAPSULE_STOPPED: &str = "stopped";
+/// The status of an activation that trapped.
+pub const CAPSULE_FAILED: &str = "failed";
+/// The cause of an activation whose guest's `run` returned success.
+pub const CAUSE_COMPLETED: &str = "completed";
+
+/// How long an ended activation stays listed, so its session, status and cause
+/// can still be read after the response that started it has long gone. The end
+/// hands the entry's removal at this instant to the [`RETENTION_SWEEPER`]; a
+/// listing also prunes an entry this old.
+pub const ENDED_CAPSULE_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The registry map the Runtime and every activation's end share.
+type CapsuleRegistry = RwLock<HashMap<String, RunningCapsuleInfo>>;
+
+/// One ended entry the sweeper removes at its deadline, if the entry still
+/// records this end. The registry is held weakly: a Runtime that has gone
+/// takes its registry with it, and its removals are then nothing.
+struct DueRemoval {
+    registry: std::sync::Weak<CapsuleRegistry>,
+    id: String,
+    ended_at: std::time::Instant,
+}
+
+/// The sweeper's deadline queue, ordered by deadline and then by arrival.
+struct RetentionQueue {
+    due: std::collections::BTreeMap<(std::time::Instant, u64), DueRemoval>,
+    arrivals: u64,
+    /// Whether the sweeper thread runs. It is started by the first end that
+    /// schedules a removal, and by a later one if that start failed.
+    sweeping: bool,
+}
+
+/// The one retention sweeper of the process: a plain thread, outside every
+/// tokio runtime, so no runtime's shutdown can cancel a removal. It waits on
+/// [`RetentionSweeper::wake`] until the earliest deadline, with the queue's
+/// lock released while it waits, and takes the registry lock only after the
+/// deadline has come.
+struct RetentionSweeper {
+    queue: StdMutex<RetentionQueue>,
+    wake: std::sync::Condvar,
+}
+
+static RETENTION_SWEEPER: RetentionSweeper = RetentionSweeper {
+    queue: StdMutex::new(RetentionQueue {
+        due: std::collections::BTreeMap::new(),
+        arrivals: 0,
+        sweeping: false,
+    }),
+    wake: std::sync::Condvar::new(),
+};
+
+impl RetentionSweeper {
+    /// Removes `id` from `registry` at `deadline` if the entry still records
+    /// the end at `ended_at`. A thread that cannot be started is logged; a
+    /// listing still prunes the entry, and the next end tries the start again.
+    fn schedule(
+        &'static self,
+        registry: &Arc<CapsuleRegistry>,
+        id: &str,
+        ended_at: std::time::Instant,
+        deadline: std::time::Instant,
+    ) {
+        let mut queue = self.queue.lock().unwrap_or_else(|err| err.into_inner());
+        let arrival = queue.arrivals;
+        queue.arrivals += 1;
+        queue.due.insert(
+            (deadline, arrival),
+            DueRemoval {
+                registry: Arc::downgrade(registry),
+                id: id.to_string(),
+                ended_at,
+            },
+        );
+        if !queue.sweeping {
+            let started = std::thread::Builder::new()
+                .name("ended-capsule-retention".into())
+                .spawn(move || self.sweep());
+            match started {
+                Ok(_) => queue.sweeping = true,
+                Err(error) => {
+                    tracing::error!(%error, "activation {id}: no thread for its retention")
+                }
+            }
+        }
+        drop(queue);
+        self.wake.notify_one();
+    }
+
+    /// The sweeper thread: one removal at a time, each at its deadline.
+    fn sweep(&'static self) {
+        loop {
+            let due = self.next_due();
+            if let Some(registry) = due.registry.upgrade() {
+                let mut capsules = registry.blocking_write();
+                remove_ended_entry(&mut capsules, &due.id, due.ended_at);
+            }
+        }
+    }
+
+    /// Waits until the earliest deadline has come and takes that removal.
+    fn next_due(&self) -> DueRemoval {
+        let mut queue = self.queue.lock().unwrap_or_else(|err| err.into_inner());
+        loop {
+            let now = std::time::Instant::now();
+            let wait = match queue.due.first_entry() {
+                Some(first) if first.key().0 <= now => return first.remove(),
+                Some(first) => Some(first.key().0.saturating_duration_since(now)),
+                None => None,
+            };
+            queue = match wait {
+                Some(wait) => {
+                    self.wake
+                        .wait_timeout(queue, wait)
+                        .unwrap_or_else(|err| err.into_inner())
+                        .0
+                }
+                None => self.wake.wait(queue).unwrap_or_else(|err| err.into_inner()),
+            };
+        }
+    }
+}
 
 /// Information about a running capsule (for API responses and lifecycle management)
 #[derive(Debug, Clone)]
@@ -23,12 +153,23 @@ pub struct RunningCapsuleInfo {
     pub id: String,
     /// Capsule name from manifest
     pub name: String,
-    /// Current status (running, stopped, etc.)
+    /// Current status (`starting`, `running`, `stopped` or `failed`)
     pub status: String,
     /// Capsule type (WASM, MicroVM)
     pub capsule_type: CapsuleType,
     /// Handle for stopping the capsule (optional, not all capsules have handles)
     pub handle: Option<CapsuleHandle>,
+    /// The session this instance runs in: the capsule id the bridge and the
+    /// pending store use for it, which is also the instance id.
+    pub session_id: String,
+    /// The principal admission bound the instance to, for an agent launch or
+    /// a launch grant.
+    pub principal: Option<String>,
+    /// Why the activation ended, once it has: `completed` for a natural
+    /// return, or the trap's message.
+    pub cause: Option<String>,
+    /// When the activation ended; `None` while it is starting or running.
+    pub ended_at: Option<std::time::Instant>,
 }
 
 /// Which unsigned local capsules the Runtime admits.
@@ -37,7 +178,21 @@ enum UnsignedCapsules {
     Allowed,
     /// Only capsules setup installed from the signed release of the Home at this data dir.
     InstalledRelease(PathBuf),
-    Refused,
+    /// Unsigned capsules are refused. The Home's data dir is known once
+    /// admission is configured; a Runtime that was never configured has none.
+    Refused(Option<PathBuf>),
+}
+
+/// A component folder start outside dev mode, as the folder gate's one walk
+/// read it: the manifest that walk read from `capsule.json`, the CID that
+/// names the bytes, the entrypoint bytes from that same walk, and the data dir
+/// whose by-CID store may accept the CID. `None` for the data dir is a Runtime
+/// with no configured Home store.
+struct FolderStart {
+    manifest: CapsuleManifest,
+    cid: LabCid,
+    entrypoint: Vec<u8>,
+    data_dir: Option<PathBuf>,
 }
 
 /// The signer that admitted a capsule: the trusted key that verified it, the
@@ -50,6 +205,16 @@ pub(crate) enum Signer {
     InstalledRelease,
     /// Admitted unsigned because `dev_mode = true`.
     UnsignedDev,
+}
+
+/// Whether a start waits for the activation to end.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LaunchMode {
+    /// Wait for the guest's `run` to end: a CLI run, a bundle start, a test.
+    Bounded,
+    /// A component returns once its guest entered `run`, and stays in the
+    /// registry until it ends. Other capsule types stay bounded.
+    Detached,
 }
 
 /// The main ElastOS runtime
@@ -65,12 +230,27 @@ pub struct Runtime {
     unsigned_capsules: RwLock<UnsignedCapsules>,
     /// Provider registry (optional, set when server mode is active)
     provider_registry: RwLock<Option<Arc<ProviderRegistry>>>,
-    /// Registry of running capsules (for API queries)
-    running_capsules: RwLock<HashMap<String, RunningCapsuleInfo>>,
+    /// Registry of running capsules (for API queries). Shared with each
+    /// activation's ending watcher so the entry it wrote at admission can be
+    /// ended without the Runtime handle.
+    running_capsules: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
     bridge_manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    /// Model-token ceiling for an admitted agent, by capsule id. A missing
+    /// entry is not an admitted agent. Present, including 0, is the ceiling
+    /// admission recorded and passed into the start. The manifest is not
+    /// read again for this number.
+    bridge_model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
+    /// The capability store and manager a detached activation's end settles
+    /// through, set with the provider registry. `None` is a Runtime with no
+    /// capability plane (the CLI): an ending there has nothing to settle.
+    instance_authority: StdRwLock<Option<InstanceAuthority>>,
+    /// A detached activation's stop request, by its capsule id: the flag the
+    /// bridge's wait loop reads and the cause its end records. It goes when
+    /// the activation ends.
+    activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
     /// For each program a content launch is running, by its capsule id: the
     /// content it was launched with. Kept like the ceilings, beside them.
     launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
@@ -117,6 +297,458 @@ impl Drop for LaunchHeld {
     }
 }
 
+/// The capability store and manager a detached activation's end settles and
+/// revokes through: the same pair the bridge asked a grant from. A revoke
+/// that store cannot save is kept in the pending revocation list of the Home
+/// at `data_dir`.
+#[derive(Clone)]
+struct InstanceAuthority {
+    pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+    capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
+    data_dir: std::path::PathBuf,
+}
+
+/// The cause an activation records when the task watching it went away before
+/// the guest's outcome was known.
+const CAUSE_TASK_LOST: &str = "activation task ended before its outcome";
+
+/// One detached activation's stop request (M1-R A10-R). `requested` is the
+/// flag the bridge's wait loop reads, so a guest held inside a call leaves it
+/// within one poll; `cause` is the reason the activation's one end records.
+/// The cause is written before the flag is raised, so an end that sees the
+/// flag always sees its reason.
+struct ActivationStop {
+    flag: Arc<crate::resource_bridge::ActivationStopFlag>,
+    cause: StdMutex<Option<String>>,
+}
+
+impl ActivationStop {
+    /// Records this stop's reason (`stopped: <reason>`) and raises the flag.
+    /// The first reason recorded is the one the end records: a later stop
+    /// keeps it.
+    fn request(&self, reason: &str) {
+        self.cause
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get_or_insert_with(|| format!("{CAPSULE_STOPPED}: {reason}"));
+        self.flag.requested.store(true, Ordering::Release);
+    }
+
+    /// The reason this stop was requested with, if any.
+    fn cause(&self) -> Option<String> {
+        self.cause
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
+    }
+
+    /// Whether the bridge's wait loop left the guest's call because of this
+    /// stop: then the stop, not the call, is what ended the guest.
+    fn cancelled(&self) -> bool {
+        self.flag.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Where an end that is still owed runs when its guard is dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwedEnd {
+    /// In a task of the current runtime.
+    Task,
+    /// On a thread of its own: the task was dropped before the end finished,
+    /// as a runtime shutting down drops the tasks it has not run.
+    Thread,
+    /// Nowhere: the thread could not finish it either.
+    Lost,
+}
+
+/// Owns a detached component's admission context until its watcher has
+/// ended it. One ending, however the activation ends: the worker is stopped,
+/// the session's pending requests are denied and its grants revoked, the
+/// ceiling and principal go away, one `capsule_stop` is audited with the
+/// cause, and the registry entry records the status, cause and end. Nothing
+/// here starts the activation again.
+struct ActivationContextHeld {
+    id: elastos_common::CapsuleId,
+    handle: CapsuleHandle,
+    component: Arc<ComponentProvider>,
+    registry: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
+    manifest_capabilities: Arc<StdRwLock<HashMap<String, Vec<AuthorityBound>>>>,
+    model_token_ceilings: Arc<StdRwLock<HashMap<String, u64>>>,
+    activation_stops: Arc<StdRwLock<HashMap<String, Arc<ActivationStop>>>>,
+    /// The launch contents, by capsule id: a content launch's program reads
+    /// its content from here until its end, and no other activation does.
+    launch_contents: Arc<StdRwLock<HashMap<String, Arc<LaunchContent>>>>,
+    /// This activation's stop request, the same value the bridge and the stop
+    /// route hold.
+    stop: Arc<ActivationStop>,
+    authority: Option<InstanceAuthority>,
+    /// How long the ended entry stays before the sweeper removes it:
+    /// [`ENDED_CAPSULE_RETENTION`], which only a unit row shortens.
+    retention: std::time::Duration,
+    /// The end is owed until the registry entry records it.
+    armed: bool,
+    owed: OwedEnd,
+    /// The status and cause the session was settled with, so an end run
+    /// again after a lost task records and audits the same ones.
+    settled: Option<(String, String)>,
+    audited: bool,
+}
+
+impl ActivationContextHeld {
+    fn new(runtime: &Runtime, handle: &CapsuleHandle, component: Arc<ComponentProvider>) -> Self {
+        let authority = runtime
+            .instance_authority
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        // The stop request lives as long as the activation: the bridge looks
+        // it up by capsule id on every call, and the stop route by instance id.
+        let stop = Arc::new(ActivationStop {
+            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
+            cause: StdMutex::new(None),
+        });
+        runtime
+            .activation_stops
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(handle.id.0.clone(), stop.clone());
+        Self {
+            id: handle.id.clone(),
+            handle: handle.clone(),
+            component,
+            registry: runtime.running_capsules.clone(),
+            retention: ENDED_CAPSULE_RETENTION,
+            manifest_capabilities: runtime.bridge_manifest_capabilities.clone(),
+            model_token_ceilings: runtime.bridge_model_token_ceilings.clone(),
+            activation_stops: runtime.activation_stops.clone(),
+            launch_contents: runtime.launch_contents.clone(),
+            stop,
+            authority,
+            armed: true,
+            owed: OwedEnd::Task,
+            settled: None,
+            audited: false,
+        }
+    }
+
+    /// The reason a stop was requested with, if it was.
+    fn requested_stop(&self) -> Option<String> {
+        self.stop.cause()
+    }
+
+    /// Whether the bridge left the guest's call because of its stop.
+    fn stop_cancelled_guest(&self) -> bool {
+        self.stop.cancelled()
+    }
+
+    /// Takes away what the start put in place: the provider's activation
+    /// entry and the principal the guest ran for, the manifest ceiling, the
+    /// model-token ceiling and the launch content. It is called at the one
+    /// end of every detached activation, before the entry records the end,
+    /// so nothing of the instance is left for a reader or a late bridge call.
+    /// The stop request is not this method's: the entry's end takes it away
+    /// after the write, so a racing stop still finds it.
+    async fn release(&mut self) {
+        self.component.forget_instance(&self.id).await;
+        if let Ok(mut bounds) = self.manifest_capabilities.write() {
+            bounds.remove(&self.id.0);
+        }
+        self.model_token_ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id.0);
+        self.launch_contents
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id.0);
+    }
+
+    /// The one ending of a detached activation (M1-R A11-R). `status` is
+    /// `failed` with this `cause`, or `stopped` with its own. The session's
+    /// pending requests are denied by the Runtime and its grants revoked
+    /// before the context goes; the stop is audited once; and the entry is
+    /// written last, so a reader that sees `ended_at` also sees that nothing
+    /// of the activation is left. A revoke the store could not save ends the
+    /// entry `failed`, with a cause that names it. The stop request is taken
+    /// away only after the entry records the end, so a stop that finds the
+    /// entry not ended also finds its request. Its retention is timed from
+    /// that write: the entry's removal goes to the [`RETENTION_SWEEPER`]
+    /// here, so it happens at its 60 s even if nothing lists or registers
+    /// again and every tokio runtime has shut down.
+    async fn end_instance(mut self, status: &str, cause: &str) {
+        let (status, cause) = match self.settled.clone() {
+            Some(settled) => settled,
+            None => {
+                // An activation that already ended has no entry to stop; an
+                // ending one keeps it until its worker sees the stop flag.
+                let _ = self.component.stop(&self.handle).await;
+                let settled = match &self.authority {
+                    Some(authority) => {
+                        crate::api::handlers::settle::settle_and_revoke(
+                            &authority.pending_store,
+                            &authority.capability_manager,
+                            &authority.data_dir,
+                            &self.id.0,
+                            cause,
+                        )
+                        .await
+                    }
+                    None => Ok(()),
+                };
+                let ended = match settled {
+                    Ok(()) => (status.to_string(), cause.to_string()),
+                    Err(error) => (
+                        CAPSULE_FAILED.to_string(),
+                        format!("{cause}; revocation not saved: {error}"),
+                    ),
+                };
+                self.settled = Some(ended.clone());
+                ended
+            }
+        };
+        self.release().await;
+        if let (Some(authority), false) = (&self.authority, self.audited) {
+            authority
+                .capability_manager
+                .audit_log()
+                .capsule_stop(&self.id.0, stop_reason(&status, &cause));
+            self.audited = true;
+        }
+        let ended_at = std::time::Instant::now();
+        let mut capsules = self.registry.write().await;
+        let recorded = if let Some(info) = capsules.get_mut(&self.id.0) {
+            if info.ended_at.is_none() {
+                info.status = status.to_string();
+                info.cause = Some(cause.to_string());
+                info.ended_at = Some(ended_at);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        drop(capsules);
+
+        // The stop request is taken away only after the entry records the
+        // end, so a stop that finds the entry not ended also finds its
+        // request.
+        self.activation_stops
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&self.id.0);
+        self.armed = false;
+
+        // The sweeper removes the entry at its retention, whichever runtime
+        // ran the end and whether or not the start runtime still lives. A
+        // reader that pruned it first, or an entry a later start replaced,
+        // leaves the removal a no-op: only this end's own `ended_at` goes.
+        if recorded {
+            RETENTION_SWEEPER.schedule(
+                &self.registry,
+                &self.id.0,
+                ended_at,
+                ended_at + self.retention,
+            );
+        }
+    }
+
+    /// This guard's owed end, moved into a new guard; this one is left
+    /// disarmed.
+    fn take_owed(&mut self) -> Self {
+        self.armed = false;
+        ActivationContextHeld {
+            id: self.id.clone(),
+            handle: self.handle.clone(),
+            component: self.component.clone(),
+            registry: self.registry.clone(),
+            retention: self.retention,
+            manifest_capabilities: self.manifest_capabilities.clone(),
+            model_token_ceilings: self.model_token_ceilings.clone(),
+            activation_stops: self.activation_stops.clone(),
+            launch_contents: self.launch_contents.clone(),
+            stop: self.stop.clone(),
+            authority: self.authority.clone(),
+            armed: true,
+            owed: self.owed,
+            settled: self.settled.take(),
+            audited: self.audited,
+        }
+    }
+
+    /// Test only: a retention short enough for a row to wait out in real
+    /// time, since the sweeper runs on the real clock.
+    #[cfg(test)]
+    fn retained_for(mut self, retention: std::time::Duration) -> Self {
+        self.retention = retention;
+        self
+    }
+}
+
+/// The audit reason one ending carries. A trap is the activation's error; a
+/// natural return completed; anything else was stopped.
+fn stop_reason(status: &str, cause: &str) -> elastos_runtime::primitives::audit::StopReason {
+    use elastos_runtime::primitives::audit::StopReason;
+    match status {
+        CAPSULE_STOPPED if cause == CAUSE_COMPLETED => StopReason::Completed,
+        CAPSULE_STOPPED => StopReason::Requested,
+        _ => StopReason::Error(cause.to_string()),
+    }
+}
+
+/// Whether a start that failed is the stop's doing: the stop took the loading
+/// component away, or the epoch callback interrupted its start function. Any
+/// other failed start is the guest's own.
+fn start_ended_by_stop(err: &ElastosError) -> bool {
+    match err {
+        ElastosError::CapsuleNotFound(_) => true,
+        ElastosError::Compute(message) => message == STOPPED_BEFORE_RUN,
+        _ => false,
+    }
+}
+
+impl Drop for ActivationContextHeld {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.owed == OwedEnd::Lost {
+            self.armed = false;
+            tracing::error!("activation {}: its end could not run", self.id.0);
+            return;
+        }
+        // The watcher, or the task running the end, went away before the end
+        // was recorded. The end still runs, once, from where it got to: in a
+        // task first, and on a thread of its own if that task is dropped too.
+        // The new guard stays armed until its end is recorded.
+        let mut end = self.take_owed();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) if end.owed == OwedEnd::Task => {
+                end.owed = OwedEnd::Thread;
+                runtime.spawn(end.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+            }
+            _ => {
+                end.owed = OwedEnd::Lost;
+                let thread = std::thread::Builder::new().name("activation-end".into());
+                let spawned = thread.spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build();
+                    if let Ok(runtime) = runtime {
+                        runtime.block_on(end.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+                    }
+                });
+                if let Err(error) = spawned {
+                    tracing::error!(%error, "activation {}: no thread for its end", self.id.0);
+                }
+            }
+        }
+    }
+}
+
+/// The only place a by-CID start can build a [`VerifiedBundle`].
+///
+/// The struct's fields are private to this module. A struct literal written
+/// outside it, including one shaped `Ok(VerifiedBundle { ... })`, does not
+/// compile. [`VerifiedBundle::check`] is the function here that builds one.
+mod verified_bundle {
+    use std::path::Path;
+
+    use elastos_bundle_identity::{CheckedBundle, LabCid};
+    use elastos_common::CapsuleManifest;
+    use elastos_runtime::signature::SignatureVerifier;
+
+    use crate::bundle_admission::{
+        self, AcceptedSignature, AdmittedBundle, BundleKind, BundleRefusal,
+    };
+
+    /// A bundle the by-CID start has checked. The walked CID is the one asked
+    /// for, a publisher this Home trusts signed it, and the manifest was
+    /// admitted. A program loads from [`VerifiedBundle::into_component`].
+    /// The signature this start reports is the [`AcceptedSignature`] returned
+    /// beside the bundle, not a field of the bundle.
+    pub(crate) struct VerifiedBundle {
+        cid: LabCid,
+        admitted: AdmittedBundle,
+    }
+
+    impl VerifiedBundle {
+        /// Builds the bundle the start keeps. The walked CID equals `asked`,
+        /// the signature verifies under `trust`, the manifest is admitted,
+        /// and a program's imports pass.
+        pub(crate) fn check(
+            bundle: &CheckedBundle,
+            asked: &LabCid,
+            signature: &Path,
+            trust: &SignatureVerifier,
+        ) -> std::result::Result<(Self, AcceptedSignature), BundleRefusal> {
+            if bundle.cid() != *asked {
+                return Err(BundleRefusal::CidMismatch {
+                    asked: asked.to_string(),
+                    computed: bundle.cid().to_string(),
+                });
+            }
+            let accepted = bundle_admission::check_bundle_signature(signature, asked, trust)?;
+            let admitted = bundle_admission::admit_bundle_manifest(bundle)?;
+            if admitted.kind == BundleKind::Program {
+                crate::component::validate_component_imports_for_manifest(
+                    &admitted.component,
+                    &admitted.manifest,
+                )
+                .map_err(BundleRefusal::NotAComponent)?;
+            }
+            Ok((
+                VerifiedBundle {
+                    cid: *asked,
+                    admitted,
+                },
+                accepted,
+            ))
+        }
+
+        pub(crate) fn cid(&self) -> &LabCid {
+            &self.cid
+        }
+
+        pub(crate) fn kind(&self) -> BundleKind {
+            self.admitted.kind
+        }
+
+        pub(crate) fn manifest(&self) -> &CapsuleManifest {
+            &self.admitted.manifest
+        }
+
+        pub(crate) fn pins(&self) -> &[(String, String)] {
+            &self.admitted.pins
+        }
+
+        pub(crate) fn take_pins(&mut self) -> Vec<(String, String)> {
+            std::mem::take(&mut self.admitted.pins)
+        }
+
+        pub(crate) fn take_files(&mut self) -> std::collections::BTreeMap<String, Vec<u8>> {
+            std::mem::take(&mut self.admitted.files)
+        }
+
+        /// The manifest and the entrypoint bytes the loader compiles.
+        pub(crate) fn into_component(self) -> (CapsuleManifest, Vec<u8>) {
+            (self.admitted.manifest, self.admitted.component)
+        }
+    }
+}
+
+use verified_bundle::VerifiedBundle;
+
+/// Test only: the four tables the installed bridge host call reads for one
+/// capsule id, so a row can make a late call under exactly what an end left.
+#[cfg(test)]
+pub(crate) struct BridgeTables {
+    pub manifest_capabilities: Vec<AuthorityBound>,
+    pub launch: Option<Arc<LaunchContent>>,
+    pub model_token_ceiling: Option<u64>,
+    pub stop: Option<Arc<crate::resource_bridge::ActivationStopFlag>>,
+}
+
 impl Runtime {
     /// Create a new runtime with a single compute provider (backward compatible)
     pub fn new(storage: Arc<dyn StorageProvider>, compute: Arc<dyn ComputeProvider>) -> Self {
@@ -124,11 +756,14 @@ impl Runtime {
             _storage: storage,
             compute_providers: vec![compute],
             signature_verifier: RwLock::new(SignatureVerifier::new()),
-            unsigned_capsules: RwLock::new(UnsignedCapsules::Refused),
+            unsigned_capsules: RwLock::new(UnsignedCapsules::Refused(None)),
             provider_registry: RwLock::new(None),
-            running_capsules: RwLock::new(HashMap::new()),
+            running_capsules: Arc::new(RwLock::new(HashMap::new())),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
+            instance_authority: StdRwLock::new(None),
+            activation_stops: Arc::default(),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
         }
@@ -143,11 +778,14 @@ impl Runtime {
             _storage: storage,
             compute_providers,
             signature_verifier: RwLock::new(SignatureVerifier::new()),
-            unsigned_capsules: RwLock::new(UnsignedCapsules::Refused),
+            unsigned_capsules: RwLock::new(UnsignedCapsules::Refused(None)),
             provider_registry: RwLock::new(None),
-            running_capsules: RwLock::new(HashMap::new()),
+            running_capsules: Arc::new(RwLock::new(HashMap::new())),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
+            bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
+            instance_authority: StdRwLock::new(None),
+            activation_stops: Arc::default(),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
         }
@@ -165,12 +803,24 @@ impl Runtime {
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         data_dir: std::path::PathBuf,
     ) {
+        // A detached activation's end settles through this pair, so it is held
+        // from here rather than read again at the end.
+        *self
+            .instance_authority
+            .write()
+            .unwrap_or_else(|err| err.into_inner()) = Some(InstanceAuthority {
+            pending_store: pending_store.clone(),
+            capability_manager: capability_manager.clone(),
+            data_dir: data_dir.clone(),
+        });
         if let Some(ref component) = self.component_provider {
             let host_reg = registry.clone();
             let host_cap_mgr = capability_manager.clone();
             let host_pending = pending_store.clone();
             let host_data_dir = data_dir.clone();
             let host_manifest_capabilities = self.bridge_manifest_capabilities.clone();
+            let host_model_token_ceilings = self.bridge_model_token_ceilings.clone();
+            let host_activation_stops = self.activation_stops.clone();
             let host_launch_contents = self.launch_contents.clone();
             let host_handle = tokio::runtime::Handle::current();
             component.set_bus_hostcall(Arc::new(move |line, capsule_id, principal_id| {
@@ -181,12 +831,28 @@ impl Runtime {
                     .unwrap_or_default();
                 // The content this caller was launched with, if it is the
                 // program of a content launch: looked up by its own id, as
-                // its ceiling is, and nobody else's.
-                // A poisoned lock still holds the table, as for the guard.
+                // its ceiling is, and nobody else's. A poisoned lock still
+                // holds the table, as for the guard. The read guard ends with
+                // this statement: it is not held across the call below, so an
+                // activation's end can take the content away while another
+                // guest is inside the bridge.
                 let launch = host_launch_contents
                     .read()
-                    .unwrap_or_else(|it| it.into_inner());
-                let launch = launch.get(capsule_id).cloned();
+                    .unwrap_or_else(|it| it.into_inner())
+                    .get(capsule_id)
+                    .cloned();
+                let model_token_ceiling = host_model_token_ceilings
+                    .read()
+                    .unwrap_or_else(|it| it.into_inner())
+                    .get(capsule_id)
+                    .copied();
+                // The stop this activation was asked for, if any: the bridge's
+                // wait loop leaves a long capability wait through it.
+                let stop = host_activation_stops
+                    .read()
+                    .unwrap_or_else(|it| it.into_inner())
+                    .get(capsule_id)
+                    .map(|stop| stop.flag.clone());
                 let ctx = crate::resource_bridge::BridgeContext {
                     provider_registry: host_reg.clone(),
                     capability_manager: host_cap_mgr.clone(),
@@ -196,6 +862,8 @@ impl Runtime {
                     manifest_capabilities,
                     data_dir: Some(host_data_dir.clone()),
                     launch,
+                    model_token_ceiling,
+                    stop,
                 };
                 let response = host_handle
                     .block_on(crate::resource_bridge::handle_component_resource_request(
@@ -279,7 +947,7 @@ impl Runtime {
         let unsigned = match (installed, dev_mode) {
             (Some(_), _) => UnsignedCapsules::InstalledRelease(data_dir.to_path_buf()),
             (None, true) => UnsignedCapsules::Allowed,
-            (None, false) => UnsignedCapsules::Refused,
+            (None, false) => UnsignedCapsules::Refused(Some(data_dir.to_path_buf())),
         };
         match &unsigned {
             UnsignedCapsules::Allowed => tracing::warn!(
@@ -290,7 +958,7 @@ impl Runtime {
                 trusted_key_count,
                 if dev_mode { " (config.toml dev_mode does not apply)" } else { "" }
             ),
-            UnsignedCapsules::Refused => tracing::info!(
+            UnsignedCapsules::Refused(_) => tracing::info!(
                 "Capsule signatures enforced with {} trusted key(s)",
                 trusted_key_count
             ),
@@ -338,23 +1006,113 @@ impl Runtime {
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(CapsuleHandle, Signer)> {
-        self.run_signer(path, args, principal_id, None).await
+        self.run_signer(
+            path,
+            args,
+            principal_id,
+            None,
+            LaunchMode::Bounded,
+            (|_| {}, |_| {}),
+        )
+        .await
+    }
+
+    /// [`Self::run_local_with_signer`] with the moments around the folder
+    /// gate's one walk. Tests change the folder before the walk, as another
+    /// process could, to show that the manifest the gate checks and the bytes
+    /// that load are the ones that one walk read; and after the walk to show
+    /// that nothing reads the folder again.
+    #[cfg(test)]
+    pub(crate) async fn run_local_with_signer_observed(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        before_folder_walk: impl FnOnce(&Path) + Send,
+        after_folder_walk: impl FnOnce(&CheckedBundle) + Send,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_signer(
+            path,
+            args,
+            None,
+            None,
+            LaunchMode::Bounded,
+            (before_folder_walk, after_folder_walk),
+        )
+        .await
+    }
+
+    /// Start a capsule and return after admission, while its component worker
+    /// starts. A component activation stays in the registry (session, status,
+    /// cause) until it ends; a non-component start is still bounded and has
+    /// nothing to register. This is the launch route's entry.
+    pub(crate) async fn start_local_with_signer(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_signer(
+            path,
+            args,
+            principal_id,
+            None,
+            LaunchMode::Detached,
+            (|_| {}, |_| {}),
+        )
+        .await
     }
 
     /// The same start for a launch that admitted its principal. `actor` is the
     /// admission context's stored agent id, and it is the only way an agent's
     /// id reaches a bridge principal. The manifest and the entrypoint are the
     /// exact bytes admission walked; this reads neither back from `path`.
+    /// The bounded admitted start: waits for the guest's `run` to end. Kept
+    /// beside [`Self::start_local_admitted`] because it is the call the launch
+    /// route's F-sync falsifier restores, and the agent rows that assert a
+    /// whole run use it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn run_local_admitted(
         &self,
         path: &Path,
         args: Vec<String>,
         admission: crate::agent_admission::AdmissionContext,
     ) -> Result<(CapsuleHandle, Signer)> {
-        let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
-        let (manifest, entrypoint) = admission.into_parts();
-        self.run_signer(path, args, Some(actor), Some((manifest, entrypoint)))
+        self.run_local_admitted_mode(path, args, admission, LaunchMode::Bounded)
             .await
+    }
+
+    /// The launch route's admitted start: see [`Self::start_local_with_signer`].
+    pub(crate) async fn start_local_admitted(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        admission: crate::agent_admission::AdmissionContext,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        self.run_local_admitted_mode(path, args, admission, LaunchMode::Detached)
+            .await
+    }
+
+    /// Both admitted entries derive the same actor and ceiling from the
+    /// stored admission context before it is consumed.
+    async fn run_local_admitted_mode(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+        admission: crate::agent_admission::AdmissionContext,
+        mode: LaunchMode,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
+        let ceiling = admission.model_token_ceiling();
+        let (manifest, entrypoint) = admission.into_parts();
+        self.run_signer(
+            path,
+            args,
+            Some(actor),
+            Some((manifest, entrypoint, ceiling)),
+            mode,
+            (|_| {}, |_| {}),
+        )
+        .await
     }
 
     /// Load one local start. `admitted` is the walked manifest and entrypoint
@@ -366,8 +1124,14 @@ impl Runtime {
         path: &Path,
         args: Vec<String>,
         principal_id: Option<crate::resource_bridge::BridgePrincipal>,
-        admitted: Option<(CapsuleManifest, Vec<u8>)>,
+        admitted: Option<(CapsuleManifest, Vec<u8>, u64)>,
+        mode: LaunchMode,
+        walk_hooks: (
+            impl FnOnce(&Path) + Send,
+            impl FnOnce(&CheckedBundle) + Send,
+        ),
     ) -> Result<(CapsuleHandle, Signer)> {
+        let (before_folder_walk, after_folder_walk) = walk_hooks;
         let admitted_launch = admitted.is_some();
         if !admitted_launch {
             crate::agent_admission::refuse_unadmitted_agent_principal(
@@ -377,11 +1141,13 @@ impl Runtime {
             )
             .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
         }
-        let (manifest, walked) = match admitted {
-            Some((manifest, entrypoint)) => (Some(manifest), Some(entrypoint)),
-            None => (None, None),
+        let (manifest, walked, admitted_ceiling) = match admitted {
+            Some((manifest, entrypoint, ceiling)) => {
+                (Some(manifest), Some(entrypoint), Some(ceiling))
+            }
+            None => (None, None, None),
         };
-        let manifest: CapsuleManifest = match manifest {
+        let mut manifest: CapsuleManifest = match manifest {
             Some(manifest) => {
                 manifest.validate().map_err(ElastosError::InvalidManifest)?;
                 manifest
@@ -413,6 +1179,36 @@ impl Runtime {
             }
         };
 
+        // A component folder start outside dev mode makes one walk of the
+        // folder here. The manifest the checks below, the gate and the load
+        // use is the `capsule.json` that walk read, never a second read of
+        // the file. Dev mode walks nothing and keeps the manifest read above.
+        let folder_start = if manifest.is_component_capsule() && !admitted_launch {
+            self.walk_folder_start(path, before_folder_walk, after_folder_walk)
+                .await?
+        } else {
+            None
+        };
+        if let Some(start) = &folder_start {
+            manifest = start.manifest.clone();
+        }
+
+        if let Some(ceiling) = admitted_ceiling {
+            if manifest.resources.model_token_ceiling() != ceiling {
+                return Err(ElastosError::InvalidManifest(
+                    "the model-token ceiling is the one admission recorded".into(),
+                ));
+            }
+        }
+
+        // The server has no owner or stop route for a resident v2 activation.
+        // Refuse it before loading a component or running any guest code.
+        if manifest.bus_contract.as_deref() == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT) {
+            return Err(ElastosError::InvalidManifest(
+                "Bus v2 contract not yet runnable".into(),
+            ));
+        }
+
         // Reject entrypoints that escape the capsule directory
         if manifest.entrypoint.contains("..")
             || std::path::Path::new(&manifest.entrypoint).is_absolute()
@@ -433,12 +1229,21 @@ impl Runtime {
 
         // A component's entrypoint is one buffer. The signature check, the
         // import check and the compiler below all use these same bytes: the
-        // walked ones for an admitted launch, the one read from the folder
-        // otherwise.
+        // walked ones for an admitted launch, and the ones the folder gate's
+        // one walk read otherwise outside dev mode.
+        let (folder_cid, folder_data_dir) = match &folder_start {
+            Some(start) => (Some(start.cid), start.data_dir.clone()),
+            None => (None, None),
+        };
         let admitted_bytes = if manifest.is_component_capsule() {
             match walked {
                 Some(bytes) => Some(bytes),
-                None => Some(crate::component::read_admitted_entrypoint(path, &manifest).await?),
+                None => match folder_start {
+                    Some(start) => Some(start.entrypoint),
+                    None => {
+                        Some(crate::component::read_admitted_entrypoint(path, &manifest).await?)
+                    }
+                },
             }
         } else {
             if walked.is_some() {
@@ -454,8 +1259,18 @@ impl Runtime {
             .verify_capsule_signature(&manifest, path, admitted_bytes.as_deref())
             .await?;
         if let Some(bytes) = &admitted_bytes {
-            crate::component::validate_component_imports(bytes)
+            crate::component::validate_component_imports_for_manifest(bytes, &manifest)
                 .map_err(ElastosError::InvalidManifest)?;
+        }
+
+        // A folder start outside dev mode starts only a component whose walk
+        // CID is one this Home already admitted: a by-CID slot staged from a
+        // signed bundle, or the CID the Home's own install record holds for
+        // this folder. The signature check above names the signer; this names
+        // the bytes.
+        if let Some(cid) = folder_cid {
+            self.accept_folder_start(path, &manifest, &cid, folder_data_dir.as_deref())
+                .await?;
         }
 
         // A manifest that declares an agent runs only through a launch that
@@ -498,10 +1313,116 @@ impl Runtime {
             &mut handle,
             args,
             principal_id.map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
+            admitted_ceiling,
+            mode,
         )
         .await?;
 
         Ok((handle, signer))
+    }
+
+    /// The one walk a component folder start outside dev mode makes. In dev
+    /// mode it returns `None`, and the caller reads the entrypoint as before.
+    /// The walk is the staging walk under the staging budget; the manifest it
+    /// read from `capsule.json` and the entrypoint bytes it read are what the
+    /// caller checks and loads, so nothing reads the folder again.
+    async fn walk_folder_start(
+        &self,
+        path: &Path,
+        before_walk: impl FnOnce(&Path),
+        after_walk: impl FnOnce(&CheckedBundle),
+    ) -> Result<Option<FolderStart>> {
+        let data_dir = {
+            let admission = self.unsigned_capsules.read().await;
+            match &*admission {
+                UnsignedCapsules::Allowed => return Ok(None),
+                UnsignedCapsules::InstalledRelease(dir) => Some(dir.clone()),
+                UnsignedCapsules::Refused(dir) => dir.clone(),
+            }
+        };
+        before_walk(path);
+        let bundle = checked_bundle_within(path, bundle_admission::BUNDLE_WALK_BUDGET).map_err(
+            |refusal| {
+                ElastosError::InvalidManifest(format!(
+                    "Folder {} is not a bundle a folder start accepts: {}",
+                    path.display(),
+                    bundle_admission::walk_refusal(refusal)
+                ))
+            },
+        )?;
+        after_walk(&bundle);
+        let manifest_bytes = bundle.entry("capsule.json").ok_or_else(|| {
+            ElastosError::InvalidManifest(format!("capsule.json not found in {}", path.display()))
+        })?;
+        let manifest: CapsuleManifest = serde_json::from_slice(manifest_bytes).map_err(|e| {
+            ElastosError::InvalidManifest(format!("Failed to parse capsule.json: {}", e))
+        })?;
+        manifest.validate().map_err(ElastosError::InvalidManifest)?;
+        if !manifest.is_component_capsule() {
+            return Err(ElastosError::InvalidManifest(format!(
+                "Capsule '{}' changed while its folder was walked: its manifest is no longer a component manifest",
+                manifest.name
+            )));
+        }
+        let entrypoint = bundle.entry(&manifest.entrypoint).ok_or_else(|| {
+            ElastosError::InvalidManifest(format!(
+                "Capsule '{}' entrypoint '{}' is not a file of its bundle",
+                manifest.name, manifest.entrypoint
+            ))
+        })?;
+        Ok(Some(FolderStart {
+            manifest,
+            cid: bundle.cid(),
+            entrypoint: entrypoint.to_vec(),
+            data_dir,
+        }))
+    }
+
+    /// Whether this Home already admitted the walk CID of a component folder
+    /// start: the CID its own install record holds for the folder's canonical
+    /// path and this walk, or a by-CID slot staged from a bundle that passes
+    /// the one bundle signature check.
+    async fn accept_folder_start(
+        &self,
+        path: &Path,
+        manifest: &CapsuleManifest,
+        cid: &LabCid,
+        data_dir: Option<&Path>,
+    ) -> Result<()> {
+        let recorded = data_dir
+            .and_then(|data_dir| crate::setup::recorded_install_cid(data_dir, path))
+            .is_some_and(|recorded| recorded == cid.to_string());
+        if !recorded {
+            match data_dir {
+                Some(data_dir) if self.by_cid_slot_accepts(data_dir, cid).await => {}
+                _ => {
+                    return Err(ElastosError::InvalidManifest(format!(
+                        "Capsule '{}' is not installed: its folder walk CID {} is not a by-CID bundle this Home accepted and no install recorded it",
+                        manifest.name, cid
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the Home at `data_dir` holds a by-CID slot for `cid` whose
+    /// bytes recompute to it and whose signature passes this Home's check.
+    async fn by_cid_slot_accepts(&self, data_dir: &Path, cid: &LabCid) -> bool {
+        let slot = bundle_admission::bundle_slot(data_dir, cid);
+        let Ok(bundle) = checked_bundle_within(&slot, bundle_admission::BUNDLE_WALK_BUDGET) else {
+            return false;
+        };
+        if bundle.cid() != *cid {
+            return false;
+        }
+        let verifier = self.signature_verifier.read().await;
+        bundle_admission::check_bundle_signature(
+            &bundle_admission::bundle_signature_path(data_dir, cid),
+            cid,
+            &verifier,
+        )
+        .is_ok()
     }
 
     /// Start the bundle that the Home at `data_dir` holds under the name
@@ -606,14 +1527,14 @@ impl Runtime {
         // until the last of them is judged: trust cannot change between two
         // bundles of one start. It is let go before anything is loaded.
         let trust = self.signature_verifier.read().await;
-        let (mut admitted, accepted) = self
+        let (mut admitted, accepted): (VerifiedBundle, AcceptedSignature) = self
             .admit_closure_member(data_dir, &asked, &trust, &mut left, &mut after_walk)
             .await?;
         // What may sit below the bundle asked for follows from what it is. A
         // program pins programs. Content pins exactly one bundle, its
         // viewer, which must be a page. A page is reached through the
         // content that pins it and is not started by its own CID.
-        let below_root = match (admitted.kind, admitted.pins.len()) {
+        let below_root = match (admitted.kind(), admitted.pins().len()) {
             (BundleKind::Program, _) => BundleKind::Program,
             (BundleKind::Content, 1) => BundleKind::Page,
             (BundleKind::Content, pins) => return Err(BundleRefusal::ContentRequiresInvalid(pins)),
@@ -633,29 +1554,29 @@ impl Runtime {
         // this walk has just read, held for the launch. A content whose
         // listing would be too long to serve is refused here, before
         // anything it pins is read.
-        let launch = match admitted.kind {
+        let launch = match admitted.kind() {
             BundleKind::Content => {
-                let content = LaunchContent::new(std::mem::take(&mut admitted.files));
+                let content = LaunchContent::new(admitted.take_files());
                 Some(Arc::new(
                     content.map_err(BundleRefusal::ContentListingTooLong)?,
                 ))
             }
             BundleKind::Program | BundleKind::Page => None,
         };
-        let pins = std::mem::take(&mut admitted.pins);
+        let pins = admitted.take_pins();
         // Every bundle admitted so far, by its CID: the name it carries, the
         // deepest place a pin has reached it at, and its own pins. The
         // bundle asked for is kept with its pins like any other: a cycle of
         // pins back to it cannot be built, and if one were, the measuring
         // would go round until the depth limit refused it.
-        let root = (admitted.manifest.name.clone(), 1, pins.clone());
-        let mut seen = HashMap::from([(asked.to_string(), root)]);
+        let root = (admitted.manifest().name.clone(), 1, pins.clone());
+        let mut seen = HashMap::from([(admitted.cid().to_string(), root)]);
         let mut pending: Vec<_> = below(1, below_root, false, pins).collect();
         let mut members = 1;
         // The page a content pins, by its name: the one the launch is for.
         let mut kept_page = None;
         // What starts: the program asked for or, under content, the core.
-        let mut starts = (admitted.kind == BundleKind::Program).then_some(admitted);
+        let mut starts = (admitted.kind() == BundleKind::Program).then_some(admitted);
         while let Some((depth, expected, core, name, pin)) = pending.pop() {
             let refused = |refusal| BundleRefusal::Requirement {
                 name: name.clone(),
@@ -697,13 +1618,13 @@ impl Runtime {
                 .admit_closure_member(data_dir, &pinned, &trust, &mut left, &mut after_walk)
                 .await
                 .map_err(refused)?;
-            if member.manifest.name != name {
+            if member.manifest().name != name {
                 return Err(refused(BundleRefusal::RequirementMismatch(
-                    member.manifest.name,
+                    member.manifest().name.clone(),
                 )));
             }
-            if member.kind != expected {
-                let found = member.kind;
+            if member.kind() != expected {
+                let found = member.kind();
                 return Err(refused(match core {
                     true => BundleRefusal::ViewerCoreInvalid(format!(
                         "the viewer pins {}, not a program",
@@ -714,13 +1635,13 @@ impl Runtime {
             }
             // A page pins exactly one bundle, its program. Whatever a
             // program pins is a program.
-            let pins = std::mem::take(&mut member.pins);
-            let page = member.kind == BundleKind::Page;
+            let pins = member.take_pins();
+            let page = member.kind() == BundleKind::Page;
             if page {
                 kept_page = Some(crate::page_launch::Page {
-                    name: member.manifest.name.clone(),
-                    entrypoint: member.manifest.entrypoint.clone(),
-                    files: std::mem::take(&mut member.files),
+                    name: member.manifest().name.clone(),
+                    entrypoint: member.manifest().entrypoint.clone(),
+                    files: member.take_files(),
                 });
             }
             if page && pins.len() != 1 {
@@ -729,7 +1650,7 @@ impl Runtime {
                     pins.len()
                 ))));
             }
-            let known = (member.manifest.name.clone(), depth, pins.clone());
+            let known = (member.manifest().name.clone(), depth, pins.clone());
             seen.insert(pinned.to_string(), known);
             pending.extend(below(depth, BundleKind::Program, page, pins));
             if core {
@@ -757,7 +1678,7 @@ impl Runtime {
                 "no program was found under the viewer".to_string(),
             ));
         };
-        let (bytes, manifest) = (starts.component, starts.manifest);
+        let (manifest, bytes) = starts.into_component();
         let loaded = match manifest.asks.is_empty() {
             true => component.load_admitted_sealed(bytes, manifest).await,
             false => component.load_admitted(bytes, manifest).await,
@@ -771,7 +1692,14 @@ impl Runtime {
         let held = launch
             .clone()
             .map(|launch| LaunchHeld::new(&self.launch_contents, &handle.id.0, launch));
-        let started = self.start_loaded(component, &mut handle, args, principal_id);
+        let started = self.start_loaded(
+            component,
+            &mut handle,
+            args,
+            principal_id,
+            None,
+            LaunchMode::Bounded,
+        );
         let started = started.await;
         drop(held);
         started.map_err(failed)?;
@@ -786,9 +1714,11 @@ impl Runtime {
     /// The checks every bundle of a start by CID passes, the one asked for
     /// and each pinned one alike, in this order: the store has a slot for
     /// `cid`; one walk of it, inside what is `left` of the closure's budget;
-    /// the files recompute to `cid`; the signature beside it is accepted
-    /// under `trust`, the start's one reading of who is trusted; and only
-    /// then this start judges its manifest and its component's imports.
+    /// and then [`VerifiedBundle::check`], which builds the value this start
+    /// keeps. That function requires the files to recompute to `cid`, accepts
+    /// the signature beside the slot under `trust` (the start's one reading
+    /// of who is trusted), and only then judges the manifest and a program's
+    /// imports. Its fields are private to the module that defines the struct.
     /// What the walk took in comes off `left`.
     ///
     /// The walk is not blind to the manifest: to name a bundle it parses
@@ -804,7 +1734,7 @@ impl Runtime {
         trust: &SignatureVerifier,
         left: &mut Budget,
         after_walk: &mut impl FnMut(&LabCid),
-    ) -> std::result::Result<(AdmittedBundle, AcceptedSignature), BundleRefusal> {
+    ) -> std::result::Result<(VerifiedBundle, AcceptedSignature), BundleRefusal> {
         let slot = bundle_admission::bundle_slot(data_dir, asked);
         match std::fs::symlink_metadata(&slot) {
             Ok(_) => {}
@@ -825,20 +1755,8 @@ impl Runtime {
         let bytes: u64 = files.iter().map(|file| file.content.len() as u64).sum();
         left.max_entries = left.max_entries.saturating_sub(files.len());
         left.max_total_bytes = left.max_total_bytes.saturating_sub(bytes);
-        if bundle.cid() != *asked {
-            return Err(BundleRefusal::CidMismatch {
-                asked: asked.to_string(),
-                computed: bundle.cid().to_string(),
-            });
-        }
         let signature = bundle_admission::bundle_signature_path(data_dir, asked);
-        let accepted = bundle_admission::check_bundle_signature(&signature, asked, trust)?;
-        let admitted = bundle_admission::admit_bundle_manifest(&bundle)?;
-        if admitted.kind == BundleKind::Program {
-            crate::component::validate_component_imports(&admitted.component)
-                .map_err(BundleRefusal::NotAComponent)?;
-        }
-        Ok((admitted, accepted))
+        VerifiedBundle::check(&bundle, asked, &signature, trust)
     }
 
     /// Test only: whether who is trusted could be replaced at this moment.
@@ -856,6 +1774,22 @@ impl Runtime {
         launches.get(id).map(|launch| launch.paths())
     }
 
+    /// Test only: the model-token ceilings the bridge holds right now, one
+    /// entry per admitted instance. A missing id is not an admitted agent.
+    #[cfg(test)]
+    pub(crate) fn model_token_ceilings_held(&self) -> Vec<(String, u64)> {
+        let ceilings = self
+            .bridge_model_token_ceilings
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut held: Vec<_> = ceilings
+            .iter()
+            .map(|(id, ceiling)| (id.clone(), *ceiling))
+            .collect();
+        held.sort();
+        held
+    }
+
     /// Test only: the ceiling the bridge holds the capsule `id` to right now,
     /// each entry as it prints.
     #[cfg(test)]
@@ -865,48 +1799,315 @@ impl Runtime {
         ceiling.map(|ceiling| ceiling.iter().map(ToString::to_string).collect())
     }
 
+    /// Test only: what an end left in this Runtime's own tables, by the name
+    /// of each that still holds the instance's id. Empty is A12-R's "nothing
+    /// remains": no manifest ceiling, model-token ceiling, launch content or
+    /// stop request. The compute provider's activation entry and principal
+    /// are its tables: `provider_entry_for_test` reads the entry, and the
+    /// provider's own row proves `forget_instance` takes the principal away.
+    #[cfg(test)]
+    pub(crate) async fn context_left_for_test(&self, id: &str) -> Vec<&'static str> {
+        let mut left = Vec::new();
+        if table_holds(&self.bridge_manifest_capabilities, id) {
+            left.push("manifest ceiling");
+        }
+        if table_holds(&self.bridge_model_token_ceilings, id) {
+            left.push("model-token ceiling");
+        }
+        if table_holds(&self.launch_contents, id) {
+            left.push("launch content");
+        }
+        if table_holds(&self.activation_stops, id) {
+            left.push("stop request");
+        }
+        left
+    }
+
+    /// Test only: whether the compute provider still holds an activation
+    /// entry for this handle. `status` is the provider's own answer: an entry
+    /// is a status, a forgotten one is not found.
+    #[cfg(test)]
+    pub(crate) async fn provider_entry_for_test(&self, handle: &CapsuleHandle) -> bool {
+        match &self.component_provider {
+            Some(component) => component.status(handle).await.is_ok(),
+            None => false,
+        }
+    }
+
+    /// Test only: the principal the compute provider holds for this handle's
+    /// activation; `Some(None)` for an activation bound to no principal, `None`
+    /// when it holds no binding.
+    #[cfg(test)]
+    pub(crate) async fn provider_principal_for_test(
+        &self,
+        handle: &CapsuleHandle,
+    ) -> Option<Option<String>> {
+        match &self.component_provider {
+            Some(component) => component.bridge_principal(&handle.id).await,
+            None => None,
+        }
+    }
+
+    /// Test only: the tables the installed bridge host call reads for a call
+    /// from `id`, as it reads them: the manifest ceiling, the launch content,
+    /// the model-token ceiling and the stop request. A row builds the context
+    /// from these, so a late call is judged by exactly what the end left.
+    #[cfg(test)]
+    pub(crate) fn bridge_tables_for_test(&self, id: &str) -> BridgeTables {
+        let manifest_capabilities = self
+            .bridge_manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|guard| guard.get(id).cloned())
+            .unwrap_or_default();
+        let launch = self
+            .launch_contents
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .cloned();
+        let model_token_ceiling = self
+            .bridge_model_token_ceilings
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .copied();
+        let stop = self
+            .activation_stops
+            .read()
+            .unwrap_or_else(|it| it.into_inner())
+            .get(id)
+            .map(|stop| stop.flag.clone());
+        BridgeTables {
+            manifest_capabilities,
+            launch,
+            model_token_ceiling,
+            stop,
+        }
+    }
+
     /// The end of every start, and the one place in this file that fills a
     /// capsule's ceiling: from the one bounds function, for a start from a
-    /// folder and for a start by CID alike. While `provider` starts the
-    /// loaded capsule, that ceiling is what the bridge holds it to and, for a
-    /// component, `principal_id` is who it runs for; `args` go on its handle
-    /// first. Ceiling and principal are taken away again when the start
-    /// returns, well or badly.
+    /// folder and for a start by CID alike. While the activation runs, that
+    /// ceiling is what the bridge holds it to and, for a component,
+    /// `principal_id` is who it runs for; `args` go on its handle first.
+    ///
+    /// Bounded: this returns when the start has ended, well or badly, and the
+    /// ceiling and principal go with it. Detached: a component returns after
+    /// admission with `starting`; the worker's `started` changes the entry to
+    /// `running`, and the ending watcher takes the ceiling
+    /// and principal away and records the status and cause when the guest
+    /// ends. The entry stays listed for [`ENDED_CAPSULE_RETENTION`].
     async fn start_loaded(
         &self,
         provider: Arc<dyn ComputeProvider>,
         handle: &mut CapsuleHandle,
         args: Vec<String>,
         principal_id: Option<String>,
+        model_token_ceiling: Option<u64>,
+        mode: LaunchMode,
     ) -> Result<()> {
+        let detached_component =
+            if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
+                Some(self.component_provider.clone().ok_or_else(|| {
+                    ElastosError::Compute("No component compute provider is configured".to_string())
+                })?)
+            } else {
+                None
+            };
+        let held = detached_component
+            .as_ref()
+            .map(|component| ActivationContextHeld::new(self, handle, component.clone()));
+        self.hold_launch_context(handle, principal_id.clone(), model_token_ceiling)
+            .await;
+
+        // Set args on handle before starting
+        handle.args = args;
+
+        if let Some(component) = detached_component {
+            let id = handle.id.clone();
+            self.register_capsule(RunningCapsuleInfo {
+                id: id.0.clone(),
+                name: handle.manifest.name.clone(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.0.clone(),
+                principal: principal_id,
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+            self.watch_activation(
+                id,
+                handle.clone(),
+                component,
+                held.expect("detached context"),
+            );
+            return Ok(());
+        }
+
+        // Start capsule
+        let start = provider.start(handle).await;
+        self.release_launch_context(&handle.id).await;
+        start
+    }
+
+    /// The ceiling and, for a component, the principal the bridge holds this
+    /// activation to while it runs. `Some` is the ceiling admission recorded;
+    /// a start that was not admitted gets no token entry.
+    async fn hold_launch_context(
+        &self,
+        handle: &CapsuleHandle,
+        principal_id: Option<String>,
+        model_token_ceiling: Option<u64>,
+    ) {
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
             bounds.insert(
                 handle.id.0.clone(),
                 handle.manifest.resource_authority_bounds(),
             );
         }
+        if let Some(ceiling) = model_token_ceiling {
+            self.bridge_model_token_ceilings
+                .write()
+                .unwrap_or_else(|err| err.into_inner())
+                .insert(handle.id.0.clone(), ceiling);
+        }
         if handle.manifest.is_component_capsule() {
-            if let Some(ref component) = self.component_provider {
+            if let Some(component) = &self.component_provider {
                 component
                     .set_bridge_principal(&handle.id, principal_id)
                     .await;
             }
         }
+    }
 
-        // Set args on handle before starting
-        handle.args = args;
-
-        // Start capsule
-        let start = provider.start(handle).await;
-        if handle.manifest.is_component_capsule() {
-            if let Some(ref component) = self.component_provider {
-                component.clear_bridge_principal(&handle.id).await;
-            }
+    /// Takes away what [`Self::hold_launch_context`] put in place, at the end
+    /// of the activation however it ended.
+    async fn release_launch_context(&self, id: &elastos_common::CapsuleId) {
+        if let Some(component) = &self.component_provider {
+            component.clear_bridge_principal(id).await;
         }
         if let Ok(mut bounds) = self.bridge_manifest_capabilities.write() {
-            bounds.remove(&handle.id.0);
+            bounds.remove(&id.0);
         }
-        start
+        self.bridge_model_token_ceilings
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&id.0);
+    }
+
+    /// Remove a loaded component before the watcher can start its guest. This
+    /// exercises the real provider's pre-start error through the registry.
+    #[cfg(test)]
+    pub(crate) async fn remove_loaded_component_for_test(&self, id: &str) {
+        let handle = self
+            .get_capsule(id)
+            .await
+            .and_then(|entry| entry.handle)
+            .expect("the admitted component has a handle");
+        let component = self
+            .component_provider
+            .as_ref()
+            .expect("component provider");
+        component
+            .stop(&handle)
+            .await
+            .expect("remove the loaded component");
+    }
+
+    /// Hold registration so a route can be cancelled after it has installed
+    /// its admission context and before its watcher owns that context.
+    #[cfg(test)]
+    pub(crate) async fn hold_capsule_registry_for_test(
+        &self,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<String, RunningCapsuleInfo>> {
+        self.running_capsules.write().await
+    }
+
+    /// The compute provider's own status of a registered component: it is
+    /// `Running` from the moment its start runs guest code.
+    #[cfg(test)]
+    pub(crate) async fn component_status_for_test(
+        &self,
+        id: &str,
+    ) -> Option<elastos_common::CapsuleStatus> {
+        let handle = self.get_capsule(id).await?.handle?;
+        let component = self.component_provider.as_ref()?;
+        component.status(&handle).await.ok()
+    }
+
+    /// The cause a stop of `id` has recorded so far, read from its stop
+    /// request.
+    #[cfg(test)]
+    pub(crate) fn requested_stop_for_test(&self, id: &str) -> Option<String> {
+        let stops = self
+            .activation_stops
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        stops.get(id)?.cause()
+    }
+
+    /// Starts this activation and waits for its worker to publish its outcome, then ends it
+    /// through [`ActivationContextHeld::end_instance`]: the entry is `stopped`
+    /// with cause `completed` on a natural return, or `failed` with the
+    /// trap's cause, and it keeps its `ended_at` for
+    /// [`ENDED_CAPSULE_RETENTION`]. A stop requested before the outcome ends
+    /// the activation as `stopped` with the reason it was requested with when
+    /// the worker's ending is that stop's doing: a return or a `stopped`
+    /// after the request, a trap after the bridge left the guest's call for
+    /// it, or a start the stop took away or interrupted.
+    fn watch_activation(
+        &self,
+        id: elastos_common::CapsuleId,
+        handle: CapsuleHandle,
+        component: Arc<ComponentProvider>,
+        held: ActivationContextHeld,
+    ) {
+        use elastos_compute::providers::ActivationOutcome;
+
+        let registry = self.running_capsules.clone();
+        tokio::spawn(async move {
+            // A stop that arrived while the activation was still starting: the
+            // guest is not run at all, and the stop is its whole end.
+            if let Some(cause) = held.requested_stop() {
+                held.end_instance(CAPSULE_STOPPED, &cause).await;
+                return;
+            }
+            let (status, cause) = match component.start_resident(&handle).await {
+                Ok(mut activation) => {
+                    // Only the compute worker's `started` moves the entry from
+                    // admission's `starting` to `running`.
+                    if let Some(info) = registry.write().await.get_mut(&id.0) {
+                        info.status = CAPSULE_RUNNING.to_string();
+                    }
+                    match activation.ended().await {
+                        ActivationOutcome::Returned => match held.requested_stop() {
+                            Some(cause) => (CAPSULE_STOPPED, cause),
+                            None => (CAPSULE_STOPPED, CAUSE_COMPLETED.to_string()),
+                        },
+                        // A trap is the guest's own ending unless the stop is
+                        // what ended it: the worker's epoch interrupt, or the
+                        // bridge leaving the guest's call for the stop.
+                        ActivationOutcome::Trapped(message) => match held.requested_stop() {
+                            Some(cause) if held.stop_cancelled_guest() => (CAPSULE_STOPPED, cause),
+                            _ => (CAPSULE_FAILED, message),
+                        },
+                        ActivationOutcome::Stopped => (
+                            CAPSULE_STOPPED,
+                            held.requested_stop()
+                                .unwrap_or_else(|| "stopped by request".to_string()),
+                        ),
+                    }
+                }
+                Err(err) => match held.requested_stop() {
+                    Some(cause) if start_ended_by_stop(&err) => (CAPSULE_STOPPED, cause),
+                    _ => (CAPSULE_FAILED, err.to_string()),
+                },
+            };
+            held.end_instance(status, &cause).await;
+        });
     }
 
     /// Check that all providers required by a capsule are registered
@@ -963,7 +2164,7 @@ impl Runtime {
                         })
                         .map(|()| Signer::InstalledRelease)
                 }
-                UnsignedCapsules::Refused => Err(ElastosError::InvalidManifest(format!(
+                UnsignedCapsules::Refused(_) => Err(ElastosError::InvalidManifest(format!(
                     "Capsule '{}' is unsigned; only a source or development Home with dev_mode = true runs unsigned capsules",
                     manifest.name
                 ))),
@@ -1031,6 +2232,7 @@ impl Runtime {
     /// register capsules that weren't started through Runtime's run_* methods.
     pub async fn register_capsule(&self, info: RunningCapsuleInfo) {
         let mut capsules = self.running_capsules.write().await;
+        prune_ended(&mut capsules, std::time::Instant::now());
         tracing::info!("Registered capsule '{}' with ID: {}", info.name, info.id);
         capsules.insert(info.id.clone(), info);
     }
@@ -1043,15 +2245,34 @@ impl Runtime {
         }
     }
 
-    /// List all registered capsules
+    /// List all registered capsules, sorted by id. An entry that ended more
+    /// than [`ENDED_CAPSULE_RETENTION`] ago leaves the listing here.
     pub async fn list_capsules(&self) -> Vec<RunningCapsuleInfo> {
-        let capsules = self.running_capsules.read().await;
-        capsules.values().cloned().collect()
+        self.list_capsules_pruning_at(std::time::Instant::now())
+            .await
+    }
+
+    /// Test the retention boundary without waiting for the clock.
+    #[cfg(test)]
+    pub(crate) async fn list_capsules_at(
+        &self,
+        now: std::time::Instant,
+    ) -> Vec<RunningCapsuleInfo> {
+        self.list_capsules_pruning_at(now).await
+    }
+
+    async fn list_capsules_pruning_at(&self, now: std::time::Instant) -> Vec<RunningCapsuleInfo> {
+        let mut capsules = self.running_capsules.write().await;
+        prune_ended(&mut capsules, now);
+        let mut listed: Vec<RunningCapsuleInfo> = capsules.values().cloned().collect();
+        listed.sort_by(|left, right| left.id.cmp(&right.id));
+        listed
     }
 
     /// Get a specific capsule by ID
     pub async fn get_capsule(&self, id: &str) -> Option<RunningCapsuleInfo> {
-        let capsules = self.running_capsules.read().await;
+        let mut capsules = self.running_capsules.write().await;
+        prune_ended(&mut capsules, std::time::Instant::now());
         capsules.get(id).cloned()
     }
 
@@ -1064,43 +2285,145 @@ impl Runtime {
         }
     }
 
-    /// Stop a capsule by its ID
+    /// Stop a capsule by its ID, with the reason `user`: the route without a
+    /// body. See [`Self::stop_capsule_with_reason`].
+    pub async fn stop_capsule_by_id(&self, id: &str) -> Result<Option<RunningCapsuleInfo>> {
+        self.stop_capsule_with_reason(id, "user").await
+    }
+
+    /// Stop a capsule by its ID with this reason (M1-R A10-R). A detached
+    /// activation is ended by its own watcher, the one place an activation
+    /// ends: this records the reason, raises the flag the bridge's wait loop
+    /// reads, gives the compute provider the stop its epoch callback reads,
+    /// and waits for that end. The entry is then `stopped` with cause
+    /// `stopped: <reason>` and is kept for [`ENDED_CAPSULE_RETENTION`], unless
+    /// the guest ended for its own reason first, or an earlier stop's reason
+    /// was recorded first: then the entry says so.
     ///
-    /// This looks up the capsule in the registry and attempts to stop it.
-    /// Returns Ok(true) if stopped, Ok(false) if not found, Err on failure.
-    pub async fn stop_capsule_by_id(&self, id: &str) -> Result<bool> {
-        // Get capsule info and handle
-        let capsule_info = {
+    /// Returns the entry as the stop leaves it, or `None` if the id is not
+    /// registered. A stop of an ending or ended activation changes nothing
+    /// and returns the outcome its one end recorded. An activation with no
+    /// stop request (a capsule registered with a handle by its launcher) is
+    /// stopped and unregistered as before.
+    pub async fn stop_capsule_with_reason(
+        &self,
+        id: &str,
+        reason: &str,
+    ) -> Result<Option<RunningCapsuleInfo>> {
+        // The entry and its stop request are read under one lock: the end
+        // takes the request away only after the entry records `ended_at`, so
+        // an entry not ended here still has its request if a watcher ends it.
+        let (info, stop) = {
             let capsules = self.running_capsules.read().await;
-            capsules.get(id).cloned()
+            let Some(info) = capsules.get(id).cloned() else {
+                return Ok(None);
+            };
+            let stops = self
+                .activation_stops
+                .read()
+                .unwrap_or_else(|err| err.into_inner());
+            (info, stops.get(id).cloned())
         };
+        if info.ended_at.is_some() {
+            return Ok(Some(info));
+        }
 
-        let Some(info) = capsule_info else {
-            return Ok(false); // Not found
-        };
+        // A guest in guest code, its start function included, is trapped by
+        // its epoch callback, which reads this provider's stop flag; a
+        // component not yet started is taken away, so its start ends as
+        // stopped before it runs. A guest inside a bridge call leaves that
+        // call through the stop's own flag, which the bridge checks.
+        let provider = info
+            .handle
+            .as_ref()
+            .and_then(|handle| Some((handle, self.get_provider_for_manifest(&handle.manifest)?)));
 
-        // If we have a handle, try to stop via compute provider
-        if let Some(handle) = &info.handle {
-            // Find the provider that supports this capsule type
-            if let Some(provider) = self.get_provider_for_manifest(&handle.manifest) {
+        let Some(stop) = stop else {
+            // No watcher holds this activation: stop it through its provider
+            // and take its entry away, as before.
+            if let Some((handle, provider)) = provider {
                 tracing::info!("Stopping capsule '{}' ({})", info.name, id);
                 provider.stop(handle).await?;
             }
+            self.unregister_capsule(id).await;
+            return Ok(Some(RunningCapsuleInfo {
+                status: CAPSULE_STOPPED.to_string(),
+                ended_at: Some(std::time::Instant::now()),
+                ..info
+            }));
+        };
+
+        // The reason is recorded before the flag is raised, so the end that
+        // sees the flag records this cause.
+        stop.request(reason);
+        if let Some((handle, provider)) = provider {
+            tracing::info!("Stopping capsule '{}' ({})", info.name, id);
+            provider.stop(handle).await?;
         }
 
-        // Update status to stopped
-        {
-            let mut capsules = self.running_capsules.write().await;
-            if let Some(info) = capsules.get_mut(id) {
-                info.status = "stopped".to_string();
-            }
-        }
-
-        // Unregister the capsule
-        self.unregister_capsule(id).await;
-
-        Ok(true)
+        self.wait_ended(id).await;
+        // The end happened, whatever its recorded status and cause: the
+        // entry the list serves says which, and a stop whose guest ran to its
+        // own ending is still a stop that left nothing running.
+        Ok(self.get_capsule(id).await)
     }
+
+    /// Waits until the registry records this activation's end, or until the
+    /// wait bound passes. The worker's own deadline is 10 s; the bridge's
+    /// longest wait is 30 s.
+    async fn wait_ended(&self, id: &str) {
+        let bound = std::time::Duration::from_secs(40);
+        let deadline = std::time::Instant::now() + bound;
+        loop {
+            let ended = self
+                .get_capsule(id)
+                .await
+                .map(|info| info.ended_at.is_some())
+                .unwrap_or(true);
+            if ended || std::time::Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+}
+
+/// Takes an ended entry away only if it is still this end's: a reader may have
+/// pruned it first, or a later start may have replaced it, and neither is this
+/// end's to remove.
+fn remove_ended_entry(
+    capsules: &mut HashMap<String, RunningCapsuleInfo>,
+    id: &str,
+    ended_at: std::time::Instant,
+) {
+    if capsules
+        .get(id)
+        .is_some_and(|info| info.ended_at == Some(ended_at))
+    {
+        capsules.remove(id);
+    }
+}
+
+/// Removes the entries whose activation ended at least
+/// [`ENDED_CAPSULE_RETENTION`] before `now`. The end schedules its own
+/// removal with the [`RETENTION_SWEEPER`]; a reader still
+/// prunes, so the boundary can be read at an injected instant and an entry
+/// registered already ended cannot outlive its retention either.
+fn prune_ended(capsules: &mut HashMap<String, RunningCapsuleInfo>, now: std::time::Instant) {
+    capsules.retain(|_, info| match info.ended_at {
+        Some(ended_at) => now.duration_since(ended_at) < ENDED_CAPSULE_RETENTION,
+        None => true,
+    });
+}
+
+/// Whether a table still holds this id. A poisoned lock still holds its map,
+/// as every reader here assumes.
+#[cfg(test)]
+fn table_holds<T>(table: &StdRwLock<HashMap<String, T>>, id: &str) -> bool {
+    table
+        .read()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains_key(id)
 }
 
 #[cfg(test)]
@@ -1172,8 +2495,8 @@ pub(crate) mod tests {
     }
 
     #[derive(Default)]
-    struct BusConformanceProvider {
-        requests: Mutex<Vec<serde_json::Value>>,
+    pub(crate) struct BusConformanceProvider {
+        pub(crate) requests: Mutex<Vec<serde_json::Value>>,
     }
 
     #[async_trait]
@@ -1613,6 +2936,279 @@ pub(crate) mod tests {
         assert!(none_left(), "no ceiling is left after that start either");
     }
 
+    /// A12-R at the one end, in this Runtime's tables: the manifest ceiling,
+    /// the model-token ceiling, the launch content and the stop request all
+    /// go. No agent launch holds content; a content start does, under its
+    /// program's own id, and the end takes it away, so nothing a later bridge
+    /// call could be held to or read survives.
+    #[tokio::test]
+    async fn the_one_end_leaves_nothing_in_the_tables_the_start_filled() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        let manifest: CapsuleManifest = serde_json::from_str(&component_manifest_json("ended"))
+            .expect("the component manifest");
+        let handle = CapsuleHandle {
+            id: CapsuleId::new("component-ended"),
+            manifest,
+            args: Vec::new(),
+        };
+        let id = handle.id.0.clone();
+        runtime.launch_contents.write().unwrap().insert(
+            id.clone(),
+            Arc::new(
+                crate::resource_bridge::LaunchContent::new(std::collections::BTreeMap::new())
+                    .expect("an empty content"),
+            ),
+        );
+        runtime
+            .bridge_manifest_capabilities
+            .write()
+            .unwrap()
+            .insert(id.clone(), handle.manifest.resource_authority_bounds());
+        runtime
+            .bridge_model_token_ceilings
+            .write()
+            .unwrap()
+            .insert(id.clone(), 7);
+
+        let held = ActivationContextHeld::new(&runtime, &handle, component);
+        let mut filled = runtime.context_left_for_test(&id).await;
+        filled.sort_unstable();
+        assert_eq!(
+            filled,
+            [
+                "launch content",
+                "manifest ceiling",
+                "model-token ceiling",
+                "stop request",
+            ],
+            "the start filled the tables"
+        );
+
+        held.end_instance(CAPSULE_FAILED, "test end").await;
+        assert_eq!(
+            runtime.context_left_for_test(&id).await,
+            Vec::<&str>::new(),
+            "the one end leaves nothing"
+        );
+    }
+
+    /// The retention the sweeper rows give their activation. The sweeper runs
+    /// on the real clock, so each row waits this out in real time.
+    const ROW_RETENTION: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// A Runtime with a component provider and no compute providers, for the
+    /// sweeper rows.
+    async fn retention_runtime(temp_dir: &tempfile::TempDir) -> (Runtime, Arc<ComponentProvider>) {
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().to_path_buf())
+                .await
+                .unwrap(),
+        );
+        let component = Arc::new(ComponentProvider::new());
+        let runtime =
+            Runtime::with_providers_and_component(storage, Vec::new(), Some(component.clone()));
+        (runtime, component)
+    }
+
+    /// Registers an entry as a start does and makes its context, with
+    /// [`ROW_RETENTION`], on the runtime this is awaited on: the activation's
+    /// start runtime.
+    async fn retained_activation(
+        runtime: &Runtime,
+        component: Arc<ComponentProvider>,
+        name: &str,
+    ) -> (ActivationContextHeld, String) {
+        let manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).expect("the component manifest");
+        let handle = CapsuleHandle {
+            id: CapsuleId::new(format!("component-{name}")),
+            manifest,
+            args: Vec::new(),
+        };
+        let id = handle.id.0.clone();
+        runtime
+            .register_capsule(RunningCapsuleInfo {
+                id: id.clone(),
+                name: name.to_string(),
+                status: CAPSULE_STARTING.to_string(),
+                capsule_type: handle.manifest.capsule_type.clone(),
+                handle: Some(handle.clone()),
+                session_id: id.clone(),
+                principal: None,
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        let held =
+            ActivationContextHeld::new(runtime, &handle, component).retained_for(ROW_RETENTION);
+        (held, id)
+    }
+
+    /// The instant the end recorded, read from the registry map itself: a
+    /// listing would prune.
+    async fn recorded_end(runtime: &Runtime, id: &str) -> std::time::Instant {
+        runtime
+            .running_capsules
+            .read()
+            .await
+            .get(id)
+            .and_then(|info| info.ended_at)
+            .expect("the ended entry is kept at its end")
+    }
+
+    /// Reads the registry map itself, never a listing that would prune, until
+    /// the entry is gone, and answers the instant it saw that; `None` if the
+    /// entry is still there well after its retention. It polls with
+    /// `tokio::time::sleep`, so the runtime it is awaited on stays free.
+    async fn swept_at(runtime: &Runtime, id: &str) -> Option<std::time::Instant> {
+        let cap = std::time::Instant::now() + ROW_RETENTION + std::time::Duration::from_secs(5);
+        loop {
+            if !runtime.running_capsules.read().await.contains_key(id) {
+                return Some(std::time::Instant::now());
+            }
+            if std::time::Instant::now() >= cap {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The entry went at its retention and not before it.
+    fn assert_swept(swept: Option<std::time::Instant>, ended_at: std::time::Instant, row: &str) {
+        let swept = swept.unwrap_or_else(|| {
+            panic!("{row}: the ended entry is gone at its retention, with nothing reading it")
+        });
+        assert!(
+            swept >= ended_at + ROW_RETENTION,
+            "{row}: the ended entry is kept until its retention"
+        );
+    }
+
+    /// A3-R S6 fix 4, row (a): the start runtime lives throughout. The end
+    /// runs on it and the row waits on it, so a removal that needed that
+    /// runtime could run; the sweeper takes the entry at its retention with
+    /// nothing listing or registering again. F-nosweep (the sweeper skips the
+    /// removal) leaves the entry there and reddens the row.
+    #[tokio::test]
+    async fn an_ended_entry_is_removed_at_its_retention_without_a_reader() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (runtime, component) = retention_runtime(&temp_dir).await;
+        let (held, id) = retained_activation(&runtime, component, "retained").await;
+        held.end_instance(CAPSULE_FAILED, "test end").await;
+        let ended_at = recorded_end(&runtime, &id).await;
+        assert_swept(
+            swept_at(&runtime, &id).await,
+            ended_at,
+            "live start runtime",
+        );
+    }
+
+    /// A3-R S6 fix 4, row (a) through the fallback: the start runtime lives,
+    /// and the end runs on a throwaway current-thread runtime, the way `Drop`
+    /// hands a lost end to a thread, which closes when the end returns. The
+    /// sweeper belongs to neither runtime. F-nosweep reddens the row.
+    #[tokio::test]
+    async fn a_fallback_end_removes_its_entry_at_retention_without_a_registry_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (runtime, component) = retention_runtime(&temp_dir).await;
+        let (held, id) = retained_activation(&runtime, component, "fallback-retained").await;
+        std::thread::spawn(move || {
+            let end_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the fallback end");
+            end_runtime.block_on(held.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+        })
+        .join()
+        .expect("the fallback end runs");
+        let ended_at = recorded_end(&runtime, &id).await;
+        assert_swept(swept_at(&runtime, &id).await, ended_at, "fallback end");
+    }
+
+    /// A3-R S6 fix 4, row (b): the start runtime is dropped before the end.
+    /// The S3 lost-task shape: the runtime the activation started on goes
+    /// away, and the end then runs from a thread on a runtime of its own,
+    /// which closes when the end returns. The row waits on a third runtime.
+    /// F-nosweep reddens the row.
+    #[test]
+    fn a_lost_end_removes_its_entry_at_retention_without_a_registry_read() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the activation starts on");
+        let (runtime, held, id) = start.block_on(async {
+            let (runtime, component) = retention_runtime(&temp_dir).await;
+            let (held, id) = retained_activation(&runtime, component, "lost-retained").await;
+            (runtime, held, id)
+        });
+        drop(start);
+        std::thread::spawn(move || {
+            let end_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime for the lost end");
+            end_runtime.block_on(held.end_instance(CAPSULE_FAILED, CAUSE_TASK_LOST));
+        })
+        .join()
+        .expect("the lost end runs");
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the row reads on");
+        after.block_on(async {
+            let ended_at = recorded_end(&runtime, &id).await;
+            assert_swept(swept_at(&runtime, &id).await, ended_at, "lost end");
+        });
+    }
+
+    /// A3-R S6 fix 4, row (c), the round-4 sequence: the end runs on the
+    /// start runtime while it lives, and that runtime is dropped after the
+    /// end but before the entry's deadline. A removal that runtime ran would
+    /// be cancelled with it; the sweeper's is not. The row waits on another
+    /// runtime. F-nosweep reddens the row.
+    #[test]
+    fn an_end_whose_start_runtime_shuts_down_before_the_deadline_removes_its_entry() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the activation starts and ends on");
+        let (runtime, id, ended_at) = start.block_on(async {
+            let (runtime, component) = retention_runtime(&temp_dir).await;
+            let (held, id) = retained_activation(&runtime, component, "shutdown-retained").await;
+            held.end_instance(CAPSULE_FAILED, "test end").await;
+            let ended_at = recorded_end(&runtime, &id).await;
+            (runtime, id, ended_at)
+        });
+        drop(start);
+        assert!(
+            std::time::Instant::now() < ended_at + ROW_RETENTION,
+            "the start runtime is gone before the entry's deadline"
+        );
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("the runtime the row reads on");
+        after.block_on(async {
+            assert_swept(
+                swept_at(&runtime, &id).await,
+                ended_at,
+                "start runtime shut down after the end",
+            );
+        });
+    }
+
     pub(crate) async fn test_runtime() -> (Runtime, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
@@ -1993,13 +3589,8 @@ pub(crate) mod tests {
         )
     }
 
-    /// The file is replaced right after the Runtime's one read of it (a test
-    /// hook runs at that point). The capsule is signed and the Home enforces
-    /// signatures, so the signature check, the import check and the compiler
-    /// all take part: any of them reading the file again meets the
-    /// replacement, and the launch fails.
-    #[tokio::test]
-    async fn a_component_file_replaced_after_it_was_read_runs_the_bytes_that_were_checked() {
+    /// A Runtime with a component provider, for the folder gate's rows.
+    async fn component_runtime() -> (Runtime, tempfile::TempDir) {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(
             LocalFSProvider::new(temp_dir.path().to_path_buf())
@@ -2011,6 +3602,38 @@ pub(crate) mod tests {
             Vec::new(),
             Some(Arc::new(ComponentProvider::new())),
         );
+        (runtime, temp_dir)
+    }
+
+    /// Write one signed component folder at `dir`: the manifest, the
+    /// entrypoint named by it, and the signature over both.
+    fn signed_component_folder(
+        dir: &Path,
+        name: &str,
+        key: &elastos_runtime::signature::SigningKey,
+    ) -> Vec<u8> {
+        std::fs::create_dir_all(dir).unwrap();
+        let component = quiet_component();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json(name)).unwrap();
+        elastos_runtime::signature::sign_capsule(key, &mut manifest, &hash_content(&component))
+            .unwrap();
+        std::fs::write(
+            dir.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("app.component.wasm"), &component).unwrap();
+        component
+    }
+
+    /// A component folder outside dev mode is walked once by the folder gate,
+    /// and the bytes that walk read are the bytes that run. The test changes
+    /// the entrypoint right after the walk: a second read would meet the new
+    /// bytes, and the entrypoint-read hook would record that read.
+    #[tokio::test]
+    async fn a_component_folder_start_loads_the_bytes_its_gate_walk_read() {
+        let (runtime, temp_dir) = component_runtime().await;
         let key = elastos_runtime::signature::SigningKey::from_bytes(&[71; 32]);
         runtime
             .configure_capsule_admission(
@@ -2021,27 +3644,14 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let capsule_dir = temp_dir.path().join("capsule");
-        std::fs::create_dir_all(&capsule_dir).unwrap();
-        let component = quiet_component();
-        let mut manifest: CapsuleManifest =
-            serde_json::from_str(&component_manifest_json("replaced-component")).unwrap();
-        elastos_runtime::signature::sign_capsule(&key, &mut manifest, &hash_content(&component))
-            .unwrap();
-        std::fs::write(
-            capsule_dir.join("capsule.json"),
-            serde_json::to_string(&manifest).unwrap(),
-        )
-        .unwrap();
-        let entrypoint = capsule_dir.join("app.component.wasm");
-        std::fs::write(&entrypoint, &component).unwrap();
+        signed_component_folder(&capsule_dir, "walked-bytes", &key);
+        crate::setup::record_install_cid(temp_dir.path(), &capsule_dir, &capsule_dir);
 
-        let replacement: &[u8] = b"replaced after the check";
         let reads = Arc::new(AtomicUsize::new(0));
         let counted = reads.clone();
         crate::component::AFTER_ENTRYPOINT_READ.with(|hook| {
-            *hook.borrow_mut() = Some(Box::new(move |path| {
+            *hook.borrow_mut() = Some(Box::new(move |_path| {
                 counted.fetch_add(1, Ordering::SeqCst);
-                std::fs::write(path, replacement).unwrap();
             }));
         });
         // The hook is taken away again however this test ends.
@@ -2052,19 +3662,312 @@ pub(crate) mod tests {
             }
         }
         let _reset = ResetHook;
+
+        let entrypoint = capsule_dir.join("app.component.wasm");
+        let walked = Arc::new(AtomicUsize::new(0));
+        let seen = walked.clone();
         let launched = runtime
-            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .run_local_with_signer_observed(
+                &capsule_dir,
+                Vec::new(),
+                |_| {},
+                move |_bundle| {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    std::fs::write(&entrypoint, b"changed after the gate walk").unwrap();
+                },
+            )
             .await;
 
+        assert_eq!(walked.load(Ordering::SeqCst), 1, "one gate walk");
         assert_eq!(
             reads.load(Ordering::SeqCst),
-            1,
-            "one read of the entrypoint"
+            0,
+            "the gate walk is the only read of the entrypoint"
         );
-        assert_eq!(std::fs::read(&entrypoint).unwrap(), replacement);
-        let (_, signer) = launched.expect("the bytes that were checked are the bytes that run");
+        assert_eq!(
+            std::fs::read(capsule_dir.join("app.component.wasm")).unwrap(),
+            b"changed after the gate walk"
+        );
+        let (_, signer) = launched.expect("the walked bytes are the bytes that run");
         let did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
         assert_eq!(signer, Signer::Key { did });
+    }
+
+    /// The manifest the gate judges is the one the gate's walk read, not the
+    /// one the caller read before the walk. The test replaces `capsule.json`
+    /// right before the walk, as another process could, with a manifest of the
+    /// same key and entrypoint under another name: the refusal names the name
+    /// that walk read.
+    #[tokio::test]
+    async fn the_manifest_the_gate_checks_is_the_walked_one() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[78; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("two-manifests");
+        let component = signed_component_folder(&capsule_dir, "probe-manifest", &key);
+        let mut walked_manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("walked-manifest")).unwrap();
+        elastos_runtime::signature::sign_capsule(
+            &key,
+            &mut walked_manifest,
+            &elastos_runtime::signature::hash_content(&component),
+        )
+        .unwrap();
+        let walked_json = serde_json::to_vec(&walked_manifest).unwrap();
+        let manifest_path = capsule_dir.join("capsule.json");
+
+        let launched = runtime
+            .run_local_with_signer_observed(
+                &capsule_dir,
+                Vec::new(),
+                move |_path| {
+                    std::fs::write(&manifest_path, &walked_json).unwrap();
+                },
+                |_| {},
+            )
+            .await;
+        let error = launched
+            .expect_err("a folder no install recorded is refused")
+            .to_string();
+        assert!(error.contains("is not installed"), "{error}");
+        assert!(error.contains("'walked-manifest'"), "{error}");
+        assert!(!error.contains("'probe-manifest'"), "{error}");
+        assert!(runtime.list_capsules().await.is_empty(), "nothing started");
+    }
+
+    /// An installed folder starts from both entrances: the CLI's bounded
+    /// start and the launch route's detached start.
+    #[tokio::test]
+    async fn an_installed_folder_starts_from_the_cli_and_the_route() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[72; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("installed");
+        signed_component_folder(&capsule_dir, "installed-folder", &key);
+        crate::setup::record_install_cid(temp_dir.path(), &capsule_dir, &capsule_dir);
+        let did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
+
+        let (handle, signer) = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .expect("the CLI starts an installed folder");
+        assert_eq!(signer, Signer::Key { did: did.clone() });
+        assert_eq!(handle.manifest.name, "installed-folder");
+
+        let (_handle, signer) = runtime
+            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .expect("the route starts an installed folder");
+        assert_eq!(signer, Signer::Key { did });
+    }
+
+    /// A folder signed by a trusted key that no install recorded and no
+    /// by-CID slot accepted is refused on a Home outside dev mode, with the
+    /// reason that names its walk CID.
+    #[tokio::test]
+    async fn a_signed_folder_with_no_record_is_refused_on_a_non_dev_home() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[73; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("unrecorded");
+        signed_component_folder(&capsule_dir, "unrecorded-folder", &key);
+        let cid = crate::stage_cmd::bundle_cid(&capsule_dir).unwrap();
+
+        let error = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .expect_err("a folder no install recorded is refused");
+        let text = error.to_string();
+        assert!(text.contains("is not installed"), "{text}");
+        assert!(text.contains(&cid), "{text}");
+        assert!(runtime.list_capsules().await.is_empty(), "nothing started");
+    }
+
+    /// The same signed folder with no record starts in dev mode.
+    #[tokio::test]
+    async fn a_signed_folder_with_no_record_starts_in_dev_mode() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[74; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                true,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("dev-folder");
+        signed_component_folder(&capsule_dir, "dev-folder", &key);
+
+        let (_, signer) = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .expect("dev mode starts a signed folder with no record");
+        let did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
+        assert_eq!(signer, Signer::Key { did });
+    }
+
+    /// A folder whose bytes changed after its install does not recompute to
+    /// the recorded CID, so the gate refuses it.
+    #[tokio::test]
+    async fn a_folder_changed_after_its_install_is_refused() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[75; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("changed");
+        signed_component_folder(&capsule_dir, "changed-folder", &key);
+        crate::setup::record_install_cid(temp_dir.path(), &capsule_dir, &capsule_dir);
+        // A file the manifest does not name and the signature does not cover:
+        // the walk names different bytes, and the signature still passes.
+        std::fs::write(capsule_dir.join("added-after-install.txt"), b"later").unwrap();
+
+        let error = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .expect_err("a folder changed after its install is refused");
+        assert!(error.to_string().contains("is not installed"), "{error}");
+        assert!(runtime.list_capsules().await.is_empty(), "nothing started");
+    }
+
+    /// A folder with a file beside it that holds its own walk CID is still not
+    /// installed: the gate reads this Home's install record, which no install
+    /// wrote here, so both entries refuse it.
+    #[tokio::test]
+    async fn a_sidecar_beside_the_folder_does_not_record_an_install() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[79; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("sidecar-only");
+        signed_component_folder(&capsule_dir, "sidecar-only", &key);
+        let cid = crate::stage_cmd::bundle_cid(&capsule_dir).unwrap();
+        // The file slice 4's install also writes, filled in here without one.
+        std::fs::write(
+            crate::setup::install_cid_record(&capsule_dir).unwrap(),
+            format!("{cid}\n"),
+        )
+        .unwrap();
+
+        let cli = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .map(|_| ())
+            .expect_err("the CLI refuses a folder no install recorded")
+            .to_string();
+        let route = runtime
+            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .map(|_| ())
+            .expect_err("the route refuses a folder no install recorded")
+            .to_string();
+        assert!(cli.contains("is not installed"), "{cli}");
+        assert!(cli.contains(&cid), "{cli}");
+        assert_eq!(cli, route);
+        assert!(runtime.list_capsules().await.is_empty(), "nothing started");
+    }
+
+    /// A by-CID slot staged from a signed bundle accepts the folder it was
+    /// staged from, without an install record.
+    #[tokio::test]
+    async fn a_staged_folder_start_is_accepted_by_its_by_cid_slot() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[76; 32]);
+        runtime
+            .configure_capsule_admission(
+                &data_dir,
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("staged");
+        signed_component_folder(&capsule_dir, "staged-folder", &key);
+        let cid = crate::stage_cmd::bundle_cid(&capsule_dir).unwrap();
+        let signature = temp_dir.path().join("staged.sig.json");
+        std::fs::write(
+            &signature,
+            crate::bundle_admission::tests::signed(&cid, &key),
+        )
+        .unwrap();
+        crate::stage_cmd::stage_bundle(&runtime, &data_dir, &capsule_dir, &signature)
+            .await
+            .expect("the signed bundle stages");
+
+        let (_, signer) = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .expect("the staged CID accepts the folder it came from");
+        let did = elastos_identity::encode_did_key(&key.verifying_key()).unwrap();
+        assert_eq!(signer, Signer::Key { did });
+    }
+
+    /// The CLI's bounded start and the route's detached start give the same
+    /// answer for a folder the gate does not accept.
+    #[tokio::test]
+    async fn the_cli_and_the_route_refuse_an_unrecorded_folder_alike() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[77; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp_dir.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                false,
+            )
+            .await
+            .unwrap();
+        let capsule_dir = temp_dir.path().join("same-answer");
+        signed_component_folder(&capsule_dir, "same-answer", &key);
+
+        let cli = runtime
+            .run_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .map(|_| ())
+            .expect_err("the CLI refuses it")
+            .to_string();
+        let route = runtime
+            .start_local_with_signer(&capsule_dir, Vec::new(), None)
+            .await
+            .map(|_| ())
+            .expect_err("the route refuses it")
+            .to_string();
+        assert_eq!(cli, route);
+        assert!(cli.contains("is not installed"), "{cli}");
     }
 
     /// A component file one byte over the cap is refused at launch, before the
@@ -2739,6 +4642,460 @@ pub(crate) mod tests {
         assert_eq!(provider.requests.lock().await.len(), 1, "nothing more");
     }
 
+    /// A6-R. Two admitted agents run two component instances with distinct
+    /// principals and sessions. A's token is minted for A's session and filed
+    /// for A; B's own pending request is settled with a leaked copy. B's guest
+    /// presents it and the real
+    /// bridge refuses it at `validate`'s caller step with `capability_denied`
+    /// before the provider is reached; the audit names B as the caller of the
+    /// failed use and `wrong_capsule` as the reason. A's own invoke is the
+    /// control: the provider is called exactly once, for A.
+    #[tokio::test]
+    async fn sibling_token_refused() {
+        if !crate::agents::build_allows() {
+            return;
+        }
+        use crate::bundle_admission::tests::key;
+        use crate::stage_cmd::bundle_cid;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let publisher = key(107);
+        let trusted = [hex::encode(publisher.verifying_key().to_bytes())];
+        let component = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"),
+        )
+        .unwrap();
+        let probe = "elastos://test/bus/probe";
+        let folder = temp_dir.path().join("agent-host");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("agent-host")).unwrap();
+        manifest.asks = serde_json::from_value(serde_json::json!([
+            {"resource": probe, "actions": ["read"]}
+        ]))
+        .unwrap();
+        manifest.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
+        elastos_runtime::signature::sign_capsule(
+            &publisher,
+            &mut manifest,
+            &hash_content(&component),
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(folder.join("app.component.wasm"), &component).unwrap();
+        let cid = bundle_cid(&folder).unwrap();
+        let (home, agents) = crate::agents::tests::home_with_agents_if_built(2, &cid)
+            .expect("A6-R agent row requires prototype agents");
+        let data_dir = home.path().to_path_buf();
+        assert_ne!(agents[0], agents[1], "two distinct A5 agent principals");
+        for agent in &agents {
+            assert!(
+                agent.starts_with("agent:v2:"),
+                "A5 agent principal: {agent}"
+            );
+            let root =
+                crate::auth::principal_stored_localhost_root(Some(&data_dir), agent).unwrap();
+            assert!(root.starts_with("localhost://UsersAI/"), "{root}");
+        }
+        runtime
+            .configure_capsule_admission(&data_dir, &trusted, false)
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store = Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
+        );
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(BusConformanceProvider::default());
+        registry.register(provider.clone()).await;
+        runtime
+            .set_provider_registry(
+                registry.clone(),
+                capability_manager.clone(),
+                pending_store.clone(),
+                data_dir.clone(),
+            )
+            .await;
+
+        let start = |agent: &str| {
+            let admission = crate::agent_admission::admit_launch(
+                &data_dir,
+                &data_dir,
+                Some(home.owner.principal_id.as_str()),
+                Some(agent),
+                crate::agent_admission::walk_launch(&folder).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(admission.actor(), agent);
+            let (runtime, folder) = (runtime.clone(), folder.clone());
+            tokio::spawn(async move {
+                runtime
+                    .run_local_admitted(&folder, Vec::new(), admission)
+                    .await
+                    .map(|(handle, _)| handle)
+            })
+        };
+
+        let launch_a = start(&agents[0]);
+        let a_pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(held) = pending_store.list_pending().await.into_iter().next() {
+                    break held;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("A asks for its grant");
+        let launch_b = start(&agents[1]);
+
+        // Two instances, two sessions: the one probe is asked for twice.
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let held = pending_store.list_pending().await;
+                if held.len() == 2 {
+                    break held;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both instances ask the shell for the probe");
+        let b_pending = pending
+            .into_iter()
+            .find(|request| request.id != a_pending.id)
+            .expect("B has its own request");
+        let a_session = a_pending.session_id.as_str().to_string();
+        let b_session = b_pending.session_id.as_str().to_string();
+        assert_ne!(a_session, b_session, "two instances are two sessions");
+
+        // A's token, minted for A's session. Filed for A, and also handed to
+        // B's own pending request: a leaked sibling token.
+        let a_token = capability_manager.grant(
+            &a_session,
+            a_pending.resource.clone(),
+            a_pending.action,
+            TokenConstraints::default(),
+            None,
+        );
+        for request in [&a_pending, &b_pending] {
+            pending_store
+                .grant_request(request.id.as_str(), a_token.clone(), GrantDuration::Session)
+                .await
+                .unwrap();
+        }
+
+        let (left, right) = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            tokio::join!(launch_a, launch_b)
+        })
+        .await
+        .expect("both activations end");
+        let (left, right) = (
+            left.expect("the first launch task does not panic"),
+            right.expect("the second launch task does not panic"),
+        );
+        let calls = provider.requests.lock().await.clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the provider is called once, for A; B's call never reaches it"
+        );
+        assert_eq!(
+            calls[0]["probe"], "bus-v1-conformance",
+            "A's probe is the one provider call"
+        );
+        let (ran, refused) = match (left, right) {
+            (Ok(handle), Err(refusal)) | (Err(refusal), Ok(handle)) => (handle, refusal),
+            _ => panic!("exactly one instance uses its own grant and completes"),
+        };
+        assert_eq!(ran.id.0, a_session, "A's own token runs A's own instance");
+        assert!(
+            refused.to_string().contains("BusError::Denied"),
+            "B's component receives the bridge denial: {refused}"
+        );
+        assert!(
+            refused.to_string().contains("Capability validation failed"),
+            "B's invoke is refused by the capability check: {refused}"
+        );
+
+        // The bridge persists the principal and session of the component
+        // invocation, independently of the capability-use audit below.
+        let completed: Vec<_> = crate::auth::load_auth_state(&data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type == "component.invoke.completed")
+            .collect();
+        assert_eq!(
+            completed.len(),
+            2,
+            "one completed invoke per agent: {completed:?}"
+        );
+        for (principal, session, result) in [
+            (&agents[0], &a_session, "ok"),
+            (&agents[1], &b_session, "denied"),
+        ] {
+            assert!(
+                completed.iter().any(|event| {
+                    event.principal_id.as_deref() == Some(principal.as_str())
+                        && event.session_id.as_deref() == Some(session.as_str())
+                        && event.result == result
+                }),
+                "{principal} must own its {result} persisted invoke event: {completed:?}"
+            );
+        }
+
+        let events = audit_log.recent_events(2_000);
+        let token_id = a_token.id().to_string();
+        let uses: Vec<(String, bool)> = events
+            .iter()
+            .filter_map(|event| match event {
+                AuditEvent::CapabilityUse {
+                    token_id: used,
+                    capsule_id,
+                    success,
+                    ..
+                } if used == &token_id => Some((capsule_id.clone(), *success)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            uses.contains(&(a_session.clone(), true)),
+            "A's use of its own token is audited with A as the caller: {uses:?}"
+        );
+        assert!(
+            uses.contains(&(b_session.clone(), false)),
+            "B's use of A's token is audited with B as the caller: {uses:?}"
+        );
+        assert_eq!(uses.len(), 2, "one use each: {uses:?}");
+
+        let warnings: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AuditEvent::SecurityWarning {
+                    warning_type,
+                    details,
+                    ..
+                } if warning_type == "capability_validation_failed" => Some(details.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one failed validation: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("wrong_capsule"),
+            "the audit records wrong_capsule as the reason: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains(&b_session),
+            "the same record names B as the caller: {}",
+            warnings[0]
+        );
+
+        // The guest's BusError maps the wire code to Denied. Inspect the same
+        // bridge entry with B's leaked token to pin its exact wire code.
+        let context = crate::resource_bridge::BridgeContext {
+            provider_registry: registry,
+            capability_manager: capability_manager.clone(),
+            pending_store: pending_store.clone(),
+            capsule_id: b_session.clone(),
+            principal_id: Some(agents[1].clone()),
+            manifest_capabilities: manifest.resource_authority_bounds(),
+            data_dir: Some(data_dir.clone()),
+            launch: None,
+            model_token_ceiling: None,
+            stop: None,
+        };
+        let line = serde_json::json!({
+            "id": 99,
+            "request": {
+                "type": "resource_invoke", "uri": probe, "operation": "read",
+                "token": a_token.to_base64().unwrap(),
+                "body": {"probe": "bus-v1-conformance"}
+            }
+        })
+        .to_string();
+        let denied = crate::resource_bridge::handle_component_resource_request(&line, context)
+            .await
+            .unwrap();
+        assert_eq!(denied["response"]["code"], "capability_denied", "{denied}");
+        assert_eq!(
+            provider.requests.lock().await.len(),
+            1,
+            "only A reached the provider"
+        );
+    }
+
+    /// B2-undeclared. The signed asks are the whole ceiling. A request for a
+    /// resource the asks never named is refused by the real bridge in the
+    /// sentence that names the action and the resource, though the capsule is
+    /// loaded unsealed because it has asks: no prompt is made and the
+    /// provider is not reached. The control is the same component under an
+    /// ask on the resource it requests: it reaches the shell, and granted
+    /// there it reads once and ends well.
+    #[tokio::test]
+    async fn a_request_for_a_resource_the_signed_manifest_never_asked_for_is_refused() {
+        use crate::bundle_admission::tests::{key, signed};
+        use crate::stage_cmd::{bundle_cid, stage_bundle};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        let storage = Arc::new(
+            LocalFSProvider::new(temp_dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let publisher = key(103);
+        let trusted = [hex::encode(publisher.verifying_key().to_bytes())];
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &trusted, false)
+            .await
+            .unwrap();
+        let audit_log = Arc::new(AuditLog::new());
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending_store = Arc::new(
+            elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
+        );
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(BusConformanceProvider::default());
+        registry.register(provider.clone()).await;
+        runtime
+            .set_provider_registry(
+                registry,
+                capability_manager.clone(),
+                pending_store.clone(),
+                temp_dir.path().join("runtime-data"),
+            )
+            .await;
+
+        let component = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/bus-v1/bus-v1-conformance.component.wasm"),
+        )
+        .unwrap();
+        let probe = "elastos://test/bus/probe";
+        let elsewhere = "elastos://test/bus/elsewhere";
+        // Stage a bundle named `name` whose asks declare `actions` on `resource`.
+        let staged = |name: &'static str,
+                      resource: &'static str,
+                      actions: &'static [&'static str]| {
+            let (runtime, data_dir, component) = (runtime.clone(), data_dir.clone(), &component);
+            let folder = temp_dir.path().join("source").join(name);
+            let signature = temp_dir.path().join(format!("{name}.sig.json"));
+            let publisher = &publisher;
+            async move {
+                let mut manifest: serde_json::Value =
+                    serde_json::from_str(&component_manifest_json(name)).unwrap();
+                manifest["asks"] = serde_json::json!([{"resource": resource, "actions": actions}]);
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("capsule.json"), manifest.to_string()).unwrap();
+                std::fs::write(folder.join("app.component.wasm"), component).unwrap();
+                let cid = bundle_cid(&folder).unwrap();
+                std::fs::write(&signature, signed(&cid, publisher)).unwrap();
+                stage_bundle(&runtime, &data_dir, &folder, &signature)
+                    .await
+                    .unwrap();
+                cid
+            }
+        };
+        let start = |cid: String| {
+            let (runtime, data_dir) = (runtime.clone(), data_dir.clone());
+            tokio::spawn(async move {
+                let person = Some("person:local:bus-conformance".to_string());
+                let ran = runtime.run_by_bundle(&data_dir, &cid, Vec::new(), person);
+                ran.await.map(|(handle, _)| handle.manifest.name)
+            })
+        };
+
+        // The control: the ask names the resource the component requests.
+        let launch = start(staged("asks-probe", probe, &["read"]).await);
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = pending_store.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a request inside the asks reaches the shell");
+        assert_eq!(pending.resource.as_str(), probe);
+        assert_eq!(pending.action, elastos_runtime::capability::Action::Read);
+        let token = capability_manager.grant(
+            pending.session_id.as_str(),
+            pending.resource.clone(),
+            pending.action,
+            TokenConstraints::default(),
+            None,
+        );
+        pending_store
+            .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+            .await
+            .unwrap();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(5), launch)
+            .await
+            .expect("the run ends after the grant")
+            .expect("the launch task does not panic");
+        assert_eq!(ended.unwrap(), "asks-probe");
+
+        // Beyond the asks: the resource is not one the signed manifest asked
+        // for, though the same ask would admit it with one word changed.
+        let refused = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            start(staged("asks-elsewhere", elsewhere, &["read"]).await),
+        )
+        .await
+        .expect("a refused run ends at once")
+        .expect("the launch task does not panic")
+        .expect_err("the request for the probe is refused");
+        assert_eq!(refused.code(), "bundle_start_failed");
+        let sentence = format!("capsule manifest does not declare authority to read {probe}");
+        assert!(refused.to_string().contains(&sentence), "{refused}");
+        assert!(
+            pending_store.list_pending().await.is_empty(),
+            "no prompt was made"
+        );
+        assert_eq!(
+            provider.requests.lock().await.len(),
+            1,
+            "the provider saw only the granted read"
+        );
+    }
+
     #[tokio::test]
     async fn component_conformance_exercises_bus_authorization_dispatch_and_audit() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2925,5 +5282,205 @@ pub(crate) mod tests {
             component_provider.status(&handle).await,
             Err(ElastosError::CapsuleNotFound(_))
         ));
+    }
+
+    /// A3-R S4+S5 fix 4. The first stop's reason is the cause the end
+    /// records; a later stop raises the same flag and changes nothing else.
+    #[test]
+    fn a_later_stop_keeps_the_first_cause() {
+        let stop = ActivationStop {
+            flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
+            cause: StdMutex::new(None),
+        };
+        assert_eq!(stop.cause(), None);
+        stop.request("first");
+        assert!(stop.flag.requested.load(Ordering::Acquire));
+        stop.request("second");
+        assert_eq!(stop.cause().as_deref(), Some("stopped: first"));
+        assert!(stop.flag.requested.load(Ordering::Acquire));
+    }
+
+    /// A3-R S4+S5 fix 1. A stop given to the provider while the component is
+    /// still loading takes it away, and the start that follows fails as the
+    /// stop's doing. A start interrupted by the stop is the stop's doing too;
+    /// a start that ends on its own fuel is the guest's failure.
+    #[tokio::test]
+    async fn a_start_the_stop_took_away_is_the_stops_doing() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("app.component.wasm"), quiet_component()).unwrap();
+        let manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("taken-away")).unwrap();
+        let component = ComponentProvider::new();
+        let handle = component.load(temp.path(), manifest).await.unwrap();
+        component.stop(&handle).await.unwrap();
+        let err = match component.start_resident(&handle).await {
+            Ok(_) => panic!("a component the stop took away started"),
+            Err(err) => err,
+        };
+        assert!(start_ended_by_stop(&err), "{err}");
+        assert!(start_ended_by_stop(&ElastosError::Compute(
+            STOPPED_BEFORE_RUN.to_string()
+        )));
+        let own = "Failed to instantiate component capsule: all fuel consumed by WebAssembly";
+        assert!(!start_ended_by_stop(&ElastosError::Compute(
+            own.to_string()
+        )));
+    }
+
+    /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
+    /// task, and the runtime shuts down before it runs that task, as a
+    /// runtime does with the tasks it has not run. The end still happens
+    /// once: the entry ends `failed` with the lost-task cause, the session's
+    /// pending request is denied and its grant revoked, and one
+    /// `capsule_stop` is audited.
+    #[test]
+    fn a_lost_end_task_still_ends_the_activation_once() {
+        use elastos_runtime::capability::manager::ValidationError;
+        use elastos_runtime::capability::{Action, RequestStatus, ResourceId};
+        use elastos_runtime::primitives::audit::StopReason;
+        use elastos_runtime::session::SessionId;
+
+        const ID: &str = "lost-end";
+        let resource = ResourceId::new("elastos://content/publish");
+        let shutting_down = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (runtime, audit_log, pending_store, manager, pending, token, _temp) = shutting_down
+            .block_on(async {
+                let temp = tempfile::tempdir().unwrap();
+                let storage = LocalFSProvider::new(temp.path().join("storage"))
+                    .await
+                    .unwrap();
+                let component = Arc::new(ComponentProvider::new());
+                let runtime = Runtime::with_providers_and_component(
+                    Arc::new(storage),
+                    Vec::new(),
+                    Some(component.clone()),
+                );
+                let audit_log = Arc::new(AuditLog::new());
+                let manager = Arc::new(CapabilityManager::new(
+                    Arc::new(CapabilityStore::new()),
+                    audit_log.clone(),
+                    Arc::new(MetricsManager::new()),
+                ));
+                let pending_store = Arc::new(
+                    elastos_runtime::capability::pending::PendingRequestStore::new(
+                        audit_log.clone(),
+                    ),
+                );
+                let data_dir = temp.path().join("data");
+                std::fs::create_dir_all(&data_dir).unwrap();
+                runtime
+                    .set_provider_registry(
+                        Arc::new(ProviderRegistry::new()),
+                        manager.clone(),
+                        pending_store.clone(),
+                        data_dir,
+                    )
+                    .await;
+
+                let handle = CapsuleHandle {
+                    id: CapsuleId::new(ID),
+                    manifest: serde_json::from_str(&component_manifest_json(ID)).unwrap(),
+                    args: Vec::new(),
+                };
+                runtime
+                    .register_capsule(RunningCapsuleInfo {
+                        id: ID.to_string(),
+                        name: ID.to_string(),
+                        status: CAPSULE_RUNNING.to_string(),
+                        capsule_type: CapsuleType::Wasm,
+                        handle: Some(handle.clone()),
+                        session_id: ID.to_string(),
+                        principal: None,
+                        cause: None,
+                        ended_at: None,
+                    })
+                    .await;
+                let session = || SessionId::from_string(ID);
+                let pending = pending_store
+                    .create_request(session(), resource.clone(), Action::Read)
+                    .await
+                    .id
+                    .to_string();
+                let granted = pending_store
+                    .create_request(session(), resource.clone(), Action::Write)
+                    .await
+                    .id
+                    .to_string();
+                let constraints = TokenConstraints::default();
+                let token = manager.grant(ID, resource.clone(), Action::Write, constraints, None);
+                pending_store
+                    .grant_request(&granted, token.clone(), GrantDuration::Session)
+                    .await
+                    .unwrap();
+
+                drop(ActivationContextHeld::new(&runtime, &handle, component));
+                (
+                    runtime,
+                    audit_log,
+                    pending_store,
+                    manager,
+                    pending,
+                    token,
+                    temp,
+                )
+            });
+        let entry = runtime.running_capsules.try_read().unwrap()[ID].clone();
+        assert!(entry.ended_at.is_none(), "the end's task has not run");
+        drop(shutting_down);
+
+        let after = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        after.block_on(async {
+            let entry = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(entry) = runtime.get_capsule(ID).await {
+                        if entry.ended_at.is_some() {
+                            break entry;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the end still runs after its task was dropped");
+            assert_eq!(entry.status, CAPSULE_FAILED);
+            assert_eq!(entry.cause.as_deref(), Some(CAUSE_TASK_LOST));
+
+            let RequestStatus::Denied { reason, settled_by } =
+                pending_store.get_request(&pending).await.unwrap().status
+            else {
+                panic!("the pending request is not settled");
+            };
+            assert_eq!(reason, format!("instance ended: {CAUSE_TASK_LOST}"));
+            assert_eq!(settled_by, Settler::Runtime);
+            assert_eq!(
+                manager
+                    .validate(&token, ID, Action::Write, &resource, None)
+                    .await,
+                Err(ValidationError::TokenRevoked)
+            );
+
+            // Exactly once, also after the end had time to run again.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            let stops: Vec<_> = audit_log
+                .recent_events(usize::MAX)
+                .into_iter()
+                .filter_map(|event| match event {
+                    AuditEvent::CapsuleStop {
+                        capsule_id, reason, ..
+                    } if capsule_id == ID => Some(reason),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                matches!(stops.as_slice(), [StopReason::Error(cause)] if cause == CAUSE_TASK_LOST),
+                "{stops:?}"
+            );
+        });
     }
 }

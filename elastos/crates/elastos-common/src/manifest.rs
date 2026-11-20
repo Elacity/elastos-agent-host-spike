@@ -48,8 +48,8 @@ pub struct CapsuleManifest {
 
     /// SHA-256 of the WIT world this capsule was built against.
     ///
-    /// For `elastos.component/v1`, this must match the checked-in
-    /// `elastos/wit/elastos-bus-v1.wit` contract.
+    /// For `elastos.component/v1`, this must match the checked-in WIT for
+    /// the declared Bus contract.
     #[serde(default)]
     pub wit_world_sha256: Option<String>,
 
@@ -424,12 +424,19 @@ pub enum AffordanceAuditMode {
 pub const SCHEMA_V1: &str = "elastos.capsule/v1";
 pub const ELASTOS_BUS_V1_CONTRACT: &str = "elastos:bus@v1";
 pub const ELASTOS_BUS_V1_WORLD: &str = "product-capsule-v1";
+pub const ELASTOS_BUS_V2_CONTRACT: &str = "elastos:bus@2.0.0";
+pub const ELASTOS_BUS_V2_WORLD: &str = "product-capsule-v2";
 pub const ELASTOS_RUNTIME_PROJECTION_V1_CONTRACT: &str = "elastos.runtime-projection/v1";
 
 const ELASTOS_BUS_V1_WIT: &[u8] = include_bytes!("../../../wit/elastos-bus-v1.wit");
+const ELASTOS_BUS_V2_WIT: &[u8] = include_bytes!("../../../wit-bus-v2/elastos-bus-v2.wit");
 
 pub fn elastos_bus_v1_wit_sha256() -> String {
     hex::encode(Sha256::digest(ELASTOS_BUS_V1_WIT))
+}
+
+pub fn elastos_bus_v2_wit_sha256() -> String {
+    hex::encode(Sha256::digest(ELASTOS_BUS_V2_WIT))
 }
 
 impl CapsuleManifest {
@@ -711,6 +718,7 @@ impl CapsuleManifest {
 
         self.validate_interfaces()?;
         self.validate_asks()?;
+        self.resources.validate()?;
 
         for storage in &self.permissions.storage {
             if !is_allowed_uri_scheme(storage) {
@@ -785,6 +793,7 @@ impl CapsuleManifest {
         self.runtime_abi.as_ref() == Some(&CapsuleRuntimeAbi::ElastosComponentV1)
             || self.execution.as_ref() == Some(&CapsuleExecution::Component)
             || self.bus_contract.as_deref() == Some(ELASTOS_BUS_V1_CONTRACT)
+            || self.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT)
     }
 
     pub fn is_runtime_projection(&self) -> bool {
@@ -895,17 +904,24 @@ impl CapsuleManifest {
             if self.execution.as_ref() != Some(&CapsuleExecution::Component) {
                 return Err("component capsules must declare execution=\"component\"".to_string());
             }
-            if self.bus_contract.as_deref() != Some(ELASTOS_BUS_V1_CONTRACT) {
-                return Err(format!(
-                    "component capsules must declare bus_contract=\"{}\"",
-                    ELASTOS_BUS_V1_CONTRACT
-                ));
-            }
-            let expected_hash = elastos_bus_v1_wit_sha256();
+            let (expected_hash, world) = match self.bus_contract.as_deref() {
+                Some(ELASTOS_BUS_V1_CONTRACT) => {
+                    (elastos_bus_v1_wit_sha256(), ELASTOS_BUS_V1_WORLD)
+                }
+                Some(ELASTOS_BUS_V2_CONTRACT) => {
+                    (elastos_bus_v2_wit_sha256(), ELASTOS_BUS_V2_WORLD)
+                }
+                _ => {
+                    return Err(format!(
+                        "component capsules must declare bus_contract=\"{}\"",
+                        ELASTOS_BUS_V1_CONTRACT
+                    ));
+                }
+            };
             if self.wit_world_sha256.as_deref() != Some(expected_hash.as_str()) {
                 return Err(format!(
                     "component capsules must declare wit_world_sha256=\"{}\" for {}",
-                    expected_hash, ELASTOS_BUS_V1_WORLD
+                    expected_hash, world
                 ));
             }
         }
@@ -1206,8 +1222,9 @@ pub struct ProviderAuthority {
     /// Approved confinement rights (I-B3-5), in the declared-rights contract
     /// shape: an id, then the confinement rules that id grants.
     ///
-    /// Absent means no rights, and a Runtime refuses a confined start that has
-    /// none. This is a schema change: `deny_unknown_fields` makes an older
+    /// For a B3 provider, absence selects the confinement rights granted by
+    /// the Runtime table for its Runtime-owned provider id. This is a schema
+    /// change: `deny_unknown_fields` makes an older
     /// Runtime refuse a manifest that carries this field, which fails closed.
     #[serde(default)]
     pub rights: Vec<ProviderRight>,
@@ -1225,7 +1242,7 @@ pub struct ProviderRight {
 }
 
 /// The right ids the Runtime's confinement generator approves.
-const APPROVED_RIGHT_IDS: [&str; 2] = ["storage", "bound-executable"];
+pub const APPROVED_RIGHT_IDS: [&str; 2] = ["storage", "bound-executable"];
 
 impl ProviderAuthority {
     fn validate(&self) -> Result<(), String> {
@@ -1466,6 +1483,9 @@ impl CapsuleRole {
     }
 }
 
+/// The most model tokens a signed manifest may name. An absent ask is none.
+pub const MAX_MODEL_TOKENS: u64 = 1_000_000_000_000;
+
 /// Resource limits for a capsule
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceLimits {
@@ -1477,6 +1497,24 @@ pub struct ResourceLimits {
 
     #[serde(default)]
     pub gpu: bool,
+
+    /// Model-token ceiling. Absent asks for none, and the bytes are signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tokens: Option<u64>,
+}
+
+impl ResourceLimits {
+    /// The model-token ceiling this manifest asks for. Absent asks for none.
+    pub fn model_token_ceiling(&self) -> u64 {
+        self.model_tokens.unwrap_or(0)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.model_token_ceiling() > MAX_MODEL_TOKENS {
+            return Err(format!("model_tokens exceeds {MAX_MODEL_TOKENS}"));
+        }
+        Ok(())
+    }
 }
 
 impl Default for ResourceLimits {
@@ -1485,6 +1523,7 @@ impl Default for ResourceLimits {
             memory_mb: default_memory(),
             cpu_shares: default_cpu(),
             gpu: false,
+            model_tokens: None,
         }
     }
 }
@@ -1815,7 +1854,55 @@ mod tests {
         assert_eq!(manifest.name, "test-capsule");
         assert_eq!(manifest.capsule_type, CapsuleType::Wasm);
         assert_eq!(manifest.resources.memory_mb, 64);
+        assert_eq!(manifest.resources.model_token_ceiling(), 0);
         assert!(manifest.is_v1());
+    }
+
+    #[test]
+    fn model_tokens_absent_is_zero_and_out_of_range_is_refused() {
+        let mut value: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": "component-capsule",
+            "role": "app",
+            "type": "wasm",
+            "runtime_abi": "elastos.component/v1",
+            "bus_contract": "{}",
+            "wit_world_sha256": "{}",
+            "execution": "component",
+            "projections": ["cli"],
+            "entrypoint": "main.component.wasm"
+        }}"#,
+            ELASTOS_BUS_V1_CONTRACT,
+            elastos_bus_v1_wit_sha256()
+        ))
+        .unwrap();
+        let absent: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(absent.resources.model_token_ceiling(), 0);
+        assert!(serde_json::to_value(&absent).unwrap()["resources"]
+            .get("model_tokens")
+            .is_none());
+        absent.validate().unwrap();
+
+        value["resources"] = serde_json::json!({"model_tokens": 0});
+        let zero: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(zero.resources.model_tokens, Some(0));
+        assert_eq!(zero.resources.model_token_ceiling(), 0);
+        zero.validate().unwrap();
+
+        value["resources"]["model_tokens"] = serde_json::json!(MAX_MODEL_TOKENS);
+        serde_json::from_value::<CapsuleManifest>(value.clone())
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        value["resources"]["model_tokens"] = serde_json::json!(MAX_MODEL_TOKENS + 1);
+        let over = serde_json::from_value::<CapsuleManifest>(value.clone()).unwrap();
+        assert!(over.validate().unwrap_err().contains("model_tokens"));
+
+        value["resources"]["model_tokens"] = serde_json::json!(-1);
+        assert!(serde_json::from_value::<CapsuleManifest>(value).is_err());
     }
 
     #[test]
@@ -1937,6 +2024,60 @@ mod tests {
             manifest.wit_world_sha256.as_deref(),
             Some(elastos_bus_v1_wit_sha256().as_str())
         );
+    }
+
+    #[test]
+    fn v2_manifest_requires_the_v2_wit_hash() {
+        assert_eq!(
+            elastos_bus_v2_wit_sha256(),
+            "57984328b78a964d79d89e121a90bb6e1d775f9ec302a74fb27fb4695ee1c1a3"
+        );
+        let mut value = serde_json::json!({
+            "schema": SCHEMA_V1, "version": "0.1.0", "name": "v2-fixture",
+            "role": "app", "type": "wasm", "runtime_abi": "elastos.component/v1",
+            "execution": "component", "entrypoint": "main.component.wasm",
+            "bus_contract": ELASTOS_BUS_V2_CONTRACT,
+            "wit_world_sha256": elastos_bus_v2_wit_sha256()
+        });
+        assert_ne!(elastos_bus_v1_wit_sha256(), elastos_bus_v2_wit_sha256());
+        let manifest: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
+        assert!(manifest.is_component_capsule());
+        manifest.validate().unwrap();
+        let mut contract_only = manifest.clone();
+        contract_only.runtime_abi = None;
+        contract_only.execution = None;
+        assert!(contract_only.is_component_capsule());
+        assert_eq!(
+            contract_only.validate().unwrap_err(),
+            "component capsules must declare runtime_abi=\"elastos.component/v1\""
+        );
+
+        let mut missing_hash = manifest.clone();
+        missing_hash.wit_world_sha256 = None;
+        assert!(missing_hash
+            .validate()
+            .unwrap_err()
+            .contains(ELASTOS_BUS_V2_WORLD));
+
+        let mut unknown_contract = manifest.clone();
+        unknown_contract.bus_contract = Some("elastos:bus@unknown".into());
+        assert_eq!(
+            unknown_contract.validate().unwrap_err(),
+            "component capsules must declare bus_contract=\"elastos:bus@v1\""
+        );
+
+        value["wit_world_sha256"] = serde_json::json!(elastos_bus_v1_wit_sha256());
+        let wrong_hash: CapsuleManifest = serde_json::from_value(value.clone()).unwrap();
+        let error = wrong_hash.validate().unwrap_err();
+        assert!(error.contains(ELASTOS_BUS_V2_WORLD), "{error}");
+        assert!(error.contains(&elastos_bus_v2_wit_sha256()), "{error}");
+
+        value["bus_contract"] = serde_json::json!(ELASTOS_BUS_V1_CONTRACT);
+        value["wit_world_sha256"] = serde_json::json!(elastos_bus_v2_wit_sha256());
+        let wrong_contract: CapsuleManifest = serde_json::from_value(value).unwrap();
+        let error = wrong_contract.validate().unwrap_err();
+        assert!(error.contains(ELASTOS_BUS_V1_WORLD), "{error}");
+        assert!(error.contains(&elastos_bus_v1_wit_sha256()), "{error}");
     }
 
     #[test]

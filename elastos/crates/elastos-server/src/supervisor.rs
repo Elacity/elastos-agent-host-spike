@@ -964,6 +964,7 @@ impl Supervisor {
         archive.unpack(staged.path())?;
         std::fs::write(staged.path().join(CACHED_CID_FILE), format!("{}\n", cid))?;
         write_artifact_sha256_receipt(staged.path(), sha256)?;
+        crate::setup::record_install_cid(&self.data_dir, staged.path(), dest);
         let retired = parent.join(format!(".capsule-retired-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&retired);
         if dest.exists() {
@@ -1206,6 +1207,8 @@ impl Supervisor {
                     manifest_capabilities: manifest.resource_authority_bounds(),
                     data_dir: Some(self.data_dir.clone()),
                     launch: None,
+                    model_token_ceiling: None,
+                    stop: None,
                 }),
                 _ => None,
             };
@@ -2126,7 +2129,11 @@ mod tests {
         }
         let bytes = archive.into_inner().unwrap().finish().unwrap();
 
-        for mismatch in [true, false] {
+        for (mismatch, plant) in [
+            (true, None),
+            (false, Some(RecordPlant::Link)),
+            (false, Some(RecordPlant::Folder)),
+        ] {
             let temp = tempfile::tempdir().unwrap();
             let data = temp.path();
             let (server, serving, mut info) =
@@ -2157,6 +2164,9 @@ mod tests {
             std::fs::write(&registry_path, &registry_bytes).unwrap();
             let supervisor = Supervisor::new(data.to_path_buf(), manifest);
             let dest = data.join("capsules/chat-room");
+            if let Some(plant) = plant {
+                plant_at_record(data, &dest, plant);
+            }
 
             let result =
                 crate::setup::ensure_capsule_component_for_home_launch(data, "chat-room").await;
@@ -2190,6 +2200,8 @@ mod tests {
                         .trim(),
                     hex::encode(sha2::Sha256::digest(&bytes))
                 );
+                let files = ["browser/index.html", "capsule.json"];
+                assert_install_over(data, &dest, plant.unwrap(), &files);
                 // A second open uses the verified package even with Carrier stopped.
                 let ensure =
                     crate::setup::ensure_capsule_component_for_home_launch(data, "chat-room")
@@ -2199,6 +2211,149 @@ mod tests {
                 assert_eq!(supervisor.ensure_capsule("chat-room").await.unwrap(), dest);
             }
         }
+    }
+
+    /// `dir` holds exactly the archive's `files` and the two install receipts,
+    /// and the record beside it holds the CID a launch's walk of `dir` gives.
+    fn assert_install_cid_names(dir: &Path, files: &[&str]) -> String {
+        fn listed(dir: &Path, prefix: &str, found: &mut Vec<String>) {
+            for item in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+                let path = format!("{prefix}{}", item.file_name().to_str().unwrap());
+                if item.file_type().unwrap().is_dir() {
+                    listed(&item.path(), &format!("{path}/"), found);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        listed(dir, "", &mut found);
+        found.sort_unstable();
+        let mut expected = [CACHED_ARTIFACT_SHA_FILE, CACHED_CID_FILE].to_vec();
+        expected.extend_from_slice(files);
+        assert_eq!(
+            found, expected,
+            "the folder holds only what the install wrote"
+        );
+        let walked = crate::agent_admission::walk_launch(dir).unwrap().bundle_cid;
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        let recorded = std::fs::read_to_string(record).expect("the install wrote no record");
+        assert_eq!(recorded.trim(), walked);
+        walked
+    }
+
+    /// What a test puts at the install CID record path before an install.
+    #[derive(Clone, Copy)]
+    enum RecordPlant {
+        /// A link to a sentinel file outside `capsules/`.
+        Link,
+        /// A folder, which the rename of a record file cannot replace.
+        Folder,
+    }
+
+    fn plant_at_record(data: &Path, dir: &Path, plant: RecordPlant) {
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&record);
+        match plant {
+            RecordPlant::Link => {
+                std::fs::write(data.join("sentinel"), b"sentinel").unwrap();
+                std::os::unix::fs::symlink(data.join("sentinel"), &record).unwrap();
+            }
+            RecordPlant::Folder => std::fs::create_dir_all(record.join("kept")).unwrap(),
+        }
+    }
+
+    /// After an install over `plant`, only one entry with the record's name is
+    /// beside `dir`. A link kept its sentinel's bytes and is now a regular
+    /// record of the walk; a folder is unchanged, so the install has no record.
+    fn assert_install_over(data: &Path, dir: &Path, plant: RecordPlant, files: &[&str]) {
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        let name = record.file_name().unwrap().to_str().unwrap();
+        let beside: Vec<String> = std::fs::read_dir(record.parent().unwrap())
+            .unwrap()
+            .map(|item| item.unwrap().file_name().into_string().unwrap())
+            .filter(|item| item.starts_with(name))
+            .collect();
+        assert_eq!(beside, [name], "the install left a partial record");
+        let kind = std::fs::symlink_metadata(&record).unwrap().file_type();
+        match plant {
+            RecordPlant::Link => {
+                assert_eq!(
+                    std::fs::read(data.join("sentinel")).unwrap(),
+                    b"sentinel",
+                    "the record write followed the link"
+                );
+                assert!(kind.is_file(), "the record is not a regular file");
+                assert_install_cid_names(dir, files);
+            }
+            RecordPlant::Folder => {
+                assert!(kind.is_dir(), "the failed write replaced the folder");
+                let kept: Vec<_> = std::fs::read_dir(&record).unwrap().collect();
+                assert_eq!(kept.len(), 1, "the failed write changed the folder");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn capsule_install_records_its_walk_cid_and_a_reinstall_updates_it() {
+        let capsule = include_bytes!("../../../../capsules/chat-room/capsule.json");
+        let data = tempfile::tempdir().unwrap();
+        let cache = data.path().join("capsules/chat-room");
+        let mut recorded = Vec::new();
+        for (page, plant) in [
+            (&b"first"[..], None),
+            (&b"second"[..], None),
+            (&b"third"[..], Some(RecordPlant::Link)),
+            (&b"fourth"[..], Some(RecordPlant::Folder)),
+        ] {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for (path, bytes) in [("capsule.json", &capsule[..]), ("browser/index.html", page)] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, path, bytes).unwrap();
+            }
+            let archive = builder.into_inner().unwrap().finish().unwrap();
+            let entry: CapsuleEntry = serde_json::from_value(serde_json::json!({
+                "cid": TEST_SUPERVISOR_CID, "size": archive.len(),
+                "sha256": hex::encode(sha2::Sha256::digest(&archive)),
+            }))
+            .unwrap();
+            let registry = ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: HashMap::new(),
+                capsules: HashMap::from([("chat-room".to_string(), entry)]),
+                profiles: HashMap::new(),
+            };
+            let mut supervisor = Supervisor::new(data.path().to_path_buf(), registry);
+            supervisor.set_provider_registry(
+                registry_with_content_provider(serde_json::json!({"status": "ok",
+                    "data": {"data": base64::engine::general_purpose::STANDARD.encode(&archive)}}))
+                .await,
+            );
+            if let Some(plant) = plant {
+                plant_at_record(data.path(), &cache, plant);
+            }
+            assert_eq!(supervisor.ensure_capsule("chat-room").await.unwrap(), cache);
+            assert_eq!(
+                std::fs::read(cache.join("browser/index.html")).unwrap(),
+                page
+            );
+            let files = ["browser/index.html", "capsule.json"];
+            match plant {
+                Some(plant) => assert_install_over(data.path(), &cache, plant, &files),
+                None => recorded.push(assert_install_cid_names(&cache, &files)),
+            }
+        }
+        assert_ne!(
+            recorded[0], recorded[1],
+            "the reinstall kept the first record"
+        );
     }
 
     #[test]

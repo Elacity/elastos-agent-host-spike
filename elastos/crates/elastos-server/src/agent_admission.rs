@@ -67,6 +67,9 @@ pub(crate) struct AdmissionContext {
     actor: String,
     manifest: CapsuleManifest,
     entrypoint: Vec<u8>,
+    /// Model-token ceiling from the signed manifest this launch walked.
+    /// Absent was recorded as 0. The running guest cannot replace it.
+    model_token_ceiling: u64,
 }
 
 impl AdmissionContext {
@@ -74,6 +77,11 @@ impl AdmissionContext {
     /// authority: the seal is that only `admit_launch` builds this type.
     pub(crate) fn actor(&self) -> &str {
         &self.actor
+    }
+
+    /// The model-token ceiling recorded from the signed manifest.
+    pub(crate) fn model_token_ceiling(&self) -> u64 {
+        self.model_token_ceiling
     }
 
     /// The exact manifest and entrypoint bytes admission walked. The loader
@@ -210,10 +218,12 @@ pub(crate) fn admit_launch(
         data_dir,
         &stored.protection,
     )?);
+    let model_token_ceiling = manifest.resources.model_token_ceiling();
     Ok(Some(AdmissionContext {
         actor: agent_id.to_string(),
         manifest,
         entrypoint,
+        model_token_ceiling,
     }))
 }
 
@@ -351,6 +361,9 @@ pub(crate) mod tests {
         let mut manifest: CapsuleManifest =
             serde_json::from_slice(&std::fs::read(fixture).unwrap()).unwrap();
         manifest.name = AGENT_HOST.to_string();
+        manifest.agent = Some(elastos_common::AgentDeclaration {
+            kind: elastos_common::AgentKind::Agent,
+        });
         manifest.signature = None;
         let key = |value: u8| elastos_runtime::signature::SigningKey::from_bytes(&[value; 32]);
         let mut sign = |value: u8| {

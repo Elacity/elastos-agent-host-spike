@@ -3486,6 +3486,7 @@ pub(crate) async fn runtime_custody_buy_via_gateway(
             &listing_record,
             mint_id,
             now,
+            crate::auth::now_ts,
         )
         .await
         .map_err(purchase_denied!())?;

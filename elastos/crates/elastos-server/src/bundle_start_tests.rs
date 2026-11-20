@@ -19,11 +19,21 @@ use crate::bundle_admission::{
     BUNDLE_SIGNATURE_DOMAIN, BUNDLE_WALK_BUDGET,
 };
 use crate::runtime::tests::{
-    component_manifest_json, component_with_extra_import, quiet_component,
+    component_manifest_json, component_with_extra_import, quiet_component, BusConformanceProvider,
 };
 use crate::runtime::Runtime;
 use crate::stage_cmd::{bundle_cid, stage_bundle};
+use axum::body::Body;
+use axum::http::{header::AUTHORIZATION, Request, StatusCode};
 use elastos_bundle_identity::Budget;
+use elastos_runtime::capability::pending::{GrantDuration, PendingRequestStore};
+use elastos_runtime::capability::{Action, CapabilityManager, CapabilityStore, TokenConstraints};
+use elastos_runtime::primitives::audit::AuditLog;
+use elastos_runtime::primitives::metrics::MetricsManager;
+use elastos_runtime::provider::ProviderRegistry;
+use elastos_runtime::session::{SessionRegistry, SessionType};
+use std::time::Duration;
+use tower::ServiceExt;
 
 /// One call a component made to the bridge: the capsule's id, the principal
 /// it ran for, and the ceiling recorded for it at that moment.
@@ -185,6 +195,222 @@ impl Home {
     }
 }
 
+/// The resource the bus fixture component reads, and the one the asks of the
+/// rows below name.
+const PROBE: &str = "elastos://test/bus/probe";
+
+/// A Home whose bridge is the real resource bridge, not the recording handler
+/// above: the same Runtime, ComponentProvider and provider registry as
+/// `runtime::tests::a_request_for_a_resource_the_signed_manifest_never_asked_for_is_refused`.
+/// Its component is the bus fixture, which calls the bridge once when it runs
+/// for `PERSON` and reads its probe when the shell grants that read. A bundle
+/// whose asks include the read reaches the shell as a pending request, the
+/// ceiling the bridge holds its session to is the manifest's asks, and
+/// granted there the read reaches the provider and the run ends well: the
+/// positive controls of the B2 rows end here, not in a handler's error.
+struct RealBridge {
+    runtime: Arc<Runtime>,
+    dir: tempfile::TempDir,
+    pending: Arc<PendingRequestStore>,
+    capabilities: Arc<CapabilityManager>,
+    store: Arc<CapabilityStore>,
+    provider: Arc<BusConformanceProvider>,
+}
+
+impl RealBridge {
+    /// A Home trusting `keys`, never in dev mode, with the bus fixture
+    /// provider registered on the real bridge.
+    async fn trusting(keys: &[&SigningKey]) -> RealBridge {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            LocalFSProvider::new(dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            Some(Arc::new(ComponentProvider::new())),
+        ));
+        let audit_log = Arc::new(AuditLog::new());
+        let store = Arc::new(CapabilityStore::new());
+        let capabilities = Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit_log.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit_log.clone()));
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(BusConformanceProvider::default());
+        registry.register(provider.clone()).await;
+        runtime
+            .set_provider_registry(
+                registry,
+                capabilities.clone(),
+                pending.clone(),
+                dir.path().join("runtime-data"),
+            )
+            .await;
+        let keys: Vec<String> = keys
+            .iter()
+            .map(|key| hex::encode(key.verifying_key().to_bytes()))
+            .collect();
+        runtime
+            .configure_capsule_admission(dir.path(), &keys, false)
+            .await
+            .unwrap();
+        RealBridge {
+            runtime,
+            dir,
+            pending,
+            capabilities,
+            store,
+            provider,
+        }
+    }
+
+    /// Stage a bundle whose entrypoint is `bytes`, signed by `key`.
+    async fn staged_bytes(
+        &self,
+        name: &str,
+        manifest: &str,
+        bytes: &[u8],
+        key: &SigningKey,
+    ) -> String {
+        let folder = self.dir.path().join("source").join(name);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("capsule.json"), manifest).unwrap();
+        fs::write(folder.join(ENTRYPOINT), bytes).unwrap();
+        self.stage(&folder, key).await
+    }
+
+    fn data(&self) -> PathBuf {
+        self.dir.path().join("data")
+    }
+
+    /// A bundle folder holding `manifest` and the bus fixture as its
+    /// entrypoint.
+    fn bundle(&self, name: &str, manifest: &str) -> PathBuf {
+        let folder = self.dir.path().join("source").join(name);
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("capsule.json"), manifest).unwrap();
+        fs::write(folder.join(ENTRYPOINT), calling_component()).unwrap();
+        folder
+    }
+
+    /// Stage `folder` signed by `key`; returns the bundle's CID.
+    async fn stage(&self, folder: &Path, key: &SigningKey) -> String {
+        let cid = bundle_cid(folder).unwrap();
+        let signature = self.dir.path().join(format!("{cid}.by-hand.sig.json"));
+        fs::write(&signature, signed(&cid, key)).unwrap();
+        let staged = stage_bundle(&self.runtime, &self.data(), folder, &signature)
+            .await
+            .unwrap();
+        assert_eq!(staged.cid, cid);
+        cid
+    }
+
+    /// Put `bytes` where staging put the signature of the bundle `cid`: the
+    /// file the start by CID checks. Its place is the slot's, its content
+    /// whatever is written here.
+    fn put_signature(&self, cid: &str, bytes: &[u8]) {
+        fs::write(
+            bundle_signature_path(&self.data(), &cid.parse().unwrap()),
+            bytes,
+        )
+        .unwrap();
+    }
+
+    fn signature(&self, cid: &str) -> Vec<u8> {
+        fs::read(bundle_signature_path(&self.data(), &cid.parse().unwrap())).unwrap()
+    }
+
+    /// Overwrite one of a slot's files, which staging wrote read-only.
+    fn overwrite(&self, cid: &str, file: &str, bytes: &[u8]) {
+        let path = bundle_slot(&self.data(), &cid.parse().unwrap()).join(file);
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&path, permissions).unwrap();
+        fs::write(&path, bytes).unwrap();
+    }
+
+    /// Start `cid` for nobody: the name that ran and its signer, or the
+    /// refusal. Every refusal a row asserts here comes before a capsule runs,
+    /// so the principal does not matter.
+    async fn run(&self, cid: &str) -> Result<(String, String), BundleRefusal> {
+        self.runtime
+            .run_by_bundle(&self.data(), cid, Vec::new(), None)
+            .await
+            .map(|(handle, accepted)| (handle.manifest.name, accepted.signer_did))
+    }
+
+    /// Start `cid` for `PERSON`, wait for its one pending request on the
+    /// probe, check the ceiling the bridge records for that session, grant
+    /// the read, and return the name that ran. The read reaches the provider,
+    /// and no ceiling is left behind.
+    async fn run_granted(&self, cid: &str, ceiling: &str) -> String {
+        let launch = {
+            let (runtime, data, cid) = (self.runtime.clone(), self.data(), cid.to_string());
+            tokio::spawn(async move {
+                runtime
+                    .run_by_bundle(&data, &cid, Vec::new(), Some(PERSON.to_string()))
+                    .await
+                    .map(|(handle, _)| handle.manifest.name)
+            })
+        };
+        let pending = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = self.pending.list_pending().await.into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a request inside the asks reaches the shell");
+        assert_eq!(pending.resource.as_str(), PROBE);
+        assert_eq!(pending.action, Action::Read);
+        assert!(
+            self.provider.requests.lock().await.is_empty(),
+            "no grant yet"
+        );
+        assert_eq!(
+            self.runtime.ceiling_of(pending.session_id.as_str()),
+            Some(vec![ceiling.to_string()]),
+            "while it runs, the ceiling the bridge holds it to is its asks"
+        );
+        let token = self.capabilities.grant(
+            pending.session_id.as_str(),
+            pending.resource.clone(),
+            pending.action,
+            TokenConstraints::default(),
+            None,
+        );
+        self.pending
+            .grant_request(pending.id.as_str(), token, GrantDuration::Session)
+            .await
+            .unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), launch)
+            .await
+            .expect("the run ends after the grant")
+            .expect("the launch task does not panic");
+        let name = ended.unwrap_or_else(|refusal| panic!("the granted run ends well: {refusal}"));
+        assert_eq!(
+            self.provider.requests.lock().await.len(),
+            1,
+            "the granted read reached the provider once"
+        );
+        self.provider.requests.lock().await.clear();
+        assert_eq!(
+            self.runtime.ceiling_of(pending.session_id.as_str()),
+            None,
+            "none left after"
+        );
+        name
+    }
+}
+
 /// `manifest(name)` whose requirements pin `pins`: requirement name and CID.
 fn manifest_pinning(name: &str, pins: &[(&str, &str)]) -> String {
     let pin = |(name, cid): &(&str, &str)| serde_json::json!({"name": name, "kind": "capsule", "cid": cid});
@@ -222,8 +448,83 @@ fn calling_component() -> Vec<u8> {
     .unwrap()
 }
 
+/// One read of [`PROBE`], then the invoke of that read, for whatever principal
+/// the launch bound. The bus fixture returns before it calls unless it runs
+/// as [`PERSON`], and a Home token names this Home's device.
+fn probe_component() -> Vec<u8> {
+    // The model guest already asks and invokes once. Its resource is 22 bytes
+    // and its invoke names `offers_list`; the probe is 24 bytes and the read
+    // is the operation the test provider records.
+    assert_eq!(PROBE.len(), 24, "the length immediate below");
+    let source = include_str!("../../../tests/fixtures/components/non-agent-model.wat");
+    let source = source.replace("elastos://model/offers", PROBE);
+    let source = source.replace("i32.const 22", "i32.const 24");
+    let source = source.replace(
+        "i32.const 296\n      i32.const 11",
+        "i32.const 288\n      i32.const 4",
+    );
+    // A refused request is a bus error in the guest's memory. Returning that
+    // error is what puts its text in the open's body. The fixture traps
+    // instead, and a trap names neither the denial nor the seal.
+    let source = source.replace(
+        "i32.const 512\n      i32.load8_u\n      if unreachable end",
+        "i32.const 512\n      i32.load8_u\n      if\n        \
+         i32.const 900\n        i32.const 1\n        i32.store8\n        \
+         i32.const 904\n        i32.const 512\n        i32.load8_u offset=8\n        i32.store8\n        \
+         i32.const 908\n        i32.const 512\n        i32.load offset=12\n        i32.store\n        \
+         i32.const 912\n        i32.const 512\n        i32.load offset=16\n        i32.store\n        \
+         i32.const 900\n        return\n      end",
+    );
+    let source = source.replace(
+        "i32.const 768\n      i32.load8_u\n      if unreachable end",
+        "i32.const 768\n      i32.load8_u\n      if\n        \
+         i32.const 900\n        i32.const 1\n        i32.store8\n        \
+         i32.const 904\n        i32.const 768\n        i32.load8_u offset=4\n        i32.store8\n        \
+         i32.const 908\n        i32.const 768\n        i32.load offset=8\n        i32.store\n        \
+         i32.const 912\n        i32.const 768\n        i32.load offset=12\n        i32.store\n        \
+         i32.const 900\n        return\n      end",
+    );
+    assert_eq!(source.matches("i32.const 24").count(), 2);
+    assert!(source.contains("i32.const 288\n      i32.const 4"));
+    assert_eq!(source.matches("unreachable").count(), 0);
+    wat::parse_str(&source).expect("probe component")
+}
+
 fn code(result: Result<(String, String), BundleRefusal>) -> &'static str {
     result.expect_err("refused").code()
+}
+
+#[tokio::test]
+async fn v2_resident_is_refused_from_folder_and_cid() {
+    let publisher = key(42);
+    let home = Home::trusting(&[&publisher]).await;
+    home.admit(&[&publisher], true).await;
+    let mut json: serde_json::Value = serde_json::from_str(&manifest("v2-by-both-paths")).unwrap();
+    json["bus_contract"] = serde_json::json!("elastos:bus@2.0.0");
+    json["wit_world_sha256"] = serde_json::json!(elastos_common::elastos_bus_v2_wit_sha256());
+    let v2_component = wat::parse_str(include_str!(
+        "../../../tests/fixtures/components/v2-resident.wat"
+    ))
+    .unwrap();
+    let folder = home.bundle("v2", &json.to_string(), &v2_component);
+    assert!(matches!(
+        home.runtime.run_local(&folder, Vec::new()).await,
+        Err(elastos_common::ElastosError::InvalidManifest(why))
+            if why == "Bus v2 contract not yet runnable"
+    ));
+    assert!(home.runtime.list_capsules().await.is_empty());
+    assert!(
+        !home.data().exists(),
+        "a refused folder start leaves no store"
+    );
+
+    let cid = home.stage(&folder, &publisher).await;
+    assert!(matches!(
+        home.run(&cid, None).await,
+        Err(BundleRefusal::NotAComponent(why))
+            if why.contains("elastos:bus@2.0.0")
+    ));
+    assert!(home.calls().is_empty());
 }
 
 /// R-run, R-nogrant, R-presentation. A staged component starts by its CID and
@@ -374,6 +675,33 @@ async fn a_slot_changed_after_staging_is_refused_as_a_mismatch() {
     *changed.last_mut().unwrap() ^= 1;
     home.overwrite(&cid, ENTRYPOINT, &changed);
     let elsewhere = home.bundle("changed-copy", &manifest("changed"), &changed);
+    let computed = bundle_cid(&elsewhere).unwrap();
+    assert_ne!(computed, cid);
+    assert_eq!(
+        home.run(&cid, None).await.unwrap_err(),
+        BundleRefusal::CidMismatch {
+            asked: cid.clone(),
+            computed
+        }
+    );
+    assert_eq!(code(home.run(&cid, None).await), "bundle_cid_mismatch");
+}
+
+/// R-manifest. `capsule.json` itself changed after staging, by one trailing
+/// byte: the start refuses with the mismatch, because the manifest is one of
+/// the files the CID covers. The control is the same slot before the change.
+#[tokio::test]
+async fn a_manifest_changed_after_staging_is_refused_as_a_mismatch() {
+    let publisher = key(57);
+    let home = Home::trusting(&[&publisher]).await;
+    let text = manifest("manifest-changed");
+    let folder = home.bundle("manifest-changed", &text, &quiet_component());
+    let cid = home.stage(&folder, &publisher).await;
+    home.run(&cid, None).await.unwrap();
+
+    let changed = format!("{text}\n");
+    home.overwrite(&cid, "capsule.json", changed.as_bytes());
+    let elsewhere = home.bundle("manifest-changed-copy", &changed, &quiet_component());
     let computed = bundle_cid(&elsewhere).unwrap();
     assert_ne!(computed, cid);
     assert_eq!(
@@ -884,11 +1212,15 @@ fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
     assert_eq!(handler.matches("host_manifest_capabilities").count(), 1);
     assert_eq!(handler.matches("manifest_capabilities,\n").count(), 1);
     // The content of a launch is looked up the same way: by the caller's own
-    // id, there and nowhere else, and a caller with no entry gets none.
+    // id, there and nowhere else, and a caller with no entry gets none. Its
+    // guard ends with the lookup: the content table's lock is not held across
+    // the call, so an end can take content away while a guest is in the
+    // bridge.
     let held = "let launch = host_launch_contents\n                    \
                 .read()\n                    \
-                .unwrap_or_else(|it| it.into_inner());\n                \
-                let launch = launch.get(capsule_id).cloned();";
+                .unwrap_or_else(|it| it.into_inner())\n                    \
+                .get(capsule_id)\n                    \
+                .cloned();";
     assert_eq!(handler.matches(held).count(), 1);
     assert_eq!(handler.matches("host_launch_contents").count(), 1);
     assert_eq!(handler.matches("launch,\n").count(), 1);
@@ -980,6 +1312,51 @@ async fn a_pinned_bundles_asks_do_not_reach_the_capsule_that_starts() {
     assert_eq!(home.calls(), Vec::new());
 }
 
+/// The body of `signature`, read only after the first `anchor`.
+/// The body runs up to the `}` that shares the signature line's indent.
+fn fn_body<'a>(source: &'a str, anchor: &str, signature: &str) -> &'a str {
+    let anchored = &source[source
+        .find(anchor)
+        .unwrap_or_else(|| panic!("missing {anchor}"))..];
+    let signed = &anchored[anchored
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing {signature} after {anchor}"))..];
+    let at = source.len() - signed.len();
+    let line_start = source[..at].rfind('\n').map(|index| index + 1).unwrap_or(0);
+    let indent = source[line_start..at]
+        .chars()
+        .take_while(|character| *character == ' ')
+        .count();
+    let close = format!("\n{}}}\n", " ".repeat(indent));
+    let end = signed
+        .find(&close)
+        .unwrap_or_else(|| panic!("no close for {signature}"));
+    &signed[..end]
+}
+
+/// A line that writes a `VerifiedBundle` value. The struct definition, the
+/// impl header, and a signature that returns the type (`-> VerifiedBundle {`)
+/// are not constructors. A comment is not one. `Self {` counts only where
+/// the caller asks, because that form is ordinary on other types.
+fn verified_bundle_literal(line: &str, count_self: bool) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") {
+        return false;
+    }
+    let needle = "VerifiedBundle {";
+    let mut rest = trimmed;
+    let mut wrote_type = false;
+    while let Some(index) = rest.find(needle) {
+        let before = rest[..index].trim_end();
+        if !before.ends_with("struct") && !before.ends_with("impl") && !before.ends_with("->") {
+            wrote_type = true;
+            break;
+        }
+        rest = &rest[index + needle.len()..];
+    }
+    wrote_type || (count_self && trimmed.contains("Self {"))
+}
+
 /// Every Rust file under `dir`.
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
     for item in fs::read_dir(dir).expect("list") {
@@ -1007,20 +1384,17 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     };
     let start = body_of("pub(crate) async fn start_by_bundle(");
     let member = body_of("async fn admit_closure_member(");
+    // The first `pub(crate) fn check(` in the file is not the maker. The
+    // impl that owns the type is the anchor, and the close matches that
+    // function's own indent.
+    assert_eq!(source.matches("impl VerifiedBundle {").count(), 1);
+    let maker = fn_body(source, "impl VerifiedBundle {", "pub(crate) fn check(");
     let walk = ["checked_bundle", "_within("].concat();
     assert_eq!(start.matches(&walk).count(), 0);
-    // One bundle's checks, in their order: the walk; the CID; the signature;
-    // and only then the manifest, where a pinned manifest is turned into one
-    // that can start, and the component's imports.
-    let order = [
-        walk.as_str(),
-        "after_walk(asked)",
-        "bundle.cid() != *asked",
-        "bundle_admission::check_bundle_signature(&signature, asked, trust)",
-        "bundle_admission::admit_bundle_manifest(",
-        "validate_component_imports(",
-    ];
-    let places: Vec<usize> = order
+    // The walk, then the moment after it, then the one maker. The CID, the
+    // signature, the manifest and the imports are that maker, in that order.
+    let walked = [walk.as_str(), "after_walk(asked)", "VerifiedBundle::check("];
+    let walked_at: Vec<usize> = walked
         .iter()
         .map(|text| {
             assert_eq!(member.matches(text).count(), 1, "{text}");
@@ -1028,9 +1402,30 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         })
         .collect();
     assert!(
+        walked_at.windows(2).all(|pair| pair[0] < pair[1]),
+        "{walked_at:?}"
+    );
+    assert!(
+        member.find("left.max_entries").unwrap() < member.find("VerifiedBundle::check(").unwrap()
+    );
+    let order = [
+        "bundle.cid() != *asked",
+        "bundle_admission::check_bundle_signature(signature, asked, trust)",
+        "bundle_admission::admit_bundle_manifest(",
+        "validate_component_imports_for_manifest(",
+    ];
+    let places: Vec<usize> = order
+        .iter()
+        .map(|text| {
+            assert_eq!(maker.matches(text).count(), 1, "{text}");
+            maker.find(text).unwrap()
+        })
+        .collect();
+    assert!(
         places.windows(2).all(|pair| pair[0] < pair[1]),
         "{places:?}"
     );
+    assert_eq!(maker.matches("VerifiedBundle {").count(), 1);
     // Who is trusted is read once, by the start, before the first bundle;
     // the member check is handed that reading and takes none of its own;
     // and the reading is let go before anything is loaded.
@@ -1056,10 +1451,11 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     assert_eq!(production.matches(".admit_closure_member(").count(), 2);
     assert_eq!(production.matches("admit_bundle_manifest(").count(), 1);
     // The budget of a start is the server's one walk budget and nothing
-    // else: the constant is named once, where the one caller of the observed
-    // form hands it over; what is left starts as that budget; and it is
-    // changed at two places, each of which only takes away from it.
-    assert_eq!(production.matches("BUNDLE_WALK_BUDGET").count(), 1);
+    // else: the start hands it over to its observed form, and the folder
+    // gate's two walks name the same constant. What is left starts as that
+    // budget and is changed at two places, each of which only takes away
+    // from it.
+    assert_eq!(production.matches("BUNDLE_WALK_BUDGET").count(), 3);
     let handed_over = "let budget = bundle_admission::BUNDLE_WALK_BUDGET;\n        \
                        self.run_by_bundle_observed(data_dir, cid, args, principal_id, budget, |_| {})";
     assert_eq!(production.matches(handed_over).count(), 1);
@@ -1111,7 +1507,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
             .count(),
         1
     );
-    for body in [start, member] {
+    for body in [start, member, maker] {
         for never in [
             "fs::read",
             "read_to_string",
@@ -1135,31 +1531,109 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
         }
     }
     // It passes no ceiling of its own: the shared end fills it. One capsule
-    // is started, the one asked for.
-    assert_eq!(
-        start
-            .matches("self.start_loaded(component, &mut handle, args, principal_id)")
-            .count(),
-        1
-    );
+    // is started, the one asked for, and a bundle start is still bounded.
+    let bounded =
+        "self.start_loaded(\n            component,\n            &mut handle,\n            \
+                   args,\n            principal_id,\n            None,\n            \
+                   LaunchMode::Bounded,\n        )";
+    assert_eq!(start.matches(bounded).count(), 1);
     // One capsule is loaded, from the walked bytes and the judged manifest:
-    // sealed when that manifest has no asks, unsealed when it has. Nothing
-    // else decides the seal.
-    assert_eq!(
-        start
-            .matches("let (bytes, manifest) = (starts.component, starts.manifest);")
-            .count(),
-        1
-    );
-    let seal = "let loaded = match manifest.asks.is_empty() {\n            \
+    // sealed when that manifest has no asks, unsealed when it has. The
+    // `bytes` in that match are the ones `into_component` just bound. A
+    // load that calls `into_component` and then compiles some other buffer
+    // does not have this text.
+    assert!(!start.contains("starts.component"));
+    assert!(!start.contains("starts.manifest"));
+    let load = "let (manifest, bytes) = starts.into_component();\n        \
+                let loaded = match manifest.asks.is_empty() {\n            \
                 true => component.load_admitted_sealed(bytes, manifest).await,\n            \
                 false => component.load_admitted(bytes, manifest).await,\n        };";
-    assert_eq!(start.matches(seal).count(), 1);
+    assert_eq!(start.matches(load).count(), 1);
+    assert_eq!(start.matches("starts.into_component()").count(), 1);
+    assert_eq!(start.matches("let bytes").count(), 0);
+    assert_eq!(start.matches("bytes =").count(), 0);
     assert_eq!(start.matches(".load_admitted_sealed(").count(), 1);
     assert_eq!(start.matches(".load_admitted(").count(), 1);
     for never in ["start_loaded", "load_admitted", "provider"] {
         assert!(!member.contains(never), "{never}");
+        assert!(!maker.contains(never), "{never}");
     }
+}
+
+/// `VerifiedBundle` lives in the private module `verified_bundle`, so a
+/// struct literal outside that module does not compile. This row keeps the
+/// module private and holds it to one constructor literal, inside `check`.
+/// `start_by_bundle` takes the type, and the seal match compiles the bytes
+/// that `into_component` binds.
+#[test]
+fn verified_bundle_has_one_maker_and_start_by_bundle_takes_it() {
+    let source = include_str!("runtime.rs");
+    let header = "\nmod verified_bundle {\n";
+    assert_eq!(source.matches(header).count(), 1, "one private module");
+    assert!(!source.contains("pub mod verified_bundle"));
+    assert!(!source.contains("pub(crate) mod verified_bundle"));
+    assert!(!source.contains("pub(super) mod verified_bundle"));
+    let module = {
+        let body = &source[source.find(header).unwrap()..];
+        &body[..body.find("\n}\n").unwrap()]
+    };
+    assert_eq!(module.matches("struct VerifiedBundle {").count(), 1);
+    assert_eq!(module.matches("impl VerifiedBundle {").count(), 1);
+    assert_eq!(module.matches("pub(crate) fn check(").count(), 1);
+    let in_module: Vec<&str> = module
+        .lines()
+        .filter(|line| verified_bundle_literal(line, true))
+        .collect();
+    assert_eq!(in_module.len(), 1, "{in_module:?}");
+    let check = fn_body(source, "impl VerifiedBundle {", "pub(crate) fn check(");
+    let in_check: Vec<&str> = check
+        .lines()
+        .filter(|line| verified_bundle_literal(line, true))
+        .collect();
+    assert_eq!(in_check, in_module, "the literal sits in check");
+    // A literal elsewhere in this file, such as `Ok(VerifiedBundle {`, is
+    // outside the module. Private fields reject it at compile time. This
+    // count is the backstop when that privacy is missing and the file still
+    // compiles.
+    let in_file: Vec<&str> = source
+        .lines()
+        .filter(|line| verified_bundle_literal(line, false))
+        .collect();
+    assert_eq!(in_file, in_module, "{in_file:?}");
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut elsewhere = Vec::new();
+    for path in &files {
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name.contains("test") || name == "runtime.rs" {
+            continue;
+        }
+        let text = fs::read_to_string(path).expect("read");
+        let count = text
+            .lines()
+            .filter(|line| verified_bundle_literal(line, false))
+            .count();
+        if count > 0 {
+            elsewhere.push((name.into_owned(), count));
+        }
+    }
+    assert!(elsewhere.is_empty(), "{elsewhere:?}");
+    let start = {
+        let body = &source[source.find("pub(crate) async fn start_by_bundle(").unwrap()..];
+        &body[..body.find("\n    }\n").unwrap()]
+    };
+    assert_eq!(
+        start.matches("(VerifiedBundle, AcceptedSignature)").count(),
+        1
+    );
+    let load = "let (manifest, bytes) = starts.into_component();\n        \
+                let loaded = match manifest.asks.is_empty() {\n            \
+                true => component.load_admitted_sealed(bytes, manifest).await,\n            \
+                false => component.load_admitted(bytes, manifest).await,\n        };";
+    assert_eq!(start.matches(load).count(), 1);
 }
 
 /// The pins come off a manifest at one place in the server: where the start
@@ -3235,4 +3709,606 @@ async fn a_kept_launch_serves_the_page_its_content_pins() {
         None,
         "a gone launch"
     );
+}
+
+/// B2-edit. An ask is inside the bytes the CID names, so an edit to the asks
+/// is an edit to the signed bundle. One more action in the ask gives the
+/// folder another CID; the slot staged under the old CID holds that edited
+/// manifest, so the start recomputes and refuses, naming both CIDs, with the
+/// old bundle's signature file still beside it and still the signature that
+/// was made over the old CID. Offered for the edited CID, that old signature
+/// is refused by its own name at the signature check, after the slot's files
+/// were found to recompute to the CID asked for. Both controls run through
+/// the real bridge: the bundle as signed starts unsealed under its signed ask
+/// as the ceiling the bridge records for its session, its read is granted
+/// there and it ends well; and the edited bundle, re-signed under its own
+/// CID, starts the same way under the edited ask.
+#[tokio::test]
+async fn changing_an_ask_changes_the_cid_and_the_signed_launch_is_refused() {
+    let publisher = key(101);
+    let bridge = RealBridge::trusting(&[&publisher]).await;
+    let read = serde_json::json!([{"resource": PROBE, "actions": ["read"]}]);
+    let read_and_write = serde_json::json!([
+        {"resource": PROBE, "actions": ["read", "write"]}
+    ]);
+    let folder = bridge.bundle("asked", &manifest_with("asked", "asks", read));
+    let cid = bridge.stage(&folder, &publisher).await;
+    let edited_manifest = manifest_with("asked", "asks", read_and_write);
+
+    // The control: the bundle as signed starts through the real bridge, the
+    // ask it was signed with is the ceiling the bridge records at its
+    // session, and granted the read it ends well.
+    assert_eq!(
+        bridge.run_granted(&cid, &format!("{PROBE} [read]")).await,
+        "asked"
+    );
+
+    // One more action in that ask: the folder is another bundle, because the
+    // ask is one of the bytes the CID names.
+    fs::write(folder.join("capsule.json"), &edited_manifest).unwrap();
+    let edited = bundle_cid(&folder).unwrap();
+    assert_ne!(edited, cid, "an ask is inside the signed bytes");
+
+    // The slot staged under the old CID now holds the edited manifest: the
+    // start recomputes the CID of the bytes and refuses the mismatch.
+    bridge.overwrite(&cid, "capsule.json", edited_manifest.as_bytes());
+    assert_eq!(
+        bridge.run(&cid).await.unwrap_err(),
+        BundleRefusal::CidMismatch {
+            asked: cid.clone(),
+            computed: edited.clone()
+        }
+    );
+    // Not a missing or a tampered signature: the file is where staging put
+    // it and holds exactly the signature the publisher made over the old CID.
+    assert_eq!(bridge.signature(&cid), signed(&cid, &publisher));
+
+    // The edited bundle staged under its own CID, with that OLD signature
+    // file beside it. The CID check passes, because the slot's files are the
+    // edited ones; the signature check then refuses the file by its name,
+    // because it is the signature of another bundle.
+    assert_eq!(
+        bridge.stage(&folder, &publisher).await,
+        edited,
+        "the edited folder's own CID"
+    );
+    bridge.put_signature(&edited, &signed(&cid, &publisher));
+    assert_eq!(
+        bridge.run(&edited).await.unwrap_err(),
+        BundleRefusal::SignatureNamesAnotherCid {
+            file: cid.clone(),
+            computed: edited.clone()
+        },
+        "the signature made over the old CID is refused for the edited one"
+    );
+
+    // The control: the same edited bundle re-signed for its new CID starts
+    // through the real bridge under the edited ask.
+    assert_eq!(bridge.stage(&folder, &publisher).await, edited);
+    assert_eq!(
+        bridge.signature(&edited),
+        signed(&edited, &publisher),
+        "re-signed for its own CID"
+    );
+    assert_eq!(
+        bridge
+            .run_granted(&edited, &format!("{PROBE} [read, write]"))
+            .await,
+        "asked",
+        "the edited ask is the ceiling now"
+    );
+}
+
+/// N9. `model_tokens` is inside the bytes the CID names. Editing it after
+/// signing gives the folder another CID, and the signature made over the old
+/// CID is refused for the edited one.
+#[tokio::test]
+async fn ceiling_is_signed() {
+    let publisher = key(103);
+    let bridge = RealBridge::trusting(&[&publisher]).await;
+    let resources = serde_json::json!({"memory_mb": 64, "cpu_shares": 100, "model_tokens": 16});
+    let folder = bridge.bundle("budget", &manifest_with("budget", "resources", resources));
+    let cid = bridge.stage(&folder, &publisher).await;
+    let mut edited: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(folder.join("capsule.json")).unwrap()).unwrap();
+    edited["resources"]["model_tokens"] = serde_json::json!(32);
+    let edited_manifest = edited.to_string();
+    fs::write(folder.join("capsule.json"), &edited_manifest).unwrap();
+    let edited_cid = bundle_cid(&folder).unwrap();
+    assert_ne!(edited_cid, cid, "model_tokens is inside the signed bytes");
+    bridge.overwrite(&cid, "capsule.json", edited_manifest.as_bytes());
+    assert_eq!(
+        bridge.run(&cid).await.unwrap_err(),
+        BundleRefusal::CidMismatch {
+            asked: cid.clone(),
+            computed: edited_cid.clone()
+        }
+    );
+    assert_eq!(bridge.stage(&folder, &publisher).await, edited_cid);
+    bridge.put_signature(&edited_cid, &signed(&cid, &publisher));
+    assert_eq!(
+        bridge.run(&edited_cid).await.unwrap_err(),
+        BundleRefusal::SignatureNamesAnotherCid {
+            file: cid,
+            computed: edited_cid
+        }
+    );
+}
+
+/// B2-file. The lab's `asks.json` is bytes in the closure and never authority
+/// at a start by CID. A bundle whose `capsule.json` declares no asks starts
+/// sealed with that file beside its manifest: the admitted manifest's asks
+/// stay empty, its ceiling is empty, and no handler sees the component's
+/// call. And no file of the server reads a file by that name: the start has
+/// one source of asks, the `capsule.json` the walk checked.
+#[tokio::test]
+async fn a_lab_asks_json_beside_the_bundle_is_never_read_by_the_start() {
+    use crate::bundle_admission::admit_bundle_manifest;
+    use elastos_bundle_identity::checked_bundle_within as walk;
+    let publisher = key(102);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("lab-asks", &manifest("lab-asks"), &calling_component());
+    // An ask for the resource the component requests, in the file the lab's
+    // agent-host declares its asks in. The start must not take it.
+    let lab = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
+    fs::write(folder.join("asks.json"), lab.to_string()).unwrap();
+    let cid = home.stage(&folder, &publisher).await;
+
+    // The file is in the closure and adds nothing to the manifest.
+    let slot = bundle_slot(&home.data(), &cid.parse().unwrap());
+    let checked = walk(&slot, BUNDLE_WALK_BUDGET).unwrap();
+    assert!(checked.entry("asks.json").is_some(), "read as bytes");
+    let admitted = admit_bundle_manifest(&checked).unwrap();
+    assert!(admitted.manifest.asks.is_empty());
+    assert_eq!(
+        admitted.manifest.resource_authority_bounds(),
+        Vec::<String>::new()
+    );
+
+    // And the capsule runs sealed: its call never reaches a handler.
+    let refusal = home.run(&cid, Some(PERSON)).await.unwrap_err();
+    assert!(
+        refusal
+            .to_string()
+            .ends_with(&format!("BusError::Denied({SEALED_BRIDGE:?})")),
+        "{refusal}"
+    );
+    assert_eq!(home.calls(), Vec::new(), "no handler saw the call");
+
+    // The control, through the real bridge: the same bundle with the same
+    // `asks.json` beside its manifest, and the same ask declared in the
+    // `capsule.json` the walk checks, reaches the shell; granted there its
+    // read reaches the provider and it ends well. So the sealed run above is
+    // the start taking the manifest's asks and not the file's.
+    let bridge = RealBridge::trusting(&[&publisher]).await;
+    let control = bridge.bundle(
+        "lab-asks-declared",
+        &manifest_with("lab-asks", "asks", lab.clone()),
+    );
+    fs::write(control.join("asks.json"), lab.to_string()).unwrap();
+    let declared = bridge.stage(&control, &publisher).await;
+    assert_eq!(
+        bridge
+            .run_granted(&declared, &format!("{PROBE} [read]"))
+            .await,
+        "lab-asks"
+    );
+
+    // No file of the server reads that name; this test file is the only one
+    // that writes it, and only to prove it is ignored.
+    let mut files = Vec::new();
+    rust_files(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let mut readers: Vec<String> = files
+        .iter()
+        .filter(|path| {
+            fs::read_to_string(path)
+                .expect("read")
+                .contains("\"asks.json\"")
+        })
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    readers.sort();
+    assert_eq!(readers, ["bundle_start_tests.rs"]);
+}
+
+/// R-grants-nothing. A component signed by a trusted publisher, whose signed
+/// manifest asks nothing, starts by its CID for a person. The signature is all
+/// it has: its one bridge call is denied by the seal; this Home's own bridge
+/// handler never sees the call.
+#[tokio::test]
+async fn a_signature_grants_nothing() {
+    let publisher = key(71);
+    let home = Home::trusting(&[&publisher]).await;
+    let name = "grants-nothing";
+    let manifest_json = manifest(name);
+    let asks: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_json).unwrap();
+    assert!(asks.asks.is_empty(), "the signed manifest asks nothing");
+    let cid = home
+        .staged(
+            "grants-nothing",
+            &manifest_json,
+            &calling_component(),
+            &publisher,
+        )
+        .await;
+
+    let refusal = home.run(&cid, Some(PERSON)).await.unwrap_err();
+    assert_eq!(
+        refusal.to_string(),
+        format!(
+            "bundle_start_failed: Compute error: Component capsule denied: BusError::Denied({SEALED_BRIDGE:?})"
+        ),
+        "the trusted signature admitted the start, and the seal denied its call"
+    );
+    assert_eq!(
+        home.calls(),
+        Vec::new(),
+        "this Home's bridge handler never saw a call from the signed capsule"
+    );
+}
+
+/// D1a-http-hash. `POST /api/launch/open` starts a signed content bundle by
+/// its CID for a Home token, and the same request on a slot whose entrypoint
+/// changed is refused by the mismatch code.
+#[tokio::test]
+async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tampered_one() {
+    use crate::api::routes::kept_launch_test_tokens as tokens;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use tower::ServiceExt;
+    let publisher = key(95);
+    let home = Home::trusting(&[&publisher]).await;
+    let picture = b"the bytes of a picture".to_vec();
+    let (cid, _) = staged_quiet_set(&home, &publisher, &picture).await;
+    let data = home.data();
+    let app = axum::Router::new()
+        .route("/api/launch/open", post(crate::api::routes::open_launch))
+        .layer(axum::Extension(Some(data.clone())))
+        .layer(axum::Extension(home.runtime.clone()));
+    let open = |cid: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/launch/open")
+            .header("content-type", "application/json")
+            .header("x-elastos-home-token", tokens::home(&data))
+            .body(Body::from(serde_json::json!({"cid": cid}).to_string()))
+            .unwrap()
+    };
+    let send = |request: Request<Body>| {
+        let app = app.clone();
+        async move {
+            let answer = app.oneshot(request).await.unwrap();
+            let status = answer.status();
+            let body = axum::body::to_bytes(answer.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body.to_vec())
+        }
+    };
+
+    let (status, body) = send(open(&cid)).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let opened: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(opened["page"], "page");
+    assert_eq!(home.runtime.kept_launch_count(), 1);
+
+    let mut changed = picture.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    home.overwrite(&cid, ENTRYPOINT, &changed);
+    let (status, body) = send(open(&cid)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        String::from_utf8_lossy(&body).starts_with("bundle_cid_mismatch: "),
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(home.runtime.kept_launch_count(), 1, "nothing new kept");
+}
+
+/// One request to the router `elastos serve` builds.
+async fn http(
+    app: &axum::Router,
+    shell: &str,
+    method: &str,
+    uri: &str,
+    home: Option<&str>,
+    body: Option<&str>,
+) -> (StatusCode, String) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(AUTHORIZATION, format!("Bearer {shell}"));
+    if let Some(token) = home {
+        request = request.header("x-elastos-home-token", token);
+    }
+    let text = body.unwrap_or("");
+    if !text.is_empty() {
+        request = request.header("content-type", "application/json");
+    }
+    let response = app
+        .clone()
+        .oneshot(request.body(Body::from(text.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `events` from `GET /api/audit?type=capability_grant`, kept when they name
+/// `session`. An empty session keeps every one: a grant with no pending
+/// request still has to show up here.
+fn grants_for(events: &[serde_json::Value], session: &str) -> Vec<serde_json::Value> {
+    events
+        .iter()
+        .filter(|event| session.is_empty() || event["capsule_id"] == session)
+        .cloned()
+        .collect()
+}
+
+/// The real bridge, a shell session, and the router `elastos serve` builds
+/// from those same stores, with the person's Home token.
+struct ServerHome {
+    bridge: RealBridge,
+    app: axum::Router,
+    shell_token: String,
+    shell_id: String,
+    home_token: String,
+}
+
+impl ServerHome {
+    async fn trusting(key: &SigningKey) -> ServerHome {
+        let bridge = RealBridge::trusting(&[key]).await;
+        let sessions = Arc::new(SessionRegistry::new(
+            bridge.capabilities.audit_log().clone(),
+        ));
+        let shell = sessions.create_session(SessionType::Shell, None).await;
+        let app = crate::api::server::tests::test_server(
+            bridge.runtime.clone(),
+            sessions,
+            bridge.capabilities.clone(),
+            bridge.store.clone(),
+            bridge.pending.clone(),
+            Some(bridge.data()),
+        );
+        let home_token = crate::api::routes::kept_launch_test_tokens::home(&bridge.data());
+        ServerHome {
+            bridge,
+            app,
+            shell_token: shell.token,
+            shell_id: shell.id.to_string(),
+            home_token,
+        }
+    }
+
+    async fn call(&self, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, String) {
+        http(&self.app, &self.shell_token, method, uri, None, body).await
+    }
+
+    async fn json(&self, method: &str, uri: &str) -> serde_json::Value {
+        let (status, text) = self.call(method, uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{method} {uri}: {text}");
+        serde_json::from_str(&text).unwrap_or_else(|_| panic!("{method} {uri}: {text}"))
+    }
+
+    async fn view(&self) -> Vec<serde_json::Value> {
+        let body = self
+            .json("GET", "/api/capability/list?scope=all_sessions_live")
+            .await;
+        body["capabilities"].as_array().cloned().unwrap_or_default()
+    }
+
+    async fn pending(&self) -> Vec<serde_json::Value> {
+        let body = self.json("GET", "/api/capability/pending").await;
+        body["requests"].as_array().cloned().unwrap_or_default()
+    }
+
+    async fn grants(&self) -> Vec<serde_json::Value> {
+        let body = self
+            .json("GET", "/api/audit?type=capability_grant&limit=100")
+            .await;
+        body["events"].as_array().cloned().unwrap_or_default()
+    }
+
+    fn spawn_open(&self, cid: &str) -> tokio::task::JoinHandle<(StatusCode, String)> {
+        let (app, shell, token) = (
+            self.app.clone(),
+            self.shell_token.clone(),
+            self.home_token.clone(),
+        );
+        let body = serde_json::json!({"cid": cid}).to_string();
+        tokio::spawn(async move {
+            http(
+                &app,
+                &shell,
+                "POST",
+                "/api/launch/open",
+                Some(&token),
+                Some(&body),
+            )
+            .await
+        })
+    }
+}
+
+/// Content whose core is `component` under `manifest`, signed by `key`.
+async fn stage_content(
+    bridge: &RealBridge,
+    key: &SigningKey,
+    label: &str,
+    manifest: &str,
+    component: &[u8],
+) -> String {
+    let core = bridge
+        .staged_bytes(&format!("{label}-core"), manifest, component, key)
+        .await;
+    let page = page_manifest("page", &[("core", &core)]).to_string();
+    let page = bridge
+        .staged_bytes(&format!("{label}-page"), &page, b"a page", key)
+        .await;
+    let content = content_manifest(label, &[("page", &page)]).to_string();
+    bridge
+        .staged_bytes(&format!("{label}-content"), &content, b"a picture", key)
+        .await
+}
+
+async fn wait_for_request(
+    home: &ServerHome,
+    open: &tokio::task::JoinHandle<(StatusCode, String)>,
+) -> Vec<serde_json::Value> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
+    loop {
+        let pending = home.pending().await;
+        let stopped = !pending.is_empty() || open.is_finished();
+        if stopped || std::time::Instant::now() >= deadline {
+            return pending;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// B1-R. A trusted publisher's signature admits a start by CID on the server
+/// Home and grants nothing. While the core waits on its one read of the
+/// probe, the live view is empty and the audit log has no grant for that
+/// session; the shell's denial leaves both empty and the provider unseen; a
+/// core that asks nothing stays sealed and files no request; the grant the
+/// shell then makes is the one grant the view lists, and the provider sees
+/// that one read.
+#[tokio::test]
+async fn a_valid_signature_grants_nothing_on_the_server_home() {
+    let publisher = key(104);
+    let home = ServerHome::trusting(&publisher).await;
+    let probe = probe_component();
+    let asks = serde_json::json!([{"resource": PROBE, "actions": ["read"]}]);
+    let asking = manifest_with("core", "asks", asks);
+    let asking = stage_content(&home.bridge, &publisher, "asking", &asking, &probe).await;
+    let sealed_manifest = manifest("core");
+    let sealed = stage_content(&home.bridge, &publisher, "sealed", &sealed_manifest, &probe).await;
+
+    let before = home.view().await;
+    assert!(
+        before.is_empty(),
+        "before the open the live view is empty: {before:?}"
+    );
+
+    let open = home.spawn_open(&asking);
+    let pending = wait_for_request(&home, &open).await;
+    let view = home.view().await;
+    assert!(
+        view.is_empty(),
+        "a signature grants nothing: the live view lists {view:?}"
+    );
+    let session = pending
+        .first()
+        .and_then(|row| row["session_id"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let grants = grants_for(&home.grants().await, &session);
+    assert!(
+        grants.is_empty(),
+        "a signature grants nothing: the audit log has a capability_grant {grants:?}"
+    );
+    assert_eq!(pending.len(), 1, "the core files one request: {pending:?}");
+    assert_eq!(pending[0]["resource"], PROBE);
+    assert_eq!(pending[0]["action"], "read");
+    assert_ne!(
+        pending[0]["session_id"].as_str(),
+        Some(home.shell_id.as_str()),
+        "the request is the core's, not the shell's"
+    );
+    assert!(
+        home.bridge.provider.requests.lock().await.is_empty(),
+        "the provider has seen nothing"
+    );
+    assert_eq!(
+        home.bridge.runtime.ceiling_of(&session),
+        Some(vec![format!("{PROBE} [read]")]),
+        "the ceiling is the manifest's asks"
+    );
+
+    let deny = serde_json::json!({
+        "request_id": pending[0]["request_id"],
+        "reason": "no"
+    })
+    .to_string();
+    let (status, text) = home.call("POST", "/api/capability/deny", Some(&deny)).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let (status, text) = tokio::time::timeout(Duration::from_secs(10), open)
+        .await
+        .expect("the denied open ends")
+        .unwrap();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(text.contains("denied"), "{text}");
+    let after = home.view().await;
+    assert!(
+        after.is_empty(),
+        "after the denial the live view stays empty: {after:?}"
+    );
+    let grants = grants_for(&home.grants().await, &session);
+    assert!(grants.is_empty(), "the denial writes no grant: {grants:?}");
+    assert!(
+        home.bridge.provider.requests.lock().await.is_empty(),
+        "the provider has still seen nothing"
+    );
+
+    let body = serde_json::json!({"cid": sealed}).to_string();
+    let (status, text) = http(
+        &home.app,
+        &home.shell_token,
+        "POST",
+        "/api/launch/open",
+        Some(&home.home_token),
+        Some(&body),
+    )
+    .await;
+    let pending = home.pending().await;
+    let view = home.view().await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(
+        pending.is_empty() && text.contains(SEALED_BRIDGE) && view.is_empty(),
+        "a capsule that asks nothing files no request and stays sealed: pending={pending:?} view={view:?} body={text}"
+    );
+
+    let open = home.spawn_open(&asking);
+    let pending = wait_for_request(&home, &open).await;
+    assert_eq!(
+        pending.len(),
+        1,
+        "the control files one request: {pending:?}"
+    );
+    let session = pending[0]["session_id"].as_str().unwrap().to_string();
+    let grant = serde_json::json!({
+        "request_id": pending[0]["request_id"],
+        "duration": "session"
+    })
+    .to_string();
+    let (status, text) = home
+        .call("POST", "/api/capability/grant", Some(&grant))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let (status, text) = tokio::time::timeout(Duration::from_secs(10), open)
+        .await
+        .expect("the granted open ends")
+        .unwrap();
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let opened: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(opened["page"], "page");
+    let view = home.view().await;
+    assert_eq!(
+        view.len(),
+        1,
+        "the live view lists the shell's one grant: {view:?}"
+    );
+    assert_eq!(view[0]["session_id"], session);
+    assert_eq!(view[0]["resource"], PROBE);
+    assert_eq!(view[0]["action"], "read");
+    let seen = home.bridge.provider.requests.lock().await.clone();
+    assert_eq!(seen.len(), 1, "the provider sees one read: {seen:?}");
+    assert_eq!(seen[0]["op"], "read");
 }

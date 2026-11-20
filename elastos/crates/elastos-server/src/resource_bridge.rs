@@ -277,6 +277,16 @@ impl BridgePrincipal {
     }
 }
 
+/// One activation's stop request, shared by its end and the bridge's wait
+/// loop (M1-R A10-R). `requested` is set by the stop route before it waits;
+/// `cancelled` is set by the wait loop when it leaves the guest's call
+/// because of it, so the end can tell this stop's ending from a trap's.
+#[derive(Debug, Default)]
+pub struct ActivationStopFlag {
+    pub requested: std::sync::atomic::AtomicBool,
+    pub cancelled: std::sync::atomic::AtomicBool,
+}
+
 /// Resources needed by the bridge to handle requests.
 #[derive(Clone)]
 pub struct BridgeContext {
@@ -295,6 +305,14 @@ pub struct BridgeContext {
     /// The content this capsule was launched with, when it is the program of
     /// a content launch that is still running. Nothing else has one.
     pub launch: Option<Arc<LaunchContent>>,
+    /// Model-token ceiling admission recorded for this capsule. `None` is not
+    /// an admitted agent, and the model rule does not apply.
+    pub model_token_ceiling: Option<u64>,
+    /// The stop requested for this activation, if any (M1-R A10-R). The wait
+    /// loop reads it, so a guest held in a capability wait leaves at once
+    /// instead of waiting out the shell's polls; it records that it left for
+    /// the stop, and the activation's own end then denies the request.
+    pub stop: Option<Arc<ActivationStopFlag>>,
 }
 
 /// Spawn a resource bridge handler for a microVM capsule.
@@ -811,6 +829,12 @@ async fn authorize_and_dispatch_resource_invoke(
         return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, outcome, response);
     }
 
+    if dispatch.scheme == "model" {
+        if let Some(refusal) = model_budget_refusal(bridge_ctx) {
+            return finish_component_invoke(bridge_ctx, &audit_id, &dispatch, "denied", refusal);
+        }
+    }
+
     match bridge_ctx
         .provider_registry
         .send_raw(&dispatch.scheme, &dispatch.request)
@@ -1168,6 +1192,32 @@ fn provider_error_result(code: &str, message: &str) -> serde_json::Value {
             "message": message,
         },
     })
+}
+
+/// Why an admitted agent's model invoke is refused. One reason: the signed
+/// ceiling is 0. The request body is not a source of the ceiling, and it is
+/// not compared with the ceiling. A spend bound is a later slice.
+enum ModelBudgetRefusal {
+    SignedCeiling(u64),
+}
+
+impl ModelBudgetRefusal {
+    fn response(self) -> serde_json::Value {
+        let Self::SignedCeiling(held) = self;
+        // The wire code is the existing `denied`. The sentence names the reason.
+        resource_error_response(
+            "denied",
+            &format!("model_budget_exceeded: signed ceiling is {held}"),
+        )
+    }
+}
+
+/// Refuse a model invoke when the admitted agent's signed ceiling is 0.
+/// `None` means this capsule is not an admitted agent: there is no ceiling
+/// entry, and the model rule does not apply. The request is not an argument.
+fn model_budget_refusal(ctx: &BridgeContext) -> Option<serde_json::Value> {
+    let held = ctx.model_token_ceiling?;
+    (held == 0).then(|| ModelBudgetRefusal::SignedCeiling(held).response())
 }
 
 fn resource_error_response(code: &str, message: &str) -> serde_json::Value {
@@ -1531,6 +1581,31 @@ async fn handle_request(line: &str, ctx: &Option<BridgeContext>) -> Result<serde
                     // The shell polls /api/capability/pending and grants/denies.
                     let mut granted_token = None;
                     for _ in 0..CAPABILITY_APPROVAL_MAX_POLLS {
+                        // A stop requested for this activation ends the wait
+                        // now (M1-R A10-R): a guest whose call waits up to 30 s
+                        // for the shell must not hold the stop for that long.
+                        if ctx.stop.as_ref().is_some_and(|stop| {
+                            stop.requested.load(std::sync::atomic::Ordering::Acquire)
+                        }) {
+                            if let Some(stop) = &ctx.stop {
+                                stop.cancelled
+                                    .store(true, std::sync::atomic::Ordering::Release);
+                            }
+                            tracing::info!(
+                                "bridge: cancelled {} {} for capsule '{}'",
+                                action,
+                                resource,
+                                ctx.capsule_id,
+                            );
+                            return Ok(serde_json::json!({
+                                "id": id,
+                                "response": {
+                                    "type": "error",
+                                    "code": "cancelled",
+                                    "message": "the activation was stopped",
+                                },
+                            }));
+                        }
                         tokio::time::sleep(std::time::Duration::from_millis(
                             CAPABILITY_APPROVAL_POLL_MS,
                         ))
@@ -2321,6 +2396,8 @@ mod tests {
             ]),
             data_dir: None,
             launch: None,
+            model_token_ceiling: None,
+            stop: None,
         }
     }
 
@@ -3866,9 +3943,10 @@ mod tests {
             ),
             ("start_loaded", &[("elastos-server/src/runtime.rs", 2)][..]),
             (
-                "run_local_admitted",
+                "start_local_admitted",
                 &[("elastos-server/src/api/routes.rs", 1)][..],
             ),
+            ("run_local_admitted", &[][..]),
             (
                 "spawn_resource_bridge",
                 &[("elastos-server/src/supervisor.rs", 1)][..],
@@ -4227,6 +4305,249 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("localhost://Local/SharedByLocalUsersAndBots/Home/a.md")
         );
+    }
+
+    /// A read grant allows localhost read and refuses localhost write.
+    /// The required right is the one `resource_invoke_dispatch` took from the
+    /// localhost row, checked by `CapabilityManager::validate`.
+    #[tokio::test]
+    async fn a_read_grant_refuses_a_localhost_write() {
+        let ctx = bridge_context();
+        let uri = "localhost://Local/SharedByLocalUsersAndBots/Home/a.md";
+        let read = resource_invoke_dispatch(
+            &serde_json::json!({
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "body": {}
+            }),
+            None,
+            None,
+        )
+        .expect("localhost read reaches the capability check");
+        let write = resource_invoke_dispatch(
+            &serde_json::json!({
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "write",
+                "body": {"content": "page"}
+            }),
+            None,
+            None,
+        )
+        .expect("localhost write reaches the capability check");
+        assert_eq!(read.resource, write.resource);
+
+        let token = ctx.capability_manager.grant(
+            &ctx.capsule_id,
+            ResourceId::new(&read.resource),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+        ctx.capability_manager
+            .validate(
+                &token,
+                &ctx.capsule_id,
+                read.required_action,
+                &ResourceId::new(&read.resource),
+                None,
+            )
+            .await
+            .expect("a read grant allows localhost read");
+        let refused = ctx
+            .capability_manager
+            .validate(
+                &token,
+                &ctx.capsule_id,
+                write.required_action,
+                &ResourceId::new(&write.resource),
+                None,
+            )
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(elastos_runtime::capability::manager::ValidationError::WrongAction { .. })
+            ),
+            "a read grant refuses localhost write: {refused:?}"
+        );
+    }
+
+    fn b4r_documents(principal_id: &str) -> (tempfile::TempDir, BridgeContext, String) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let protection =
+            crate::auth::store_test_principal_root_protection(temp.path(), principal_id);
+        let mut ctx = bridge_context();
+        ctx.principal_id = Some(principal_id.to_string());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        // No listed asks, so the manifest ceiling allows read and write. A
+        // plant that asks for Read is not refused here.
+        ctx.manifest_capabilities =
+            any_action(vec![format!("{}/Documents/*", protection.localhost_root)]);
+        (temp, ctx, protection.localhost_root)
+    }
+
+    fn b4r_names(root: &str, name: &str) -> (String, String) {
+        (
+            format!("localhost://Users/self/Documents/{name}"),
+            format!("{root}/Documents/{name}"),
+        )
+    }
+
+    fn b4r_path(temp: &tempfile::TempDir, scoped: &str) -> std::path::PathBuf {
+        let path = rooted_localhost_fs_path(temp.path(), scoped).expect("file-backed path");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        path
+    }
+
+    async fn b4r_invoke(
+        ctx: &BridgeContext,
+        operation: &str,
+        uri: &str,
+        token: &str,
+        content: Option<&str>,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({});
+        if let Some(content) = content {
+            body["content"] = serde_json::Value::String(content.to_string());
+        }
+        let line = serde_json::json!({
+            "id": 7,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": operation,
+                "token": token,
+                "body": body,
+            }
+        })
+        .to_string();
+        handle_request(&line, &Some(ctx.clone()))
+            .await
+            .expect("the bridge answers")
+    }
+
+    /// A read grant calling localhost write is `capability_denied` before the
+    /// file is created or changed. The manifest ceiling allows the call.
+    #[tokio::test]
+    async fn b4r_read_grant_on_localhost_write_is_refused_before_effect() {
+        let principal_id = "person:local:b4r-read-on-write";
+        let (temp, ctx, root) = b4r_documents(principal_id);
+        let (absent_uri, absent_scoped) = b4r_names(&root, "absent.txt");
+        let (present_uri, present_scoped) = b4r_names(&root, "present.txt");
+        let absent_path = b4r_path(&temp, &absent_scoped);
+        let present_path = b4r_path(&temp, &present_scoped);
+        let original = b"kept-bytes";
+        std::fs::write(&present_path, original).expect("seed");
+        assert!(!absent_path.exists());
+
+        let absent = b4r_invoke(
+            &ctx,
+            "write",
+            &absent_uri,
+            &bridge_token(&ctx, &absent_scoped, Action::Read),
+            Some("should-not-land"),
+        )
+        .await;
+        let absent_code = absent["response"]["code"].as_str();
+        assert_ne!(
+            absent_code,
+            Some("manifest_capability_denied"),
+            "manifest ceiling refused before the token check: {absent}"
+        );
+        assert_eq!(
+            absent_code,
+            Some("capability_denied"),
+            "read grant on localhost write is capability_denied before the effect; status={} file_exists={} response={absent}",
+            absent["response"]["result"]["status"].as_str().unwrap_or(""),
+            absent_path.exists(),
+        );
+        assert!(
+            !absent_path.exists(),
+            "a refused write does not create the file"
+        );
+
+        let present = b4r_invoke(
+            &ctx,
+            "write",
+            &present_uri,
+            &bridge_token(&ctx, &present_scoped, Action::Read),
+            Some("should-not-replace"),
+        )
+        .await;
+        assert_eq!(
+            present["response"]["code"].as_str(),
+            Some("capability_denied"),
+            "read grant on an existing file is capability_denied: {present}"
+        );
+        assert_eq!(
+            std::fs::read(&present_path).expect("pre-existing file remains"),
+            original,
+            "a refused write leaves the file bytes unchanged"
+        );
+
+        let granted = b4r_invoke(
+            &ctx,
+            "write",
+            &absent_uri,
+            &bridge_token(&ctx, &absent_scoped, Action::Write),
+            Some("landed"),
+        )
+        .await;
+        assert_eq!(
+            granted["response"]["result"]["status"], "ok",
+            "a write grant reaches storage: {granted}"
+        );
+        assert_eq!(
+            crate::auth::read_principal_root_object(
+                temp.path(),
+                principal_id,
+                &root,
+                &absent_scoped,
+                &absent_path,
+            )
+            .expect("stored object"),
+            b"landed"
+        );
+    }
+
+    /// A write grant calling localhost read is `capability_denied`.
+    #[tokio::test]
+    async fn b4r_write_grant_on_localhost_read_is_refused() {
+        let (temp, ctx, root) = b4r_documents("person:local:b4r-write-on-read");
+        let (uri, scoped) = b4r_names(&root, "note.txt");
+        let path = b4r_path(&temp, &scoped);
+        let original = b"read-target";
+        std::fs::write(&path, original).expect("seed");
+
+        let response = b4r_invoke(
+            &ctx,
+            "read",
+            &uri,
+            &bridge_token(&ctx, &scoped, Action::Write),
+            None,
+        )
+        .await;
+        assert_ne!(
+            response["response"]["code"].as_str(),
+            Some("manifest_capability_denied"),
+            "manifest ceiling refused before the token check: {response}"
+        );
+        assert_eq!(
+            response["response"]["code"].as_str(),
+            Some("capability_denied"),
+            "write grant on localhost read is capability_denied: {response}"
+        );
+        assert_eq!(std::fs::read(&path).expect("file remains"), original);
+    }
+
+    /// Base `85f93f3b9` displays the webspace write right as the bytes `write`.
+    #[test]
+    fn b4r_webspace_write_required_right_is_unchanged_from_base() {
+        let right = provider_operation_action("webspace", "write")
+            .expect("webspace write has a required right");
+        assert_eq!(right.to_string().as_bytes(), b"write");
     }
 
     #[test]
@@ -6524,9 +6845,18 @@ mod tests {
         let manifest: elastos_common::CapsuleManifest =
             serde_json::from_str(include_str!("../../../../examples/agent-host/capsule.json"))
                 .unwrap();
+        manifest
+            .validate()
+            .expect("the agent host manifest validates");
         assert_eq!(
             manifest.resource_authority_bounds(),
-            vec!["localhost://Users/self/.AppData/Agents/agent-host/*".to_string()]
+            vec![elastos_common::AuthorityBound {
+                resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
+                actions: Some(vec![
+                    elastos_common::AskAction::Write,
+                    elastos_common::AskAction::Read,
+                ]),
+            }]
         );
         let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
         ctx.manifest_capabilities = manifest.resource_authority_bounds();
@@ -6558,7 +6888,7 @@ mod tests {
                 "localhost://Users/self/.AppData/Agents",
                 "manifest_capability_denied",
             ),
-            (journal_self, "capability_denied"),
+            (journal_self, "manifest_capability_denied"),
         ] {
             for grant in &grants {
                 let line = serde_json::json!({
@@ -6595,8 +6925,8 @@ mod tests {
             };
             assert_eq!(asked["response"]["code"], expected, "{uri}");
         }
-        // No request can obtain a delete grant in the area any more. Even a
-        // Delete token minted directly is refused by the Agents rule when used.
+        // Delete is outside the ask's actions, so the manifest refuses the
+        // invoke. The provider sees no request.
         let delete = bridge_token(&ctx, &journal, Action::Delete);
         let line = serde_json::json!({
             "id": 70,
@@ -6610,7 +6940,7 @@ mod tests {
         })
         .to_string();
         let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
-        assert_eq!(response["response"]["code"], "operation_not_allowed");
+        assert_eq!(response["response"]["code"], "manifest_capability_denied");
         assert!(provider.requests().await.is_empty());
         assert!(journal_path(&temp, &journal).is_file());
         assert!(temp.path().join("Users").is_dir());

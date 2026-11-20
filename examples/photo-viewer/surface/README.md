@@ -14,6 +14,8 @@ Home showed it as **Photos**; on this branch nothing opens it from Home.
 | `browser/index.html` | The page. No inline script, style or handler |
 | `browser/main.js` | `mountPhotos(window)`, nothing else |
 | `browser/photos.js` | Everything the page does; it takes the window as `env`, so tests can drive it |
+| `browser/page-client.js` | A byte-identical copy of the kit's launch token reader (`launchToken`, `TOKEN_HEADER`, `pageClient`); the surface test pins it |
+| `browser/docs-render.js` | A byte-identical copy of the kit's renderer, shipped because the client imports `cut` from it; the surface test pins it |
 | `browser/photos.css` | Layout |
 | `photos.test.mjs` | Node tests with a fake fetch and a fake document |
 | `photos-browser-smoke.mjs` | The real page in real Chromium, framed in Home's sandbox, against a stand-in server |

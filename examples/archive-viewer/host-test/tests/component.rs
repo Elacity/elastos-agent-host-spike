@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use capsule_v1_host_test::{admission, Bridge, ALLOWED_BUS_IMPORTS};
+use capsule_v1_host_test::{validate_component_imports, Bridge, ALLOWED_BUS_IMPORTS};
 use elastos_common::CapsuleManifest;
 use serde_json::{json, Value};
 
@@ -1177,13 +1177,13 @@ fn component_imports_only_the_elastos_bus() {
 #[test]
 fn component_passes_the_runtime_admission_import_check() {
     let bytes = std::fs::read(component_path()).unwrap();
-    admission::validate_component_imports(&bytes).expect("Runtime would admit these imports");
+    validate_component_imports(&bytes).expect("Runtime would admit these imports");
 }
 
 #[test]
-fn the_copied_admission_check_refuses_a_core_module() {
+fn the_runtime_admission_check_refuses_a_core_module() {
     // A plain core module (version 1, no component layer) is not admissible.
-    let err = admission::validate_component_imports(b"\0asm\x01\0\0\0").unwrap_err();
+    let err = validate_component_imports(b"\0asm\x01\0\0\0").unwrap_err();
     assert!(err.contains("must be a WebAssembly component"), "{err}");
 }
 

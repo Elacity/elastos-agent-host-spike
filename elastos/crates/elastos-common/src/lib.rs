@@ -26,13 +26,15 @@ pub use cid_form::cid_form;
 pub use error::{ElastosError, Result};
 pub use free_space::{require_free_space, NotEnoughFreeSpace, FREE_SPACE_RESERVE_BYTES};
 pub use manifest::{
-    elastos_bus_v1_wit_sha256, validate_model_content_path, AffordanceApprovalMode,
-    AffordanceAuditMode, AffordanceRisk, AgentDeclaration, AgentKind, AskAction, AuthorityBound,
-    CapsuleAffordanceDescriptor, CapsuleExecution, CapsuleInterfaceDescriptor, CapsuleManifest,
-    CapsuleProjection, CapsuleRequirement, CapsuleRole, CapsuleRuntimeAbi, CapsuleType,
-    CapsuleWindowPolicy, ManifestAsk, MicroVmConfig, ModelContentMetadata, Permissions,
-    ProviderAuthority, ProviderCapabilitySchema, RequirementKind, ResourceLimits,
-    ELASTOS_BUS_V1_CONTRACT, ELASTOS_BUS_V1_WORLD, SCHEMA_V1,
+    elastos_bus_v1_wit_sha256, elastos_bus_v2_wit_sha256, validate_model_content_path,
+    AffordanceApprovalMode, AffordanceAuditMode, AffordanceRisk, AgentDeclaration, AgentKind,
+    AskAction, AuthorityBound, CapsuleAffordanceDescriptor, CapsuleExecution,
+    CapsuleInterfaceDescriptor, CapsuleManifest, CapsuleProjection, CapsuleRequirement,
+    CapsuleRole, CapsuleRuntimeAbi, CapsuleType, CapsuleWindowPolicy, ManifestAsk, MicroVmConfig,
+    ModelContentMetadata, Permissions, ProviderAuthority, ProviderCapabilitySchema,
+    RequirementKind, ResourceLimits, APPROVED_RIGHT_IDS, ELASTOS_BUS_V1_CONTRACT,
+    ELASTOS_BUS_V1_WORLD, ELASTOS_BUS_V2_CONTRACT, ELASTOS_BUS_V2_WORLD, MAX_MODEL_TOKENS,
+    SCHEMA_V1,
 };
 pub use pinned_manifest::{
     PinnedManifest, PinnedManifestError, PIN_FORM_INVALID, REQUIREMENT_DUPLICATE,

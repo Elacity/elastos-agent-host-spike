@@ -107,7 +107,7 @@ pub async fn read_file(
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, Action::Read).await?;
+    enforce_capability(&state, &session, &headers, &path, row_right("read")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -142,7 +142,7 @@ pub async fn write_file(
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, Action::Write).await?;
+    enforce_capability(&state, &session, &headers, &path, row_right("write")?).await?;
 
     // Enforce storage quota (0 = unlimited)
     if state.storage_quota_mb > 0 {
@@ -205,7 +205,7 @@ pub async fn delete_path(
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, Action::Delete).await?;
+    enforce_capability(&state, &session, &headers, &path, row_right("delete")?).await?;
     let uri = canonical_local_uri(&path)?;
     let recursive = query.recursive.unwrap_or(false);
 
@@ -257,7 +257,7 @@ pub async fn list_dir(
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, Action::Read).await?;
+    enforce_capability(&state, &session, &headers, &path, row_right("list")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -339,7 +339,7 @@ pub async fn stat_path(
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, Action::Read).await?;
+    enforce_capability(&state, &session, &headers, &path, row_right("stat")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -388,7 +388,7 @@ pub async fn mkdir(
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
-    enforce_capability(&state, &session, &headers, &path, Action::Write).await?;
+    enforce_capability(&state, &session, &headers, &path, row_right("mkdir")?).await?;
     let uri = canonical_local_uri(&path)?;
 
     let result = state
@@ -414,6 +414,12 @@ pub struct MkdirOutput {
 }
 
 // === Capability Enforcement ===
+
+fn row_right(op: &str) -> Result<Action, StorageApiError> {
+    crate::provider_resource::provider_operation_action("localhost", op).ok_or_else(|| {
+        StorageApiError::PermissionDenied(format!("localhost operation {op} has no required right"))
+    })
+}
 
 /// Validate that the session has permission for this storage operation.
 ///

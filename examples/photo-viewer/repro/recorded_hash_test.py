@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check the hash record and artifact comparison without Cargo or Docker."""
 import hashlib
+import os
 import pathlib
 import sys
 import tempfile
@@ -9,7 +10,8 @@ import unittest
 HERE = pathlib.Path(__file__).resolve().parent
 EXAMPLES = HERE.parent.parent
 KIT = EXAMPLES / "capsule-kit"
-RECORD = KIT / "repro" / "recorded-hashes.txt"
+RECORD = pathlib.Path(os.environ.get("ELASTOS_RECORDED_HASHES")
+                      or KIT / "repro" / "recorded-hashes.txt")
 CHECK = KIT / "repro" / "check-recorded-hash.py"
 README = HERE / "README.md"
 sys.path.insert(0, str(KIT / "falsify"))
@@ -47,7 +49,8 @@ class RecordedHashTests(unittest.TestCase):
                  if line.strip() and not line.lstrip().startswith("#")]
         self.assertEqual(len(lines), 3)
         for name, line in zip(("photo-viewer", "docs-viewer", "archive-viewer"), lines):
-            self.assertRegex(line, rf"\A{name} [0-9a-f]{{64}}\Z")
+            self.assertRegex(line, rf"\A{name} [0-9a-f]{{64}}\Z",
+                             f"{RECORD}: {name} entry is {line!r}")
         hashes = [line.split()[1] for line in lines]
         self.assertEqual(CASES[1][4][0][1], f"\n{hashes[0]}\n",
                          "update the stale photo-hash plant from the record")

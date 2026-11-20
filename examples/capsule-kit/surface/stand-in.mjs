@@ -3,9 +3,10 @@
 // examples/photo-viewer/surface/photos-browser-smoke.mjs.
 //
 // The server serves the page's files with the headers Runtime sends for an
-// app (the CSP, CORS and isolation headers that elastos-server's
-// gateway_tests/photos.rs runtime_serves_the_real_photos_surface_in_its_sandbox
-// pins), answers the CORS preflight as the gateway front door does, refuses a
+// app (the CSP, CORS and isolation headers pinned byte for byte by
+// elastos-server's browser_capsules.rs
+// stand_in_headers_match_the_served_browser_capsule_headers test), answers the
+// CORS preflight as the gateway front door does, refuses a
 // request without the launch token or from outside the opaque frame, and
 // serves the page's routes. Home frames the page in its opaque sandbox
 // (capsules/home-gui/browser/shell-windows.js).
