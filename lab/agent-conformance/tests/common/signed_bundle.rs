@@ -10,8 +10,8 @@
 //! `read` and a `write` of `localhost://Public/resident-instances/shared.txt`
 //! and of `localhost://Public/plan-approval/a.txt`, the resources these
 //! journeys request. `capabilities` is removed so that list is the one
-//! ceiling. `asks.json` is still written for the stand-in that reads it. A
-//! test that needs another declared set writes both before it signs.
+//! ceiling. `asks.json` stays in the signed bytes and is not the schema. A
+//! test that needs another declared set writes the manifest before it signs.
 
 #![allow(dead_code)]
 

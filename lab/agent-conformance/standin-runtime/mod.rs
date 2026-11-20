@@ -1545,7 +1545,6 @@ impl StandIn {
     ///
     /// The asks the request route checks are the typed `asks` of the checked
     /// `capsule.json` (M1 check B2). A manifest with no asks is status 400.
-    /// `asks.json` is still refused when its provisional schema does not hold.
     /// No asks are taken from disk a second time.
     ///
     /// A `content` manifest is content, never code: it opens by CID as
@@ -2489,73 +2488,9 @@ fn check_bundle(
     Ok(checked)
 }
 
-/// The first key in `object` that is not one of `allowed`, in the object's
-/// own order. `None` means every key is known.
-fn unknown_key<'a>(object: &'a Map<String, Value>, allowed: &[&str]) -> Option<&'a str> {
-    object
-        .keys()
-        .map(String::as_str)
-        .find(|key| !allowed.contains(key))
-}
-
 /// The ceiling is the typed `asks` of the walked `capsule.json`.
-/// `asks.json` is still schema-checked and is not the ceiling. A manifest
-/// with no asks is status 400. This reads `CheckedBundle::entry` only.
+/// A manifest with no asks is status 400. This reads `CheckedBundle::entry` only.
 fn admitted_asks(
-    checked: &CheckedBundle,
-) -> Result<Vec<elastos_common::ManifestAsk>, (u16, String)> {
-    const ASKS_FILE: &str = "asks.json";
-    const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
-    const ASKS_KEYS: [&str; 2] = ["schema", "asks"];
-    const ASK_KEYS: [&str; 2] = ["kind", "resource"];
-    const BAD_ASKS: &str = "asks.json does not follow the provisional ask schema";
-
-    let bytes = checked
-        .entry(ASKS_FILE)
-        .ok_or_else(|| (400, format!("bundle declares no {ASKS_FILE}")))?;
-    let file = serde_json::from_slice::<Value>(bytes).ok();
-    let refuse_unknown = |key: &str| (400, format!("asks.json carries an unknown key: {key}"));
-    if let Some(key) = file
-        .as_ref()
-        .and_then(Value::as_object)
-        .and_then(|object| unknown_key(object, &ASKS_KEYS))
-    {
-        return Err(refuse_unknown(key));
-    }
-    let bad = || (400, BAD_ASKS.to_owned());
-    let schema = file
-        .as_ref()
-        .and_then(|file| file.get("schema"))
-        .and_then(Value::as_str);
-    let asks = file
-        .as_ref()
-        .and_then(|file| file.get("asks"))
-        .and_then(Value::as_array);
-    let (Some(schema), Some(asks)) = (schema, asks) else {
-        return Err(bad());
-    };
-    if schema != ASKS_SCHEMA {
-        return Err(bad());
-    }
-    for ask in asks {
-        let object = ask.as_object().ok_or_else(bad)?;
-        if let Some(key) = unknown_key(object, &ASK_KEYS) {
-            return Err(refuse_unknown(key));
-        }
-        if object.get("kind").and_then(Value::as_str).is_none()
-            || object.get("resource").and_then(Value::as_str).is_none()
-        {
-            return Err(bad());
-        }
-    }
-    if asks.is_empty() {
-        return Err(bad());
-    }
-    manifest_asks(checked)
-}
-
-/// Typed manifest asks from the walked bytes. Empty asks are refused.
-fn manifest_asks(
     checked: &CheckedBundle,
 ) -> Result<Vec<elastos_common::ManifestAsk>, (u16, String)> {
     let bytes = checked
@@ -3089,7 +3024,7 @@ mod tests {
 
     /// Replaces the fixture's asks with exactly `asks`, in that order, before
     /// the bundle is signed. The manifest gets the typed rows. `asks.json`
-    /// keeps the same pairs for the stand-in that still reads that file.
+    /// stays in the signed bytes and is not the schema.
     fn declare_asks(root: &Path, asks: &[(&str, &str)]) {
         let listed = asks
             .iter()

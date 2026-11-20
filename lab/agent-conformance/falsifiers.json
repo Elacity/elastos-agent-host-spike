@@ -1646,6 +1646,22 @@
       "tests": [
         "admitted_ask_keeps_its_resource_after_the_manifest_changes"
       ]
+    },
+    {
+      "id": "F-ac-u10-s11",
+      "title": "add an invalid manifest ask when the signed manifest declares none",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "    if manifest.asks.is_empty() {\n        return Err((400, \"the signed manifest declares no asks\".to_owned()));\n    }\n",
+          "new": "    let mut manifest = manifest;\n    if manifest.asks.is_empty() {\n        manifest.asks.push(elastos_common::ManifestAsk {\n            resource: \"localhost://Public/not-declared\".to_owned(),\n            actions: vec![elastos_common::AskAction::Read],\n        });\n    }\n"
+        }
+      ],
+      "tests": [
+        "standin_refuses_to_admit_a_bundle_whose_asks_do_not_follow_the_schema"
+      ]
     }
   ]
 }
