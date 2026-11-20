@@ -696,6 +696,7 @@ dependencies = [
  "agent-conformance",
  "capsule-identity",
  "ed25519-dalek",
+ "elastos-common",
  "elastos-identity",
  "rand",
  "serde_json",
