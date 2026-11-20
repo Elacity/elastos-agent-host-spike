@@ -131,7 +131,7 @@ mod tests {
                     .unwrap();
             },
         );
-        let error = result.err().expect("grown manifest must be refused");
+        let error = result.expect_err("grown manifest must be refused");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("exceeds"));
     }
