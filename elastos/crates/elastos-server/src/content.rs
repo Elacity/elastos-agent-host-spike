@@ -29,7 +29,6 @@ use sha2::Digest;
 const AVAILABILITY_RECEIPT_SCHEMA: &str = "elastos.content.availability.receipt/v1";
 const AVAILABILITY_RECEIPT_DOMAIN: &str = "elastos.content.availability.receipt.v1";
 pub const MAX_FETCH_RECEIPT_ATTEMPTS: u8 = 8;
-const MAX_FETCH_REASON_CODE_LEN: usize = 32;
 const AVAILABILITY_DASHBOARD_SCHEMA: &str = "elastos.content.availability.dashboard/v1";
 const CONTENT_ADMISSION_DOMAIN: &str = "elastos.content.admission.v1";
 const CONTENT_ACCOUNTING_SCHEMA: &str = "elastos.content.accounting/v1";
@@ -5992,19 +5991,6 @@ pub enum FetchFailureReason {
     ResponseTooLarge,
 }
 
-impl FetchFailureReason {
-    const fn code(&self) -> &'static str {
-        match self {
-            Self::Timeout => "timeout",
-            Self::PeerUnavailable => "peer_unavailable",
-            Self::PeerRefused => "peer_refused",
-            Self::Transport => "transport",
-            Self::InvalidResponse => "invalid_response",
-            Self::ResponseTooLarge => "response_too_large",
-        }
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FetchReceiptWire {
@@ -6032,6 +6018,11 @@ impl FetchReceipt {
         if cid.to_string() != requested_cid {
             return Err("fetch receipt requires a canonical requested CID".into());
         }
+        // Content CIDs use SHA2-256. Other multihashes can carry caller-chosen
+        // bytes in their digest, including credentials under the identity code.
+        if cid.hash().code() != 0x12 || cid.hash().digest().len() != 32 {
+            return Err("fetch receipt requires a SHA2-256 requested CID".into());
+        }
         elastos_identity::decode_did_key(peer_did)
             .map_err(|_| "fetch receipt requires a valid peer DID".to_string())?;
         if !(1..=MAX_FETCH_RECEIPT_ATTEMPTS).contains(&attempt) {
@@ -6049,9 +6040,6 @@ impl FetchReceipt {
             }
             FetchResult::Failed(_) if verified => {
                 return Err("failed fetch cannot be verified".into());
-            }
-            FetchResult::Failed(reason) if reason.code().len() > MAX_FETCH_REASON_CODE_LEN => {
-                return Err("fetch failure reason exceeds the code limit".into());
             }
             _ => {}
         }
@@ -6071,8 +6059,8 @@ impl FetchReceipt {
     }
 
     pub fn decode_canonical(encoded: &[u8]) -> Result<Self, String> {
-        let wire: FetchReceiptWire =
-            serde_json::from_slice(encoded).map_err(|err| err.to_string())?;
+        let wire: FetchReceiptWire = serde_json::from_slice(encoded)
+            .map_err(|_| "fetch receipt contains invalid JSON or fields".to_string())?;
         let receipt = Self::new(
             &wire.requested_cid,
             &wire.peer_did,
@@ -9441,6 +9429,61 @@ mod tests {
     }
 
     #[test]
+    fn fetch_receipt_accepts_only_sha2_256_content_cids() {
+        let token = "sk_live_peer_token_1234567890abcdef";
+        assert_eq!(token.len(), 35);
+        let cid_with = |code, digest: &[u8]| {
+            cid::Cid::new_v1(
+                0x55,
+                cid::multihash::Multihash::<64>::wrap(code, digest).unwrap(),
+            )
+            .to_string()
+        };
+        let token_cid = cid_with(0x00, token.as_bytes());
+        assert_eq!(
+            cid::Cid::try_from(token_cid.as_str())
+                .unwrap()
+                .hash()
+                .digest(),
+            token.as_bytes()
+        );
+        let rows = [
+            ("normal content CID", TEST_CID.to_string(), true),
+            ("identity multihash", cid_with(0x00, &[7; 32]), false),
+            ("identity with redaction token", token_cid, false),
+            ("unsupported hash code", cid_with(0x1e, &[7; 32]), false),
+            ("short SHA2-256 digest", cid_with(0x12, &[7; 31]), false),
+        ];
+        let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
+        let canonical = String::from_utf8(
+            fetch_receipt(FetchResult::Ok, true, 1)
+                .encode_canonical()
+                .unwrap(),
+        )
+        .unwrap();
+        for (label, requested_cid, accepted) in rows {
+            let parsed = cid::Cid::try_from(requested_cid.as_str()).unwrap();
+            assert_eq!(parsed.to_string(), requested_cid, "{label}");
+            let result = FetchReceipt::new(
+                &requested_cid,
+                &peer_did,
+                42,
+                true,
+                FetchResult::Ok,
+                1,
+                1_700_000_000,
+            );
+            assert_eq!(result.is_ok(), accepted, "{label}");
+            let encoded = canonical.replace(TEST_CID, &requested_cid);
+            assert_eq!(
+                FetchReceipt::decode_canonical(encoded.as_bytes()).is_ok(),
+                accepted,
+                "decode: {label}"
+            );
+        }
+    }
+
+    #[test]
     fn fetch_receipt_refuses_unknown_fields() {
         let receipt = fetch_receipt(FetchResult::Failed(FetchFailureReason::Timeout), false, 1);
         let mut value = serde_json::to_value(receipt).unwrap();
@@ -9452,7 +9495,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_receipt_caps_attempts_and_reason_codes() {
+    fn fetch_receipt_caps_attempts_and_uses_closed_reason_codes() {
         assert!(FetchReceipt::new(
             TEST_CID,
             &elastos_identity::derive_did(&[7; 32]).1,
@@ -9491,7 +9534,8 @@ mod tests {
             FetchFailureReason::InvalidResponse,
             FetchFailureReason::ResponseTooLarge,
         ] {
-            assert!(reason.code().len() <= MAX_FETCH_REASON_CODE_LEN);
+            let code = serde_json::to_value(reason).unwrap();
+            assert!(code.as_str().unwrap().len() <= 32);
         }
         let mut value = serde_json::to_value(fetch_receipt(FetchResult::Ok, true, 1)).unwrap();
         value["attempt"] = json!(MAX_FETCH_RECEIPT_ATTEMPTS + 1);
@@ -9508,7 +9552,8 @@ mod tests {
         ))
         .unwrap();
         value["result"]["reason_code"] = json!(token);
-        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+        let err = FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(!err.contains(token));
         assert!(FetchReceipt::new(
             TEST_CID,
             token,
