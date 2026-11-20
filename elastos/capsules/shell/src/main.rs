@@ -763,9 +763,6 @@ fn config_for_capsule(
     let mut config = serde_json::Map::new();
 
     if is_target {
-        if spec.interactive_target {
-            config.insert("_elastos_interactive".into(), serde_json::json!(true));
-        }
         if let serde_json::Value::Object(target_cfg) = spec.target_config.clone() {
             for (k, v) in target_cfg {
                 config.insert(k, v);
@@ -1110,6 +1107,7 @@ fn dispatch_command(api: &str, token: &str, command_json: &str) {
         let body = serde_json::json!({
             "name": cap,
             "config": config,
+            "interactive": i == last_idx && spec.interactive_target,
         });
         match supervisor_post(api, token, "/api/supervisor/launch-capsule", &body) {
             Ok(resp) => {
@@ -1651,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn config_for_capsule_chat_marks_interactive() {
+    fn config_for_capsule_chat_carries_no_host_key() {
         let cmd = CommandRequest::Chat {
             nick: Some("alice".into()),
             connect: None,
@@ -1662,7 +1660,7 @@ mod tests {
         };
         let spec = command_spec(&cmd).unwrap();
         let cfg = config_for_capsule(&cmd, &spec, "chat", true);
-        assert_eq!(cfg["_elastos_interactive"], true);
+        assert!(cfg.get("_elastos_interactive").is_none());
         assert_eq!(cfg["nick"], "alice");
     }
 

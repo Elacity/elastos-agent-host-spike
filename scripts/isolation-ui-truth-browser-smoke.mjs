@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 // Source UI fixtures for #170. Installed journeys require the candidate receipt.
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, resolve, relative, isAbsolute, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const playwrightModule = process.env.ELASTOS_PLAYWRIGHT_MODULE
-  ? await import(pathToFileURL(process.env.ELASTOS_PLAYWRIGHT_MODULE).href)
-  : createRequire(new URL("../elastos/tools/browser-playwright-engine/package.json", import.meta.url))("playwright");
-const { chromium } = playwrightModule.chromium ? playwrightModule : playwrightModule.default;
+// A DOM wait fails on a wrong page, not on a slow runner: same predicate, more time.
+const BROWSER_WAIT_TIMEOUT_MS = browserWaitTimeoutMs();
+const { chromium } = await importProductSmokePlaywright();
 const cid = `bafybei${"a".repeat(52)}`;
 const requests = [];
 const misses = [];
@@ -127,10 +127,25 @@ await new Promise(done => server.listen(0, "127.0.0.1", done));
 const origin = `http://127.0.0.1:${server.address().port}`;
 let browser;
 try {
-  browser = await chromium.launch({ headless: true });
+  browser = await chromium.launch({ headless: true, ...productSmokeLaunchOptions() });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, reducedMotion: "reduce" });
   const pageErrors = []; page.on("pageerror", error => pageErrors.push(error.message));
   const frame = () => page.frames().find(f => f !== page.mainFrame());
+  // Home ignores a close click on a new window until the window's own close
+  // guard expires (capsules/home-gui/browser/shell-windows.js:711 writes
+  // data-close-guard-until, :766 compares it with the page clock). Wait for
+  // that value to pass instead of sleeping past it. A window that carries no
+  // attribute, or one that is not a number, counts as no guard, which is how
+  // the page reads it too.
+  const waitForCloseGuardExpired = async (windowSelector) => {
+    await frame().locator(windowSelector).waitFor();
+    await frame().waitForFunction((selector) => {
+      const node = document.querySelector(selector);
+      if (!node) return false;
+      const until = Number.parseFloat(node.dataset.closeGuardUntil || "0");
+      return !Number.isFinite(until) || until <= performance.now();
+    }, windowSelector, { timeout: BROWSER_WAIT_TIMEOUT_MS });
+  };
   await page.goto(origin);
   await frame().locator('.store-row[data-app="blank"]').waitFor();
   for (const item of cases) {
@@ -183,10 +198,10 @@ try {
   for (let i = 0; !libraryApp() && i < 50; i++) await page.waitForTimeout(100);
   for (const load of ["first load", "reload"]) {
     if (load === "reload") await libraryApp().evaluate(() => location.reload());
-    await libraryApp().waitForFunction(() => window.uiPreferences?.some(p => p.theme === "light"), null, { timeout: 5000 })
+    await libraryApp().waitForFunction(() => window.uiPreferences?.some(p => p.theme === "light"), null, { timeout: BROWSER_WAIT_TIMEOUT_MS })
       .catch(() => assert.fail(`Library window gets the light theme on ${load}`));
   }
-  await page.waitForTimeout(2700); // Home protects a new window from the opening pointer's close click.
+  await waitForCloseGuardExpired('.window[data-target="library"]');
   await frame().locator('.window[data-target="library"] [data-action="close"]').click();
   await frame().locator('.window').waitFor({ state: 'detached' });
   await frame().locator("#desktop-shortcut-system").click({ button: "right" });
@@ -197,7 +212,7 @@ try {
   assert.equal(await frame().locator("#desktop-shortcut-system .desktop-shortcut-title").textContent(), "Fixture shortcut");
   await frame().locator("#desktop-shortcut-system").press("Enter");
   await page.waitForFunction(() => window.calls.some(m => m.type === "home:launch-target" && m.target === "system"));
-  await page.waitForTimeout(2700); // Home protects a new window from the opening pointer's close click.
+  await waitForCloseGuardExpired('.window[data-target="system"]');
   await frame().locator('.window [data-action="close"]').first().click();
   await frame().locator('.window').waitFor({ state: 'detached' });
   const file = frame().locator('[data-kind="object"]').first();
@@ -208,7 +223,7 @@ try {
   assert.equal(await frame().locator(".desktop-shortcut-rename").count(), 0, "File edit shortcuts stay unavailable");
   await file.dblclick();
   await page.waitForFunction(() => window.calls.some(m => m.type === "home:launch-target" && m.target === "documents"));
-  await page.waitForTimeout(2700); // Home protects a new window from the opening pointer's close click.
+  await waitForCloseGuardExpired('.window[data-target="documents"]');
   await frame().locator('.window [data-action="close"]').first().click();
   await frame().locator('.window').waitFor({ state: 'detached' });
   // Wallet rail Connect: the host attaches the authorized connector; the rail closes so the window is not beneath it.
@@ -220,12 +235,12 @@ try {
       target: "wallet-metamask", title: "MetaMask", attach_kind: "iframe",
       route: `/apps/wallet-metamask/?home_origin=${encodeURIComponent(homeOrigin)}#home_token=fixture-metamask` },
   }, "*"), origin);
-  await frame().locator('.window[data-target="wallet-metamask"]').waitFor({ timeout: 5000 })
+  await frame().locator('.window[data-target="wallet-metamask"]').waitFor({ timeout: BROWSER_WAIT_TIMEOUT_MS })
     .catch(() => assert.fail("Wallet rail Connect opens the MetaMask connector window"));
-  await frame().locator("#wallet-rail").waitFor({ state: "hidden", timeout: 5000 })
+  await frame().locator("#wallet-rail").waitFor({ state: "hidden", timeout: BROWSER_WAIT_TIMEOUT_MS })
     .catch(() => assert.fail("Wallet rail closes when Connect opens the connector window"));
   assert.equal(await frame().locator('.window[data-target="wallet-metamask"]').isVisible(), true, "Connector window is visible");
-  await page.waitForTimeout(2700);
+  await waitForCloseGuardExpired('.window[data-target="wallet-metamask"]');
   await frame().locator('.window[data-target="wallet-metamask"] [data-action="close"]').click();
   await frame().locator('.window').waitFor({ state: 'detached' });
   await frame().locator("#desktop").click({ button: "right", position: { x: 600, y: 400 } });
@@ -267,7 +282,7 @@ try {
   await frame().locator('#toolbar-control-centre').click();
   await frame().locator('#control-centre-system').press('Enter');
   await frame().locator('.window[data-target="system"]').waitFor();
-  await page.waitForTimeout(2700);
+  await waitForCloseGuardExpired('.window[data-target="system"]');
   await frame().locator('.window[data-target="system"] [data-action="close"]').click();
   await frame().locator('.window').waitFor({ state: 'detached' });
   assert.deepEqual(misses, [], "Visible UI stays on supported routes");

@@ -31,7 +31,9 @@ use elastos_wallet_contract::{
     WalletProviderResponseV2, WalletResultV2, PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT,
     VALIDATED_CHAIN_OUTCOME_SCHEMA,
 };
-use k256::ecdsa::SigningKey;
+#[cfg(target_os = "linux")]
+use elastos_wallet_contract::{WALLET_PROTOCOL_VERSION, WALLET_RESPONSE_SCHEMA};
+use k256::ecdsa::{RecoveryId, Signature as EcdsaSignature, SigningKey, VerifyingKey};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sha3::Keccak256;
@@ -688,11 +690,275 @@ fn provider_init_request(name: &str, base: &Path) -> Value {
     json!({ "op": "init", "config": provider_init_config(name, base) })
 }
 
-/// `init` and `status` report the model provider with its one offer ready.
+/// The protocol version every model status answer names.
+#[cfg(target_os = "linux")]
+const MODEL_PROTOCOL_VERSION: &str = "elastos.model-provider/v1";
+
+/// `init` and `status` report the model provider with its one offer ready, and
+/// both name the provider protocol version.
 #[cfg(target_os = "linux")]
 fn assert_serving(data: &Value) {
     assert_eq!(data["provider"], MODEL_PROVIDER, "{data}");
+    assert_eq!(data["protocol_version"], MODEL_PROTOCOL_VERSION, "{data}");
     assert_eq!(data["offers_ready"], 1, "{data}");
+}
+
+/// The id of the one hosted text offer the journey's `init` config names.
+#[cfg(target_os = "linux")]
+const MODEL_HOSTED_OFFER_ID: &str = "confine-hosted-text";
+
+/// The wire schema of a model run view and of one run-events page.
+#[cfg(target_os = "linux")]
+const MODEL_RUN_SCHEMA: &str = "elastos.model.run/v1";
+#[cfg(target_os = "linux")]
+const MODEL_RUN_EVENTS_SCHEMA: &str = "elastos.model.run-events/v1";
+
+/// The seven model operations the Linux journey drives after `init` and
+/// `status`, in the order it drives them.
+///
+/// `offers_list`, `runs_create`, `runs_get`, `runs_events`, `runs_cancel` and
+/// `shutdown` answer `ok`, so their class is `Permitted`. The unsupported
+/// operation answers the provider's own typed refusal,
+/// `unsupported_operation`, so its class is `Denied`; the helper asserts that
+/// code and its message, so "answered under the filter" is this refusal and
+/// not any other answer.
+#[cfg(target_os = "linux")]
+const MODEL_LINUX_ONLY_CASES: [(&str, SuiteClass); 7] = [
+    ("offers_list", SuiteClass::Permitted),
+    ("runs_create", SuiteClass::Permitted),
+    ("runs_get", SuiteClass::Permitted),
+    ("runs_events", SuiteClass::Permitted),
+    ("runs_cancel", SuiteClass::Permitted),
+    ("unsupported", SuiteClass::Denied),
+    ("shutdown", SuiteClass::Permitted),
+];
+
+/// One `runs_create` body for the journey's hosted offer.
+///
+/// The binding carries a fresh `model-v1:` request id and the input hash the
+/// contract derives from the exact input, so the provider's own binding checks
+/// pass. The config names no `runtime_hosted_socket`, and hosted containment is
+/// granted on macOS only, so the provider refuses the hosted dispatch before
+/// any socket on Linux: the run is stored and answers `terminal.error`
+/// `context_rejected` with `Hosted external HTTPS is paused.`, and no request
+/// needs a network.
+#[cfg(target_os = "linux")]
+fn model_linux_run_create_request() -> Value {
+    let input = json!({
+        "schema": "elastos.model.input.text/v1",
+        "prompt": "confined read",
+    });
+    let canonical = serde_json::to_vec(&input).expect("the model input must serialize");
+    let input_hash = format!("sha256:{}", hex::encode(Sha256::digest(canonical)));
+    let issued = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock must be after the epoch")
+        .as_millis() as u64;
+    json!({
+        "op": "runs_create",
+        "offer_id": MODEL_HOSTED_OFFER_ID,
+        "operation": "text.generate",
+        "input": input,
+        "runtime_binding": {
+            "schema": "elastos.model.runtime-binding/v1",
+            "principal_id": "person:local:confine",
+            "session_id": "session:confine",
+            "capsule_id": "assistant",
+            "grant_id": "grant:confine",
+            "request_id": format!("model-v1:{issued}:confine-model"),
+            "offer_id": MODEL_HOSTED_OFFER_ID,
+            "operation": "text.generate",
+            "input_hash": input_hash,
+        },
+    })
+}
+
+/// The access binding one model read of `run_id` sends. It keeps the create
+/// binding's owner fields, which the provider compares with the stored run, and
+/// names the run the create answered.
+#[cfg(target_os = "linux")]
+fn model_linux_access_binding(create: &Value, run_id: &str) -> Value {
+    let binding = &create["runtime_binding"];
+    json!({
+        "schema": "elastos.model.runtime-access-binding/v1",
+        "principal_id": binding["principal_id"].clone(),
+        "session_id": binding["session_id"].clone(),
+        "capsule_id": binding["capsule_id"].clone(),
+        "grant_id": binding["grant_id"].clone(),
+        "request_id": binding["request_id"].clone(),
+        "run_id": run_id,
+    })
+}
+
+/// The seven model operations the Linux journey drives after `init` and
+/// `status`, using the record type and judgement of the did and wallet suites.
+///
+/// It starts no provider. `offers_list` answers with the configured hosted
+/// offer. `runs_create` stores one run and asserts its typed answer: the run is
+/// `failed` with `terminal.error` `context_rejected` and
+/// `Hosted external HTTPS is paused.`, because the provider refuses hosted
+/// dispatch before any socket when the config names none. `runs_get` reads that
+/// run back equal to the create data, `runs_events` shows the terminal page
+/// with a last `failed` event and no more pages, and `runs_cancel` on a
+/// terminal run returns the same run data. The unsupported operation asserts
+/// `unsupported_operation`, and `shutdown` is last: it answers `ok` and the
+/// child exits with status 0, which `ConfinedProvider::shutdown` asserts.
+#[cfg(target_os = "linux")]
+fn model_standin_linux_only_operations(
+    provider: &mut ConfinedProvider,
+    label: &str,
+) -> Vec<SuiteEntry> {
+    let mut record = Vec::new();
+
+    let offers = provider.send(&json!({ "op": "offers_list" }));
+    assert_eq!(
+        offers["status"], "ok",
+        "{label}: offers_list must answer: {offers}"
+    );
+    assert_eq!(
+        offers["data"]["schema"], "elastos.model.offers-list/v1",
+        "{label}: offers_list must use its own schema: {offers}"
+    );
+    assert_eq!(
+        offers["data"]["provider"], MODEL_PROVIDER,
+        "{label}: offers_list must name the provider: {offers}"
+    );
+    assert_eq!(
+        offers["data"]["offers"][0]["id"], MODEL_HOSTED_OFFER_ID,
+        "{label}: offers_list must name the configured offer: {offers}"
+    );
+    assert_eq!(
+        offers["data"]["offers"][0]["operation"], "text.generate",
+        "{label}: the configured offer must be the text offer: {offers}"
+    );
+    record.push(suite_entry("offers_list", SuiteClass::Permitted, &offers));
+
+    let create_request = model_linux_run_create_request();
+    let created = provider.send(&create_request);
+    assert_eq!(
+        created["status"], "ok",
+        "{label}: runs_create must store the run: {created}"
+    );
+    let data = &created["data"];
+    assert_eq!(
+        data["schema"], MODEL_RUN_SCHEMA,
+        "{label}: runs_create must answer a run view: {created}"
+    );
+    assert_eq!(
+        data["offer_id"], MODEL_HOSTED_OFFER_ID,
+        "{label}: the run must name the configured offer: {created}"
+    );
+    assert_eq!(
+        data["operation"], "text.generate",
+        "{label}: the run must name its operation: {created}"
+    );
+    assert_eq!(
+        data["status"], "failed",
+        "{label}: the refused hosted dispatch must fail the run: {created}"
+    );
+    assert_eq!(
+        data["terminal"]["error"],
+        json!({
+            "class": "context_rejected",
+            "code": "context_rejected",
+            "message": "Hosted external HTTPS is paused.",
+        }),
+        "{label}: the provider's own hosted refusal must settle the run: {created}"
+    );
+    let run_id = data["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: runs_create must name the run id: {created}"))
+        .to_string();
+    assert!(
+        run_id.starts_with("run:sha256:") && run_id.len() == "run:sha256:".len() + 64,
+        "{label}: the run id must be the contract id: {created}"
+    );
+    record.push(suite_entry("runs_create", SuiteClass::Permitted, &created));
+
+    let access = model_linux_access_binding(&create_request, &run_id);
+    let got = provider.send(&json!({
+        "op": "runs_get", "run_id": run_id.clone(), "runtime_binding": access.clone()
+    }));
+    assert_eq!(got["status"], "ok", "{label}: runs_get must answer: {got}");
+    assert_eq!(
+        got["data"], created["data"],
+        "{label}: runs_get must read back the stored run: {got}"
+    );
+    record.push(suite_entry("runs_get", SuiteClass::Permitted, &got));
+
+    let events = provider.send(&json!({
+        "op": "runs_events",
+        "run_id": run_id.clone(),
+        "after_sequence": 0,
+        "runtime_binding": access.clone(),
+    }));
+    assert_eq!(
+        events["status"], "ok",
+        "{label}: runs_events must answer: {events}"
+    );
+    assert_eq!(
+        events["data"]["schema"], MODEL_RUN_EVENTS_SCHEMA,
+        "{label}: runs_events must use the run-events schema: {events}"
+    );
+    assert_eq!(
+        events["data"]["run_id"], run_id,
+        "{label}: runs_events must name the stored run: {events}"
+    );
+    assert_eq!(
+        events["data"]["has_more"], false,
+        "{label}: the terminal page must not continue: {events}"
+    );
+    let last = events["data"]["events"]
+        .as_array()
+        .and_then(|page| page.last())
+        .unwrap_or_else(|| panic!("{label}: the stored run must keep a last event: {events}"));
+    assert_eq!(
+        last["kind"], "failed",
+        "{label}: the last event kind must be failed: {events}"
+    );
+    record.push(suite_entry("runs_events", SuiteClass::Permitted, &events));
+
+    let cancelled = provider.send(&json!({
+        "op": "runs_cancel", "run_id": run_id.clone(), "runtime_binding": access.clone()
+    }));
+    assert_eq!(
+        cancelled["status"], "ok",
+        "{label}: runs_cancel must answer: {cancelled}"
+    );
+    assert_eq!(
+        cancelled["data"], created["data"],
+        "{label}: a terminal runs_cancel must return the stored run: {cancelled}"
+    );
+    record.push(suite_entry(
+        "runs_cancel",
+        SuiteClass::Permitted,
+        &cancelled,
+    ));
+
+    let unsupported = provider.send(&json!({ "op": "not_an_op" }));
+    assert_eq!(
+        unsupported["status"], "error",
+        "{label}: an unknown operation must be refused: {unsupported}"
+    );
+    assert_eq!(
+        unsupported["code"], "unsupported_operation",
+        "{label}: an unknown operation must answer unsupported_operation: {unsupported}"
+    );
+    assert_eq!(
+        unsupported["message"], "unsupported model provider operation",
+        "{label}: the refusal must name the unsupported operation: {unsupported}"
+    );
+    record.push(suite_entry("unsupported", SuiteClass::Denied, &unsupported));
+
+    let shutdown = provider.shutdown();
+    assert_eq!(
+        shutdown["data"],
+        json!({ "shutdown": true }),
+        "{label}: shutdown must answer its one field: {shutdown}"
+    );
+    record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
+
+    record
 }
 
 /// The test creates the directory `STORAGE_PARENT` names before the launch,
@@ -2187,6 +2453,48 @@ fn sign_test_message(signing_key: &SigningKey, message: &str) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
+/// The bytes `personal_sign` signs for `message`, computed as
+/// `src/crypto/evm/browser.rs::browser_personal_sign_message_bytes` computes
+/// them: a `0x` prefix with even hex digits is decoded, and every other message
+/// is its own UTF-8 bytes.
+fn browser_personal_sign_message_bytes(message: &str) -> Vec<u8> {
+    match message
+        .strip_prefix("0x")
+        .or_else(|| message.strip_prefix("0X"))
+    {
+        Some(raw) if raw.len() % 2 == 0 && raw.chars().all(|ch| ch.is_ascii_hexdigit()) => {
+            hex::decode(raw).expect("even hex digits must decode")
+        }
+        _ => message.as_bytes().to_vec(),
+    }
+}
+
+/// The address `signature` recovers to over `message`, computed as
+/// `src/crypto/evm/signature.rs::recover_evm_address_from_hash` computes it:
+/// the EIP-191 hash of the signed bytes, the 65-byte signature, and the Keccak
+/// digest of the recovered public key without its prefix byte. A signature the
+/// wallet answers must name the account's own address through this path.
+fn recover_evm_message_address(message: &str, signature: &str) -> String {
+    let hash = ethereum_signed_message_hash(&browser_personal_sign_message_bytes(message));
+    let signature_hex = signature
+        .strip_prefix("0x")
+        .unwrap_or_else(|| panic!("an EVM signature must carry 0x: {signature}"));
+    let bytes = hex::decode(signature_hex).expect("an EVM signature must be hex");
+    assert_eq!(bytes.len(), 65, "an EVM signature must be 65 bytes");
+    let ecdsa = EcdsaSignature::try_from(&bytes[..64]).expect("the signature must decode");
+    let recovery_id = match bytes[64] {
+        0 | 1 => bytes[64],
+        27 | 28 => bytes[64] - 27,
+        other => panic!("unsupported EVM recovery id: {other}"),
+    };
+    let recovery_id = RecoveryId::try_from(recovery_id).expect("the recovery id must decode");
+    let verifying_key = VerifyingKey::recover_from_prehash(&hash, &ecdsa, recovery_id)
+        .expect("the signature must recover a signer");
+    let encoded = verifying_key.to_encoded_point(false);
+    let digest = Keccak256::digest(&encoded.as_bytes()[1..]);
+    format!("0x{}", hex::encode(&digest[12..]))
+}
+
 /// The ERC-1271 evidence in `src/tests/support.rs::erc1271_proof`'s shape: the
 /// SIWE message hash, a SHA-256 of the signature bytes, and no chain access.
 fn erc1271_evidence(message: &str, signature: &str, contract: &str) -> Erc1271ProofEvidenceV1 {
@@ -2717,6 +3025,7 @@ fn managed_approvals_persist_under_storage_root() {
         .to_string();
 
     let mut request_ids = Vec::new();
+    let mut request_messages = Vec::new();
     for message in ["First managed approval", "Second managed approval"] {
         let data = ok_data(provider.wallet(personal_sign_approval(&account_id, &address, message)));
         let approval = &data["approval_request"];
@@ -2724,6 +3033,7 @@ fn managed_approvals_persist_under_storage_root() {
             approval["status"], "pending",
             "request_approval must answer a pending request"
         );
+        request_messages.push(message);
         request_ids.push(
             approval["request_id"]
                 .as_str()
@@ -2782,6 +3092,14 @@ fn managed_approvals_persist_under_storage_root() {
             .as_str()
             .is_some_and(|signature| !signature.is_empty()),
         "approve_and_sign_managed must answer a signature"
+    );
+    let signature = data["signature"]
+        .as_str()
+        .expect("approve_and_sign_managed must answer a signature");
+    assert_eq!(
+        recover_evm_message_address(request_messages[0], signature),
+        address,
+        "the signature must recover the created account's address"
     );
 
     let data = ok_data(provider.wallet(WalletProviderOperationV2::RejectApproval {
@@ -5138,6 +5456,801 @@ fn wallet_standin_suite(
     record
 }
 
+/// The wallet operations the Linux journey drives after `init` and `status`, in
+/// the order it drives them. Each answers `ok` and each answer is asserted
+/// exactly, so the journey shows the call under the filter and not a refusal.
+///
+/// Every effectful call needs a stored effect. The store's replace is admitted
+/// for wallet, so the first `create_managed_account` writes the account and the
+/// later calls use it: rename, the default account, one approved Browser
+/// personal_sign request, one rejected request, the transaction handoff and its
+/// Chain outcome, the protected-content rights request, and the recovery
+/// exports and imports. The proof calls use the local test keys and the ERC-1271
+/// evidence the macOS stand-in test builds, so none needs a network or a chain.
+#[cfg(target_os = "linux")]
+const WALLET_LINUX_ONLY_CASES: [(&str, SuiteClass); 29] = [
+    ("create_managed_account", SuiteClass::Permitted),
+    ("list_accounts", SuiteClass::Permitted),
+    ("rename_account", SuiteClass::Permitted),
+    ("set_default_account", SuiteClass::Permitted),
+    ("default_account", SuiteClass::Permitted),
+    ("challenge", SuiteClass::Permitted),
+    ("verify_proof", SuiteClass::Permitted),
+    // The contract proof path needs its own challenge, so `challenge` answers
+    // twice: once for the EOA proof and once for the ERC-1271 evidence.
+    ("challenge", SuiteClass::Permitted),
+    ("verify_contract_proof", SuiteClass::Permitted),
+    ("link_verified_account", SuiteClass::Permitted),
+    ("bitcoin_challenge", SuiteClass::Permitted),
+    ("verify_bip322_proof", SuiteClass::Permitted),
+    ("request_approval", SuiteClass::Permitted),
+    ("approve_and_sign_managed", SuiteClass::Permitted),
+    // A second personal_sign request is refused, so `request_approval` answers
+    // once for the approved request and once for the rejected one.
+    ("request_approval", SuiteClass::Permitted),
+    ("reject_approval", SuiteClass::Permitted),
+    ("list_approvals", SuiteClass::Permitted),
+    // The connector is its own linked account, and its transaction handoff
+    // needs one further approval, so both operations answer twice.
+    ("link_verified_account", SuiteClass::Permitted),
+    ("request_approval", SuiteClass::Permitted),
+    ("approve_connector_handoff", SuiteClass::Permitted),
+    ("complete_connector_handoff", SuiteClass::Permitted),
+    ("attach_validated_chain_outcome", SuiteClass::Permitted),
+    (
+        "request_protected_content_rights_signature",
+        SuiteClass::Permitted,
+    ),
+    ("export_managed_recovery_key", SuiteClass::Permitted),
+    ("export_managed_recovery_set", SuiteClass::Permitted),
+    ("import_managed_recovery_key", SuiteClass::Permitted),
+    ("import_managed_recovery_set", SuiteClass::Permitted),
+    ("revoke_account", SuiteClass::Permitted),
+    ("shutdown", SuiteClass::Permitted),
+];
+
+/// The wallet operations of `WALLET_LINUX_ONLY_CASES` on one started provider
+/// and one root. It starts no provider and ends with `shutdown`, whose child
+/// exit `ConfinedProvider::shutdown` asserts.
+///
+/// One managed account is created first and every stored effect uses it. A
+/// second linked account is the external connector for the transaction handoff,
+/// and the last call revokes it, so the run leaves one active managed account.
+/// The recovery set is exported before the imports, and the set import restores
+/// the renamed label last. Each case is recorded through `wallet_suite_entry`
+/// and judged by `assert_suite_outcomes` against `WALLET_LINUX_ONLY_CASES`.
+#[cfg(target_os = "linux")]
+fn wallet_standin_linux_only_operations(
+    provider: &mut ConfinedProvider,
+    _root: &Path,
+    label: &str,
+) -> Vec<SuiteEntry> {
+    macro_rules! wallet_case {
+        ($provider:expr, $record:expr, $label:expr, $case:literal, $operation:expr) => {{
+            let (request, answer) = $provider.wallet_request_and_answer($operation);
+            assert_eq!(
+                answer["data"]["schema"], WALLET_RESPONSE_SCHEMA,
+                "{}: {} must answer its response schema: {answer}",
+                $label, $case
+            );
+            assert_eq!(
+                answer["data"]["protocol_version"], WALLET_PROTOCOL_VERSION,
+                "{}: {} must answer the contract's protocol version: {answer}",
+                $label, $case
+            );
+            $record.push(wallet_suite_entry(
+                $label,
+                $case,
+                SuiteClass::Permitted,
+                &request,
+                &answer,
+            ));
+            answer["data"]["result"].clone()
+        }};
+    }
+
+    let mut record = Vec::new();
+
+    // The managed account every later stored effect uses.
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "create_managed_account",
+        WalletProviderOperationV2::CreateManagedAccount {
+            chain_namespace: "eip155:20".to_string(),
+            label: Some("Journey".to_string()),
+            create_new: true,
+        }
+    );
+    let created = &result["data"];
+    assert_eq!(result["status"], "ok", "{label}: create answer: {result}");
+    assert_eq!(created["created"], true);
+    assert_eq!(created["account"]["principal_id"], "person:local:alice");
+    assert_eq!(created["account"]["chain_namespace"], "eip155:20");
+    assert_eq!(created["account"]["proof_type"], "managed_evm");
+    assert_eq!(created["account"]["label"], "Journey");
+    assert_eq!(created["account"]["connector_id"], Value::Null);
+    assert_eq!(created["account"]["revoked_at"], Value::Null);
+    let account_id = created["account"]["account_id"]
+        .as_str()
+        .expect("the created account must name its id")
+        .to_string();
+    let account_address = created["account"]["address"]
+        .as_str()
+        .expect("the created account must name its address")
+        .to_string();
+    assert_eq!(
+        created["account"]["proof_binding_id"],
+        format!("proof:wallet:managed:eip155:20:{account_address}")
+    );
+    assert!(created["account"]["linked_at"].is_u64());
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "list_accounts",
+        WalletProviderOperationV2::ListAccounts {
+            include_revoked: false,
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["default_accounts"], json!([]));
+    let accounts = data["accounts"]
+        .as_array()
+        .expect("list_accounts must answer its accounts");
+    assert_eq!(accounts.len(), 1, "{label}: list_accounts answer: {result}");
+    assert_eq!(accounts[0]["account_id"], account_id);
+    assert_eq!(accounts[0]["label"], "Journey");
+    assert_eq!(accounts[0]["signing_available"], true);
+    assert_eq!(accounts[0]["signing_status"], "managed_key_available");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "rename_account",
+        WalletProviderOperationV2::RenameAccount {
+            account_id: account_id.clone(),
+            label: "Renamed".to_string(),
+        }
+    );
+    assert_eq!(result["data"]["account"]["account_id"], account_id);
+    assert_eq!(result["data"]["account"]["label"], "Renamed");
+    assert_eq!(result["data"]["account"]["revoked_at"], Value::Null);
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "set_default_account",
+        WalletProviderOperationV2::SetDefaultAccount {
+            chain_namespace: "eip155:20".to_string(),
+            intent: "publish_envelope".to_string(),
+            account_id: account_id.clone(),
+        }
+    );
+    let default = &result["data"]["default_account"];
+    assert_eq!(default["schema"], "elastos.wallet.default_account/v1");
+    assert_eq!(default["principal_id"], "person:local:alice");
+    assert_eq!(default["chain_namespace"], "eip155:20");
+    assert_eq!(default["intent"], "publish_envelope");
+    assert_eq!(default["account_id"], account_id);
+    assert!(default["set_at"].is_u64());
+    assert_eq!(result["data"]["account"]["account_id"], account_id);
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "default_account",
+        WalletProviderOperationV2::DefaultAccount {
+            chain_namespace: "eip155:20".to_string(),
+            intent: "publish_envelope".to_string(),
+        }
+    );
+    assert_eq!(
+        result["data"]["default_account"],
+        json!({
+            "schema": "elastos.wallet.default_account/v1",
+            "principal_id": "person:local:alice",
+            "chain_namespace": "eip155:20",
+            "intent": "publish_envelope",
+            "account_id": account_id,
+            "set_at": result["data"]["default_account"]["set_at"],
+        })
+    );
+    assert_eq!(result["data"]["account"]["account_id"], account_id);
+
+    // The EVM proof calls use a fixed local key, so no network is touched.
+    let evm_key = evm_test_signing_key();
+    let eoa_address = evm_test_address(&evm_key);
+    let contract = "0x00000000000000000000000000000000000000cc";
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "challenge",
+        WalletProviderOperationV2::Challenge {
+            domain: "http://elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: eoa_address.clone(),
+            chain_id: 20,
+            resources: vec!["elastos://wallet/account/link".to_string()],
+        }
+    );
+    let eoa_message = result["data"]["message"]
+        .as_str()
+        .expect("challenge must answer its message")
+        .to_string();
+    let eoa_challenge_id = result["data"]["challenge_id"]
+        .as_str()
+        .expect("challenge must answer its id")
+        .to_string();
+    assert_eq!(result["data"]["schema"], "elastos.auth.challenge/v1");
+    assert_eq!(
+        result["data"]["resources"],
+        json!([
+            format!("elastos://auth/challenge/{eoa_challenge_id}"),
+            "elastos://wallet/account/link"
+        ])
+    );
+    assert!(result["data"]["expires_at"].is_u64());
+
+    let eoa_signature = sign_test_message(&evm_key, &eoa_message);
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "verify_proof",
+        WalletProviderOperationV2::VerifyProof {
+            message: eoa_message.clone(),
+            signature: eoa_signature.clone(),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["schema"], "elastos.wallet.proof/v1");
+    assert_eq!(data["proof_type"], "siwe");
+    assert_eq!(data["chain_namespace"], "eip155:20");
+    assert_eq!(data["address"], eoa_address.to_ascii_lowercase());
+    assert_eq!(
+        data["proof_binding_id"],
+        format!(
+            "proof:wallet:eip155:20:{}",
+            eoa_address.to_ascii_lowercase()
+        )
+    );
+    assert_eq!(data["challenge_id"], eoa_challenge_id);
+    let proof_binding_id = data["proof_binding_id"]
+        .as_str()
+        .expect("the proof must answer its binding")
+        .to_string();
+    assert_message_hash(data, label, "verify_proof");
+
+    // The contract proof uses the same local challenge and supplied ERC-1271
+    // evidence; no chain is contacted.
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "challenge",
+        WalletProviderOperationV2::Challenge {
+            domain: "http://elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: contract.to_string(),
+            chain_id: 20,
+            resources: vec!["elastos://wallet/account/link".to_string()],
+        }
+    );
+    let contract_message = result["data"]["message"]
+        .as_str()
+        .expect("a contract challenge must answer its message")
+        .to_string();
+    let contract_signature = "0x01020304";
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "verify_contract_proof",
+        WalletProviderOperationV2::VerifyContractProof {
+            message: contract_message.clone(),
+            signature: contract_signature.to_string(),
+            evidence: erc1271_evidence(&contract_message, contract_signature, contract),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["proof_type"], "siwe_erc1271");
+    assert_eq!(data["chain_namespace"], "eip155:20");
+    assert_eq!(data["address"], contract);
+    assert_eq!(
+        data["proof_binding_id"],
+        format!("proof:wallet:eip155:20:{contract}")
+    );
+    assert_message_hash(data, label, "verify_contract_proof");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "link_verified_account",
+        WalletProviderOperationV2::LinkVerifiedAccount {
+            proof_binding_id: proof_binding_id.clone(),
+            chain_namespace: "eip155:20".to_string(),
+            address: eoa_address.clone(),
+            proof_type: "siwe".to_string(),
+            label: Some("Proof".to_string()),
+        }
+    );
+    let linked = &result["data"]["account"];
+    assert_eq!(linked["proof_binding_id"], proof_binding_id);
+    assert_eq!(linked["address"], eoa_address.to_ascii_lowercase());
+    assert_eq!(linked["proof_type"], "siwe");
+    assert_eq!(linked["connector_id"], "wallet");
+    assert_eq!(linked["label"], "Proof");
+    assert_eq!(
+        linked["account_id"],
+        format!("wallet:eip155:20:{}", eoa_address.to_ascii_lowercase())
+    );
+
+    // The Bitcoin proof calls sign with a local key on a P2PKH address.
+    let bitcoin_key = bitcoin_test_signing_key();
+    let bitcoin_address = bitcoin_test_address(&bitcoin_key);
+    let bitcoin_public_key = bitcoin_test_public_key(&bitcoin_key);
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "bitcoin_challenge",
+        WalletProviderOperationV2::BitcoinChallenge {
+            domain: "elastos.local".to_string(),
+            uri: "http://elastos.local/apps/home/".to_string(),
+            address: bitcoin_address.clone(),
+            network: PublicNetwork::bitcoin(),
+            resources: vec!["elastos://wallet/account/link".to_string()],
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["schema"], "elastos.wallet.bitcoin_challenge/v1");
+    assert_eq!(data["network"], "bitcoin");
+    assert_eq!(data["address"], bitcoin_address);
+    assert_eq!(data["proof_type"], "bitcoin_signed_message");
+    let bitcoin_message = data["message"]
+        .as_str()
+        .expect("a Bitcoin challenge must answer its message")
+        .to_string();
+    let bitcoin_challenge_id = data["challenge_id"]
+        .as_str()
+        .expect("a Bitcoin challenge must answer its id")
+        .to_string();
+    assert_eq!(
+        data["resources"],
+        json!([
+            format!("elastos://auth/bitcoin-challenge/{bitcoin_challenge_id}"),
+            "elastos://wallet/account/link"
+        ])
+    );
+
+    let bitcoin_signature = sign_bitcoin_test_message(&bitcoin_key, &bitcoin_message);
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "verify_bip322_proof",
+        WalletProviderOperationV2::VerifyBip322Proof {
+            message: bitcoin_message.clone(),
+            signature: bitcoin_signature.clone(),
+            signature_type: "bitcoin_signed_message".to_string(),
+            public_key: Some(bitcoin_public_key.clone()),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["schema"], "elastos.wallet.proof/v1");
+    assert_eq!(data["proof_type"], "bitcoin_signed_message");
+    assert_eq!(data["proof_strength"], "standard");
+    assert_eq!(
+        data["chain_namespace"],
+        "bip122:000000000019d6689c085ae165831e93"
+    );
+    assert_eq!(data["address"], bitcoin_address);
+    assert_eq!(data["challenge_id"], bitcoin_challenge_id);
+    assert_eq!(
+        data["proof_binding_id"],
+        format!("proof:wallet:bip122:000000000019d6689c085ae165831e93:{bitcoin_address}")
+    );
+    assert_message_hash(data, label, "verify_bip322_proof");
+
+    // One managed approval is signed, one is rejected, and both use the
+    // account created above.
+    let first_managed_message = "First managed approval";
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "request_approval",
+        personal_sign_approval(&account_id, &account_address, first_managed_message)
+    );
+    let approval = &result["data"]["approval_request"];
+    assert_eq!(result["data"]["requires_approval"], true);
+    assert_eq!(result["data"]["signature"], Value::Null);
+    assert_eq!(approval["schema"], "elastos.wallet.approval_request/v1");
+    assert_eq!(approval["kind"], "signature");
+    assert_eq!(approval["status"], "pending");
+    assert_eq!(approval["principal_id"], "person:local:alice");
+    assert_eq!(approval["session_id"], "session:confine");
+    assert_eq!(approval["requested_by_actor"], "wallet");
+    assert_eq!(approval["account_id"], account_id);
+    assert_eq!(approval["chain_namespace"], "eip155:20");
+    assert_eq!(approval["intent"], "browser_personal_sign");
+    assert_eq!(approval["connector_id"], Value::Null);
+    assert_eq!(approval["resolved_at"], Value::Null);
+    let payload_hash = approval["payload_hash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: request_approval must name its payload hash"));
+    assert!(
+        payload_hash.starts_with("0x"),
+        "{label}: payload hash: {payload_hash}"
+    );
+    assert_eq!(
+        payload_hash.len(),
+        66,
+        "{label}: payload hash: {payload_hash}"
+    );
+    let first_request_id = approval["request_id"]
+        .as_str()
+        .expect("an approval must name its id")
+        .to_string();
+    let first_payload_hash = approval["payload_hash"]
+        .as_str()
+        .expect("an approval must name its payload hash")
+        .to_string();
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "approve_and_sign_managed",
+        WalletProviderOperationV2::ApproveAndSignManaged {
+            request_id: first_request_id.clone(),
+            reason: "approved by the confined journey".to_string(),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["approval_request"]["status"], "completed");
+    let signature = data["signature"]
+        .as_str()
+        .expect("approve_and_sign_managed must answer a signature");
+    assert!(
+        signature.starts_with("0x"),
+        "{label}: signature: {signature}"
+    );
+    assert_eq!(signature.len(), 132, "{label}: signature: {signature}");
+    assert_eq!(
+        recover_evm_message_address(first_managed_message, signature),
+        account_address,
+        "{label}: the signature must recover the created account's address"
+    );
+    assert_eq!(
+        data["signature_receipt"]["schema"],
+        "elastos.wallet.signature_receipt/v1"
+    );
+    assert_eq!(data["signature_receipt"]["request_id"], first_request_id);
+    assert_eq!(data["signature_receipt"]["signer"], account_address);
+    assert_eq!(
+        data["signature_receipt"]["payload_hash"],
+        first_payload_hash
+    );
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "request_approval",
+        personal_sign_approval(&account_id, &account_address, "Second managed approval")
+    );
+    let second_request_id = result["data"]["approval_request"]["request_id"]
+        .as_str()
+        .expect("an approval must name its id")
+        .to_string();
+    assert_eq!(result["data"]["approval_request"]["status"], "pending");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "reject_approval",
+        WalletProviderOperationV2::RejectApproval {
+            request_id: second_request_id.clone(),
+            reason: "rejected by the confined journey".to_string(),
+        }
+    );
+    assert_eq!(result["data"]["approval_request"]["status"], "rejected");
+    assert_eq!(
+        result["data"]["approval_request"]["rejection_reason"],
+        "rejected by the confined journey"
+    );
+    assert_eq!(
+        result["data"]["approval_request"]["request_id"],
+        second_request_id
+    );
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "list_approvals",
+        WalletProviderOperationV2::ListApprovals {
+            include_resolved: true,
+        }
+    );
+    let requests = result["data"]["approval_requests"]
+        .as_array()
+        .expect("list_approvals must answer its requests");
+    assert_eq!(requests.len(), 2, "{label}: list_approvals: {result}");
+    for (request_id, expected) in [
+        (&first_request_id, "completed"),
+        (&second_request_id, "rejected"),
+    ] {
+        let request = requests
+            .iter()
+            .find(|request| request["request_id"].as_str() == Some(request_id.as_str()))
+            .unwrap_or_else(|| panic!("{label}: list_approvals must hold {request_id}"));
+        assert_eq!(request["status"], expected);
+    }
+
+    // The external connector account and its transaction handoff.
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "link_verified_account",
+        WalletProviderOperationV2::LinkVerifiedAccount {
+            proof_binding_id: format!("proof:eip155:20:{CONNECTOR_ADDRESS}"),
+            chain_namespace: "eip155:20".to_string(),
+            address: CONNECTOR_ADDRESS.to_string(),
+            proof_type: "siwe".to_string(),
+            label: None,
+        }
+    );
+    let connector = &result["data"]["account"];
+    assert_eq!(connector["connector_id"], "wallet");
+    assert_eq!(connector["address"], CONNECTOR_ADDRESS);
+    let connector_account_id = connector["account_id"]
+        .as_str()
+        .expect("the connector account must name its id")
+        .to_string();
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "request_approval",
+        WalletProviderOperationV2::RequestApproval {
+            account_id: connector_account_id.clone(),
+            chain_namespace: "eip155:20".to_string(),
+            intent: "transaction_intent".to_string(),
+            resource: "elastos://chain/esc-mainnet/broadcast_transaction".to_string(),
+            reason: "Send EVM transaction".to_string(),
+            payload: external_transaction_payload(CONNECTOR_ADDRESS),
+            expires_at: now_ts().saturating_add(10 * 60),
+        }
+    );
+    let transaction_approval = &result["data"]["approval_request"];
+    assert_eq!(transaction_approval["status"], "pending");
+    assert_eq!(transaction_approval["intent"], "transaction_intent");
+    assert_eq!(transaction_approval["connector_id"], "wallet");
+    assert_eq!(transaction_approval["address"], CONNECTOR_ADDRESS);
+    let transaction_request_id = transaction_approval["request_id"]
+        .as_str()
+        .expect("the transaction approval must name its id")
+        .to_string();
+    let transaction_payload_hash = transaction_approval["payload_hash"]
+        .as_str()
+        .expect("the transaction approval must name its payload hash")
+        .to_string();
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "approve_connector_handoff",
+        WalletProviderOperationV2::ApproveConnectorHandoff {
+            request_id: transaction_request_id.clone(),
+            reason: "approved by the confined journey".to_string(),
+        }
+    );
+    assert_eq!(result["data"]["approval_request"]["status"], "approved");
+    assert_eq!(
+        result["data"]["approval_request"]["approval_reason"],
+        "approved by the confined journey"
+    );
+    assert_eq!(result["data"]["handoff"]["intent"], "transaction_intent");
+    assert_eq!(result["data"]["signature"], Value::Null);
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "complete_connector_handoff",
+        WalletProviderOperationV2::CompleteConnectorHandoff {
+            request_id: transaction_request_id.clone(),
+            payload_hash: transaction_payload_hash.clone(),
+            signature: None,
+            signature_type: None,
+            public_key: None,
+            signer: CONNECTOR_ADDRESS.to_string(),
+            transaction_hash: Some(CONNECTOR_TRANSACTION_HASH.to_string()),
+        }
+    );
+    let data = &result["data"];
+    assert_eq!(data["approval_request"]["status"], "completed");
+    assert_eq!(
+        data["approval_request"]["signed_result"]["transaction_hash"],
+        CONNECTOR_TRANSACTION_HASH
+    );
+    assert_eq!(
+        data["signature_receipt"]["request_id"],
+        transaction_request_id
+    );
+    assert_eq!(data["signature_receipt"]["signer"], CONNECTOR_ADDRESS);
+
+    let outcome = external_chain_outcome(
+        &transaction_request_id,
+        &connector_account_id,
+        CONNECTOR_TRANSACTION_HASH,
+    );
+    let expected_outcome = serde_json::to_value(&outcome).expect("the outcome must serialize");
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "attach_validated_chain_outcome",
+        WalletProviderOperationV2::AttachValidatedChainOutcome {
+            outcome: outcome.clone(),
+        }
+    );
+    assert_eq!(
+        result["data"]["approval_request"]["validated_chain_outcome"], expected_outcome,
+        "{label}: attach must answer the stored outcome"
+    );
+
+    // The protected-content rights request is a pending approval on the managed
+    // account; it stays pending and is listed by its id.
+    let issued_at = now_ts();
+    let rights_request =
+        protected_content_rights_request(&account_address, issued_at, issued_at + 120, 0x51);
+    let canonical_rights_request_hex = hex::encode(
+        rights_request
+            .canonical_bytes()
+            .expect("the rights request must encode canonically"),
+    );
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "request_protected_content_rights_signature",
+        WalletProviderOperationV2::RequestProtectedContentRightsSignature {
+            account_id: account_id.clone(),
+            canonical_rights_request_hex: canonical_rights_request_hex.clone(),
+            reason: "Review and sign the exact protected-content rights request".to_string(),
+        }
+    );
+    let approval = &result["data"]["approval_request"];
+    assert_eq!(result["data"]["requires_approval"], true);
+    assert_eq!(result["data"]["signature"], Value::Null);
+    assert_eq!(approval["status"], "pending");
+    assert_eq!(approval["account_id"], account_id);
+    assert_eq!(
+        approval["intent"],
+        PROTECTED_CONTENT_RIGHTS_SIGNATURE_INTENT
+    );
+    assert_eq!(
+        approval["payload"]["canonical_rights_request_hex"],
+        canonical_rights_request_hex
+    );
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "export_managed_recovery_key",
+        WalletProviderOperationV2::ExportManagedRecoveryKey {
+            account_id: account_id.clone(),
+        }
+    );
+    let recovery_key = result["data"].clone();
+    assert_eq!(recovery_key["schema"], "elastos.wallet.recovery-key/v1");
+    assert_eq!(recovery_key["account_id"], account_id);
+    assert_eq!(recovery_key["chain_namespace"], "eip155:20");
+    assert_eq!(recovery_key["address"], account_address);
+    assert_eq!(recovery_key["secret_type"], "secp256k1_private_key_hex");
+    let private_key_hex = recovery_key["private_key_hex"]
+        .as_str()
+        .expect("the recovery key must name its private key");
+    assert_eq!(private_key_hex.len(), 64, "{label}: private key length");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "export_managed_recovery_set",
+        WalletProviderOperationV2::ExportManagedRecoverySet {}
+    );
+    let recovery_set_value = result["data"].clone();
+    assert_eq!(
+        recovery_set_value["schema"],
+        "elastos.wallet.managed-recovery-set/v1"
+    );
+    let keys = recovery_set_value["keys"]
+        .as_array()
+        .expect("the recovery set must answer its keys");
+    assert_eq!(keys.len(), 1, "{label}: recovery set: {result}");
+    assert_eq!(keys[0]["account_id"], account_id);
+    assert_eq!(keys[0]["label"], "Renamed");
+    assert_eq!(keys[0]["recovery_key"]["account_id"], account_id);
+    let recovery_set: ManagedRecoverySetV1 = serde_json::from_value(recovery_set_value.clone())
+        .expect("the exported set must decode as a recovery set");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "import_managed_recovery_key",
+        WalletProviderOperationV2::ImportManagedRecoveryKey {
+            recovery_key: recovery_key.clone(),
+            label: Some("Recovered".to_string()),
+        }
+    );
+    assert_eq!(result["data"]["imported"], true);
+    assert_eq!(result["data"]["account"]["account_id"], account_id);
+    assert_eq!(result["data"]["account"]["label"], "Recovered");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "import_managed_recovery_set",
+        WalletProviderOperationV2::ImportManagedRecoverySet {
+            recovery_set: recovery_set.clone(),
+        }
+    );
+    assert_eq!(result["data"]["imported"], true);
+    assert_eq!(result["data"]["account_count"], 1);
+    assert_eq!(result["data"]["accounts"][0]["account_id"], account_id);
+    assert_eq!(result["data"]["accounts"][0]["label"], "Renamed");
+
+    let result = wallet_case!(
+        provider,
+        &mut record,
+        label,
+        "revoke_account",
+        WalletProviderOperationV2::RevokeAccount {
+            account_id: connector_account_id.clone(),
+        }
+    );
+    assert_eq!(
+        result["data"]["account"]["account_id"],
+        connector_account_id
+    );
+    assert!(result["data"]["account"]["revoked_at"].is_u64());
+
+    let shutdown = provider.shutdown();
+    record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
+
+    record
+}
+
+/// The proof answers name a `0x`-prefixed 32-byte hash.
+#[cfg(target_os = "linux")]
+fn assert_message_hash(data: &Value, label: &str, call: &str) {
+    let hash = data["message_hash"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: {call} must answer a message hash: {data}"));
+    assert!(hash.starts_with("0x"), "{label}: {call}: {hash}");
+    assert_eq!(hash.len(), 66, "{label}: {call}: {hash}");
+    assert!(hash[2..].bytes().all(|byte| byte.is_ascii_hexdigit()));
+}
+
 /// The permitted did operations on one started provider and one root, using the
 /// record type and judgement of `wallet_standin_suite`, and the did suite's
 /// first half.
@@ -5214,6 +6327,121 @@ fn did_standin_permitted_operations(
         SuiteClass::Permitted,
         &persona,
     ));
+
+    record
+}
+
+/// The four did operations the Linux journey drives after the six
+/// `did_standin_permitted_operations` records, in the order it drives them.
+///
+/// `sign_chat_message` and `verify` answer `ok`, and `shutdown` answers `ok` and
+/// ends the provider, so their class is `Permitted`. `verify_did_recovery`
+/// answers the provider's own typed refusal, `invalid_signature`, for a
+/// well-formed request whose signature is not hex, so its class is `Denied`;
+/// the helper asserts that code and its reason, so "answered under the filter"
+/// is this refusal and not any other answer.
+#[cfg(target_os = "linux")]
+const DID_LINUX_ONLY_CASES: [(&str, SuiteClass); 4] = [
+    ("sign_chat_message", SuiteClass::Permitted),
+    ("verify", SuiteClass::Permitted),
+    ("verify_did_recovery", SuiteClass::Denied),
+    ("shutdown", SuiteClass::Permitted),
+];
+
+/// The four remaining did operations on one started provider, using the record
+/// type and judgement of `did_standin_permitted_operations`.
+///
+/// It starts no provider and reads the device DID it needs from the running
+/// one. `verify` is fed the payload and signature `sign_chat_message` just
+/// answered, so the test renders no signing payload and constructs no
+/// signature. `verify_did_recovery` sends one complete request with a
+/// well-formed binding and timestamps and a signature that is not hex: the
+/// provider answers `invalid_signature` with its `Invalid hex sig:` reason, and
+/// this helper asserts that answer, so the case records the provider's typed
+/// refusal rather than a pass on any answer. `shutdown` answers `ok` and the
+/// child exits with status 0, which `ConfinedProvider::shutdown` asserts.
+#[cfg(target_os = "linux")]
+fn did_standin_linux_only_operations(
+    provider: &mut ConfinedProvider,
+    label: &str,
+) -> Vec<SuiteEntry> {
+    let mut record = Vec::new();
+
+    let did_data = provider.send(&json!({ "op": "get_did" }));
+    let did = did_data["data"]["did"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: get_did must name the DID: {did_data}"))
+        .to_string();
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock must be after the epoch")
+        .as_secs();
+    let signed = provider.send(&json!({
+        "op": "sign_chat_message", "sender_id": did, "ts": ts, "content": "confined"
+    }));
+    let payload = signed["data"]["payload"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: sign_chat_message must return its payload: {signed}"))
+        .to_string();
+    let signature = signed["data"]["signature"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: sign_chat_message must return its signature: {signed}"))
+        .to_string();
+    record.push(suite_entry(
+        "sign_chat_message",
+        SuiteClass::Permitted,
+        &signed,
+    ));
+
+    let verified = provider
+        .send(&json!({ "op": "verify", "did": did, "data": payload, "signature": signature }));
+    assert_eq!(
+        verified["data"]["valid"], true,
+        "{label}: verify must accept the payload and signature sign_chat_message answered: {verified}"
+    );
+    record.push(suite_entry("verify", SuiteClass::Permitted, &verified));
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock must be after the epoch")
+        .as_secs();
+    let recovery = provider.send(&json!({
+        "op": "verify_did_recovery",
+        "did": did,
+        "principal_id": "person:local:confined",
+        "localhost_root": "localhost://Users/person:local:confined",
+        "protector_id": "protector:did:confined",
+        "data_key_id": "pdek:confined",
+        "nonce": "nonce:confined",
+        "issued_at": now,
+        "expires_at": now + 300,
+        "signature": "not-hex"
+    }));
+    assert_eq!(
+        recovery["status"], "error",
+        "{label}: verify_did_recovery must answer a typed refusal, not a crash: {recovery}"
+    );
+    assert_eq!(
+        recovery["code"], "invalid_signature",
+        "{label}: verify_did_recovery must refuse the non-hex signature with invalid_signature: \
+         {recovery}"
+    );
+    assert!(
+        recovery["message"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Invalid hex sig:"),
+        "{label}: the refusal must come from the signature decode: {recovery}"
+    );
+    record.push(suite_entry(
+        "verify_did_recovery",
+        SuiteClass::Denied,
+        &recovery,
+    ));
+
+    let shutdown = provider.shutdown();
+    record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
 
     record
 }
@@ -6701,6 +7929,12 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("readlinkat", Some(267), Some(78)),
     ("readv", Some(19), Some(65)),
     ("recvmsg", Some(47), Some(212)),
+    // x86-64 only: aarch64 has no rename call, so glibc's rename calls
+    // renameat there.
+    ("rename", Some(82), None),
+    // aarch64 only: glibc's rename is this call there, and x86-64 reaches the
+    // same replace through `rename`, so no x86-64 journey needs this row.
+    ("renameat", None, Some(38)),
     ("renameat2", Some(316), Some(276)),
     ("rseq", Some(334), Some(293)),
     ("rt_sigaction", Some(13), Some(134)),
@@ -6734,7 +7968,19 @@ const SECCOMP_AUDIT_ARCH: u32 = 0;
 
 /// The calls the table carries for x86-64 alone: older forms of admitted
 /// calls, or calls aarch64 does not have.
-const X86_64_ONLY_SYSCALLS: &[&str] = &["arch_prctl", "epoll_wait", "mkdir", "poll", "unlink"];
+const X86_64_ONLY_SYSCALLS: &[&str] = &[
+    "arch_prctl",
+    "epoll_wait",
+    "mkdir",
+    "poll",
+    "rename",
+    "unlink",
+];
+
+/// The calls the table carries for aarch64 alone. `renameat` is the form
+/// glibc's `rename` calls on aarch64, and x86-64 admits `rename` itself, so its
+/// x86-64 cell is empty and no x86-64 program renders the row.
+const AARCH64_ONLY_SYSCALLS: &[&str] = &["renameat"];
 
 /// The first number of the x32 call space on x86-64.
 const SECCOMP_X32_FIRST: u32 = 0x4000_0000;
@@ -6782,8 +8028,9 @@ impl SeccompInstruction {
 
 /// What a runtime with threads needs beyond `LAUNCH_ESSENTIALS`, measured with
 /// strace on the model provider's `init`, `status` and `shutdown` on aarch64,
-/// kernel 7.0. did and wallet are single-threaded and have none of these, so their
-/// programs stay byte-equal. `clone`, `clone3` and `socketpair` are not here: they
+/// kernel 7.0. did and wallet are single-threaded and have none of these, so
+/// their programs stay byte-equal apart from wallet's store replace below.
+/// `clone`, `clone3` and `socketpair` are not here: they
 /// take the argument-checked rules in `seccomp_program_with_thread_rules`.
 /// `epoll_wait` is the x86-64 form of `epoll_pwait`, named by a run on GitHub's
 /// x86-64 runner whose filter logged instead of refusing (run 42448113772);
@@ -6801,6 +8048,14 @@ impl SeccompInstruction {
 /// `munmap` also passes when refused, and stays as a stated exception, not a
 /// measured need: it unmaps only the caller's own memory, so refusing it takes
 /// no authority away and only stops memory being returned. No run shows a leak.
+///
+/// `rename` and `renameat` are the model's record replace: `runs_create` writes
+/// one run through `std::fs::rename`, which calls libc `rename`. glibc's
+/// `rename` is the `rename` call on x86-64 and `renameat` on aarch64, where the
+/// kernel has no `rename`. The storage row names only `renameat2`, so without
+/// these two the replace fails with `EACCES`, Rust reads that as
+/// `PermissionDenied`, and the provider answers `journal_access_denied`. Each
+/// architecture admits only the form it has.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "epoll_create1",
     "epoll_ctl",
@@ -6811,8 +8066,22 @@ const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
     "flock",
     "geteuid",
     "munmap",
+    "rename",
+    "renameat",
     "rseq",
 ];
+
+/// The wallet's store replace, beside `LAUNCH_ESSENTIALS`: `save_store` writes
+/// `.wallet-state.json.<pid>.<rand>.tmp` beside the store and calls
+/// `std::fs::rename`, which calls libc `rename`. glibc's `rename` is the
+/// `rename` call on x86-64 and `renameat` on aarch64, where the kernel has no
+/// `rename`. The storage row names only `renameat2`, so without these two the
+/// replace fails with `EACCES`, Rust reads that as `PermissionDenied`, and the
+/// provider answers `storage_error`. Each architecture admits only the form it
+/// has, through the number table's empty cell for the other. did has no store
+/// replace, so its list stays as it is.
+const WALLET_RUNTIME_ESSENTIALS: &[&str] = &["rename", "renameat"];
+
 /// Argument words in `seccomp_data`: each argument is 64 bits, low word first on
 /// both aarch64 and x86_64.
 const SECCOMP_ARG0_LOW: u32 = 16;
@@ -6895,6 +8164,8 @@ impl SeccompAllowList {
         let mut syscalls = self.syscalls.clone();
         let runtime: &[&'static str] = if threaded {
             MODEL_RUNTIME_ESSENTIALS
+        } else if self.provider == WALLET_PROVIDER {
+            WALLET_RUNTIME_ESSENTIALS
         } else {
             &[]
         };
@@ -9366,7 +10637,7 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
     // would make the builders skip the call on that architecture, and the
     // one-ALLOW-per-syscall check above would agree with the shortened list.
     for (name, x86_64, aarch64) in SECCOMP_SYSCALL_NUMBERS {
-        if !X86_64_ONLY_SYSCALLS.contains(name) {
+        if !X86_64_ONLY_SYSCALLS.contains(name) && !AARCH64_ONLY_SYSCALLS.contains(name) {
             assert!(
                 x86_64.is_some() && aarch64.is_some(),
                 "{name} is a shared row, so both its cells must hold a number"
@@ -9382,6 +10653,17 @@ fn seccomp_program_denies_by_default_and_lists_no_undeclared_call() {
             seccomp_syscall_number(name, 0xc000_00b7),
             None,
             "{name} exists only on x86-64, so its aarch64 cell must be empty"
+        );
+    }
+    for name in AARCH64_ONLY_SYSCALLS {
+        assert_eq!(
+            seccomp_syscall_number(name, 0xc000_003e),
+            None,
+            "{name} exists only on aarch64, so its x86-64 cell must be empty"
+        );
+        assert!(
+            seccomp_syscall_number(name, 0xc000_00b7).is_some(),
+            "{name}'s aarch64 cell must hold its number"
         );
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -10866,7 +12148,7 @@ macro_rules! model_allowed_x86_64 {
             SYS_pread64 = 17, SYS_pwrite64 = 18, SYS_readv = 19, SYS_writev = 20,
             SYS_socketpair = 53, SYS_clone = 56, SYS_execve = 59, SYS_exit = 60, SYS_uname = 63,
             SYS_fcntl = 72, SYS_flock = 73, SYS_fsync = 74, SYS_fdatasync = 75, SYS_ftruncate = 77,
-            SYS_mkdir = 83, SYS_unlink = 87, SYS_fchmod = 91, SYS_sysinfo = 99, SYS_geteuid = 107,
+            SYS_rename = 82, SYS_mkdir = 83, SYS_unlink = 87, SYS_fchmod = 91, SYS_sysinfo = 99, SYS_geteuid = 107,
             SYS_arch_prctl = 158, SYS_futex = 202, SYS_getdents64 = 217, SYS_exit_group = 231,
             SYS_epoll_wait = 232, SYS_epoll_ctl = 233, SYS_openat = 257, SYS_mkdirat = 258,
             SYS_newfstatat = 262, SYS_unlinkat = 263, SYS_linkat = 265, SYS_readlinkat = 267,
@@ -10881,6 +12163,7 @@ macro_rules! model_allowed_aarch64 {
         $rows! {
             SYS_eventfd2 = 19, SYS_epoll_create1 = 20, SYS_epoll_ctl = 21, SYS_epoll_pwait = 22,
             SYS_fcntl = 25, SYS_flock = 32, SYS_mkdirat = 34, SYS_unlinkat = 35, SYS_linkat = 37,
+            SYS_renameat = 38,
             SYS_ftruncate = 46, SYS_faccessat = 48, SYS_fchmod = 52, SYS_openat = 56,
             SYS_close = 57, SYS_getdents64 = 61, SYS_lseek = 62, SYS_read = 63, SYS_write = 64,
             SYS_readv = 65, SYS_writev = 66, SYS_pread64 = 67, SYS_pwrite64 = 68, SYS_ppoll = 73,
@@ -11015,6 +12298,34 @@ fn model_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
         0xc000_00b7 => include_str!("model-seccomp-aarch64.golden"),
         other => panic!("no golden model program for audit architecture {other:#x}"),
     };
+    parse_seccomp_golden(text)
+}
+
+/// The checked-in golden copy of the wallet's final program for `audit_arch`,
+/// in the same one-instruction-per-line form as the model's.
+fn wallet_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
+    let text = match audit_arch {
+        0xc000_003e => include_str!("wallet-seccomp-x86_64.golden"),
+        0xc000_00b7 => include_str!("wallet-seccomp-aarch64.golden"),
+        other => panic!("no golden wallet program for audit architecture {other:#x}"),
+    };
+    parse_seccomp_golden(text)
+}
+
+/// The checked-in golden copy of did's final program for `audit_arch`.
+fn did_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
+    let text = match audit_arch {
+        0xc000_003e => include_str!("did-seccomp-x86_64.golden"),
+        0xc000_00b7 => include_str!("did-seccomp-aarch64.golden"),
+        other => panic!("no golden did program for audit architecture {other:#x}"),
+    };
+    parse_seccomp_golden(text)
+}
+
+/// One checked-in golden program's lines, read as four plain integers and the
+/// comment: `code jt jf k  # comment`. A line that does not carry that shape is
+/// a panic, not a skipped line.
+fn parse_seccomp_golden(text: &'static str) -> Vec<([u32; 4], &'static str)> {
     let number = |word: &str| match word.strip_prefix("0x") {
         Some(hex) => u32::from_str_radix(hex, 16),
         None => word.parse(),
@@ -11041,6 +12352,32 @@ fn model_seccomp_golden(audit_arch: u32) -> Vec<([u32; 4], &'static str)> {
             ([code, jt, jf, k], comment)
         })
         .collect()
+}
+
+/// One provider's rendered program on `audit_arch` equals that provider's
+/// golden copy, instruction for instruction, and the golden's call lines name
+/// libc's numbers where the host has them.
+fn assert_program_equals_golden(
+    provider: &str,
+    arch_name: &str,
+    program: &[SeccompInstruction],
+    golden: Vec<([u32; 4], &'static str)>,
+) {
+    let program: Vec<[u32; 4]> = program
+        .iter()
+        .map(|at| [u32::from(at.code), u32::from(at.jt), u32::from(at.jf), at.k])
+        .collect();
+    let golden: Vec<[u32; 4]> = golden.into_iter().map(|(at, _)| at).collect();
+    let first = (0..program.len().max(golden.len())).find(|&i| program.get(i) != golden.get(i));
+    assert!(
+        first.is_none(),
+        "the {arch_name} {provider} program must equal its golden copy: it has {} instructions \
+         and the golden {}, and instruction {first:?} differs, in hex: {:x?} against {:x?}",
+        program.len(),
+        golden.len(),
+        first.and_then(|i| program.get(i)),
+        first.and_then(|i| golden.get(i)),
+    );
 }
 
 /// The model's final program on each architecture equals its checked-in golden
@@ -11072,23 +12409,111 @@ fn seccomp_model_program_equals_its_golden_copy() {
         }
         // Both sides are plain integers: the rendered program's four fields read
         // directly, and the golden's own parse.
-        let program: Vec<[u32; 4]> = program
-            .iter()
-            .map(|at| [u32::from(at.code), u32::from(at.jt), u32::from(at.jf), at.k])
-            .collect();
-        let golden: Vec<[u32; 4]> = model_seccomp_golden(arch)
-            .into_iter()
-            .map(|(at, _)| at)
-            .collect();
-        let first = (0..program.len().max(golden.len())).find(|&i| program.get(i) != golden.get(i));
+        assert_program_equals_golden(
+            MODEL_PROVIDER,
+            arch_name,
+            &program,
+            model_seccomp_golden(arch),
+        );
+    }
+}
+
+/// The wallet's final program on each architecture equals its checked-in golden
+/// copy, instruction for instruction: every call, return action and jump target.
+/// Any change to the filter fails here until the golden file changes in the same
+/// diff, where a reviewer reads it. The program is rendered through the one
+/// builder and join, the host's being the launch's, with no kernel call, so the
+/// test runs on every OS.
+///
+/// Falsifier: WP258 removes `rename` and `renameat` from
+/// `WALLET_RUNTIME_ESSENTIALS`, so each golden shows two more call rows than the
+/// rendered program and this test fails on both architectures.
+#[test]
+fn seccomp_wallet_program_equals_its_golden_copy() {
+    let host = seccomp_probe_list(WALLET_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = seccomp_probe_list_for_arch(WALLET_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
+        if arch == host.audit_arch {
+            assert_eq!(
+                program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        assert_program_equals_golden(
+            WALLET_PROVIDER,
+            arch_name,
+            &program,
+            wallet_seccomp_golden(arch),
+        );
+    }
+}
+
+/// Did's final program uses its own rights and the lab builder on both
+/// architectures. The wallet relation test checks that did omits only the
+/// wallet's store-replace call. The committed copies pin all four fields of
+/// every instruction independently of the Runtime renderer.
+#[test]
+fn seccomp_did_program_equals_its_golden_copy() {
+    let host = seccomp_probe_list(DID_PROVIDER).unwrap_or_else(|err| panic!("{err}"));
+    for (arch, arch_name) in [(0xc000_003e_u32, "x86-64"), (0xc000_00b7, "aarch64")] {
+        let program = seccomp_probe_list_for_arch(DID_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"))
+            .program;
+        if arch == host.audit_arch {
+            assert_eq!(
+                program, host.program,
+                "{arch_name} must render the launch's"
+            );
+        }
+        assert_program_equals_golden(DID_PROVIDER, arch_name, &program, did_seccomp_golden(arch));
+    }
+}
+
+/// The wallet's launch list is did's plus the store replace, and each
+/// architecture admits only its own form of that replace: `rename` on x86-64 and
+/// `renameat` on aarch64. did has no store replace, so its list gains nothing.
+/// The list and both programs are built through the one builder and join, with
+/// no kernel call, so the test runs on every OS.
+///
+/// Falsifier: WP258 removes `rename` and `renameat` from
+/// `WALLET_RUNTIME_ESSENTIALS`, so wallet's list equals did's and this test fails
+/// on the missing row for both architectures.
+#[test]
+fn seccomp_wallet_program_adds_only_the_store_replace() {
+    for (arch, arch_name, own_form, other_form) in [
+        (0xc000_003e_u32, "x86-64", "rename", "renameat"),
+        (0xc000_00b7, "aarch64", "renameat", "rename"),
+    ] {
+        let did =
+            seccomp_probe_list_for_arch(DID_PROVIDER, arch).unwrap_or_else(|err| panic!("{err}"));
+        let wallet = seccomp_probe_list_for_arch(WALLET_PROVIDER, arch)
+            .unwrap_or_else(|err| panic!("{err}"));
+        let mut expected = did.syscalls.clone();
+        expected.push(own_form);
+        expected.sort_unstable();
+        assert_eq!(
+            wallet.syscalls, expected,
+            "the {arch_name} wallet list must be did's plus {own_form}"
+        );
         assert!(
-            first.is_none(),
-            "the {arch_name} model program must equal its golden copy: it has {} instructions \
-             and the golden {}, and instruction {first:?} differs, in hex: {:x?} against {:x?}",
-            program.len(),
-            golden.len(),
-            first.and_then(|i| program.get(i)),
-            first.and_then(|i| golden.get(i)),
+            wallet.admits(own_form),
+            "the {arch_name} wallet list must admit its own {own_form}"
+        );
+        assert!(
+            !wallet.admits(other_form),
+            "the {arch_name} wallet list must not admit {other_form}"
+        );
+        assert_eq!(
+            wallet.program,
+            seccomp_program(&expected, arch),
+            "the {arch_name} wallet program must be that list"
+        );
+        assert_eq!(
+            did.syscalls.len() + 1,
+            wallet.syscalls.len(),
+            "the {arch_name} wallet list must add exactly one call"
         );
     }
 }
@@ -13000,6 +14425,12 @@ fn linux_landlock_requires_no_new_privs() {
     }
 }
 
+/// The one base name the journey puts under `STORAGE_PARENT` and outside
+/// `STORAGE_ROOT`, so a caller that must prepare that path before the launch
+/// names it here instead of repeating the name.
+#[cfg(target_os = "linux")]
+const LANDLOCK_OUTSIDE_BASE: &str = "landlock-outside-base";
+
 /// The journey: `name` starts under the Landlock file row built from that
 /// provider's own declared rights and under the seccomp list built the same
 /// way, and one probe child under the same ruleset shows the file row refusing
@@ -13124,7 +14555,7 @@ fn landlock_file_row_journey(
         profile_dir.display()
     );
 
-    let outside_base = storage_parent(name, base).join("landlock-outside-base");
+    let outside_base = storage_parent(name, base).join(LANDLOCK_OUTSIDE_BASE);
     let outside = first_effect_outside(&mut provider, &outside_base);
     assert_eq!(
         outside["status"], "error",
@@ -13283,6 +14714,15 @@ fn linux_wallet_file_row_is_refused_outside_storage_root() {
 /// `get_persona_did`, judged against `DID_SUITE_CASES`' permitted prefix, so
 /// the did run proves its own operations answer under did's ruleset.
 ///
+/// The outside effect is a `set_nickname` write that did's ruleset refuses at
+/// `did/nickname.enc`. The caller creates that outside `did` directory before
+/// the launch and copies the root's `nickname.enc` into it, so the outside
+/// `Init` that holds the fixture device key is refused when it reads the copy
+/// and the `set_nickname` that follows meets an existing directory, opens
+/// `nickname.enc` and is refused on that write. The caller removes the planted
+/// file and the directory it made, so the journey's "creates nothing" check
+/// still holds.
+///
 /// The two Linux-only plants are the wallet caller's: a did launcher that skips
 /// only its own Landlock install fails the outside `Init`, and a
 /// `STORAGE_PARENT` row that grants a read fails the planted read beneath did's
@@ -13295,6 +14735,12 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
     let loader = landlock_loader_paths(DID_PROVIDER);
     let fixture = landlock_file_fixture(DID_PROVIDER, binary, &loader);
     let label = "did-provider landlock file row";
+    fs::create_dir_all(
+        storage_parent(DID_PROVIDER, &fixture.base)
+            .join(LANDLOCK_OUTSIDE_BASE)
+            .join("did"),
+    )
+    .expect("the outside nickname directory must stand before the launch");
     landlock_file_row_journey(
         DID_PROVIDER,
         binary,
@@ -13318,12 +14764,41 @@ fn linux_did_file_row_is_refused_outside_storage_root() {
                 "{label}: the replaced nickname must read back: {nickname}"
             );
         },
-        // did's Init records the root and writes nothing, so the kernel's refusal
-        // comes at its first write there.
+        // did's outside `Init` reads `did/nickname.enc`. A nickname file copied
+        // beneath `STORAGE_PARENT` from the root gives that read its path, so
+        // the kernel refuses the read itself. Removing only that copy leaves the
+        // outside `did` directory standing, so the `set_nickname` this closure
+        // returns is refused on the open of `nickname.enc`, not on a directory
+        // it would have created.
         |provider, outside| {
-            let init = provider.init(outside);
-            assert_eq!(init["status"], "ok", "did's Init writes nothing: {init}");
-            provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }))
+            let inside_nickname =
+                provider_storage_root(DID_PROVIDER, &fixture.base).join("nickname.enc");
+            let outside_nickname = outside.join("did").join("nickname.enc");
+            fs::copy(&inside_nickname, &outside_nickname)
+                .expect("the outside nickname file must take the root's bytes");
+            let init = provider.send(&provider_init_request(DID_PROVIDER, outside));
+            assert_eq!(
+                init["status"], "error",
+                "the outside nickname read must be refused: {init}"
+            );
+            assert_eq!(init["code"], "storage_error", "{init}");
+            let reason = init["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the refused init must carry a reason: {init}"));
+            assert!(
+                reason.contains("Permission denied"),
+                "the kernel's denial must reach init's reason, and it answered: {reason}"
+            );
+            fs::remove_file(&outside_nickname)
+                .expect("the planted outside nickname file must be removable");
+            let refused = provider.send(&json!({ "op": "set_nickname", "nickname": "Outside" }));
+            assert!(
+                !outside_nickname.exists(),
+                "a refused outside write must leave no nickname file at {}",
+                outside_nickname.display()
+            );
+            fs::remove_dir_all(outside).expect("the outside fixture must be removable");
+            refused
         },
     );
 }
@@ -13452,6 +14927,10 @@ struct SeccompJourneyFiles {
     expected_fixture: &'static [u8],
 }
 
+/// The one fixed-byte sentinel every journey writes under its `STORAGE_ROOT`,
+/// so an operation that corrupts it leaves the evidence for the comparison.
+const SECCOMP_INSIDE_FIXTURE_NAME: &str = "seccomp-inside-write";
+
 /// The named journey fixtures of `name` under `base`, or a panic naming the
 /// provider whose layout this function does not know. The lab serves three
 /// providers and a guessed layout would be a fallback (P11).
@@ -13465,7 +14944,7 @@ fn seccomp_journey_files(name: &str, base: &Path) -> SeccompJourneyFiles {
     };
     SeccompJourneyFiles {
         inside: inside_name.map(|name| root.join(name)),
-        inside_fixture: root.join("seccomp-inside-write"),
+        inside_fixture: root.join(SECCOMP_INSIDE_FIXTURE_NAME),
         outside: storage_parent(name, base).join("seccomp-outside-write"),
         expected_fixture,
     }
@@ -13710,11 +15189,29 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
             "the model program must be that list with the thread rules"
         );
     } else {
+        // did and wallet share their declared rights, so the two launch lists
+        // differ only by wallet's store replace. A difference in any other call
+        // is a per-provider widening and fails here.
+        let mut expected = allow.syscalls.clone();
+        for syscall in WALLET_RUNTIME_ESSENTIALS {
+            // A call this architecture lacks is never admitted: the replace is
+            // renameat on aarch64 and rename on x86-64.
+            if seccomp_syscall_number(syscall, allow.audit_arch).is_none() {
+                continue;
+            }
+            if !expected.contains(syscall) {
+                expected.push(syscall);
+            }
+        }
+        expected.sort_unstable();
         assert_eq!(
-            allow.program, wallet_allow.program,
-            "the {name} program must equal wallet's: the two declared-rights files \
-             declare the same rights and the same two platform-baseline ids with \
-             identical rule text, so a difference is a per-provider widening"
+            wallet_allow.syscalls, expected,
+            "the wallet list must differ from {name}'s only by the store replace"
+        );
+        assert_eq!(
+            wallet_allow.program,
+            seccomp_program(&expected, wallet_allow.audit_arch),
+            "the wallet program must be that list"
         );
     }
     eprintln!("{}", linux_seccomp_journey_label());
@@ -13744,55 +15241,12 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         .expect("the provider fixture root must exist");
     fs::write(&files.inside_fixture, files.expected_fixture)
         .expect("the named inside fixture must be writable");
-    // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
-    // the provider wrote it: wallet's `init` writes the random key, and did's
-    // `set_nickname` writes the encrypted nickname. The model's `init` creates
-    // its journal directories and no file, so its permitted calls, `init` and
-    // `status`, carry no inside file to compare.
-    let expected_inside: Option<Vec<u8>> = match name {
-        WALLET_PROVIDER => {
-            // Init creates the random key. Keep those exact bytes as the expected
-            // value across the read-only calls, and also compare a fixed byte
-            // fixture.
-            let key_file = files
-                .inside
-                .as_ref()
-                .expect("wallet names its storage key file");
-            let expected_key = fs::read(key_file).expect("init must create the storage key");
-            let status = provider.send(&json!({ "op": "status" }));
-            assert_eq!(status["status"], "ok", "status must answer: {status}");
-            let accounts = provider.wallet(WalletProviderOperationV2::ListAccounts {
-                include_revoked: false,
-            });
-            assert_eq!(
-                ok_data(accounts)["accounts"],
-                json!([]),
-                "a fresh wallet lists no account"
-            );
-            Some(expected_key)
-        }
-        DID_PROVIDER => {
-            let record = did_standin_permitted_operations(&mut provider, &base, &label);
-            assert_suite_outcomes(&label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
-            let nickname = files.inside.as_ref().expect("did names its nickname file");
-            Some(fs::read(nickname).unwrap_or_else(|err| {
-                panic!(
-                    "{label}: set_nickname must write {}: {err}",
-                    nickname.display()
-                )
-            }))
-        }
-        MODEL_PROVIDER => {
-            let init = provider.send(&provider_init_request(MODEL_PROVIDER, &base));
-            assert_eq!(init["status"], "ok", "the model init must answer: {init}");
-            assert_serving(&init["data"]);
-            let status = provider.send(&json!({ "op": "status" }));
-            assert_eq!(status["status"], "ok", "status must answer: {status}");
-            assert_serving(&status["data"]);
-            None
-        }
-        other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
-    };
+    // The launched child's mode and the launcher's own install record are read
+    // while that child runs: `launched_seccomp_mode` opens its
+    // `/proc/<pid>/status`, which exists only until the child exits, and every
+    // provider's run ends with `shutdown`. These checks therefore run before
+    // any operation suite sends a request; every later check reads files or
+    // fields that outlive the child.
     assert_eq!(
         provider.launched_seccomp_mode(),
         SECCOMP_MODE_FILTER,
@@ -13817,7 +15271,97 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
         "a seccomp start writes no profile: {}",
         profile_dir.display()
     );
-    provider.shutdown();
+    // The bytes of the file the run wrote under STORAGE_ROOT, read at the point
+    // the provider wrote it: wallet's `init` writes the random key, and did's
+    // `set_nickname` writes the encrypted nickname. The model's `init` creates
+    // its journal directories and no file, so its permitted calls, `init` and
+    // `status`, carry no inside file to compare.
+    let expected_inside: Option<Vec<u8>> = match name {
+        WALLET_PROVIDER => {
+            // Init creates the random key. Keep those exact bytes as the expected
+            // value across the read-only calls, and also compare a fixed byte
+            // fixture.
+            let key_file = files
+                .inside
+                .as_ref()
+                .expect("wallet names its storage key file");
+            let expected_key = fs::read(key_file).expect("init must create the storage key");
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            assert_eq!(
+                status["data"]["provider"], WALLET_PROVIDER,
+                "status must name the provider it serves: {status}"
+            );
+            assert_eq!(
+                status["data"]["storage_configured"], true,
+                "the launch's init must have configured storage: {status}"
+            );
+            assert_eq!(
+                status["data"]["managed_wallets_configured"], true,
+                "the launch's init must have configured managed wallets: {status}"
+            );
+            for count in [
+                "active_account_count",
+                "managed_account_count",
+                "pending_challenge_count",
+                "pending_bitcoin_challenge_count",
+                "pending_approval_count",
+            ] {
+                assert_eq!(
+                    status["data"][count], 0,
+                    "a fresh wallet counts no {count}: {status}"
+                );
+            }
+            // The five remaining wallet operations, `shutdown` last. Every other
+            // wallet operation needs a stored effect, and the filter refuses the
+            // store's replace, so this journey drives the calls that answer and
+            // the one refusal that names why the rest cannot.
+            let linux_only = wallet_standin_linux_only_operations(&mut provider, &base, &label);
+            assert_suite_outcomes(&label, &linux_only, &WALLET_LINUX_ONLY_CASES);
+            Some(expected_key)
+        }
+        DID_PROVIDER => {
+            let record = did_standin_permitted_operations(&mut provider, &base, &label);
+            assert_suite_outcomes(&label, &record, &DID_SUITE_CASES[..DID_PERMITTED_CASES]);
+            // The four remaining did operations drive after the six, so this
+            // caller answers all ten under the filter. `shutdown` is the last
+            // of them and ends the provider here.
+            let linux_only = did_standin_linux_only_operations(&mut provider, &label);
+            assert_suite_outcomes(&label, &linux_only, &DID_LINUX_ONLY_CASES);
+            let nickname = files.inside.as_ref().expect("did names its nickname file");
+            Some(fs::read(nickname).unwrap_or_else(|err| {
+                panic!(
+                    "{label}: set_nickname must write {}: {err}",
+                    nickname.display()
+                )
+            }))
+        }
+        MODEL_PROVIDER => {
+            let init = provider.send(&provider_init_request(MODEL_PROVIDER, &base));
+            assert_eq!(init["status"], "ok", "the model init must answer: {init}");
+            assert_serving(&init["data"]);
+            let status = provider.send(&json!({ "op": "status" }));
+            assert_eq!(status["status"], "ok", "status must answer: {status}");
+            assert_serving(&status["data"]);
+            assert_eq!(
+                status["data"], init["data"],
+                "status must answer exactly what init did: {status} against {init}"
+            );
+            // The seven remaining model operations, `shutdown` last, so this
+            // caller answers all nine under the filter.
+            let linux_only = model_standin_linux_only_operations(&mut provider, &label);
+            assert_suite_outcomes(&label, &linux_only, &MODEL_LINUX_ONLY_CASES);
+            None
+        }
+        other => panic!("the journey names no provider whose permitted calls it knows: {other}"),
+    };
+    // Every provider's `shutdown` is its last operation inside its own Linux-only
+    // helper, which `assert_suite_outcomes` judges: did's is the tenth entry of
+    // `DID_LINUX_ONLY_CASES`, the model's the seventh of
+    // `MODEL_LINUX_ONLY_CASES`, and wallet's the fifth of
+    // `WALLET_LINUX_ONLY_CASES`. The mode read above already observed the live
+    // child, and `ConfinedProvider::shutdown` waits for the child's exit and
+    // asserts its status is 0, so the answer and its effect are both shown.
 
     let written = assert_seccomp_journey_files(name, &files, expected_inside.as_deref());
     if name == WALLET_PROVIDER {
@@ -13895,6 +15439,19 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
 /// `seccomp_confined_journey`: this caller passes wallet's own binary, file and
 /// test name.
 ///
+/// The operations are `init` with wallet's fixture config, which the launch
+/// sends; `status`, asserted field by field for a fresh wallet; then
+/// `wallet_standin_linux_only_operations`, which drives the twenty-nine answers
+/// of `WALLET_LINUX_ONLY_CASES` and asserts each exact result: the managed
+/// account with `create_managed_account`, the listing, rename, the default
+/// account, the EOA and ERC-1271 proof calls, the proof account and connector
+/// links, the Bitcoin challenge and BIP322 proof, the approved, rejected and
+/// connector approvals with signing, handoff and Chain outcome, the
+/// protected-content rights request, both recovery exports and imports, the
+/// revoked connector, and `shutdown` last. The store replace is admitted, so
+/// every effectful call writes its store and every operations-table Linux cell
+/// cites this journey.
+///
 /// Falsifier: WP176 skips only the launcher's `pre_exec` install and leaves the
 /// self-filtering probe intact. The journey inherits an allow-all fixture filter,
 /// so the mode assertion passes and the before/after assertion fails. WP177
@@ -13920,10 +15477,15 @@ fn linux_wallet_journey_runs_under_the_seccomp_allow_list() {
 /// program as wallet, with did's own binary, did's own committed declared-rights
 /// file and did's own operations. Wallet owns the four-call probe run.
 ///
-/// The permitted calls are `did_standin_permitted_operations`, judged by
-/// `assert_suite_outcomes` against the permitted prefix of `DID_SUITE_CASES`, so
-/// `init`, `get_did` with a `did:key:` value, `resolve`, `set_nickname`,
-/// `get_nickname` and `get_persona_did` answer under the filter. The did suite's
+/// The permitted calls are all ten did operations. `did_standin_permitted_operations`
+/// drives the six file-state calls, judged by `assert_suite_outcomes` against the
+/// permitted prefix of `DID_SUITE_CASES`: `init`, `get_did` with a `did:key:`
+/// value, `resolve`, `set_nickname`, `get_nickname` and `get_persona_did`.
+/// `did_standin_linux_only_operations` then drives `sign_chat_message`,
+/// `verify` on the payload and signature it just answered,
+/// `verify_did_recovery` with a well-formed request whose signature is not hex
+/// (answered `invalid_signature`), and `shutdown`, judged against
+/// `DID_LINUX_ONLY_CASES`, so each answers under the filter. The did suite's
 /// file-denial cases stay in the B3 and C0 journeys: a seccomp filter carries
 /// syscall policy and not path policy, so they cannot pass under it alone.
 ///
@@ -14394,9 +15956,10 @@ const MODEL_INLINE_HEADING: &str = "## The model provider's inline profile";
 /// every refusal of its reader names it.
 const BRIDGE_SOURCE_PATH: &str = "elastos/crates/elastos-runtime/src/provider/bridge.rs";
 
-/// The attribute line that starts the bridge's test module. The production
-/// region is cut before the first line equal to this text.
+/// The two lines that start the bridge's test module. Earlier test-only
+/// helpers also use the attribute, so the region is cut only at this pair.
 const TEST_MODULE_ATTRIBUTE: &str = "#[cfg(test)]";
+const TEST_MODULE_DECLARATION: &str = "mod tests {";
 
 /// The one declaration each `tests/confine.rs` file holds the OSes its
 /// confinement tests exercise in. The two files are two test binaries, so no
@@ -15461,26 +17024,31 @@ fn read_bridge_source() -> Result<String, String> {
     fs::read_to_string(&path).map_err(|err| format!("{BRIDGE_SOURCE_PATH} must be readable: {err}"))
 }
 
-/// The production region of a Rust source: the text before its first top-level
-/// `#[cfg(test)]` line, or a refusal that names `source_name` when that line is
-/// absent.
+/// The production region of a Rust source: the text before its top-level
+/// `#[cfg(test)]` / `mod tests {` pair, or a refusal that names `source_name`
+/// when that pair is absent.
 ///
-/// A line that carries the attribute after indentation belongs to a nested
-/// module and is not the top-level one, so it does not cut the region. A source
-/// with no top-level test module is a refusal, never a silent read of the whole
-/// file, because a whole-file read would let a test's own launch answer for the
-/// shipped policy.
+/// An attribute on a test-only helper or in a nested module does not cut the
+/// region. A source with no top-level test module is a refusal, never a silent
+/// read of the whole file, because a whole-file read would let a test's own
+/// launch answer for the shipped policy.
 fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a str, String> {
     let mut cut = 0;
-    for line in source.split_inclusive('\n') {
-        if line.trim_end_matches(['\n', '\r']) == TEST_MODULE_ATTRIBUTE {
+    let mut lines = source.split_inclusive('\n').peekable();
+    while let Some(line) = lines.next() {
+        if line.trim_end_matches(['\n', '\r']) == TEST_MODULE_ATTRIBUTE
+            && lines
+                .peek()
+                .is_some_and(|next| next.trim_end_matches(['\n', '\r']) == TEST_MODULE_DECLARATION)
+        {
             return Ok(&source[..cut]);
         }
         cut += line.len();
     }
     Err(format!(
-        "{source_name} must hold one top-level line {TEST_MODULE_ATTRIBUTE} that starts its test \
-         module; found none, so its production region cannot be cut"
+        "{source_name} must hold one top-level {TEST_MODULE_ATTRIBUTE} / \
+         {TEST_MODULE_DECLARATION} pair that starts its test module; found none, so its \
+         production region cannot be cut"
     ))
 }
 
@@ -15956,6 +17524,11 @@ fn operations_table_citation_problems(
     };
     let mut problems = Vec::new();
     let mut citations: Vec<&str> = Vec::new();
+    // The Linux cells cite the one sibling wallet test file, so that citation
+    // resolves against the capsules folder that holds both providers.
+    let capsules_root = capsule_dir
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok());
     for span in backtick_spans(&section) {
         let Some((file, function)) = span.split_once("::") else {
             continue;
@@ -15971,6 +17544,7 @@ fn operations_table_citation_problems(
             ));
             continue;
         }
+        let sibling_citation = file == LINUX_CITATION_FILE;
         let path = capsule_dir.join(file);
         let resolved = match fs::canonicalize(&path) {
             Ok(resolved) => resolved,
@@ -15983,14 +17557,25 @@ fn operations_table_citation_problems(
                 continue;
             }
         };
+        // This citation resolves against the capsules folder, not the provider
+        // folder, because the Linux cells cite the sibling wallet test file.
+        let sibling_allowed = sibling_citation
+            && capsules_root
+                .as_ref()
+                .is_some_and(|root| resolved.starts_with(root));
+        // The falsifier WP82 disables this one line, so the outside refusal
+        // keeps its own condition and the sibling allowance is a second check.
+        #[allow(clippy::collapsible_if)]
         if !resolved.starts_with(&provider_root) {
-            problems.push(format!(
-                "{document_name} CONFINEMENT.md: {span} resolves outside the provider directory: \
-                 {} (provider directory {})",
-                resolved.display(),
-                provider_root.display()
-            ));
-            continue;
+            if !sibling_allowed {
+                problems.push(format!(
+                    "{document_name} CONFINEMENT.md: {span} resolves outside the provider directory: \
+                     {} (provider directory {})",
+                    resolved.display(),
+                    provider_root.display()
+                ));
+                continue;
+            }
         }
         let source = match fs::read_to_string(&resolved) {
             Ok(source) => source,
@@ -16223,13 +17808,10 @@ struct DeclaredTest {
 /// line is not a function declaration.
 fn test_declaration_name(line: &str) -> Option<String> {
     let mut rest = line.trim();
-    loop {
-        let Some(next) = ["pub ", "async ", "unsafe ", "const "]
-            .iter()
-            .find_map(|prefix| rest.strip_prefix(prefix))
-        else {
-            break;
-        };
+    while let Some(next) = ["pub ", "async ", "unsafe ", "const "]
+        .iter()
+        .find_map(|prefix| rest.strip_prefix(prefix))
+    {
         rest = next;
     }
     let rest = rest.strip_prefix("fn ")?;
@@ -16451,6 +18033,61 @@ const STORE_FILE_NAME: &str = "wallet-state.json";
 
 /// The one Linux cell value every operations row uses in this lab.
 const LINUX_STATUS: &str = "designed, not enforced";
+
+/// The prefix of a Linux cell that cites the recorded Linux host's tests
+/// instead of staying at `LINUX_STATUS`.
+const LINUX_ENFORCED_PREFIX: &str = "enforced on the recorded Linux host:";
+
+/// The one file a Linux cell's citation names, relative to a provider folder.
+const LINUX_CITATION_FILE: &str = "../wallet-provider/tests/confine.rs";
+
+/// The test file `LINUX_CITATION_FILE` resolves to, relative to this crate.
+const LINUX_CITATION_TEST_FILE: &str = "tests/confine.rs";
+
+/// The one attribute a cited Linux test carries.
+const LINUX_TEST_GATE: &str = "#[cfg(target_os = \"linux\")]";
+
+/// The exact journey and file-row test names one provider's Linux cells cite,
+/// keyed by the provider document name. A provider without an entry records no
+/// Linux cell, and the check refuses one instead of reading a name fragment.
+const LINUX_CITATION_BINDINGS: &[(&str, &str, &str)] = &[
+    (
+        "did-provider",
+        "linux_did_journey_runs_under_the_seccomp_allow_list",
+        "linux_did_file_row_is_refused_outside_storage_root",
+    ),
+    // The row fixture copies did's Linux cells, so it carries did's names.
+    (
+        "fixture-provider",
+        "linux_did_journey_runs_under_the_seccomp_allow_list",
+        "linux_did_file_row_is_refused_outside_storage_root",
+    ),
+    (
+        "model-provider",
+        "linux_model_journey_runs_under_the_seccomp_allow_list",
+        "linux_model_file_row_is_refused_outside_storage_root",
+    ),
+    (
+        "wallet-provider",
+        "linux_wallet_journey_runs_under_the_seccomp_allow_list",
+        "linux_wallet_file_row_is_refused_outside_storage_root",
+    ),
+];
+
+/// The journey and file-row test names bound to `document_name`, or `None`
+/// when that provider records no Linux cell yet.
+fn linux_citation_binding(document_name: &str) -> Option<(&'static str, &'static str)> {
+    LINUX_CITATION_BINDINGS
+        .iter()
+        .find(|(provider, _, _)| *provider == document_name)
+        .map(|(_, journey, file_row)| (*journey, *file_row))
+}
+
+/// The one test file the Linux cells cite, read once.
+static LINUX_CITATION_SOURCE: LazyLock<Result<String, String>> = LazyLock::new(|| {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(LINUX_CITATION_TEST_FILE);
+    fs::read_to_string(&path).map_err(|err| format!("{} is not readable: {err}", path.display()))
+});
 
 /// The two sides a row whose Right is a declared right cites in its macOS cell.
 const PERMITTED_SIDE: &str = "permitted:";
@@ -18675,17 +20312,293 @@ fn right_side_problems(document_name: &str, row: &OperationsRow) -> Vec<String> 
     problems
 }
 
+/// `source` with every `//` line comment and every `/* ... */` block comment
+/// removed, and every string, raw string, byte string and character literal
+/// copied as it is written.
+///
+/// A literal's own bytes never open or close a comment, so a `"..."` that
+/// holds `//` or `/*` stays a string, an escaped quote keeps its string open,
+/// a raw string ends at its own hash delimiter, and a character literal such
+/// as `'"'` is not the start of a string. Block comments nest, a line comment
+/// keeps its newline, and a block comment keeps its newlines, so every line
+/// that holds code keeps its own place. The literals are copied rather than
+/// decoded, because this scan reads no value and this file's byte strings hold
+/// escapes wider than a wire name may carry.
+fn strip_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut kept: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some((quote, hashes)) = raw_string_open(bytes, index) {
+            let end = raw_string_end(bytes, quote, hashes);
+            kept.extend_from_slice(&bytes[index..end]);
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                let mut depth = 1usize;
+                while index < bytes.len() && depth > 0 {
+                    if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        if bytes[index] == b'\n' {
+                            kept.push(b'\n');
+                        }
+                        index += 1;
+                    }
+                }
+            }
+            b'"' => {
+                let end = quoted_end(bytes, index);
+                kept.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            b'\'' => {
+                let end = character_literal_end(bytes, index);
+                kept.extend_from_slice(&bytes[index..end]);
+                index = end;
+            }
+            _ => {
+                kept.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(kept).expect("stripping comments keeps every character it copies")
+}
+
+/// The opening quote and hash count of the raw string that starts at `index`,
+/// or `None` when no raw string opens there. `r`, `br` and `cr` prefixes all
+/// take this one reading.
+fn raw_string_open(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    let start = match bytes[index] {
+        b'r' => index,
+        b'b' | b'c' if bytes.get(index + 1) == Some(&b'r') => index + 1,
+        _ => return None,
+    };
+    let mut quote = start + 1;
+    let mut hashes = 0;
+    while bytes.get(quote) == Some(&b'#') {
+        hashes += 1;
+        quote += 1;
+    }
+    (bytes.get(quote) == Some(&b'"')).then_some((quote, hashes))
+}
+
+/// The byte after the raw string whose opening quote is `quote` and whose
+/// closing delimiter needs `hashes` hashes.
+fn raw_string_end(bytes: &[u8], quote: usize, hashes: usize) -> usize {
+    let mut index = quote + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"'
+            && bytes.len() >= index + 1 + hashes
+            && bytes[index + 1..index + 1 + hashes]
+                .iter()
+                .all(|byte| *byte == b'#')
+        {
+            return index + 1 + hashes;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+/// The byte after the closing quote of the string whose opening quote is
+/// `open`. A backslash escapes the byte after it, so an escaped quote keeps
+/// the string open.
+fn quoted_end(bytes: &[u8], open: usize) -> usize {
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The byte after the character literal that starts at `open`, or the byte
+/// after its apostrophe when that apostrophe starts a lifetime instead. A
+/// plain character sits between two apostrophes, and an escaped character runs
+/// to the next apostrophe within its own escape.
+fn character_literal_end(bytes: &[u8], open: usize) -> usize {
+    match bytes.get(open + 1) {
+        Some(b'\\') => {
+            let mut index = open + 2;
+            while index < bytes.len() && index < open + 12 {
+                if bytes[index] == b'\'' {
+                    return index + 1;
+                }
+                index += 1;
+            }
+            open + 1
+        }
+        Some(_) if bytes.get(open + 2) == Some(&b'\'') => open + 3,
+        _ => open + 1,
+    }
+}
+
+/// Whether `function` in `source` is an item the recorded Linux host runs: a
+/// line whose trimmed text starts `fn <function>(`, or `pub fn <function>(`,
+/// and both `LINUX_TEST_GATE` and `DECLARED_TEST_ATTRIBUTE` among the
+/// attribute lines directly above that line.
+///
+/// `strip_comments` removes every line and block comment before the scan, so
+/// a gate and an item that a `/* ... */` block comment holds are no more an
+/// item than one a `//` line holds, and a string that spells `//` or `/*`
+/// stays a string. Another line between the attributes and the item breaks the
+/// block, so the gate and the test attribute must belong to the cited item
+/// itself; a gated helper with no `#[test]` is refused, because the recorded
+/// host runs no such test.
+fn linux_citation_gate(source: &str, function: &str) -> Result<(), String> {
+    let signature = format!("fn {function}(");
+    let stripped = strip_comments(source);
+    let lines: Vec<&str> = stripped.lines().collect();
+    let item = lines.iter().position(|line| {
+        let declaration = line.trim_start();
+        let declaration = declaration.strip_prefix("pub ").unwrap_or(declaration);
+        declaration.starts_with(&signature)
+    });
+    let Some(item) = item else {
+        if source.contains(&signature) {
+            return Err(format!(
+                "{LINUX_CITATION_FILE} holds {function} only in a comment, and a citation names \
+                 an item"
+            ));
+        }
+        return Err(format!("{LINUX_CITATION_FILE} does not hold {function}"));
+    };
+    let mut gated = false;
+    let mut tested = false;
+    let mut cursor = item;
+    while let Some(previous) = cursor.checked_sub(1) {
+        let line = lines[previous].trim();
+        if !line.starts_with("#[") {
+            break;
+        }
+        gated |= line == LINUX_TEST_GATE;
+        tested |= line == DECLARED_TEST_ATTRIBUTE;
+        cursor = previous;
+    }
+    if !gated {
+        return Err(format!("{function} is not gated by {LINUX_TEST_GATE}"));
+    }
+    if !tested {
+        return Err(format!(
+            "{function} carries {LINUX_TEST_GATE} and no {DECLARED_TEST_ATTRIBUTE}, so the \
+             recorded host runs no test of that name"
+        ));
+    }
+    Ok(())
+}
+
 /// Every problem with one row's Linux cell, naming the document, the row and
 /// the value.
+///
+/// A cell is exactly `LINUX_STATUS`, or it starts `LINUX_ENFORCED_PREFIX` and
+/// every backtick span after that prefix that holds `::` is a
+/// `LINUX_CITATION_FILE::<fn>` citation of an item `linux_citation_gate` finds
+/// Linux-gated in the one test file, while a span with no `::` is prose. A
+/// cell cites only the two names `linux_citation_binding` binds to its
+/// provider: the journey, and on a row whose Right cell names a declared right
+/// also the file row, because the journey shows the call answering and the
+/// file row shows the same file refused outside `STORAGE_ROOT`. The test file
+/// is read once, by `LINUX_CITATION_SOURCE`.
 fn linux_status_problems(document_name: &str, row: &OperationsRow) -> Vec<String> {
     if row.linux == LINUX_STATUS {
         return Vec::new();
     }
-    vec![format!(
-        "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Linux cell {}, and \
-         every Linux cell is {LINUX_STATUS}",
-        row.operation, row.linux
-    )]
+    let Some(cell) = row.linux.strip_prefix(LINUX_ENFORCED_PREFIX) else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Linux cell {}, \
+             and a Linux cell is {LINUX_STATUS} or starts {LINUX_ENFORCED_PREFIX} and cites \
+             {LINUX_CITATION_FILE}",
+            row.operation, row.linux
+        )];
+    };
+    let Some((journey_test, file_row_test)) = linux_citation_binding(document_name) else {
+        return vec![format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names a recorded-host \
+             Linux cell, and {document_name} binds no journey and file-row test",
+            row.operation
+        )];
+    };
+    let source = match LINUX_CITATION_SOURCE.as_ref() {
+        Ok(source) => source,
+        Err(reason) => {
+            return vec![format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cannot be \
+                 checked because {reason}",
+                row.operation
+            )];
+        }
+    };
+    let mut problems = Vec::new();
+    let mut journey = false;
+    let mut file_row = false;
+    for span in backtick_spans(cell) {
+        // A span with no `::` is prose, such as a path the cell explains; only
+        // a span that holds two colons is read as a citation.
+        let Some((file, function)) = span.split_once("::") else {
+            continue;
+        };
+        if file != LINUX_CITATION_FILE {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites \
+                 {span} in another file, and a Linux citation names {LINUX_CITATION_FILE}",
+                row.operation
+            ));
+            continue;
+        }
+        if let Err(reason) = linux_citation_gate(source, function) {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites \
+                 {span}, and {reason}",
+                row.operation
+            ));
+            continue;
+        }
+        if function == journey_test {
+            journey = true;
+        } else if function == file_row_test {
+            file_row = true;
+        } else {
+            problems.push(format!(
+                "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites \
+                 {span}, and this provider's Linux cells cite exactly {journey_test} for the \
+                 journey and {file_row_test} for the file row",
+                row.operation
+            ));
+        }
+    }
+    if !journey {
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} Linux cell cites no \
+             journey test of {LINUX_CITATION_FILE}",
+            row.operation
+        ));
+    }
+    if declared_right_cell(&row.right) && row.right != NO_DECLARED_RIGHT && !file_row {
+        problems.push(format!(
+            "{document_name} CONFINEMENT.md: {OPERATIONS_HEADING} row {} names the Right {} and \
+             its Linux cell cites no file-row test of {LINUX_CITATION_FILE}",
+            row.operation, row.right
+        ));
+    }
+    problems
 }
 
 /// The one declared-rights file under a provider directory. The row check
@@ -19109,8 +21022,10 @@ fn effect_cell_problems_rows(
 /// Right cell must be exactly `NO_DECLARED_RIGHT` or one backtick span holding
 /// an id `CONTRACT_RIGHTS` or `PLATFORM_BASELINE_IDS` declares. A row whose
 /// Right is a declared right must cite `permitted:` and `nearest outside
-/// refused:` in its macOS cell, and a `none:` row must cite neither. Every
-/// Linux cell must be `LINUX_STATUS`. Every Outputs cell must name its error
+/// refused:` in its macOS cell, and a `none:` row must cite neither. A Linux
+/// cell is `LINUX_STATUS` or starts `LINUX_ENFORCED_PREFIX` and cites Linux-gated
+/// tests of `LINUX_CITATION_FILE`, including the journey and, on a declared-right
+/// row, the file row. Every Outputs cell must name its error
 /// side as the provider's serde tag and `Error` fields, and its ok side's
 /// `data` children as its handler's own `json!` keys, or as
 /// `WalletProviderResponseV2`'s declared fields on a `wallet_contract` row.
@@ -22591,15 +24506,16 @@ fn model_inline_profile_check_refuses_each_bad_section() {
         rust_production_region(BRIDGE_SOURCE_PATH, &inline.did_document)
             .expect_err("a source with no test module must be refused"),
         format!(
-            "{BRIDGE_SOURCE_PATH} must hold one top-level line {TEST_MODULE_ATTRIBUTE} that starts \
-             its test module; found none, so its production region cannot be cut"
+            "{BRIDGE_SOURCE_PATH} must hold one top-level {TEST_MODULE_ATTRIBUTE} / \
+             {TEST_MODULE_DECLARATION} pair that starts its test module; found none, so its \
+             production region cannot be cut"
         ),
         "a source with no test module is a refusal that names the file"
     );
     assert!(
-        !inline
-            .region
-            .contains(&format!("\n{TEST_MODULE_ATTRIBUTE}")),
+        !inline.region.contains(&format!(
+            "\n{TEST_MODULE_ATTRIBUTE}\n{TEST_MODULE_DECLARATION}"
+        )),
         "the production region must stop before the test module"
     );
 
@@ -22654,8 +24570,7 @@ fn model_inline_profile_check_refuses_each_bad_section() {
     // and with it dropped, so the two copies differ by one whole line.
     let last_sentence = real
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .next_back()
+        .rfind(|line| !line.trim().is_empty())
         .expect("a real section holds a sentence line");
     let longer = real.replacen(
         last_sentence,
@@ -22751,8 +24666,14 @@ fn every_operations_table_cites_existing_tests() {
 /// declared id in a backtick span; a row whose Right is a declared right cites
 /// both `permitted:` and `nearest outside refused:`, and a `none:` row cites
 /// neither; a declared-right row's macOS cell quotes at least one allow form of
-/// that right and a `none:` row quotes none; and every Linux cell is exactly
-/// `designed, not enforced`. Each
+/// that right and a `none:` row quotes none; and a Linux cell is either
+/// `designed, not enforced` or `enforced on the recorded Linux host:` with a
+/// citation of a Linux-gated test of the wallet test file, the journey on every
+/// such cell and the file row on a declared-right row. The model provider is
+/// not in `OPERATIONS_TABLES` yet, because its macOS and Effect cells do not
+/// carry these claims; its nine Linux cells are read by
+/// `model_operations_linux_cell_problems` through the same rule and row reader,
+/// and `model_linux_cell_refusal_cases` holds that rule's refusals. Each
 /// fault is one line naming the document, the row (or the arm) and the value.
 /// The check reads files and starts no process, so it runs on every platform.
 ///
@@ -22782,7 +24703,186 @@ fn every_operations_table_row_matches_its_provider_and_the_contract() {
             &capsules.join(name),
         ));
     }
+    problems.extend(model_operations_linux_cell_problems(capsules));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+    model_linux_cell_refusal_cases();
+    wallet_linux_cell_refusal_cases();
+}
+
+/// The refusals the wallet Linux-cell rule makes, built from the row type so
+/// they do not depend on a mutated document.
+///
+/// A wallet cell that cites the model journey is refused by exact name, even
+/// though that journey is a Linux-gated test of the cited file and a test of
+/// this crate. A wallet `storage` row that cites only the journey is refused,
+/// because the journey shows the call answering and the file row shows the same
+/// file refused outside `STORAGE_ROOT`. Both citations pass in the complete form,
+/// so the refusals come from the binding and not from the cell's form.
+fn wallet_linux_cell_refusal_cases() {
+    let journey =
+        format!("{LINUX_CITATION_FILE}::linux_wallet_journey_runs_under_the_seccomp_allow_list");
+    let file_row =
+        format!("{LINUX_CITATION_FILE}::linux_wallet_file_row_is_refused_outside_storage_root");
+    let model_journey =
+        format!("{LINUX_CITATION_FILE}::linux_model_journey_runs_under_the_seccomp_allow_list");
+    let wrong = OperationsRow {
+        operation: "status".to_string(),
+        inputs: String::new(),
+        outputs: String::new(),
+        right: NO_DECLARED_RIGHT.to_string(),
+        effect: String::new(),
+        macos: String::new(),
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}` and `{model_journey}`"),
+    };
+    assert_eq!(
+        linux_status_problems(WALLET_PROVIDER, &wrong),
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {model_journey}, and this provider's Linux cells cite exactly \
+             linux_wallet_journey_runs_under_the_seccomp_allow_list for the journey and \
+             linux_wallet_file_row_is_refused_outside_storage_root for the file row"
+        )],
+        "a wallet cell citing the model journey must be refused by its exact name"
+    );
+
+    let right_only = OperationsRow {
+        operation: "init".to_string(),
+        inputs: String::new(),
+        outputs: String::new(),
+        right: "`storage`".to_string(),
+        effect: String::new(),
+        macos: String::new(),
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}`"),
+    };
+    assert_eq!(
+        linux_status_problems(WALLET_PROVIDER, &right_only),
+        vec![format!(
+            "wallet-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+             `storage` and its Linux cell cites no file-row test of {LINUX_CITATION_FILE}"
+        )],
+        "a wallet storage row citing only the journey must be refused"
+    );
+
+    let complete = OperationsRow {
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}` and `{file_row}`"),
+        ..right_only
+    };
+    assert_eq!(
+        linux_status_problems(WALLET_PROVIDER, &complete),
+        Vec::<String>::new(),
+        "a storage row citing the journey and the file row must pass"
+    );
+}
+
+/// Every problem with the model provider's nine Linux cells, in row order.
+///
+/// The model table is not one of `OPERATIONS_TABLES`, because its macOS and
+/// Effect cells do not yet carry the three providers' row claims. Its Linux
+/// cells are ready to be checked, so this helper reads the same document, the
+/// same row reader and the same `linux_status_problems` rule. It requires the
+/// nine operations in the provider's order, then applies the Linux-cell rule to
+/// every row: the bound model journey, and the bound model file row on a
+/// `storage` row.
+fn model_operations_linux_cell_problems(capsules: &Path) -> Vec<String> {
+    let document = match read_confinement_document(capsules, MODEL_PROVIDER) {
+        Ok(document) => document,
+        Err(reason) => return vec![reason],
+    };
+    let section = match section_under_one_heading(MODEL_PROVIDER, &document, OPERATIONS_HEADING) {
+        Ok(section) => section,
+        Err(problems) => return problems,
+    };
+    let (rows, mut problems) = match operations_table_rows(MODEL_PROVIDER, &section) {
+        Ok(read) => read,
+        Err(problems) => return problems,
+    };
+    let operations: Vec<&str> = rows.iter().map(|row| row.operation.as_str()).collect();
+    let expected = [
+        "init",
+        "status",
+        "shutdown",
+        "offers_list",
+        "runs_create",
+        "runs_get",
+        "runs_events",
+        "runs_cancel",
+        "unsupported",
+    ];
+    if operations != expected {
+        problems.push(format!(
+            "model-provider CONFINEMENT.md: {OPERATIONS_HEADING} must hold the nine model \
+             operations in this order: {operations:?}"
+        ));
+    }
+    for row in &rows {
+        problems.extend(linux_status_problems(MODEL_PROVIDER, row));
+    }
+    problems
+}
+
+/// The refusals the model Linux-cell rule makes, built from the row type so
+/// they do not depend on a mutated document.
+///
+/// A model cell that cites the did journey is refused by exact name, even
+/// though that journey is a Linux-gated test of the cited file. A model
+/// `storage` row that cites only the journey is refused, because the journey
+/// shows the call answering and the file row shows the same file refused
+/// outside `STORAGE_ROOT`. Both citations pass, so the refusals come from the
+/// binding and not from the cell's form.
+fn model_linux_cell_refusal_cases() {
+    let journey =
+        format!("{LINUX_CITATION_FILE}::linux_model_journey_runs_under_the_seccomp_allow_list");
+    let file_row =
+        format!("{LINUX_CITATION_FILE}::linux_model_file_row_is_refused_outside_storage_root");
+    let did_journey =
+        format!("{LINUX_CITATION_FILE}::linux_did_journey_runs_under_the_seccomp_allow_list");
+    let wrong = OperationsRow {
+        operation: "status".to_string(),
+        inputs: String::new(),
+        outputs: String::new(),
+        right: NO_DECLARED_RIGHT.to_string(),
+        effect: String::new(),
+        macos: String::new(),
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}` and `{did_journey}`"),
+    };
+    assert_eq!(
+        linux_status_problems(MODEL_PROVIDER, &wrong),
+        vec![format!(
+            "model-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {did_journey}, and this provider's Linux cells cite exactly \
+             linux_model_journey_runs_under_the_seccomp_allow_list for the journey and \
+             linux_model_file_row_is_refused_outside_storage_root for the file row"
+        )],
+        "a model cell citing the did journey must be refused by its exact name"
+    );
+
+    let right_only = OperationsRow {
+        operation: "runs_get".to_string(),
+        inputs: String::new(),
+        outputs: String::new(),
+        right: "`storage`".to_string(),
+        effect: String::new(),
+        macos: String::new(),
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}`"),
+    };
+    assert_eq!(
+        linux_status_problems(MODEL_PROVIDER, &right_only),
+        vec![format!(
+            "model-provider CONFINEMENT.md: {OPERATIONS_HEADING} row runs_get names the Right \
+             `storage` and its Linux cell cites no file-row test of {LINUX_CITATION_FILE}"
+        )],
+        "a model storage row citing only the journey must be refused"
+    );
+
+    let complete = OperationsRow {
+        linux: format!("{LINUX_ENFORCED_PREFIX} `{journey}` and `{file_row}`"),
+        ..right_only
+    };
+    assert_eq!(
+        linux_status_problems(MODEL_PROVIDER, &complete),
+        Vec::<String>::new(),
+        "a storage row citing the journey and the file row must pass"
+    );
 }
 
 /// The removal check reports an allow form that no entry removes, and only a
@@ -24141,7 +26241,8 @@ fn operations_table_row_check_refuses_each_bad_table() {
                 ),
                 format!(
                     "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {row_name} names \
-                     the Linux cell enforced, and every Linux cell is {LINUX_STATUS}"
+                     the Linux cell enforced, and a Linux cell is {LINUX_STATUS} or starts \
+                     {LINUX_ENFORCED_PREFIX} and cites {LINUX_CITATION_FILE}"
                 ),
             ],
             "{case} must reach rules 1, 2 and 4"
@@ -24171,7 +26272,8 @@ fn operations_table_row_check_refuses_each_bad_table() {
                 ),
                 format!(
                     "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row phantom names \
-                     the Linux cell enforced, and every Linux cell is {LINUX_STATUS}"
+                     the Linux cell enforced, and a Linux cell is {LINUX_STATUS} or starts \
+                     {LINUX_ENFORCED_PREFIX} and cites {LINUX_CITATION_FILE}"
                 ),
             ],
             "a row with optional outer bars must reach rules 1, 2 and 4: {row}"
@@ -25585,7 +27687,8 @@ enum WalletProviderOperationV2 {
         );
     }
 
-    // Rule 4: a Linux cell that is not `designed, not enforced`, one per row.
+    // Rule 4: a Linux cell that is neither `designed, not enforced` nor a
+    // recorded-host citation, one per row.
     let enforced = passing.replace(LINUX_STATUS, "enforced by Landlock");
     assert_ne!(enforced, passing, "the fixture must name its Linux cells");
     let problems = operations_table_row_problems("fixture-provider", &enforced, provider.path());
@@ -25599,11 +27702,214 @@ enum WalletProviderOperationV2 {
             problem,
             &format!(
                 "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row {operation} names the \
-                 Linux cell enforced by Landlock, and every Linux cell is {LINUX_STATUS}"
+                 Linux cell enforced by Landlock, and a Linux cell is {LINUX_STATUS} or starts \
+                 {LINUX_ENFORCED_PREFIX} and cites {LINUX_CITATION_FILE}"
             ),
             "the refusal must name the rule, the row and the value"
         );
     }
+
+    // Rule 4: a recorded-host cell must cite a Linux-gated test of the one test
+    // file, the journey on every such cell, and the file row on a right row.
+    let journey =
+        format!("{LINUX_CITATION_FILE}::linux_did_journey_runs_under_the_seccomp_allow_list");
+    let file_row =
+        format!("{LINUX_CITATION_FILE}::linux_did_file_row_is_refused_outside_storage_root");
+    let with_linux = |operation: &str, linux: &str| -> String {
+        let storage_effect = fixture_storage_effect();
+        let updated = fixture_row(
+            operation,
+            &fixture_inputs(operation),
+            &fixture_outputs(operation),
+            if fixture_writes_storage(operation) {
+                "`storage`"
+            } else {
+                NO_DECLARED_RIGHT
+            },
+            if fixture_writes_storage(operation) {
+                storage_effect.as_str()
+            } else {
+                "answers from the in-memory store"
+            },
+            if fixture_writes_storage(operation) {
+                fixture_storage_macos()
+            } else {
+                "`tests/confine.rs::present_case` shows the answer."
+            },
+            &format!("{LINUX_ENFORCED_PREFIX} {linux}"),
+        );
+        let replaced = passing_fixture_row(operation);
+        assert_ne!(
+            updated, replaced,
+            "the fixture row must carry its Linux cell"
+        );
+        passing.replacen(&replaced, &updated, 1)
+    };
+
+    let missing = format!("{LINUX_CITATION_FILE}::linux_did_journey_absent");
+    let document = with_linux("status", &format!("`{journey}` and `{missing}`"));
+    assert_ne!(
+        document, passing,
+        "the missing-function case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {missing}, and {LINUX_CITATION_FILE} does not hold linux_did_journey_absent"
+        )],
+        "a Linux cell citing a missing function must be refused"
+    );
+
+    let ungated = format!("{LINUX_CITATION_FILE}::sandbox_available");
+    let document = with_linux("status", &format!("`{journey}` and `{ungated}`"));
+    assert_ne!(document, passing, "the ungated case must change the table");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {ungated}, and sandbox_available is not gated by {LINUX_TEST_GATE}"
+        )],
+        "a Linux cell citing a function without the Linux gate must be refused"
+    );
+
+    // A name that appears only in a comment line names no item. The comment
+    // below this case, and the two nested items under it, give the citation
+    // check those two shapes in this file.
+    let comment_only = format!("{LINUX_CITATION_FILE}::linux_citation_comment_only_fixture");
+    let document = with_linux("status", &format!("`{journey}` and `{comment_only}`"));
+    assert_ne!(
+        document, passing,
+        "the comment-only case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {comment_only}, and {LINUX_CITATION_FILE} holds linux_citation_comment_only_fixture \
+             only in a comment, and a citation names an item"
+        )],
+        "a Linux cell citing a name that only a comment holds must be refused"
+    );
+
+    // The Linux gate belongs to the item beside the cited one, so the cited
+    // item is not gated even though the gate sits in the same paragraph.
+    let beside = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_beside_it");
+    let document = with_linux("status", &format!("`{journey}` and `{beside}`"));
+    assert_ne!(
+        document, passing,
+        "the separate-item gate case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {beside}, and linux_citation_gate_fixture_beside_it is not gated by {LINUX_TEST_GATE}"
+        )],
+        "a Linux cell whose gate sits on another item must be refused"
+    );
+
+    // A gate and an item inside a block comment are not an item either. The
+    // scan strips comments before it reads a line, so the nested comment below
+    // cannot keep this citation.
+    let commented = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_block_commented");
+    let document = with_linux("status", &format!("`{journey}` and `{commented}`"));
+    assert_ne!(
+        document, passing,
+        "the block-comment case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {commented}, and {LINUX_CITATION_FILE} holds \
+             linux_citation_gate_fixture_block_commented only in a comment, and a citation names \
+             an item"
+        )],
+        "a Linux cell citing an item a block comment holds must be refused"
+    );
+
+    // A gated function with no test attribute is a helper the recorded host
+    // never runs, so a citation to it is refused.
+    let untested = format!("{LINUX_CITATION_FILE}::linux_citation_gate_fixture_gated");
+    let document = with_linux("status", &format!("`{journey}` and `{untested}`"));
+    assert_ne!(document, passing, "the no-test case must change the table");
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {untested}, and linux_citation_gate_fixture_gated carries {LINUX_TEST_GATE} and no \
+             {DECLARED_TEST_ATTRIBUTE}, so the recorded host runs no test of that name"
+        )],
+        "a Linux cell citing a gated function with no test attribute must be refused"
+    );
+
+    let document = with_linux("init", &format!("`{journey}`"));
+    assert_ne!(
+        document, passing,
+        "the right-row case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row init names the Right \
+             `storage` and its Linux cell cites no file-row test of {LINUX_CITATION_FILE}"
+        )],
+        "a right row that cites only the journey must be refused"
+    );
+
+    // Another provider's real journey is Linux-gated and exists, but it is not
+    // the journey bound to this document's provider, so the cell is refused by
+    // name instead of by a fragment of its name.
+    let wallet_journey =
+        format!("{LINUX_CITATION_FILE}::linux_wallet_journey_runs_under_the_seccomp_allow_list");
+    let document = with_linux("status", &format!("`{journey}` and `{wallet_journey}`"));
+    assert_ne!(
+        document, passing,
+        "the wrong-provider case must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &document, provider.path()),
+        vec![format!(
+            "fixture-provider CONFINEMENT.md: {OPERATIONS_HEADING} row status Linux cell cites \
+             {wallet_journey}, and this provider's Linux cells cite exactly \
+             linux_did_journey_runs_under_the_seccomp_allow_list for the journey and \
+             linux_did_file_row_is_refused_outside_storage_root for the file row"
+        )],
+        "a Linux cell citing another provider's journey must be refused by its exact name"
+    );
+
+    // The journey and the file row together pass, so the refusals above come
+    // from the citation rule and not from the cells' form.
+    let passing_linux = with_linux("init", &format!("`{journey}` and `{file_row}`"));
+    assert_ne!(
+        passing_linux, passing,
+        "the passing Linux cell must change the table"
+    );
+    assert_eq!(
+        operations_table_row_problems("fixture-provider", &passing_linux, provider.path()),
+        Vec::<String>::new(),
+        "a right row citing both Linux-gated tests must pass"
+    );
+
+    // The citation check strips comments before it reads an item line and the
+    // attributes above it. These fixtures give its refusals their shape: a line
+    // comment, a block comment with a nested one inside it, a gate on the item
+    // beside the cited one, and a gated item with no test attribute. No
+    // citation names them.
+    // fn linux_citation_comment_only_fixture(
+
+    /* The scan strips this comment, and the gate and item it holds. The nested
+    comment keeps the outer one open past the inner close:
+    /* nested */ #[cfg(target_os = "linux")]
+    fn linux_citation_gate_fixture_block_commented() {}
+    */
+
+    #[allow(dead_code)]
+    #[cfg(target_os = "linux")]
+    fn linux_citation_gate_fixture_gated() {}
+    #[allow(dead_code)]
+    fn linux_citation_gate_fixture_beside_it() {}
 
     // Rule 7: the manifest declares only operations the provider answers. One
     // case per refusal, and the passing table with its manifest present still

@@ -314,6 +314,24 @@ fn write_profile_authority_update(
     updated_at: u64,
 ) -> anyhow::Result<VerifiedCollaborationProfileDocument> {
     require_profile_authority_passkey_binding(data_dir, principal_id, Some(proof_binding_id))?;
+    write_stored_profile_authority(
+        data_dir,
+        principal_id,
+        localhost_root,
+        display_name,
+        handle,
+        updated_at,
+    )
+}
+
+fn write_stored_profile_authority(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    display_name: &str,
+    handle: Option<&str>,
+    updated_at: u64,
+) -> anyhow::Result<VerifiedCollaborationProfileDocument> {
     let (local_device_did, display_name, handle) =
         prepare_profile_authority_update(data_dir, display_name, handle)?;
     let path = profile_authority_path(data_dir, localhost_root)?;
@@ -412,6 +430,32 @@ fn write_profile_authority_update(
     )?;
     load_profile_authority(data_dir, principal_id, localhost_root)?
         .ok_or_else(|| anyhow!("profile authority bundle missing after write"))
+}
+
+/// Writes the same profile bundle as `update_profile_authority` without the
+/// passkey-binding check. Production `update_profile_authority` still requires
+/// `proof:passkey:`. A stored agent fixture has an admission binding, so the
+/// rows that need a real bundle under that agent's root call this.
+#[cfg(test)]
+pub(crate) fn test_plant_profile_authority(
+    data_dir: &Path,
+    principal_id: &str,
+    localhost_root: &str,
+    display_name: &str,
+    handle: Option<&str>,
+    updated_at: u64,
+) -> anyhow::Result<VerifiedCollaborationProfileDocument> {
+    let _guard = profile_authority_mutation_lock()
+        .lock()
+        .map_err(|_| anyhow!("profile authority mutation lock poisoned"))?;
+    write_stored_profile_authority(
+        data_dir,
+        principal_id,
+        localhost_root,
+        display_name,
+        handle,
+        updated_at,
+    )
 }
 
 pub(crate) fn validate_profile_authority_update(

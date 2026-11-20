@@ -1,0 +1,30 @@
+[package]
+name = "capsule-v1-host-test"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# The host-test harness shared by the Bus v1 component capsules of the capsule
+# kit (item A2). A dev-dependency of each capsule's host-test; tests only.
+
+[dependencies]
+elastos-common = { path = "../../../elastos/crates/elastos-common" }
+elastos-compute = { path = "../../../elastos/crates/elastos-compute" }
+# The Runtime's own component admission check and import table (kit item A2):
+# the harness calls them instead of carrying a copy that drifts.
+elastos-server = { path = "../../../elastos/crates/elastos-server" }
+serde_json = "1"
+sha2 = "0.10.9"
+# The same Wasmtime, pinned the same way and built with the same features, as elastos-compute
+# (elastos/crates/elastos-compute/Cargo.toml): the fuel this harness measures is then measured on
+# the engine version the Runtime runs. What still differs is said at `measure::run` in src/lib.rs.
+wasmtime = { version = "=48.0.9", default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "component-model",
+    "std",
+] }
+
+# Keep it outside the main ElastOS Cargo workspace.
+[workspace]

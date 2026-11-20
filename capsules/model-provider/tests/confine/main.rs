@@ -871,7 +871,9 @@ fn wait_for_terminal(
 /// the real-file missing-test check and returns ok. A data row starts with
 /// `| ` and its first non-empty cell is not `Operation` and not `---`. The
 /// Right cell is the fourth non-empty cell and the Linux cell is the seventh:
-/// `designed, not enforced`.
+/// `designed, not enforced`, or a cell that starts `enforced on the recorded
+/// Linux host:` and cites the model journey, which the row check in
+/// `../wallet-provider/tests/confine.rs` binds to this provider.
 ///
 /// `match_operation` is false for the in-memory rows: the Right cell passes
 /// when `entry_id` read that id from the fixture's `rights` array, or the cell
@@ -880,12 +882,13 @@ fn wait_for_terminal(
 /// cell of `status`, `shutdown`, `offers_list` and `unsupported` is exactly
 /// `none: needs no declared right`, and the Right cell of `init`,
 /// `runs_create`, `runs_get`, `runs_events` and `runs_cancel` is exactly
-/// `storage`. An in-memory row whose Right cell is `network` panics, and the
-/// panic contains `network` and `right`. A `storage` cell whose id list is
-/// only `bound-executable` panics with `storage` and `right`. The enforced
-/// panic contains the backticked cell `` `enforced` ``. An in-memory row with
-/// the old phrase panics with that phrase and `right`. In the true mode, a
-/// wrong Right cell panics with the operation and the rejected cell.
+/// `storage` in a backtick span. The in-memory rows write that id bare, so one
+/// comparison strips either form. An in-memory row whose Right cell is
+/// `network` panics, and the panic contains `network` and `right`. A `storage`
+/// cell whose id list is only `bound-executable` panics with `storage` and
+/// `right`. An in-memory row with the old phrase panics with that phrase and
+/// `right`. In the true mode, a wrong Right cell panics with the operation and
+/// the rejected cell.
 ///
 /// Falsifier: F-cc31a renames `model_provider_ops_under_profile`, so this
 /// test no longer finds that function. F-cc49a drops the `generated_`
@@ -978,6 +981,7 @@ fn operations_section_cites_existing_tests() {
         const UNSHOWN_RIGHT: &str = "no named test shows this";
         const NO_DECLARED_RIGHT: &str = "none: needs no declared right";
         const LINUX_CLAIM: &str = "designed, not enforced";
+        const LINUX_ENFORCED_PREFIX: &str = "enforced on the recorded Linux host:";
         const NO_RIGHT_OPERATIONS: [&str; 4] = ["status", "shutdown", "offers_list", "unsupported"];
         const STORAGE_OPERATIONS: [&str; 5] = [
             "init",
@@ -1002,6 +1006,14 @@ fn operations_section_cites_existing_tests() {
                 continue;
             }
             let right = cells.get(RIGHT_PLACE - 1).copied().unwrap_or("");
+            // The model table writes each declared-right id in a backtick
+            // span, as the three providers' tables do; the in-memory rows
+            // below write the bare id, so the one comparison strips either
+            // form. The none phrase is written bare.
+            let right_id = right
+                .strip_prefix('`')
+                .and_then(|inner| inner.strip_suffix('`'))
+                .unwrap_or(right);
             if match_operation {
                 if NO_RIGHT_OPERATIONS.contains(&first) {
                     if right != NO_DECLARED_RIGHT {
@@ -1009,7 +1021,7 @@ fn operations_section_cites_existing_tests() {
                             "operation `{first}` needs right cell `{NO_DECLARED_RIGHT}`, not `{right}`"
                         ));
                     }
-                } else if STORAGE_OPERATIONS.contains(&first) && right != "storage" {
+                } else if STORAGE_OPERATIONS.contains(&first) && right_id != "storage" {
                     return Err(format!(
                         "operation `{first}` needs right cell `storage`, not `{right}`"
                     ));
@@ -1019,13 +1031,13 @@ fn operations_section_cites_existing_tests() {
                     "right cell `{UNSHOWN_RIGHT}` does not pass; a shown call says `{NO_DECLARED_RIGHT}`"
                 ));
             }
-            if !right_ids.contains(&right) && right != NO_DECLARED_RIGHT {
+            if !right_ids.contains(&right_id) && right != NO_DECLARED_RIGHT {
                 return Err(format!("right cell `{right}` is not an approved right id"));
             }
             let linux = cells.get(LINUX_PLACE - 1).copied().unwrap_or("");
-            if linux != LINUX_CLAIM {
+            if linux != LINUX_CLAIM && !linux.starts_with(LINUX_ENFORCED_PREFIX) {
                 return Err(format!(
-                    "Linux cell `{linux}` is not designed, not enforced"
+                    "Linux cell `{linux}` is neither designed, not enforced nor a recorded-host citation"
                 ));
             }
         }

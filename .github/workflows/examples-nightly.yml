@@ -1,0 +1,116 @@
+name: Example gates (nightly)
+
+# Runs the gates of the folders under examples/ on the main line every night,
+# and by hand. Nothing else on the main line runs them, so a change outside
+# examples/ that breaks an example would stay unseen. It happened twice on
+# 10 Nov 2026: a changed browser fixture script, and a workspace version bump
+# that left six example lockfiles stale.
+#
+# What this is not: it is not a required check and no pull request waits for
+# it. A red night is read the next morning and gets an issue named for the
+# gate that failed. It runs on a pull request only when that pull request
+# changes this file, so that an edit to the workflow is itself tested.
+#
+# First slice: non-strict and without a browser. A gate whose browser smoke
+# cannot run ends "INCOMPLETE, the parts that ran passed" and exits 0. The
+# smokes are added once this has run for a week and its times are known.
+on:
+  schedule:
+    # 03:43 Bangkok, after the main workflow's nightly run.
+    - cron: "43 20 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/examples-nightly.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: examples-nightly-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    name: ${{ matrix.gate.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        # Named on purpose. Only an explicit `bash` runs with pipefail; the
+        # default shell does not, and then a gate that fails behind `tee`
+        # would be reported as passed (this workflow's first run did that).
+        shell: bash
+    env:
+      # The gates' mutation runner reads cargo's own "Compiling <crate>" lines
+      # to know that a mutant was really built. Colour codes hide those lines
+      # from it, and it then stops the gate: "no test can be scored".
+      CARGO_TERM_COLOR: never
+    strategy:
+      # One gate's failure says nothing about the others: let each finish.
+      fail-fast: false
+      matrix:
+        gate:
+          - { name: photo-viewer, run: "bash examples/photo-viewer/verify.sh" }
+          - { name: docs-viewer, run: "bash examples/docs-viewer/verify.sh" }
+          - { name: archive-viewer, run: "bash examples/archive-viewer/verify.sh --runtime" }
+          - { name: capsule-kit-guest, run: "bash examples/capsule-kit/guest/verify.sh" }
+          - { name: gba-viewer, run: "bash examples/gba-viewer/verify.sh" }
+          # Reported on its own on purpose: this gate has wall-clock tests.
+          - { name: bus2-proof, run: "bash examples/bus2-proof/verify.sh" }
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '26'
+      - name: Run the gate
+        env:
+          GATE: ${{ matrix.gate.run }}
+          CARGO_TERM_COLOR: never
+        run: |
+          # The command's own exit code, not the pipe's last command's.
+          capture() {
+            local code
+            set +e
+            bash -c "$1" 2>&1 | tee "$2"
+            code=${PIPESTATUS[0]}
+            set -e
+            return "$code"
+          }
+          # Self-check first: a command that fails must come back as its own
+          # exit code, or this step could never show a red gate. It checks
+          # `capture`; it does not check the two places below that carry the
+          # gate's own code: `capture "$GATE" gate.log || status=$?`, which
+          # stores it, and the last line, `exit "$status"`, which hands it
+          # on. Both must stay as they are.
+          check=0
+          capture 'echo "self-check: this command exits 7"; exit 7' selfcheck.log || check=$?
+          if [ "$check" -ne 7 ]; then
+            echo "this step cannot see a failed gate: the self-check came back as $check, not 7" >&2
+            exit 1
+          fi
+          start=$(date +%s)
+          status=0
+          capture "$GATE" gate.log || status=$?
+          seconds=$(( $(date +%s) - start ))
+          {
+            echo "### ${{ matrix.gate.name }}"
+            echo "- command: \`$GATE\`"
+            echo "- exit: $status"
+            echo "- seconds: $seconds"
+            echo "- last line: \`$(tail -n 1 gate.log | cut -c1-200)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "gate ${{ matrix.gate.name }}: exit $status after $seconds seconds"
+          exit "$status"
+      - name: The gate left the source as it found it
+        if: always()
+        run: |
+          rm -f gate.log selfcheck.log
+          git status --porcelain
+          test -z "$(git status --porcelain)"

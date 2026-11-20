@@ -159,7 +159,7 @@ async function settle() {
 }
 
 function extractInboxScript(html) {
-  assert(html.includes('<script src="./inbox.js"></script>'), "Inbox script reference not found");
+  assert.match(html, /<script src="\.\/inbox\.js(?:\?[^"\s]*)?"><\/script>/, "Inbox script reference not found");
   return fs.readFileSync(new URL("../capsules/inbox/browser/inbox.js", import.meta.url), "utf8");
 }
 
@@ -325,6 +325,36 @@ async function runInboxHomeChromeSmoke() {
       ["Never", "community-presence-never:42"],
     ]);
     assert(!actions.children.some(node => String(node.dataset.actionId || "").startsWith("notification-dismiss:")));
+  }
+  // An agent plan card carries every stored step and the full binding hash. It
+  // has no approve action yet and no Dismiss control.
+  {
+    const hash = "b".repeat(64);
+    const entry = {
+      id: "agent-plan-request:inspect-act-9-abc",
+      kind: "agent_plan",
+      source_app: "inbox",
+      title: "Agent plan for capsule:agent-host",
+      body: [
+        'Step 1: {"operation":"status","request":{"capsule":"capsule:impostor","principal":"person:other"},"scheme":"availability"}',
+        "Gate preview: Capability elastos://availability/status: read.",
+        `Binding sha256: ${hash}`,
+      ].join("\n"),
+      severity: "attention",
+      read: false,
+      created_at: Math.floor(Date.now() / 1000),
+    };
+    assert.equal(context.inboxEntryText(entry, "body", "Review"), entry.body);
+    context.renderDetail(entry);
+    const detail = nodes.get("entry-detail");
+    const detailText = descendants(detail).map(node => node.textContent).join("");
+    for (const line of entry.body.split("\n")) {
+      assert(detailText.includes(line), `Agent plan card lost: ${line}`);
+    }
+    assert(detailText.includes(hash), "Agent plan card lost the binding hash");
+    const facts = descendants(detail).find(node => String(node.className || "").split(/\s+/).includes("entry-facts"));
+    assert(Boolean(facts), "Agent plan card is not rendered as facts");
+    assert(!descendants(detail).some(node => node.tagName === "BUTTON"), "Agent plan card offers an action");
   }
   context.setStatus("unauthorized provider");
   assert.equal(nodes.get("status-text").textContent, "Inbox action could not be completed.");

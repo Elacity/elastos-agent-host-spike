@@ -618,6 +618,8 @@ test("one failed absence proof does not contaminate independent cleanup fields",
     });
     t.after(() => new Promise((resolve) => blockedPort.close(resolve)));
   }
+  // This fixture reaches TURN preflight, so it needs an available local port.
+  // A shared fixed port can reject the launch before the injected cleanup failure.
   const turnPort = process.env.ELASTOS_BROWSER_TEST_USE_FIXED_TURN_PORT
     ? 49160
     : await availableTcpPort();

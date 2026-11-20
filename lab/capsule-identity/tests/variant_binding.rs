@@ -852,7 +852,7 @@ fn variant_binding_paths_share_one_implementation() {
     for text in [".wasm", "PORTABLE_PLATFORM", "Refusal::WasmNotPortable"] {
         assert_eq!(portable.matches(text).count(), 1, "{text}:\n{portable}");
     }
-    assert_eq!(code.matches(".wasm").count(), 1, ".wasm");
+    assert_eq!(code.matches(".wasm").count(), 2, ".wasm");
     let shape = library_item(&code, "fn require_variant_shape<'a>(");
     assert_eq!(
         shape.matches("Refusal::PortableNotAlone").count(),
@@ -1170,33 +1170,38 @@ fn wasm_type_comes_from_the_one_manifest_check() {
     // the seam keeps what that one call returns. Nothing else parses
     // capsule.json or names the manifest type.
     let code = library_code();
-    let parse = ": CapsuleManifest = serde_json::from_slice";
+    let parse = "PinnedManifest::parse(";
     assert_eq!(code.matches(parse).count(), 1, "{parse}");
     let check = library_item(&code, "fn check_manifest(");
     assert_eq!(check.matches(parse).count(), 1, "{check}");
     assert_eq!(
         check
-            .matches("manifest.capsule_type == CapsuleType::Wasm")
+            .matches("manifest.capsule_type() == &CapsuleType::Wasm")
             .count(),
         1,
         "{check}"
     );
-    // The `use` line, then check_manifest: nowhere else, apart from the two
-    // refusal texts that name the Runtime's checks.
+    // The `use` line, then check_manifest: nowhere else. The library no
+    // longer names `CapsuleManifest` in code, only in the two refusal texts
+    // that name the Runtime's checks, and it parses no JSON itself: the
+    // Runtime's reader of a manifest that may pin a requirement does both.
     for (text, count) in [
-        ("CapsuleManifest", 4),
+        ("CapsuleManifest", 2),
         ("CapsuleType", 2),
         ("capsule_type", 1),
-        ("serde_json::", 1),
+        ("serde_json::", 0),
+        ("PinnedManifestError::", 3),
     ] {
         assert_eq!(code.matches(text).count(), count, "{text}");
     }
     assert_eq!(
-        code.matches("use elastos_common::{CapsuleManifest, CapsuleType};")
-            .count(),
+        code.matches(
+            "use elastos_common::{cid_form, CapsuleType, PinnedManifest, PinnedManifestError};"
+        )
+        .count(),
         1
     );
-    let seam = library_item(&code, "pub fn checked_bundle_observed(");
+    let seam = library_item(&code, "pub fn checked_bundle_within_observed(");
     for text in [
         "let (wasm, name, role) = check_manifest(",
         "CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n            role,\n        }",
@@ -1211,9 +1216,9 @@ fn wasm_variant_refusal_order_is_stable() {
     // check answers, in both verifiers.
     let bundle = assemble(&AGENT_HOST);
     let other = assemble(&AGENT_HOST);
-    let mut asks = read_fixture(&AGENT_HOST, "asks.json");
-    asks[0] ^= 1;
-    write_file(other.path(), "asks.json", &asks);
+    let mut manifest = read_fixture(&AGENT_HOST, "capsule.json");
+    flip_one_manifest_ask_byte(&mut manifest);
+    write_file(other.path(), "capsule.json", &manifest);
     let other_cid = named(other.path()).to_string();
     assert_ne!(other_cid, AGENT_HOST_LAB_CID);
     let recipe = variant_recipe();

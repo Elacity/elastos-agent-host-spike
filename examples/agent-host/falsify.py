@@ -309,7 +309,9 @@ def load(path=DATA):
 #   WP109 edit it.
 # - lab/capsule-identity/falsifiers.json: capsule-identity's .gitignore,
 #   README.md, src/lib.rs, tests/common/mod.rs and
-#   fixtures/wc001-core/capsule.json.
+#   fixtures/wc001-core/capsule.json, and the bundle identity crate's
+#   src/lib.rs (elastos/crates/elastos-bundle-identity), where the lane's
+#   identity code lives.
 # - lab/wasm-capsule/falsifiers.json and lab/wasm-capsule/audit/falsifiers.json:
 #   the lab capsule's .gitignore, README.md, capsule/capsule.json,
 #   capsule/src/lib.rs, tests/common/build.rs, tests/lab_cid.rs,
@@ -355,6 +357,7 @@ PROVIDER_TARGETS = (
     "capsules/wallet-provider/tests/confine.rs",
     "capsules/wallet-provider/src/tests/falsifiers.rs",
     "lab/capsule-identity/src/lib.rs",
+    "elastos/crates/elastos-bundle-identity/src/lib.rs",
     "lab/capsule-identity/tests/common/mod.rs",
     "lab/capsule-identity/fixtures/wc001-core/capsule.json",
     "lab/wasm-capsule/capsule/src/lib.rs",
@@ -2129,7 +2132,8 @@ def a_killed_provider_edit_is_recovered():
     harness and wallet's falsifier honesty test and the profile generator
     file tests/common/profile_generator.rs, capsule-identity's
     .gitignore, README.md, src/lib.rs, tests/common/mod.rs and
-    fixtures/wc001-core/capsule.json, and
+    fixtures/wc001-core/capsule.json, the bundle identity crate's
+    src/lib.rs, and
     the wasm lab's .gitignore, README.md, LOG.md, capsule/capsule.json,
     capsule/src/lib.rs, tests/common/build.rs, tests/lab_cid.rs,
     tests/verify.rs, tools/build, tools/src/bin/bundle.rs,
@@ -2154,6 +2158,7 @@ def a_killed_provider_edit_is_recovered():
     # provider's process test file, wallet's falsifier honesty test,
     # capsule-identity's .gitignore, README.md,
     # src/lib.rs, tests/common/mod.rs and fixtures/wc001-core/capsule.json,
+    # the bundle identity crate's src/lib.rs,
     # the wasm lab's edit and run-log files, and agent-conformance's 19 edit
     # targets are named here, not read from the table, so a target dropped
     # from PROVIDER_TARGETS is caught. The stand-in
@@ -2173,6 +2178,7 @@ def a_killed_provider_edit_is_recovered():
                  "../../capsules/wallet-provider/tests/common/profile_generator.rs",
                  "../../capsules/wallet-provider/src/tests/falsifiers.rs",
                  "../../lab/capsule-identity/src/lib.rs",
+                 "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
                  "../../lab/capsule-identity/tests/common/mod.rs",
                  "../../lab/capsule-identity/fixtures/wc001-core/capsule.json",
                  "../../lab/wasm-capsule/capsule/src/lib.rs",

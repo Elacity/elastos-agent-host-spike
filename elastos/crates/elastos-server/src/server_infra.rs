@@ -645,7 +645,7 @@ pub(crate) async fn start_carrier_plane(
 async fn serve_capability_store(
     data_dir: &Path,
 ) -> anyhow::Result<Arc<capability::CapabilityStore>> {
-    capability::CapabilityStore::with_persistence(data_dir.join("capability_store"))
+    api::handlers::settle::open_capability_store(data_dir)
         .await
         .map(Arc::new)
         .map_err(|err| anyhow::anyhow!("capability store unavailable: {err}"))
@@ -992,35 +992,6 @@ async fn setup_server_infrastructure_impl(
             "media-provider binary is not installed; protected-content media sessions will fail closed"
         ),
         Err(_) => tracing::warn!("Skipping media-provider due to verification failure"),
-    }
-
-    if let Some(path) = crate::find_installed_provider_binary("operator-drive-adapter") {
-        if let Err(e) = verify_provider_binary("operator-drive-adapter", &path) {
-            tracing::warn!(
-                "Skipping operator-drive-adapter due to verification failure: {}",
-                e
-            );
-        } else {
-            let adapter_config = provider::BridgeProviderConfig {
-                base_path: data_dir.to_string_lossy().to_string(),
-                read_only: false,
-                extra: operator_drive_adapter_config_from_env(&data_dir)
-                    .unwrap_or(serde_json::Value::Null),
-                ..Default::default()
-            };
-            match provider::ProviderBridge::spawn(&path, adapter_config).await {
-                Ok(bridge) => {
-                    let provider: Arc<dyn provider::Provider> =
-                        Arc::new(provider::CapsuleProvider::with_scheme(
-                            Arc::new(bridge),
-                            "operator-drive-adapter",
-                        ));
-                    provider_registry.register(provider).await;
-                    tracing::info!("operator-drive-adapter capsule from {}", path.display());
-                }
-                Err(e) => tracing::warn!("Failed to spawn operator-drive-adapter: {}", e),
-            }
-        }
     }
 
     match binaries::resolve_verified_native_provider_binary("ipfs-provider") {
@@ -1671,6 +1642,7 @@ async fn setup_server_infrastructure_impl(
         .as_ref()
         .map(|service| service.gateway_context())
         .unwrap_or_default();
+    collaboration_context.capability_manager = Some(capability_manager.clone());
     collaboration_context.carrier_endpoint = carrier_service
         .as_ref()
         .and_then(|service| service.endpoint());
@@ -2134,14 +2106,6 @@ fn browser_engine_adapter_config_from_env(data_dir: &std::path::Path) -> Option<
         data_dir,
         "ELASTOS_BROWSER_ENGINE_ADAPTER_CONFIG",
         "browser-engine-adapter.json",
-    )
-}
-
-fn operator_drive_adapter_config_from_env(data_dir: &std::path::Path) -> Option<serde_json::Value> {
-    provider_config_from_env_or_file(
-        data_dir,
-        "ELASTOS_OPERATOR_DRIVE_ADAPTER_CONFIG",
-        "operator-drive-adapter.json",
     )
 }
 
@@ -3837,27 +3801,6 @@ mod tests {
     }
 
     #[test]
-    fn operator_drive_adapter_config_prefers_explicit_json() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::new(&["ELASTOS_OPERATOR_DRIVE_ADAPTER_CONFIG"]);
-        std::env::set_var(
-            "ELASTOS_OPERATOR_DRIVE_ADAPTER_CONFIG",
-            r#"{"operator_endpoint":{"url":"http://127.0.0.1:9797/operator-drive","authorization":"Bearer secret"}}"#,
-        );
-
-        let data_dir = crate::sources::default_data_dir();
-        let config = operator_drive_adapter_config_from_env(&data_dir).unwrap();
-        assert_eq!(
-            config["operator_endpoint"]["url"],
-            "http://127.0.0.1:9797/operator-drive"
-        );
-        assert_eq!(
-            config["operator_endpoint"]["authorization"],
-            "Bearer secret"
-        );
-    }
-
-    #[test]
     fn browser_local_exit_config_prefers_explicit_json() {
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::new(&["ELASTOS_BROWSER_LOCAL_EXIT_CONFIG"]);
@@ -4331,6 +4274,73 @@ mod tests {
                 Err(capability::manager::ValidationError::TokenRevoked)
             ),
             "revoked token must stay revoked after restart: {result:?}"
+        );
+    }
+
+    /// A3-R S3 fix 2: the Home's start applies the pending revocation list.
+    /// An end's revoke the store could not save is refused by the restarted
+    /// Home's capability store.
+    #[tokio::test]
+    async fn serve_capability_store_applies_pending_revocations() {
+        use elastos_server::api::handlers::settle;
+        let data_dir = TempDir::new().unwrap();
+        let resource = capability::ResourceId::new("elastos://content/fetch");
+        let plane = |store| {
+            capability::CapabilityManager::load_or_generate(
+                data_dir.path(),
+                store,
+                Arc::new(primitives::audit::AuditLog::new()),
+                Arc::new(primitives::metrics::MetricsManager::new()),
+            )
+        };
+        let store = serve_capability_store(data_dir.path()).await.unwrap();
+        let manager = plane(store);
+        let pending = capability::pending::PendingRequestStore::new(manager.audit_log().clone());
+        let session = session::SessionId::from_string("ended-capsule");
+        let request = pending
+            .create_request(session, resource.clone(), capability::Action::Read)
+            .await;
+        let token = manager.grant(
+            "ended-capsule",
+            resource.clone(),
+            capability::Action::Read,
+            capability::TokenConstraints::default(),
+            None,
+        );
+        pending
+            .grant_request(
+                request.id.as_str(),
+                token.clone(),
+                capability::GrantDuration::Session,
+            )
+            .await
+            .unwrap();
+        let store_dir = settle::capability_store_dir(data_dir.path());
+        fs::create_dir(store_dir.join("revoked_tokens")).unwrap();
+        let settled = settle::settle_and_revoke(
+            &pending,
+            &manager,
+            data_dir.path(),
+            "ended-capsule",
+            "trapped",
+        )
+        .await;
+        assert!(settled.is_err(), "the save failed: {settled:?}");
+
+        let restarted = plane(serve_capability_store(data_dir.path()).await.unwrap());
+        let result = restarted
+            .validate(
+                &token,
+                "ended-capsule",
+                capability::Action::Read,
+                &resource,
+                None,
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err(capability::manager::ValidationError::TokenRevoked),
+            "the restarted Home refuses the unsaved revoke"
         );
     }
 

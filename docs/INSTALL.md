@@ -18,7 +18,7 @@ An enabled Terminal runs commands with the host user's rights.
 The [data, keys and backups](#data-keys-and-backups) section explains current
 host access and the protection target for hosted and locked self-hosted Homes.
 
-The [isolation plan](https://github.com/Elacity/elastos-runtime/issues/173)
+The [isolation plan](https://github.com/elastos/elastos-runtime/issues/173)
 records the remaining gates. Source checks describe this source tree. Accepted
 installed proof binds the exact Runtime, components and app assets to the
 journeys tested on that device.
@@ -87,7 +87,9 @@ stop after bootstrap.
 
 The current default Home exposes Assistant, Chat (Community), System, People,
 Wallet, Documents, Library, Marketplace, and Inbox. On Apple Silicon
-Macs it also exposes Browser; Linux Homes do not show Browser in 2.0.0. People is installed as a
+Macs it also exposes Browser. On supported Linux ARM64 computers with KVM,
+Browser is optional; see [Jetson](#jetson) for `elastos setup --browser`.
+People is installed as a
 separate app capsule; Home presents it but does not own its state or authority.
 
 Native Windows is not an accepted install target today. The current product
@@ -173,20 +175,27 @@ The installer detects Linux `aarch64`:
 curl -fsSL https://elastos.elacitylabs.com/install.sh | bash
 ```
 
-Home and chat use the ordinary user account. Browser runs on Apple Silicon Macs
-and uses the local Engine's virtual machine. When the signed release supplies
-Browser support, setup obtains its matching helpers and verified image before
-Home starts. The image streams to disk with progress; a transfer stops after 30
-seconds without data. Runtime keeps the committed Browser profile separate from
-the image during reopen and updates.
+Home and chat use the ordinary user account. Browser uses the local Engine's
+virtual machine on Apple Silicon Macs and supported Linux ARM64 hosts with KVM.
+On Linux, Marketplace lists Browser with its setup command. To turn it on, run
+`elastos setup --browser` in a terminal as the user who installed Home. The
+command installs the signed Browser helpers, shows the host access changes and
+asks for administrator approval. It then downloads and verifies the image with
+progress. Close Home and start it again with `elastos home --browser`.
 
-On other computers, including Linux ARM64 (Jetson) and Linux x86-64, Browser is
-hidden until the next release; setup prints "Browser is not available on this
-computer yet." Setup also clears the Browser Engine selection and removes the
-Browser host helpers and image an earlier release installed (Browser profiles
-stay). The installer runs its Linux host step only after setup and only if the
-helper is still present, so it asks for no administrator step. If an earlier
-release set up Browser host access on Linux, it can be removed with:
+The Linux installer and ordinary `elastos setup` leave Browser preparation to
+your choice until you enable it. Home lists Browser on supported Linux ARM64
+computers; opening it before setup explains the command and restart. After you
+enable Browser, ordinary setup refreshes its signed helpers and image during
+updates. A later open repairs missing or changed helpers and prepares a missing
+image on demand. Apple Silicon setup continues to prepare its helpers and image
+before Home starts. The image
+streams to disk with progress; a transfer stops after 30 seconds without data.
+Runtime keeps the committed Browser profile separate from the image during
+reopen and updates. Linux x86-64 keeps Browser hidden and retires helpers and
+images from unsupported releases while preserving Browser profiles.
+
+To remove Browser host access, close Browser and run this before uninstalling:
 
 ```sh
 sudo /usr/bin/python3 -I /usr/local/lib/elastos/browser-vm-linux-network.py remove --user "$(id -un)"
@@ -346,10 +355,10 @@ in place, and stay connected to the network Home updates over.
    it was finishing, and a System update that stopped while it was replacing an
    app. The command a message names then stops with the same message every
    time. Do not delete or move any files. Ask for help in
-   [GitHub issues](https://github.com/Elacity/elastos-runtime/issues) and
+   [GitHub issues](https://github.com/elastos/elastos-runtime/issues) and
    include the output of `elastos --version` and the exact message. We are
    fixing this in a later update
-   ([#108](https://github.com/Elacity/elastos-runtime/issues/108)).
+   ([#108](https://github.com/elastos/elastos-runtime/issues/108)).
 
 A Home with an installed update controller keeps its controller Runtime and
 private receipt in the data directory. The controller of the version that runs
@@ -483,7 +492,7 @@ The publisher's signed manifest controls what `elastos setup` installs. Run
 `elastos setup --list` to inspect the selected manifest's current profiles and
 components before installation. The installed `components.json` records what
 the selected profile installed. Do not infer parity with this development tree
-from the version label or a successful setup. [Install/update acceptance](https://github.com/Elacity/elastos-runtime/issues/89)
+from the version label or a successful setup. [Install/update acceptance](https://github.com/elastos/elastos-runtime/issues/89)
 owns exact public-manifest parity evidence.
 
 ## Remove ElastOS
@@ -502,8 +511,8 @@ directory stays, including Browser profiles, so installing again continues with
 the same identity. Pass the same `--install-dir` you installed with. An install
 or update that is running or was interrupted stops the removal; finish it first.
 
-On Linux, the uninstall leaves any Browser host access an earlier release set
-up in place. Remove it with:
+On Linux, the administrator helper owns Browser host access. If you enabled it,
+close Browser and remove that access before uninstalling:
 
 ```sh
 sudo /usr/bin/python3 -I /usr/local/lib/elastos/browser-vm-linux-network.py remove --user "$(id -un)"
@@ -527,7 +536,7 @@ material; keep it under your own control.
 
 Use hosted accounts only for public demos. Keep wallets, private data and
 recovery material on your own device until
-[hosted protection](https://github.com/Elacity/elastos-runtime/issues/209) passes
+[hosted protection](https://github.com/elastos/elastos-runtime/issues/209) passes
 its acceptance gate. The seed operator can read hosted data, wallet keys and
 recovery phrases stored on the seed. Host-side encryption with keys stored
 beside the data leaves those secrets accessible to that operator.

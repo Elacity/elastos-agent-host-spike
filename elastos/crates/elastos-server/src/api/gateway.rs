@@ -41,20 +41,25 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use url::form_urlencoded;
 
+#[path = "gateway_agents.rs"]
+mod gateway_agents;
 #[path = "gateway_assistant.rs"]
 mod gateway_assistant;
 #[path = "gateway_assistant_workspace_v2.rs"]
 mod gateway_assistant_workspace_v2;
 #[path = "gateway_browser.rs"]
 mod gateway_browser;
+#[path = "gateway_browser_internet.rs"]
+mod gateway_browser_internet;
 #[cfg(test)]
 #[path = "gateway_r3_stored_root_tests.rs"]
-mod r3_stored_root_tests;
+pub(in crate::api) mod r3_stored_root_tests;
 pub(crate) use gateway_browser::gateway_browser_operator::{
     register_browser_operator_sessions, BrowserOperatorService,
 };
 pub(crate) use gateway_browser::gateway_browser_remote::invoke as invoke_remote_browser_engine;
 pub(crate) use gateway_browser::gateway_browser_remote::provider_transport_ready as browser_remote_provider_transport_ready;
+pub(crate) use gateway_browser_internet::BrowserInternetService;
 #[path = "gateway_capsule_catalog.rs"]
 mod gateway_capsule_catalog;
 #[path = "gateway_collaboration_presence.rs"]
@@ -95,9 +100,9 @@ mod gateway_model_remote;
 mod gateway_model_service;
 pub(in crate::api) use gateway_model_service::deny_grant_and_settle as deny_model_grant_and_settle;
 pub(crate) use gateway_model_service::{
-    invoke as invoke_remote_model, model_grant_id, ModelServiceGrant, MODEL_GRANT_SCHEMA,
-    MODEL_GRANT_SCOPE, MODEL_GRANT_TTL_SECS, MODEL_LOCAL_OFFER, MODEL_OPERATIONS,
-    MODEL_SERVICE_KIND, MODEL_SERVICE_URI,
+    invoke as invoke_remote_model, model_grant_id, ModelServiceGrant, MODEL_AUTHORITY_TIMEOUT_CODE,
+    MODEL_GRANT_SCHEMA, MODEL_GRANT_SCOPE, MODEL_GRANT_TTL_SECS, MODEL_LOCAL_OFFER,
+    MODEL_OPERATIONS, MODEL_SERVICE_KIND, MODEL_SERVICE_URI,
 };
 #[path = "gateway_origin.rs"]
 mod gateway_origin;
@@ -117,6 +122,7 @@ mod gateway_transaction_effects;
 mod gateway_wallet;
 #[path = "gateway_wallet_adapter.rs"]
 mod gateway_wallet_adapter;
+use gateway_agents::*;
 #[cfg(test)]
 use gateway_browser::browser_runtime_stream_socket_path;
 use gateway_capsule_catalog::*;
@@ -142,6 +148,7 @@ pub(crate) fn principal_root_protected_object_inventory(
 }
 
 pub(in crate::api) use gateway_home_runtime::capsule_icon_variants;
+pub(super) use gateway_home_runtime::{gateway_attach_runtime_token, load_live_runtime_coords};
 pub(super) use gateway_home_runtime::{viewer_object_shell_description, viewer_object_shell_title};
 pub(in crate::api) use gateway_home_system::profile_readiness_for_principal;
 use gateway_home_system::*;
@@ -157,18 +164,22 @@ pub(super) use gateway_home_token::home_session_cookie_name;
 pub(super) use gateway_home_token::launch_principal_root;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
 pub(crate) use gateway_home_token::RuntimeWalletAuthority;
+pub(crate) use gateway_home_token::VerifiedLaunchGrant;
 pub(super) use gateway_home_token::{
     home_browser_origin, home_launch_token_header, home_session_clear_cookie_header,
     home_session_cookie_header_for_token, issue_home_launch_token_for_auth_grant,
-    issue_home_launch_token_for_verified_grant, issue_home_projection_launch_token_with_context,
+    issue_home_launch_token_for_verified_grant, issue_home_launch_token_with_context,
+    issue_home_projection_launch_token_with_context, issue_launch_page_token,
     require_carried_home_launch_token, require_home_launch_token,
     require_home_launch_token_binding, require_home_launch_token_context,
     require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
     require_home_projection_launch_token_context, require_home_runtime_wallet_authority,
     require_home_token, require_home_token_context, require_home_viewer_launch_token_context,
     require_internal_shell_launch_grant_for_any_context,
-    require_internal_shell_runtime_wallet_authority, require_runtime_wallet_authority,
-    runtime_wallet_authority, HomeLaunchContext, RequiredHomeLaunchToken,
+    require_internal_shell_launch_grant_principal, require_internal_shell_projection_context,
+    require_internal_shell_runtime_wallet_authority, require_launch_bound_token,
+    require_runtime_wallet_authority, runtime_wallet_authority, HomeLaunchContext,
+    RequiredHomeLaunchToken,
 };
 use gateway_home_update::*;
 
@@ -182,8 +193,7 @@ pub(super) use gateway_home_system_ai_provider::{
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
     issue_expired_home_launch_token_with_context, issue_home_launch_token,
-    issue_home_launch_token_with_context, local_home_launch_token_context,
-    set_test_home_launch_auth_data_dir, uuid_like_token,
+    local_home_launch_token_context, set_test_home_launch_auth_data_dir, uuid_like_token,
 };
 use gateway_home_wallet_connector::*;
 use gateway_inbox::*;
@@ -276,7 +286,7 @@ const WALLET_PRICE_IDS: &[(&str, &str)] = &[
 pub(crate) const ROOM_SESSION_COOKIE: &str = "room-session";
 pub(crate) const BROWSER_SESSION_COOKIE: &str = "browser-session";
 pub(crate) const HOME_SESSION_COOKIE: &str = "home-session";
-const HOME_LAUNCH_TOKEN_DOMAIN: &str = "elastos.home.launch.v4";
+use crate::auth::HOME_LAUNCH_TOKEN_DOMAIN;
 const HOME_LAUNCH_TOKEN_TTL_SECS: u64 = 12 * 60 * 60;
 const HOME_BROWSER_STATE_SCHEMA: &str = "elastos.home.browser-state/v1";
 const HOME_BROWSER_STATE_MAX_BYTES: usize = 64 * 1024;
@@ -430,7 +440,6 @@ fn home_launch_token_context_from_parts(
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, &auth_data_dir, principal_id)?;
     Ok(HomeLaunchTokenContext::resolved(
         root,
-        principal_id.to_string(),
         session_id.to_string(),
         proof_binding_id,
         grant_id.to_string(),
@@ -509,6 +518,7 @@ struct WalletPricePolicy {
 
 #[derive(Clone)]
 pub struct GatewayState {
+    pub(crate) browser_internet: Arc<BrowserInternetService>,
     pub(crate) carrier_endpoint: Option<iroh::Endpoint>,
     pub provider_registry: Option<Arc<ProviderRegistry>>,
     pub(crate) collaboration_chat_product_port:
@@ -587,6 +597,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
 
     Router::new()
         .merge(user_content)
+        .route(
+            "/api/apps/browser/internet",
+            get(gateway_browser_internet::summary).post(gateway_browser_internet::action),
+        )
         .route("/healthz", get(healthz))
         .route(
             "/api/auth/evm/challenge",
@@ -786,6 +800,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
                 .layer(DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
+            "/api/apps/system/update-channel",
+            post(system_source_switch_channel).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
             "/api/apps/system/appearance/preferences",
             post(system_appearance_preferences_update),
         )
@@ -805,6 +823,13 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             "/api/apps/system/access/guest-registration",
             post(system_guest_registration_update),
         )
+        .route("/api/apps/system/agents", get(agents_list))
+        .route("/api/apps/system/agents/enable", post(agents_enable))
+        .route("/api/apps/system/agents/disable", post(agents_disable))
+        .route("/api/apps/system/agents/create", post(agents_create))
+        .route("/api/apps/system/agents/retire", post(agents_retire))
+        .route("/api/apps/system/agents/rename", post(agents_rename))
+        .route("/api/apps/system/agents/activate", post(agents_activate))
         .route(
             "/api/apps/system/community",
             get(system_community_membership_get).post(system_community_membership_update),
@@ -1063,7 +1088,12 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             get(home_background_image),
         )
         .route("/api/apps/home/runtime/ensure", post(home_runtime_ensure))
-        .route("/api/apps/home/launch", post(home_launch))
+        .route(
+            "/api/apps/home/launch",
+            post(|state, headers, input| async move {
+                home_launch(state, headers, input, &crate::setup::detect_platform()).await
+            }),
+        )
         .route("/api/apps/home/external-link", post(home_external_link))
         .route(
             "/api/apps/home/shared-content/check",
@@ -1251,6 +1281,22 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             get(super::viewer_gateway::viewer_content),
         )
         .route(
+            "/api/viewers/:viewer/launch/output/:name",
+            get(super::viewer_gateway::viewer_launch_output),
+        )
+        .route(
+            "/api/viewers/:viewer/launch/content/*path",
+            get(super::viewer_gateway::viewer_launch_content),
+        )
+        .route(
+            "/api/home/launch/content",
+            post(super::viewer_gateway::home_launch_content),
+        )
+        .route(
+            "/launch/:id/page/*path",
+            get(super::browser_capsules::serve_launch_page),
+        )
+        .route(
             "/api/viewers/:viewer/library-object",
             get(super::viewer_gateway::viewer_library_object_get)
                 .post(super::viewer_gateway::viewer_library_object_post)
@@ -1392,6 +1438,10 @@ fn gateway_provider_error_response(scheme: &str, err: anyhow::Error) -> Response
 }
 
 fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode, String) {
+    (gateway_provider_error_status(scheme, &err), err.to_string())
+}
+
+fn gateway_provider_error_status(scheme: &str, err: &anyhow::Error) -> StatusCode {
     let text = err.to_string();
     let unavailable = format!("{scheme} provider unavailable");
     let forbidden = text.contains("home launch token")
@@ -1401,7 +1451,7 @@ fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode
         || text.contains("private host blocked")
         || text.contains("private IP blocked")
         || text.contains("private network");
-    let status = if forbidden {
+    if forbidden {
         StatusCode::FORBIDDEN
     } else if text.contains(&unavailable) {
         StatusCode::SERVICE_UNAVAILABLE
@@ -1416,11 +1466,13 @@ fn gateway_provider_error_tuple(scheme: &str, err: anyhow::Error) -> (StatusCode
         StatusCode::BAD_REQUEST
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
-    };
-    (status, text)
+    }
 }
 
 fn inbox_error_response(err: anyhow::Error) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
     let profile_required = gateway_home_system::profile_required_message(&err);
     let text = profile_required
         .map(str::to_string)
@@ -1454,7 +1506,20 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
     (status, text).into_response()
 }
 
+/// The response for a held-root write that refused because the person's
+/// record is kept in another Runtime's store and this Runtime holds no
+/// protection for the object. `home_state_write_error` puts a path context on
+/// top of the refusal, so this looks through the whole cause chain.
+pub(super) fn protected_record_kept_elsewhere_response(err: &anyhow::Error) -> Option<Response> {
+    err.chain()
+        .find(|cause| cause.is::<crate::auth::ProtectedRecordKeptElsewhere>())
+        .map(|cause| (StatusCode::FORBIDDEN, cause.to_string()).into_response())
+}
+
 fn system_error_response(err: anyhow::Error) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
     if let Some(text) = gateway_home_system::home_appearance_preference_request_message(&err) {
         return (StatusCode::BAD_REQUEST, text.to_string()).into_response();
     }
@@ -1492,6 +1557,9 @@ fn system_error_response(err: anyhow::Error) -> Response {
 }
 
 fn home_error_response(err: anyhow::Error) -> Response {
+    if let Some(response) = protected_record_kept_elsewhere_response(&err) {
+        return response;
+    }
     let profile_required = gateway_home_system::profile_required_message(&err);
     let appearance_request = gateway_home_system::home_appearance_preference_request_message(&err);
     let text = profile_required
@@ -1544,4 +1612,4 @@ fn home_error_response(err: anyhow::Error) -> Response {
 mod gateway_browser_tests;
 #[cfg(test)]
 #[path = "gateway_tests/mod.rs"]
-mod gateway_tests;
+pub(in crate::api) mod gateway_tests;

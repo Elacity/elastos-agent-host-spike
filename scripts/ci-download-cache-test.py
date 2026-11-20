@@ -90,17 +90,19 @@ class AptRetryTests(unittest.TestCase):
     def run_install(self, corrupt=False, bad_download=False, update_failures=0):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            archives, etc, shims = root / 'archives', root / 'etc', root / 'shims'
-            for path in (archives, etc, shims):
-                path.mkdir()
+            apt_cache = root / 'apt-cache'
+            archives, lists = apt_cache / 'archives', apt_cache / 'ci-lists'
+            etc, shims = root / 'etc', root / 'shims'
+            for path in (archives, lists, etc, shims):
+                path.mkdir(parents=True)
             (etc / 'sources.list').write_text('deb https://archive.ubuntu.com/ubuntu noble main\n')
             payload = b'inert Ubuntu package'
             (archives / 'fixture_1_all.deb').write_bytes(b'x' * len(payload) if corrupt else payload)
             commands = {
                 'sudo': 'os.execvp(args[0], args)',
                 'chown': 'pass',
-                'install': 'pass',
-                'dpkg-deb': "print('fixture\\n1\\nall')",
+                'install': "if '-d' in args:\n    for path in args[args.index('-m') + 2:]:\n        pathlib.Path(path).mkdir(parents=True, exist_ok=True)",
+                'dpkg-deb': "print('fixture 1 all')",
                 'apt-cache': "print('SHA256: ' + os.environ['FIXTURE_SHA256'])",
                 'timeout': "os.execvp(args[2], args[2:])",
                 'sleep': 'pass',
@@ -123,7 +125,8 @@ if '--download-only' in args:
                     f'    stream.write(json.dumps({{"command": {command!r}, "args": args}}) + "\\n")\n' + body)
                 shim.chmod(0o700)
             script = (ROOT / 'scripts/ci-apt-prerequisites.sh').read_text()
-            script = script.replace('/var/cache/apt/archives', str(archives)).replace('/etc/apt', str(etc))
+            script = script.replace('/var/cache/apt', str(apt_cache)).replace('/etc/apt', str(etc))
+            self.assertNotIn('/var/cache/apt', script)
             result = subprocess.run(['bash', '-c', script], text=True, capture_output=True, timeout=15,
                 env={**os.environ, 'PATH': str(shims) + os.pathsep + os.environ['PATH'],
                      'CI_APT_PACKAGES': 'coturn e2fsprogs ffmpeg musl-tools nasm pkg-config',
@@ -148,21 +151,22 @@ if '--download-only' in args:
         self.assertFalse(any('--no-download' in e['args'] for e in events if e['command'] == 'apt-get'))
         self.assertEqual(output, '')
 
-    def test_unchanged_verified_archive_set_skips_save(self):
+    def test_cold_index_cache_is_saved_with_verified_archive(self):
         result, _, output = self.run_install()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(output, 'changed=false\n')
+        self.assertEqual(output, 'changed=true\n')
 
-    def test_mirror_hiccup_recovers_with_backoff(self):
-        result, events, output = self.run_install(update_failures=2)
+    def test_default_mirror_failure_uses_fallback(self):
+        result, events, output = self.run_install(update_failures=1)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual([e['args'] for e in events if e['command'] == 'sleep'], [['15'], ['30']])
-        self.assertEqual(output, 'changed=false\n')
+        self.assertEqual(sum('update' in e['args'] for e in events if e['command'] == 'apt-get'), 2)
+        self.assertEqual([e['args'] for e in events if e['command'] == 'sleep'], [])
+        self.assertEqual(output, 'changed=true\n')
 
-    def test_persistent_mirror_failure_stops_after_three_attempts(self):
-        result, events, output = self.run_install(update_failures=3)
+    def test_both_mirrors_failing_stops_after_two_attempts(self):
+        result, events, output = self.run_install(update_failures=2)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(sum('update' in e['args'] for e in events if e['command'] == 'apt-get'), 3)
+        self.assertEqual(sum('update' in e['args'] for e in events if e['command'] == 'apt-get'), 2)
         self.assertEqual(output, '')
 
 

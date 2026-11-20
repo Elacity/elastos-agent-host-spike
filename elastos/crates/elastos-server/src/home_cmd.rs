@@ -2428,9 +2428,26 @@ fn gather_capsule_actions(catalog: &serde_json::Value) -> Vec<ActionInfo> {
     actions
 }
 
+/// The local runtime to report: an operator runtime (`elastos serve`), else the
+/// managed runtime that runs Browser Home's capsules, else Browser Home's gateway.
+async fn live_runtime_coords(data_dir: &Path) -> Option<runtime_control::RuntimeCoords> {
+    for path in [
+        runtime_control::runtime_coord_path(data_dir),
+        runtime_control::home_runtime_coord_path(data_dir),
+    ] {
+        if let Some(coords) = runtime_control::read_runtime_coords(&path).await {
+            return Some(coords);
+        }
+    }
+    runtime_control::read_attachable_runtime_coords(
+        data_dir,
+        runtime_control::AttachableRuntimeKind::Gateway,
+    )
+    .await
+}
+
 async fn gather_runtime_status(data_dir: &Path) -> RuntimeStatus {
-    let coords_path = runtime_control::runtime_coord_path(data_dir);
-    let Some(coords) = runtime_control::read_runtime_coords(&coords_path).await else {
+    let Some(coords) = live_runtime_coords(data_dir).await else {
         return RuntimeStatus {
             running: false,
             kind: None,
@@ -2476,6 +2493,11 @@ async fn gather_runtime_status(data_dir: &Path) -> RuntimeStatus {
         running_capsules: Vec::new(),
         note: None,
     };
+    // The gateway serves Home; it runs no capsules and has no peer capability.
+    if coords.is_gateway_runtime() {
+        status.note = Some(format!("Home is open at {}", coords.home_url));
+        return status;
+    }
 
     let client_token = match attach_client(&client, &coords).await {
         Ok(token) => token,
@@ -2702,6 +2724,12 @@ async fn list_runtime_capsules(
     let mut capsules = Vec::new();
     if let Some(items) = body.get("capsules").and_then(|v| v.as_array()) {
         for item in items {
+            if matches!(
+                item.get("status").and_then(|v| v.as_str()),
+                Some("stopped" | "failed")
+            ) {
+                continue;
+            }
             if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
                 let rendered = if let Some(state) = item.get("status").and_then(|v| v.as_str()) {
                     format!("{} ({})", name, state)
@@ -3335,6 +3363,42 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) static HOME_CMD_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Route 19 fence: `home_cmd.rs:1575-1592 create_session` builds the
+    /// session root itself from a fresh id
+    /// (`format!("{}/{}", HOME_SESSION_ROOT, id)`), and the function takes no
+    /// request and no caller path. Two sessions get two different locations.
+    #[test]
+    fn route_19_home_cli_session_location_is_built_by_the_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = create_session(dir.path()).unwrap();
+        // The id is `{pid}-{millis}`: two opens in one process need distinct
+        // milliseconds, as two separate CLI opens have.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = create_session(dir.path()).unwrap();
+        assert_ne!(
+            first.uri_root, second.uri_root,
+            "two sessions, two locations"
+        );
+        assert_ne!(first.path, second.path);
+        for session in [&first, &second] {
+            assert!(
+                session
+                    .uri_root
+                    .starts_with("localhost://Local/SharedByLocalUsersAndBots/Home/sessions/"),
+                "{}",
+                session.uri_root
+            );
+            assert!(
+                session
+                    .path
+                    .starts_with(dir.path().join("Local/Shared/Home/sessions")),
+                "{}",
+                session.path.display()
+            );
+            assert!(session.path.is_dir());
+        }
+    }
 
     #[test]
     fn home_cli_renderer_resolves_only_the_installed_capsule() {
@@ -4149,7 +4213,9 @@ pub(crate) mod tests {
     }
 
     fn write_home_cmd_active_shell_state(data_dir: &Path, principal_id: &str, active: &str) {
-        let localhost_root = elastos_server::auth::principal_localhost_root(principal_id);
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(principal_id.as_bytes());
+        let localhost_root = format!("localhost://Users/{}", hex::encode(&digest[..12]));
         let state_uri = format!("{localhost_root}/.AppData/ElastOS/Home/active-shell.json");
         let state_path = elastos_common::localhost::rooted_localhost_fs_path(data_dir, &state_uri)
             .expect("valid active shell state path");
@@ -5068,6 +5134,71 @@ pub(crate) mod tests {
             clear_intent(&access, &session).await.unwrap();
             assert!(read_intent(&access, &session).await.unwrap().is_none());
         }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn runtime_status_reports_a_serving_browser_home() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let _coords = ScopedEnvVar::set(
+            "ELASTOS_RUNTIME_COORDS_FILE",
+            temp.path().join("missing-runtime-coords.json"),
+        );
+        let app = axum::Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({"status": "ok", "version": "2.0.1-test"}))
+                }),
+            )
+            .route(
+                "/api/auth/attach",
+                axum::routing::post(|| async { axum::Json(serde_json::json!({"token": "t"})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let coords = |kind: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "api_url": format!("http://{addr}"), "attach_secret": "secret",
+                "pid": std::process::id(), "runtime_kind": kind,
+                "home_url": "http://localhost:8090/home/"
+            }))
+            .unwrap()
+        };
+
+        let stopped = gather_runtime_status(temp.path()).await;
+        assert!(!stopped.running);
+        assert_eq!(
+            stopped.note.as_deref(),
+            Some("No active local ElastOS service")
+        );
+
+        // Browser Home publishes only its gateway coordinates until its runtime starts.
+        let gateway = temp.path().join("gateway-runtime-coords.json");
+        std::fs::write(&gateway, coords("gateway")).unwrap();
+        std::fs::set_permissions(&gateway, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let serving = gather_runtime_status(temp.path()).await;
+        assert!(serving.running);
+        assert_eq!(serving.kind.as_deref(), Some("gateway"));
+        assert_eq!(serving.version.as_deref(), Some("2.0.1-test"));
+        assert_eq!(
+            serving.note.as_deref(),
+            Some("Home is open at http://localhost:8090/home/")
+        );
+
+        // Its managed runtime, which runs the capsules, is reported once it is live.
+        std::fs::write(
+            temp.path().join("home-runtime-coords.json"),
+            coords("managed-home"),
+        )
+        .unwrap();
+        let managed = gather_runtime_status(temp.path()).await;
+        assert!(managed.running);
+        assert_eq!(managed.kind.as_deref(), Some("managed-home"));
         server.abort();
     }
 }

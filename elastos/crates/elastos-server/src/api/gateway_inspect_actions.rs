@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "gateway_inspect_actions/agent_plan.rs"]
+mod agent_plan;
 #[path = "gateway_inspect_actions/binding.rs"]
 mod binding;
 #[path = "gateway_inspect_actions/store.rs"]
@@ -10,7 +12,7 @@ use binding::{
 };
 use store::{
     claim_pending_inspect_action_record, read_inspect_action_record, write_inspect_action_record,
-    InspectActionRequestRecord, INSPECT_ACTION_SCHEMA,
+    InspectActionRequestRecord, AGENT_PLAN_KIND, INSPECT_ACTION_KIND, INSPECT_ACTION_SCHEMA,
 };
 
 pub(super) async fn gateway_inspect_action_request(
@@ -38,6 +40,10 @@ pub(super) fn append_inspect_action_notifications(
     requests: Vec<serde_json::Value>,
 ) {
     for request in requests {
+        if request.get("kind").and_then(serde_json::Value::as_str) == Some(AGENT_PLAN_KIND) {
+            append_agent_plan_notification(notifications, &request);
+            continue;
+        }
         let request_id = request
             .get("request_id")
             .and_then(serde_json::Value::as_str)
@@ -88,6 +94,58 @@ pub(super) fn append_inspect_action_notifications(
             created_at,
         });
     }
+}
+
+/// One Inbox card for a pending agent plan: every stored step, the gate preview
+/// and the full binding hash. No approve action exists yet, so the card carries
+/// none.
+fn append_agent_plan_notification(
+    notifications: &mut HomeNotificationsSummary,
+    request: &serde_json::Value,
+) {
+    let request_id = request
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let target = request
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("agent plan");
+    let created_at = request
+        .get("created_at")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(now_ts);
+    let steps = request
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = Vec::with_capacity(steps.len() + 2);
+    for (index, step) in steps.iter().enumerate() {
+        let step = serde_json::to_string(step).unwrap_or_default();
+        lines.push(format!("Step {}: {step}", index + 1));
+    }
+    if let Some(summary) = inspect_action_gate_summary(request.get("plan")) {
+        lines.push(summary);
+    }
+    let sha256 = request
+        .pointer("/request_binding/sha256")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    lines.push(format!("Binding sha256: {sha256}"));
+    notifications.unread_count += 1;
+    notifications.attention_count += 1;
+    notifications.entries.push(HomeNotificationEntrySummary {
+        id: format!("agent-plan-request:{request_id}"),
+        source_app: INBOX_CAPSULE_ID.to_string(),
+        kind: AGENT_PLAN_KIND.to_string(),
+        title: format!("Agent plan for {target}"),
+        body: lines.join("\n"),
+        action_ref: None,
+        severity: "attention".to_string(),
+        read: false,
+        created_at,
+    });
 }
 
 fn inspect_action_gate_summary(plan: Option<&serde_json::Value>) -> Option<String> {
@@ -574,6 +632,7 @@ async fn create_inspect_action_request(
     );
     let record = InspectActionRequestRecord {
         schema: INSPECT_ACTION_SCHEMA.to_string(),
+        kind: INSPECT_ACTION_KIND.to_string(),
         request_id,
         principal_id: context.principal_id().to_string(),
         session_id: context.session_id().to_string(),
@@ -676,5 +735,160 @@ mod tests {
                 "accepted unrelated result at {pointer}"
             );
         }
+    }
+
+    const PLAN_PRINCIPAL: &str = "person:owner";
+    const PLAN_CAPSULE: &str = "capsule:agent-host";
+
+    fn plan_context() -> agent_plan::AgentPlanContext<'static> {
+        agent_plan::AgentPlanContext {
+            principal_id: PLAN_PRINCIPAL,
+            capsule_id: PLAN_CAPSULE,
+            session_id: "session:agent-1",
+        }
+    }
+
+    fn status_plan(request: serde_json::Value) -> serde_json::Value {
+        let step = stored_step(request);
+        serde_json::json!({ "steps": [step] })
+    }
+
+    fn stored_step(request: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "scheme": "availability",
+            "operation": "status",
+            "request": request,
+        })
+    }
+
+    fn expected_binding(
+        request_id: &str,
+        request: serde_json::Value,
+    ) -> crate::esp_binding::EspRequestBinding {
+        crate::esp_binding::esp_request_binding(
+            request_id,
+            PLAN_PRINCIPAL,
+            PLAN_CAPSULE,
+            None,
+            "status",
+            ["elastos://availability/status".to_string()],
+            &stored_step(request),
+        )
+    }
+
+    fn agent_plan_cards(dir: &std::path::Path) -> Vec<HomeNotificationEntrySummary> {
+        let pending = store::pending_inspect_action_requests(dir, PLAN_PRINCIPAL).unwrap();
+        let mut notifications = HomeNotificationsSummary::default();
+        append_inspect_action_notifications(&mut notifications, pending);
+        notifications.entries
+    }
+
+    #[test]
+    fn a15r_inbox_card_shows_every_stored_step_and_the_full_binding_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = serde_json::json!({
+            "principal": "person:other",
+            "capsule": "capsule:impostor",
+        });
+        let record = agent_plan::create_pending_agent_plan_record(
+            dir.path(),
+            &plan_context(),
+            &status_plan(body.clone()),
+            41,
+        )
+        .unwrap();
+        let expected = expected_binding(&record.request_id, body);
+        assert_eq!(record.request_binding.as_ref(), Some(&expected));
+
+        let cards = agent_plan_cards(dir.path());
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        assert_eq!(card.kind, AGENT_PLAN_KIND);
+        assert_eq!(card.id, format!("agent-plan-request:{}", record.request_id));
+        assert!(card.action_ref.is_none());
+        assert_eq!(expected.sha256.len(), 64);
+        assert!(card.body.contains(&expected.sha256), "{}", card.body);
+        assert!(
+            card.body.contains(
+                r#"{"operation":"status","request":{"capsule":"capsule:impostor","principal":"person:other"},"scheme":"availability"}"#
+            ),
+            "{}",
+            card.body
+        );
+        assert!(
+            card.body
+                .contains("Gate preview: Capability elastos://availability/status: read"),
+            "{}",
+            card.body
+        );
+    }
+
+    #[test]
+    fn a15r_plan_changed_after_storing_shows_the_new_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = agent_plan::create_pending_agent_plan_record(
+            dir.path(),
+            &plan_context(),
+            &status_plan(serde_json::json!({ "principal": "person:other" })),
+            42,
+        )
+        .unwrap();
+        let stored_hash = record.request_binding.as_ref().unwrap().sha256.clone();
+        let first = agent_plan_cards(dir.path());
+        assert_eq!(first.len(), 1);
+        assert!(first[0].body.contains(&stored_hash));
+
+        let mut changed =
+            store::read_inspect_action_record(dir.path(), &record.request_id).unwrap();
+        changed.request["request"]["principal"] = serde_json::json!("person:changed");
+        store::write_inspect_action_record(dir.path(), &changed).unwrap();
+
+        let expected = expected_binding(
+            &record.request_id,
+            serde_json::json!({ "principal": "person:changed" }),
+        );
+        assert_ne!(expected.sha256, stored_hash);
+        let second = agent_plan_cards(dir.path());
+        assert_eq!(second.len(), 1);
+        assert!(
+            second[0].body.contains(&expected.sha256),
+            "{}",
+            second[0].body
+        );
+        assert!(!second[0].body.contains(&stored_hash), "{}", second[0].body);
+    }
+
+    #[test]
+    fn a15r_over_long_plan_is_refused_not_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = agent_plan::create_pending_agent_plan_record(
+            dir.path(),
+            &plan_context(),
+            &status_plan(serde_json::json!({})),
+            43,
+        )
+        .unwrap();
+        let mut oversize =
+            store::read_inspect_action_record(dir.path(), &record.request_id).unwrap();
+        oversize.request["request"]["pad"] = serde_json::json!("x".repeat(2000));
+        store::write_inspect_action_record(dir.path(), &oversize).unwrap();
+        assert!(agent_plan_cards(dir.path()).is_empty());
+
+        let whole = agent_plan::create_pending_agent_plan_record(
+            dir.path(),
+            &plan_context(),
+            &status_plan(serde_json::json!({})),
+            44,
+        )
+        .unwrap();
+        let cards = agent_plan_cards(dir.path());
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].id,
+            format!("agent-plan-request:{}", whole.request_id)
+        );
+        assert!(!cards
+            .iter()
+            .any(|card| card.id.ends_with(&record.request_id)));
     }
 }

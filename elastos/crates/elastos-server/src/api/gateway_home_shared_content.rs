@@ -74,7 +74,7 @@ fn redeem_check(
     let index = checks.iter().position(|(id, _)| id == check_id)?;
     let (_, check) = checks.remove(index);
     (check.expires_at > now
-        && check.principal_id == home.principal_id
+        && check.principal_id == home.principal_id()
         && check.session_id == home.session_id)
         .then_some(check)
 }
@@ -438,6 +438,15 @@ pub(super) async fn home_shared_content_check(
         return reply("not_contact", extra);
     };
     let now = now_ts();
+    let expires_at = match gateway_home_token::grant_bound_token_expiry(
+        &state.data_dir,
+        &home,
+        now,
+        SHARED_CONTENT_CHECK_TTL_SECS,
+    ) {
+        Ok(expires_at) => expires_at,
+        Err(err) => return (StatusCode::FORBIDDEN, err.to_string()).into_response(),
+    };
     let online = match state.collaboration_presence_product_port.as_ref() {
         Some(port) => port
             .authorized_snapshot(now)
@@ -450,13 +459,13 @@ pub(super) async fn home_shared_content_check(
     };
     extra["check_id"] = json!(remember_check(
         SharedContentCheck {
-            principal_id: home.principal_id.clone(),
+            principal_id: home.principal_id().to_string(),
             session_id: home.session_id.clone(),
             app_id: app.id,
             cid: cid.clone(),
             peer_did,
             message: source,
-            expires_at: now + SHARED_CONTENT_CHECK_TTL_SECS,
+            expires_at,
         },
         now,
     ));
@@ -570,7 +579,13 @@ mod tests {
 
     #[test]
     fn a_check_is_redeemed_once_and_only_by_its_home_session() {
-        let home = HomeLaunchTokenContext::for_test("principal", "session", None, "");
+        let home = HomeLaunchTokenContext::for_test(
+            "principal",
+            "session",
+            None,
+            "",
+            crate::auth::PrincipalKind::Human,
+        );
         let check = |expires_at| SharedContentCheck {
             principal_id: "principal".into(),
             session_id: "session".into(),
@@ -586,7 +601,13 @@ mod tests {
         let id = remember_check(check(200), 100);
         assert_eq!(redeem_check(&id, &home, 150).unwrap().cid, V1);
         assert!(redeem_check(&id, &home, 150).is_none(), "single use");
-        let other = HomeLaunchTokenContext::for_test("principal", "other", None, "");
+        let other = HomeLaunchTokenContext::for_test(
+            "principal",
+            "other",
+            None,
+            "",
+            crate::auth::PrincipalKind::Human,
+        );
         let id = remember_check(check(200), 100);
         assert!(redeem_check(&id, &other, 150).is_none(), "another session");
         assert!(

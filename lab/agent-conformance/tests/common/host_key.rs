@@ -129,10 +129,12 @@ pub fn exercise() {
                 Observation::Native {
                     role: "elastos".into(),
                     sha256: runtime.sha256.clone(),
+                    path: None,
                 },
                 Observation::Native {
                     role: "localhost-provider".into(),
                     sha256: localhost_provider_under_test().unwrap().sha256.clone(),
+                    path: None,
                 },
                 launched,
             ],

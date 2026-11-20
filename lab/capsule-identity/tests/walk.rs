@@ -298,8 +298,22 @@ fn lab_cid_and_the_seam_run_one_walk() {
         2,
         "collect_entries"
     );
-    for call in ["Dir::read_from(", "openat(", "fstat("] {
+    for call in ["Dir::read_from(", "openat("] {
         assert_eq!(code.matches(call).count(), 1, "{call} is not in one place");
+    }
+    // A handle is asked about itself in two places and no third: its kind,
+    // where it is opened, and its size, where a file is read under a budget.
+    // Both ask the open handle, never a path.
+    assert_eq!(code.matches("fstat(").count(), 2, "fstat(");
+    for (item, text) in [
+        ("fn open_checked(", "let stat = fstat(&handle)"),
+        ("fn read_file(", "let size = fstat(&handle)"),
+    ] {
+        assert_eq!(
+            library_item(&code, item).matches(text).count(),
+            1,
+            "{item} does not ask its handle once: {text}"
+        );
     }
     for call in [
         "fs::read",

@@ -12,13 +12,16 @@ use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use std::sync::Mutex as StdMutex;
 
+use elastos_common::ProviderAuthority;
+
 #[cfg(target_os = "macos")]
 use elastos_model_contract::{model_input_hash, model_run_id, RuntimeCreateBinding};
 
 use serde::{Deserialize, Serialize};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 
 use super::registry::{
     EntryType, Provider, ProviderError, ResourceAction, ResourceEntry, ResourceRequest,
@@ -509,6 +512,8 @@ pub enum BridgeError {
     Provider { code: String, message: String },
     /// Background provider I/O task failed
     TaskJoin(String),
+    /// The Runtime refused to start a provider; it names the reason verbatim.
+    Refused(String),
 }
 
 impl std::fmt::Display for BridgeError {
@@ -526,6 +531,7 @@ impl std::fmt::Display for BridgeError {
             BridgeError::TaskJoin(message) => {
                 write!(f, "provider bridge task failed: {}", message)
             }
+            BridgeError::Refused(message) => write!(f, "{}", message),
         }
     }
 }
@@ -548,6 +554,9 @@ struct ProviderIo {
 pub struct ProviderBridge {
     io: Arc<Mutex<ProviderIo>>,
     child: Mutex<Option<Child>>,
+    /// A forked provider whose pid this process owns. At most one of `child`
+    /// and `fork` is set. The blocking `waitpid` task is the only reaper.
+    fork: Mutex<Option<ForkChild>>,
     #[cfg(unix)]
     helper_owner: Mutex<Option<elastos_common::process_lifetime::ParentLifetime>>,
     /// True once a shutdown attempt has completed (child reaped, or the
@@ -597,6 +606,1138 @@ impl Drop for BrokerTasks {
     }
 }
 
+/// A forked provider the Runtime owns. `status` resolves after the blocking
+/// `waitpid` task reaps the pid, so that task is the only reaper.
+struct ForkChild {
+    pid: libc::pid_t,
+    /// Opened before the wait. A later signal names this process.
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+    status: oneshot::Receiver<i32>,
+    /// True once the status was received; the waitpid task has reaped the pid,
+    /// so `Drop` must not signal it again.
+    reaped: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: libc::pid_t) -> Result<OwnedFd, BridgeError> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
+        Err(refused(
+            "provider start is refused: the process handle could not be opened",
+        ))
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    }
+}
+
+/// The child is still ours: it has not been waited on, so the pid cannot have
+/// been reused. Reap it and refuse the start.
+#[cfg(any(test, target_os = "linux"))]
+fn reap_refused_child(pid: libc::pid_t) {
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let mut status = 0;
+    loop {
+        let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if waited == pid
+            || (waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR))
+        {
+            break;
+        }
+    }
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn refuse_child_without_process_handle(pid: libc::pid_t) -> BridgeError {
+    reap_refused_child(pid);
+    refused("provider start is refused: the process handle could not be opened")
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static REPORT_LAUNCHED_PID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The next confined start writes the launched pid as the child's first stdin
+/// line. The probe records that line.
+#[cfg(all(test, target_os = "linux"))]
+fn set_report_launched_pid(enabled: bool) {
+    REPORT_LAUNCHED_PID.with(|cell| cell.set(enabled));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn launched_pid_line(pid: libc::pid_t) -> Option<String> {
+    REPORT_LAUNCHED_PID
+        .with(|cell| cell.get())
+        .then(|| format!("{pid}\n"))
+}
+
+#[cfg(not(all(test, target_os = "linux")))]
+fn launched_pid_line(_pid: libc::pid_t) -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+static REAP_HOLD_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Tests can hold the reaper for one pid. Production returns at once.
+#[cfg(test)]
+fn pause_before_reap(pid: libc::pid_t) {
+    while REAP_HOLD_PID.load(std::sync::atomic::Ordering::Acquire) == pid {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[cfg(not(test))]
+fn pause_before_reap(_pid: libc::pid_t) {}
+
+#[cfg(test)]
+static REAP_WAIT_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn note_reap_wait() {
+    REAP_WAIT_STARTED.store(true, std::sync::atomic::Ordering::Release);
+}
+
+#[cfg(not(test))]
+fn note_reap_wait() {}
+
+#[cfg(test)]
+fn swap_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().expect("cleanup swap tests")
+}
+
+#[cfg(test)]
+struct HeldUnlinkSwap {
+    dev: u64,
+    ino: u64,
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+}
+
+#[cfg(test)]
+static HELD_UNLINK_SWAP: std::sync::Mutex<Option<HeldUnlinkSwap>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn arm_held_unlink_swap(dev: u64, ino: u64, aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+    *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = Some(HeldUnlinkSwap {
+        dev,
+        ino,
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+    });
+}
+
+#[cfg(test)]
+fn held_unlink_swap_is_armed() -> bool {
+    HELD_UNLINK_SWAP.lock().expect("held unlink swap").is_some()
+}
+
+/// Tests can move the live name aside and put another directory there before
+/// the remove. The swap is for one directory. Production returns at once.
+#[cfg(test)]
+fn pause_before_held_unlink(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) {
+    let Ok(info) = stat_fd(directory.as_raw_fd()) else {
+        return;
+    };
+    let swap = {
+        let mut slot = HELD_UNLINK_SWAP.lock().expect("held unlink swap");
+        if slot
+            .as_ref()
+            .is_some_and(|swap| swap.dev != stat_dev(&info) || swap.ino != stat_ino(&info))
+        {
+            return;
+        }
+        slot.take()
+    };
+    let Some(swap) = swap else {
+        return;
+    };
+    unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        );
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        );
+    }
+}
+
+#[cfg(not(test))]
+fn pause_before_held_unlink(_parent: &OwnedFd, _directory: &OwnedFd, _name: &std::ffi::CStr) {}
+
+#[cfg(test)]
+struct MismatchSwap {
+    dev: u64,
+    ino: u64,
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+    blocker: std::ffi::CString,
+}
+
+#[cfg(test)]
+static MISMATCH_SWAP: std::sync::Mutex<Option<MismatchSwap>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn arm_mismatch_swap(
+    dev: u64,
+    ino: u64,
+    aside: &std::ffi::CStr,
+    canary: &std::ffi::CStr,
+    blocker: &std::ffi::CStr,
+) {
+    *MISMATCH_SWAP.lock().expect("mismatch swap") = Some(MismatchSwap {
+        dev,
+        ino,
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+        blocker: blocker.to_owned(),
+    });
+}
+
+/// Tests can replace the private name after the rename and occupy the public
+/// name. Production returns at once.
+#[cfg(test)]
+fn pause_after_quarantine_rename(
+    parent: &OwnedFd,
+    directory: &OwnedFd,
+    quarantine: &std::ffi::CStr,
+    name: &std::ffi::CStr,
+) {
+    let Ok(info) = stat_fd(directory.as_raw_fd()) else {
+        return;
+    };
+    let swap = {
+        let mut slot = MISMATCH_SWAP.lock().expect("mismatch swap");
+        let matches = slot
+            .as_ref()
+            .is_some_and(|swap| swap.dev == stat_dev(&info) && swap.ino == stat_ino(&info));
+        if !matches {
+            return;
+        }
+        slot.take()
+    };
+    let Some(swap) = swap else {
+        return;
+    };
+    let aside = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            quarantine.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        )
+    };
+    let canary = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            quarantine.as_ptr(),
+        )
+    };
+    let blocker = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.blocker.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    assert_eq!(
+        (aside, canary, blocker),
+        (0, 0, 0),
+        "the identity-check swap could not be arranged"
+    );
+}
+
+#[cfg(not(test))]
+fn pause_after_quarantine_rename(
+    _parent: &OwnedFd,
+    _directory: &OwnedFd,
+    _quarantine: &std::ffi::CStr,
+    _name: &std::ffi::CStr,
+) {
+}
+
+#[cfg(test)]
+struct PrivateUnlinkSwap {
+    dev: u64,
+    ino: u64,
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+}
+
+#[cfg(test)]
+static PRIVATE_UNLINK_SWAP: std::sync::Mutex<Option<PrivateUnlinkSwap>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn arm_private_unlink_swap(dev: u64, ino: u64, aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+    *PRIVATE_UNLINK_SWAP.lock().expect("private unlink swap") = Some(PrivateUnlinkSwap {
+        dev,
+        ino,
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+    });
+}
+
+/// Tests can replace the private name after it has matched the held object.
+/// Production returns at once.
+#[cfg(test)]
+fn pause_before_private_unlink(
+    parent: &OwnedFd,
+    expected: &libc::stat,
+    quarantine: &std::ffi::CStr,
+) {
+    let swap = {
+        let mut slot = PRIVATE_UNLINK_SWAP.lock().expect("private unlink swap");
+        let matches = slot
+            .as_ref()
+            .is_some_and(|swap| swap.dev == stat_dev(expected) && swap.ino == stat_ino(expected));
+        if !matches {
+            return;
+        }
+        slot.take()
+    };
+    let Some(swap) = swap else {
+        return;
+    };
+    let aside = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            quarantine.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        )
+    };
+    let canary = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            quarantine.as_ptr(),
+        )
+    };
+    assert_eq!(
+        (aside, canary),
+        (0, 0),
+        "the private-name swap could not be arranged"
+    );
+}
+
+#[cfg(not(test))]
+fn pause_before_private_unlink(
+    _parent: &OwnedFd,
+    _expected: &libc::stat,
+    _quarantine: &std::ffi::CStr,
+) {
+}
+
+#[cfg(test)]
+struct UnopenedSwap {
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+}
+
+#[cfg(test)]
+static UNOPENED_SWAP: std::sync::Mutex<Option<UnopenedSwap>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn arm_unopened_swap(aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+    *UNOPENED_SWAP.lock().expect("unopened root") = Some(UnopenedSwap {
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+    });
+}
+
+/// Tests can replace a directory this start just created, before it is opened.
+/// Production returns at once.
+#[cfg(test)]
+fn pause_after_creating_root(parent: &OwnedFd, name: &std::ffi::CStr) {
+    let Some(swap) = UNOPENED_SWAP.lock().expect("unopened root").take() else {
+        return;
+    };
+    let aside = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        )
+    };
+    let canary = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    let hidden = unsafe { libc::fchmodat(parent.as_raw_fd(), name.as_ptr(), 0, 0) };
+    assert_eq!(
+        (aside, canary, hidden),
+        (0, 0, 0),
+        "the unopened-root swap could not be arranged"
+    );
+}
+
+#[cfg(not(test))]
+fn pause_after_creating_root(_parent: &OwnedFd, _name: &std::ffi::CStr) {}
+
+impl ForkChild {
+    fn start(pid: libc::pid_t) -> Result<Self, BridgeError> {
+        #[cfg(target_os = "linux")]
+        let pidfd = match open_pidfd(pid) {
+            Ok(pidfd) => pidfd,
+            Err(_) => return Err(refuse_child_without_process_handle(pid)),
+        };
+        let (sender, status) = oneshot::channel();
+        tokio::task::spawn_blocking(move || {
+            pause_before_reap(pid);
+            let mut word = 0;
+            loop {
+                let waited = unsafe { libc::waitpid(pid, &mut word, 0) };
+                if waited == pid {
+                    break;
+                }
+                if waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                {
+                    break;
+                }
+            }
+            let _ = sender.send(word);
+        });
+        Ok(Self {
+            pid,
+            #[cfg(target_os = "linux")]
+            pidfd,
+            status,
+            reaped: false,
+        })
+    }
+
+    fn force_kill(&self) {
+        #[cfg(target_os = "linux")]
+        {
+            // The pid stays with the wait. The signal names the pidfd opened
+            // for this process.
+            let _ = self.pid;
+            let _ = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    self.pidfd.as_raw_fd(),
+                    libc::SIGKILL,
+                    0,
+                    0,
+                )
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+        }
+    }
+}
+
+fn fresh_status() -> oneshot::Receiver<i32> {
+    let (_sender, status) = oneshot::channel();
+    status
+}
+
+/// `blocking_recv` panics on a runtime thread, so the wait runs on its own thread.
+fn wait_for_reaper(status: oneshot::Receiver<i32>) {
+    note_reap_wait();
+    let waiting = std::thread::spawn(move || {
+        let _ = status.blocking_recv();
+    });
+    let _ = waiting.join();
+}
+
+impl Drop for ForkChild {
+    fn drop(&mut self) {
+        // A received status means the waitpid task already reaped the pid.
+        if self.reaped {
+            return;
+        }
+        let pending = match self.status.try_recv() {
+            Ok(_) => {
+                self.reaped = true;
+                false
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.reaped = true;
+                false
+            }
+            Err(oneshot::error::TryRecvError::Empty) => true,
+        };
+        if pending {
+            self.force_kill();
+            let status = std::mem::replace(&mut self.status, fresh_status());
+            wait_for_reaper(status);
+            self.reaped = true;
+        }
+    }
+}
+
+/// A provider that was confined at launch and answered `Init`.
+///
+/// The field is private and `spawn_confined` is the only constructor. There is
+/// no `From<ProviderBridge>`, so a plain spawn cannot be dressed as confined.
+pub struct Confined {
+    bridge: Arc<ProviderBridge>,
+}
+
+impl Confined {
+    pub fn bridge(&self) -> &Arc<ProviderBridge> {
+        &self.bridge
+    }
+}
+
+impl std::fmt::Debug for Confined {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Confined")
+    }
+}
+
+/// A storage root this start created. Drop removes that directory through the
+/// descriptor opened at creation. A root that already existed stays. A later
+/// name at the same path is a different file, so it is left in place.
+struct CreatedStorageRoot {
+    parent: OwnedFd,
+    name: std::ffi::CString,
+    directory: OwnedFd,
+    armed: bool,
+}
+
+impl CreatedStorageRoot {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn remove_opened_root(&self) {
+        let _ = unlink_held_directory(&self.parent, &self.directory, Some(&self.name));
+    }
+}
+
+/// The bridge owns the child. Dropping it reaps that child before `root`
+/// removes the directory this start created.
+struct ConfinedStart {
+    bridge: Option<ProviderBridge>,
+    root: CreatedStorageRoot,
+}
+
+impl Drop for ConfinedStart {
+    fn drop(&mut self) {
+        // The child is reaped before the storage root is removed.
+        self.bridge.take();
+    }
+}
+
+impl Drop for CreatedStorageRoot {
+    fn drop(&mut self) {
+        if self.armed {
+            self.remove_opened_root();
+        }
+    }
+}
+
+#[cfg(test)]
+struct CheckedLaunchSwap {
+    dev: u64,
+    ino: u64,
+    aside: std::ffi::CString,
+    canary: std::ffi::CString,
+}
+
+#[cfg(test)]
+static CHECKED_LAUNCH_SWAP: std::sync::Mutex<Option<CheckedLaunchSwap>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "linux"))]
+fn arm_checked_launch_swap(dev: u64, ino: u64, aside: &std::ffi::CStr, canary: &std::ffi::CStr) {
+    *CHECKED_LAUNCH_SWAP.lock().expect("checked launch") = Some(CheckedLaunchSwap {
+        dev,
+        ino,
+        aside: aside.to_owned(),
+        canary: canary.to_owned(),
+    });
+}
+
+/// Tests can place another directory at the storage root after this start has
+/// opened it and before the launcher opens that path. The placement is for one
+/// directory. Production returns at once.
+#[cfg(test)]
+fn pause_before_launcher(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) {
+    let Ok(info) = stat_fd(directory.as_raw_fd()) else {
+        return;
+    };
+    let swap = {
+        let mut slot = CHECKED_LAUNCH_SWAP.lock().expect("checked launch");
+        let matches = slot
+            .as_ref()
+            .is_some_and(|swap| swap.dev == stat_dev(&info) && swap.ino == stat_ino(&info));
+        if !matches {
+            return;
+        }
+        slot.take()
+    };
+    let Some(swap) = swap else {
+        return;
+    };
+    let aside = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            parent.as_raw_fd(),
+            swap.aside.as_ptr(),
+        )
+    };
+    let canary = unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            swap.canary.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    assert_eq!(
+        (aside, canary),
+        (0, 0),
+        "the checked directory could not be set aside"
+    );
+}
+
+#[cfg(not(test))]
+fn pause_before_launcher(_parent: &OwnedFd, _directory: &OwnedFd, _name: &std::ffi::CStr) {}
+
+fn refused(reason: &str) -> BridgeError {
+    BridgeError::Refused(reason.to_string())
+}
+
+fn open_directory(path: &Path) -> std::io::Result<OwnedFd> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let fd = unsafe {
+        libc::open(
+            bytes.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn open_directory_at(parent: &OwnedFd, name: &std::ffi::CStr) -> std::io::Result<OwnedFd> {
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+}
+
+fn stat_fd(fd: i32) -> std::io::Result<libc::stat> {
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstat(fd, info.as_mut_ptr()) } < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { info.assume_init() })
+    }
+}
+
+fn stat_dev(info: &libc::stat) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        info.st_dev
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        info.st_dev as u64
+    }
+}
+
+fn stat_ino(info: &libc::stat) -> u64 {
+    info.st_ino
+}
+
+fn lstat_at(directory: &OwnedFd, name: &std::ffi::CStr) -> std::io::Result<libc::stat> {
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let rc = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(unsafe { info.assume_init() })
+    }
+}
+
+fn list_entries(directory: &OwnedFd) -> std::io::Result<Vec<std::ffi::CString>> {
+    let duplicate = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        let error = std::io::Error::last_os_error();
+        unsafe { libc::close(duplicate) };
+        return Err(error);
+    }
+    let mut names = Vec::new();
+    loop {
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name != c"." && name != c".." {
+            names.push(name.to_owned());
+        }
+    }
+    unsafe { libc::closedir(stream) };
+    Ok(names)
+}
+
+/// Remove entries through `directory`. A symlink is unlinked itself.
+fn remove_children(directory: &OwnedFd) {
+    let Ok(names) = list_entries(directory) else {
+        return;
+    };
+    for name in names {
+        let Ok(info) = lstat_at(directory, &name) else {
+            continue;
+        };
+        if info.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            let Ok(child) = open_directory_at(directory, &name) else {
+                continue;
+            };
+            let Ok(opened) = stat_fd(child.as_raw_fd()) else {
+                continue;
+            };
+            if stat_dev(&opened) == stat_dev(&info) && stat_ino(&opened) == stat_ino(&info) {
+                let _ = unlink_held_directory(directory, &child, Some(&name));
+            }
+        } else {
+            unlink_listed_file(directory, &name, &info);
+        }
+    }
+}
+
+/// The last component of the directory this descriptor holds.
+fn held_directory_name(directory: &OwnedFd) -> Option<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    #[cfg(target_os = "linux")]
+    let bytes = {
+        let link = std::fs::read_link(format!("/proc/self/fd/{}", directory.as_raw_fd())).ok()?;
+        link.file_name()?.as_bytes().to_vec()
+    };
+    #[cfg(target_os = "macos")]
+    let bytes = {
+        let mut buf = [0u8; 1024];
+        let rc = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        let text = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().cast()) };
+        let path = Path::new(std::ffi::OsStr::from_bytes(text.to_bytes()));
+        path.file_name()?.as_bytes().to_vec()
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let bytes = {
+        let _ = directory;
+        return None;
+    };
+    std::ffi::CString::new(bytes).ok()
+}
+
+fn same_directory(left: &libc::stat, right: &libc::stat) -> bool {
+    stat_dev(left) == stat_dev(right) && stat_ino(left) == stat_ino(right)
+}
+
+fn fill_random(bytes: &mut [u8]) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let wrote = unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+        wrote == bytes.len() as isize
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) == 0 }
+    }
+}
+
+/// A sibling name that no caller chooses. The 16 hex digits come from the
+/// kernel random source.
+fn private_component() -> Option<std::ffi::CString> {
+    let mut bytes = [0u8; 8];
+    if !fill_random(&mut bytes) {
+        return None;
+    }
+    let mut name = *b".elastos-held-0000000000000000\0";
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (index, byte) in bytes.iter().enumerate() {
+        name[14 + index * 2] = HEX[(byte >> 4) as usize];
+        name[15 + index * 2] = HEX[(byte & 0xf) as usize];
+    }
+    std::ffi::CStr::from_bytes_with_nul(&name)
+        .ok()
+        .map(std::ffi::CString::from)
+}
+
+/// A parent of a storage root or of a cleanup entry is owned by the effective
+/// user and has no group or other write permission.
+fn parent_is_private(info: &libc::stat) -> bool {
+    info.st_uid == unsafe { libc::geteuid() } && info.st_mode & 0o022 == 0
+}
+
+fn held_parent_is_private(parent: &OwnedFd) -> bool {
+    stat_fd(parent.as_raw_fd()).is_ok_and(|info| parent_is_private(&info))
+}
+
+/// Rename without replacing a name that already exists. A parent that is not
+/// owned by the effective user, or that is writable by group or other, stays
+/// as it is.
+fn rename_exclusive(parent: &OwnedFd, from: &std::ffi::CStr, to: &std::ffi::CStr) -> bool {
+    if !held_parent_is_private(parent) {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        const RENAME_NOREPLACE: libc::c_uint = 1;
+        unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                RENAME_NOREPLACE,
+            ) == 0
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        const RENAME_EXCL: libc::c_uint = 0x0004;
+        unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                RENAME_EXCL,
+            ) == 0
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (parent, from, to);
+        false
+    }
+}
+
+/// Put the private name back on the public name. A failed check does not remove
+/// the private entry: that entry may be a different file.
+fn restore_name(parent: &OwnedFd, quarantine: &std::ffi::CStr, name: &std::ffi::CStr) {
+    let _ = rename_exclusive(parent, quarantine, name);
+}
+
+fn entry_matches(
+    parent: &OwnedFd,
+    name: &std::ffi::CStr,
+    flags: libc::c_int,
+    expected: &libc::stat,
+) -> bool {
+    if flags == libc::AT_REMOVEDIR {
+        let Ok(opened) = open_directory_at(parent, name) else {
+            return false;
+        };
+        let Ok(info) = stat_fd(opened.as_raw_fd()) else {
+            return false;
+        };
+        return same_directory(&info, expected);
+    }
+    let Ok(info) = lstat_at(parent, name) else {
+        return false;
+    };
+    same_directory(&info, expected)
+}
+
+/// Remove the private name only when it is still `expected` and the parent is
+/// owned by the effective user with no group or other write permission. A
+/// mismatch is renamed back and left in place. A parent that fails that check
+/// is left in place.
+fn release_private_name(
+    parent: &OwnedFd,
+    quarantine: &std::ffi::CStr,
+    original: &std::ffi::CStr,
+    flags: libc::c_int,
+    expected: &libc::stat,
+) -> bool {
+    pause_before_private_unlink(parent, expected, quarantine);
+    if !entry_matches(parent, quarantine, flags, expected) {
+        restore_name(parent, quarantine, original);
+        return false;
+    }
+    if !held_parent_is_private(parent) {
+        return false;
+    }
+    unsafe { libc::unlinkat(parent.as_raw_fd(), quarantine.as_ptr(), flags) == 0 }
+}
+
+/// Move `name` to a private sibling, and remove that sibling only when it is
+/// still the held directory. A different directory at the private name is
+/// renamed back. `unlinkat` accepts `AT_REMOVEDIR` and rejects every other
+/// flag, so the remove names the private entry and only after that check.
+fn relocate_held_directory(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) -> bool {
+    let Some(quarantine) = private_component() else {
+        return false;
+    };
+    if !rename_exclusive(parent, name, &quarantine) {
+        return false;
+    }
+    pause_after_quarantine_rename(parent, directory, &quarantine, name);
+    let Ok(held) = stat_fd(directory.as_raw_fd()) else {
+        restore_name(parent, &quarantine, name);
+        return false;
+    };
+    if !entry_matches(parent, &quarantine, libc::AT_REMOVEDIR, &held) {
+        restore_name(parent, &quarantine, name);
+        return false;
+    }
+    remove_children(directory);
+    release_private_name(parent, &quarantine, name, libc::AT_REMOVEDIR, &held)
+}
+
+/// Unlink a non-directory only when its dev and inode are still the listed ones.
+fn unlink_listed_file(parent: &OwnedFd, name: &std::ffi::CStr, listed: &libc::stat) -> bool {
+    let Some(quarantine) = private_component() else {
+        return false;
+    };
+    if !rename_exclusive(parent, name, &quarantine) {
+        return false;
+    }
+    if !entry_matches(parent, &quarantine, 0, listed) {
+        restore_name(parent, &quarantine, name);
+        return false;
+    }
+    release_private_name(parent, &quarantine, name, 0, listed)
+}
+
+fn unlink_name_if_held(parent: &OwnedFd, directory: &OwnedFd, name: &std::ffi::CStr) -> bool {
+    pause_before_held_unlink(parent, directory, name);
+    relocate_held_directory(parent, directory, name)
+}
+
+/// Remove the directory this descriptor holds. The current name is read twice
+/// so a test can move the directory aside between the reads. The remembered
+/// name is the last place to look. Each attempt removes only the directory
+/// this descriptor still holds.
+fn unlink_held_directory(
+    parent: &OwnedFd,
+    directory: &OwnedFd,
+    remembered: Option<&std::ffi::CStr>,
+) -> bool {
+    for _ in 0..2 {
+        if let Some(name) = held_directory_name(directory) {
+            if unlink_name_if_held(parent, directory, &name) {
+                return true;
+            }
+        }
+    }
+    match remembered {
+        Some(name) => unlink_name_if_held(parent, directory, name),
+        None => false,
+    }
+}
+
+fn create_directory_at(parent: &OwnedFd, name: &std::ffi::CStr) -> Result<bool, BridgeError> {
+    if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EEXIST) {
+        Ok(false)
+    } else {
+        Err(BridgeError::Io(error))
+    }
+}
+
+/// A directory this start created and never opened stays. Removing the name
+/// can remove a different directory.
+fn keep_unopened_root(parent: &OwnedFd, name: &std::ffi::CStr) {
+    // The name stays because this start never opened the directory.
+    let _ = (parent, name);
+}
+
+fn name_is_symlink(parent: &OwnedFd, name: &std::ffi::CStr) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let rc = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            info.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc < 0 {
+        return false;
+    }
+    let info = unsafe { info.assume_init() };
+    info.st_mode & libc::S_IFMT == libc::S_IFLNK
+}
+
+/// Create `storage_root` at 0700 under a parent owned by the effective user
+/// with no group or other write permission, and open it with
+/// `O_DIRECTORY | O_NOFOLLOW`. The returned guard holds that descriptor.
+fn create_storage_root(storage_root: &Path) -> Result<CreatedStorageRoot, BridgeError> {
+    use std::os::unix::ffi::OsStrExt;
+    let parent_path = storage_root
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| {
+            refused("provider start is refused: the storage root has no parent directory")
+        })?;
+    let name = storage_root.file_name().ok_or_else(|| {
+        refused("provider start is refused: the storage root has no directory name")
+    })?;
+    let parent = open_directory(parent_path).map_err(|error| {
+        let symlink = std::fs::symlink_metadata(parent_path)
+            .ok()
+            .is_some_and(|meta| meta.file_type().is_symlink());
+        if symlink || error.raw_os_error() == Some(libc::ELOOP) {
+            refused("provider start is refused: the storage root's parent is a symlink")
+        } else {
+            BridgeError::Io(error)
+        }
+    })?;
+    let parent_stat = stat_fd(parent.as_raw_fd()).map_err(BridgeError::Io)?;
+    if !parent_is_private(&parent_stat) {
+        return Err(refused(
+            if parent_stat.st_uid != unsafe { libc::geteuid() } {
+                "provider start is refused: the storage root's parent is not owned by the effective user"
+            } else {
+                "provider start is refused: the storage root's parent is writable by group or other"
+            },
+        ));
+    }
+    let name_c = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| refused("provider start is refused: the storage root name contains NUL"))?;
+    let created = create_directory_at(&parent, &name_c)?;
+    if created {
+        pause_after_creating_root(&parent, &name_c);
+    }
+    let directory = match open_directory_at(&parent, &name_c) {
+        Ok(directory) => directory,
+        Err(error) => {
+            if created {
+                keep_unopened_root(&parent, &name_c);
+            }
+            let symlink = name_is_symlink(&parent, &name_c);
+            return Err(match error.raw_os_error() {
+                _ if symlink || error.raw_os_error() == Some(libc::ELOOP) => {
+                    refused("provider start is refused: the storage root is a symlink")
+                }
+                Some(libc::ENOTDIR) => {
+                    refused("provider start is refused: the storage root is not a directory")
+                }
+                _ => BridgeError::Io(error),
+            });
+        }
+    };
+    let info = match stat_fd(directory.as_raw_fd()) {
+        Ok(info) => info,
+        Err(error) => {
+            if created {
+                let _ = unlink_held_directory(&parent, &directory, Some(&name_c));
+            }
+            return Err(BridgeError::Io(error));
+        }
+    };
+    if info.st_uid != unsafe { libc::geteuid() } {
+        // The opened directory is not ours. Removing `name` can delete a
+        // different directory, so both stay.
+        return Err(refused(
+            "provider start is refused: the storage root is not owned by the effective user",
+        ));
+    }
+    if unsafe { libc::fchmod(directory.as_raw_fd(), 0o700) } < 0
+        || unsafe { libc::fsync(directory.as_raw_fd()) } < 0
+    {
+        let error = std::io::Error::last_os_error();
+        if created {
+            let _ = unlink_held_directory(&parent, &directory, Some(&name_c));
+        }
+        return Err(BridgeError::Io(error));
+    }
+    Ok(CreatedStorageRoot {
+        parent,
+        name: name_c,
+        directory,
+        armed: created,
+    })
+}
+
+fn pipe_pair() -> Result<(OwnedFd, OwnedFd), BridgeError> {
+    let mut fds = [-1; 2];
+    #[cfg(target_os = "linux")]
+    {
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+            return Err(BridgeError::Spawn(std::io::Error::last_os_error()));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
+            return Err(BridgeError::Spawn(std::io::Error::last_os_error()));
+        }
+        for &fd in &fds {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0
+            {
+                let error = std::io::Error::last_os_error();
+                unsafe {
+                    libc::close(fds[0]);
+                    libc::close(fds[1]);
+                }
+                return Err(BridgeError::Spawn(error));
+            }
+        }
+    }
+    if fds[0] < 3 || fds[1] < 3 {
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        return Err(refused(
+            "provider start is refused: a pipe descriptor is below fd 3",
+        ));
+    }
+    unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
+}
+
 impl ProviderBridge {
     async fn force_child_reap(
         child: &mut Child,
@@ -633,6 +1774,114 @@ impl ProviderBridge {
     /// for the init response.
     pub async fn spawn(binary_path: &Path, config: ProviderConfig) -> Result<Self, BridgeError> {
         Self::spawn_with_timeouts(binary_path, config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT).await
+    }
+
+    /// Start a rights-declaring provider through the OS entry and return
+    /// `Confined` only after `Init` succeeded.
+    ///
+    /// The Runtime creates the fresh storage root under a parent owned by the
+    /// effective user with no group or other write permission, opens that
+    /// directory without following a symlink, and syncs it. The launcher
+    /// receives that directory's device and inode, opens the path again, and
+    /// refuses when the directory is different. That comparison happens before
+    /// the plan and the fork. The child's stdin and stdout are fresh pipes. A
+    /// refusal returns `Err` and starts nothing; there is no fallback to the
+    /// plain `spawn`.
+    pub async fn spawn_confined(
+        component_key: &str,
+        authority: &ProviderAuthority,
+        binary_path: &Path,
+        storage_root: &Path,
+        config: ProviderConfig,
+    ) -> Result<Confined, BridgeError> {
+        let Some(provider) =
+            super::rights_table::RuntimeProviderId::from_component_key(component_key)
+        else {
+            return Err(BridgeError::Refused(format!(
+                "provider start is refused: component key \"{component_key}\" is not one of did-provider, wallet-provider, model-provider"
+            )));
+        };
+        let created_root = create_storage_root(storage_root)?;
+        let info = stat_fd(created_root.directory.as_raw_fd()).map_err(BridgeError::Io)?;
+        let checked = super::os_entry::CheckedDirectory {
+            path: storage_root,
+            dev: stat_dev(&info),
+            ino: stat_ino(&info),
+        };
+        pause_before_launcher(
+            &created_root.parent,
+            &created_root.directory,
+            &created_root.name,
+        );
+        let (stdin_read, to_child) = pipe_pair()?;
+        let (from_child, stdout_write) = pipe_pair()?;
+        let stdio = super::os_entry::ChildStdio {
+            stdin: stdin_read.as_raw_fd(),
+            stdout: stdout_write.as_raw_fd(),
+            to_child,
+            from_child,
+        };
+        let launched =
+            super::os_entry::start_provider(provider, authority, binary_path, checked, stdio)
+                .map_err(BridgeError::Refused)?;
+        // The child holds its copies; these are the parent's, and must close
+        // so the child sees EOF on stdin and the parent sees EOF on stdout.
+        drop(stdin_read);
+        drop(stdout_write);
+
+        let fork = ForkChild::start(launched.pid)?;
+        let mut to_child = std::fs::File::from(launched.to_child);
+        if let Some(line) = launched_pid_line(launched.pid) {
+            use std::io::Write as _;
+            if let Err(error) = to_child.write_all(line.as_bytes()) {
+                drop(fork);
+                return Err(BridgeError::Io(error));
+            }
+        }
+        let from_child = std::fs::File::from(launched.from_child);
+        let bridge = Self {
+            io: Arc::new(Mutex::new(ProviderIo {
+                writer: Box::new(tokio::fs::File::from_std(to_child)),
+                reader: Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
+                    from_child,
+                ))),
+            })),
+            child: Mutex::new(None),
+            fork: Mutex::new(Some(fork)),
+            #[cfg(unix)]
+            helper_owner: Mutex::new(None),
+            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
+            shutdown_timeout: SHUTDOWN_TIMEOUT,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_ipc_dir: Mutex::new(None),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_brokers: Mutex::new(BrokerTasks::default()),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_provider_pid: Arc::new(AtomicU32::new(0)),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_provider_birth: Arc::new(AtomicU64::new(0)),
+            #[cfg(target_os = "macos")]
+            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+        };
+        let mut start = ConfinedStart {
+            bridge: Some(bridge),
+            root: created_root,
+        };
+        let init_result = start
+            .bridge
+            .as_ref()
+            .expect("the confined start owns its bridge")
+            .init_provider(config, INIT_TIMEOUT)
+            .await;
+        init_result?;
+        start.root.disarm();
+        let bridge = start
+            .bridge
+            .take()
+            .expect("the confined start owns its bridge");
+        Ok(Confined {
+            bridge: Arc::new(bridge),
+        })
     }
 
     /// Admit only Runtime-selected private engine sockets for the native model provider.
@@ -1296,6 +2545,7 @@ impl ProviderBridge {
                 reader: Box::new(tokio::io::BufReader::new(stdout)),
             })),
             child: Mutex::new(Some(child)),
+            fork: Mutex::new(None),
             #[cfg(unix)]
             helper_owner: Mutex::new(helper_owner),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -1312,13 +2562,22 @@ impl ProviderBridge {
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         };
 
-        // Send Init request
+        bridge.init_provider(config, init_timeout).await?;
+        Ok(bridge)
+    }
+
+    /// The one Init implementation: send `Init`, bound by `init_timeout`, and
+    /// settle a failed start through `shutdown`.
+    async fn init_provider(
+        &self,
+        config: ProviderConfig,
+        init_timeout: std::time::Duration,
+    ) -> Result<(), BridgeError> {
         let init_req = ProviderRequest::Init { config };
-        let response = match tokio::time::timeout(init_timeout, bridge.request_raw(init_req)).await
-        {
+        let response = match tokio::time::timeout(init_timeout, self.request_raw(init_req)).await {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
-                let shutdown_error = bridge.shutdown().await.err().map(|err| err.to_string());
+                let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
                         format!("{error}; failed to settle provider child: {shutdown_error}")
@@ -1328,7 +2587,7 @@ impl ProviderBridge {
                 return Err(BridgeError::InitFailed(detail));
             }
             Err(_) => {
-                let shutdown_error = bridge.shutdown().await.err().map(|err| err.to_string());
+                let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
                         format!("provider init timed out; failed to settle provider child: {shutdown_error}")
@@ -1340,9 +2599,9 @@ impl ProviderBridge {
         };
 
         match response {
-            ProviderResponse::Ok { .. } => Ok(bridge),
+            ProviderResponse::Ok { .. } => Ok(()),
             ProviderResponse::Error { code, message } => {
-                let shutdown_error = bridge.shutdown().await.err().map(|err| err.to_string());
+                let shutdown_error = self.shutdown().await.err().map(|err| err.to_string());
                 let detail = match shutdown_error {
                     Some(shutdown_error) => {
                         format!(
@@ -1367,6 +2626,7 @@ impl ProviderBridge {
                 reader: Box::new(reader),
             })),
             child: Mutex::new(None),
+            fork: Mutex::new(None),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -1393,7 +2653,9 @@ impl ProviderBridge {
 
     /// Send a request and receive a response (no timeout).
     async fn request_raw(&self, req: ProviderRequest) -> Result<ProviderResponse, BridgeError> {
-        let line = self.send_json_line(req, None).await?;
+        let line = self
+            .send_json_line(req, None, super::dispatch::current())
+            .await?;
         serde_json::from_str(line.trim()).map_err(BridgeError::Serde)
     }
 
@@ -1409,7 +2671,10 @@ impl ProviderBridge {
         let dispatch_run = recorded_run.clone();
         #[cfg(not(target_os = "macos"))]
         let dispatch_run = None;
-        let line = match self.send_json_line(request.clone(), dispatch_run).await {
+        let line = match self
+            .send_json_line(request.clone(), dispatch_run, super::dispatch::current())
+            .await
+        {
             Ok(line) => line,
             Err(error) => {
                 #[cfg(target_os = "macos")]
@@ -1448,6 +2713,7 @@ impl ProviderBridge {
         &self,
         request: T,
         dispatch_run: Option<String>,
+        fence: Option<super::dispatch::DispatchFence>,
     ) -> Result<String, BridgeError>
     where
         T: Serialize + Send + 'static,
@@ -1496,12 +2762,22 @@ impl ProviderBridge {
                 "provider request sent"
             );
             let result: Result<String, BridgeError> = async {
+                let dispatch_guard = match fence {
+                    Some(fence) => Some(fence.enter().await.map_err(|message| {
+                        BridgeError::Io(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            message,
+                        ))
+                    })?),
+                    None => None,
+                };
                 io.writer
                     .write_all(json.as_bytes())
                     .await
                     .map_err(BridgeError::Io)?;
                 io.writer.write_all(b"\n").await.map_err(BridgeError::Io)?;
                 io.writer.flush().await.map_err(BridgeError::Io)?;
+                drop(dispatch_guard);
                 #[cfg(target_os = "macos")]
                 if let Some(run_id) = &dispatch_run {
                     if let Ok(mut runs) = bindings.lock() {
@@ -1538,10 +2814,67 @@ impl ProviderBridge {
         .map_err(|err| BridgeError::TaskJoin(err.to_string()))?
     }
 
+    /// Deliver the protocol shutdown on the transport alone.
+    async fn protocol_shutdown(&self) -> Result<(), BridgeError> {
+        tokio::time::timeout(
+            self.shutdown_timeout,
+            self.request_raw(ProviderRequest::Shutdown),
+        )
+        .await
+        .map_err(|_| BridgeError::Timeout)
+        .and_then(|result| result)
+        .and_then(|response| match response {
+            ProviderResponse::Ok { .. } => Ok(()),
+            ProviderResponse::Error { code, message } => {
+                Err(BridgeError::Provider { code, message })
+            }
+        })
+    }
+
     /// Gracefully shut down the provider.
     pub async fn shutdown(&self) -> Result<(), BridgeError> {
         #[cfg(unix)]
         self.helper_owner.lock().await.take();
+        if let Some(mut fork) = self.fork.lock().await.take() {
+            let protocol_error = self.protocol_shutdown().await.err();
+            let status_error =
+                match tokio::time::timeout(self.shutdown_timeout, &mut fork.status).await {
+                    Ok(status) => {
+                        fork.reaped = status.is_ok();
+                        match status {
+                            Ok(0) => None,
+                            _ => Some(BridgeError::ProcessExited),
+                        }
+                    }
+                    Err(_) => {
+                        fork.force_kill();
+                        match tokio::time::timeout(self.shutdown_timeout, &mut fork.status).await {
+                            Ok(status) => {
+                                fork.reaped = status.is_ok();
+                                Some(BridgeError::Timeout)
+                            }
+                            Err(_) => {
+                                // The signal has been sent and the reaper has not
+                                // collected the child. Wait for that collection
+                                // before returning, so the caller does not remove
+                                // the root while the child is still live.
+                                fork.reaped = (&mut fork.status).await.is_ok();
+                                Some(BridgeError::Timeout)
+                            }
+                        }
+                    }
+                };
+            self.shutdown_completed
+                .store(true, std::sync::atomic::Ordering::Release);
+            drop(fork);
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            self.stop_local_brokers().await;
+            return match (protocol_error, status_error) {
+                (Some(error), _) => Err(error),
+                (None, Some(error)) => Err(error),
+                (None, None) => Ok(()),
+            };
+        }
         let mut child_guard = self.child.lock().await;
         let Some(child) = child_guard.as_mut() else {
             if self
@@ -1663,6 +2996,12 @@ impl CapsuleProvider {
             bridge,
             scheme_static,
         }
+    }
+
+    /// Create a CapsuleProvider from a provider the confined entry launched.
+    /// Only `spawn_confined` can produce `Confined`.
+    pub fn from_confined(confined: Confined, scheme: impl Into<String>) -> Self {
+        Self::with_scheme(confined.bridge, scheme)
     }
 
     /// Get a reference to the underlying bridge for raw communication.
@@ -1843,6 +3182,17 @@ impl Provider for CapsuleProvider {
             .send_raw(request)
             .await
             .map_err(|e| ProviderError::Provider(e.to_string()))
+    }
+
+    async fn send_raw_fenced(
+        &self,
+        request: &serde_json::Value,
+        fence: Option<super::dispatch::DispatchFence>,
+    ) -> Result<serde_json::Value, ProviderError> {
+        match fence {
+            Some(fence) => fence.scope(self.send_raw(request)).await,
+            None => self.send_raw(request).await,
+        }
     }
 
     async fn shutdown(&self) -> Result<(), ProviderError> {
@@ -2259,6 +3609,77 @@ mod tests {
         let json = r#"{"status":"error","code":"read_failed","message":"No such file"}"#;
         let resp: ProviderResponse = serde_json::from_str(json).unwrap();
         assert!(matches!(resp, ProviderResponse::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn browser_internet_queued_bridge_write_cannot_dispatch_after_stop() {
+        let (client_read, _server_write) = tokio::io::duplex(4096);
+        let (mut server_read, client_write) = tokio::io::duplex(4096);
+        let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(client_read), client_write);
+        let fence = super::super::dispatch::DispatchFence::new(|| Ok(()));
+        let io = bridge.io.lock().await;
+        let request = serde_json::json!({"op":"connect"});
+        let pending = fence.scope(bridge.send_raw(&request));
+        tokio::pin!(pending);
+        // Poll until the real bridge has spawned its detached write, held behind
+        // its I/O lock. Revocation completes while that write is queued.
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(std::future::Future::poll(
+                pending.as_mut(),
+                cx
+            )))
+            .await
+            .is_pending()
+        );
+        fence.revoke().await;
+        drop(io);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+            .await
+            .expect("revoked write must finish without waiting for a provider response");
+        assert!(result.is_err());
+        use tokio::io::AsyncReadExt;
+        let mut bytes = [0u8; 1];
+        let read = server_read.read(&mut bytes);
+        tokio::pin!(read);
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(std::future::Future::poll(
+                read.as_mut(),
+                cx
+            )))
+            .await
+            .is_pending(),
+            "revoked dispatch wrote provider bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_internet_accepted_bridge_call_can_finish_after_stop() {
+        let (client_read, mut server_write) = tokio::io::duplex(4096);
+        let (server_read, client_write) = tokio::io::duplex(4096);
+        let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(client_read), client_write);
+        let fence = super::super::dispatch::DispatchFence::new(|| Ok(()));
+        let call_fence = fence.clone();
+        let call = tokio::spawn(async move {
+            call_fence
+                .scope(bridge.send_raw(&serde_json::json!({"op":"connect"})))
+                .await
+        });
+        let mut reader = tokio::io::BufReader::new(server_read);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap()["op"],
+            "connect"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), fence.revoke())
+            .await
+            .unwrap();
+        assert!(!call.is_finished());
+        server_write
+            .write_all(b"{\"status\":\"ok\"}\n")
+            .await
+            .unwrap();
+        assert_eq!(call.await.unwrap().unwrap()["status"], "ok");
     }
 
     #[tokio::test]
@@ -3326,5 +4747,1059 @@ mod tests {
             !process_exists(&pid.to_string()),
             "provider survived shutdown"
         );
+    }
+
+    // === Slice 10: spawn_confined and Confined ===
+
+    fn committed_authority(name: &str) -> ProviderAuthority {
+        let path = format!(
+            "{}/../../../capsules/{name}-provider/capsule.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let json = std::fs::read_to_string(&path).unwrap();
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&json).unwrap();
+        manifest.authority.unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_confined_probe(root: &Path, pid_file: &Path, mode: &str) -> PathBuf {
+        build_confined_probe_reporting(root, pid_file, mode, "")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn build_confined_probe_reporting(
+        root: &Path,
+        pid_file: &Path,
+        mode: &str,
+        stderr_report: &str,
+    ) -> PathBuf {
+        let source = root.join("confined-provider-probe.rs");
+        let binary = root.join("confined-provider-probe");
+        let pid = pid_file.to_str().unwrap();
+        let text = include_str!("../../tests/fixtures/confined_provider_probe.rs")
+            .replace("@@PID_FILE@@", pid)
+            .replace("@@MODE@@", mode)
+            .replace("@@STDERR_REPORT@@", stderr_report);
+        std::fs::write(&source, text).unwrap();
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-O"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "probe build failed: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        binary
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pid_gone(pid: libc::pid_t) -> bool {
+        (unsafe { libc::kill(pid, 0) }) == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fork_pid(bridge: &ProviderBridge) -> libc::pid_t {
+        bridge
+            .fork
+            .try_lock()
+            .expect("no live request holds the fork handle")
+            .as_ref()
+            .expect("a confined start keeps its fork handle")
+            .pid
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn confined_start_answers_init_over_its_own_pipes() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = build_confined_probe(temp.path(), Path::new(""), "ok");
+        let root = temp.path().join("did-root");
+        let confined = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("confined start must answer Init: {error}"));
+        let pid = fork_pid(confined.bridge());
+        // Row 2: the child's fd 0 and fd 1 are its own pipes, and it inherited
+        // nothing else.
+        let fds = std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            fds.iter()
+                .all(|fd| fd.parse::<i32>().is_ok_and(|fd| fd <= 2)),
+            "the child sees only fds 0-2: {fds:?}"
+        );
+        let child_stdin = std::fs::read_link(format!("/proc/{pid}/fd/0")).unwrap();
+        let child_stdout = std::fs::read_link(format!("/proc/{pid}/fd/1")).unwrap();
+        let parent_stdin = std::fs::read_link("/proc/self/fd/0").unwrap();
+        let parent_stdout = std::fs::read_link("/proc/self/fd/1").unwrap();
+        assert!(child_stdin.to_string_lossy().starts_with("pipe:"));
+        assert!(child_stdout.to_string_lossy().starts_with("pipe:"));
+        assert_ne!(
+            child_stdin, parent_stdin,
+            "the child inherited the parent's stdin"
+        );
+        assert_ne!(
+            child_stdout, parent_stdout,
+            "the child inherited the parent's stdout"
+        );
+        let child_stderr = std::fs::read_link(format!("/proc/{pid}/fd/2")).unwrap();
+        assert_eq!(
+            child_stderr,
+            Path::new("/dev/null"),
+            "the confined child's standard error is /dev/null"
+        );
+        // Row 1: Shutdown is answered, the child exits, and the pid is reaped.
+        confined.bridge().shutdown().await.unwrap();
+        for _ in 0..250 {
+            if pid_gone(pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(pid_gone(pid), "the confined child was not reaped");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn refused_start_leaves_no_root_and_success_leaves_one() {
+        use std::os::unix::fs::MetadataExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        // Refused: a widened rule stops before the fork and removes the root.
+        let widened = temp.path().join("widened-root");
+        let mut authority = committed_authority("did");
+        let storage = authority
+            .rights
+            .iter_mut()
+            .find(|right| right.id == "storage")
+            .unwrap();
+        storage.rules = vec![r#"(allow file-read* file-write* (subpath "/"))"#.to_string()];
+        let error = match ProviderBridge::spawn_confined(
+            "did-provider",
+            &authority,
+            &temp.path().join("never-runs"),
+            &widened,
+            ProviderConfig::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("a widened declaration must refuse"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider right \"storage\" rule text differs from the Runtime template"
+        );
+        assert!(!widened.exists(), "a refused start leaves no root");
+        // Success: the root is 0700 and owned by the euid.
+        let binary = build_confined_probe(temp.path(), Path::new(""), "ok");
+        let root = temp.path().join("kept-root");
+        let confined = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap();
+        let metadata = std::fs::metadata(&root).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        confined.bridge().shutdown().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn refused_start_never_runs_the_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("ran");
+        let program = temp.path().join("mark.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut authority = committed_authority("did");
+        authority
+            .rights
+            .iter_mut()
+            .find(|right| right.id == "storage")
+            .unwrap()
+            .rules = vec![r#"(allow file-read* file-write* (subpath "/"))"#.to_string()];
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &authority,
+            &program,
+            &temp.path().join("root"),
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider right \"storage\" rule text differs from the Runtime template"
+        );
+        assert!(!marker.exists(), "the provider binary never runs");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_reopened_storage_root_that_differs_from_the_checked_directory_is_refused() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let marker = root.join("started");
+        let program = temp.path().join("mark.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = open_directory(&root).unwrap();
+        let info = stat_fd(directory.as_raw_fd()).unwrap();
+        arm_checked_launch_swap(stat_dev(&info), stat_ino(&info), c"root.checked", c"canary");
+        drop(directory);
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *CHECKED_LAUNCH_SWAP.lock().expect("checked launch") = None;
+            }
+        }
+        let _clear = Clear;
+        let error = match ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &program,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        {
+            Ok(confined) => {
+                let _ = confined.bridge().shutdown().await;
+                panic!(
+                    "a reopened storage root that differs from the checked directory is refused"
+                );
+            }
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: the reopened storage root is not the checked directory",
+            "a reopened storage root that differs from the checked directory is refused"
+        );
+        assert!(!marker.exists(), "the provider does not start");
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o755,
+            "the canary stays unchanged"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ClearLaunchedPid;
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ClearLaunchedPid {
+        fn drop(&mut self) {
+            super::set_report_launched_pid(false);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn report_launched_pid() -> ClearLaunchedPid {
+        super::set_report_launched_pid(true);
+        ClearLaunchedPid
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_init_leaves_no_live_child_and_no_zombie() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let pid_file = root.join("child.pid");
+        let _report = report_launched_pid();
+        let binary = build_confined_probe(temp.path(), &pid_file, "reject_init");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, BridgeError::InitFailed(_)), "{error}");
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            pid_gone(pid),
+            "an Init failure must reap the child: pid {pid} still visible"
+        );
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn each_start_uses_its_own_root_and_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_a = temp.path().join("root-a");
+        let root_b = temp.path().join("root-b");
+        let mut pids = Vec::new();
+        let _report = report_launched_pid();
+        for root in [&root_a, &root_b, &root_a] {
+            let pid_file = root.join("child.pid");
+            let binary = build_confined_probe(temp.path(), &pid_file, "ok");
+            let confined = ProviderBridge::spawn_confined(
+                "did-provider",
+                &committed_authority("did"),
+                &binary,
+                root,
+                ProviderConfig::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("start under {}: {error}", root.display()));
+            assert!(root.is_dir(), "root_a.is_dir()");
+            let pid = fork_pid(confined.bridge());
+            // The child writes under its own root, so a plan inherited from the
+            // previous start would leave this file absent.
+            let recorded: libc::pid_t = std::fs::read_to_string(&pid_file)
+                .unwrap_or_else(|error| {
+                    panic!("the child writes under {}: {error}", root.display())
+                })
+                .trim()
+                .parse()
+                .unwrap();
+            assert_eq!(recorded, pid, "the recorded pid is the launched child");
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+            assert!(
+                status.lines().any(|line| line == "Seccomp:\t2"),
+                "each start installs the filter: {status}"
+            );
+            assert!(
+                status.lines().any(|line| line == "NoNewPrivs:\t1"),
+                "each start sets no_new_privs: {status}"
+            );
+            pids.push(pid);
+            confined.bridge().shutdown().await.unwrap();
+            for _ in 0..250 {
+                if pid_gone(pid) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(pid_gone(pid));
+        }
+        assert_ne!(pids[0], pids[1]);
+        assert_ne!(pids[1], pids[2]);
+        assert!(root_a.is_dir() && root_b.is_dir());
+    }
+
+    #[tokio::test]
+    async fn symlink_at_the_storage_root_refuses_and_leaves_the_canary() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let root = temp.path().join("root");
+        std::os::unix::fs::symlink(&canary, &root).unwrap();
+        #[cfg(target_os = "linux")]
+        let binary = build_confined_probe(temp.path(), &canary.join("child.pid"), "ok");
+        #[cfg(not(target_os = "linux"))]
+        let binary = temp.path().join("never-runs");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            std::fs::metadata(&canary).unwrap().mode() & 0o777,
+            0o755,
+            "the canary and its permissions stay unchanged"
+        );
+        assert_eq!(std::fs::read(canary.join("kept")).unwrap(), b"kept");
+        assert!(
+            !canary.join("child.pid").exists(),
+            "the canary and its permissions stay unchanged"
+        );
+        assert!(
+            error.to_string().contains("symlink"),
+            "a symlink storage root must refuse: {error}"
+        );
+        assert!(std::fs::symlink_metadata(&root)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_init_removes_the_root_a_child_wrote_into() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let binary = build_confined_probe(temp.path(), &root.join("child.pid"), "reject_init");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &binary,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, BridgeError::InitFailed(_)), "{error}");
+        assert!(
+            !root.exists(),
+            "a failed Init removes the root this start created"
+        );
+    }
+
+    #[test]
+    fn an_armed_root_removes_the_tree_and_not_a_symlink_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"stay").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        drop(guard);
+        assert!(!root.exists(), "a failed start removes the created root");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"stay");
+    }
+
+    #[test]
+    fn a_group_writable_parent_is_refused_and_a_writable_root_keeps_its_canary() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let root = parent.join("root");
+        match create_storage_root(&root) {
+            Ok(guard) => {
+                drop(guard);
+                panic!("a group-writable parent is refused before the storage root is created");
+            }
+            Err(error) => assert_eq!(
+                error.to_string(),
+                "provider start is refused: the storage root's parent is writable by group or other",
+                "a group-writable parent is refused before the storage root is created"
+            ),
+        }
+        assert!(
+            !root.exists(),
+            "a group-writable parent is refused before the storage root is created"
+        );
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let guard = create_storage_root(&root).unwrap();
+        assert!(guard.armed, "this start creates the root");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o770)).unwrap();
+        std::fs::write(root.join("canary"), b"kept").unwrap();
+        let info = stat_fd(guard.directory.as_raw_fd()).unwrap();
+        drop(guard);
+        let kept = std::fs::read_dir(&parent).unwrap().any(|entry| {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            let Ok(opened) = open_directory(&entry.path()) else {
+                return false;
+            };
+            let Ok(found) = stat_fd(opened.as_raw_fd()) else {
+                return false;
+            };
+            same_directory(&found, &info)
+                && std::fs::read(entry.path().join("canary")).ok().as_deref()
+                    == Some(b"kept".as_slice())
+        });
+        assert!(
+            kept,
+            "cleanup preserves the canary inside a group-writable root"
+        );
+    }
+
+    #[test]
+    fn a_symlink_at_the_root_path_leaves_the_canary() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        let opened = temp.path().join("root.opened");
+        std::fs::rename(&root, &opened).unwrap();
+        std::os::unix::fs::symlink(&canary, &root).unwrap();
+        drop(guard);
+        assert_eq!(std::fs::read(canary.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::symlink_metadata(&canary).unwrap().mode() & 0o777,
+            0o755
+        );
+        assert!(
+            !opened.exists(),
+            "cleanup removes the directory this start opened"
+        );
+        assert!(std::fs::symlink_metadata(&root)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+    }
+
+    #[test]
+    fn a_renamed_root_is_removed_and_the_directory_at_the_old_name_stays() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        let opened = temp.path().join("root.opened");
+        std::fs::rename(&root, &opened).unwrap();
+        std::fs::rename(&canary, &root).unwrap();
+        drop(guard);
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o755,
+            "the directory now at the old name stays"
+        );
+        assert!(
+            !opened.exists(),
+            "cleanup removes the opened directory and leaves the directory now at its old name"
+        );
+    }
+
+    #[test]
+    fn a_swap_during_cleanup_keeps_the_name_and_removes_the_opened_directory() {
+        use std::os::unix::fs::MetadataExt;
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(canary.join("kept"), b"kept").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        struct ClearSwap;
+        impl Drop for ClearSwap {
+            fn drop(&mut self) {
+                *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = None;
+            }
+        }
+        let _clear = ClearSwap;
+        let info = stat_fd(guard.directory.as_raw_fd()).unwrap();
+        arm_held_unlink_swap(stat_dev(&info), stat_ino(&info), c"root.opened", c"canary");
+        drop(guard);
+        assert_eq!(std::fs::read(root.join("kept")).unwrap(), b"kept");
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o755
+        );
+        assert!(
+            !temp.path().join("root.opened").exists(),
+            "a swap during cleanup removes the opened directory and leaves the directory now at its old name"
+        );
+        let leftover = std::fs::read_dir(temp.path()).unwrap().any(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| entry.file_name().into_string().ok())
+                .is_some_and(|name| name.starts_with(".elastos-held-"))
+        });
+        assert!(!leftover, "cleanup leaves no private name");
+        drop(swap_tests);
+    }
+
+    #[test]
+    fn a_private_name_that_fails_the_identity_check_stays() {
+        use std::os::unix::fs::MetadataExt;
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(temp.path().join("blocker"), b"block").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        let info = stat_fd(guard.directory.as_raw_fd()).unwrap();
+        arm_mismatch_swap(
+            stat_dev(&info),
+            stat_ino(&info),
+            c"root.held",
+            c"canary",
+            c"blocker",
+        );
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *MISMATCH_SWAP.lock().expect("mismatch swap") = None;
+            }
+        }
+        let _clear = Clear;
+        drop(guard);
+        let kept = std::fs::read_dir(temp.path()).unwrap().any(|entry| {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".elastos-held-")
+                && entry.metadata().unwrap().mode() & 0o777 == 0o755
+        });
+        assert!(
+            kept,
+            "a directory that failed the identity check stays under its private name"
+        );
+        assert_eq!(std::fs::read(temp.path().join("root")).unwrap(), b"block");
+        drop(swap_tests);
+    }
+
+    #[test]
+    fn a_swap_of_the_private_name_keeps_the_directory_placed_there() {
+        use std::os::unix::fs::MetadataExt;
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        let info = stat_fd(guard.directory.as_raw_fd()).unwrap();
+        arm_private_unlink_swap(stat_dev(&info), stat_ino(&info), c"root.held", c"canary");
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *PRIVATE_UNLINK_SWAP.lock().expect("private unlink swap") = None;
+            }
+        }
+        let _clear = Clear;
+        drop(guard);
+        assert!(
+            root.is_dir(),
+            "a swap of the private name keeps the directory that was placed there"
+        );
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().mode() & 0o777,
+            0o755
+        );
+        assert!(!temp.path().join("root.held").exists());
+        drop(swap_tests);
+    }
+
+    #[test]
+    fn an_unopened_created_root_leaves_the_directory_now_at_its_name() {
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let canary = temp.path().join("canary");
+        std::fs::create_dir(&canary).unwrap();
+        std::fs::set_permissions(&canary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        arm_unopened_swap(c"root.created", c"canary");
+        struct Clear<'a> {
+            root: &'a Path,
+        }
+        impl Drop for Clear<'_> {
+            fn drop(&mut self) {
+                *UNOPENED_SWAP.lock().expect("unopened root") = None;
+                let _ = std::fs::set_permissions(self.root, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let _clear = Clear { root: &root };
+        assert!(
+            create_storage_root(&root).is_err(),
+            "an unopened root must be refused"
+        );
+        assert!(
+            root.is_dir(),
+            "a directory this start never opened stays at the storage root name"
+        );
+        assert!(temp.path().join("root.created").is_dir());
+        drop(swap_tests);
+    }
+
+    #[test]
+    fn a_swap_for_one_root_stays_armed_while_another_root_is_removed() {
+        let swap_tests = swap_test_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let root_a = temp.path().join("root-a");
+        let root_b = temp.path().join("root-b");
+        std::fs::create_dir(&root_a).unwrap();
+        std::fs::create_dir(&root_b).unwrap();
+        std::fs::write(root_a.join("wrote"), b"a").unwrap();
+        std::fs::write(root_b.join("wrote"), b"b").unwrap();
+        std::fs::create_dir(temp.path().join("canary-a")).unwrap();
+        let mut guard_a = create_storage_root(&root_a).unwrap();
+        let mut guard_b = create_storage_root(&root_b).unwrap();
+        guard_a.armed = true;
+        guard_b.armed = true;
+        let info = stat_fd(guard_a.directory.as_raw_fd()).unwrap();
+        arm_held_unlink_swap(stat_dev(&info), stat_ino(&info), c"aside-a", c"canary-a");
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = None;
+            }
+        }
+        let _clear = Clear;
+        drop(guard_b);
+        assert!(
+            held_unlink_swap_is_armed(),
+            "a swap for one directory stays armed while another root is removed"
+        );
+        assert!(!root_b.exists());
+        *HELD_UNLINK_SWAP.lock().expect("held unlink swap") = None;
+        drop(guard_a);
+        drop(swap_tests);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_live_child_reaps_before_the_root_goes() {
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                loop {
+                    libc::sleep(30);
+                }
+            }
+        }
+        assert!(pid > 0, "fork");
+        struct Release(libc::pid_t);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if REAP_HOLD_PID.load(std::sync::atomic::Ordering::Acquire) == self.0 {
+                    REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+                    unsafe {
+                        libc::kill(self.0, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        REAP_HOLD_PID.store(pid, std::sync::atomic::Ordering::Release);
+        let release = Release(pid);
+        REAP_WAIT_STARTED.store(false, std::sync::atomic::Ordering::Release);
+        let fork = match ForkChild::start(pid) {
+            Ok(fork) => fork,
+            Err(error) => {
+                REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let mut status = 0;
+                let _ = unsafe { libc::waitpid(pid, &mut status, 0) };
+                panic!("the child could not be owned: {error}");
+            }
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let mut created = create_storage_root(&root).unwrap();
+        created.armed = true;
+        let bridge = ProviderBridge::from_io(
+            tokio::io::BufReader::new(tokio::io::empty()),
+            tokio::io::sink(),
+        );
+        *bridge.fork.lock().await = Some(fork);
+        let start = ConfinedStart {
+            bridge: Some(bridge),
+            root: created,
+        };
+        let root_path = root.clone();
+        let watcher = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            while !REAP_WAIT_STARTED.load(std::sync::atomic::Ordering::Acquire) {
+                if began.elapsed() > std::time::Duration::from_secs(5) {
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let stayed = root_path.exists();
+            REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+            stayed
+        });
+        drop(start);
+        let stayed = watcher.join().expect("the watcher finishes");
+        REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+        drop(release);
+        assert!(stayed, "the root stays until the child is reaped");
+        assert!(!root.exists(), "the root goes after the child is reaped");
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(waited, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn a_disarmed_root_stays() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("wrote"), b"x").unwrap();
+        let mut guard = create_storage_root(&root).unwrap();
+        guard.armed = true;
+        guard.disarm();
+        drop(guard);
+        assert!(root.join("wrote").is_file());
+    }
+
+    #[tokio::test]
+    async fn a_second_shutdown_wait_reaps_before_it_returns() {
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                loop {
+                    libc::sleep(30);
+                }
+            }
+        }
+        assert!(pid > 0, "fork");
+        struct Release(libc::pid_t);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if REAP_HOLD_PID.load(std::sync::atomic::Ordering::Acquire) == self.0 {
+                    REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+        REAP_HOLD_PID.store(pid, std::sync::atomic::Ordering::Release);
+        let _release = Release(pid);
+        let fork = match ForkChild::start(pid) {
+            Ok(fork) => fork,
+            Err(error) => {
+                REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                let mut status = 0;
+                let _ = unsafe { libc::waitpid(pid, &mut status, 0) };
+                panic!("the child could not be owned: {error}");
+            }
+        };
+        let mut bridge = ProviderBridge::from_io(
+            tokio::io::BufReader::new(tokio::io::empty()),
+            tokio::io::sink(),
+        );
+        bridge.shutdown_timeout = std::time::Duration::from_millis(40);
+        *bridge.fork.lock().await = Some(fork);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if REAP_HOLD_PID.load(std::sync::atomic::Ordering::Acquire) == pid {
+                REAP_HOLD_PID.store(0, std::sync::atomic::Ordering::Release);
+            }
+        });
+        let _ = bridge.shutdown().await;
+        let mut status = 0;
+        let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        let reaped =
+            waited == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+        let _ = releaser.join();
+        assert!(reaped, "shutdown returns only after the child is reaped");
+    }
+
+    #[test]
+    fn a_start_without_a_process_handle_reaps_the_child() {
+        let pid = unsafe { libc::fork() };
+        assert!(pid > 0, "fork");
+        if pid == 0 {
+            unsafe { libc::_exit(0) };
+        }
+        let error = refuse_child_without_process_handle(pid);
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: the process handle could not be opened"
+        );
+        let mut status = 0;
+        assert_eq!(
+            unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_component_key_is_refused_before_the_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let error = ProviderBridge::spawn_confined(
+            "ipfs-provider",
+            &committed_authority("did"),
+            &temp.path().join("never-runs"),
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: component key \"ipfs-provider\" is not one of did-provider, wallet-provider, model-provider"
+        );
+        assert!(!root.exists(), "the refused key creates no root");
+    }
+
+    #[test]
+    fn only_the_confined_entry_makes_a_confined() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![root];
+        let mut other = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+                if path.ends_with("provider/bridge.rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                if text.contains("fn from_confined") || text.contains("Confined {") {
+                    other.push(path);
+                }
+            }
+        }
+        assert!(
+            other.is_empty(),
+            "only bridge.rs constructs Confined: {other:?}"
+        );
+        let source = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/provider/bridge.rs"),
+        )
+        .unwrap();
+        let from_needle = concat!("pub ", "fn from_confined(confined: Confined, scheme");
+        assert_eq!(source.matches(from_needle).count(), 1);
+        let struct_needle = concat!(
+            "pub struct Confined {\n    br",
+            "idge: Arc<ProviderBridge>,"
+        );
+        assert_eq!(source.matches(struct_needle).count(), 1);
+        assert!(!source.contains(concat!("impl From<ProviderBridge> ", "for Confined")));
+        let start = source.find("pub async fn spawn_confined(").unwrap();
+        let end = source[start..]
+            .find("/// Admit only Runtime-selected private engine sockets")
+            .map(|at| at + start)
+            .expect("the confined start ends before the model path");
+        let body = &source[start..end];
+        assert!(
+            !body.contains("ProviderBridge::spawn") && !body.contains("Self::spawn("),
+            "the confined start has no unconfined fallback"
+        );
+        assert!(body.contains("super::os_entry::start_provider("));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_confined_start_refuses_and_starts_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("ran");
+        let program = temp.path().join("mark.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = temp.path().join("root");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &program,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider start on macos is refused: the Seatbelt profile has no spawn path yet"
+        );
+        assert!(!marker.exists(), "the provider binary never runs");
+        assert!(!root.exists(), "a refused start leaves no root");
+    }
+
+    #[cfg(elastos_unsupported_os_check)]
+    #[tokio::test]
+    async fn unsupported_os_confined_start_refuses_and_starts_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("ran");
+        let program = temp.path().join("mark.sh");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = temp.path().join("root");
+        let error = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &program,
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: this operating system has no confinement, so the provider binary does not start"
+        );
+        assert!(!marker.exists(), "the provider binary never runs");
+        assert!(!root.exists(), "a refused start leaves no root");
     }
 }

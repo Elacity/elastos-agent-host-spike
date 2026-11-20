@@ -53,10 +53,20 @@ pub enum SupervisorRequest {
     #[serde(rename = "launch_capsule")]
     LaunchCapsule {
         name: String,
+        /// The guest payload, moved whole to the guest. The host reads none of
+        /// it; the wire name stays `config`.
+        #[serde(default, rename = "config")]
+        guest_payload: serde_json::Value,
+        /// Guest stdio: a shell-launched capsule that needs a terminal.
         #[serde(default)]
-        config: serde_json::Value,
+        interactive: bool,
+        /// Arguments forwarded to the capsule entrypoint by the guest init.
         #[serde(default)]
-        principal_id: Option<String>,
+        capsule_args: Vec<String>,
+        /// Typed: a request that deserialises carries `None`, because the
+        /// wire cannot mint a `BridgePrincipal` (`#[serde(skip, default)]`).
+        #[serde(skip, default)]
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     },
 
     #[serde(rename = "stop_capsule")]
@@ -267,6 +277,19 @@ impl Supervisor {
                      ({name} is not published for it)"
                 )
             })
+    }
+
+    /// The guest boot argument that forwards capsule arguments: the arguments
+    /// joined by newlines and base64-encoded, or none when there are none. The
+    /// guest init decodes with `base64 -d` and splits on newlines.
+    fn capsule_args_boot_arg(capsule_args: &[String]) -> Option<String> {
+        if capsule_args.is_empty() {
+            return None;
+        }
+        use base64::Engine as _;
+        let joined = capsule_args.join("\n");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
+        Some(format!("elastos.capsule_args={encoded}"))
     }
 
     fn verify_host_artifact(&self, component: &str, path: &Path) -> Result<()> {
@@ -498,9 +521,20 @@ impl Supervisor {
             },
             SupervisorRequest::LaunchCapsule {
                 name,
-                config,
+                guest_payload,
+                interactive,
+                capsule_args,
                 principal_id,
-            } => match self.launch_capsule(&name, config, principal_id).await {
+            } => match self
+                .launch_capsule(
+                    &name,
+                    guest_payload,
+                    interactive,
+                    capsule_args,
+                    principal_id,
+                )
+                .await
+            {
                 Ok((handle, cid)) => SupervisorResponse::ok_with_handle(handle, cid),
                 Err(e) => SupervisorResponse::err(format!("launch_capsule failed: {e}")),
             },
@@ -930,6 +964,7 @@ impl Supervisor {
         archive.unpack(staged.path())?;
         std::fs::write(staged.path().join(CACHED_CID_FILE), format!("{}\n", cid))?;
         write_artifact_sha256_receipt(staged.path(), sha256)?;
+        crate::setup::record_install_cid(&self.data_dir, staged.path(), dest);
         let retired = parent.join(format!(".capsule-retired-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&retired);
         if dest.exists() {
@@ -963,9 +998,24 @@ impl Supervisor {
         &self,
         name: &str,
         config: serde_json::Value,
-        principal_id: Option<String>,
+        interactive: bool,
+        capsule_args: Vec<String>,
+        principal_id: Option<crate::resource_bridge::BridgePrincipal>,
     ) -> Result<(String, u32)> {
+        // An agent's own principal reaches no VM: a stored agent launches
+        // through the component admission, never here.
+        crate::agent_admission::refuse_unadmitted_agent_principal(
+            principal_id
+                .as_ref()
+                .map(crate::resource_bridge::BridgePrincipal::principal_str),
+        )?;
         let (capsule_dir, manifest) = self.load_capsule_manifest(name).await?;
+        // A manifest that declares an agent runs only through the component
+        // admission. A VM launch would put its launcher's principal on the
+        // bridge while the manifest's agent stayed unbound.
+        if manifest.agent.is_some() {
+            bail!("{}", crate::agent_admission::NO_VM_AGENT);
+        }
         if principal_id.is_some() && !manifest.role.is_shell_launchable() {
             bail!("principal launch grants are only valid for shell-launchable capsules");
         }
@@ -1012,32 +1062,15 @@ impl Supervisor {
 
         let handle = Self::unique_handle(name, cid);
 
-        // Normalize supervisor-reserved launch config keys.
-        let mut launch_config = config;
-        let interactive_stdio = launch_config
-            .get("_elastos_interactive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let capsule_args: Vec<String> = launch_config
-            .get("_elastos_capsule_args")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if let Some(obj) = launch_config.as_object_mut() {
-            obj.remove("_elastos_interactive");
-            obj.remove("_elastos_capsule_args");
-        }
+        // The guest payload is moved whole; the host reads none of it here.
+        let guest_payload = config;
 
         // Create VM config from manifest, override vsock CID
         let mut vm_config =
             VmConfig::from_manifest(&manifest, &capsule_dir, &self.crosvm_config.kernel_path);
         vm_config.vsock_cid = cid;
         vm_config.boot_args = format!("{} elastos.data_dir=/opt/elastos", vm_config.boot_args);
-        vm_config.interactive_stdio = interactive_stdio;
+        vm_config.interactive_stdio = interactive;
         let vm_id = vm_config.vm_id.clone();
 
         // TAP networking only when explicitly requested via permissions.guest_network.
@@ -1052,7 +1085,7 @@ impl Supervisor {
         // guest TUI can render at the correct size and use matching escape sequences.
         // Serial consoles lack TIOCGWINSZ and default to TERM=linux which causes
         // key misinterpretation when the host terminal is xterm-256color etc.
-        if interactive_stdio {
+        if interactive {
             let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
             let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
             if ok == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
@@ -1108,24 +1141,19 @@ impl Supervisor {
             }
         }
 
-        // Inject command payload as base64-encoded boot arg
-        if !launch_config.is_null() {
+        // Inject command payload as base64-encoded boot arg. This is the one
+        // host read of the guest payload (pair 7 of the eleven pass-through
+        // pairs); it serialises, it does not inspect.
+        if !guest_payload.is_null() {
             use base64::Engine as _;
-            let json_bytes = serde_json::to_vec(&launch_config)?;
+            let json_bytes = serde_json::to_vec(&guest_payload)?;
             let encoded = base64::engine::general_purpose::STANDARD.encode(&json_bytes);
             vm_config.boot_args = format!("{} elastos.command={}", vm_config.boot_args, encoded);
         }
 
-        // Pass capsule arguments as base64-encoded boot arg so the guest
-        // init can forward them to the entrypoint binary.
-        // Encoding: args joined by newlines, then base64-encoded. Guest init
-        // decodes with `base64 -d` and splits on newlines.
-        if !capsule_args.is_empty() {
-            use base64::Engine as _;
-            let joined = capsule_args.join("\n");
-            let encoded = base64::engine::general_purpose::STANDARD.encode(joined.as_bytes());
-            vm_config.boot_args =
-                format!("{} elastos.capsule_args={}", vm_config.boot_args, encoded);
+        // Pass the typed capsule arguments to the guest init.
+        if let Some(boot_arg) = Self::capsule_args_boot_arg(&capsule_args) {
+            vm_config.boot_args = format!("{} {}", vm_config.boot_args, boot_arg);
         }
 
         // Provider capsules expose their request/response bridge on a fixed
@@ -1174,9 +1202,13 @@ impl Supervisor {
                     capability_manager: cap_mgr.clone(),
                     pending_store: pending.clone(),
                     capsule_id: format!("vm-{}", name),
-                    principal_id: principal_id.clone(),
+                    principal_id: principal_id
+                        .map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
                     manifest_capabilities: manifest.resource_authority_bounds(),
                     data_dir: Some(self.data_dir.clone()),
+                    launch: None,
+                    model_token_ceiling: None,
+                    stop: None,
                 }),
                 _ => None,
             };
@@ -1206,7 +1238,7 @@ impl Supervisor {
         // Register provider route using guest IP (TCP bridge over TAP)
         let provider_route =
             if let Some(guest_ip) = vm.config.network.as_ref().map(|n| n.guest_ip.clone()) {
-                self.register_provider_route(name, provides.as_deref(), &guest_ip, launch_config)
+                self.register_provider_route(name, provides.as_deref(), &guest_ip, guest_payload)
                     .await
             } else {
                 None
@@ -1547,6 +1579,7 @@ impl Supervisor {
         let collaboration_presence_product_port = self.collaboration_presence_product_port.clone();
         let collaboration_discovery_service = self.collaboration_discovery_service.clone();
         let carrier_endpoint = self.carrier_endpoint.clone();
+        let capability_manager = self.capability_manager.clone();
 
         let task = tokio::spawn({
             let listen_addr = listen_addr.clone();
@@ -1558,6 +1591,7 @@ impl Supervisor {
                         &listen_addr,
                         Some(registry),
                         crate::api::gateway::GatewayCollaborationContext {
+                            capability_manager,
                             chat_product_port: collaboration_chat_product_port,
                             presence_product_port: collaboration_presence_product_port,
                             discovery_service: collaboration_discovery_service,
@@ -1666,6 +1700,182 @@ mod tests {
         }
     }
 
+    /// R6-1 row r2: a defensive TYPE pin, not a live HTTP test. Nothing in
+    /// production deserialises `SupervisorRequest`; the wire type is
+    /// `LaunchCapsuleInput`, which already refuses `principal_id` and
+    /// `home_token`. `BridgePrincipal` has no `Deserialize` and no `Default`
+    /// constructor, so the field must be skipped: a request that deserialises
+    /// carries no principal.
+    #[test]
+    fn r6_a_deserialised_launch_capsule_request_carries_no_principal() {
+        let req: SupervisorRequest = serde_json::from_value(serde_json::json!({
+            "op": "launch_capsule",
+            "name": "x",
+            "principal_id": "person:local:abc"
+        }))
+        .unwrap();
+        match req {
+            SupervisorRequest::LaunchCapsule { principal_id, .. } => {
+                assert!(
+                    principal_id.is_none(),
+                    "a deserialised request cannot mint a bridge principal"
+                );
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// a5 (R6-2a): the guest boot arg `elastos.capsule_args=` is built from the
+    /// typed field. The expected value is independent: base64 of `--demo` and
+    /// `a b` joined by a newline. The source pin shows the VM path calls the
+    /// builder with the typed parameter.
+    #[test]
+    fn r6_2a_the_capsule_args_boot_arg_is_built_from_the_typed_field() {
+        assert_eq!(
+            Supervisor::capsule_args_boot_arg(&["--demo".to_string(), "a b".to_string()]),
+            Some("elastos.capsule_args=LS1kZW1vCmEgYg==".to_string())
+        );
+        assert_eq!(Supervisor::capsule_args_boot_arg(&[]), None);
+
+        let production = include_str!("supervisor.rs");
+        let end = production.find("\nmod tests {").unwrap();
+        assert_eq!(
+            production[..end]
+                .matches("capsule_args_boot_arg(&capsule_args)")
+                .count(),
+            1,
+            "the VM path builds the guest boot arg from the typed parameter"
+        );
+    }
+
+    /// Amendment row S(b): a stored agent's principal sent straight to the
+    /// supervisor is refused by name, before any manifest is read, so no
+    /// bridge and no VM is made.
+    #[tokio::test]
+    async fn a_stored_agents_principal_launches_no_vm() {
+        if !crate::agents::build_allows() {
+            return;
+        }
+        let data_dir = tempfile::tempdir().unwrap();
+        let supervisor = Supervisor::new(
+            data_dir.path().to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules: std::collections::HashMap::new(),
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let error = supervisor
+            .launch_capsule(
+                "not-installed",
+                serde_json::json!({}),
+                false,
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(agent)),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "a stored agent's principal reaches only a launch that admitted it: \
+             agent:v2:0123456789abcdef0123456789abcdef"
+        );
+        assert!(
+            supervisor.running.read().await.is_empty(),
+            "no VM was recorded"
+        );
+    }
+
+    /// S5 part 2 row E (blocker evidence, no production change): a stored
+    /// agent's own principal reaches no VM launch. This is why row 4 on
+    /// route 3 has no agent actor to test. The capsule this row drives
+    /// declares no agent, so removing the principal refusal leaves a launch
+    /// that reaches the VM gates and the row fails at its own literal, not at
+    /// the manifest refusal (that rule has its own row below). Like the rows
+    /// above, it runs only in a build that carries agents (in another, no
+    /// agent exists), and it does not name the cargo feature, which is read
+    /// in one place only (`agents::build_allows`).
+    #[tokio::test]
+    async fn a_vm_launch_refuses_a_stored_agents_principal() {
+        let Some((_home, agents)) =
+            crate::agents::tests::home_with_agents_if_built(1, "bafkreia5probe")
+        else {
+            assert!(!crate::agents::build_allows());
+            return;
+        };
+        let agent = agents.into_iter().next().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let capsule_dir = data_dir.join("capsules/plain-vm-test");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-plain-vm-test\n").unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "plain-vm-test",
+                "version": "0.1.0",
+                "role": "app",
+                "type": "microvm",
+                "entrypoint": "rootfs.ext4"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "plain-vm-test".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-plain-vm-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+
+        // The stored agent's own principal is refused before any manifest is
+        // read, whatever the manifest declares.
+        let error = supervisor
+            .launch_capsule(
+                "plain-vm-test",
+                serde_json::json!({}),
+                false,
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    agent.as_str(),
+                )),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("a stored agent's principal reaches only a launch that admitted it: {agent}")
+        );
+        assert!(
+            supervisor.running.read().await.is_empty(),
+            "no VM was recorded"
+        );
+    }
+
     #[tokio::test]
     async fn test_launch_capsule_rejects_principal_for_provider_role() {
         let temp = tempfile::tempdir().unwrap();
@@ -1692,6 +1902,7 @@ mod tests {
         capsules.insert(
             "provider-test".to_string(),
             CapsuleEntry {
+                extra: Default::default(),
                 cid: "bafy-provider-test".to_string(),
                 sha256: String::new(),
                 size: 0,
@@ -1703,6 +1914,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -1715,7 +1927,11 @@ mod tests {
             .launch_capsule(
                 "provider-test",
                 serde_json::json!({}),
-                Some("person:local:alice".to_string()),
+                false,
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    "person:local:alice",
+                )),
             )
             .await
             .unwrap_err();
@@ -1723,6 +1939,163 @@ mod tests {
         assert!(err
             .to_string()
             .contains("principal launch grants are only valid for shell-launchable capsules"));
+    }
+
+    /// The S5 rows review's Low: a shell-launchable VM capsule whose manifest
+    /// declares an agent starts nothing, and the launcher's principal never
+    /// reaches a bridge.
+    #[tokio::test]
+    async fn a_vm_manifest_that_declares_an_agent_launches_no_vm() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let capsule_dir = data_dir.join("capsules/agent-vm-test");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-agent-vm-test\n").unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "agent-vm-test",
+                "version": "0.1.0",
+                "role": "app",
+                "type": "microvm",
+                "entrypoint": "rootfs.ext4",
+                "agent": {"kind": "agent"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "agent-vm-test".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-agent-vm-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+
+        let err = supervisor
+            .launch_capsule(
+                "agent-vm-test",
+                serde_json::json!({}),
+                false,
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    "person:local:alice",
+                )),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), crate::agent_admission::NO_VM_AGENT);
+        assert!(
+            supervisor.running.read().await.is_empty(),
+            "no VM was recorded"
+        );
+    }
+
+    /// G3a-2 (r4 §2; facts §5.3): the supervisor's own pre-gate launch, driven
+    /// directly with a person principal and an agent-shaped guest payload,
+    /// reaches the release's microVM gate as the person. Nothing here needs
+    /// KVM: `microvm_unavailable` fires before the KVM check. The payload's
+    /// agent id is a valid stored-agent-shaped id, so the plant that takes the
+    /// principal from it (the agents feature on) turns this row red at
+    /// `UNADMITTED_AGENT_PRINCIPAL`; with the feature off that refusal is a
+    /// no-op and the row still observes the gate.
+    #[tokio::test]
+    async fn r6_2b_a_person_launch_with_an_agent_shaped_payload_reaches_the_microvm_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let capsule_dir = data_dir.join("capsules/plain-vm-test");
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-plain-vm-test\n").unwrap();
+        std::fs::write(
+            capsule_dir.join("capsule.json"),
+            serde_json::json!({
+                "schema": "elastos.capsule/v1",
+                "name": "plain-vm-test",
+                "version": "0.1.0",
+                "role": "app",
+                "type": "microvm",
+                "entrypoint": "rootfs.ext4"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "plain-vm-test".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-plain-vm-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            data_dir.to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        assert!(crate::auth::validate_agent_id(agent).is_ok());
+        let error = supervisor
+            .launch_capsule(
+                "plain-vm-test",
+                serde_json::json!({
+                    "agent_id": agent,
+                    "agent": {"kind": "agent"},
+                    "principal": {"id": agent}
+                }),
+                false,
+                Vec::new(),
+                Some(crate::resource_bridge::BridgePrincipal::for_test(
+                    "person:local:alice",
+                )),
+            )
+            .await
+            .unwrap_err();
+
+        let text = error.to_string();
+        assert!(
+            text.starts_with("microVM capsules are not available on "),
+            "the person passes the agent gate: {text}"
+        );
+        assert!(
+            text.contains(". Cannot launch capsule 'plain-vm-test'."),
+            "{text}"
+        );
+        assert!(
+            supervisor.running.read().await.is_empty(),
+            "no VM was recorded"
+        );
     }
 
     #[test]
@@ -1756,7 +2129,11 @@ mod tests {
         }
         let bytes = archive.into_inner().unwrap().finish().unwrap();
 
-        for mismatch in [true, false] {
+        for (mismatch, plant) in [
+            (true, None),
+            (false, Some(RecordPlant::Link)),
+            (false, Some(RecordPlant::Folder)),
+        ] {
             let temp = tempfile::tempdir().unwrap();
             let data = temp.path();
             let (server, serving, mut info) =
@@ -1787,6 +2164,9 @@ mod tests {
             std::fs::write(&registry_path, &registry_bytes).unwrap();
             let supervisor = Supervisor::new(data.to_path_buf(), manifest);
             let dest = data.join("capsules/chat-room");
+            if let Some(plant) = plant {
+                plant_at_record(data, &dest, plant);
+            }
 
             let result =
                 crate::setup::ensure_capsule_component_for_home_launch(data, "chat-room").await;
@@ -1820,6 +2200,8 @@ mod tests {
                         .trim(),
                     hex::encode(sha2::Sha256::digest(&bytes))
                 );
+                let files = ["browser/index.html", "capsule.json"];
+                assert_install_over(data, &dest, plant.unwrap(), &files);
                 // A second open uses the verified package even with Carrier stopped.
                 let ensure =
                     crate::setup::ensure_capsule_component_for_home_launch(data, "chat-room")
@@ -1829,6 +2211,149 @@ mod tests {
                 assert_eq!(supervisor.ensure_capsule("chat-room").await.unwrap(), dest);
             }
         }
+    }
+
+    /// `dir` holds exactly the archive's `files` and the two install receipts,
+    /// and the record beside it holds the CID a launch's walk of `dir` gives.
+    fn assert_install_cid_names(dir: &Path, files: &[&str]) -> String {
+        fn listed(dir: &Path, prefix: &str, found: &mut Vec<String>) {
+            for item in std::fs::read_dir(dir).unwrap().map(Result::unwrap) {
+                let path = format!("{prefix}{}", item.file_name().to_str().unwrap());
+                if item.file_type().unwrap().is_dir() {
+                    listed(&item.path(), &format!("{path}/"), found);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        listed(dir, "", &mut found);
+        found.sort_unstable();
+        let mut expected = [CACHED_ARTIFACT_SHA_FILE, CACHED_CID_FILE].to_vec();
+        expected.extend_from_slice(files);
+        assert_eq!(
+            found, expected,
+            "the folder holds only what the install wrote"
+        );
+        let walked = crate::agent_admission::walk_launch(dir).unwrap().bundle_cid;
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        let recorded = std::fs::read_to_string(record).expect("the install wrote no record");
+        assert_eq!(recorded.trim(), walked);
+        walked
+    }
+
+    /// What a test puts at the install CID record path before an install.
+    #[derive(Clone, Copy)]
+    enum RecordPlant {
+        /// A link to a sentinel file outside `capsules/`.
+        Link,
+        /// A folder, which the rename of a record file cannot replace.
+        Folder,
+    }
+
+    fn plant_at_record(data: &Path, dir: &Path, plant: RecordPlant) {
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&record);
+        match plant {
+            RecordPlant::Link => {
+                std::fs::write(data.join("sentinel"), b"sentinel").unwrap();
+                std::os::unix::fs::symlink(data.join("sentinel"), &record).unwrap();
+            }
+            RecordPlant::Folder => std::fs::create_dir_all(record.join("kept")).unwrap(),
+        }
+    }
+
+    /// After an install over `plant`, only one entry with the record's name is
+    /// beside `dir`. A link kept its sentinel's bytes and is now a regular
+    /// record of the walk; a folder is unchanged, so the install has no record.
+    fn assert_install_over(data: &Path, dir: &Path, plant: RecordPlant, files: &[&str]) {
+        let record = crate::setup::install_cid_record(dir).unwrap();
+        let name = record.file_name().unwrap().to_str().unwrap();
+        let beside: Vec<String> = std::fs::read_dir(record.parent().unwrap())
+            .unwrap()
+            .map(|item| item.unwrap().file_name().into_string().unwrap())
+            .filter(|item| item.starts_with(name))
+            .collect();
+        assert_eq!(beside, [name], "the install left a partial record");
+        let kind = std::fs::symlink_metadata(&record).unwrap().file_type();
+        match plant {
+            RecordPlant::Link => {
+                assert_eq!(
+                    std::fs::read(data.join("sentinel")).unwrap(),
+                    b"sentinel",
+                    "the record write followed the link"
+                );
+                assert!(kind.is_file(), "the record is not a regular file");
+                assert_install_cid_names(dir, files);
+            }
+            RecordPlant::Folder => {
+                assert!(kind.is_dir(), "the failed write replaced the folder");
+                let kept: Vec<_> = std::fs::read_dir(&record).unwrap().collect();
+                assert_eq!(kept.len(), 1, "the failed write changed the folder");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn capsule_install_records_its_walk_cid_and_a_reinstall_updates_it() {
+        let capsule = include_bytes!("../../../../capsules/chat-room/capsule.json");
+        let data = tempfile::tempdir().unwrap();
+        let cache = data.path().join("capsules/chat-room");
+        let mut recorded = Vec::new();
+        for (page, plant) in [
+            (&b"first"[..], None),
+            (&b"second"[..], None),
+            (&b"third"[..], Some(RecordPlant::Link)),
+            (&b"fourth"[..], Some(RecordPlant::Folder)),
+        ] {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            let mut builder = tar::Builder::new(encoder);
+            for (path, bytes) in [("capsule.json", &capsule[..]), ("browser/index.html", page)] {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder.append_data(&mut header, path, bytes).unwrap();
+            }
+            let archive = builder.into_inner().unwrap().finish().unwrap();
+            let entry: CapsuleEntry = serde_json::from_value(serde_json::json!({
+                "cid": TEST_SUPERVISOR_CID, "size": archive.len(),
+                "sha256": hex::encode(sha2::Sha256::digest(&archive)),
+            }))
+            .unwrap();
+            let registry = ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: HashMap::new(),
+                capsules: HashMap::from([("chat-room".to_string(), entry)]),
+                profiles: HashMap::new(),
+            };
+            let mut supervisor = Supervisor::new(data.path().to_path_buf(), registry);
+            supervisor.set_provider_registry(
+                registry_with_content_provider(serde_json::json!({"status": "ok",
+                    "data": {"data": base64::engine::general_purpose::STANDARD.encode(&archive)}}))
+                .await,
+            );
+            if let Some(plant) = plant {
+                plant_at_record(data.path(), &cache, plant);
+            }
+            assert_eq!(supervisor.ensure_capsule("chat-room").await.unwrap(), cache);
+            assert_eq!(
+                std::fs::read(cache.join("browser/index.html")).unwrap(),
+                page
+            );
+            let files = ["browser/index.html", "capsule.json"];
+            match plant {
+                Some(plant) => assert_install_over(data.path(), &cache, plant, &files),
+                None => recorded.push(assert_install_cid_names(&cache, &files)),
+            }
+        }
+        assert_ne!(
+            recorded[0], recorded[1],
+            "the reinstall kept the first record"
+        );
     }
 
     #[test]
@@ -1998,6 +2523,7 @@ mod tests {
         Supervisor::new(
             tempfile::tempdir().unwrap().keep(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -2011,6 +2537,7 @@ mod tests {
         let mut platforms = std::collections::HashMap::new();
         platforms.insert(crate::setup::detect_platform(), platform_info);
         Component {
+            extra: Default::default(),
             version: None,
             install_path: Some(install_path.to_string()),
             repository: None,
@@ -2032,6 +2559,131 @@ mod tests {
             "entrypoint": "rootfs.ext4",
         }))
         .unwrap()
+    }
+
+    /// A capsule folder the supervisor already holds. With a capability alone,
+    /// the loaded manifest's ceiling is that capability, for any action (the
+    /// control). With asks beside the capability, and with asks alone, the
+    /// ceiling is the asks and nothing else: the action asked for passes and
+    /// another on the same resource is refused, although the capability
+    /// beside the asks names no action. The bounds function decides it,
+    /// whatever else the manifest holds.
+    #[tokio::test]
+    async fn a_loaded_manifest_with_asks_is_held_to_its_asks() {
+        let temp = tempfile::tempdir().unwrap();
+        let name = "asks-fixture";
+        let capsule_dir = temp.path().join("capsules").join(name);
+        std::fs::create_dir_all(&capsule_dir).unwrap();
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-asks-test\n").unwrap();
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            name.to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-asks-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            temp.path().to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let capability = serde_json::json!(["elastos://did/*"]);
+        let asks = serde_json::json!([{"resource": "elastos://did/*", "actions": ["read"]}]);
+        let mut ceilings = Vec::new();
+        for (capabilities, asks) in [
+            (capability.clone(), serde_json::json!([])),
+            (capability, asks.clone()),
+            (serde_json::json!([]), asks),
+        ] {
+            let manifest = serde_json::json!({
+                "schema": "elastos.capsule/v1", "name": name, "version": "0.1.0",
+                "role": "app", "type": "data", "entrypoint": "index.html",
+                "capabilities": capabilities, "asks": asks,
+            });
+            std::fs::write(
+                capsule_dir.join("capsule.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let (_, loaded) = supervisor.load_capsule_manifest(name).await.unwrap();
+            let ceiling = loaded.resource_authority_bounds();
+            let allowed = |action: &str| {
+                let resource = "elastos://did/key";
+                crate::resource_bridge::manifest_allows_resource(
+                    &ceiling, resource, action, None, None,
+                )
+            };
+            let shown: Vec<String> = ceiling.iter().map(ToString::to_string).collect();
+            ceilings.push((shown, allowed("read"), allowed("write")));
+        }
+        let asked = vec!["elastos://did/* [read]".to_string()];
+        assert_eq!(
+            ceilings,
+            vec![
+                (vec!["elastos://did/*".to_string()], true, true),
+                (asked.clone(), true, false),
+                (asked, true, false),
+            ]
+        );
+    }
+
+    /// The supervisor's launch of a capsule it already holds stops at its
+    /// manifest parse when the manifest pins a requirement. The serde text is
+    /// under the context line, so the whole chain is read (`{:#}`).
+    #[tokio::test]
+    async fn the_supervisors_launch_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        use crate::runtime::tests::{write_fixture_capsule, PINNED_MANIFEST};
+        let temp = tempfile::tempdir().unwrap();
+        let capsule_dir = write_fixture_capsule(&temp.path().join("capsules"), PINNED_MANIFEST);
+        std::fs::write(capsule_dir.join(CACHED_CID_FILE), "bafy-pinned-test\n").unwrap();
+        let mut capsules = std::collections::HashMap::new();
+        capsules.insert(
+            "pinned-fixture".to_string(),
+            CapsuleEntry {
+                extra: Default::default(),
+                cid: "bafy-pinned-test".to_string(),
+                sha256: String::new(),
+                size: 0,
+                repository: None,
+                platforms: vec![],
+            },
+        );
+        let supervisor = Supervisor::new(
+            temp.path().to_path_buf(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: std::collections::HashMap::new(),
+                capsules,
+                profiles: std::collections::HashMap::new(),
+            },
+        );
+        let error = supervisor
+            .launch_capsule(
+                "pinned-fixture",
+                serde_json::json!({}),
+                false,
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap_err();
+        let chain = format!("{error:#}");
+        let expected = "parsing capsule.json for 'pinned-fixture': unknown field `cid`";
+        assert!(chain.starts_with(expected), "{chain}");
+        assert!(supervisor.running.read().await.is_empty());
     }
 
     fn dead_vm_capsule(handle: &str, route: ProviderRoute) -> RunningCapsule {
@@ -2128,6 +2780,7 @@ mod tests {
             "vmlinux".to_string(),
             make_external_component(
                 PlatformInfo {
+                    extra: Default::default(),
                     url: None,
                     cid: None,
                     release_path: None,
@@ -2147,6 +2800,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external,
@@ -2185,6 +2839,7 @@ mod tests {
             "vmlinux".to_string(),
             make_external_component(
                 PlatformInfo {
+                    extra: Default::default(),
                     url: None,
                     cid: None,
                     release_path: None,
@@ -2204,6 +2859,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external,
@@ -2230,6 +2886,7 @@ mod tests {
             "crosvm".to_string(),
             make_external_component(
                 PlatformInfo {
+                    extra: Default::default(),
                     url: None,
                     cid: None,
                     release_path: None,
@@ -2249,6 +2906,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external,
@@ -2317,6 +2975,7 @@ mod tests {
         capsules.insert(
             "carrier-service".to_string(),
             CapsuleEntry {
+                extra: Default::default(),
                 cid: "bafy-test-cid".to_string(),
                 sha256: "test-artifact".to_string(),
                 size: 0,
@@ -2328,6 +2987,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -2363,6 +3023,7 @@ mod tests {
         capsules.insert(
             "carrier-service".to_string(),
             CapsuleEntry {
+                extra: Default::default(),
                 cid: "bafy-test-cid".to_string(),
                 sha256: "test-artifact".to_string(),
                 size: 0,
@@ -2374,6 +3035,7 @@ mod tests {
         let supervisor = Supervisor::new(
             data_dir.to_path_buf(),
             ComponentsManifest {
+                extra: Default::default(),
                 model_catalog: None,
                 collaboration_network: None,
                 external: std::collections::HashMap::new(),
@@ -2490,6 +3152,7 @@ mod tests {
         .unwrap();
         let data = tempfile::tempdir().unwrap().keep();
         let registry = ComponentsManifest {
+            extra: Default::default(),
             model_catalog: None,
             collaboration_network: None,
             external: std::collections::HashMap::new(),

@@ -212,17 +212,29 @@ fn checked_bundle_checks_the_manifest_once() {
         2,
         "check_manifest is not defined once and called once"
     );
-    let seam = library_item(&code, "pub fn checked_bundle_observed(");
+    // The seam is the walk under a budget; the unbudgeted entry point is that
+    // same function with no limit, and does nothing of its own.
+    let seam = library_item(&code, "pub fn checked_bundle_within_observed(");
     assert_eq!(
         seam.matches("check_manifest(").count(),
         1,
         "the seam does not check the manifest:\n{seam}"
     );
+    let unbudgeted = library_item(&code, "pub fn checked_bundle_observed(");
+    assert!(
+        unbudgeted.contains(
+            "{\n    checked_bundle_within_observed(bundle, Budget::UNLIMITED, observe)\n}"
+        ),
+        "checked_bundle_observed is not the seam with no limit:\n{unbudgeted}"
+    );
+    // The Runtime's parse and its validate() are both inside the Runtime's
+    // own reader, which the library calls once; it makes neither call itself.
+    assert_eq!(code.matches("PinnedManifest::parse(").count(), 1);
     for runtime_check in ["serde_json::from_slice", ".validate()"] {
         assert_eq!(
             code.matches(runtime_check).count(),
-            1,
-            "{runtime_check} is not in one place"
+            0,
+            "the library makes the Runtime's check {runtime_check} itself"
         );
     }
 }
@@ -235,9 +247,12 @@ fn checked_bundle_fields_are_private() {
     // no constructor, From, Default or Deserialize makes one with another lab
     // CID or other entries, and nothing hands out a &mut to it or its parts.
     let code = library_code();
-    assert!(
-        code.contains("#![forbid(unsafe_code)]"),
-        "the crate does not forbid unsafe code"
+    // The library is two sources read together (the bundle identity crate
+    // and this one): each must carry the line, so the count is two.
+    assert_eq!(
+        code.matches("#![forbid(unsafe_code)]").count(),
+        2,
+        "each of the two crates forbids unsafe code"
     );
 
     let definition = library_item(&code, "pub struct CheckedBundle {");
@@ -278,7 +293,7 @@ fn checked_bundle_fields_are_private() {
                 .any(|word| code[..*at].ends_with(word))
         })
         .count();
-    let seam = library_item(&code, "pub fn checked_bundle_observed(");
+    let seam = library_item(&code, "pub fn checked_bundle_within_observed(");
     assert_eq!(
         (builds, seam.matches("CheckedBundle {").count()),
         (1, 1),

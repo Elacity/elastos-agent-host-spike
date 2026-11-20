@@ -8,7 +8,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    links.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));\n",
           "new": ""
         }
@@ -24,12 +24,12 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        put_length_delimited(&mut pb_link, 2, link.name.as_bytes());\n",
           "new": "        pb_link.push((2 << 3) | 2);\n        pb_link.extend_from_slice(link.name.as_bytes());\n"
         },
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        pb_link.push(3 << 3);\n        put_varint(&mut pb_link, link.tsize);\n",
           "new": ""
         }
@@ -45,7 +45,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);\n    block\n",
           "new": "    put_length_delimited(&mut block, 1, &[1 << 3, DIRECTORY_TYPE]);\n    block.extend_from_slice(\n        &std::time::SystemTime::now()\n            .duration_since(std::time::UNIX_EPOCH)\n            .unwrap_or_default()\n            .as_nanos()\n            .to_be_bytes(),\n    );\n    block\n"
         }
@@ -61,7 +61,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        write!(f, \"{}\", printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0)))\n",
           "new": "        write!(f, \"{}\", &printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0))[1..])\n"
         }
@@ -104,14 +104,14 @@
     },
     {
       "id": "F-CI1g",
-      "title": "parse capsule.json as plain JSON instead of the Runtime type when the Runtime type refuses it",
+      "title": "name a bundle whose capsule.json the Runtime type refuses to parse",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let manifest: CapsuleManifest = serde_json::from_slice(bytes)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n",
-          "new": "    let Ok(manifest) = serde_json::from_slice::<CapsuleManifest>(bytes) else {\n        serde_json::from_slice::<serde_json::Value>(bytes)\n            .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n        return Ok((false, String::new()));\n    };\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {\n",
+          "new": "    if matches!(\n        PinnedManifest::parse(bytes),\n        Err(PinnedManifestError::Unparsed(_))\n    ) {\n        return Ok((false, String::new(), String::new()));\n    }\n    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {\n"
         }
       ],
       "tests": [
@@ -121,14 +121,14 @@
     },
     {
       "id": "F-CI1h",
-      "title": "skip the Runtime's validate() call",
+      "title": "name a bundle whose capsule.json fails the Runtime's validate()",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    manifest.validate().map_err(Refusal::ManifestInvalid)?;\n",
-          "new": ""
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {\n",
+          "new": "    if matches!(\n        PinnedManifest::parse(bytes),\n        Err(PinnedManifestError::Invalid(_))\n    ) {\n        return Ok((false, String::new(), String::new()));\n    }\n    let manifest = PinnedManifest::parse(bytes).map_err(|error| match error {\n"
         }
       ],
       "tests": [
@@ -142,12 +142,12 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "            file_type: item.file_type(),\n",
           "new": "            file_type: FileType::from_raw_mode(\n                rustix::fs::statat(folder, name, rustix::fs::AtFlags::empty())\n                    .map_err(|error| unreadable(prefix, error))?\n                    .st_mode,\n            ),\n"
         },
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;\n",
           "new": "    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;\n"
         }
@@ -191,21 +191,21 @@
     },
     {
       "id": "F-CI1l",
-      "title": "name only the manifest and its entrypoint, leaving browser/app.js out",
+      "title": "name only the manifest and its entrypoint, leaving browser/app.js out, and replace the manifest asks array with an empty array",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entrypoint = serde_json::from_slice::<CapsuleManifest>(&manifest.content)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?\n        .entrypoint;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .collect();\n    encode_entries(&entries)\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    let entrypoint = {\n        let text = String::from_utf8_lossy(&manifest.content).into_owned();\n        let key = \"\\\"entrypoint\\\": \\\"\";\n        let at = text.find(key).expect(\"an entrypoint\");\n        let start = at + key.len();\n        let end = text[start..].find('\"').expect(\"an entrypoint\");\n        text[start..start + end].to_owned()\n    };\n    fn without_asks(bytes: &[u8]) -> Vec<u8> {\n        let Ok(text) = std::str::from_utf8(bytes) else {\n            return bytes.to_vec();\n        };\n        let key = \"\\\"asks\\\"\";\n        let Some(key_at) = text.find(key) else {\n            return bytes.to_vec();\n        };\n        let after_key = key_at + key.len();\n        let Some(rel) = text[after_key..].find('[') else {\n            return bytes.to_vec();\n        };\n        let open = after_key + rel;\n        let mut depth = 0usize;\n        let mut end = None;\n        for (index, ch) in text[open..].char_indices() {\n            match ch {\n                '[' => depth += 1,\n                ']' => {\n                    depth -= 1;\n                    if depth == 0 {\n                        end = Some(open + index);\n                        break;\n                    }\n                }\n                _ => {}\n            }\n        }\n        let Some(end) = end else {\n            return bytes.to_vec();\n        };\n        let mut out = String::new();\n        out.push_str(&text[..open]);\n        out.push_str(\"[]\");\n        out.push_str(&text[end + 1..]);\n        out.into_bytes()\n    }\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path == MANIFEST_FILE || entry.path == entrypoint)\n        .map(|mut entry| {\n            if entry.path == MANIFEST_FILE {\n                entry.content = without_asks(&entry.content);\n            }\n            entry\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
         "lab_cid_matches_the_pinned_value_for_each_fixture",
         "one_byte_change_in_any_payload_file_changes_the_lab_cid",
         "adding_or_removing_a_payload_file_changes_the_lab_cid",
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "three_kinds_share_the_package_rules"
       ]
     },
@@ -216,7 +216,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        let kind = match entry_kind(file_type) {\n",
           "new": "        if path == MANIFEST_FILE {\n            let content = std::fs::read(bundle.join(&path)).map_err(|error| unreadable(&path, error))?;\n            entries.push(BundleEntry { path, content });\n            continue;\n        }\n        let kind = match entry_kind(file_type) {\n"
         }
@@ -233,7 +233,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "            EntryKind::Special(kind) => return Err(Refusal::NotRegularFile { path, kind }),\n",
           "new": "            EntryKind::Special(_) => continue,\n"
         }
@@ -250,7 +250,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    match name.to_str() {\n",
           "new": "    match Some(name.to_string_lossy()).as_deref() {\n"
         }
@@ -266,7 +266,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        put_length_delimited(&mut pb_link, 2, link.name.as_bytes());\n",
           "new": "        pb_link.push((2 << 3) | 2);\n        pb_link.extend_from_slice(link.name.as_bytes());\n"
         }
@@ -282,7 +282,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        pb_link.push(3 << 3);\n        put_varint(&mut pb_link, link.tsize);\n",
           "new": ""
         }
@@ -298,7 +298,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "            Some(Child::File { .. }) => Err(Refusal::DuplicatePath {\n                path: path.to_owned(),\n            }),\n",
           "new": "            Some(Child::File { .. }) => {\n                directory.children.push(((*name).to_owned(), file));\n                Ok(())\n            }\n"
         }
@@ -314,7 +314,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        let handle = open_checked(folder.handle.as_fd(), name.as_c_str(), kind, &path)?;\n",
           "new": "        let handle = match open_checked(folder.handle.as_fd(), name.as_c_str(), kind, &path) {\n            Err(_) if kind == EntryKind::Directory => continue,\n            result => result?,\n        };\n"
         }
@@ -330,7 +330,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n",
           "new": "        .find(|entry| entry.path.ends_with(MANIFEST_FILE))\n        .ok_or(Refusal::NoManifest)?;\n"
         }
@@ -346,7 +346,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    } else if file_type.is_file() {\n",
           "new": "    } else if !file_type.is_symlink() {\n"
         }
@@ -364,7 +364,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;\n",
           "new": "    let flags = OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC;\n"
         }
@@ -381,7 +381,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;\n",
           "new": "    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;\n"
         }
@@ -397,7 +397,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let stat = fstat(&handle).map_err(|error| unreadable(path, error))?;\n    match entry_kind(FileType::from_raw_mode(stat.st_mode)) {\n        EntryKind::Special(kind) => Err(Refusal::NotRegularFile {\n            path: shown(path),\n            kind,\n        }),\n        opened if opened != listed => Err(Refusal::Changed { path: shown(path) }),\n        _ => Ok(handle),\n    }\n",
           "new": "    Ok(handle)\n"
         }
@@ -414,8 +414,8 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            let content = read_file(handle, &path)?;\n",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "            let content = read_file(handle, &path, tally)?;\n",
           "new": "            let content = std::fs::read(bundle.join(&path)).map_err(|error| unreadable(&path, error))?;\n"
         }
       ],
@@ -431,9 +431,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            let listing = list_folder(handle.as_fd(), &path)?;\n",
-          "new": "            let by_path = File::open(bundle.join(&path)).map_err(|error| unreadable(&path, error))?;\n            let listing = list_folder(by_path.as_fd(), &path)?;\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "            let listing = list_folder(handle.as_fd(), &path, tally)?;\n",
+          "new": "            let by_path = File::open(bundle.join(&path)).map_err(|error| unreadable(&path, error))?;\n            let listing = list_folder(by_path.as_fd(), &path, tally)?;\n"
         }
       ],
       "tests": [
@@ -448,7 +448,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        let handle = open_checked(folder.handle.as_fd(), name.as_c_str(), kind, &path)?;\n",
           "new": "        let handle = open_checked(CWD, bundle.join(&path).as_path(), kind, &path)?;\n"
         }
@@ -464,7 +464,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        opened if opened != listed => Err(Refusal::Changed { path: shown(path) }),\n",
           "new": ""
         }
@@ -480,7 +480,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        if matches!(name.to_bytes(), b\".\" | b\"..\") {\n            continue;\n        }\n",
           "new": ""
         }
@@ -496,7 +496,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "pub fn lab_cid(bundle: &Path) -> Result<LabCid, Refusal> {\n    lab_cid_observed(bundle, |_, _| {})\n}\n",
           "new": "pub fn lab_cid(bundle: &Path) -> Result<LabCid, Refusal> {\n    let mut entries = Vec::new();\n    let mut folders = vec![(bundle.to_path_buf(), String::new())];\n    while let Some((folder, prefix)) = folders.pop() {\n        for item in std::fs::read_dir(&folder).map_err(|error| unreadable(&prefix, error))? {\n            let item = item.map_err(|error| unreadable(&prefix, error))?;\n            let path = entry_path(&prefix, &item.file_name())?;\n            let file_type = std::fs::symlink_metadata(item.path())\n                .map_err(|error| unreadable(&path, error))?\n                .file_type();\n            if file_type.is_dir() {\n                folders.push((item.path(), path));\n            } else if file_type.is_file() {\n                let content = std::fs::read(item.path()).map_err(|error| unreadable(&path, error))?;\n                entries.push(BundleEntry { path, content });\n            } else {\n                return Err(Refusal::NotRegularFile { path, kind: \"special file\" });\n            }\n        }\n    }\n    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n}\n"
         }
@@ -513,7 +513,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    if errno == Errno::LOOP && listed == EntryKind::RegularFile {\n        Refusal::NotRegularFile {\n            path: shown(path),\n            kind: special_name(FileType::Symlink),\n        }\n    } else {\n        unreadable(path, errno)\n    }\n",
           "new": "    let _ = listed;\n    unreadable(path, errno)\n"
         }
@@ -529,7 +529,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    if errno == Errno::LOOP && listed == EntryKind::RegularFile {\n",
           "new": "    if errno == Errno::LOOP {\n"
         }
@@ -577,9 +577,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let entries = collect_entries(bundle, &mut observe)?;\n",
-          "new": "    let mut entries = collect_entries(bundle, &mut observe)?;\n    entries.extend(collect_entries(bundle.parent().unwrap_or(bundle), &mut observe)?);\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;\n",
+          "new": "    let mut entries = collect_entries(bundle, &mut observe, &mut Tally::new(budget))?;\n    entries.extend(collect_entries(\n        bundle.parent().unwrap_or(bundle),\n        &mut observe,\n        &mut Tally::new(budget),\n    )?);\n"
         }
       ],
       "tests": [
@@ -593,9 +593,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n",
-          "new": "            let mtime = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mtime;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mtime\"),\n                content: mtime.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "            let content = read_file(handle, &path, tally)?;\n            entries.push(BundleEntry { path, content });\n",
+          "new": "            let mtime = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mtime;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mtime\"),\n                content: mtime.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path, tally)?;\n            entries.push(BundleEntry { path, content });\n"
         }
       ],
       "tests": [
@@ -609,7 +609,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    if actual.0 != claimed_digits {\n        return Err(Refusal::NameMismatch {\n            actual,\n            claimed: claimed.to_owned(),\n        });\n    }\n",
           "new": "    let _ = (actual, claimed_digits);\n"
         }
@@ -619,7 +619,7 @@
         "one_byte_change_in_the_manifest_changes_the_lab_cid",
         "one_byte_change_in_any_payload_file_changes_the_lab_cid",
         "adding_or_removing_a_payload_file_changes_the_lab_cid",
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "checked_name_check_judges_the_checked_bytes",
         "checked_name_check_refuses_a_mismatch"
       ]
@@ -631,14 +631,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
-          "new": "    let cid = claimed\n        .strip_prefix('b')\n        .or(Some(claimed))\n        .and_then(decode_base32)\n"
-        },
-        {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if printed_cid(&cid) != claimed {\n        return Err(not_a_lab_cid());\n    }\n",
-          "new": "    if printed_cid(&cid).trim_start_matches('b') != claimed.trim_start_matches('b') {\n        return Err(not_a_lab_cid());\n    }\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    cid_form(claimed)\n        .or_else(|| cid_form(&format!(\"b{claimed}\")))\n        .ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -647,18 +642,18 @@
     },
     {
       "id": "F-CI3i",
-      "title": "leave asks.json out of the stream (it is still read)",
+      "title": "replace the manifest asks array with an empty array before the name; the manifest is still read",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
-          "new": "    let (wasm, name) = check_manifest(&manifest.content)?;\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .filter(|entry| entry.path != \"asks.json\")\n        .collect();\n    encode_entries(&entries)\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    encode_entries(&entries)\n",
+          "new": "    let (wasm, name, role) = check_manifest(&manifest.content)?;\n    fn without_asks(bytes: &[u8]) -> Vec<u8> {\n        let Ok(text) = std::str::from_utf8(bytes) else {\n            return bytes.to_vec();\n        };\n        let key = \"\\\"asks\\\"\";\n        let Some(key_at) = text.find(key) else {\n            return bytes.to_vec();\n        };\n        let after_key = key_at + key.len();\n        let Some(rel) = text[after_key..].find('[') else {\n            return bytes.to_vec();\n        };\n        let open = after_key + rel;\n        let mut depth = 0usize;\n        let mut end = None;\n        for (index, ch) in text[open..].char_indices() {\n            match ch {\n                '[' => depth += 1,\n                ']' => {\n                    depth -= 1;\n                    if depth == 0 {\n                        end = Some(open + index);\n                        break;\n                    }\n                }\n                _ => {}\n            }\n        }\n        let Some(end) = end else {\n            return bytes.to_vec();\n        };\n        let mut out = String::new();\n        out.push_str(&text[..open]);\n        out.push_str(\"[]\");\n        out.push_str(&text[end + 1..]);\n        out.into_bytes()\n    }\n    let entries: Vec<BundleEntry> = entries\n        .into_iter()\n        .map(|mut entry| {\n            if entry.path == MANIFEST_FILE {\n                entry.content = without_asks(&entry.content);\n            }\n            entry\n        })\n        .collect();\n    encode_entries(&entries)\n"
         }
       ],
       "tests": [
-        "one_byte_change_in_asks_json_changes_the_lab_cid",
+        "one_byte_change_in_a_manifest_ask_changes_the_lab_cid",
         "lab_cid_matches_the_pinned_value_for_each_fixture"
       ]
     },
@@ -669,9 +664,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n",
-          "new": "            let mode = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mode;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mode\"),\n                content: mode.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path)?;\n            entries.push(BundleEntry { path, content });\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "            let content = read_file(handle, &path, tally)?;\n            entries.push(BundleEntry { path, content });\n",
+          "new": "            let mode = fstat(&handle)\n                .map_err(|error| unreadable(&path, error))?\n                .st_mode;\n            entries.push(BundleEntry {\n                path: format!(\"{path}#mode\"),\n                content: mode.to_be_bytes().to_vec(),\n            });\n            let content = read_file(handle, &path, tally)?;\n            entries.push(BundleEntry { path, content });\n"
         }
       ],
       "tests": [
@@ -680,14 +675,14 @@
     },
     {
       "id": "F-CI3k",
-      "title": "check_name accepts any CID bytes that end in 32 bytes: a raw leaf's CID passes",
+      "title": "the form check lets through any 59-character text that starts with bafkrei, a raw leaf's CID among them",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if cid != cid_bytes(DAG_PB_CODEC, &root) {\n        return Err(not_a_lab_cid());\n    }\n",
-          "new": ""
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    cid_form(claimed)\n        .or_else(|| {\n            (claimed.len() == 59 && claimed.starts_with(\"bafkrei\")).then_some([0u8; 32])\n        })\n        .ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -701,9 +696,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
-          "new": "    let claimed: &str = &claimed\n        .chars()\n        .filter(|one| one.is_ascii_lowercase() || ('2'..='7').contains(one))\n        .collect::<String>();\n    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    let claimed: &str = &claimed\n        .chars()\n        .filter(|one| one.is_ascii_lowercase() || ('2'..='7').contains(one))\n        .collect::<String>();\n    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -717,9 +712,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n",
-          "new": "    let claimed: &str = &claimed.to_ascii_lowercase();\n    let cid = claimed\n        .strip_prefix('b')\n        .and_then(decode_base32)\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    let claimed: &str = &claimed.to_ascii_lowercase();\n    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -733,7 +728,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let actual = lab_cid(bundle)?;\n",
           "new": "    let actual = lab_cid(bundle).map_err(|_| Refusal::NameMismatch {\n        actual: LabCid([0; 32]),\n        claimed: claimed.to_owned(),\n    })?;\n"
         }
@@ -749,9 +744,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let actual = lab_cid(bundle)?;\n",
-          "new": "    let entries = collect_entries(bundle, &mut |_, _| {})?;\n    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    let actual = encode_entries(&entries)?;\n"
+          "new": "    let entries = collect_entries(bundle, &mut |_, _| {}, &mut Tally::new(Budget::UNLIMITED))?;\n    let manifest = entries\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    let actual = encode_entries(&entries)?;\n"
         }
       ],
       "tests": [
@@ -766,7 +761,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let claimed_digits = lab_cid_digits(claimed)?;\n    let actual = lab_cid(bundle)?;\n",
           "new": "    let actual = lab_cid(bundle)?;\n    let claimed_digits = lab_cid_digits(claimed)?;\n"
         }
@@ -820,7 +815,7 @@
           "new": "    let (wasm, name) = (false, String::new());\n    encode_entries(&entries)\n"
         },
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    Ok(checked_bundle_observed(bundle, observe)?.cid())\n",
           "new": "    let checked = checked_bundle_observed(bundle, observe)?;\n    let manifest = checked\n        .entries()\n        .iter()\n        .find(|entry| entry.path == MANIFEST_FILE)\n        .ok_or(Refusal::NoManifest)?;\n    check_manifest(&manifest.content)?;\n    Ok(checked.cid())\n"
         }
@@ -853,7 +848,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "impl CheckedBundle {\n",
           "new": "impl CheckedBundle {\n    pub fn new(cid: LabCid, entries: Vec<BundleEntry>) -> Self {\n        Self {\n            cid,\n            entries,\n            wasm: false,\n            name: String::new(),\n        }\n    }\n\n"
         }
@@ -869,7 +864,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "impl CheckedBundle {\n",
           "new": "impl CheckedBundle {\n    pub fn cid_mut(&mut self) -> &mut LabCid {\n        &mut self.cid\n    }\n\n"
         }
@@ -885,7 +880,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        let claimed_digits = lab_cid_digits(claimed)?;\n        compare_name(self.cid, claimed_digits, claimed)\n",
           "new": "        let manifest = self\n            .entries\n            .iter()\n            .find(|entry| entry.path == MANIFEST_FILE)\n            .ok_or(Refusal::NoManifest)?;\n        check_manifest(&manifest.content)?;\n        let claimed_digits = lab_cid_digits(claimed)?;\n        compare_name(self.cid, claimed_digits, claimed)\n"
         }
@@ -901,7 +896,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        compare_name(self.cid, claimed_digits, claimed)\n",
           "new": "        let _ = claimed_digits;\n        Ok(())\n"
         }
@@ -919,9 +914,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        let claimed_digits = lab_cid_digits(claimed)?;\n        compare_name(self.cid, claimed_digits, claimed)\n",
-          "new": "        let claimed_digits: [u8; 32] = decode_base32(claimed.strip_prefix('b').unwrap_or(claimed))\n            .and_then(|cid| cid.get(4..).and_then(|digest| digest.try_into().ok()))\n            .unwrap_or([0; 32]);\n        compare_name(self.cid, claimed_digits, claimed)\n"
+          "new": "        let claimed_digits: [u8; 32] = cid_form(claimed)\n            .or_else(|| cid_form(&format!(\"b{claimed}\")))\n            .unwrap_or([0; 32]);\n        compare_name(self.cid, claimed_digits, claimed)\n"
         }
       ],
       "tests": [
@@ -946,7 +941,7 @@
           "new": "        .map(|cid| CheckedBundle {\n            cid,\n            entries,\n            wasm,\n            name,\n            bundle: bundle.to_path_buf(),\n        })\n"
         },
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        compare_name(self.cid, claimed_digits, claimed)\n",
           "new": "        compare_name(lab_cid(&self.bundle)?, claimed_digits, claimed)\n"
         }
@@ -1406,7 +1401,7 @@
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "    let signature = key.sign(&digest).to_bytes();\n    Ok(NameSignature {\n",
-          "new": "    let signature = key.sign(&digest).to_bytes();\n    let manifest_path = bundle.join(MANIFEST_FILE);\n    let bytes = std::fs::read(&manifest_path).map_err(|error| unreadable(MANIFEST_FILE, error))?;\n    let mut manifest: CapsuleManifest = serde_json::from_slice(&bytes)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n    manifest.signature = Some(hex::encode(signature));\n    let rewritten = serde_json::to_vec_pretty(&manifest)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n    std::fs::write(&manifest_path, rewritten).map_err(|error| unreadable(MANIFEST_FILE, error))?;\n    Ok(NameSignature {\n"
+          "new": "    let signature = key.sign(&digest).to_bytes();\n    let manifest_path = bundle.join(MANIFEST_FILE);\n    let unreadable = |error: std::io::Error| Refusal::Unreadable {\n        path: MANIFEST_FILE.to_owned(),\n        reason: error.to_string(),\n    };\n    let bytes = std::fs::read(&manifest_path).map_err(unreadable)?;\n    let mut manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&bytes)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n    manifest.signature = Some(hex::encode(signature));\n    let rewritten = serde_json::to_vec_pretty(&manifest)\n        .map_err(|error| Refusal::ManifestUnparsed(error.to_string()))?;\n    std::fs::write(&manifest_path, rewritten).map_err(unreadable)?;\n    Ok(NameSignature {\n"
         }
       ],
       "tests": [
@@ -1463,14 +1458,14 @@
     },
     {
       "id": "F-CI13a",
-      "title": "the parse decodes the base32 itself, without the one claim check, so a raw leaf's CID parses",
+      "title": "the parse reads the claim itself, without the one claim check, so a raw leaf's CID parses",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        let digest = lab_cid_digits(printed)?;\n",
-          "new": "        let digest: [u8; 32] = printed\n            .strip_prefix('b')\n            .and_then(decode_base32)\n            .and_then(|cid| cid.get(4..).and_then(|digest| digest.try_into().ok()))\n            .ok_or_else(|| Refusal::NotALabCid {\n                claimed: printed.to_owned(),\n            })?;\n"
+          "new": "        let digest: [u8; 32] = cid_form(printed)\n            .or_else(|| {\n                (printed.len() == 59 && printed.starts_with(\"bafkrei\")).then_some([0u8; 32])\n            })\n            .ok_or_else(|| Refusal::NotALabCid {\n                claimed: printed.to_owned(),\n            })?;\n"
         }
       ],
       "tests": [
@@ -1485,7 +1480,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        Ok(LabCid(digest))\n",
           "new": "        let mut digest = digest;\n        digest.reverse();\n        Ok(LabCid(digest))\n"
         }
@@ -1501,7 +1496,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        Ok(LabCid(digest))\n",
           "new": "        Ok(LabCid([0; 32]))\n"
         }
@@ -1517,7 +1512,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "pub const MANIFEST_FILE: &str = \"capsule.json\";\n",
           "new": "pub async fn admit() {}\n\npub const MANIFEST_FILE: &str = \"capsule.json\";\n"
         }
@@ -1565,7 +1560,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "pub const MANIFEST_FILE: &str = \"capsule.json\";\n",
           "new": "#[rustfmt::skip]\npub async\nfn admit() {}\n\npub const MANIFEST_FILE: &str = \"capsule.json\";\n"
         }
@@ -2589,9 +2584,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    let wasm = manifest.capsule_type == CapsuleType::Wasm;\n",
-          "new": "    let wasm = manifest.capsule_type == CapsuleType::Wasm || true;\n"
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    let wasm = manifest.capsule_type() == &CapsuleType::Wasm;\n",
+          "new": "    let wasm = manifest.capsule_type() == &CapsuleType::Wasm || true;\n"
         }
       ],
       "tests": [
@@ -2607,8 +2602,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "        .filter(|(platform, checked)| checked.wasm && *platform != PORTABLE_PLATFORM)\n",
-          "new": "        .filter(|(platform, checked)| {\n            let manifest = checked\n                .entries\n                .iter()\n                .find(|entry| entry.path == MANIFEST_FILE)\n                .expect(\"the walk read capsule.json\");\n            let manifest: CapsuleManifest = serde_json::from_slice(&manifest.content)\n                .expect(\"the walk parsed capsule.json\");\n            manifest.capsule_type == CapsuleType::Wasm && *platform != PORTABLE_PLATFORM\n        })\n"
+          "old": "        .filter(|(platform, checked)| checked.wasm() && *platform != PORTABLE_PLATFORM)\n",
+          "new": "        .filter(|(platform, checked)| {\n            let manifest = checked\n                .entries()\n                .iter()\n                .find(|entry| entry.path == MANIFEST_FILE)\n                .expect(\"the walk read capsule.json\");\n            let manifest: elastos_common::CapsuleManifest =\n                serde_json::from_slice(&manifest.content).expect(\"the walk parsed capsule.json\");\n            manifest.capsule_type == elastos_common::CapsuleType::Wasm\n                && *platform != PORTABLE_PLATFORM\n        })\n"
         }
       ],
       "tests": [
@@ -2624,7 +2619,7 @@
         {
           "file": "../../lab/capsule-identity/src/lib.rs",
           "old": "    require_portable_wasm(\n        walked\n            .iter()\n            .map(|(platform, checked)| (*platform, checked)),\n    )?;\n",
-          "new": "    let mut own: Vec<&(&str, CheckedBundle)> = walked.iter().collect();\n    own.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));\n    for (platform, checked) in own {\n        if checked.wasm && *platform != PORTABLE_PLATFORM {\n            return Err(Refusal::WasmNotPortable {\n                platform: (*platform).to_owned(),\n                bundle: checked.cid(),\n            });\n        }\n    }\n"
+          "new": "    let mut own: Vec<&(&str, CheckedBundle)> = walked.iter().collect();\n    own.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));\n    for (platform, checked) in own {\n        if checked.wasm() && *platform != PORTABLE_PLATFORM {\n            return Err(Refusal::WasmNotPortable {\n                platform: (*platform).to_owned(),\n                bundle: checked.cid(),\n            });\n        }\n    }\n"
         }
       ],
       "tests": [
@@ -2719,7 +2714,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "                (cid_bytes(DAG_PB_CODEC, &digest), tsize)\n",
           "new": "                ([SHA2_256, SHA2_256_LENGTH].iter().chain(&digest).copied().collect(), tsize)\n"
         }
@@ -2735,7 +2730,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "const SHA2_256: u8 = 0x12;\n",
           "new": "const SHA2_256: u8 = 0x13;\n"
         }
@@ -2751,7 +2746,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    (cid_bytes(RAW_CODEC, sha256), size)\n",
           "new": "    (cid_bytes(DAG_PB_CODEC, sha256), size)\n"
         }
@@ -2767,7 +2762,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "const CHUNK_SIZE: usize = 262_144;\n",
           "new": "const CHUNK_SIZE: usize = 262_143;\n"
         }
@@ -2783,7 +2778,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    if content.len().div_ceil(CHUNK_SIZE) > MAX_FILE_LINKS {\n        return Err(Refusal::FileOverLeafLimit {\n            path: path.to_owned(),\n            length: content.len(),\n        });\n    }\n",
           "new": ""
         }
@@ -2799,7 +2794,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    links.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));\n",
           "new": "    links.sort_by(|a, b| b.name.as_bytes().cmp(a.name.as_bytes()));\n"
         }
@@ -2815,7 +2810,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "const DIRECTORY_TYPE: u8 = 1;\n",
           "new": "const DIRECTORY_TYPE: u8 = 5;\n"
         }
@@ -2831,7 +2826,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    if block.len() > DIRECTORY_BLOCK_LIMIT {\n        return Err(Refusal::DirectoryOverBlockLimit {\n            path: shown(path),\n            length: block.len(),\n        });\n    }\n",
           "new": ""
         }
@@ -2847,7 +2842,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    (cid_bytes(RAW_CODEC, sha256), size)\n",
           "new": "    if size <= 32 {\n        ([&[CID_VERSION, RAW_CODEC, 0x00, size as u8][..], &sha256[..size as usize]].concat(), size)\n    } else {\n        (cid_bytes(RAW_CODEC, sha256), size)\n    }\n"
         }
@@ -2863,7 +2858,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        write!(f, \"{}\", printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0)))\n",
           "new": "        write!(f, \"lab-cid:sha256:{}\", printed_cid(&cid_bytes(DAG_PB_CODEC, &self.0)))\n"
         }
@@ -2880,7 +2875,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "const BASE32_ALPHABET: &[u8; 32] = b\"abcdefghijklmnopqrstuvwxyz234567\";\n",
           "new": "const BASE32_ALPHABET: &[u8; 32] = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567\";\n"
         }
@@ -2896,9 +2891,9 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
-          "old": "    if printed_cid(&cid) != claimed {\n        return Err(not_a_lab_cid());\n    }\n",
-          "new": ""
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
+          "old": "    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n",
+          "new": "    let last = claimed.len().saturating_sub(1);\n    let respelled: String = claimed\n        .char_indices()\n        .map(|(at, one)| {\n            match BASE32_ALPHABET.iter().position(|&letter| letter as char == one) {\n                Some(value) if at == last => BASE32_ALPHABET[value & !0b11] as char,\n                _ => one,\n            }\n        })\n        .collect();\n    let claimed: &str = &respelled;\n    cid_form(claimed).ok_or_else(|| Refusal::NotALabCid {\n"
         }
       ],
       "tests": [
@@ -2912,7 +2907,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let tsize = block.len() as u64 + links.iter().map(|link| link.tsize).sum::<u64>();\n",
           "new": "    let tsize = block.len() as u64;\n"
         }
@@ -2928,7 +2923,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    (cid_bytes(RAW_CODEC, sha256), size)\n",
           "new": "    if size == 0 {\n        (cid_bytes(DAG_PB_CODEC, &naming_hash(&[0x0a, 0x04, 0x08, 0x02, 0x18, 0x00])), size)\n    } else {\n        (cid_bytes(RAW_CODEC, sha256), size)\n    }\n"
         }
@@ -2944,7 +2939,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    put_varint(out, bytes.len() as u64);\n",
           "new": "    out.push(bytes.len() as u8);\n"
         }
@@ -2960,7 +2955,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "            Some(Child::Directory(_)) => Err(Refusal::FileAndDirectory {\n                path: path.to_owned(),\n            }),\n",
           "new": "            Some(Child::Directory(_)) => {\n                let at = directory.position(name).expect(\"found above\");\n                directory.children[at].1 = file;\n                Ok(())\n            }\n"
         }
@@ -2976,7 +2971,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "            directory = match &mut directory.children[at].1 {\n",
           "new": "            if matches!(directory.children[at].1, Child::File { .. }) {\n                directory.children[at].1 = Child::Directory(Directory::default());\n            }\n            directory = match &mut directory.children[at].1 {\n"
         }
@@ -2992,7 +2987,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "const DAG_PB_CODEC: u8 = 0x70;\n",
           "new": "const DAG_PB_CODEC: u8 = 0x71;\n"
         }
@@ -3008,7 +3003,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        if parts.iter().any(|part| matches!(*part, \"\" | \".\" | \"..\")) {\n            return Err(Refusal::BadPathPart {\n                path: path.to_owned(),\n            });\n        }\n",
           "new": ""
         }
@@ -3040,7 +3035,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "const RAW_CODEC: u8 = 0x55;\n",
           "new": "const RAW_CODEC: u8 = 0x56;\n"
         }
@@ -3508,7 +3503,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "/// The manifest every bundle holds at its root.\n",
           "new": "/// The manifest every bundle holds at its root. Its lab CID equals the\n/// Runtime's CID.\n"
         }
@@ -4175,14 +4170,14 @@
     },
     {
       "id": "F-CI33a",
-      "title": "a launch gives the instance one grant for each capabilities entry of its manifest, so a valid signature alone yields a grant",
+      "title": "a launch gives the instance one grant for each action of each ask in its manifest, so a valid signature alone yields a grant",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        Ok(self.launch(name, asks))\n",
-          "new": "        let answer = self.launch(name, asks);\n        let session_id = answer[\"session_id\"].as_str().expect(\"a session id\").to_owned();\n        let folder = self.store[body[\"cid\"].as_str().expect(\"a cid\")].clone();\n        let manifest: elastos_common::CapsuleManifest =\n            serde_json::from_slice(&fs::read(folder.join(capsule_identity::MANIFEST_FILE)).expect(\"the manifest\"))\n                .expect(\"a manifest\");\n        for capability in manifest.capabilities {\n            self.seed_grant(&session_id, &capability, \"*\", \"session\");\n        }\n        Ok(answer)\n"
+          "new": "        let answer = self.launch(name, asks);\n        let session_id = answer[\"session_id\"].as_str().expect(\"a session id\").to_owned();\n        let folder = self.store[body[\"cid\"].as_str().expect(\"a cid\")].clone();\n        let manifest: elastos_common::CapsuleManifest =\n            serde_json::from_slice(&fs::read(folder.join(capsule_identity::MANIFEST_FILE)).expect(\"the manifest\"))\n                .expect(\"a manifest\");\n        for ask in manifest.asks {\n            for action in &ask.actions {\n                self.seed_grant(&session_id, &ask.resource, action.as_str(), \"session\");\n            }\n        }\n        Ok(answer)\n"
         }
       ],
       "tests": [
@@ -4224,14 +4219,14 @@
     },
     {
       "id": "F-CI35a",
-      "title": "the planted accept-anything stub: asks_of reads asks.json from the stored folder at call time, so a change on disk after launch reaches the instance",
+      "title": "the planted accept-anything stub: asks_of reads the manifest asks from the stored folder at call time, so a change on disk after launch reaches the instance",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "            .and_then(|instance| instance.asks.clone())\n",
-          "new": "            .and_then(|_| fs::read(self.store.values().next()?.join(ASKS_FILE)).ok())\n"
+          "new": "            .and_then(|_| {\n                let bytes = fs::read(self.store.values().next()?.join(capsule_identity::MANIFEST_FILE)).ok()?;\n                let parsed: elastos_common::CapsuleManifest = serde_json::from_slice(&bytes).ok()?;\n                if parsed.asks.is_empty() {\n                    None\n                } else {\n                    serde_json::to_vec(&parsed.asks).ok()\n                }\n            })\n"
         }
       ],
       "tests": [
@@ -4262,8 +4257,8 @@
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
-          "old": "        .map(|entry| entry.content.clone())\n",
-          "new": "        .map(|entry| entry.content.clone())\n        .or(Some(Vec::new()))\n"
+          "old": "    if parsed.asks.is_empty() {\n        None\n    } else {\n",
+          "new": "    if parsed.asks.is_empty() {\n        return Some(Vec::new());\n    } else {\n"
         }
       ],
       "tests": [
@@ -4277,7 +4272,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        &self.name\n",
           "new": "        \"\"\n"
         }
@@ -4353,14 +4348,14 @@
     },
     {
       "id": "F-CI44a",
-      "title": "the 041 review's stub: checked_launch reads asks.json from the stored folder at launch, after the walk, instead of taking it from the checked entries",
+      "title": "the 041 review's stub: checked_launch reads the manifest asks from the stored folder at launch, after the walk, instead of taking them from the checked entries",
       "command": "capsule-identity",
       "expect": "caught",
       "edits": [
         {
           "file": "../../lab/capsule-identity/tests/common/mod.rs",
           "old": "        Ok((checked.manifest_name().to_owned(), signed_asks(&checked)))\n",
-          "new": "        Ok((checked.manifest_name().to_owned(), fs::read(folder.join(ASKS_FILE)).ok()))\n"
+          "new": "        let on_disk = fs::read(folder.join(capsule_identity::MANIFEST_FILE)).ok().and_then(|bytes| {\n            let parsed: elastos_common::CapsuleManifest = serde_json::from_slice(&bytes).ok()?;\n            if parsed.asks.is_empty() {\n                None\n            } else {\n                serde_json::to_vec(&parsed.asks).ok()\n            }\n        });\n        Ok((checked.manifest_name().to_owned(), on_disk))\n"
         }
       ],
       "tests": [
@@ -4406,7 +4401,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let (digest, _) = encode_directory(&root, \"\", &naming_hash)?;\n",
           "new": "    let _ = encode_directory(&root, \"\", &naming_hash)?;\n    fn walk_listing(directory: &Directory, parent: &str, out: &mut Vec<(String, String, u64)>) {\n        for (name, child) in &directory.children {\n            let path = if parent.is_empty() { name.clone() } else { format!(\"{parent}/{name}\") };\n            match child {\n                Child::File { cid, tsize } => {\n                    let hex: String = cid[4..].iter().map(|byte| format!(\"{byte:02x}\")).collect();\n                    out.push((path, hex, *tsize));\n                }\n                Child::Directory(inner) => walk_listing(inner, &path, out),\n            }\n        }\n    }\n    let mut sorted = Vec::new();\n    walk_listing(&root, \"\", &mut sorted);\n    sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));\n    let listed: Vec<String> = sorted\n        .iter()\n        .map(|(path, hex, size)| format!(\"{{\\\"path\\\":{path:?},\\\"sha256\\\":\\\"{hex}\\\",\\\"size\\\":{size}}}\"))\n        .collect();\n    let listing = format!(\"{{\\\"files\\\":[{}],\\\"schema\\\":\\\"elastos.capsule.closure/v1\\\"}}\", listed.join(\",\"));\n    let digest = naming_hash(listing.as_bytes());\n"
         }
@@ -4423,7 +4418,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    (cid_bytes(RAW_CODEC, sha256), size)\n",
           "new": "    (cid_bytes(RAW_CODEC, sha256), 0)\n"
         }
@@ -4439,7 +4434,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        if file.size > CHUNK_SIZE as u64 {\n            return Err(Refusal::FileOverChunkLimit {\n                path: file.path.clone(),\n                length: usize::try_from(file.size).unwrap_or(usize::MAX),\n            });\n        }\n",
           "new": ""
         }
@@ -4456,7 +4451,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "        put_length_delimited(&mut pb_link, 2, link.name.as_bytes());\n",
           "new": "        if !link.name.is_empty() {\n            put_length_delimited(&mut pb_link, 2, link.name.as_bytes());\n        }\n"
         }
@@ -4472,7 +4467,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    for leaf in leaves {\n        data.push(4 << 3);\n        put_varint(&mut data, leaf.tsize);\n    }\n",
           "new": ""
         }
@@ -4488,7 +4483,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    data.push(3 << 3);\n    put_varint(&mut data, length);\n",
           "new": ""
         }
@@ -4504,7 +4499,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "    let tsize = block.len() as u64 + leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n",
           "new": "    let tsize = leaves.iter().map(|leaf| leaf.tsize).sum::<u64>();\n"
         }
@@ -4520,7 +4515,7 @@
       "expect": "caught",
       "edits": [
         {
-          "file": "../../lab/capsule-identity/src/lib.rs",
+          "file": "../../elastos/crates/elastos-bundle-identity/src/lib.rs",
           "old": "const MAX_FILE_LINKS: usize = 174;\n",
           "new": "const MAX_FILE_LINKS: usize = 175;\n"
         }

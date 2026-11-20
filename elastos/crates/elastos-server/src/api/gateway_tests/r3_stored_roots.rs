@@ -20,6 +20,7 @@ async fn unstored_principal_is_refused(app: &str, endpoint: &str, body: Value) {
         grant.session_id,
         Some(grant.proof_binding_id),
         grant.grant_id,
+        crate::auth::PrincipalKind::Human,
     );
     // The signed token and active grant reach root resolution before any handler.
     let token = issue_home_launch_token_with_context(dir.path(), app, &context).unwrap();
