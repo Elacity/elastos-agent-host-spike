@@ -2,7 +2,7 @@
 
 This value is the lab stand-in for the shell-only view of every session's live grants. The real route can replace it later because the JSON matches (M1-R).
 
-The conformance fixture writer records each journey ask on `capsule.json` as a Runtime manifest ask: one resource and its actions, with `capabilities` removed so that list is the one ceiling. `asks.json` stays in the signed bytes and is not the schema. A shell grant remains the decision; an ask is only the maximum.
+The conformance fixture writer records each journey ask on `capsule.json` as a Runtime manifest ask: one resource and its actions, with `capabilities` removed so that list is the one ceiling. The signed fixture is the manifest. A shell grant remains the decision; an ask is only the maximum.
 
 `StandIn::get_capability_list` answers `GET /api/capability/list`. `scope: None` is the plain route. `scope: Some("all_sessions_live")` is `GET /api/capability/list?scope=all_sessions_live`. The caller is `Shell` or `Client { session_id }`, a method argument for the authenticated session. It is not a JSON field.
 
