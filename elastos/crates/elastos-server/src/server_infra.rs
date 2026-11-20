@@ -659,8 +659,14 @@ async fn start_did_provider(
     let Some(admitted) = binaries::AdmittedProvider::admit(data_dir, "did-provider")? else {
         return Ok(None);
     };
+    let confined_data_dir = std::fs::canonicalize(data_dir).with_context(|| {
+        format!(
+            "failed to resolve DID provider data root {}",
+            data_dir.display()
+        )
+    })?;
     let did_config = provider::BridgeProviderConfig {
-        base_path: data_dir.to_string_lossy().to_string(),
+        base_path: confined_data_dir.to_string_lossy().to_string(),
         allowed_paths: file_backed_prefixes(),
         read_only: false,
         encryption_key: device_key_hex.to_owned(),
@@ -670,7 +676,7 @@ async fn start_did_provider(
         admitted.key(),
         admitted.authority(),
         admitted.path(),
-        &data_dir.join("did"),
+        &confined_data_dir.join("did"),
         did_config,
     )
     .await
@@ -2227,8 +2233,13 @@ mod tests {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let source = temp.path().join("did-probe.rs");
-            let text = include_str!("../tests/fixtures/did_confined_probe.rs")
-                .replace("@@ROOT@@", &data_dir.join("did").to_string_lossy());
+            let text = include_str!("../tests/fixtures/did_confined_probe.rs").replace(
+                "@@ROOT@@",
+                &fs::canonicalize(&data_dir)
+                    .unwrap()
+                    .join("did")
+                    .to_string_lossy(),
+            );
             fs::write(&source, text).unwrap();
             let output = Command::new("rustc")
                 .args(["--edition", "2021", "-o"])

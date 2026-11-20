@@ -104,7 +104,6 @@ fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-#[allow(dead_code)] // The server does not call this entry yet.
 fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
@@ -163,10 +162,12 @@ fn macos_start(
     stdio: ChildStdio,
     profile: String,
 ) -> Result<Launched, String> {
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::OpenOptionsExt;
-    use std::process::{Command, Stdio};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
 
     let directory = std::fs::OpenOptions::new()
         .read(true)
@@ -184,9 +185,24 @@ fn macos_start(
                 .into(),
         );
     }
-    let storage = std::fs::canonicalize(checked.path).map_err(|error| {
-        format!("provider start is refused: cannot resolve storage root: {error}")
+    // Resolve the storage path from the directory we checked, not from a
+    // second lookup of the caller's pathname.
+    let mut path = [0i8; 1024];
+    if unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_GETPATH, path.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "provider start is refused: cannot resolve held storage root: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let storage = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+        unsafe { std::ffi::CStr::from_ptr(path.as_ptr()) }.to_bytes(),
+    ));
+    let resolved = std::fs::metadata(&storage).map_err(|error| {
+        format!("provider start is refused: cannot verify held storage root path: {error}")
     })?;
+    if resolved.dev() != checked.dev || resolved.ino() != checked.ino {
+        return Err("provider start is refused: held storage root path changed".into());
+    }
     let parent = storage
         .parent()
         .ok_or("provider start is refused: storage root has no parent")?;
@@ -208,19 +224,39 @@ fn macos_start(
     };
     let input = duplicate(stdio.stdin)?;
     let output = duplicate(stdio.stdout)?;
-    let child = Command::new("/usr/bin/sandbox-exec")
-        .arg("-p")
-        .arg(profile)
-        .arg("-D")
-        .arg(format!("PROVIDER_EXECUTABLE={}", binary.display()))
-        .arg("-D")
-        .arg(format!("STORAGE_PARENT={}", parent.display()))
-        .arg("-D")
-        .arg(format!("STORAGE_ROOT={}", storage.display()))
-        .arg(&binary)
+    let mut command = macos_command(
+        Path::new("/usr/bin/sandbox-exec"),
+        &profile,
+        &binary,
+        parent,
+        &storage,
+    )?;
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "provider start is refused: cannot inspect descriptor limit: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let maxfilesperproc = macos_maxfilesperproc();
+    let max_fd = macos_fd_sweep_limit(unsafe { limit.assume_init() }.rlim_cur, maxfilesperproc)?;
+    // The child's stdio is already mapped when pre_exec runs. Mark every
+    // other open descriptor close-on-exec before sandbox-exec starts.
+    unsafe {
+        command.pre_exec(move || {
+            for fd in 3..max_fd {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let child = command
         .stdin(Stdio::from(input))
         .stdout(Stdio::from(output))
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|error| {
             format!("provider start is refused: cannot start sandbox-exec: {error}")
@@ -232,6 +268,87 @@ fn macos_start(
         to_child: stdio.to_child,
         from_child: stdio.from_child,
     })
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+fn macos_maxfilesperproc() -> Result<libc::rlim_t, String> {
+    let mut maxfilesperproc: libc::c_int = 0;
+    let mut length = std::mem::size_of_val(&maxfilesperproc);
+    // SAFETY: kern.maxfilesperproc is an int and `length` is its size.
+    let read = unsafe {
+        libc::sysctlbyname(
+            c"kern.maxfilesperproc".as_ptr(),
+            (&mut maxfilesperproc as *mut libc::c_int).cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return Err(format!(
+            "provider start is refused: cannot read kern.maxfilesperproc: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if length != std::mem::size_of_val(&maxfilesperproc) || maxfilesperproc <= 0 {
+        return Err("provider start is refused: kern.maxfilesperproc has an invalid value".into());
+    }
+    Ok(maxfilesperproc as libc::rlim_t)
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+fn macos_fd_sweep_limit(
+    soft: libc::rlim_t,
+    maxfilesperproc: Result<libc::rlim_t, String>,
+) -> Result<i32, String> {
+    let maxfilesperproc = maxfilesperproc?;
+    if maxfilesperproc == 0 || maxfilesperproc > i32::MAX as libc::rlim_t {
+        return Err("provider start is refused: kern.maxfilesperproc has an invalid value".into());
+    }
+    Ok(soft.min(maxfilesperproc) as i32)
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+fn macos_command(
+    launcher: &Path,
+    profile: &str,
+    binary: &Path,
+    parent: &Path,
+    storage: &Path,
+) -> Result<std::process::Command, String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut command = std::process::Command::new(launcher);
+    command.env_clear();
+    command.arg("-p").arg(profile);
+    for (name, path) in [
+        ("STORAGE_ROOT", storage),
+        ("STORAGE_PARENT", parent),
+        ("PROVIDER_EXECUTABLE", binary),
+    ] {
+        command.arg("-D").arg(format!("{name}={}", path.display()));
+    }
+    command.arg(binary);
+    let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+    if arg_max <= 0 {
+        return Err("provider start is refused: cannot inspect argument limit".into());
+    }
+    // Include the executable, every NUL-terminated argument, and argv pointers.
+    // Keep the complete argv below half of ARG_MAX for exec's own overhead.
+    let args: Vec<_> = command.get_args().collect();
+    let argv_bytes = launcher.as_os_str().as_bytes().len()
+        + 1
+        + args
+            .iter()
+            .map(|arg| arg.as_bytes().len() + 1)
+            .sum::<usize>()
+        + (args.len() + 2) * std::mem::size_of::<*const libc::c_char>();
+    if argv_bytes > (arg_max as usize) / 2 {
+        return Err(
+            "provider start is refused: sandbox-exec arguments exceed argument limit".into(),
+        );
+    }
+    Ok(command)
 }
 
 /// The unsupported-OS arm. Real `dispatch` on an unsupported target calls this
@@ -338,6 +455,182 @@ mod tests {
         let json = std::fs::read_to_string(&path).unwrap();
         let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&json).unwrap();
         manifest.authority.unwrap()
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn macos_fd_sweep_limit_clamps_large_finite_and_unlimited() {
+        let maxfilesperproc = 184_320 as libc::rlim_t;
+        assert_eq!(
+            macos_fd_sweep_limit(2_000_000_000, Ok(maxfilesperproc)),
+            Ok(maxfilesperproc as i32)
+        );
+        assert_eq!(
+            macos_fd_sweep_limit(libc::RLIM_INFINITY, Ok(maxfilesperproc)),
+            Ok(maxfilesperproc as i32)
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn macos_fd_sweep_limit_keeps_small_soft_limit() {
+        assert_eq!(macos_fd_sweep_limit(1024, Ok(184_320)), Ok(1024));
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn macos_fd_sweep_limit_refuses_unreadable_maxfilesperproc() {
+        let error = "provider start is refused: cannot read kern.maxfilesperproc: fixture failure";
+        assert_eq!(
+            macos_fd_sweep_limit(1024, Err(error.to_string())),
+            Err(error.to_string())
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn macos_launch_binds_every_profile_parameter() {
+        use std::collections::BTreeSet;
+
+        let binary = Path::new("/private/fixture/bin/did-provider");
+        let parent = Path::new("/private/fixture/data");
+        let storage = Path::new("/private/fixture/data/did");
+        let profile = super::super::macos_profile::render_macos_profile(
+            RuntimeProviderId::Did,
+            &super::super::rights::admit_committed(RuntimeProviderId::Did),
+        );
+        let command = macos_command(
+            Path::new("/usr/bin/sandbox-exec"),
+            &profile,
+            binary,
+            parent,
+            storage,
+        )
+        .unwrap();
+        assert!(
+            command.get_current_dir().is_none(),
+            "inherit the caller's working directory"
+        );
+        assert!(
+            command.get_envs().next().is_none(),
+            "the helper needs no environment entries"
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "-p");
+        assert_eq!(
+            args[1], profile,
+            "the profile text is an argument, not a path"
+        );
+        assert!(!args.iter().any(|arg| arg == "-f"));
+        assert_eq!(
+            &args[2..],
+            [
+                "-D",
+                "STORAGE_ROOT=/private/fixture/data/did",
+                "-D",
+                "STORAGE_PARENT=/private/fixture/data",
+                "-D",
+                "PROVIDER_EXECUTABLE=/private/fixture/bin/did-provider",
+                "/private/fixture/bin/did-provider",
+            ]
+        );
+        let named: BTreeSet<_> = profile
+            .split("(param \"")
+            .skip(1)
+            .map(|tail| tail.split_once('"').unwrap().0)
+            .collect();
+        let bound: BTreeSet<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-D")
+            .map(|pair| pair[1].split_once('=').unwrap().0)
+            .collect();
+        assert_eq!(
+            bound, named,
+            "every rendered parameter needs one -D binding"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn macos_profile_has_no_swappable_file() {
+        let binary = Path::new("/private/fixture/bin/did-provider");
+        let parent = Path::new("/private/fixture/data");
+        let storage = Path::new("/private/fixture/data/did");
+        let profile = super::super::macos_profile::render_macos_profile(
+            RuntimeProviderId::Did,
+            &super::super::rights::admit_committed(RuntimeProviderId::Did),
+        );
+        let command = macos_command(
+            Path::new("/usr/bin/sandbox-exec"),
+            &profile,
+            binary,
+            parent,
+            storage,
+        )
+        .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[0], "-p");
+        assert_eq!(args[1], profile.as_str());
+        assert!(!args.iter().any(|arg| arg == "-f"));
+
+        let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+        assert!(arg_max > 0);
+        assert!(profile.len() < (arg_max as usize) / 2);
+        assert_eq!(
+            macos_command(
+                Path::new("/usr/bin/sandbox-exec"),
+                &"x".repeat(arg_max as usize),
+                binary,
+                parent,
+                storage,
+            )
+            .unwrap_err(),
+            "provider start is refused: sandbox-exec arguments exceed argument limit"
+        );
+        let long_storage = format!("/{}", "x".repeat(arg_max as usize / 2));
+        assert_eq!(
+            macos_command(
+                Path::new("/usr/bin/sandbox-exec"),
+                &profile,
+                binary,
+                parent,
+                Path::new(&long_storage),
+            )
+            .unwrap_err(),
+            "provider start is refused: sandbox-exec arguments exceed argument limit"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn macos_helper_does_not_see_parent_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = temp.path().join("launcher.sh");
+        std::fs::write(&launcher, b"#!/bin/sh\n/usr/bin/env\n").unwrap();
+        let mut permissions = std::fs::metadata(&launcher).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&launcher, permissions).unwrap();
+        let marker = "ELASTOS_MACOS_PROVIDER_PARENT_ONLY_1750";
+        std::env::set_var(marker, "private-parent-value");
+        let output = macos_command(
+            &launcher,
+            "(version 1)\n(deny default)\n",
+            Path::new("/private/fixture/bin/did-provider"),
+            Path::new("/private/fixture/data"),
+            Path::new("/private/fixture/data/did"),
+        )
+        .unwrap()
+        .output()
+        .unwrap();
+        std::env::remove_var(marker);
+        assert!(output.status.success(), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(marker));
     }
 
     fn marker_program(dir: &Path) -> (PathBuf, PathBuf) {

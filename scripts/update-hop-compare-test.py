@@ -1373,27 +1373,25 @@ class CliFixtureTests(unittest.TestCase):
                 self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 0))
                 self.assertEqual(package.extractfile(member).read(), (self.root / expected[member.name]).read_bytes())
 
-    def test_linux_did_helper_setup_requires_its_binary_and_manifest(self):
-        did = ("did-provider",)
-        native = (*(name for name in observer.CLI_NATIVE_SETUP if name != "did-provider"), *did)
-        components = (*(name for name in observer.CLI_SETUP_COMPONENTS if name != "did-provider"), *did)
-        artifacts = tuple(name + ".tar.gz" if name in observer.CLI_WEB_CAPSULES else name for name in components)
-        release_support = (*("bin/" + name for name in native),
-                           *("capsules/" + name + "/" for name in (*observer.CLI_WEB_CAPSULES, "localhost-provider", *did)))
-        with contextlib.ExitStack() as stack:
-            for name, value in (("CLI_DID_SETUP", did), ("CLI_NATIVE_SETUP", native),
-                                ("CLI_SETUP_COMPONENTS", components), ("CLI_SETUP_ARTIFACTS", artifacts),
-                                ("CLI_RELEASE_SUPPORT", release_support)):
-                stack.enter_context(patch.object(observer, name, value))
-            self.setup_fixture(initial_home=True)
-            mapping = observer.cli_admit_setup(self.root, self.manifest)
-            observer.cli_admit_home_support(self.root, self.manifest)
-            self.assertIn("bin/did-provider", mapping)
-            self.assertIn("capsules/did-provider/capsule.json", mapping)
-            missing = copy.deepcopy(self.manifest)
-            del missing["consumer"]["files"]["capsules/did-provider/capsule.json"]
-            with self.assertRaisesRegex(ValueError, "DID helper manifest is absent"):
-                observer.cli_admit_setup(self.root, missing)
+    def test_did_helper_manifest_is_pinned_home_support_after_setup(self):
+        self.setup_fixture(initial_home=True)
+        mapping = observer.cli_admit_setup(self.root, self.manifest)
+        observer.cli_admit_home_support(self.root, self.manifest)
+        target = "capsules/did-provider/capsule.json"
+        self.assertIn("bin/did-provider", mapping)
+        self.assertNotIn(target, mapping)
+        self.assertIn(target, self.manifest["consumer"]["files"])
+        self.assertIn(target, self.manifest["initial_home"]["files"])
+        installed = self.root / "installed-support"
+        installed.mkdir()
+        observer.cli_copy(self.root, self.manifest,
+                          {target: self.manifest["consumer"]["files"][target]}, installed)
+        self.assertEqual(observer.digest(installed / target),
+                         self.manifest["files"][self.manifest["consumer"]["files"][target]]["sha256"])
+        missing = copy.deepcopy(self.manifest)
+        del missing["consumer"]["files"][target]
+        with self.assertRaisesRegex(ValueError, "DID helper manifest is absent"):
+            observer.cli_admit_setup(self.root, missing)
 
     def test_setup_admission_refuses_incomplete_or_unmodeled_artifacts(self):
         self.setup_fixture()
@@ -1597,6 +1595,7 @@ class CliFixtureTests(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.assertIn("state/value", copied)
         self.assertIn(observer.CLI_OPENER, copied)
+        self.assertIn("capsules/did-provider/capsule.json", copied)
 
     def test_prepare_refuses_setup_support_drift_before_copying_sentinels(self):
         self.setup_fixture()

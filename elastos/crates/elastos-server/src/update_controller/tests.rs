@@ -4493,14 +4493,16 @@ fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
     .unwrap();
     let other_binary = fixture.data.join("other-runtime");
     fixture.file(&other_binary, b"other Runtime", 0o755);
+    let error = crate::installed_release::read_signed_release_for_host_start(
+        &fixture.data,
+        &other_binary,
+        &source,
+        false,
+    )
+    .unwrap_err();
     assert!(
-        crate::installed_release::read_signed_release_for_host_start(
-            &fixture.data,
-            &other_binary,
-            &source,
-            false,
-        )
-        .is_err()
+        format!("{error:#}").contains("Installed source binary path differs from its writer"),
+        "{error:#}"
     );
 
     let writer = prepare_host_fence_release(&fixture, &fixture.binary, false);
@@ -4537,6 +4539,19 @@ fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
     let other_binary = fixture.data.join("alternate-bin/installed-runtime");
     fs::create_dir(other_binary.parent().unwrap()).unwrap();
     fixture.file(&other_binary, b"candidate fixture Runtime", 0o755);
+    let error = crate::install_transaction::authorize_host_start_with_generation(
+        &fixture.data,
+        &other_binary,
+        Some(&claim.generation),
+        std::process::id(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("differs from the installation retained for recovery"),
+        "{error:#}"
+    );
     assert_ne!(
         std::env::var("ELASTOS_UPDATE_GENERATION").ok().as_deref(),
         Some(claim.generation.as_str()),
@@ -4558,14 +4573,18 @@ fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
         error.to_string().contains("claimed generation"),
         "{error:#}"
     );
+    let error = crate::installed_release::read_signed_release_for_host_start(
+        &fixture.data,
+        &other_binary,
+        &source,
+        false,
+    )
+    .unwrap_err();
     assert!(
-        crate::installed_release::read_signed_release_for_host_start(
-            &fixture.data,
-            &other_binary,
-            &source,
-            false,
-        )
-        .is_err()
+        error
+            .to_string()
+            .contains("differs from the installation retained for recovery"),
+        "{error:#}"
     );
 }
 

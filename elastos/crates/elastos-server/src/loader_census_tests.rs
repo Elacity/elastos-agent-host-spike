@@ -107,10 +107,10 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_start",
+            "macos_command",
             "command",
             "native provider",
-            "admitted binary+OS gate+confined storage",
+            "none",
             "P2-8",
             1,
         ),
@@ -119,7 +119,7 @@ fn rows() -> Vec<Row> {
             "macos_start",
             "spawn()",
             "native provider",
-            "admitted binary+OS gate+confined storage",
+            "checked storage+Seatbelt profile",
             "P2-8",
             1,
         ),
@@ -995,6 +995,7 @@ fn every_executable_loader_has_an_authority_row() {
                 | "DID"
                 | "checksum"
                 | "admitted binary+OS gate+confined storage"
+                | "checked storage+Seatbelt profile"
                 | "none"
         ));
         assert!(!row.kind.is_empty());

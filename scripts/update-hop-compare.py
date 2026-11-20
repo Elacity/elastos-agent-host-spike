@@ -1310,6 +1310,8 @@ def cli_admit_home_support(root, manifest):
     mapping = manifest["consumer"]["files"]
     native_paths = {"bin/" + name for name in CLI_NATIVE_SETUP}
     expected = set(cli_setup_files(manifest)) | {CLI_OPENER}
+    if CLI_DID_SETUP:
+        expected.add("capsules/did-provider/capsule.json")
     need(fixture["files"] == sorted(expected) and native_paths <= expected
          and CLI_OPENER in expected and "capsules/home/capsule.json" in expected and fixture["entrypoint"] in expected,
          "initial Home support closure is incomplete")
@@ -1436,7 +1438,7 @@ def cli_localhost_metadata_files(raw, selected):
 
 def cli_setup_files(manifest):
     return {target: relative for target, relative in manifest["consumer"]["files"].items()
-            if target.startswith(tuple("capsules/" + name + "/" for name in (*CLI_WEB_CAPSULES, "localhost-provider", *CLI_DID_SETUP))) or target in
+            if target.startswith(tuple("capsules/" + name + "/" for name in (*CLI_WEB_CAPSULES, "localhost-provider"))) or target in
             tuple("bin/" + name for name in CLI_NATIVE_SETUP)}
 
 
@@ -1450,7 +1452,8 @@ def cli_support_view(manifest, release):
         shared = {target: relative for target, relative in manifest["consumer"]["files"].items() if target not in setup_files}
         return {**manifest, "support_of": "old", "setup": previous["setup"], "consumer": {"files": {**shared, **previous["support"]}},
                 "qualified_capsules": previous["qualified_capsules"], "publications": {"old": manifest["publications"]["old"]}}
-    return {**manifest, "support_of": "new", "initial_home": {**manifest["initial_home"], "files": sorted({*setup_files, CLI_OPENER})},
+    did_files = {"capsules/did-provider/capsule.json"} if CLI_DID_SETUP else set()
+    return {**manifest, "support_of": "new", "initial_home": {**manifest["initial_home"], "files": sorted({*setup_files, *did_files, CLI_OPENER})},
             "publications": {name: value for name, value in manifest["publications"].items() if name != "old"}}
 
 
@@ -1538,8 +1541,8 @@ def cli_admit_setup(root, manifest):
          and all("capsules/" + name + "/browser/index.html" in mapping for name in CLI_WEB_CAPSULES),
          "setup output inventory is incomplete")
     if CLI_DID_SETUP:
-        need("capsules/did-provider/capsule.json" in mapping,
-             "DID helper manifest is absent from setup inventory")
+        need("capsules/did-provider/capsule.json" in manifest["consumer"]["files"],
+             "DID helper manifest is absent from Home support inventory")
     need(not any(Path(target).name in CLI_HOME_CACHE for target in mapping),
          "setup cache metadata belongs to installed setup")
     platform_name = cli_component_platform(manifest["platform"])
