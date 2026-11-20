@@ -395,6 +395,7 @@ pub(super) fn notification(
                     app: INBOX_CAPSULE_ID.into(),
                     action_id: format!("browser-internet-allow:{request_id}"),
                 }),
+                ..Default::default()
             });
         }
         Consent::Granted { at, token_id, .. } => (
@@ -436,6 +437,7 @@ pub(super) fn notification(
             app: INBOX_CAPSULE_ID.into(),
             action_id,
         }),
+        ..Default::default()
     })
 }
 
