@@ -913,10 +913,13 @@ fn found(sources: &BTreeMap<String, String>) -> BTreeMap<(String, String, String
                 .or_default() += 1;
         }
         let code = source::code_only(text);
+        // Joined at run time, so this file never holds the literal call that
+        // bundle_start_tests counts across the server sources.
+        let bundle_start = [".start_by", "_bundle("].concat();
         for (label, needle) in [
             ("command", "Command::new("),
             ("content import", "prepare_capsule_from_content_provider("),
-            ("bundle start", ".start_by_bundle("),
+            ("bundle start", bundle_start.as_str()),
             ("folder start", ".run_signer("),
             ("Home install", "ensure_capsule_component_for_home_launch("),
             ("release capsule", "verify_installed_release_capsule("),
