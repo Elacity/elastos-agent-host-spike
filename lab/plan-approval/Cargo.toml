@@ -22,4 +22,3 @@ rand = "0.8"
 tempfile = "3"
 elastos-common = { path = "../../elastos/crates/elastos-common" }
 elastos-identity = { path = "../../elastos/crates/elastos-identity" }
-elastos-common = { path = "../../elastos/crates/elastos-common" }
