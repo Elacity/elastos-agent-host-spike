@@ -3708,10 +3708,11 @@ impl ContentProvider {
                 .and_then(|value| value.as_str())
                 .unwrap_or("Carrier availability fetch failed");
             // A distinct-holder refusal carries its receipts. Sign them with
-            // this requester's node key and hand the answer to the caller: the
-            // code and the rows stay visible, so the refusal names what was
-            // proven. Answers without rows keep the existing error shapes.
-            if min_distinct_holders.is_some() {
+            // this requester's node key and the caller's required count. The
+            // availability answer's holder-count fields are not read. A
+            // caller value this mode cannot prove is not replaced from the
+            // answer. Answers without rows keep the existing error shapes.
+            if let Some(required) = required_distinct_holders_from_caller(&min_distinct_holders) {
                 let mut data = response
                     .get("data")
                     .cloned()
@@ -3722,7 +3723,8 @@ impl ContentProvider {
                         "distinct-holder answers require the requester node key".into(),
                     )
                 })?;
-                if Self::attach_signed_fetch_receipt_set(signer_data_dir, cid, &mut data)? {
+                if Self::attach_signed_fetch_receipt_set(signer_data_dir, cid, required, &mut data)?
+                {
                     return Ok(AvailabilityFallback::Refused {
                         code: code.to_string(),
                         message: message.to_string(),
@@ -3862,22 +3864,18 @@ impl ContentProvider {
         Ok(())
     }
 
-    /// Sign one distinct-holder answer and attach that set. The unsigned
-    /// copies of the counts and receipts are dropped: readers use the verified
-    /// payload. An answer without rows is left unchanged.
+    /// Sign one distinct-holder refusal and attach that set. `required` is the
+    /// caller's count on this path, as on a success. The availability answer's
+    /// holder-count fields are not read. Unsigned copies of the counts and
+    /// receipts are dropped: readers use the verified payload. An answer
+    /// without rows is left unchanged.
     fn attach_signed_fetch_receipt_set(
         data_dir: &Path,
         cid: &str,
+        required: u8,
         answer: &mut Value,
     ) -> Result<bool, ProviderError> {
         let Some(receipts) = answer.get("receipts").filter(|value| value.is_array()) else {
-            return Ok(false);
-        };
-        let Some(required) = answer
-            .get("required_distinct_holders")
-            .and_then(Value::as_u64)
-            .and_then(|required| u8::try_from(required).ok())
-        else {
             return Ok(false);
         };
         let receipts: Vec<FetchReceipt> =
@@ -10293,6 +10291,7 @@ mod tests {
         assert!(!ContentProvider::attach_signed_fetch_receipt_set(
             data_dir.path(),
             TEST_CID,
+            2,
             &mut answer,
         )
         .unwrap());
@@ -10691,6 +10690,99 @@ mod tests {
         assert_eq!(signed.payload.requested_cid, TEST_CID);
         assert_eq!(signed.payload.required_distinct_holders, 2);
         assert_eq!(signed.payload.observed_distinct_holders, 1);
+    }
+
+    /// One verified receipt on a distinct-holders error. `with_required_one`
+    /// puts `1` in the answer's required-count field; otherwise that field is
+    /// absent. `distinct_holders` stays `1` and is not the signed requirement.
+    fn distinct_holder_error_answer(with_required_one: bool) -> Value {
+        let mut data = json!({
+            "distinct_holders": 1,
+            "receipt_attestation": "self",
+            "receipts": [fetch_receipt(FetchResult::Ok, true, 1)],
+        });
+        if with_required_one {
+            let key = ["required_", "distinct_", "holders"].concat();
+            data.as_object_mut().unwrap().insert(key, json!(1));
+        }
+        json!({
+            "status": "error",
+            "code": "carrier_fetch_distinct_holders",
+            "message": "Carrier content fetch verified 1 distinct holder(s); 1 required",
+            "data": data,
+        })
+    }
+
+    async fn assert_availability_error_signs_the_callers_two(body: Value) {
+        let (data_dir, availability, response) = content_fetch_against_bridge(body).await;
+        let sent = availability.requests.lock().await.clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["min_distinct_holders"], 2);
+        let response = response.expect("the refusal is an error answer, not a transport failure");
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], "carrier_fetch_distinct_holders");
+        let rendered = serde_json::to_string(&response).unwrap();
+        assert_hides_bridge_and_local_bytes(&rendered);
+        let data = &response["data"];
+        assert!(data.get("data").is_none(), "{data}");
+        assert_eq!(data["receipt_attestation"], FETCH_RECEIPT_SET_ATTESTATION);
+        assert!(data.get("receipts").is_none());
+        assert!(data.get("distinct_holders").is_none());
+        assert!(data.get("required_distinct_holders").is_none());
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(data["receipt_set"].clone()).unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(signed.payload.requested_cid, TEST_CID);
+        assert_eq!(signed.payload.required_distinct_holders, 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+    }
+
+    /// An availability error with one verified receipt and a required count of
+    /// 1, while the caller asked for 2, is the refusal. The signed set says
+    /// required 2 and observed 1.
+    #[tokio::test]
+    async fn availability_error_with_required_one_signs_the_callers_two() {
+        assert_availability_error_signs_the_callers_two(distinct_holder_error_answer(true)).await;
+    }
+
+    /// The same error with the required-count field omitted is the same
+    /// refusal: required 2 and observed 1.
+    #[tokio::test]
+    async fn availability_error_without_required_count_signs_the_callers_two() {
+        assert_availability_error_signs_the_callers_two(distinct_holder_error_answer(false)).await;
+    }
+
+    /// Product code outside this module does not read a holder-count key from
+    /// an availability answer. The two `remove` calls drop the unsigned copies
+    /// and discard the values. The needles are joined at run time.
+    #[test]
+    fn content_product_source_does_not_read_availability_holder_count_keys() {
+        let source = include_str!("content.rs");
+        let product = source
+            .split_once("\nmod tests {\n")
+            .expect("content.rs tests module")
+            .0;
+        let keys = [
+            ["required_", "distinct_", "holders"].concat(),
+            ["distinct_", "holders"].concat(),
+        ];
+        for key in keys {
+            let quoted = ["\"", &key, "\""].concat();
+            let removal = ["object.remove(", &quoted, ");"].concat();
+            for (index, line) in product.lines().enumerate() {
+                if !line.contains(&quoted) {
+                    continue;
+                }
+                assert_eq!(
+                    line.trim(),
+                    removal,
+                    "line {} reads an availability holder-count key",
+                    index + 1
+                );
+            }
+        }
     }
 
     /// Two verified receipts for another CID do not prove this CID.

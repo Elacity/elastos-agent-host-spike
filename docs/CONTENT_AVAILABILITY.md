@@ -334,17 +334,21 @@ without exposing raw provider internals.
 A fetch that sets `min_distinct_holders` is a success only when the signed
 receipt set's own receipts show at least that many distinct verified holder
 DIDs for the requested CID. Content counts those DIDs from the receipts. It
-does not read a holder-count field on the availability answer. When that
-answer says success but the receipts are missing, name another CID, show
-fewer distinct verified holders than the caller required, or cannot be
-signed, content does not return the bytes. If at least one receipt can be
-signed, the answer is the distinct-holders refusal together with the signed
+does not read a holder-count field on the availability answer. The signed
+set's required count is the caller's value on a success and on a refusal. An
+availability error that states another count, or omits the count, is signed
+with the caller's count when that count is in 1 to 8 and one receipt can be
+signed. When the availability answer says success but the receipts are
+missing, name another CID, show fewer distinct verified holders than the
+caller required, or cannot be signed, content does not return the bytes. If
+at least one receipt can be signed, the answer is the distinct-holders
+refusal together with the signed
 set of what was observed. If none can, the answer is the existing unavailable
 error. A local copy does not answer this fetch: content uses the existing
-availability path. With the field absent, fetch stays local-first and that
-answer is unchanged. A local-only fetch stays on this machine. With the field
-set, it returns an error on a local hit and on a local miss, and it does not
-call availability.
+availability path. With `min_distinct_holders` absent, fetch stays local-first
+and that answer is unchanged. A local-only fetch stays on this machine. With
+`min_distinct_holders` set, it returns an error on a local hit and on a local
+miss, and it does not call availability.
 The requester signs the set with its node key under the domain label
 `elastos.content.fetch.receipt-set.v1` and marks it
 `requester-signed-not-holder-countersigned`: its own statement after its CID
