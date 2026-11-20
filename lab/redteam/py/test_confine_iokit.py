@@ -31,15 +31,15 @@ A recorded allow keeps the gate green. The deny test is an expected
 failure and its docstring names that finding file (README guard b).
 Each confirmed allow is written before the next profile is classified.
 A later harness error still fails the gate. The plant still runs.
-A recorded allow is not a skip. This module skips only when
-``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing.
+A recorded allow is not a skip. The live probe class skips when
+``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing, or when the
+unsandboxed helper proves a named IOKit device is absent on this runner.
 A profile error, a failed compile, a failed
 unsandboxed control, nonempty stderr, and an exit other than 0 are harness
 errors. They are not a deny and they are not a skip.
 
-``IokitProbe`` compiles and launches. It skips only when
-``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing, and the reason
-names that path. ``IokitRules`` does not compile and does not launch.
+``IokitProbe`` compiles and launches. ``IokitRules`` checks deny/allow
+classification without compiling or launching the helper.
 """
 
 import ast
@@ -495,6 +495,39 @@ def run_unsandboxed(binary):
     return require_unsandboxed_allow(result)
 
 
+def absent_device_reason(binary):
+    """Name only devices the unsandboxed helper cannot find on this runner.
+
+    Other invalid results remain harness errors. A present device must open
+    before a confined denial can be attributed to a profile.
+    """
+    require_storage_path(binary)
+    completed = subprocess.run(
+        [binary], capture_output=True, text=True, timeout=HELPER_TIMEOUT,
+    )
+    result = sbx.Result(
+        exit_code=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        argv=[binary],
+    )
+    if result.exit_code != 0 or result.stderr:
+        classify(result)
+    rows = parse_line(result.stdout)
+    if rows is None:
+        classify(result)
+    absent = []
+    for name, matched, kr in rows:
+        if matched == 0 and kr == -1:
+            absent.append(SERVICE_CLASS[name])
+        elif matched != 1 or kr != 0:
+            require_unsandboxed_allow(result)
+    if absent:
+        return "missing IOKit device " + ", ".join(absent) + " on this runner"
+    require_unsandboxed_allow(result)
+    return None
+
+
 def require_denied(profile):
     """The one helper. ``profile`` must deny every user-client open.
 
@@ -696,6 +729,9 @@ class IokitProbe(unittest.TestCase):
         cls.addClassCleanup(shutil.rmtree, cls.parent, ignore_errors=True)
         cls.addClassCleanup(shutil.rmtree, cls.root, ignore_errors=True)
         cls.binary = compile_iokit(cls.parent, cls.root, HELPER_C)
+        cls.skip_reason = absent_device_reason(cls.binary)
+        if cls.skip_reason:
+            return
         observe(cls)
 
     def setUp(self):
@@ -1006,8 +1042,8 @@ class IokitRules(unittest.TestCase):
         self.assertIsNone(present)
         self.launch_guard.assert_not_called()
 
-    def test_skip_is_only_a_missing_toolchain(self):
-        """``skipTest`` is only the missing compiler or ``sandbox-exec`` path."""
+    def test_skip_reason_is_tool_or_absent_device(self):
+        """The live probe skips for a missing tool or named absent device."""
         source = Path(__file__).read_text(encoding="utf-8")
         tree = ast.parse(source)
         calls = []
@@ -1018,14 +1054,52 @@ class IokitRules(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         line = source.splitlines()[calls[0].lineno - 1]
         self.assertIn("skip_reason", line)
+        self.assertIn("cls.skip_reason = absent_device_reason(cls.binary)", source)
         with patch.object(os.path, "isfile", return_value=True):
             self.assertIsNone(skip_reason())
+        self.launch_guard.assert_not_called()
+
+    def test_absent_device_skips_only_live_probe(self):
+        """A missing SMC skips live launches; classifier tests still run."""
+        absent = format_line((
+            (0, -1), (1, 0), (1, 0), (1, 0),
+        ))
+        with patch.object(
+            subprocess, "run",
+            return_value=subprocess.CompletedProcess(["/private/iokit"], 0, absent, ""),
+        ):
+            self.assertEqual(
+                absent_device_reason("/private/iokit"),
+                "missing IOKit device AppleSMC on this runner",
+            )
+        bad = format_line(((0, -1), (1, 5), (1, 0), (1, 0)))
+        with patch.object(
+            subprocess, "run",
+            return_value=subprocess.CompletedProcess(["/private/iokit"], 0, bad, ""),
+        ):
+            with self.assertRaises(HarnessError):
+                absent_device_reason("/private/iokit")
+        with patch.object(os.path, "isfile", return_value=True), patch(
+            __name__ + ".compile_iokit", return_value="/private/iokit"
+        ), patch(__name__ + ".absent_device_reason", return_value=(
+            "missing IOKit device AppleSMC on this runner"
+        )), patch(__name__ + ".observe") as observed:
+            class MissingSmc(IokitProbe):
+                pass
+
+            probes = unittest.TestResult()
+            unittest.defaultTestLoader.loadTestsFromTestCase(MissingSmc).run(probes)
+        self.assertEqual(probes.errors, [])
+        self.assertEqual(probes.failures, [])
+        self.assertEqual(len(probes.skipped), len(unittest.defaultTestLoader.getTestCaseNames(IokitProbe)))
+        self.assertTrue(all("AppleSMC" in reason for _, reason in probes.skipped))
+        observed.assert_not_called()
         self.launch_guard.assert_not_called()
 
     def test_missing_tools_skip_only_probe_class(self):
         """Each missing tool skips every probe while the classifier checks run."""
         classifier_names = (
-            "test_skip_is_only_a_missing_toolchain",
+            "test_skip_reason_is_tool_or_absent_device",
             "test_recorded_allow_does_not_skip",
         )
         probe_names = unittest.defaultTestLoader.getTestCaseNames(IokitProbe)
@@ -2192,7 +2266,9 @@ class IokitRules(unittest.TestCase):
                     sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
                 ), patch.object(os.path, "isfile", return_value=True), patch(
                     __name__ + ".compile_iokit", side_effect=injected_compile
-                ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
+                ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch(
+                    __name__ + ".absent_device_reason", return_value=None
+                ), patch.object(
                     sbx, "run", side_effect=injected_sandbox
                 ), patch(__name__ + ".last_change", return_value="a" * 40), patch(
                     __name__ + ".pr_label", return_value="PR fixture"

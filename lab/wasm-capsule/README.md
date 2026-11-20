@@ -59,14 +59,23 @@ rust-toolchain.toml   pins rustc 1.91.0 + the wasm target (for adoption)
 ```
 
 The lane is a Cargo workspace whose root is the package `capsule` (not a virtual
-workspace), so the lane gates — `cargo fmt`/`cargo test --manifest-path
-.../Cargo.toml` — act on `capsule` without `--all`/`--workspace`. Its other
+workspace), so the lane gates — `cargo fmt` and `cargo test` from this folder —
+act on `capsule` without `--all`/`--workspace`. Its other
 members are `audit/` and `tools/`. `audit/` is the `wasm-capsule-audit` crate:
 the one import-audit path (P10), which wc-004's verifier calls through a path
 dependency. The cx-wasm-audit lane owns it; this lane does not edit it. Test it
 from this directory with `cargo test -p wasm-capsule-audit --locked`. `tools/`
 is the `wasm-capsule-tools` crate, the lab's host-side library (the lab name
 the verifier and the runner, below).
+
+Run the lane gate from this folder so rustup selects this lane's pinned Rust
+1.91.0 toolchain. From the repository root:
+
+```bash
+cd lab/wasm-capsule
+cargo fmt -- --check
+cargo test --locked
+```
 
 The runner (`tools/src/run.rs`) starts two host engines. Rong's ruling (26 Oct):
 Both engines, wasmtime and wasmer, are test-only and not endorsed. The engine choice is Anders's.
@@ -282,7 +291,7 @@ F-WC3-LANE-FILES-QUOTED, task 029; counted in "## Falsifiers").
 
 ### Why the tests live in the root package
 
-The lane gate `(cd lab/wasm-capsule && cargo test --locked)`
+The lane gate `cd lab/wasm-capsule && cargo test --locked`
 runs only the root package `capsule` (there is no `--workspace`), so a test
 inside `tools/` would never run in the gate. So every named test is in
 `tests/`, and `capsule` reaches the tools crate through a dev-dependency. The
@@ -2095,7 +2104,7 @@ Limits, not claimed:
 
 ## Named tests
 
-`cargo test --manifest-path lab/wasm-capsule/Cargo.toml`:
+`cargo test --locked` from `lab/wasm-capsule`:
 
 - `digest_returns_the_fixed_value` — the shared impl returns the pinned value.
 - `two_clean_builds_in_different_paths_are_byte_identical` — the foundation claim.
