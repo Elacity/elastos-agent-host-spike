@@ -994,14 +994,15 @@ class AgentHostDynamicChecks(unittest.TestCase):
             self.assertIn("checkout", str(refused.exception))
 
     def test_export_paths_follow_the_crate(self):
+        sidecar = "asks" + ".json"
         text = (
-            'include_str!("../asks.json");\n'
+            'include_str!("../' + sidecar + '");\n'
             'include_bytes!("../../../capsules/model-provider/src/local_llama.rs");\n'
             'path: "../../elastos/wit",\n'
             'include_str!("lib.rs");\n'
         )
         self.assertEqual(referenced_repo_paths(text), [
-            "examples/agent-host/asks.json",
+            "examples/agent-host/" + sidecar,
             "capsules/model-provider/src/local_llama.rs",
             "examples/agent-host/src/lib.rs",
             "elastos/wit",
@@ -1011,7 +1012,7 @@ class AgentHostDynamicChecks(unittest.TestCase):
         self.assertIn("rust-toolchain.toml", exported)
         self.assertIn("elastos/wit", exported)
         self.assertIn("capsules/model-provider/src/local_llama.rs", exported)
-        self.assertNotIn("examples/agent-host/asks.json", exported)
+        self.assertNotIn("examples/agent-host/" + sidecar, exported)
         with self.assertRaises(ExportError):
             referenced_repo_paths('include_str!("../../../../outside");')
 

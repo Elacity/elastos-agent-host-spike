@@ -65,6 +65,11 @@ pub const BUNDLE_WALK_BUDGET: Budget = Budget {
     max_path_bytes: 1_024,
 };
 
+const _: () = assert!(
+    BUNDLE_WALK_BUDGET.max_total_bytes
+        <= elastos_common::capsule_manifest_file::MAX_CAPSULE_MANIFEST_BYTES
+);
+
 /// The most bundles one start by CID takes in: the one asked for and every
 /// bundle pinned below it, each counted once however many pins reach it.
 pub const CLOSURE_MAX_MEMBERS: usize = 16;
