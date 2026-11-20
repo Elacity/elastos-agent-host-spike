@@ -2779,6 +2779,7 @@ impl ModelPartReads {
             cid,
             path,
             &transfer,
+            None,
         )
         .await;
         if index_read {
@@ -3424,6 +3425,7 @@ impl ContentProvider {
                     cid,
                     path,
                     &transfer,
+                    request.get("min_distinct_holders").cloned(),
                 )
                 .await;
                 if model_index {
@@ -3529,6 +3531,7 @@ impl ContentProvider {
         cid: &str,
         path: &str,
         transfer: &ContentFetchTransfer,
+        min_distinct_holders: Option<Value>,
     ) -> Result<Option<ContentFetchResult>, ProviderError> {
         let mut request = json!({
             "op": "fetch",
@@ -3537,6 +3540,12 @@ impl ContentProvider {
         });
         if !path.is_empty() {
             request["path"] = Value::String(path.to_string());
+        }
+        // The ordinary Get omits this field. When the caller set it, forward
+        // the value unchanged so a string, a negative, or a fraction is the
+        // availability provider's refusal and not a silent ordinary Get.
+        if let Some(required) = min_distinct_holders {
+            request["min_distinct_holders"] = required;
         }
         // A bounded read travels as its own request so the holder applies the
         // exact range or metadata bound once and returns only those bytes.
@@ -5999,6 +6008,21 @@ struct FetchReceiptWire {
     time: u64,
 }
 
+/// The only CID shape a fetch receipt may name: canonical and SHA2-256.
+/// Other multihashes can carry caller-chosen bytes in their digest, including
+/// credentials under the identity code.
+pub(crate) fn require_fetch_receipt_cid(requested_cid: &str) -> Result<(), String> {
+    let cid = cid::Cid::try_from(requested_cid)
+        .map_err(|_| "fetch receipt requires a valid requested CID".to_string())?;
+    if cid.to_string() != requested_cid {
+        return Err("fetch receipt requires a canonical requested CID".into());
+    }
+    if cid.hash().code() != 0x12 || cid.hash().digest().len() != 32 {
+        return Err("fetch receipt requires a SHA2-256 requested CID".into());
+    }
+    Ok(())
+}
+
 impl FetchReceipt {
     pub fn new(
         requested_cid: &str,
@@ -6009,16 +6033,7 @@ impl FetchReceipt {
         attempt: u8,
         time: u64,
     ) -> Result<Self, String> {
-        let cid = cid::Cid::try_from(requested_cid)
-            .map_err(|_| "fetch receipt requires a valid requested CID".to_string())?;
-        if cid.to_string() != requested_cid {
-            return Err("fetch receipt requires a canonical requested CID".into());
-        }
-        // Content CIDs use SHA2-256. Other multihashes can carry caller-chosen
-        // bytes in their digest, including credentials under the identity code.
-        if cid.hash().code() != 0x12 || cid.hash().digest().len() != 32 {
-            return Err("fetch receipt requires a SHA2-256 requested CID".into());
-        }
+        require_fetch_receipt_cid(requested_cid)?;
         elastos_identity::decode_did_key(peer_did)
             .map_err(|_| "fetch receipt requires a valid peer DID".to_string())?;
         if !(1..=MAX_FETCH_RECEIPT_ATTEMPTS).contains(&attempt) {
@@ -6048,6 +6063,13 @@ impl FetchReceipt {
             attempt,
             time,
         })
+    }
+
+    /// The peer DID when this runtime verified the bytes against the CID.
+    /// Distinct-holder counting compares these DIDs, never addresses or
+    /// tickets, so two announcements for one key remain one holder.
+    pub fn peer_did_verified(&self) -> Option<&str> {
+        self.verified.then_some(self.peer_did.as_str())
     }
 
     pub fn encode_canonical(&self) -> Result<Vec<u8>, serde_json::Error> {
