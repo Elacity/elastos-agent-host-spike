@@ -96,13 +96,13 @@ fn load_capsule_manifest(
     Ok(manifest)
 }
 
-struct ScopedTerminalEnv {
+pub(crate) struct ScopedTerminalEnv {
     cols_prev: Option<std::ffi::OsString>,
     rows_prev: Option<std::ffi::OsString>,
 }
 
 impl ScopedTerminalEnv {
-    fn capture() -> Self {
+    pub(crate) fn capture() -> Self {
         let cols_prev = std::env::var_os("ELASTOS_TERM_COLS");
         let rows_prev = std::env::var_os("ELASTOS_TERM_ROWS");
 

@@ -31,7 +31,8 @@ it when it starts. A command must not silently start a competing host.
 | `elastos`, `elastos home` | Managed user lane | Opens Home. `elastos home` starts or reuses the managed Home runtime. It does not attach to an operator runtime that already owns the same home. |
 | `elastos home --status`, `elastos home --json` | Self-contained | Reads and prints a Home-state probe. It does not start Home. |
 | `elastos run <path>` or `elastos run --cid <cid>`, `type=data` | Self-contained | Materializes the capsule, creates an in-process Runtime and preview server, opens the browser, and remains active until stopped. It does not attach to `elastos serve`. |
-| `elastos run <path>` or `elastos run --cid <cid>`, Component | Operator lane | Accepts only `type=wasm` with `runtime_abi="elastos.component/v1"`. It attaches to the operator runtime for Bus authorization, then executes the Component locally. |
+| `elastos run <path>` or `elastos run --cid <cid>`, Component | Self-contained | Accepts only `type=wasm` with `runtime_abi="elastos.component/v1"`. The folder selects a CID; Runtime starts the checked bundle from this Home's staged store after CID, publisher signature, and pinned closure checks. A missing bundle requires `elastos stage-bundle <folder> --signature <file>`. It captures terminal size and raw input while the guest runs. This path has no attached Bus bridge. |
+| `elastos run --dev-unsigned-component <path>` | Self-contained | Starts an unsigned local Component only in a source or CI Home with `dev_mode=true`. An installed signed release refuses this path even when its config enables dev mode. It has no attached Bus bridge. |
 | `elastos run <path>` or `elastos run --cid <cid>`, microVM | Operator lane | Uses the operator runtime supervisor to launch and stop the microVM. |
 | `elastos run`, other manifest types or no manifest | Self-contained | Falls through to the local runner. This is outside the supported capsule-authoring contract. A non-Component WASM manifest is rejected. |
 | `elastos capsule <name>` with `--lifecycle interactive` or `--interactive` | Managed user lane | Reuses an active operator, managed Home, or managed Chat runtime recorded for the same data home. If none is recorded, it starts the managed Home runtime. Either option selects the interactive runtime path; `--interactive` also sets the capsule launch flag. |
@@ -63,8 +64,9 @@ The host operator controls web terminal access with
 `elastos config set developer_mode false`. Runtime stores this boolean in
 `config.toml` in its data folder. The default is off. Home and apps use Runtime
 routes and app storage roots; the host CLI owns this setting. The separate
-`dev_mode` setting lets source and CI Homes run unsigned local capsules; an
-installed signed release ignores it.
+`dev_mode` setting lets source and CI Homes run unsigned local capsules through
+the explicit `run --dev-unsigned-component` path; an installed signed release
+refuses that path.
 
 Runtime refuses all web terminal routes with HTTP 403 while developer mode is
 off or guest registration is enabled. This includes signed-in owners. A refused

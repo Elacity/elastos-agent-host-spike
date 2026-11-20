@@ -254,26 +254,57 @@ self-contained data preview.
 
 ## Run a Component
 
-Component and microVM `run` commands require the operator runtime. From the
-repository root, use two terminals:
+For a source or CI Home, run an unsigned Component explicitly in development
+mode. From the repository root, after building `my-app`:
 
 ```bash
-# Terminal 1
-./elastos/target/release/elastos serve
+./elastos/target/release/elastos config set dev_mode true
+./elastos/target/release/elastos run --dev-unsigned-component my-app
 ```
+
+An installed signed release refuses this development command, even if its
+config says `dev_mode = true`. The command runs a local Component without an
+attached Bus bridge. Use a Runtime integration test for a Component that needs
+Bus grants, as [agent-host](../examples/agent-host/README.md) does.
+
+The normal `run` command starts only a staged, signed bundle. Package the
+manifest and declared entrypoint in a clean folder so build outputs do not
+become part of its CID:
 
 ```bash
-# Terminal 2
-./elastos/target/release/elastos run my-app
+mkdir my-app-bundle
+cp my-app/capsule.json my-app/my-app.component.wasm my-app-bundle/
 ```
 
-The second command fails if the operator runtime is absent. Data capsules are
-different: their `run` path starts its own in-process preview. The complete
-classification lives in [Command runtime matrix](COMMAND_MATRIX.md).
+Create this Home's config file if needed:
 
-The operator runtime grants the capsule only what its policy file allows (see
-[Capability policy](INSTALL.md#capability-policy)). To grant every request
-while you develop, start Terminal 1 with `ELASTOS_SHELL_MODE=auto`.
+```bash
+./elastos/target/release/elastos config set dev_mode false
+```
+
+Add `trusted_keys = ["<publisher-public-key-hex>"]` to the `config.toml` path
+that command prints so this Home trusts the publisher key. Get the bundle CID:
+
+```bash
+./elastos/target/release/elastos stage-bundle my-app-bundle
+```
+
+Sign that CID in the `elastos.capsule.bundle.v1` domain with the trusted
+publisher key, and save the bundle-signature JSON as `my-app-bundle.sig.json`. Then
+stage and run:
+
+```bash
+./elastos/target/release/elastos stage-bundle my-app-bundle --signature my-app-bundle.sig.json
+./elastos/target/release/elastos run my-app-bundle
+```
+
+The signature file has `schema` set to
+`elastos.capsule.bundle-signature/v1` and contains `cid`, `signer_did`, and
+`signature` fields. The signature is the hex Ed25519 signature of
+SHA-256(domain bytes, one zero byte, CID text bytes). If the slot is missing,
+`run` gives the staging command. The staged slot supplies the bytes that run.
+Data capsules use an in-process preview; microVM `run` still uses the operator
+runtime. See the [Command runtime matrix](COMMAND_MATRIX.md).
 
 ## Publish with the right gate
 

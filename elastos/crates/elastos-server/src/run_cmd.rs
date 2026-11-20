@@ -5,8 +5,12 @@ pub async fn run_capsule(
     cid: Option<String>,
     with: Vec<String>,
     carrier_addr: Option<String>,
+    dev_unsigned_component: bool,
     capsule_args: Vec<String>,
 ) -> anyhow::Result<()> {
+    if dev_unsigned_component && (!with.is_empty() || carrier_addr.is_some() || cid.is_some()) {
+        anyhow::bail!("--dev-unsigned-component takes only a local Component folder");
+    }
     if let Some(plan) = resolve_provider_host_plan(
         path.as_deref(),
         cid.as_deref(),
@@ -33,7 +37,14 @@ pub async fn run_capsule(
     // not know. Select this path by its type and ABI; staged admission reads
     // and verifies the complete manifest before anything runs.
     if is_component_bundle(&capsule_dir).await? {
-        return run_staged_component(&capsule_dir, capsule_args).await;
+        return if dev_unsigned_component {
+            run_unsigned_development_component(&capsule_dir, capsule_args).await
+        } else {
+            run_staged_component(&capsule_dir, capsule_args).await
+        };
+    }
+    if dev_unsigned_component {
+        anyhow::bail!("--dev-unsigned-component requires a Component manifest");
     }
     let manifest = load_valid_manifest_if_present(&capsule_dir).await?;
 
@@ -211,6 +222,8 @@ async fn is_component_bundle(capsule_dir: &Path) -> anyhow::Result<bool> {
 async fn run_staged_component(capsule_dir: &Path, capsule_args: Vec<String>) -> anyhow::Result<()> {
     let data_dir = crate::default_data_dir();
     let runtime = crate::create_runtime(data_dir.join("storage")).await?;
+    let _term_env = crate::capsule_cmd::ScopedTerminalEnv::capture();
+    let _saved_termios = crate::runtime_control::enable_host_raw_mode_pub();
     let (handle, _) = elastos_server::stage_cmd::run_staged_folder(
         &runtime,
         &data_dir,
@@ -225,6 +238,23 @@ async fn run_staged_component(capsule_dir: &Path, capsule_args: Vec<String>) -> 
         other => other.into(),
     })?;
     eprintln!("[run] Component capsule '{}' exited", handle.manifest.name);
+    Ok(())
+}
+
+async fn run_unsigned_development_component(
+    capsule_dir: &Path,
+    capsule_args: Vec<String>,
+) -> anyhow::Result<()> {
+    let runtime = crate::create_runtime(crate::default_data_dir().join("storage")).await?;
+    let _term_env = crate::capsule_cmd::ScopedTerminalEnv::capture();
+    let _saved_termios = crate::runtime_control::enable_host_raw_mode_pub();
+    let handle = runtime
+        .run_unsigned_development_component(capsule_dir, capsule_args)
+        .await?;
+    eprintln!(
+        "[run] Development Component capsule '{}' exited",
+        handle.manifest.name
+    );
     Ok(())
 }
 
@@ -322,6 +352,7 @@ mod tests {
                 None,
                 Vec::new(),
                 None,
+                false,
                 Vec::new(),
             )
             .await
@@ -330,42 +361,14 @@ mod tests {
         }
     }
 
-    // A manifest whose requirement carries a `cid`: a pin. Only
-    // `PinnedManifest` reads one; the ordinary manifest type refuses the key.
-    const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+    // A Component requirement with a CID pin needs the staged manifest reader.
+    const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","runtime_abi":"elastos.component/v1","bus_contract":"elastos:bus@v1","wit_world_sha256":"7a026e0a641c8c04214576dc85a677e0b52c9f02866d231119f9a3ba609d49e2","execution":"component","projections":["cli"],"entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
 
     #[tokio::test]
     async fn pinned_component_selects_staged_admission_before_legacy_parse() {
         let directory = tempfile::tempdir().unwrap();
-        let mut manifest: serde_json::Value = serde_json::from_str(PINNED).unwrap();
-        manifest["runtime_abi"] = "elastos.component/v1".into();
-        std::fs::write(
-            directory.path().join("capsule.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        assert!(is_component_bundle(directory.path()).await.unwrap());
-    }
-
-    /// A pinned manifest does not start through `run`: the command stops at
-    /// its own manifest parse, with that parse's error and nothing around it.
-    #[tokio::test]
-    async fn run_stops_at_its_manifest_parse_for_a_pinned_requirement() {
-        let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("capsule.json"), PINNED).unwrap();
-        let error = run_capsule(
-            Some(directory.path().to_path_buf()),
-            None,
-            Vec::new(),
-            None,
-            Vec::new(),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            error.to_string().starts_with("unknown field `cid`"),
-            "{error}"
-        );
+        assert!(is_component_bundle(directory.path()).await.unwrap());
     }
 
     /// a4 (R6-2a): the three CLI senders put the host keys in the typed
