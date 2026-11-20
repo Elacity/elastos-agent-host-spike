@@ -29,6 +29,12 @@ pub async fn run_capsule(
     }
 
     let capsule_dir = resolve_capsule_dir(path, cid).await?;
+    // A pinned Component manifest has keys the legacy manifest reader does
+    // not know. Select this path by its type and ABI; staged admission reads
+    // and verifies the complete manifest before anything runs.
+    if is_component_bundle(&capsule_dir).await? {
+        return run_staged_component(&capsule_dir, capsule_args).await;
+    }
     let manifest = load_valid_manifest_if_present(&capsule_dir).await?;
 
     if let Some(ref manifest) = manifest {
@@ -55,8 +61,7 @@ pub async fn run_capsule(
                         manifest.name
                     );
                 }
-                return run_component_via_operator_runtime(&capsule_dir, manifest, capsule_args)
-                    .await;
+                return run_staged_component(&capsule_dir, capsule_args).await;
             }
             elastos_common::CapsuleType::Data => {
                 let runtime =
@@ -190,6 +195,39 @@ async fn load_valid_manifest_if_present(
     Ok(Some(manifest))
 }
 
+async fn is_component_bundle(capsule_dir: &Path) -> anyhow::Result<bool> {
+    let manifest = capsule_dir.join("capsule.json");
+    if !manifest.exists() {
+        return Ok(false);
+    }
+    let value: serde_json::Value = serde_json::from_slice(&tokio::fs::read(manifest).await?)?;
+    Ok(
+        value.get("type").and_then(|value| value.as_str()) == Some("wasm")
+            && value.get("runtime_abi").and_then(|value| value.as_str())
+                == Some("elastos.component/v1"),
+    )
+}
+
+async fn run_staged_component(capsule_dir: &Path, capsule_args: Vec<String>) -> anyhow::Result<()> {
+    let data_dir = crate::default_data_dir();
+    let runtime = crate::create_runtime(data_dir.join("storage")).await?;
+    let (handle, _) = elastos_server::stage_cmd::run_staged_folder(
+        &runtime,
+        &data_dir,
+        capsule_dir,
+        capsule_args,
+    )
+    .await
+    .map_err(|error| match error {
+        elastos_server::bundle_admission::BundleRefusal::Missing(_) => anyhow::anyhow!(
+            "{error}; stage the signed folder with `elastos stage-bundle <folder> --signature <file>`"
+        ),
+        other => other.into(),
+    })?;
+    eprintln!("[run] Component capsule '{}' exited", handle.manifest.name);
+    Ok(())
+}
+
 async fn operator_runtime_coords() -> anyhow::Result<crate::runtime_control::RuntimeCoords> {
     let data_dir = crate::default_data_dir();
     let coords_path = crate::runtime_control::runtime_coord_path(&data_dir);
@@ -249,96 +287,6 @@ async fn run_microvm_via_operator_runtime(
     Ok(())
 }
 
-async fn run_component_via_operator_runtime(
-    capsule_dir: &Path,
-    manifest: &elastos_common::CapsuleManifest,
-    capsule_args: Vec<String>,
-) -> anyhow::Result<()> {
-    let coords = operator_runtime_coords().await?;
-    eprintln!(
-        "[run] Component capsule attached to runtime at {}",
-        coords.api_url
-    );
-
-    let runtime = crate::create_runtime(crate::default_data_dir().join("storage")).await?;
-    let tokens = crate::runtime_control::attach_to_runtime(&coords).await?;
-    let api_url = coords.api_url.clone();
-    let client_token = tokens.client_token;
-    let manifest_capabilities = manifest.resource_authority_bounds();
-    let audit_data_dir = crate::default_data_dir();
-    let hostcall_handle = tokio::runtime::Handle::current();
-    runtime.set_bridge_hostcall(std::sync::Arc::new(
-        move |line, capsule_id, principal_id| {
-            let response = hostcall_handle
-                .block_on(
-                    elastos_server::resource_bridge::handle_remote_request_with_audit_dir(
-                        line,
-                        &api_url,
-                        &client_token,
-                        capsule_id,
-                        &manifest_capabilities,
-                        principal_id,
-                        Some(audit_data_dir.as_path()),
-                    ),
-                )
-                .map_err(|err| err.to_string())?;
-            serde_json::to_string(&response).map_err(|err| err.to_string())
-        },
-    ));
-
-    let _saved_termios = crate::runtime_control::enable_host_raw_mode_pub();
-    let _term_env = ScopedTerminalEnv::capture();
-    let handle = runtime
-        .run_local(capsule_dir, capsule_args)
-        .await
-        .map_err(|e| anyhow::anyhow!("Component capsule failed: {}", e))?;
-    eprintln!("[run] Component capsule '{}' exited", handle.manifest.name);
-    Ok(())
-}
-
-struct ScopedTerminalEnv {
-    cols_prev: Option<std::ffi::OsString>,
-    rows_prev: Option<std::ffi::OsString>,
-}
-
-impl ScopedTerminalEnv {
-    fn capture() -> Self {
-        let cols_prev = std::env::var_os("ELASTOS_TERM_COLS");
-        let rows_prev = std::env::var_os("ELASTOS_TERM_ROWS");
-
-        #[cfg(unix)]
-        unsafe {
-            let mut ws: libc::winsize = std::mem::zeroed();
-            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 {
-                if ws.ws_col > 0 {
-                    std::env::set_var("ELASTOS_TERM_COLS", ws.ws_col.to_string());
-                }
-                if ws.ws_row > 0 {
-                    std::env::set_var("ELASTOS_TERM_ROWS", ws.ws_row.to_string());
-                }
-            }
-        }
-
-        Self {
-            cols_prev,
-            rows_prev,
-        }
-    }
-}
-
-impl Drop for ScopedTerminalEnv {
-    fn drop(&mut self) {
-        match &self.cols_prev {
-            Some(value) => std::env::set_var("ELASTOS_TERM_COLS", value),
-            None => std::env::remove_var("ELASTOS_TERM_COLS"),
-        }
-        match &self.rows_prev {
-            Some(value) => std::env::set_var("ELASTOS_TERM_ROWS", value),
-            None => std::env::remove_var("ELASTOS_TERM_ROWS"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +333,19 @@ mod tests {
     // A manifest whose requirement carries a `cid`: a pin. Only
     // `PinnedManifest` reads one; the ordinary manifest type refuses the key.
     const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    #[tokio::test]
+    async fn pinned_component_selects_staged_admission_before_legacy_parse() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(PINNED).unwrap();
+        manifest["runtime_abi"] = "elastos.component/v1".into();
+        std::fs::write(
+            directory.path().join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(is_component_bundle(directory.path()).await.unwrap());
+    }
 
     /// A pinned manifest does not start through `run`: the command stops at
     /// its own manifest parse, with that parse's error and nothing around it.
