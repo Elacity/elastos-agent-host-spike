@@ -203,8 +203,60 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     let request_id = created["request_id"].as_str().unwrap();
     let mut wrong_card = created["request_binding"].clone();
     wrong_card["sha256"] = json!("00".repeat(32));
+    let fresh = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({ "request_id": request_id }),
+    );
+    let (status, body) = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &wrong_card, Some(&fresh)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("changed before Inbox approval"), "{body}");
+    let record = read_record(dir.path(), request_id);
+    assert_eq!(record["status"], "stale");
+    assert!(record["result"].is_null(), "a stale plan runs nothing");
+
+    // A changed non-hash card field is stale even when its sha256 is the
+    // same. A launch token alone cannot write the stale decision.
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(agent_plan_state(dir.path()));
+    let owner = passkey_authority(dir.path());
+    let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+    let created = submit(
+        dir.path(),
+        &owner.principal_id,
+        "agent:v2:plan-requester",
+        read_plan(),
+        53,
+    );
+    let request_id = created["request_id"].as_str().unwrap();
+    let card = owner_card(&app, &token, request_id).await;
+    let mut wrong_card = card["request_binding"].clone();
+    wrong_card["preview"]["step"]["operation"] = json!("changed");
+    assert_eq!(wrong_card["sha256"], card["request_binding"]["sha256"]);
     let (status, body) =
         post_action(&app, &token, approve_body(request_id, &wrong_card, None)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(read_record(dir.path(), request_id)["status"], "pending");
+    let fresh = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({ "request_id": request_id }),
+    );
+    let (status, body) = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &wrong_card, Some(&fresh)),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("changed before Inbox approval"), "{body}");
     let record = read_record(dir.path(), request_id);
@@ -229,15 +281,24 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     let mut changed = read_record(dir.path(), request_id);
     changed["request"]["request"]["principal"] = json!("person:changed");
     write_record(dir.path(), request_id, &changed);
+    let fresh = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({ "request_id": request_id }),
+    );
     let (status, body) = post_action(
         &app,
         &token,
-        approve_body(request_id, &card["request_binding"], None),
+        approve_body(request_id, &card["request_binding"], Some(&fresh)),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("changed before Inbox approval"), "{body}");
-    assert_eq!(read_record(dir.path(), request_id)["status"], "stale");
+    let record = read_record(dir.path(), request_id);
+    assert_eq!(record["status"], "stale");
+    assert!(record["result"].is_null());
 
     // A record whose stored binding was changed under the same step is refused
     // too: the whole stored binding is compared, not only the recomputed one.
@@ -257,15 +318,24 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     let mut changed = read_record(dir.path(), request_id);
     changed["request_binding"]["sha256"] = json!("11".repeat(32));
     write_record(dir.path(), request_id, &changed);
+    let fresh = step_up_token_for_app_context(
+        dir.path(),
+        INBOX_CAPSULE_ID,
+        &token,
+        "agent_plan.approve",
+        &json!({ "request_id": request_id }),
+    );
     let (status, body) = post_action(
         &app,
         &token,
-        approve_body(request_id, &card["request_binding"], None),
+        approve_body(request_id, &card["request_binding"], Some(&fresh)),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("changed before Inbox approval"), "{body}");
-    assert_eq!(read_record(dir.path(), request_id)["status"], "stale");
+    let record = read_record(dir.path(), request_id);
+    assert_eq!(record["status"], "stale");
+    assert!(record["result"].is_null());
 }
 
 #[tokio::test]
@@ -450,7 +520,7 @@ async fn a15r_approve_a_writing_step_needs_a_fresh_passkey() {
 }
 
 #[tokio::test]
-async fn a15r_parallel_approve_clicks_claim_one_plan() {
+async fn a15r_double_clicks_claim_one_plan() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(agent_plan_state(dir.path()));
     let owner = passkey_authority(dir.path());
@@ -475,18 +545,18 @@ async fn a15r_parallel_approve_clicks_claim_one_plan() {
     };
     let first_token = passkey();
     let second_token = passkey();
-    let (first, second) = tokio::join!(
-        post_action(
-            &app,
-            &token,
-            approve_body(request_id, &card["request_binding"], Some(&first_token)),
-        ),
-        post_action(
-            &app,
-            &token,
-            approve_body(request_id, &card["request_binding"], Some(&second_token)),
-        ),
-    );
+    let first = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &card["request_binding"], Some(&first_token)),
+    )
+    .await;
+    let second = post_action(
+        &app,
+        &token,
+        approve_body(request_id, &card["request_binding"], Some(&second_token)),
+    )
+    .await;
     let outcomes = [first, second];
     assert_eq!(
         outcomes

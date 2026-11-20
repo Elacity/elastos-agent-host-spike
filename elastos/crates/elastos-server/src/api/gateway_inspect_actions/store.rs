@@ -134,8 +134,9 @@ pub(super) fn claim_pending_inspect_action_record(
 
 /// Claims one pending agent plan for its owner under the store lock. The card's
 /// whole binding must equal both the stored and the recomputed one, so a changed
-/// plan becomes stale and claims nothing. The passkey check runs before the claim:
-/// a failed passkey leaves the record pending, and a second click finds it claimed.
+/// plan becomes stale and claims nothing. The passkey check runs before any
+/// state write: a failed passkey leaves the record pending, and a second click
+/// finds it claimed.
 pub(super) fn claim_pending_agent_plan_for_owner(
     data_dir: &Path,
     request_id: &str,
@@ -163,6 +164,7 @@ pub(super) fn claim_pending_agent_plan_for_owner(
     }
     let card: EspRequestBinding = serde_json::from_value(card_binding.clone())
         .map_err(|err| anyhow::anyhow!("agent plan card binding is invalid: {err}"))?;
+    consume_step_up(&record)?;
     if record.request_binding.as_ref() != Some(&card)
         || super::agent_plan::agent_plan_request_binding(&record) != Some(card.clone())
     {
@@ -173,7 +175,6 @@ pub(super) fn claim_pending_agent_plan_for_owner(
         write_inspect_action_record_unlocked(data_dir, &record)?;
         anyhow::bail!(message);
     }
-    consume_step_up(&record)?;
     record.status = "approved".to_string();
     record.updated_at = updated_at;
     write_inspect_action_record_unlocked(data_dir, &record)?;

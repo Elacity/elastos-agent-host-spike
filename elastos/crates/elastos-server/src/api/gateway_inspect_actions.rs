@@ -431,7 +431,7 @@ pub(super) fn approve_agent_plan_request(
             )
         },
     )?;
-    Ok("Approved agent plan. Runtime runs its stored step once.".to_string())
+    Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
 
 pub(super) fn deny_inspect_action_request(
