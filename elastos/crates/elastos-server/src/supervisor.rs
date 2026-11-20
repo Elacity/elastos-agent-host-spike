@@ -1208,6 +1208,7 @@ impl Supervisor {
                     data_dir: Some(self.data_dir.clone()),
                     launch: None,
                     model_token_ceiling: None,
+                    model_budget: None,
                     stop: None,
                 }),
                 _ => None,
