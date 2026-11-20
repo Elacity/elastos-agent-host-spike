@@ -842,6 +842,8 @@ pub(crate) mod tests {
         requests: std::sync::Mutex<Vec<serde_json::Value>>,
         ceilings_at_call: std::sync::Mutex<Vec<Vec<(String, u64)>>>,
         runtime: std::sync::Mutex<Option<Arc<Runtime>>>,
+        revision: std::sync::Mutex<Option<String>>,
+        reject_next_valid_create: std::sync::Mutex<bool>,
     }
 
     impl CapturingModelProvider {
@@ -851,6 +853,10 @@ pub(crate) mod tests {
 
         fn watch(&self, runtime: Arc<Runtime>) {
             *self.runtime.lock().unwrap() = Some(runtime);
+        }
+
+        fn raise_revision_after_rejection(&self) {
+            *self.reject_next_valid_create.lock().unwrap() = true;
         }
 
         fn ceilings_at_call(&self) -> Vec<Vec<(String, u64)>> {
@@ -890,6 +896,41 @@ pub(crate) mod tests {
                 self.ceilings_at_call.lock().unwrap().push(held);
             }
             self.requests.lock().unwrap().push(request.clone());
+            if request["op"] == "offers_list" {
+                let revision = self
+                    .revision
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| "sha256:fixture".into());
+                return Ok(serde_json::json!({
+                    "status": "ok", "data": {
+                        "offers": [{
+                            "id": "offer:fixture", "operation": "text.generate",
+                            "policy": {"input_bytes_limit": 100, "inline_output_bytes_limit": 64}
+                        }, {
+                            "id": "offer:large", "operation": "text.generate",
+                            "policy": {"input_bytes_limit": 300, "inline_output_bytes_limit": 64}
+                        }],
+                        "offer_revisions": {"offer:fixture": revision, "offer:large": "sha256:large"}
+                    }
+                }));
+            }
+            if request["operation"] != "text.generate" {
+                return Err(elastos_runtime::provider::ProviderError::Provider(
+                    "requested operation does not match configured offer".into(),
+                ));
+            }
+            let reject_valid_create = {
+                let mut reject = self.reject_next_valid_create.lock().unwrap();
+                std::mem::take(&mut *reject)
+            };
+            if reject_valid_create {
+                *self.revision.lock().unwrap() = Some("sha256:raised".into());
+                return Err(elastos_runtime::provider::ProviderError::Provider(
+                    "fixture rejects first valid create".into(),
+                ));
+            }
             Ok(serde_json::json!({"status": "ok", "data": {"ok": true}}))
         }
     }
@@ -3899,6 +3940,7 @@ pub(crate) mod tests {
             data_dir: Some(home.data_dir.clone()),
             launch: tables.launch,
             model_token_ceiling: tables.model_token_ceiling,
+            model_budget: None,
             stop: tables.stop,
         };
         let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
@@ -5044,6 +5086,7 @@ pub(crate) mod tests {
             data_dir: Some(home.data_dir.clone()),
             launch: None,
             model_token_ceiling: None,
+            model_budget: None,
             stop: None,
         };
         let request = serde_json::json!({"path": foreign, "content": "x"});
@@ -6440,6 +6483,320 @@ pub(crate) mod tests {
         assert_eq!(end.cause.as_deref(), Some("completed"));
         grants.abort();
         home.results(agent).join("\n")
+    }
+
+    fn model_create_line(request_id: &str, extra: &str) -> String {
+        model_create_line_for(request_id, "offer:fixture", "text.generate", extra)
+    }
+
+    fn model_create_line_for(
+        request_id: &str,
+        offer_id: &str,
+        operation: &str,
+        extra: &str,
+    ) -> String {
+        let resource = crate::provider_resource::build_capability_resource(
+            "model",
+            "runs_create",
+            &serde_json::json!({"offer_id": offer_id}),
+        )
+        .unwrap();
+        let body = format!(
+            "\",\"offer_id\":\"{offer_id}\",\"operation\":\"{operation}\",\"request_id\":\"{request_id}\",\"input\":{{\"schema\":\"elastos.model.input.text/v1\",\"prompt\":\"hi\"}}{extra},\"pad\":\""
+        );
+        format!("invoke\t{resource}\t{resource}\truns_create\texecute\t{body}")
+    }
+
+    async fn run_model_plan(
+        home: &ProbeLaunch,
+        dir: &std::path::Path,
+        agent: &str,
+        creates: &[(&str, &str)],
+    ) -> String {
+        let mut lines = vec![
+            "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t"
+                .to_string(),
+        ];
+        lines.extend(
+            creates
+                .iter()
+                .map(|(id, extra)| model_create_line(id, extra)),
+        );
+        run_model_lines(home, dir, agent, &lines).await
+    }
+
+    async fn run_model_lines(
+        home: &ProbeLaunch,
+        dir: &std::path::Path,
+        agent: &str,
+        lines: &[String],
+    ) -> String {
+        home.plan(agent, lines);
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let launched = home.launch_from(dir, agent).await.unwrap().0;
+        assert_eq!(launched.status, "starting");
+        let end = home.wait_ended(&launched.id).await;
+        assert_eq!(end.cause.as_deref(), Some("completed"));
+        grants.abort();
+        home.results(agent).join("\n")
+    }
+
+    fn create_calls(model: &CapturingModelProvider) -> Vec<serde_json::Value> {
+        model
+            .requests()
+            .into_iter()
+            .filter(|request| request["op"] == "runs_create")
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn over_cap_refused_before_dispatch() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let outcome = run_model_plan(
+            &home,
+            &dir,
+            &agent,
+            &[("request:first", ""), ("request:second", "")],
+        )
+        .await;
+        assert_eq!(
+            create_calls(&model).len(),
+            1,
+            "only the reserved run reaches Runtime dispatch"
+        );
+        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+    }
+
+    #[tokio::test]
+    async fn resident_create_after_launch_returns_is_reserved() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        home.plan(
+            &agent,
+            &[
+                "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t"
+                    .into(),
+                model_create_line("request:resident-first", ""),
+                model_create_line("request:resident-second", ""),
+            ],
+        );
+        let launched = home.launch_from(&dir, &agent).await.unwrap().0;
+        assert_eq!(launched.status, "starting");
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let end = home.wait_ended(&launched.id).await;
+        grants.abort();
+        assert_eq!(end.cause.as_deref(), Some("completed"));
+        let outcome = home.results(&agent).join("\n");
+        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+        assert_eq!(create_calls(&model).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_not_double_charged() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let outcome = run_model_plan(
+            &home,
+            &dir,
+            &agent,
+            &[
+                ("request:retry", ""),
+                ("request:retry", ""),
+                ("request:new", ""),
+            ],
+        )
+        .await;
+        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+        let calls = create_calls(&model);
+        assert_eq!(calls.len(), 2, "same request id reuses its hold");
+        assert_eq!(
+            calls[0]["runtime_binding"]["request_id"],
+            calls[1]["runtime_binding"]["request_id"]
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_offer_retry_refused_before_dispatch() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let lines = vec![
+            "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
+            model_create_line_for("request:swap", "offer:fixture", "wrong.operation", ""),
+            model_create_line_for("request:swap", "offer:large", "text.generate", ""),
+        ];
+        let outcome = run_model_lines(&home, &dir, &agent, &lines).await;
+        assert!(
+            outcome.contains("Provider operation failed"),
+            "first create must fail at provider: {outcome}"
+        );
+        let calls = create_calls(&model);
+        assert_eq!(
+            calls.len(),
+            1,
+            "the large offer must be refused before dispatch"
+        );
+        assert!(
+            outcome.contains("request_id conflicts with an existing model hold"),
+            "{outcome}"
+        );
+        assert_eq!(calls[0]["offer_id"], "offer:fixture");
+    }
+
+    #[tokio::test]
+    async fn changed_revision_retry_refused_before_dispatch() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        model.raise_revision_after_rejection();
+        let create = model_create_line("request:revision", "");
+        let lines = vec![
+            "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
+            create.clone(),
+            "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
+            create,
+        ];
+        let retry = run_model_lines(&home, &dir, &agent, &lines).await;
+        assert!(retry.contains("Provider operation failed"), "{retry}");
+        assert!(
+            retry.contains("request_id conflicts with an existing model hold"),
+            "{retry}"
+        );
+        let calls = create_calls(&model);
+        assert_eq!(
+            calls.len(),
+            1,
+            "changed revision must be refused before dispatch"
+        );
+        assert_eq!(calls[0]["operation"], "text.generate");
+        assert_eq!(
+            calls[0]["expected_execution_binding_hash"],
+            "sha256:fixture"
+        );
+        assert_eq!(
+            model
+                .requests()
+                .iter()
+                .filter(|request| request["op"] == "offers_list")
+                .count(),
+            2,
+            "the retry must follow a fresh offer listing"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_creates_share_cap() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let _ = ask_model(&home, &dir, &agent, None).await;
+        home.plan(&agent, &[model_create_line("request:concurrent", "")]);
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let (first, second) = tokio::join!(
+            home.launch_from(&dir, &agent),
+            home.launch_from(&dir, &agent)
+        );
+        let first = first.unwrap().0;
+        let second = second.unwrap().0;
+        assert_eq!(first.status, "starting");
+        assert_eq!(second.status, "starting");
+        assert_eq!(
+            home.wait_ended(&first.id).await.cause.as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            home.wait_ended(&second.id).await.cause.as_deref(),
+            Some("completed")
+        );
+        grants.abort();
+        assert_eq!(
+            create_calls(&model).len(),
+            1,
+            "two creates share the admitted agent ceiling"
+        );
+        let run_events: Vec<_> = crate::auth::load_auth_state(&home.data_dir)
+            .unwrap()
+            .audit
+            .into_iter()
+            .filter(|event| event.event_type == "component.invoke.completed")
+            .filter(|event| event.principal_id.as_deref() == Some(agent.as_str()))
+            .filter(|event| event.reason.contains("elastos://model/offers/sha256/"))
+            .collect();
+        assert_eq!(run_events.len(), 2, "both creates reached the bridge");
+        assert_eq!(
+            run_events
+                .iter()
+                .filter(|event| event.result == "denied")
+                .count(),
+            1,
+            "the shared account refused one create"
+        );
+    }
+
+    #[tokio::test]
+    async fn b_unaffected_by_a_exhaustion() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.model_host("model-host", Some(1_140));
+        let a = home.create_agent_for_host("model-a", &cid);
+        let b = home.create_agent_for_host("model-b", &cid);
+        let model = Arc::new(CapturingModelProvider::default());
+        let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+        registry.register(model.clone()).await;
+        registry.register(home.provider.clone()).await;
+        home.runtime
+            .set_provider_registry(
+                registry,
+                home.capability_manager.clone(),
+                home.pending_store.clone(),
+                home.data_dir.clone(),
+            )
+            .await;
+        model.watch(home.runtime.clone());
+        let a_outcome =
+            run_model_plan(&home, &dir, &a, &[("request:a1", ""), ("request:a2", "")]).await;
+        assert!(a_outcome.contains("model_budget_exceeded"), "{a_outcome}");
+        let b_outcome = run_model_plan(&home, &dir, &b, &[("request:b1", "")]).await;
+        assert!(!b_outcome.contains("model_budget_exceeded"), "{b_outcome}");
+        let calls = create_calls(&model);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["runtime_binding"]["principal_id"], a);
+        assert_eq!(calls[1]["runtime_binding"]["principal_id"], b);
+    }
+
+    #[tokio::test]
+    async fn guest_cannot_raise_cap() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
+        let forged = ",\"model_tokens\":999999999";
+        let outcome = run_model_plan(
+            &home,
+            &dir,
+            &agent,
+            &[("request:guest1", forged), ("request:guest2", forged)],
+        )
+        .await;
+        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+        let calls = create_calls(&model);
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].get("model_tokens").is_none());
     }
 
     /// An admitted agent whose signed manifest asks for no model tokens cannot
