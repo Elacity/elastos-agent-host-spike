@@ -8,8 +8,9 @@ const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 /// Runtime-owned model launch inputs. Each numbered socket is a bound literal;
 /// the later caller supplies the canonical paths before starting the child.
 fn model_inputs() -> Vec<String> {
-    // macOS probe X2 starts this list. Proposal row 4 is the model, the device
-    // nodes and the engine. Probe X4's /usr/lib read is a launch input.
+    // Lab-only X1 layout: 19 ancestors and 64 reserved socket slots. The
+    // installer must derive these bounds from its verified launch inputs.
+    // X2 is process-fork; proposal rows 2, 4 and 5 cover the fixed inputs.
     let fixed = [
         "(allow process-fork)",
         r#"(allow file-read* (literal (param "MODEL")))"#,
@@ -26,7 +27,7 @@ fn model_inputs() -> Vec<String> {
             "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_{index}\")))"
         ));
     }
-    // macOS probe X3: only the 64 reserved broker and engine paths.
+    // Probe X3 is network-bind; proposal rows 6 and 7 cover the other paths.
     for slot in 0..64 {
         for (op, param) in [
             ("network-outbound", "BROKER_SOCKET"),
@@ -37,7 +38,7 @@ fn model_inputs() -> Vec<String> {
             forms.push(format!("(allow {op} (literal (param \"{param}_{slot}\")))"));
         }
     }
-    // macOS probe X2: the guard signals only its engine child.
+    // Proposal row 5: the guard signals only its engine child.
     forms.push("(allow signal (target children))".to_string());
     forms
 }
@@ -175,7 +176,7 @@ mod tests {
                 // The measured fixed paths. A new quoted path fails this equality.
                 assert_eq!(
                     literals,
-                    BTreeSet::from(["/dev/null", "/dev/urandom", "/System", "/usr/lib"]),
+                    BTreeSet::from(["/dev/null", "/dev/urandom", "/System/Library/Extensions/AGXMetalG17X.bundle", "/usr/lib"]),
                     "{name} fixed paths"
                 );
             } else {
@@ -208,7 +209,7 @@ mod tests {
         assert_eq!(
             row.rules,
             [
-                r#"(allow file-read* (subpath "/System"))"#,
+                r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#,
                 r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
                 r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
             ]

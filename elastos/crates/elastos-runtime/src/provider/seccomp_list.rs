@@ -26,7 +26,7 @@ const BASELINE: &str = concat!(
 // Linux probe rows follow the original model names. `socket` is absent here:
 // the program admits it only for AF_UNIX. `connect`, `sendto` and `bind` stay,
 // because the probe measured them and they do not carry an address family.
-const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt kill listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
+const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
 /// The lab sorts names after it joins declared rights and the baseline.
 pub(super) fn linux_seccomp_list(
@@ -57,7 +57,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const MODEL_PROBE_NAMES: &str = "accept4 bind connect dup2 getpgrp getpid getsockopt kill listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
+    const MODEL_PROBE_NAMES: &str = "accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
     // Normalization: only LAB_BASELINE is subtracted from the crate side. The pin set stays as derived.
     // `did` has none. A mismatch prints the symmetric difference. The baseline check does not apply that delta.

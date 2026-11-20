@@ -27,10 +27,10 @@
 (allow file-read* file-write* (subpath (param "STORAGE_ROOT")))
 
 ;; macOS probe X5, X6, and the X4 /System read for the Metal bundle.
-(allow file-read* (subpath "/System"))
+(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))
 (allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))
 (allow mach-lookup (global-name "com.apple.MTLCompilerService"))
-;; macOS probe X2, then proposal row 4: process and artifact inputs.
+;; Probe X2 and proposal rows 2, 4 and 5: process and artifact inputs.
 (allow process-fork)
 (allow file-read* (literal (param "MODEL")))
 (allow file-read* (literal "/dev/urandom"))
@@ -59,7 +59,7 @@
 (allow file-read-metadata (literal (param "MODEL_ANCESTOR_16")))
 (allow file-read-metadata (literal (param "MODEL_ANCESTOR_17")))
 (allow file-read-metadata (literal (param "MODEL_ANCESTOR_18")))
-;; macOS probe X3: 64 broker sockets and engine sockets.
+;; Proposal rows 6 and 7, plus probe X3 network-bind: 64 private sockets.
 (allow network-outbound (literal (param "BROKER_SOCKET_0")))
 (allow file-read-metadata (literal (param "ENGINE_SOCKET_0")))
 (allow file-write* (literal (param "ENGINE_SOCKET_0")))
@@ -316,5 +316,5 @@
 (allow file-read-metadata (literal (param "ENGINE_SOCKET_63")))
 (allow file-write* (literal (param "ENGINE_SOCKET_63")))
 (allow network-bind (literal (param "ENGINE_SOCKET_63")))
-;; macOS probe X2: guard signals only its engine child.
+;; Proposal row 5: guard signals only its engine child.
 (allow signal (target children))

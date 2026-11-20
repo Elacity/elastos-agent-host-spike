@@ -46,11 +46,11 @@ fn jump(code: u32, k: u32, jt: u32, jf: u32) -> Instruction {
 
 // The model's measured argument rules, packed as code:jt:jf:k. Seven syscall
 // operands are filled from NUMBERS below. The suffix is the measured program:
-// clone tests CLONE_THREAD and then CLONE_VFORK, fcntl admits F_GETFD,
+// clone tests CLONE_THREAD and then the exact measured vfork flags, fcntl admits F_GETFD,
 // F_DUPFD_CLOEXEC, F_GETFL and F_SETFL, and socket admits AF_UNIX only.
 const MODEL_RULES: &str = concat!(
     "0015000100000000 0006000000050026 0015000600000000 0020000000000010 0045000100010000 000600007fff0000 ",
-    "0045000100004000 000600007fff0000 000600000005000d 0015000400000000 0020000000000010 0015000100000001 ",
+    "0015000100004111 000600007fff0000 000600000005000d 0015000400000000 0020000000000010 0015000100000001 ",
     "000600007fff0000 000600000005000d 0015000700000000 0020000000000018 0015030000000001 0015020000000406 ",
     "0015010000000003 0015000100000004 000600007fff0000 000600000005000d 0015000a00000000 0020000000000010 ",
     "0015000700000000 0020000000000014 0015000500000000 0020000000000020 0015000300000000 0020000000000024 ",
@@ -86,15 +86,6 @@ pub(super) fn program(
                            (42, "socket")] {
             rules[at][3] = number(name, arch).expect("model rule needs an architecture number");
         }
-        // Measured offsets, assigned after the packed program. CLONE_THREAD
-        // falls through to its allow; any other flags reach CLONE_VFORK.
-        // F_GETFD, F_DUPFD_CLOEXEC, F_GETFL and F_SETFL share one allow.
-        // socket compares the domain with AF_UNIX.
-        rules[2][2] = 6;
-        rules[4][1] = 0;
-        rules[14][2] = 7; rules[16][1] = 3; rules[17][1] = 2;
-        rules[17][2] = 0;
-        rules[44][3] = 1;
         code.extend(rules);
     } else {
         code.push(stmt(6, DENY));
@@ -138,26 +129,50 @@ mod tests {
         check!("model-seccomp-aarch64.golden", Aarch64, Model);
     }
 
+    /// Whole-file pins for the reviewed M1a programs. These digests are
+    /// independent of both builders and include every argument decision.
+    #[test]
+    fn model_whole_goldens_match_reviewed_pins() {
+        use sha2::{Digest as _, Sha256};
+        for (golden, expected) in [
+            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-x86_64.golden").as_slice(), "fe85718ec6ee3f930e5eb00d1789c52a0093b85c5501050a0573abe72b1eab1a"),
+            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-aarch64.golden").as_slice(), "7bc5b726c2bc0e49b720703a52aa29fffc245d20af0ff603477296619c8c7a1c"),
+        ] {
+            assert_eq!(format!("{:x}", Sha256::digest(golden)), expected);
+        }
+    }
+
     #[test]
     #[should_panic(expected = "has no syscall number row")]
     fn unknown_syscall_name_fails_loudly() {
         number("missing_call", AuditArch::Aarch64);
     }
 
-    /// Eight measured decisions, on both architectures. A classic BPF interpreter
+    /// Measured decisions on both architectures. A classic BPF interpreter
     /// runs the rendered program. The pin's unconditional baseline is separate.
     #[test]
-    fn measured_filter_decides_the_eight_argument_cases() {
+    fn measured_filter_decides_the_argument_cases() {
         // label, syscall, args, allow
-        let cases: [(&str, &str, [u64; 6], bool); 8] = [
+        let cases: [(&str, &str, [u64; 6], bool); 19] = [
             ("thread clone", "clone", [0x3d_0f00, 0, 0, 0, 0, 0], true),
+            ("measured vfork", "clone", [0x4111, 0, 0, 0, 0, 0], true),
             ("plain fork", "clone", [0x11, 0, 0, 0, 0, 0], false),
             ("clone newuser", "clone", [0x1000_0011, 0, 0, 0, 0, 0], false),
+            ("clone newuser vfork", "clone", [0x1000_4011, 0, 0, 0, 0, 0], false),
             ("futex", "futex", [0, 0, 0, 0, 0, 0], true),
+            ("futex requeue", "futex", [0, 3, 0, 0, 0, 0], false),
             ("socketpair", "socketpair", [1, 1, 0, 0, 0, 0], true),
+            ("socketpair inet", "socketpair", [2, 1, 0, 0, 0, 0], false),
             ("fcntl getfl", "fcntl", [3, 3, 0, 0, 0, 0], true),
+            ("fcntl setfl", "fcntl", [3, 4, 0, 0, 0, 0], true),
+            ("fcntl setfd", "fcntl", [3, 2, 0, 0, 0, 0], false),
             ("prlimit64", "prlimit64", [0, 0, 0, 0, 0, 0], true),
+            ("prlimit64 other pid", "prlimit64", [1, 0, 0, 0, 0, 0], false),
+            ("prlimit64 new limit", "prlimit64", [0, 0, 1, 0, 0, 0], false),
+            ("socket unix", "socket", [1, 1, 0, 0, 0, 0], true),
             ("socket inet", "socket", [2, 1, 0, 0, 0, 0], false),
+            ("socket inet6", "socket", [10, 1, 0, 0, 0, 0], false),
+            ("kill other pid", "kill", [1, 9, 0, 0, 0, 0], false),
         ];
         for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
             let audit = match arch { AuditArch::X86_64 => 0xc000_003e, AuditArch::Aarch64 => 0xc000_00b7 };

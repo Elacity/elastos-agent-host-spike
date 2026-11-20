@@ -66,7 +66,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use test_support::FIXTURE_EVENT_TIMEOUT;
@@ -295,15 +295,51 @@ impl FixtureProfile {
     }
 }
 
-/// The three parameter bindings one storage and one executable make, in the
-/// order every confined launch binds them: `PROVIDER_EXECUTABLE`,
-/// `STORAGE_ROOT`, then `STORAGE_PARENT`.
-fn canonical_bindings(storage: &Storage, executable: &Path) -> [(&'static str, PathBuf); 3] {
-    [
+/// The shared three bindings plus the measured X1 and proposal rows 4, 6, 7
+/// lab inputs. Every path stays inside this launch's temporary fixture or is
+/// the selected executable. The production installer derives its own inputs.
+fn canonical_bindings(storage: &Storage, executable: &Path) -> Vec<(&'static str, PathBuf)> {
+    static ANCESTOR_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+        (0..19)
+            .map(|index| Box::leak(format!("MODEL_ANCESTOR_{index}").into_boxed_str()) as &str)
+            .collect()
+    });
+    static SOCKET_NAMES: LazyLock<Vec<(&'static str, &'static str)>> = LazyLock::new(|| {
+        (0..64)
+            .map(|slot| {
+                (
+                    Box::leak(format!("BROKER_SOCKET_{slot}").into_boxed_str()) as &str,
+                    Box::leak(format!("ENGINE_SOCKET_{slot}").into_boxed_str()) as &str,
+                )
+            })
+            .collect()
+    });
+    let mut bindings = vec![
         ("PROVIDER_EXECUTABLE", executable.to_path_buf()),
         ("STORAGE_ROOT", storage.root.clone()),
         ("STORAGE_PARENT", storage.parent.clone()),
-    ]
+        ("MODEL", executable.to_path_buf()),
+        ("ENGINE", executable.to_path_buf()),
+        (
+            "ENGINE_BUNDLE",
+            executable
+                .parent()
+                .expect("executable parent")
+                .to_path_buf(),
+        ),
+    ];
+    for (index, name) in ANCESTOR_NAMES.iter().enumerate() {
+        let path = executable.ancestors().nth(index).unwrap_or(Path::new("/"));
+        bindings.push((*name, path.to_path_buf()));
+    }
+    for (slot, (broker, engine)) in SOCKET_NAMES.iter().enumerate() {
+        bindings.push((*broker, storage.base.join(format!("ipc/{slot}.sock"))));
+        bindings.push((
+            *engine,
+            storage.base.join(format!("ipc/{slot}.engine.sock")),
+        ));
+    }
+    bindings
 }
 
 thread_local! {
@@ -4748,12 +4784,20 @@ fn allow_rules_trace_to_declared_rights() {
         )
     );
     let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
-    assert_eq!(right_ids, ["storage", "bound-executable"]);
+    assert_eq!(right_ids, ["storage", "bound-executable", "model-gpu"]);
     let baseline_ids: Vec<&str> = baseline.iter().map(entry_id).collect();
-    assert_eq!(baseline_ids, ["startup-root-directory", "startup-sysctl"]);
+    assert_eq!(
+        baseline_ids,
+        [
+            "startup-root-directory",
+            "startup-sysctl",
+            "model-launch-inputs"
+        ]
+    );
     let justifications = [
         "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Process startup reads the root directory before `main` runs",
         "macOS model-provider executable bound as PROVIDER_EXECUTABLE: At startup the Rust runtime reads the page size to place its stack guard page.",
+        "macOS model-provider executable bound as PROVIDER_EXECUTABLE: Runtime-owned measured X1-X4 engine and private socket inputs.",
     ];
     assert_eq!(baseline.len(), justifications.len());
     for (entry, expected) in baseline.iter().zip(justifications) {
@@ -4785,6 +4829,40 @@ fn allow_rules_trace_to_declared_rights() {
 /// while keeping both pins.
 #[test]
 fn platform_baseline_rules_stay_narrow() {
+    // X4's observed AGXMetal bundle and proposal rows 2, 4 and 7 are
+    // separate grants. This list is independent of the declaration fixture.
+    fn measured_model_file_form(line: &str) -> bool {
+        if [
+            r#"(allow file-read* (subpath "/System/Library/Extensions/AGXMetalG17X.bundle"))"#,
+            r#"(allow file-read* (literal (param "MODEL")))"#,
+            r#"(allow file-read* (literal "/dev/urandom"))"#,
+            r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
+            r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
+            r#"(allow file-read* (subpath "/usr/lib"))"#,
+        ]
+        .contains(&line)
+        {
+            return true;
+        }
+        for index in 0..19 {
+            if line
+                == format!(
+                    "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_{index}\")))"
+                )
+            {
+                return true;
+            }
+        }
+        for slot in 0..64 {
+            if line
+                == format!("(allow file-read-metadata (literal (param \"ENGINE_SOCKET_{slot}\")))")
+                || line == format!("(allow file-write* (literal (param \"ENGINE_SOCKET_{slot}\")))")
+            {
+                return true;
+            }
+        }
+        false
+    }
     // One check classifies every baseline refusal. The file scan below and
     // the in-memory cases call it, so a write grant is not a second path.
     fn refuse_widened_baseline(allow_lines: &[&str]) -> Result<(), String> {
@@ -4828,6 +4906,7 @@ fn platform_baseline_rules_stay_narrow() {
             .copied()
             .filter(|line| {
                 line.contains("file")
+                    && !measured_model_file_form(line)
                     && !matches!(
                         *line,
                         "(allow file-read* (literal (param \"STORAGE_PARENT\")))"
