@@ -1,5 +1,8 @@
 //! Count the two current capsule call layers. These rows record the source
-//! contract; they do not freeze the Bus or approve a provider.
+//! contract; they do not freeze the Bus or approve a provider. The last row
+//! counts the mapped pairs the capability resource builder cannot build
+//! today, so the layer 2 total reads as authorization surface, not as
+//! dispatch surface.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -132,14 +135,18 @@ fn localhost_operations(input: &[Token]) -> BTreeSet<String> {
         .collect()
 }
 
-fn scheme_arms(body: &[Token]) -> Vec<(&[Token], &[Token])> {
-    let open = body
+/// Split the arms of `match <scrutinee> { ... }` into (pattern, body) pairs.
+/// A scrutinee that does not occur in the body yields no arms.
+fn match_arms<'a>(body: &'a [Token], scrutinee: &str) -> Vec<(&'a [Token], &'a [Token])> {
+    let Some(open) = body
         .windows(3)
         .position(|part| {
-            part[0].value == "match" && part[1].value == "scheme" && part[2].value == "{"
+            part[0].value == "match" && part[1].value == scrutinee && part[2].value == "{"
         })
         .map(|i| i + 2)
-        .unwrap();
+    else {
+        return Vec::new();
+    };
     let input = enclosed(body, open, "{", "}");
     let mut arms = Vec::new();
     let mut start = 0;
@@ -181,9 +188,16 @@ fn mapped_pairs() -> BTreeMap<String, BTreeSet<String>> {
     let map_name = ["provider", "operation", "action"].join("_");
     let body = function_body(&source, &map_name);
     let mut result = BTreeMap::new();
-    for (pattern, action) in scheme_arms(body) {
+    for (pattern, action) in match_arms(body, "scheme") {
         let schemes = quoted(pattern);
         if schemes.is_empty() {
+            // A scheme arm without a string literal must be the one-token
+            // wildcard arm. A named const would silently hide a scheme from
+            // this count, so anything else is an error, not a skip.
+            assert!(
+                pattern.len() == 1 && pattern[0].value == "_",
+                "scheme arm has no string literal and is not the wildcard arm: {pattern:?}"
+            );
             continue;
         }
         let helper = action
@@ -208,16 +222,23 @@ fn mapped_pairs() -> BTreeMap<String, BTreeSet<String>> {
     result
 }
 
+/// First-party provider manifests live in more than one folder (today
+/// `capsules/` and `elastos/capsules/`), so the scan walks the repository at
+/// run time. The walk skips VCS data, dependency caches and build output
+/// (`.git`, `node_modules`, `target`, `target-build`), the `lab/` and
+/// `examples/` trees, and test fixture folders (`fixtures`, `testdata`):
+/// those carry no shipping first-party provider. A manifest joins the count
+/// only with `role: "provider"` and `author: "elastos"`. The manifests used
+/// are printed, one per line, with the scheme each declares.
 fn manifests() -> BTreeMap<String, BTreeSet<String>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../capsules");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut paths = Vec::new();
+    collect_manifest_paths(&root, &mut paths);
+    paths.sort();
     let mut result: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for entry in fs::read_dir(root).unwrap() {
-        let path = entry.unwrap().path().join("capsule.json");
-        if !path.is_file() {
-            continue;
-        }
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut used = Vec::new();
+    for path in &paths {
+        let manifest: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         if manifest["role"] != "provider" || manifest["author"] != "elastos" {
             continue;
         }
@@ -234,9 +255,15 @@ fn manifests() -> BTreeMap<String, BTreeSet<String>> {
             rest.split('/').next().unwrap().to_owned()
         } else if provides.starts_with("localhost://WebSpaces/") {
             "webspace".to_owned()
+        } else if provides == "localhost://*" {
+            "localhost".to_owned()
         } else {
             panic!("unknown first-party provider scheme in {}", path.display());
         };
+        used.push(format!(
+            "{} -> {scheme}",
+            path.strip_prefix(&root).unwrap().display()
+        ));
         let ops = result.entry(scheme).or_default();
         for capability in capabilities {
             for op in capability["operations"].as_array().unwrap() {
@@ -244,7 +271,39 @@ fn manifests() -> BTreeMap<String, BTreeSet<String>> {
             }
         }
     }
+    println!("first-party provider manifests used ({}):", used.len());
+    for entry in &used {
+        println!("  {entry}");
+    }
     result
+}
+
+fn collect_manifest_paths(dir: &Path, out: &mut Vec<PathBuf>) {
+    const SKIP: [&str; 8] = [
+        ".git",
+        "node_modules",
+        "target",
+        "target-build",
+        "lab",
+        "examples",
+        "fixtures",
+        "testdata",
+    ];
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            if SKIP.contains(&name.to_str().unwrap_or("")) {
+                continue;
+            }
+            collect_manifest_paths(&entry.path(), out);
+        } else if kind.is_file() && name == "capsule.json" {
+            out.push(entry.path());
+        }
+    }
 }
 
 fn pairs(table: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<(String, String)> {
@@ -306,6 +365,12 @@ fn layer_1_interface_counts() {
 fn layer_2_runtime_owned_counts() {
     let table = mapped_pairs();
     print_table(&table);
+    let gap = not_dispatchable(&table);
+    println!(
+        "mapped but not dispatchable today: {} of {} pairs (counted in mapped_but_not_dispatchable_today)",
+        gap.values().map(BTreeSet::len).sum::<usize>(),
+        pairs(&table).len()
+    );
     let expected: BTreeMap<&str, usize> = [
         ("availability", 2),
         ("block-graph", 3),
@@ -343,6 +408,10 @@ fn layer_2_runtime_owned_counts() {
 }
 
 /// OPEN (P2-3 and P2-10): report both directions of manifest/action drift.
+/// The manifest scan walks the repository (see `manifests`); today it finds
+/// 19 first-party provider manifests, including
+/// `elastos/capsules/localhost-provider/capsule.json` with its seven
+/// localhost operations.
 #[test]
 fn declared_versus_mapped_open() {
     let declared = pairs(&manifests());
@@ -355,7 +424,7 @@ fn declared_versus_mapped_open() {
     );
     println!("OPEN mapped-only {}: {mapped_only:?}", mapped_only.len());
     assert_eq!(declared_only.len(), 0);
-    assert_eq!(mapped_only.len(), 78);
+    assert_eq!(mapped_only.len(), 71);
 }
 
 fn is_file_operation(scheme: &str, op: &str) -> bool {
@@ -398,7 +467,9 @@ fn file_operations_first() {
 fn third_party_operation_open() {
     let map = mapped_pairs();
     let first_party = manifests();
-    let internal = ["localhost", "launch", "content", "inspect", "peer"];
+    // Mapped schemes with no first-party manifest. `localhost` has one
+    // (elastos/capsules/localhost-provider), found by the repository walk.
+    let internal = ["launch", "content", "inspect", "peer"];
     for scheme in map.keys() {
         assert!(
             first_party.contains_key(scheme) || internal.contains(&scheme.as_str()),
@@ -444,10 +515,22 @@ fn is_network_verb(scheme: &str, op: &str) -> bool {
 
 /// Network-locator verbs belong to the Runtime's Net and Exit providers.
 /// DID and WebSpace `resolve` name identities and files, so they are separate.
+///
+/// Operations outside net/exit that have a network effect are not counted as
+/// network verbs, each for its own reason: `browser-engine/attach_stream` and
+/// `browser-engine/webrtc_signal` attach and signal the engine's own WebRTC
+/// session, whose network path belongs to the browser-engine contract, not to
+/// Net/Exit; `tunnel/start` and `tunnel/stop` are tunnel lifecycle verbs
+/// under the tunnel scheme's Admin action, not data-path verbs;
+/// `peer/connect` manages a peer session under the peer scheme's Message
+/// action; `did/resolve` names an identity and `webspace/resolve` names a
+/// WebSpace file. The list is pinned in the test below: a new operation with
+/// a network effect outside net/exit needs an explicit decision there.
 #[test]
 fn network_verbs_stay_with_network_providers() {
-    let network: Vec<_> = pairs(&mapped_pairs())
-        .into_iter()
+    let all = pairs(&mapped_pairs());
+    let network: Vec<_> = all
+        .iter()
         .filter(|(scheme, op)| is_network_verb(scheme, op))
         .collect();
     println!("network verbs {}: {network:?}", network.len());
@@ -458,4 +541,275 @@ fn network_verbs_stay_with_network_providers() {
         );
     }
     assert_eq!(network.len(), 8);
+    // Pinned: the network-effect operations outside net/exit named in the doc
+    // comment, with the reason each is not counted as a network verb.
+    let exclusions = [
+        (
+            "browser-engine",
+            "attach_stream",
+            "attaches the engine's own WebRTC session",
+        ),
+        (
+            "browser-engine",
+            "webrtc_signal",
+            "signals the engine's own WebRTC session",
+        ),
+        (
+            "tunnel",
+            "start",
+            "tunnel lifecycle under the Admin action, not a data-path verb",
+        ),
+        (
+            "tunnel",
+            "stop",
+            "tunnel lifecycle under the Admin action, not a data-path verb",
+        ),
+        (
+            "peer",
+            "connect",
+            "peer session under the peer scheme's Message action",
+        ),
+        ("did", "resolve", "names an identity, not a network locator"),
+        (
+            "webspace",
+            "resolve",
+            "names a WebSpace file, not a network locator",
+        ),
+    ];
+    println!(
+        "network-effect operations outside net/exit, not counted as network verbs ({}):",
+        exclusions.len()
+    );
+    for (scheme, op, reason) in exclusions {
+        let pair = (scheme.to_owned(), op.to_owned());
+        assert!(
+            all.contains(&pair),
+            "pinned network-effect operation unmapped: {scheme}/{op}"
+        );
+        assert!(
+            !is_network_verb(scheme, op),
+            "pinned network-effect operation counted as a network verb: {scheme}/{op}"
+        );
+        println!("  {scheme}/{op}: {reason}");
+    }
+}
+
+/// Operations the capability resource builder can build for `scheme`, read
+/// from `build_capability_resource` and its helpers at run time: literal
+/// `match op` arms, `op == "..."` comparisons, and the supported-operations
+/// arrays of `simple_elastos_resource` and `ensure_supported_operation`
+/// calls. A scheme with no builder arm builds nothing: WebSpace requests are
+/// addressed as `localhost://WebSpaces/` URIs and dispatched under the
+/// `localhost` scheme, so the bare `webspace` scheme has no arm by design.
+fn builder_ops(source: &[Token], scheme: &str) -> BTreeSet<String> {
+    let builder_name = ["build", "capability", "resource"].join("_");
+    let body = function_body(source, &builder_name);
+    let arm = match_arms(body, "scheme")
+        .into_iter()
+        .find(|(pattern, _)| quoted(pattern).contains(scheme));
+    let Some((_, action)) = arm else {
+        return BTreeSet::new();
+    };
+    ops_in_builder(source, action, 0)
+}
+
+fn ops_in_builder(source: &[Token], body: &[Token], depth: usize) -> BTreeSet<String> {
+    assert!(depth < 4, "resource builder delegation is too deep");
+    let mut ops = BTreeSet::new();
+    for (pattern, arm) in match_arms(body, "op") {
+        let names = quoted(pattern);
+        if names.is_empty() {
+            // As in the action map, a literal-less pattern must be the
+            // one-token wildcard arm, not a named const.
+            assert!(
+                pattern.len() == 1 && pattern[0].value == "_",
+                "builder pattern has no string literal and is not the wildcard arm: {pattern:?}"
+            );
+            continue;
+        }
+        assert!(
+            arm.iter()
+                .any(|token| token.value == "Ok" || token.value == "Some"),
+            "literal builder arm must build or map its pattern: {names:?}"
+        );
+        ops.extend(names);
+    }
+    // `op == "name"` guards name an accepted operation. The tokenizer keeps
+    // `==` as two `=` tokens, so the window is four tokens wide.
+    for part in body.windows(4) {
+        if part[0].value == "op" && part[1].value == "=" && part[2].value == "=" && part[3].quoted {
+            ops.insert(part[3].value.clone());
+        }
+    }
+    for helper in [
+        ["simple", "elastos", "resource"].join("_"),
+        ["ensure", "supported", "operation"].join("_"),
+    ] {
+        for (offset, part) in body.windows(2).enumerate() {
+            if part[0].value == helper && part[1].value == "(" {
+                let group = enclosed(body, offset + 1, "(", ")");
+                let open = group
+                    .iter()
+                    .position(|token| token.value == "[")
+                    .unwrap_or_else(|| panic!("{helper} call names no supported-operations array"));
+                let names = quoted(enclosed(group, open, "[", "]"));
+                assert!(
+                    !names.is_empty(),
+                    "{helper} call names no supported operations"
+                );
+                ops.extend(names);
+            }
+        }
+    }
+    if !ops.is_empty() {
+        return ops;
+    }
+    let localhost_operation = ["localhost", "operation"].join("_");
+    if body.iter().any(|token| token.value == localhost_operation) {
+        // The localhost builder accepts exactly the LOCALHOST_OPERATIONS table.
+        return localhost_operations(source);
+    }
+    let delegated = body.windows(2).find(|part| {
+        part[1].value == "("
+            && (part[0].value.ends_with("_resource") || part[0].value.ends_with("_action"))
+    });
+    let Some(call) = delegated else {
+        panic!("resource builder arm has no operations and no delegation");
+    };
+    ops_in_builder(source, function_body(source, &call[0].value), depth + 1)
+}
+
+/// Pairs the action map knows but the capability resource builder cannot
+/// build today, per scheme.
+fn not_dispatchable(
+    mapped: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let source = source_tokens("provider_resource.rs");
+    let mut gap = BTreeMap::new();
+    for (scheme, ops) in mapped {
+        let missing: BTreeSet<String> = ops
+            .difference(&builder_ops(&source, scheme))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            gap.insert(scheme.clone(), missing);
+        }
+    }
+    gap
+}
+
+/// The action map names what the Runtime can authorize; the capability
+/// resource builder names what the generic provider path can dispatch. This
+/// row counts pairs the action map knows but `build_capability_resource`
+/// cannot build today, derived at run time from the resource builders in
+/// provider_resource.rs, and prints the count next to layer 2's total so the
+/// headline number is not over-read.
+///
+/// Today's 40: `drm` 7, `key` 7, `decrypt` 6 and `rights` 4 share the
+/// nine-operation `read_only_provider_action` helper, but each scheme's
+/// builder accepts fewer (provider_resource.rs:808-846) — 24 pairs. `did` 6
+/// are operations in `execute_op_required_action` that `did_resource` does
+/// not build (chat_completions, health, list_backends, list_models, ping,
+/// status); the did manifest declares only the eight buildable ones.
+/// `browser-engine` 1 is `readiness`, mapped and manifest-declared but
+/// without a `browser_engine_resource` arm (provider_resource.rs:754-768).
+/// `webspace` 9 has no builder arm at all: WebSpace requests are addressed
+/// as `localhost://WebSpaces/` URIs and dispatched under the `localhost`
+/// scheme, and provider_resource.rs pins the bare-scheme refusal in its own
+/// tests.
+#[test]
+fn mapped_but_not_dispatchable_today() {
+    let table = mapped_pairs();
+    let gap = not_dispatchable(&table);
+    let total: usize = gap.values().map(BTreeSet::len).sum();
+    println!(
+        "mapped {} pairs; dispatchable {}; mapped but not dispatchable {total}",
+        pairs(&table).len(),
+        pairs(&table).len() - total
+    );
+    for (scheme, ops) in &gap {
+        println!(
+            "  {scheme} {}: {}",
+            ops.len(),
+            ops.iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let expected: BTreeMap<String, BTreeSet<String>> = [
+        ("browser-engine", ["readiness"].as_slice()),
+        (
+            "decrypt",
+            [
+                "can_download",
+                "can_stream",
+                "has_access_by_content_id",
+                "is_subscription_active",
+                "open",
+                "release",
+            ]
+            .as_slice(),
+        ),
+        (
+            "did",
+            [
+                "chat_completions",
+                "health",
+                "list_backends",
+                "list_models",
+                "ping",
+                "status",
+            ]
+            .as_slice(),
+        ),
+        (
+            "drm",
+            [
+                "can_download",
+                "can_stream",
+                "has_access_by_content_id",
+                "is_subscription_active",
+                "open_session",
+                "release",
+                "render",
+            ]
+            .as_slice(),
+        ),
+        (
+            "key",
+            [
+                "can_download",
+                "can_stream",
+                "has_access_by_content_id",
+                "is_subscription_active",
+                "open",
+                "open_session",
+                "render",
+            ]
+            .as_slice(),
+        ),
+        (
+            "rights",
+            ["open", "open_session", "release", "render"].as_slice(),
+        ),
+        (
+            "webspace",
+            [
+                "delete", "exists", "list", "mkdir", "ping", "read", "resolve", "stat", "write",
+            ]
+            .as_slice(),
+        ),
+    ]
+    .into_iter()
+    .map(|(scheme, ops)| {
+        (
+            scheme.to_owned(),
+            ops.iter().map(|op| op.to_string()).collect(),
+        )
+    })
+    .collect();
+    assert_eq!(pairs(&table).len(), 193);
+    assert_eq!(total, 40);
+    assert_eq!(gap, expected);
 }
