@@ -1,4 +1,7 @@
-//! Home authority inventory. The counted gate table covers every production
+//! Home authority inventory. The scan covers production sources under
+//! elastos-server/src/api/ only. Its call census does not see callers outside
+//! api/, aliased or function-pointer calls, macro-generated calls, or calls to
+//! gates defined outside gateway_home_token.rs. The counted gate table covers every production
 //! `require_*` function in gateway_home_token.rs. A call is counted when its
 //! actor is Home, can resolve to Home, or has an unresolved local actor list.
 //! Calls within the verifier module are forwarding, so route entries start in
@@ -24,65 +27,110 @@ struct AuthorityRow {
 // Every production require_* definition in gateway_home_token.rs has one
 // decision here. This is deliberately a counted table: a new definition must
 // be reviewed before the call-site scan can pass.
-fn gate_decisions() -> BTreeMap<&'static str, bool> {
+fn gate_decisions() -> BTreeMap<&'static str, (bool, &'static str)> {
     BTreeMap::from([
-        ("require_home_launch_token", true),
-        ("require_home_launch_token_context", true),
-        ("require_home_launch_grant", true),
-        ("require_home_launch_token_for_any_context", true),
-        ("require_home_launch_token_for_any_app_context", true),
-        ("require_home_projection_launch_token_context", true),
-        ("require_home_viewer_launch_token_context", true),
-        ("require_internal_shell_launch_grant_for_any_context", true),
-        ("require_internal_shell_launch_grant_principal", true),
-        ("require_internal_shell_projection_context", true),
-        ("require_launch_bound_token", true),
-        ("require_home_token", true),
-        ("require_home_token_context", true),
-        ("require_signed_browser_launch", false),
-        ("require_gateway_launch_for", true),
-        ("require_gateway_launch", true),
-        ("require_runtime_wallet_authority", true),
-        ("require_internal_shell_runtime_wallet_authority", true),
-        ("require_home_runtime_wallet_authority", true),
-        ("require_home_launch_token_binding", true),
-        ("require_home_launch_token_for_any_from", true),
-        ("require_home_launch_token_for_any_from_with_origin", true),
-        ("require_home_launch_token_for_any_from_expected_did", true),
-        ("require_carried_home_launch_token", true),
-        ("require_home_launch_token_value_from_expected_did", true),
-        ("require_launch_token_schema", false),
-        ("require_capsule_browser_origin", false),
-        ("require_exact_home_browser_origin", false),
-        ("require_internal_shell_origin", false),
+        ("require_home_launch_token", (true, "")),
+        ("require_home_launch_token_context", (true, "")),
+        ("require_home_launch_grant", (true, "")),
+        ("require_home_launch_token_for_any_context", (true, "")),
+        ("require_home_launch_token_for_any_app_context", (true, "")),
+        ("require_home_projection_launch_token_context", (true, "")),
+        ("require_home_viewer_launch_token_context", (true, "")),
+        (
+            "require_internal_shell_launch_grant_for_any_context",
+            (true, ""),
+        ),
+        ("require_internal_shell_launch_grant_principal", (true, "")),
+        ("require_internal_shell_projection_context", (true, "")),
+        ("require_launch_bound_token", (true, "")),
+        ("require_home_token", (true, "")),
+        ("require_home_token_context", (true, "")),
+        (
+            "require_signed_browser_launch",
+            (false, "Browser-only actor list"),
+        ),
+        ("require_gateway_launch_for", (true, "")),
+        ("require_gateway_launch", (true, "")),
+        ("require_runtime_wallet_authority", (true, "")),
+        (
+            "require_internal_shell_runtime_wallet_authority",
+            (true, ""),
+        ),
+        ("require_home_runtime_wallet_authority", (true, "")),
+        ("require_home_launch_token_binding", (true, "")),
+        ("require_home_launch_token_for_any_from", (true, "")),
+        (
+            "require_home_launch_token_for_any_from_with_origin",
+            (true, ""),
+        ),
+        (
+            "require_home_launch_token_for_any_from_expected_did",
+            (true, ""),
+        ),
+        ("require_carried_home_launch_token", (true, "")),
+        (
+            "require_home_launch_token_value_from_expected_did",
+            (true, ""),
+        ),
+        (
+            "require_launch_token_schema",
+            (false, "Payload schema check only"),
+        ),
+        (
+            "require_capsule_browser_origin",
+            (false, "Opaque origin check only"),
+        ),
+        (
+            "require_exact_home_browser_origin",
+            (false, "Same-origin check only"),
+        ),
+        (
+            "require_internal_shell_origin",
+            (false, "Browser provenance check only"),
+        ),
     ])
 }
 
 // A wrapper is counted when a direct or already-counted wrapper call admits
 // Home. Guarded connector and fixed documents-viewer wrappers remain listed
 // as non-admitting decisions, so a new wrapper needs an explicit decision.
-fn wrapper_decisions() -> BTreeMap<&'static str, bool> {
+fn wrapper_decisions() -> BTreeMap<&'static str, (bool, &'static str)> {
     BTreeMap::from([
-        ("require_auth_home_or_system_context", true),
-        ("require_capsule_catalog_token", true),
-        ("require_home_active_shell_wallet_authority", true),
-        ("require_home_active_shell_token_context", true),
-        ("require_home_active_shell_update_token_context", true),
-        ("require_home_shell_state_token_context", true),
-        ("require_home_wallet_connector_authority", true),
-        ("require_passkey_add_launch", true),
-        ("require_library_object_viewer_context", true),
-        ("require_viewer_library_launch_context", true),
-        ("require_viewer_bound_launch_token_context", true),
-        ("require_documents_viewer_context", false),
-        ("require_wallet_connector_launch_authority", false),
-        ("require_wallet_connector_launch_context", false),
+        ("require_auth_home_or_system_context", (true, "")),
+        ("require_capsule_catalog_token", (true, "")),
+        ("require_home_active_shell_wallet_authority", (true, "")),
+        ("require_home_active_shell_token_context", (true, "")),
+        ("require_home_active_shell_update_token_context", (true, "")),
+        ("require_home_shell_state_token_context", (true, "")),
+        ("require_home_wallet_connector_authority", (true, "")),
+        ("require_passkey_add_launch", (true, "")),
+        ("require_library_object_viewer_context", (true, "")),
+        ("require_viewer_library_launch_context", (true, "")),
+        ("require_viewer_bound_launch_token_context", (true, "")),
+        (
+            "require_documents_viewer_context",
+            (false, "Documents viewer pin"),
+        ),
+        (
+            "require_wallet_connector_launch_authority",
+            (false, "Connector ID guard"),
+        ),
+        (
+            "require_wallet_connector_launch_context",
+            (false, "Connector ID guard"),
+        ),
     ])
 }
 
 fn counted_gate_total() -> usize {
-    gate_decisions().values().filter(|admit| **admit).count()
-        + wrapper_decisions().values().filter(|admit| **admit).count()
+    gate_decisions()
+        .values()
+        .filter(|(admit, _)| *admit)
+        .count()
+        + wrapper_decisions()
+            .values()
+            .filter(|(admit, _)| *admit)
+            .count()
 }
 
 fn source_gate_names(code: &str) -> BTreeSet<String> {
@@ -98,6 +146,48 @@ fn source_gate_names(code: &str) -> BTreeSet<String> {
         .collect()
 }
 
+// These HeaderMap gates have fixed non-Home actors and do not enter the Home
+// call census. A new API HeaderMap gate needs a decision in one of the tables.
+fn other_api_header_gate_decisions() -> BTreeMap<&'static str, &'static str> {
+    BTreeMap::from([
+        ("require_wallet_link_context", "WalletConnect actor only"),
+        ("require_wallet_app_launch_authority", "Wallet actor only"),
+        ("require_system_admin", "System actor and admin passkey"),
+    ])
+}
+
+#[test]
+fn every_api_header_gate_has_a_decision() {
+    let decided: BTreeSet<_> = gate_decisions()
+        .keys()
+        .chain(wrapper_decisions().keys())
+        .chain(other_api_header_gate_decisions().keys())
+        .map(|name| (*name).to_string())
+        .collect();
+    let mut unreviewed = BTreeSet::new();
+    for (file, raw) in source::production_sources() {
+        if !file.starts_with("elastos-server/src/api/") || file.contains("/gateway_tests/") {
+            continue;
+        }
+        let code = source::code_only(&raw);
+        for name in source_gate_names(&code) {
+            let open = code
+                .find(&format!("fn {name}("))
+                .expect("gate definition has a parameter list")
+                + "fn ".len()
+                + name.len();
+            let signature = &code[open..call_end(&code, open)];
+            if signature.contains("HeaderMap") && !decided.contains(&name) {
+                unreviewed.insert(format!("{file}::{name}"));
+            }
+        }
+    }
+    assert!(
+        unreviewed.is_empty(),
+        "API HeaderMap gates need a decision: {unreviewed:?}"
+    );
+}
+
 #[test]
 fn every_home_token_gate_has_a_counted_decision() {
     let sources = source::production_sources();
@@ -109,7 +199,10 @@ fn every_home_token_gate_has_a_counted_decision() {
         decisions.keys().map(|name| (*name).to_string()).collect(),
         "gateway_home_token.rs gate definitions changed"
     );
-    assert!(decisions.values().filter(|admit| **admit).count() > 0);
+    assert!(decisions.values().filter(|(admit, _)| *admit).count() > 0);
+    assert!(decisions
+        .values()
+        .all(|(admit, reason)| *admit || !reason.is_empty()));
 }
 
 fn rows() -> Vec<AuthorityRow> {
@@ -247,21 +340,21 @@ fn rows() -> Vec<AuthorityRow> {
             "home_events",
             "require_home_runtime_wallet_authority",
             1,
-            "delegates:wallet via Home events authority",
+            "delegates:wallet+object via home_realtime_snapshot -> home_desktop_events_signature -> registry.send_raw(object/events)",
         ),
         row(
             HOME_SYSTEM,
             "home_events_stream",
             "require_home_runtime_wallet_authority",
             1,
-            "delegates:wallet via Home events stream authority",
+            "delegates:wallet+object via home_realtime_snapshot -> home_desktop_events_signature -> registry.send_raw(object/events)",
         ),
         row(
             HOME_SYSTEM,
             "home_summary",
             "require_home_active_shell_wallet_authority",
             1,
-            "delegates:wallet via Home summary authority",
+            "delegates:wallet+object via home_desktop_objects_summary -> registry.send_raw(object/list) -> home_trash_desktop_object -> registry.send_raw(object/roots)",
         ),
         row(
             HOME_SYSTEM,
@@ -352,7 +445,7 @@ fn rows() -> Vec<AuthorityRow> {
             "kept_launch_reader",
             "require_internal_shell_projection_context",
             1,
-            "app-grant:OPEN; conditional: admits Home when the name resolves to home",
+            "app-grant:launch-bound page token; Home actor only when the kept page resolves to home",
         ),
         row(
             ROUTES,
@@ -471,7 +564,7 @@ fn rows() -> Vec<AuthorityRow> {
             "gateway_carrier_bootstrap",
             "require_gateway_launch",
             1,
-            "delegates:carrier via managed_runtime_carrier_bootstrap or gateway_provider_carrier_bootstrap",
+            "delegates:peer via managed_runtime_carrier_bootstrap or gateway_provider_carrier_bootstrap -> registry.send_raw(peer/get_ticket)",
         ),
         row(
             SITE,
@@ -598,7 +691,10 @@ fn call_arguments(call: &str) -> Vec<&str> {
 }
 
 fn actor_can_be_home(code: &str, at: usize, function: &str, gate: &str, call: &str) -> bool {
-    if wrapper_decisions().get(gate).copied().unwrap_or(false) {
+    if wrapper_decisions()
+        .get(gate)
+        .is_some_and(|(admit, _)| *admit)
+    {
         return true;
     }
     if matches!(
@@ -710,8 +806,8 @@ fn found() -> BTreeMap<(String, String, String), usize> {
                 continue;
             }
             let gate = &code[at..end_name];
-            if !gates.get(gate).copied().unwrap_or(false)
-                && !wrappers.get(gate).copied().unwrap_or(false)
+            if !gates.get(gate).is_some_and(|(admit, _)| *admit)
+                && !wrappers.get(gate).is_some_and(|(admit, _)| *admit)
             {
                 continue;
             }
@@ -750,6 +846,9 @@ fn every_home_admitting_route_has_an_authority_row() {
         decisions.keys().copied().collect(),
         "API wrapper decisions changed"
     );
+    assert!(decisions
+        .values()
+        .all(|(admit, reason)| *admit || !reason.is_empty()));
     let mut listed = BTreeSet::new();
     let mut classes = BTreeMap::new();
     let mut open = Vec::new();
@@ -789,7 +888,7 @@ fn every_home_admitting_route_has_an_authority_row() {
         "unlisted Home authority routes: {missing:#?}"
     );
     println!(
-        "Home authority: {} gates, {} rows, {} calls; {:?}; OPEN rows: {:?}",
+        "Home authority (production elastos-server/src/api/ only; call census misses outside-api callers, aliased/function-pointer calls, macro-generated calls, and calls to gates outside gateway_home_token.rs): {} gates, {} rows, {} calls; {:?}; OPEN rows: {:?}",
         counted_gate_total(),
         listed.len(),
         calls,
