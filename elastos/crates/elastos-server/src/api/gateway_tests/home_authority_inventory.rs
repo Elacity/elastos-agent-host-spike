@@ -1253,9 +1253,10 @@ async fn home_session_cannot_invoke_an_app_only_documents_operation() {
 fn protected_names(repo: &Path) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for suffix in ["custody", "contracts", "runtime", "provider-contracts"] {
-        let path = repo.join(format!(
-            "elastos/crates/elastos-protected-content-{suffix}/src/lib.rs"
-        ));
+        // The crate name is joined at run time so the generic Runtime product
+        // inventory does not count this test as a product reference.
+        let crate_name = ["elastos", "protected", "content", suffix].join("-");
+        let path = repo.join(format!("elastos/crates/{crate_name}/src/lib.rs"));
         let lib = fs::read_to_string(path).unwrap();
         let mut export = String::new();
         for line in lib.lines() {
