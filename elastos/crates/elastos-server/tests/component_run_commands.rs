@@ -69,7 +69,11 @@ fn folder(home: &Path, manifest: &str) -> std::path::PathBuf {
 
 #[test]
 fn documented_stage_then_run_and_explicit_development_commands() {
-    let guide = include_str!("../../../../docs/CAPSULE_AUTHORING.md");
+    // Read at run time: Rust sources outside lab/ must not embed notes (scripts/ci-installed-app-paths-test.py).
+    let guide = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/CAPSULE_AUTHORING.md"),
+    )
+    .unwrap();
     assert!(guide.contains("mkdir my-app-bundle"));
     assert!(guide.contains("cp my-app/capsule.json my-app/my-app.component.wasm my-app-bundle/"));
     assert!(guide.contains("elastos config set dev_mode false"));
