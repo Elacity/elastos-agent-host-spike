@@ -62,10 +62,24 @@ pub(super) struct Plan {
     pub abi: u32,
     pub handled: u64,
     pub rules: Vec<PathRule>,
+    /// Device and inode of the storage directory opened before launch.
+    pub storage_dev: u64,
+    pub storage_ino: u64,
 }
+
+/// The storage directory opened before launch, with that directory's identity.
+#[cfg(target_os = "linux")]
+pub(super) struct StorageRoot<'a> {
+    pub path: &'a std::path::Path,
+    pub dev: u64,
+    pub ino: u64,
+}
+
 pub(super) struct Bindings {
     pub storage_root: PathBuf,
     pub provider_executable: PathBuf,
+    pub storage_dev: u64,
+    pub storage_ino: u64,
 }
 
 pub(super) fn require_abi(reported: io::Result<u32>) -> Result<u32, String> {
@@ -141,6 +155,8 @@ fn build_for_arch(
         abi,
         handled: HANDLED,
         rules,
+        storage_dev: bindings.storage_dev,
+        storage_ino: bindings.storage_ino,
     })
 }
 
@@ -323,11 +339,14 @@ mod tests {
             let bindings = Bindings {
                 storage_root: format!("/provider/{provider:?}").into(),
                 provider_executable: format!("/bin/{provider:?}").into(),
+                storage_dev: 7,
+                storage_ino: 9,
             };
             let admitted = super::super::rights::admit_committed(provider);
             for arch in [LoaderArch::X86_64, LoaderArch::Aarch64] {
                 let plan = build_for_arch(provider, &admitted, &bindings, arch, 5).unwrap();
                 assert_eq!(plan.abi, 5, "{name} {arch:?} abi");
+                assert_eq!((plan.storage_dev, plan.storage_ino), (bindings.storage_dev, bindings.storage_ino), "the plan keeps the storage identity");
                 let mut expected = Vec::new();
                 for claim in declared["rights"].as_array().unwrap() {
                     for form in claim["rules"].as_array().unwrap() {

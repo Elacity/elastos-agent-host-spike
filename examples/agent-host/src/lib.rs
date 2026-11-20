@@ -19903,11 +19903,10 @@ mod tests {
         assert_eq!(step_state(&first, first_run), Some(StepState::Prepared));
     }
 
-    // Task 027: the declaration of every per-step ask. `asks.json` is an
-    // auditable declaration, not the policy check: the Runtime enforces each
-    // grant (P4, P18), and this lane's file retires into the Runtime manifest
-    // when the Runtime defines per-step asks (P10). The tests below keep the
-    // declaration equal to what the guest proposes, in both directions.
+    // The manifest `asks` are this guest's maximum. `asks.json` stays as the
+    // lane-local list the parser checks. Each proposal kind the guest can
+    // name is observed in the scenarios. Each observed resource is the
+    // resource that scenario passed.
 
     fn asks_document(entries: &str) -> String {
         format!(r#"{{"schema":"{ASKS_SCHEMA}","asks":[{entries}]}}"#)
@@ -20234,98 +20233,230 @@ mod tests {
         }
     }
 
-    /// Every kind the guest can propose has a declared ask. The kind match has
-    /// no wildcard, so a new kind does not compile until it is named. The
-    /// `unspecified` placeholder is not an ask, and a declaration of it is
-    /// refused.
+    /// Every kind the guest can propose appears in the scenarios. The kind
+    /// match has no wildcard, so a new kind does not compile until it is
+    /// named. `Unspecified` is a step opened with no proposal.
     #[test]
-    fn every_proposal_kind_has_a_declared_ask() {
-        for kind in PROPOSABLE_KINDS {
-            let name = ask_kind_name(*kind).expect("every proposable kind has a name");
-            assert_eq!(proposal_kind(name), Some(*kind), "{name} parses back");
-            assert!(
-                declared_asks().iter().any(|ask| ask.kind == *kind),
-                "{name} is proposable and must be declared"
-            );
-        }
-        assert_eq!(ask_kind_name(ProposalKind::Unspecified), None);
-        assert!(!declared_asks()
-            .iter()
-            .any(|ask| ask.kind == ProposalKind::Unspecified));
-        assert_eq!(
-            parse_asks(&asks_document(
-                r#"{"kind":"unspecified","resource":"<principal>/"}"#
-            )),
-            Err("asks kind unspecified"),
-            "the placeholder is not an ask"
-        );
-        for ask in declared_asks() {
-            assert!(
-                PROPOSABLE_KINDS.contains(&ask.kind),
-                "{:?} is declared but cannot be proposed",
-                ask.kind
-            );
-            assert!(ask_kind_name(ask.kind).is_some());
-        }
-    }
-
-    /// Every resource the guest actually proposes matches a declared pattern,
-    /// and every proposable kind appears in the scenarios that drive it. A
-    /// proposal outside the declaration fails this test.
-    #[test]
-    fn every_resource_the_guest_proposes_is_declared() {
+    fn every_proposal_kind_is_observed() {
         let observed = observed_proposals();
         for kind in PROPOSABLE_KINDS {
             assert!(
                 observed.iter().any(|(other, _)| other == kind),
                 "{kind:?} is proposable and these scenarios must propose it"
             );
+            let name = ask_kind_name(*kind).unwrap_or_else(|| panic!("{kind:?} has no name"));
+            assert_eq!(proposal_kind(name), Some(*kind), "{name} parses back");
         }
-        for (kind, resource) in &observed {
-            assert!(
-                declared_ask(*kind, resource),
-                "{kind:?} proposes {resource} outside the declaration"
-            );
-        }
+        assert!(observed
+            .iter()
+            .all(|(kind, _)| *kind != ProposalKind::Unspecified));
+        assert_eq!(ask_kind_name(ProposalKind::Unspecified), None);
     }
 
-    /// The reverse direction: every declared ask is observed. An unused
-    /// pattern is a grant wider than the guest needs, so it fails here.
-    #[test]
-    fn every_declared_ask_is_observed() {
-        let observed = observed_proposals();
-        for ask in declared_asks() {
-            assert!(
-                observed
-                    .iter()
-                    .any(|(kind, resource)| *kind == ask.kind && ask_covers(ask, resource)),
-                "{:?} ask {:?} is declared but no scenario proposes a matching resource",
-                ask.kind,
-                ask.pattern
-            );
-        }
+    fn proposed_resources(journal: &Journal) -> Vec<(ProposalKind, String)> {
+        journal
+            .steps
+            .iter()
+            .filter(|step| step.kind != ProposalKind::Unspecified && !step.resource.is_empty())
+            .map(|step| (step.kind, step.resource.clone()))
+            .collect()
     }
 
-    /// The journal ask is exactly the capsule's one declared capability: its
-    /// own task journal root under the launching person. A sibling agent's
-    /// journal stays outside the declaration.
+    /// Each scenario names the resource it passes. The stored step keeps that
+    /// resource, and the collected scenarios are that same sequence.
     #[test]
-    fn the_journal_ask_is_the_capsules_own_root() {
+    fn every_observed_proposal_keeps_its_scenario_resource() {
+        let rich = a_rich_journal();
+        let rich_named = vec![
+            (
+                ProposalKind::Read,
+                "localhost://Users/self/Documents/note.txt".to_string(),
+            ),
+            (
+                ProposalKind::Edit,
+                "localhost://Users/self/Projects/demo/notes.txt".to_string(),
+            ),
+            (
+                ProposalKind::Run,
+                "localhost://Users/self/Projects/demo".to_string(),
+            ),
+            (
+                ProposalKind::Child,
+                "localhost://Users/self/Projects/demo/src".to_string(),
+            ),
+            (
+                ProposalKind::JournalAppend,
+                journal_resource("agent-host", "task-1").expect("journal id"),
+            ),
+        ];
+        assert_eq!(proposed_resources(&rich), rich_named);
+
+        let mut session = empty_journal();
+        for round in [2, 3] {
+            assert!(run_session_round(&mut session, 0, round), "round {round}");
+        }
+        let session_named = vec![
+            (
+                ProposalKind::Run,
+                "localhost://Users/self/Projects/session-0".to_string(),
+            ),
+            (
+                ProposalKind::Hosted,
+                "localhost://Users/self/.AppData/Models/session-0.gguf".to_string(),
+            ),
+        ];
+        assert_eq!(proposed_resources(&session), session_named);
+
+        let model = "localhost://Models/hosted";
+        let mut hosted = two_turns();
+        propose_hosted(&mut hosted, model).unwrap();
+        let hosted_named = vec![(ProposalKind::Hosted, model.to_string())];
+        assert_eq!(proposed_resources(&hosted), hosted_named);
+
+        let page = "localhost://Users/self/Projects/demo/index.html";
+        let mut project = empty_journal();
+        propose_init(&mut project, "self", "demo").unwrap();
+        assert!(observe_read(
+            &mut project,
+            page,
+            1,
+            "rev-1",
+            None,
+            false,
+            ""
+        ));
+        propose_restore(&mut project, page, 1).unwrap();
+        let project_named = vec![
+            (
+                ProposalKind::Init,
+                "localhost://Users/self/Projects/demo".to_string(),
+            ),
+            (ProposalKind::Restore, page.to_string()),
+        ];
+        assert_eq!(proposed_resources(&project), project_named);
+
+        let mut named = rich_named;
+        named.extend(session_named);
+        named.extend(hosted_named);
+        named.extend(project_named);
+        assert_eq!(observed_proposals(), named);
+    }
+
+    /// The one manifest row: its resource and the actions on that resource.
+    fn manifest_journal_ask() -> (String, Vec<String>) {
         let capsule: serde_json::Value =
             serde_json::from_str(include_str!("../capsule.json")).expect("capsule.json parses");
-        let capabilities = capsule["capabilities"]
-            .as_array()
-            .expect("the capsule declares its capabilities");
-        assert_eq!(capabilities.len(), 1, "the capsule declares one capability");
-        let own_root = capabilities[0]
+        assert!(
+            capsule.get("capabilities").is_none(),
+            "the manifest maximum is asks"
+        );
+        let asks = capsule["asks"].as_array().expect("the manifest lists asks");
+        assert_eq!(asks.len(), 1, "the manifest lists one ask");
+        let resource = asks[0]["resource"]
             .as_str()
-            .expect("a capability is a string")
+            .expect("an ask names a resource")
+            .to_string();
+        let actions = asks[0]["actions"]
+            .as_array()
+            .expect("an ask lists actions")
+            .iter()
+            .map(|action| action.as_str().expect("an action is a string").to_string())
+            .collect();
+        (resource, actions)
+    }
+
+    /// A pattern that ends in `/*` covers a longer resource under that
+    /// directory. The listed actions are the ones that row allows.
+    fn journal_manifest_ask_fits(
+        pattern: &str,
+        actions: &[&str],
+        resource: &str,
+        action: &str,
+    ) -> bool {
+        let covered = match pattern.strip_suffix("/*") {
+            Some(root) => {
+                let prefix = format!("{root}/");
+                resource.starts_with(&prefix)
+                    && resource.len() > prefix.len()
+                    && !resource
+                        .split('/')
+                        .any(|segment| segment == ".." || segment == ".")
+            }
+            None => resource == pattern,
+        };
+        covered && actions.contains(&action)
+    }
+
+    /// Stores each grant request the guest makes.
+    struct GrantRequestLog {
+        calls: Vec<(String, String)>,
+    }
+
+    impl ResourceBus for GrantRequestLog {
+        fn request_grant(
+            &mut self,
+            resource: &str,
+            action: &str,
+            _reason: &str,
+        ) -> Result<String, BusFailure> {
+            self.calls.push((action.to_string(), resource.to_string()));
+            Ok(action.to_string())
+        }
+
+        fn invoke(
+            &mut self,
+            _resource: &str,
+            _operation: &str,
+            _body: &[u8],
+            _grant: &str,
+        ) -> Result<Vec<u8>, BusFailure> {
+            Err(BusFailure::Denied)
+        }
+    }
+
+    /// The running guest asks for write, then read, on its own journal. Both
+    /// requests fit the manifest row. A sibling agent's journal stays outside
+    /// that row. The row is a maximum: approval still decides the grant.
+    #[test]
+    fn the_two_journal_requests_fit_the_manifest_asks() {
+        let cursor = journal_cursor("agent-host", "demo").expect("the guest's journal id");
+        let mut bus = GrantRequestLog { calls: Vec::new() };
+        let _grants = request_journal_grants(&mut bus, &cursor);
+        assert_eq!(
+            bus.calls,
+            vec![
+                ("write".to_string(), cursor.resource.clone()),
+                ("read".to_string(), cursor.resource.clone()),
+            ]
+        );
+        let (pattern, actions) = manifest_journal_ask();
+        let listed: Vec<&str> = actions.iter().map(String::as_str).collect();
+        assert_eq!(listed, ["write", "read"]);
+        for (action, resource) in &bus.calls {
+            assert!(
+                journal_manifest_ask_fits(&pattern, &listed, resource, action),
+                "{action} {resource} is outside the manifest ask {pattern} {listed:?}"
+            );
+        }
+        let other = journal_resource("other-agent", "demo").expect("a sibling journal id");
+        assert!(
+            !journal_manifest_ask_fits(&pattern, &listed, &other, "write"),
+            "the manifest ask stays on this guest's journal"
+        );
+    }
+
+    /// The lane-local journal row names this capsule's own root, the same root
+    /// the manifest ask names. A sibling agent's journal stays outside that row.
+    #[test]
+    fn the_journal_ask_is_the_capsules_own_root() {
+        let (resource, _) = manifest_journal_ask();
+        let own_root = resource
             .strip_suffix('*')
-            .expect("the capability ends with a directory wildcard");
+            .expect("the ask resource ends with a directory wildcard");
         let journal = declared_asks()
             .iter()
             .find(|ask| ask.kind == ProposalKind::JournalAppend)
-            .expect("the declaration declares the journal append");
+            .expect("the lane-local list names the journal append");
         let declared = format!(
             "localhost://{}",
             journal.pattern.replacen(PRINCIPAL_MARKER, "Users/self", 1)
@@ -20336,7 +20467,7 @@ mod tests {
                 ProposalKind::JournalAppend,
                 "localhost://Users/self/.AppData/Agents/other-agent/tasks/t/journal"
             ),
-            "the journal ask names this capsule's own root only"
+            "the journal row names this capsule's own root"
         );
     }
 

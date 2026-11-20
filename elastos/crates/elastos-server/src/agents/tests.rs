@@ -193,6 +193,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             created_at: 5,
             updated_at: 5,
         },
+        active: true,
     }
 }
 
@@ -522,13 +523,18 @@ fn only_the_listed_operations_change_the_file() {
     ));
     assert!(permits(Operation::Create, &before, &next(add_third)));
     assert!(permits(Operation::Retire, &before, &next(retire_first)));
+    let rename_first = |file: &mut AgentRecordsFile| {
+        file.agents[0].record.display_name = "Renamed".to_string();
+        file.agents[0].record.updated_at = 9;
+    };
+    assert!(permits(Operation::Rename, &before, &next(rename_first)));
     let mut enabled_again = disabled.clone();
     enabled_again.sequence += 1;
     enabled_again.enabled = before.enabled.clone();
     assert!(permits(Operation::Enable, &disabled, &enabled_again));
 
     // Anything else, under each operation.
-    let refused: [(Operation, EditFile, &str); 9] = [
+    let refused: [(Operation, EditFile, &str); 10] = [
         (Operation::Enable, |_| {}, "enable when already on"),
         (
             Operation::Disable,
@@ -591,6 +597,15 @@ fn only_the_listed_operations_change_the_file() {
             Operation::Retire,
             |file| file.agents.swap(0, 1),
             "retire that reorders",
+        ),
+        (
+            Operation::Rename,
+            |file| {
+                file.agents[0].record.display_name = "Renamed".to_string();
+                file.agents[0].record.updated_at = 9;
+                file.agents[0].record.created_at = 1;
+            },
+            "rename that changes another field",
         ),
     ];
     for (operation, change, name) in refused {
@@ -1020,6 +1035,36 @@ fn create_one(home: &Home, request_id: &str) -> AgentView {
     create_as(home, &home.caller(), request_id).unwrap()
 }
 
+#[cfg(feature = "prototype-agents")]
+fn create_real(home: &Home, request_id: &str) -> AgentView {
+    create(home.path(), &home.caller(), &request(request_id), admit, 9).unwrap()
+}
+
+#[cfg(feature = "prototype-agents")]
+fn write_agent_note(home: &Home, agent_id: &str) -> (String, String, PathBuf) {
+    let root = crate::auth::principal_stored_localhost_root(Some(home.path()), agent_id).unwrap();
+    let uri = format!("{root}/journal/stable-id.txt");
+    let path = elastos_common::localhost::rooted_localhost_fs_path(home.path(), &uri).unwrap();
+    crate::auth::write_principal_root_object(
+        home.path(),
+        agent_id,
+        &root,
+        &uri,
+        &path,
+        b"agent-owned data",
+    )
+    .unwrap();
+    (root, uri, path)
+}
+
+#[cfg(feature = "prototype-agents")]
+fn assert_agent_note(home: &Home, agent_id: &str, root: &str, uri: &str, path: &Path) {
+    assert_eq!(
+        crate::auth::read_principal_root_object(home.path(), agent_id, root, uri, path).unwrap(),
+        b"agent-owned data"
+    );
+}
+
 /// A second admin person with storage protection, in the same Home.
 fn second_person(home: &Home, principal_id: &str) -> PrincipalRecord {
     crate::auth::store_test_principal_root_protection(home.path(), principal_id);
@@ -1236,6 +1281,16 @@ fn create_refuses_each_caller_and_request_it_should() {
         refusal_of(list_in_any_build(home.path(), &as_agent)),
         NOT_A_PERSON
     );
+    assert_eq!(
+        refusal_of(rename_in_any_build(
+            home.path(),
+            &as_agent,
+            &stored.principal_id,
+            "Other",
+            9
+        )),
+        NOT_A_PERSON
+    );
 
     // A person with no storage protection.
     let bare = crate::auth::store_test_human_principal(home.path(), "person:local:bare");
@@ -1402,6 +1457,257 @@ fn retire_happens_once_and_only_for_the_owner() {
 }
 
 #[test]
+fn rename_changes_display_name_only() {
+    let home = Home::new();
+    turn_on(&home);
+    let created = create_one(&home, "request-1");
+    let before = loaded(&home);
+    let snapshot = before.agents[0].clone();
+    let owner_file = home.owner_json_without_audit();
+
+    let renamed = rename_in_any_build(
+        home.path(),
+        &home.caller(),
+        &created.agent_id,
+        "Helper 2",
+        11,
+    )
+    .unwrap();
+    assert_eq!(renamed.display_name, "Helper 2");
+    assert_eq!(renamed.agent_id, snapshot.record.principal_id);
+
+    let after = loaded(&home);
+    let agent = &after.agents[0];
+    // id, root, binding, owner, package and protection stay. The name and
+    // updated_at move, and the sign-in file gains no agent record.
+    let mut only_name = snapshot.clone();
+    only_name.record.display_name = "Helper 2".to_string();
+    only_name.record.updated_at = 11;
+    assert_eq!(agent.record.principal_id, snapshot.record.principal_id);
+    assert_eq!(agent.record.localhost_root, snapshot.record.localhost_root);
+    assert_eq!(agent.record.proof_binding, snapshot.record.proof_binding);
+    assert_eq!(
+        agent.record.proof_binding_id,
+        snapshot.record.proof_binding_id
+    );
+    assert_eq!(agent.record.owner, snapshot.record.owner);
+    assert_eq!(
+        agent.record.agent_host_package,
+        snapshot.record.agent_host_package
+    );
+    assert_eq!(agent.protection, snapshot.protection);
+    assert_eq!(*agent, only_name);
+    assert_eq!(home.owner_json_without_audit(), owner_file);
+    let event = home.agent_events().pop().unwrap();
+    assert_eq!(event.event_type, "agent.record.rename");
+    assert_eq!(
+        event.principal_id.as_deref(),
+        Some(snapshot.record.principal_id.as_str())
+    );
+
+    let written = home.agent_bytes();
+    let same = rename_in_any_build(
+        home.path(),
+        &home.caller(),
+        &created.agent_id,
+        "Helper 2",
+        12,
+    )
+    .unwrap();
+    assert_eq!(same.display_name, "Helper 2");
+    assert_eq!(home.agent_bytes(), written, "the same name writes nothing");
+    let bad = rename_in_any_build(
+        home.path(),
+        &home.caller(),
+        &created.agent_id,
+        " padded ",
+        12,
+    );
+    assert_eq!(refusal_of(bad), BAD_REQUEST);
+    assert_eq!(home.agent_bytes(), written);
+
+    // A rename that also moves another record field is not the operation.
+    let error = write_change(&home, Operation::Rename, |file| {
+        file.agents[0].record.display_name = "Other".to_string();
+        file.agents[0].record.updated_at = 13;
+        file.agents[0].record.created_at = 1;
+    })
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "agent file change is not one Rename permits"
+    );
+    assert_eq!(home.agent_bytes(), written);
+    let kept = &loaded(&home).agents[0];
+    assert_eq!(kept.record.principal_id, snapshot.record.principal_id);
+    assert_eq!(kept.record.localhost_root, snapshot.record.localhost_root);
+    assert_eq!(kept.record.proof_binding, snapshot.record.proof_binding);
+    assert_eq!(kept.record.owner, snapshot.record.owner);
+    assert_eq!(
+        kept.record.agent_host_package,
+        snapshot.record.agent_host_package
+    );
+    assert_eq!(kept.protection, snapshot.protection);
+}
+
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn stable_id_after_rename_and_reopen() {
+    let home = Home::new();
+    turn_on(&home);
+    let created = create_real(&home, "stable-id-request");
+    let original_id = created.agent_id;
+    let (original_root, uri, path) = write_agent_note(&home, &original_id);
+
+    let renamed =
+        rename(home.path(), &home.caller(), &original_id, "Renamed", 11).expect("rename succeeds");
+    assert_eq!(renamed.agent_id, original_id, "rename keeps the ID");
+
+    let Home { dir, owner: _ } = home;
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    let owner = crate::auth::stored_principal_record(dir.path(), OWNER_ID)
+        .unwrap()
+        .unwrap();
+    let reopened = Home { dir, owner };
+    let [stored] = loaded(&reopened).agents.try_into().unwrap();
+    assert_eq!(stored.record.principal_id, original_id, "reopened ID");
+    assert_eq!(stored.record.localhost_root, original_root, "reopened root");
+    assert_agent_note(&reopened, &original_id, &original_root, &uri, &path);
+}
+
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn owner_recovery_reopens_agent_data() {
+    const ORIGIN: &str = "http://localhost:61180";
+    let dir = tempfile::tempdir().unwrap();
+    let mut identity = elastos_identity::IdentityManager::new(dir.path().into()).unwrap();
+    let secret = crate::auth::random_secret_hex();
+    let admission = crate::auth::OwnerAdmission {
+        origin: ORIGIN,
+        rp_id: "localhost",
+        claimant: &secret,
+        loopback: true,
+    };
+    let (_, options) = crate::auth::begin_owner_enrollment(
+        dir.path(),
+        &mut identity,
+        &admission,
+        "owner",
+        crate::auth::now_ts(),
+    )
+    .unwrap()
+    .unwrap();
+    let response = crate::auth::owner_attestation_for_test(
+        &options.unwrap().public_key.challenge,
+        "localhost",
+        ORIGIN,
+    );
+    let grant = crate::auth::complete_owner_enrollment(
+        dir.path(),
+        &mut identity,
+        &admission,
+        "owner",
+        Some(&response),
+        None,
+        crate::auth::now_ts(),
+    )
+    .unwrap()
+    .unwrap();
+    let owner =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &grant.proof_binding_id).unwrap();
+    let protection =
+        crate::auth::store_test_principal_root_protection(dir.path(), &owner.principal_id);
+    let kit = crate::auth::recovery_kit_from_archive(
+        dir.path(),
+        protection.protectors[0].archive.as_ref().unwrap(),
+    )
+    .unwrap();
+    let home = Home { dir, owner };
+    turn_on(&home);
+    let original_id = create_real(&home, "recovery-request").agent_id;
+    let (original_root, uri, path) = write_agent_note(&home, &original_id);
+    let original_binding = home.owner.proof_binding_id.clone();
+
+    let code = crate::auth::arm_owner_recovery(home.path(), ORIGIN, "localhost", 300).unwrap();
+    let client = crate::auth::OwnerRecoveryClient {
+        origin: ORIGIN,
+        rp_id: "localhost",
+        code: &code,
+    };
+    let options =
+        crate::auth::begin_owner_recovery(home.path(), &mut identity, &client, "recovery").unwrap();
+    let response = crate::auth::passkey_attestation_with_id_for_test(
+        &options.public_key.challenge,
+        "localhost",
+        ORIGIN,
+        b"replacement-passkey",
+    );
+    crate::auth::complete_owner_recovery(
+        home.path(),
+        &mut identity,
+        &client,
+        "recovery",
+        &response,
+        &kit,
+    )
+    .expect("same-Home owner recovery succeeds");
+
+    let owner_id = home.owner.principal_id.clone();
+    let Home { dir, owner: _ } = home;
+    drop(identity);
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    let owner = crate::auth::stored_principal_record(dir.path(), &owner_id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(owner.proof_binding_id, original_binding);
+    let reopened = Home { dir, owner };
+    let [stored] = loaded(&reopened).agents.try_into().unwrap();
+    assert_eq!(stored.record.principal_id, original_id, "recovered ID");
+    assert_eq!(
+        stored.record.localhost_root, original_root,
+        "recovered root"
+    );
+    assert_agent_note(&reopened, &original_id, &original_root, &uri, &path);
+}
+
+#[test]
+fn rename_is_owner_only() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-1");
+    let other = second_person(&home, "person:local:other-owner");
+    let written = home.agent_bytes();
+    let events = home.audit().len();
+
+    for (caller, id) in [
+        (caller_of(&other), agent.agent_id.as_str()),
+        (home.caller(), AGENT_A),
+    ] {
+        let result = rename_in_any_build(home.path(), &caller, id, "Taken", 11);
+        assert_eq!(refusal_of(result), NO_SUCH_AGENT);
+    }
+    assert_eq!(home.agent_bytes(), written);
+    assert_eq!(home.audit().len(), events);
+    assert_eq!(loaded(&home).agents[0].record.display_name, "Helper");
+
+    let renamed =
+        rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 11).unwrap();
+    assert_eq!(renamed.display_name, "Helper 2");
+    assert_eq!(loaded(&home).agents[0].record.principal_id, agent.agent_id);
+
+    retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 12).unwrap();
+    let tombstone = home.agent_bytes();
+    let after_retire =
+        rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "After", 13);
+    assert_eq!(refusal_of(after_retire), ALREADY_RETIRED);
+    assert_eq!(
+        home.agent_bytes(),
+        tombstone,
+        "a retired agent is not renamed"
+    );
+}
+
+#[test]
 fn a_retired_agent_no_longer_counts_toward_the_limit() {
     let home = Home::new();
     turn_on(&home);
@@ -1443,6 +1749,8 @@ fn with_agents_off_every_use_refuses_and_the_records_are_kept() {
     );
     let retire = retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 12);
     assert_eq!(refusal_of(retire), NOT_ENABLED);
+    let rename = rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 12);
+    assert_eq!(refusal_of(rename), NOT_ENABLED);
     assert_eq!(home.agent_bytes(), written);
 
     turn_on(&home);
@@ -1479,6 +1787,8 @@ fn a_refused_file_keeps_its_bytes_and_refuses_every_operation() {
     );
     let retire = retire_in_any_build(home.path(), &caller, &agent.agent_id, 12);
     assert_eq!(refusal_of(retire), unavailable);
+    let rename = rename_in_any_build(home.path(), &caller, &agent.agent_id, "Helper 2", 12);
+    assert_eq!(refusal_of(rename), unavailable);
     assert_eq!(
         refusal_of(list_in_any_build(home.path(), &caller)),
         unavailable
@@ -1529,6 +1839,10 @@ fn with_the_feature_off_every_operation_refuses_by_name() {
         refusal_of(retire(home.path(), &caller, &agent_id, 12)),
         FEATURE_OFF
     );
+    assert_eq!(
+        refusal_of(rename(home.path(), &caller, &agent_id, "Helper 2", 12)),
+        FEATURE_OFF
+    );
 
     assert_eq!(home.agent_bytes(), written);
     assert_eq!(home.audit().len(), events);
@@ -1547,6 +1861,9 @@ fn with_the_feature_on_the_operations_are_served() {
         list(home.path(), &caller).unwrap(),
         std::slice::from_ref(&agent)
     );
+    let renamed = rename(home.path(), &caller, &agent.agent_id, "Helper 2", 10).unwrap();
+    assert_eq!(renamed.display_name, "Helper 2");
+    assert_eq!(renamed.agent_id, agent.agent_id);
     let retired = retire(home.path(), &caller, &agent.agent_id, 11).unwrap();
     assert_eq!(retired.retired_at, Some(11));
     assert!(!set_enabled(home.path(), &caller, false, 12).unwrap());
@@ -1659,6 +1976,7 @@ fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-1");
+    rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 10).unwrap();
     retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
     set_enabled_in_any_build(home.path(), &home.caller(), false, 12).unwrap();
 
@@ -1680,6 +1998,7 @@ fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
         [
             "agent.records.enable",
             "agent.record.create",
+            "agent.record.rename",
             "agent.record.retire",
             "agent.records.disable",
         ]
@@ -1698,6 +2017,7 @@ fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-1");
+    crate::agents::set_active(home.path(), &home.caller(), &agent.agent_id, true, 10).unwrap();
     let stored = crate::agents::stored_agent(home.path(), OWNER_ID, &agent.agent_id).unwrap();
     assert_eq!(stored.record.principal_id, agent.agent_id);
     assert_eq!(stored.record.owner.as_deref(), Some(OWNER_ID));
@@ -1748,6 +2068,30 @@ fn a_launch_finds_only_its_owners_enabled_unretired_agent() {
             .unwrap_err()
             .to_string(),
         NOT_ENABLED
+    );
+}
+
+/// A file with no `active` field is the shape from before this change.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn existing_agent_records_keep_their_behaviour() {
+    let (host, host_cid) = host_capsule(crate::agent_admission::tests::AGENT_HOST, b"old-record");
+    let (home, agents) = home_with_agents(1, &host_cid);
+    let raw = home.agent_bytes();
+    assert!(!raw.windows(8).any(|window| window == b"\"active\""));
+    assert!(parse_strict(&raw).unwrap().agents[0].active);
+    assert_eq!(
+        admit_walked(
+            home.path(),
+            home.path(),
+            host.path(),
+            Some(OWNER_ID),
+            Some(&agents[0])
+        )
+        .unwrap()
+        .unwrap()
+        .actor(),
+        agents[0]
     );
 }
 
@@ -1813,7 +2157,7 @@ pub(crate) fn home_with_agents(
     crate::agents::set_enabled(home.path(), &caller, true, 1).unwrap();
     let agents = (0..count)
         .map(|index| {
-            crate::agents::create(
+            let agent_id = crate::agents::create(
                 home.path(),
                 &caller,
                 &crate::agents::CreateRequest {
@@ -1833,7 +2177,9 @@ pub(crate) fn home_with_agents(
                 1,
             )
             .unwrap()
-            .agent_id
+            .agent_id;
+            crate::agents::set_active(home.path(), &caller, &agent_id, true, 1).unwrap();
+            agent_id
         })
         .collect();
     (home, agents)

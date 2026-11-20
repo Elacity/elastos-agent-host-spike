@@ -1128,10 +1128,13 @@ pub(crate) mod tests {
 /// Records one step of the signature check for a test; the product keeps
 /// none. It sits after the tests module so the source pin above reads the
 /// check itself and not this.
-fn record_work(_step: &'static str) {
-    #[cfg(test)]
-    SIGNATURE_CHECK_WORK.with(|work| work.borrow_mut().push(_step));
+#[cfg(test)]
+fn record_work(step: &'static str) {
+    SIGNATURE_CHECK_WORK.with(|work| work.borrow_mut().push(step));
 }
+
+#[cfg(not(test))]
+fn record_work(_step: &'static str) {}
 
 #[cfg(test)]
 thread_local! {

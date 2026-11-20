@@ -498,7 +498,6 @@ async fn run_with_data_dir(
                         return Err(error);
                     }
                 }
-                record_installed_component_folders(&data_dir, comp, &platform, platform_info);
                 line.note("already installed");
                 skipped_count += 1;
                 continue;
@@ -588,7 +587,11 @@ async fn run_with_data_dir(
                 write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)
             })
             .await?;
-            record_installed_capsule_folder(&data_dir, &dest);
+            if comp.capsule_metadata.is_none() {
+                record_installed_component_folders(&data_dir, comp, &platform, Some(platform_info));
+            } else {
+                record_installed_capsule_folder(&data_dir, &dest);
+            }
             changed = true;
         }
 
@@ -1491,7 +1494,6 @@ pub(crate) async fn ensure_capsule_component_for_home_launch(
     let install_state =
         component_install_state_for_name(&manifest, data_dir, name, component, Some(platform_info));
     if matches!(install_state, InstallState::Installed) {
-        record_installed_capsule_folder(data_dir, &data_dir.join(install_path));
         if name == "browser" {
             browser_config::ensure_host_components(
                 data_dir,
@@ -2715,7 +2717,11 @@ pub(crate) fn install_cid_record(dir: &Path) -> anyhow::Result<PathBuf> {
     let mut record = std::ffi::OsString::from(".");
     record.push(name);
     record.push(".elastos-install-cid");
-    Ok(dir.with_file_name(record))
+    if dir.file_name().is_none() {
+        Ok(fs::canonicalize(dir)?.with_file_name(record))
+    } else {
+        Ok(dir.with_file_name(record))
+    }
 }
 
 /// The last name of `dir`, with `.` and a trailing separator resolved, so a
@@ -2768,6 +2774,17 @@ fn write_install_cid_ledger(data_dir: &Path, dir: &Path, cid: Option<&str>) -> a
     let path = install_cid_ledger(data_dir);
     let parent = path.parent().context("install CID ledger has no parent")?;
     fs::create_dir_all(parent)?;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let _lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(parent.join(".install-cids.lock"))?;
+    if unsafe { libc::flock(_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
     let key = canonical_install_folder(dir)
         .context("install CID ledger has no folder key")?
         .to_string_lossy()
@@ -7575,6 +7592,7 @@ pub(crate) mod tests {
         )
         .unwrap();
 
+        record_install_cid(tmp.path(), &install_root, &install_root);
         let ensure = ensure_capsule_component_for_home_launch(tmp.path(), "marketplace")
             .await
             .unwrap();
@@ -7603,6 +7621,29 @@ pub(crate) mod tests {
             record,
             tmp.path().join("capsules/.marketplace.elastos-install-cid")
         );
+        assert_eq!(
+            install_cid_record(Path::new(".")).unwrap(),
+            install_cid_record(&std::env::current_dir().unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn concurrent_install_cid_writes_keep_every_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("capsules")).unwrap();
+        let barrier = std::sync::Barrier::new(32);
+        let data = tmp.path();
+        std::thread::scope(|scope| {
+            for i in 0..32 {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let dir = data.join(format!("capsules/{i}"));
+                    write_install_cid_ledger(data, &dir, Some("cid")).unwrap();
+                });
+            }
+        });
+        assert_eq!(read_install_cid_ledger(tmp.path()).len(), 32);
     }
 
     /// A component with one empty `run`, as bytes.
@@ -7787,7 +7828,7 @@ pub(crate) mod tests {
     /// from the installed path and from a setup run, so it starts on a Home
     /// outside dev mode.
     #[tokio::test]
-    async fn an_already_installed_component_keeps_its_record() {
+    async fn an_already_installed_component_keeps_its_prior_record_state() {
         let _guard = ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
@@ -7841,14 +7882,15 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(ensured.status, "installed");
         let walked = crate::stage_cmd::bundle_cid(&folder).unwrap();
+        assert!(recorded_install_cid(&data, &folder).is_none());
+        record_install_cid(&data, &folder, &folder);
         assert_eq!(
             recorded_install_cid(&data, &folder).as_deref(),
             Some(walked.as_str()),
             "the installed path keeps the Home's record"
         );
 
-        // A setup run over a folder it already has writes the record again, so
-        // a Home that installed before the record existed needs no reinstall.
+        // A setup run over a folder it already has keeps the prior record state.
         write_install_cid_ledger(&data, &folder, None).unwrap();
         assert!(recorded_install_cid(&data, &folder).is_none());
         let original = std::env::var_os(COMPONENTS_MANIFEST_ENV);
@@ -7868,6 +7910,8 @@ pub(crate) mod tests {
             None => std::env::remove_var(COMPONENTS_MANIFEST_ENV),
         }
         setup.expect("setup skips an already installed component");
+        assert!(recorded_install_cid(&data, &folder).is_none());
+        record_install_cid(&data, &folder, &folder);
         assert_eq!(
             recorded_install_cid(&data, &folder).as_deref(),
             Some(walked.as_str()),

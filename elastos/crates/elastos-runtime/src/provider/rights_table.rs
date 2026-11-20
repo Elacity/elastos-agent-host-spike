@@ -42,6 +42,17 @@ pub(super) enum RuntimeProviderId {
 }
 
 impl RuntimeProviderId {
+    /// Map a `components.json` key to the Runtime id. The manifest's `name` is
+    /// never the input. An unknown key has no id and no grant.
+    pub(super) fn from_component_key(key: &str) -> Option<Self> {
+        match key {
+            "did-provider" => Some(Self::Did),
+            "wallet-provider" => Some(Self::Wallet),
+            "model-provider" => Some(Self::Model),
+            _ => None,
+        }
+    }
+
     pub(super) fn rights(self) -> &'static [&'static str] {
         match self {
             Self::Did => DID_RIGHT_IDS,

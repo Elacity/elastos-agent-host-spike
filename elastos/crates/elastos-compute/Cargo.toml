@@ -14,7 +14,7 @@ tokio = { version = "1.0", features = ["sync", "rt-multi-thread", "time", "fs", 
 # RA2 compiles async support for the separate Bus v2 engine. The v1 engine stays
 # synchronous. `gc`, `threads`, `stack-switching`, `parallel-compilation` and
 # `cache` remain outside this feature set.
-wasmtime = { version = "=48.0.8", default-features = false, features = [
+wasmtime = { version = "=48.0.9", default-features = false, features = [
     "runtime",
     "cranelift",
     "component-model",

@@ -17,6 +17,7 @@ use elastos_runtime::provider::{
 };
 use serde_json::{json, Value};
 
+pub(crate) use planning::plan_scheme;
 pub use sources::{
     AggregateInspectSource, CatalogInspectSource, InspectEntry, InspectSource,
     RegistryInspectSource,

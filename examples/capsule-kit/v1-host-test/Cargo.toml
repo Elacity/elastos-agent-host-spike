@@ -19,7 +19,7 @@ sha2 = "0.10.9"
 # The same Wasmtime, pinned the same way and built with the same features, as elastos-compute
 # (elastos/crates/elastos-compute/Cargo.toml): the fuel this harness measures is then measured on
 # the engine version the Runtime runs. What still differs is said at `measure::run` in src/lib.rs.
-wasmtime = { version = "=48.0.8", default-features = false, features = [
+wasmtime = { version = "=48.0.9", default-features = false, features = [
     "runtime",
     "cranelift",
     "component-model",
