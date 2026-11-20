@@ -10,8 +10,8 @@
 //! `read` and a `write` of `localhost://Public/resident-instances/shared.txt`
 //! and of `localhost://Public/plan-approval/a.txt`, the resources these
 //! journeys request. `capabilities` is removed so that list is the one
-//! ceiling. `asks.json` stays in the signed bytes and is not the schema. A
-//! test that needs another declared set writes the manifest before it signs.
+//! ceiling. The signed fixture is the manifest. A test that needs another
+//! declared set writes the manifest before it signs.
 
 #![allow(dead_code)]
 
@@ -40,16 +40,10 @@ mod manifest_asks;
 pub use manifest_asks::write_typed_manifest_asks;
 
 /// The committed `agent-host` fixture: a real bundle the walk accepts.
-const AGENT_HOST_FILES: [(&str, &[u8]); 2] = [
-    (
-        "capsule.json",
-        include_bytes!("../../../capsule-identity/fixtures/agent-host/capsule.json"),
-    ),
-    (
-        "asks.json",
-        include_bytes!("../../../capsule-identity/fixtures/agent-host/asks.json"),
-    ),
-];
+const AGENT_HOST_FILES: [(&str, &[u8]); 1] = [(
+    "capsule.json",
+    include_bytes!("../../../capsule-identity/fixtures/agent-host/capsule.json"),
+)];
 
 /// The committed `content-sample` fixture: a real bundle the walk accepts
 /// whose manifest `role` is `content`.
@@ -115,10 +109,6 @@ impl SignedBundle {
         );
         let renamed = text.replace(&name_key, &format!("\"name\": \"{name}\""));
         fs::write(&manifest, renamed).expect("rename the second bundle's manifest");
-        let asks = second.path().join("asks.json");
-        let mut bytes = fs::read(&asks).expect("read asks.json");
-        bytes.push(b'\n');
-        fs::write(&asks, &bytes).expect("change the second bundle");
         second
     }
 
@@ -157,26 +147,16 @@ fn write_files(root: &Path, files: &[(&str, &[u8])]) {
         fs::write(&target, bytes).expect("write a bundle file");
     }
     // The content fixture declares no asks: it never runs as code, so the one
-    // admission refuses it on its role and the asks file does not apply.
-    if !root.join("asks.json").is_file() {
+    // admission refuses it on its role. An app fixture records the journey
+    // asks on the manifest.
+    let manifest = fs::read(root.join("capsule.json")).expect("read capsule.json");
+    let document: Value = serde_json::from_slice(&manifest).expect("parse capsule.json");
+    if document["role"] != "app" {
         return;
     }
-    let committed = fs::read(root.join("asks.json")).expect("read the committed asks");
-    let mut asks: Value = serde_json::from_slice(&committed).expect("parse the committed asks");
-    let listed = asks["asks"]
-        .as_array_mut()
-        .expect("the committed asks list asks");
-    let mut pairs = Vec::new();
-    for resource in SHARED_ASKS_RESOURCES {
-        for action in REQUESTED_ACTIONS {
-            pairs.push((resource, *action));
-            listed.push(json!({ "kind": action, "resource": resource }));
-        }
-    }
+    let pairs: Vec<(&str, &str)> = SHARED_ASKS_RESOURCES
+        .iter()
+        .flat_map(|resource| REQUESTED_ACTIONS.iter().map(|action| (*resource, *action)))
+        .collect();
     write_typed_manifest_asks(root, &pairs);
-    fs::write(
-        root.join("asks.json"),
-        serde_json::to_vec_pretty(&asks).expect("encode the fixture asks"),
-    )
-    .expect("write the fixture asks");
 }

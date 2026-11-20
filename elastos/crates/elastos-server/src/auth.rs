@@ -7724,6 +7724,12 @@ fn write_principal_root_object_locked_unchecked(
     plaintext: &[u8],
     options: PrincipalRootObjectWriteOptions<'_>,
 ) -> anyhow::Result<()> {
+    // Every writer that shares this function refuses a path that passes
+    // through a symlink. The protected writer keeps its own, stricter parent
+    // check below (and its own error); the others get this one.
+    if !options.require_protection {
+        ensure_no_symlink_components(data_dir, path)?;
+    }
     if let Some(precondition) = options.precondition {
         let exists = match std::fs::symlink_metadata(path) {
             Ok(_) => true,
@@ -16152,6 +16158,77 @@ pub(crate) mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(victim).unwrap(), b"preserve");
+    }
+
+    /// A symlinked folder inside a protected root must not redirect a save.
+    /// The create-only, revision and plain writers each refuse it, write
+    /// nothing at the link's target and leave an existing object unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn principal_root_writers_refuse_a_symlinked_parent() {
+        for writer in ["create-only", "revision", "plain"] {
+            let data = tempfile::tempdir().unwrap();
+            let principal = "person:local:save-parent-link";
+            let protection = store_test_principal_root_protection(data.path(), principal);
+            let root = &protection.localhost_root;
+            let uri = format!("{root}/saves/game.sav");
+            let path = rooted_localhost_fs_path(data.path(), &uri).unwrap();
+            let saves = path.parent().unwrap();
+            // Control: with a real folder the same writer succeeds.
+            write_principal_root_object(data.path(), principal, root, &uri, &path, b"first")
+                .unwrap();
+            let revision = principal_root_object_revision(principal, &uri, b"first");
+            // The folder moves aside and a link takes its place.
+            let elsewhere = data.path().join("elsewhere");
+            std::fs::rename(saves, &elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, saves).unwrap();
+            let moved = elsewhere.join("game.sav");
+            if writer == "create-only" {
+                std::fs::remove_file(&moved).unwrap();
+            }
+            let before = std::fs::read(&moved).ok();
+
+            let result = match writer {
+                "create-only" => write_principal_root_object_if_revision(
+                    data.path(),
+                    principal,
+                    root,
+                    &uri,
+                    &path,
+                    b"second",
+                    PrincipalRootObjectPrecondition::Absent,
+                ),
+                "revision" => write_principal_root_object_if_revision(
+                    data.path(),
+                    principal,
+                    root,
+                    &uri,
+                    &path,
+                    b"second",
+                    PrincipalRootObjectPrecondition::Revision(&revision),
+                ),
+                _ => write_principal_root_object(
+                    data.path(),
+                    principal,
+                    root,
+                    &uri,
+                    &path,
+                    b"second",
+                ),
+            };
+
+            let error = result.expect_err(writer).to_string();
+            assert!(
+                error.contains("rejects symlink components"),
+                "{writer}: {error}"
+            );
+            assert_eq!(std::fs::read(&moved).ok(), before, "{writer}");
+            assert_eq!(
+                std::fs::read_dir(&elsewhere).unwrap().count(),
+                usize::from(before.is_some()),
+                "{writer}"
+            );
+        }
     }
 
     #[cfg(unix)]

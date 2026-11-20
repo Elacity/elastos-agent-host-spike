@@ -18,7 +18,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use elastos_common::localhost::rooted_localhost_uri;
+use elastos_common::localhost::{parse_localhost_uri, rooted_localhost_uri};
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};
 use elastos_runtime::primitives::audit::AuditLog;
 use elastos_runtime::provider::{
@@ -512,16 +512,15 @@ fn canonical_local_uri(path: &str) -> Result<String, StorageApiError> {
 }
 
 fn reject_principal_root_storage_path(path: &str) -> Result<(), StorageApiError> {
-    // Check the canonical URI too: it is what the route uses, and it trims
-    // whitespace the raw text keeps (" Users/...").
-    let canonical = rooted_localhost_uri(path).unwrap_or_default();
-    if path == "Users"
-        || path.starts_with("Users/")
-        || canonical == "localhost://Users"
-        || canonical.starts_with("localhost://Users/")
-    {
+    let uri = canonical_local_uri(path)?;
+    if matches!(parse_localhost_uri(&uri), Some(("Users" | "UsersAI", _))) {
         return Err(StorageApiError::PermissionDenied(
             "principal-root storage requires a runtime principal-scoped provider route".into(),
+        ));
+    }
+    if path.split('/').any(|segment| segment == "..") {
+        return Err(StorageApiError::InvalidPath(
+            "path must not contain parent segments".to_string(),
         ));
     }
     Ok(())
@@ -621,6 +620,46 @@ mod tests {
     use elastos_runtime::primitives::metrics::MetricsManager;
     use elastos_runtime::session::SessionType;
 
+    #[tokio::test]
+    async fn s5_p7_storage_closes_both_launched_agent_roots() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = crate::api::routes::tests::ProbeLaunch::new(&["s5-x", "s5-y"]).await;
+        let x = home.agents[0].clone();
+        let y = home.agents[1].clone();
+        let _vm_id = home.launched_instance_id(&x).await;
+        let x_root = home.root(&x);
+        let y_root = home.root(&y);
+        let y_file = home
+            .data_dir
+            .join(y_root.trim_start_matches("localhost://"))
+            .join("memory/notes.md");
+        std::fs::create_dir_all(y_file.parent().unwrap()).unwrap();
+        std::fs::write(&y_file, b"Y private bytes").unwrap();
+        let y_segment = y_root.strip_prefix("localhost://UsersAI/").unwrap();
+        let x_segment = x_root.strip_prefix("localhost://UsersAI/").unwrap();
+        for raw in [
+            y_root.clone(),
+            format!("{y_root}/memory/notes.md"),
+            "UsersAI".to_owned(),
+            "UsersAI/".to_owned(),
+            format!("UsersAI/./{y_segment}/memory/notes.md"),
+            format!("UsersAI//{y_segment}/memory/notes.md"),
+            format!("UsersAI/{x_segment}/../{y_segment}/memory/notes.md"),
+            x_root.clone(),
+            format!("{x_root}/memory/notes.md"),
+        ] {
+            let path = normalize_path(&raw);
+            assert!(
+                reject_principal_root_storage_path(&path).is_err(),
+                "P7 X's storage route accepted {raw:?} -> {path:?}"
+            );
+            assert_eq!(std::fs::read(&y_file).unwrap(), b"Y private bytes");
+        }
+        assert!(home.pending_store.list_pending().await.is_empty());
+    }
+
     /// Every principal-root path is refused on this route, however it is
     /// spelled: the guard must see what the route will use, after trimming.
     #[test]
@@ -650,6 +689,119 @@ mod tests {
                 "{raw}"
             );
         }
+    }
+
+    use axum::{body::Body, http::Request};
+    use elastos_runtime::provider::{Provider, ResourceRequest};
+    use tokio::sync::Mutex;
+    use tower::ServiceExt;
+
+    #[derive(Default)]
+    struct RecordingLocalhostProvider {
+        requests: Mutex<Vec<ResourceRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for RecordingLocalhostProvider {
+        async fn handle(
+            &self,
+            request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            self.requests.lock().await.push(request);
+            Ok(ResourceResponse::Data(b"allowed".to_vec()))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["localhost"]
+        }
+
+        fn name(&self) -> &'static str {
+            "recording-localhost"
+        }
+    }
+
+    #[tokio::test]
+    async fn storage_http_refuses_principal_areas_for_all_operations() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(RecordingLocalhostProvider::default());
+        registry.register(provider.clone()).await;
+        let app = crate::api::server::storage_router()
+            .layer(Extension(make_session(SessionType::Shell)))
+            .with_state(ProviderStorageState {
+                registry,
+                audit_log: None,
+                capability_manager: None,
+                storage_quota_mb: 0,
+            });
+
+        for area in ["Users", "UsersAI"] {
+            let child = format!("{area}/owner/Documents/a.md");
+            let spellings = [
+                format!("%2F%20{child}"),
+                format!("localhost:%2F%2F%20{child}"),
+                format!("localhost:%2F%2Flocalhost:%2F%2F{child}"),
+                format!("%20{child}"),
+                format!("%2F%09{child}"),
+                format!("%2F%0A{child}"),
+                format!("%2F%C2%A0{child}"),
+                area.to_string(),
+                format!("{area}/"),
+                format!("{child}/"),
+                format!("{area}//owner//Documents/a.md"),
+                format!("{area}/./owner/Documents/a.md"),
+                format!("{area}/owner/../owner/Documents/a.md"),
+            ];
+            for spelling in spellings {
+                for (method, query) in [
+                    ("GET", ""),
+                    ("PUT", ""),
+                    ("DELETE", ""),
+                    ("GET", "?list=true"),
+                    ("HEAD", ""),
+                    ("POST", "?mkdir=true"),
+                ] {
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(method)
+                                .uri(format!("/api/localhost/{spelling}{query}"))
+                                .body(Body::from("test"))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::FORBIDDEN,
+                        "{method} {spelling}{query}"
+                    );
+                }
+            }
+        }
+        assert!(provider.requests.lock().await.is_empty());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/localhost/MyWebSite/Pictures/allowed.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"allowed");
+        let requests = provider.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].uri,
+            "localhost://MyWebSite/Pictures/allowed.txt"
+        );
     }
 
     fn make_capability_manager() -> Arc<CapabilityManager> {
@@ -871,6 +1023,109 @@ mod tests {
             list_result,
             Err(StorageApiError::PermissionDenied(message))
                 if message.contains("principal-scoped provider route")
+        ));
+    }
+
+    const PRINCIPAL_AREA_SPELLINGS: &[&str] = &[
+        "UsersAI",
+        "UsersAI/",
+        "localhost://UsersAI",
+        "/UsersAI",
+        "UsersAI//agent-root/Documents/a.md",
+        "UsersAI/./agent-root/Documents/a.md",
+        "UsersAI/agent-root/../agent-root/Documents/a.md",
+        "/UsersAI/agent-root/Documents/a.md",
+        "localhost://UsersAI/agent-root/Documents/a.md",
+    ];
+
+    #[tokio::test]
+    async fn shell_storage_rejects_every_agent_root_spelling() {
+        for spelling in PRINCIPAL_AREA_SPELLINGS {
+            let state = State(make_state(None));
+            let session = Extension(make_session(SessionType::Shell));
+            let headers = HeaderMap::new();
+
+            let read_result = read_file(
+                state.clone(),
+                session.clone(),
+                headers.clone(),
+                Path((*spelling).to_string()),
+            )
+            .await;
+            assert!(
+                matches!(
+                    read_result,
+                    Err(StorageApiError::PermissionDenied(message))
+                        if message.contains("principal-scoped provider route")
+                ),
+                "read {spelling}"
+            );
+
+            let write_result = write_file(
+                state.clone(),
+                session.clone(),
+                headers.clone(),
+                Path((*spelling).to_string()),
+                Bytes::from_static(b"# draft"),
+            )
+            .await;
+            assert!(
+                matches!(
+                    write_result,
+                    Err(StorageApiError::PermissionDenied(message))
+                        if message.contains("principal-scoped provider route")
+                ),
+                "write {spelling}"
+            );
+
+            let delete_result = delete_path(
+                state,
+                session,
+                headers,
+                Path((*spelling).to_string()),
+                Query(DeleteQuery { recursive: None }),
+            )
+            .await;
+            assert!(
+                matches!(
+                    delete_result,
+                    Err(StorageApiError::PermissionDenied(message))
+                        if message.contains("principal-scoped provider route")
+                ),
+                "delete {spelling}"
+            );
+        }
+    }
+
+    /// The guard follows the root parser used to build the provider URI.
+    #[test]
+    fn principal_area_guard_uses_routed_root() {
+        for path in ["MyWebSite/UsersAI/a.md", "Public/a.md"] {
+            assert!(
+                reject_principal_root_storage_path(path).is_ok(),
+                "{path} must pass the guard"
+            );
+        }
+        for path in [
+            "Users",
+            "Users/a.md",
+            "Users/../Public/a.md",
+            "UsersAI",
+            "UsersAI/a.md",
+            " UsersAI/a.md",
+            "localhost://UsersAI/a.md",
+        ] {
+            assert!(
+                matches!(
+                    reject_principal_root_storage_path(path),
+                    Err(StorageApiError::PermissionDenied(_))
+                ),
+                "{path} must be refused"
+            );
+        }
+        assert!(matches!(
+            reject_principal_root_storage_path("Public/../Users/a.md"),
+            Err(StorageApiError::InvalidPath(_))
         ));
     }
 }
