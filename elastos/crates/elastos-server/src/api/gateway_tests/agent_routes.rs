@@ -152,6 +152,163 @@ mod on {
         (StatusCode::FORBIDDEN, "admin passkey required".to_string())
     }
 
+    /// U3 acceptance: Home asks, Runtime owns the authority check and id.
+    #[tokio::test]
+    async fn u3_owner_create_replaces_admission_mint() {
+        let installed = installed_home();
+        let data = &installed.home.data;
+        let app = &installed.app;
+        let owner = &installed.owner;
+        assert_eq!(
+            call(app, ENABLE, &owner.system_token, None).await.0,
+            StatusCode::OK
+        );
+        let before = std::fs::read(agent_file(data)).unwrap();
+
+        // Create accepts no owner field, regardless of which admin sends it.
+        let other = passkey_authority_with_name_role_credential(
+            data,
+            Some("Other Admin"),
+            crate::auth::RuntimePrincipalRole::Admin,
+            "u3-other-admin-passkey",
+        );
+        crate::auth::store_test_principal_root_protection(data, &other.principal_id);
+        let mut owner_spoof = create_body("u3-spoof");
+        owner_spoof["owner"] = json!(&owner.principal_id);
+        let (status, reason) = call(app, CREATE, &other.system_token, Some(owner_spoof)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(reason.starts_with("agent request is invalid: "), "{reason}");
+        assert_eq!(std::fs::read(agent_file(data)).unwrap(), before);
+
+        let guest = passkey_authority_with_name_role(
+            data,
+            Some("Guest"),
+            crate::auth::RuntimePrincipalRole::Guest,
+        );
+        crate::auth::store_test_principal_root_protection(data, &guest.principal_id);
+        assert_eq!(
+            call(
+                app,
+                CREATE,
+                &guest.system_token,
+                Some(create_body("u3-guest"))
+            )
+            .await,
+            admin_required()
+        );
+        assert_eq!(std::fs::read(agent_file(data)).unwrap(), before);
+
+        // Identical names and Hosts do not choose identity. Runtime chooses it.
+        let mut ids = Vec::new();
+        for request_id in ["u3-first", "u3-second"] {
+            let body = create_body(request_id);
+            let (status, answer) = call(app, CREATE, &owner.system_token, Some(body.clone())).await;
+            assert_eq!(status, StatusCode::OK, "{answer}");
+            let created: Value = serde_json::from_str(&answer).unwrap();
+            let id = created["agent_id"].as_str().unwrap().to_string();
+            assert!(crate::auth::validate_agent_id(&id).is_ok());
+            assert_eq!(created["display_name"], "Helper");
+            assert_eq!(created["active"], false);
+            assert_eq!(
+                call(app, CREATE, &owner.system_token, Some(body)).await,
+                (StatusCode::OK, answer),
+                "a retry keeps the Runtime id"
+            );
+            ids.push(id);
+        }
+        assert_ne!(ids[0], ids[1], "the name and Host do not derive the id");
+        let stored: Value =
+            serde_json::from_slice(&std::fs::read(agent_file(data)).unwrap()).unwrap();
+        let rows = stored["agents"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for (row, id) in rows.iter().zip(&ids) {
+            assert_eq!(row["record"]["principal_id"], id.as_str());
+            assert_eq!(row["record"]["owner"], owner.principal_id);
+            assert_eq!(row["active"], false);
+        }
+
+        // The old admission-time mint cannot turn an unknown id into a record.
+        let written = std::fs::read(agent_file(data)).unwrap();
+        let unknown = "agent:v2:ffffffffffffffffffffffffffffffff";
+        let host_dir = data.join("capsules").join(AGENT_HOST);
+        let refused = crate::agent_admission::admit_launch(
+            data,
+            data,
+            Some(&owner.principal_id),
+            Some(unknown),
+            crate::agent_admission::walk_launch(&host_dir).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(refused.to_string(), "the caller owns no agent with that id");
+        assert_eq!(std::fs::read(agent_file(data)).unwrap(), written);
+    }
+
+    /// A stored Agent can hold a valid token, but cannot ask Runtime to create.
+    #[tokio::test]
+    async fn u3_agent_principal_cannot_call_create() {
+        let installed = installed_home();
+        let agent_id = create_agent(&installed, "u3-agent-caller-setup").await;
+        let data = &installed.home.data;
+        let root = crate::auth::principal_kind_localhost_root(
+            &agent_id,
+            crate::auth::PrincipalKind::Agent,
+        );
+        let binding = crate::agents::stored_agent_for_root(data, &agent_id, &root)
+            .unwrap()
+            .unwrap()
+            .record
+            .proof_binding_id;
+        let now = now_ts();
+        let grant = AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: format!("grant:{}", uuid_like_token()),
+            session_id: format!("auth:{}", uuid_like_token()),
+            principal_id: agent_id.clone(),
+            proof_binding_id: binding.clone(),
+            issued_at: now,
+            expires_at: now + 3600,
+            apps: vec![SYSTEM_CAPSULE_ID.to_string()],
+        };
+        crate::auth::store_session_grant(data, grant.clone()).unwrap();
+        let agent_token =
+            issue_home_launch_token_for_auth_grant(data, SYSTEM_CAPSULE_ID, &grant).unwrap();
+        let before = std::fs::read(agent_file(data)).unwrap();
+        assert_eq!(
+            call(
+                &installed.app,
+                CREATE,
+                &agent_token,
+                Some(create_body("u3-agent-caller")),
+            )
+            .await,
+            (
+                StatusCode::FORBIDDEN,
+                "Gateway request requires an admitted host and caller".to_string(),
+            ),
+        );
+        assert_eq!(std::fs::read(agent_file(data)).unwrap(), before);
+
+        let request = serde_json::from_value(create_body("u3-agent-store")).unwrap();
+        let caller = crate::agents::Caller {
+            principal_id: &agent_id,
+            proof_binding_id: &binding,
+            session_id: &grant.session_id,
+        };
+        assert_eq!(
+            crate::agents::create(
+                data,
+                &caller,
+                &request,
+                |_| panic!("agent reached admit"),
+                now
+            )
+            .unwrap_err()
+            .to_string(),
+            crate::agents::NOT_A_PERSON,
+        );
+        assert_eq!(std::fs::read(agent_file(data)).unwrap(), before);
+    }
+
     #[tokio::test]
     async fn enable_needs_the_admin_passkey_owner() {
         let dir = tempfile::tempdir().unwrap();
