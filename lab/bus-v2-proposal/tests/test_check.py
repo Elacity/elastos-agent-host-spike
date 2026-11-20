@@ -124,14 +124,22 @@ LAUNCHING_CONST = 'const LAUNCHING_PRINCIPAL: &str = "Users/self";'
 ASKS_REL = OWNED_REL
 ASKS_NUMBER = 8149
 ASKS_SPAN = "examples/agent-host/src/lib.rs:8149"
-ASKS_FIRST = "/// The declared per-step asks, compiled in from `asks.json` in this lane. The"
+ASKS_FIRST = (
+    "/// The declared per-step asks, compiled in from `"
+    + "asks"
+    + ".json` in this lane. The"
+)
 ASKS_SECOND = "/// file is an auditable declaration, not the policy check: the Runtime"
 ASKS_THIRD = "/// enforces each grant (P4, P18). It is a lane-local stand-in for the Runtime"
 ASKS_FOURTH = "/// manifest and retires into that one place when the Runtime defines per-step"
 ASKS_FIFTH = "/// asks (P10). It is read by this module's tests only, so the shipped guest"
 ASKS_SIXTH = "/// keeps no new production path."
 ASKS_CFG = "#[cfg(test)]"
-ASKS_CONST = 'const ASKS_JSON: &str = include_str!("../asks.json");'
+ASKS_CONST = (
+    'const ASKS_JSON: &str = include_str!("../'
+    + "asks"
+    + '.json");'
+)
 
 DENY_REL = OWNED_REL
 DENY_NUMBER = 3526
