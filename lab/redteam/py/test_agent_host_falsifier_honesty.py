@@ -243,8 +243,19 @@ def asks_problems(read):
         return [problem("", "asks is not a list")]
     if not asks:
         return [problem("", "asks is empty")]
-    return [problem(f"ask {at}", reason)
-            for at, reason in enumerate(map(ask_reason, asks)) if reason]
+    problems = []
+    seen = set()
+    for at, ask in enumerate(asks):
+        reason = ask_reason(ask)
+        if reason is not None:
+            problems.append(problem(f"ask {at}", reason))
+            continue
+        resource = ask["resource"]
+        if resource in seen:
+            problems.append(problem(
+                f"ask {at}", f"{resource!r} is asked for twice"))
+        seen.add(resource)
+    return problems
 
 
 def ask_reason(ask):
@@ -267,9 +278,13 @@ def ask_reason(ask):
         return "actions is not a list"
     if not actions:
         return "actions is empty"
+    seen = set()
     for action in actions:
         if action not in ASK_ACTIONS:
             return f"action {action!r} is not a known action"
+        if action in seen:
+            return f"the ask for {resource!r} repeats the action {action!r}"
+        seen.add(action)
     return None
 
 
@@ -715,6 +730,15 @@ class ProbeControls(unittest.TestCase):
             ("an unknown action",
              asks({"asks": [{"resource": "localhost://Public/a", "actions": ["edit"]}]}),
              ask("ask 0", "action 'edit' is not a known action")),
+            ("a repeated action",
+             asks({"asks": [{"resource": "localhost://Public/a", "actions": ["read", "read"]}]}),
+             ask("ask 0", "the ask for 'localhost://Public/a' repeats the action 'read'")),
+            ("one resource asked twice",
+             asks({"asks": [
+                 {"resource": "localhost://Public/a", "actions": ["read"]},
+                 {"resource": "localhost://Public/a", "actions": ["write"]},
+             ]}),
+             ask("ask 1", "'localhost://Public/a' is asked for twice")),
         )
         for label, files, want in cases:
             with self.subTest(label):
