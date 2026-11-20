@@ -31,8 +31,8 @@ it when it starts. A command must not silently start a competing host.
 | `elastos`, `elastos home` | Managed user lane | Opens Home. `elastos home` starts or reuses the managed Home runtime. It does not attach to an operator runtime that already owns the same home. |
 | `elastos home --status`, `elastos home --json` | Self-contained | Reads and prints a Home-state probe. It does not start Home. |
 | `elastos run <path>` or `elastos run --cid <cid>`, `type=data` | Self-contained | Materializes the capsule, creates an in-process Runtime and preview server, opens the browser, and remains active until stopped. It does not attach to `elastos serve`. |
-| `elastos run <path>` or `elastos run --cid <cid>`, Component | Self-contained | Accepts only `type=wasm` with `runtime_abi="elastos.component/v1"`. The folder selects a CID; Runtime starts the checked bundle from this Home's staged store after CID, publisher signature, and pinned closure checks. A missing bundle requires `elastos stage-bundle <folder> --signature <file>`. It captures terminal size and raw input while the guest runs. This path has no attached Bus bridge. |
-| `elastos run --dev-unsigned-component <path>` | Self-contained | Starts an unsigned local Component only in a source or CI Home with `dev_mode=true`. An installed signed release refuses this path even when its config enables dev mode. It has no attached Bus bridge. |
+| `elastos run <path>` or `elastos run --cid <cid>`, Component | Self-contained start; operator Bus | Accepts only `type=wasm` with `runtime_abi="elastos.component/v1"`. The folder selects a CID; Runtime starts the checked bundle from this Home's staged store after CID, publisher signature, and pinned closure checks. A missing bundle requires `elastos stage-bundle <folder> --signature <file>`. It captures terminal size and raw input while the guest runs. A guest Bus call attaches to this Home's operator Runtime and uses the admitted manifest ceiling; it fails if that Runtime is unavailable. |
+| `elastos run --dev-unsigned-component <path>` | Self-contained start; operator Bus | Starts an unsigned local Component only in a source or CI Home with `dev_mode=true`. An installed signed release refuses this path even when its config enables dev mode. A guest Bus call attaches to this Home's operator Runtime and uses the active manifest ceiling. |
 | `elastos run <path>` or `elastos run --cid <cid>`, microVM | Operator lane | Uses the operator runtime supervisor to launch and stop the microVM. |
 | `elastos run`, other manifest types or no manifest | Self-contained | Falls through to the local runner. This is outside the supported capsule-authoring contract. A non-Component WASM manifest is rejected. |
 | `elastos capsule <name>` with `--lifecycle interactive` or `--interactive` | Managed user lane | Reuses an active operator, managed Home, or managed Chat runtime recorded for the same data home. If none is recorded, it starts the managed Home runtime. Either option selects the interactive runtime path; `--interactive` also sets the capsule launch flag. |
@@ -132,16 +132,17 @@ capability, provider, and audit boundaries.
 ## Rules
 
 1. Every command must complete, time out, or fail clearly.
-2. A self-contained command does not read or create Runtime coordinates unless
-   its row says otherwise.
+2. A self-contained command reads Runtime coordinates only when its row names
+   an operator Bus or remote target.
 3. `elastos home --status` and `--json` never start Home.
 4. A managed user command starts or reuses only the Runtime kind named in its
    row.
 5. An operator command fails when the operator Runtime is absent; it does not
    widen or replace a managed policy.
 6. Host-side provider bridge commands are explicit operator tooling, not app-capsule authority.
-7. `elastos run` is the explicit path for arbitrary path or CID input. Data runs
-   locally; executable Component and microVM paths use the operator lane.
+7. `elastos run` is the explicit path for arbitrary path or CID input. Data and
+   Component starts run locally; Component Bus calls and microVM starts use the
+   operator lane.
 8. `elastos` and `elastos serve` are separate lanes for one data home and must
    not own it concurrently.
 

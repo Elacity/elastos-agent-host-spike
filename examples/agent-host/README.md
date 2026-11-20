@@ -241,7 +241,8 @@ turns, and checks the journal through the real Bus bridge:
 ```
 
 The general `elastos run <folder>` command selects a staged, signed CID and
-starts the checked slot in a self-contained Runtime. It has no attached Bus
-bridge, so it cannot complete this ask-bearing guest's journal journey. The
-explicit unsigned development command has the same Bus limit. Home's window
-does not list this guest.
+starts the checked slot in a self-contained Runtime. Its Bus calls attach to
+the operator Runtime when one is available, but this command supplies no person
+principal or journal grants for the guest's full journey. The explicit unsigned
+development command has the same principal limit. The Runtime test above
+supplies that context. Home's window does not list this guest.
