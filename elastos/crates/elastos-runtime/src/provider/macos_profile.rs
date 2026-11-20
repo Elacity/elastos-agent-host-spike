@@ -8,39 +8,37 @@ const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 /// Runtime-owned model launch inputs. Each numbered socket is a bound literal;
 /// the later caller supplies the canonical paths before starting the child.
 fn model_inputs() -> Vec<String> {
-    let mut forms = vec![
-        // macOS probe X2: the provider forks its guard and the guard forks the engine.
-        "(allow process-fork)".into(),
-        // macOS probe X4: the model and engine remain bound to verified artifacts.
-        r#"(allow file-read* (literal (param "MODEL")))"#.into(),
-        r#"(allow file-read* (literal "/dev/urandom"))"#.into(),
-        r#"(allow file-read* file-write-data (literal "/dev/null"))"#.into(),
-        r#"(allow process-exec (literal (param "ENGINE")))"#.into(),
-        r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#.into(),
-        // macOS probe X3: only the 64 reserved broker and engine paths.
+    // macOS probe X2 starts this list. Proposal row 4 is the model, the device
+    // nodes and the engine. Probe X4's /usr/lib read is a launch input.
+    let fixed = [
+        "(allow process-fork)",
+        r#"(allow file-read* (literal (param "MODEL")))"#,
+        r#"(allow file-read* (literal "/dev/urandom"))"#,
+        r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
+        r#"(allow process-exec (literal (param "ENGINE")))"#,
+        r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
+        r#"(allow file-read* (subpath "/usr/lib"))"#,
     ];
+    let mut forms: Vec<String> = fixed.into_iter().map(str::to_string).collect();
     // macOS probe X1: 19 measured canonical ancestors, each a bound literal.
     for index in 0..19 {
         forms.push(format!(
             "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_{index}\")))"
         ));
     }
+    // macOS probe X3: only the 64 reserved broker and engine paths.
     for slot in 0..64 {
-        forms.push(format!(
-            "(allow network-outbound (literal (param \"BROKER_SOCKET_{slot}\")))"
-        ));
-        forms.push(format!(
-            "(allow file-read-metadata (literal (param \"ENGINE_SOCKET_{slot}\")))"
-        ));
-        forms.push(format!(
-            "(allow file-write* (literal (param \"ENGINE_SOCKET_{slot}\")))"
-        ));
-        forms.push(format!(
-            "(allow network-bind (literal (param \"ENGINE_SOCKET_{slot}\")))"
-        ));
+        for (op, param) in [
+            ("network-outbound", "BROKER_SOCKET"),
+            ("file-read-metadata", "ENGINE_SOCKET"),
+            ("file-write*", "ENGINE_SOCKET"),
+            ("network-bind", "ENGINE_SOCKET"),
+        ] {
+            forms.push(format!("(allow {op} (literal (param \"{param}_{slot}\")))"));
+        }
     }
     // macOS probe X2: the guard signals only its engine child.
-    forms.push("(allow signal (target children))".into());
+    forms.push("(allow signal (target children))".to_string());
     forms
 }
 
@@ -50,36 +48,34 @@ pub(super) fn render_macos_profile(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
 ) -> String {
-    let mut forms: Vec<String> = HEAD.iter().map(|form| (*form).into()).collect();
+    let mut forms = HEAD.to_vec();
     // The executable rule precedes the baseline; storage follows it in all three oracles.
     for row in admitted
         .rows()
         .iter()
         .filter(|row| row.id == "bound-executable")
     {
-        forms.extend(row.rules.iter().map(|form| (*form).into()));
+        forms.extend_from_slice(row.rules);
     }
-    forms.push(
-        match provider {
-            RuntimeProviderId::Model => "(allow file-read-data (literal \"/\"))",
-            RuntimeProviderId::Did | RuntimeProviderId::Wallet => {
-                "(allow file-read* (literal \"/\"))"
-            }
-        }
-        .into(),
-    );
-    forms.push("(allow sysctl-read)".into());
+    forms.push(match provider {
+        RuntimeProviderId::Model => "(allow file-read-data (literal \"/\"))",
+        RuntimeProviderId::Did | RuntimeProviderId::Wallet => "(allow file-read* (literal \"/\"))",
+    });
+    forms.push("(allow sysctl-read)");
     for row in admitted
         .rows()
         .iter()
         .filter(|row| row.id != "bound-executable")
     {
-        forms.extend(row.rules.iter().map(|form| (*form).into()));
+        forms.extend_from_slice(row.rules);
     }
+    let mut rendered = forms.join("\n");
     if matches!(provider, RuntimeProviderId::Model) {
-        forms.extend(model_inputs());
+        rendered.push('\n');
+        rendered.push_str(&model_inputs().join("\n"));
     }
-    forms.join("\n") + "\n"
+    rendered.push('\n');
+    rendered
 }
 
 #[cfg(test)]
@@ -139,24 +135,52 @@ mod tests {
                 &super::super::rights::admit_committed(provider),
             );
             let mut parameters = BTreeSet::new();
+            let mut literals = BTreeSet::new();
             for argument in path_arguments(&rendered) {
                 if argument == "\"/\"" {
                     continue;
                 }
-                if name == "model-provider" && argument.starts_with('"') {
+                if let Some(parameter) = argument
+                    .strip_prefix("(param \"")
+                    .and_then(|value| value.strip_suffix("\")"))
+                {
+                    parameters.insert(parameter);
                     continue;
                 }
-                let parameter = argument
-                    .strip_prefix("(param \"")
-                    .and_then(|value| value.strip_suffix("\")"));
-                assert!(parameter.is_some(), "{name} path argument: {argument}");
-                parameters.insert(parameter.unwrap());
+                let literal = argument
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'));
+                assert!(
+                    literal.is_some(),
+                    "{name} path argument: actual {argument}, expected a param or root literal"
+                );
+                literals.insert(literal.unwrap());
             }
-            let expected = BTreeSet::from(["PROVIDER_EXECUTABLE", "STORAGE_PARENT", "STORAGE_ROOT"]);
+            let shared = BTreeSet::from(["PROVIDER_EXECUTABLE", "STORAGE_PARENT", "STORAGE_ROOT"]);
             if name == "model-provider" {
-                assert!(expected.is_subset(&parameters), "{name} path parameters");
+                let mut expected = shared.iter().copied().map(str::to_string).collect::<BTreeSet<_>>();
+                expected.extend(["MODEL", "ENGINE", "ENGINE_BUNDLE"].map(str::to_string));
+                for index in 0..19 {
+                    expected.insert(format!("MODEL_ANCESTOR_{index}"));
+                }
+                for slot in 0..64 {
+                    expected.insert(format!("BROKER_SOCKET_{slot}"));
+                    expected.insert(format!("ENGINE_SOCKET_{slot}"));
+                }
+                assert_eq!(
+                    parameters.iter().copied().map(str::to_string).collect::<BTreeSet<_>>(),
+                    expected,
+                    "{name} path parameters"
+                );
+                // The measured fixed paths. A new quoted path fails this equality.
+                assert_eq!(
+                    literals,
+                    BTreeSet::from(["/dev/null", "/dev/urandom", "/System", "/usr/lib"]),
+                    "{name} fixed paths"
+                );
             } else {
-                assert_eq!(parameters, expected, "{name} path parameters");
+                assert_eq!(parameters, shared, "{name} path parameters");
+                assert!(literals.is_empty(), "{name} fixed paths: {literals:?}");
             }
             let actual = forms(&rendered);
             let expected = forms(oracle);
@@ -184,7 +208,7 @@ mod tests {
         assert_eq!(
             row.rules,
             [
-                r#"(allow file-read* (subpath "/usr/lib") (subpath "/System"))"#,
+                r#"(allow file-read* (subpath "/System"))"#,
                 r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
                 r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
             ]
@@ -217,5 +241,23 @@ mod tests {
             assert!(out.status.success(), "pin {spec} missing: {}", String::from_utf8_lossy(&out.stderr));
             assert_eq!(disk, out.stdout, "moved reference at pin {spec}");
         }
+        // The model files grew after the pin. The pin's rules stay the prefix.
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../..");
+        let sb = std::fs::read_to_string(format!("{root}/capsules/model-provider/confine.sb")).unwrap();
+        let sb_out = super::super::rights::git_show("d0dd5693:capsules/model-provider/confine.sb");
+        assert!(sb_out.status.success(), "pin d0dd5693 model confine.sb");
+        let sb_pin = String::from_utf8(sb_out.stdout).unwrap();
+        fn paren_lines(text: &str) -> Vec<&str> { text.lines().map(str::trim).filter(|line| line.starts_with('(')).collect() }
+        let sb_lines = paren_lines(&sb);
+        let sb_pin_lines = paren_lines(&sb_pin);
+        assert_eq!(&sb_lines[..sb_pin_lines.len()], sb_pin_lines.as_slice(), "pin d0dd5693 model confine.sb rules");
+        let disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{root}/capsules/model-provider/tests/fixtures/confine/declared-rights.json")).unwrap()).unwrap();
+        let json_out = super::super::rights::git_show("d0dd5693:capsules/model-provider/tests/fixtures/confine/declared-rights.json");
+        assert!(json_out.status.success(), "pin d0dd5693 model declared-rights");
+        let pinned: serde_json::Value = serde_json::from_slice(&json_out.stdout).unwrap();
+        assert_eq!(disk["rights"][0], pinned["rights"][0], "pin d0dd5693 model storage");
+        assert_eq!(disk["rights"][1], pinned["rights"][1], "pin d0dd5693 model executable");
+        assert_eq!(disk["platform_baseline"]["rules"][0], pinned["platform_baseline"]["rules"][0], "pin d0dd5693 model startup root");
+        assert_eq!(disk["platform_baseline"]["rules"][1], pinned["platform_baseline"]["rules"][1], "pin d0dd5693 model sysctl");
     }
 }

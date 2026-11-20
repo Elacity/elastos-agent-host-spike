@@ -26,17 +26,19 @@
 ;; Journal: one grant covers the run records under the journal root.
 (allow file-read* file-write* (subpath (param "STORAGE_ROOT")))
 
-;; macOS probe X4, X5, X6: one separately named model-gpu right.
-(allow file-read* (subpath "/usr/lib") (subpath "/System"))
+;; macOS probe X5, X6, and the X4 /System read for the Metal bundle.
+(allow file-read* (subpath "/System"))
 (allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))
 (allow mach-lookup (global-name "com.apple.MTLCompilerService"))
-;; macOS probe X2, X4: process, artifact, and device inputs.
+;; macOS probe X2, then proposal row 4: process and artifact inputs.
 (allow process-fork)
 (allow file-read* (literal (param "MODEL")))
 (allow file-read* (literal "/dev/urandom"))
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow process-exec (literal (param "ENGINE")))
 (allow file-read* (subpath (param "ENGINE_BUNDLE")))
+;; macOS probe X4: /usr/lib is a launch input. It is not GPU access.
+(allow file-read* (subpath "/usr/lib"))
 ;; macOS probe X1: exact metadata ancestors from the measured lab layout.
 (allow file-read-metadata (literal (param "MODEL_ANCESTOR_0")))
 (allow file-read-metadata (literal (param "MODEL_ANCESTOR_1")))

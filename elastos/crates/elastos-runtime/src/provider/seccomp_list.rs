@@ -23,12 +23,10 @@ const BASELINE: &str = concat!(
     "arch_prctl close exit_group getrandom mmap mprotect ppoll poll rt_sigaction",
 );
 
-const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq";
-// Linux probe seccomp rows, named by the denied syscall in linux-report.md.
-const MODEL_PROBE: &str = concat!(
-    "accept4 bind connect dup2 getpgrp getpid getsockopt kill listen pipe2 ",
-    "readlink recvfrom rt_sigprocmask sendto setpgid socket waitid",
-);
+// Linux probe rows follow the original model names. `socket` is absent here:
+// the program admits it only for AF_UNIX. `connect`, `sendto` and `bind` stay,
+// because the probe measured them and they do not carry an address family.
+const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt kill listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
 /// The lab sorts names after it joins declared rights and the baseline.
 pub(super) fn linux_seccomp_list(
@@ -45,10 +43,7 @@ pub(super) fn linux_seccomp_list(
     match provider {
         RuntimeProviderId::Did => {}
         RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
-        RuntimeProviderId::Model => {
-            names.extend(MODEL.split_whitespace());
-            names.extend(MODEL_PROBE.split_whitespace());
-        }
+        RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
     }
     names.retain(|name| number(name, arch).is_some());
     names.sort_unstable();
@@ -61,6 +56,8 @@ pub(super) fn linux_seccomp_list(
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    const MODEL_PROBE_NAMES: &str = "accept4 bind connect dup2 getpgrp getpid getsockopt kill listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
     // Normalization: only LAB_BASELINE is subtracted from the crate side. The pin set stays as derived.
     // `did` has none. A mismatch prints the symmetric difference. The baseline check does not apply that delta.
@@ -217,7 +214,8 @@ mod tests {
                 if *who == name && same_arch(*row_arch, arch) { got.remove(*call); commits.push_str(commit); commits.push(' '); }
             }
             if name == "model" {
-                for call in MODEL_PROBE.split_whitespace() { got.remove(call); }
+                // Probe names are not in the lab pin. The test drops them before the comparison.
+                for call in MODEL_PROBE_NAMES.split_whitespace() { got.remove(call); }
             }
             let (crate_only, pin_only): (Vec<_>, Vec<_>) = (got.difference(&lab).cloned().collect(), lab.difference(&got).cloned().collect());
             assert!(crate_only.is_empty() && pin_only.is_empty(), "{name} {arch:?} symmetric difference crate-only {crate_only:?} pin-only {pin_only:?} baseline {commits}");

@@ -11,33 +11,6 @@ const BINARY: u64 = 0x5;
 const HANDLED: u64 = 0xffff;
 const NO_LANDLOCK: &str = "linux confinement refused: the kernel has no Landlock";
 
-/// Linux report rules 1–20, kept as model launch inputs until the model caller
-/// supplies its verified engine, weights and private IPC bindings in M1b/M2.
-/// Each item is (report rule, binding or literal, relative file, Landlock mask).
-#[allow(dead_code)]
-const MODEL_INPUTS: &[(&str, &str, &str, u64)] = &[
-    ("1", "ENGINE", "llama-server", 0x5),
-    ("2", "ENGINE_BUNDLE", "libggml-base.so.0.20.2", 0x4),
-    ("3", "ENGINE_BUNDLE", "libggml-cpu.so.0.20.2", 0x4),
-    ("4", "ENGINE_BUNDLE", "libggml.so.0.20.2", 0x4),
-    ("5", "ENGINE_BUNDLE", "libllama-common.so.0.1.2", 0x4),
-    ("6", "ENGINE_BUNDLE", "libllama-server-impl.so", 0x4),
-    ("7", "ENGINE_BUNDLE", "libllama.so.0.1.2", 0x4),
-    ("8", "ENGINE_BUNDLE", "libmtmd.so.0.1.2", 0x4),
-    ("9", "MODEL", "weights.gguf", 0x4),
-    ("10", "IPC", "", 0x433e),
-    ("11", "/proc/meminfo", "", 0x4),
-    ("12", "/proc/self/cgroup", "", 0x4),
-    ("13", "/proc/self/mountinfo", "", 0x4),
-    ("14", "/sys/fs/cgroup/cgroup.controllers", "", 0x4),
-    ("15", "/sys/fs/cgroup/init.scope/memory.max", "", 0x4),
-    ("16", "/sys/fs/cgroup/init.scope/memory.current", "", 0x4),
-    ("17", "/sys/fs/cgroup/init.scope/cgroup.type", "", 0x4),
-    ("18", "/dev/urandom", "", 0x4),
-    ("19", "/dev/null", "", 0x6),
-    ("20", "/lib/x86_64-linux-gnu/libstdc++.so.6", "", 0x5),
-];
-
 #[derive(Clone, Copy, Debug)]
 enum LoaderArch {
     X86_64,
@@ -171,8 +144,8 @@ fn build_for_arch(
                         BINARY,
                     ))
                 }
-                // macOS probe X4–X6: this named GPU right has no Linux path decision.
-                r#"(allow file-read* (subpath "/usr/lib") (subpath "/System"))"#
+                // macOS probe X4 /System, X5 and X6: this GPU right has no Linux path decision.
+                r#"(allow file-read* (subpath "/System"))"#
                 | r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#
                 | r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#
                     if matches!(provider, RuntimeProviderId::Model) => {}
@@ -197,23 +170,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use RuntimeProviderId::*;
-
-    #[test]
-    fn model_landlock_inputs_match_linux_probe_oracle() {
-        let rendered = MODEL_INPUTS
-            .iter()
-            .map(|(id, binding, file, mask)| format!("{id} {binding} {file} {mask:#x}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            + "\n";
-        assert_eq!(
-            rendered,
-            include_str!(
-                "../../../../../capsules/model-provider/tests/model-landlock-inputs.golden"
-            )
-        );
-        assert_eq!(MODEL_INPUTS.len(), 20);
-    }
 
     const LAB: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -373,7 +329,7 @@ mod tests {
         let (masks, handled) = lab_masks();
         // Same Bindings both sides. Paths stay unchanged: no canonicalization.
         // Projections are separate and in order: paths, masks, then handled.
-        for provider in [Did, Wallet] {
+        for provider in [Did, Wallet, Model] {
             let name = match provider {
                 Did => "did-provider",
                 Wallet => "wallet-provider",
@@ -400,7 +356,10 @@ mod tests {
                 for claim in declared["rights"].as_array().unwrap() {
                     for form in claim["rules"].as_array().unwrap() {
                         let form = form.as_str().unwrap();
-                        let mask = masks[form];
+                        let Some(mask) = masks.get(form).copied() else {
+                            assert!(form.starts_with("(allow iokit-open") || form.starts_with("(allow mach-lookup") || form == r#"(allow file-read* (subpath "/System"))"#, "lab form has no mask: {form}");
+                            continue;
+                        };
                         if mask == 0 {
                             continue;
                         }

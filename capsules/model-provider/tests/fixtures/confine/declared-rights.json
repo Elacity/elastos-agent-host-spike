@@ -18,7 +18,7 @@
     {
       "id": "model-gpu",
       "rules": [
-        "(allow file-read* (subpath \"/usr/lib\") (subpath \"/System\"))",
+        "(allow file-read* (subpath \"/System\"))",
         "(allow iokit-open-user-client (iokit-user-client-class \"AGXDeviceUserClient\") (iokit-user-client-class \"IOSurfaceRootUserClient\"))",
         "(allow mach-lookup (global-name \"com.apple.MTLCompilerService\"))"
       ]
@@ -51,6 +51,7 @@
           "(allow file-read* file-write-data (literal \"/dev/null\"))",
           "(allow process-exec (literal (param \"ENGINE\")))",
           "(allow file-read* (subpath (param \"ENGINE_BUNDLE\")))",
+          "(allow file-read* (subpath \"/usr/lib\"))",
           "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_0\")))",
           "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_1\")))",
           "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_2\")))",

@@ -36,7 +36,7 @@
       {
         "id": "model-gpu",
         "rules": [
-          "(allow file-read* (subpath \"/usr/lib\") (subpath \"/System\"))",
+          "(allow file-read* (subpath \"/System\"))",
           "(allow iokit-open-user-client (iokit-user-client-class \"AGXDeviceUserClient\") (iokit-user-client-class \"IOSurfaceRootUserClient\"))",
           "(allow mach-lookup (global-name \"com.apple.MTLCompilerService\"))"
         ]

@@ -28,8 +28,9 @@ pub(super) static RIGHTS: &[RightRow] = &[
     RightRow {
         id: "model-gpu",
         rules: &[
-            // macOS probe X4: engine descendants load libraries from these two trees.
-            r#"(allow file-read* (subpath "/usr/lib") (subpath "/System"))"#,
+            // macOS probe X4: the Metal bundle read. The measured allow is
+            // `subpath "/System"`; the probe did not pass a narrower subpath.
+            r#"(allow file-read* (subpath "/System"))"#,
             // macOS probe X5: the pinned engine initializes Metal at gpu_layers 0.
             r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
             // macOS probe X6: the only measured compiler service name.
