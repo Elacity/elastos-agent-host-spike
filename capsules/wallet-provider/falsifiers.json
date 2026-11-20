@@ -322,7 +322,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "            if !CANONICAL_PARAMS.contains(&token)\n                && !(name == MODEL_PROVIDER && measured_model_form(form))\n            {\n                return Err(format!(\n                    \"{name} declares the non-canonical parameter token {token}; \\\n                     every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE\"\n                ));\n            }",
+          "old": "            if !(CANONICAL_PARAMS.contains(&token)\n                || (name == MODEL_PROVIDER && measured_model_form(form)))\n            {\n                return Err(format!(\n                    \"{name} declares the non-canonical parameter token {token}; \\\n                     every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE\"\n                ));\n            }",
           "new": "            // falsifier: the check no longer refuses a non-canonical parameter token"
         }
       ],
