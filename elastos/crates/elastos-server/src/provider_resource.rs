@@ -470,6 +470,9 @@ fn object_op_required_action(op: &str) -> Option<Action> {
 pub fn inspect_op_required_action(op: &str) -> Option<Action> {
     match op {
         "capsules" | "capsule" | "self" | "plan" => Some(Action::Read),
+        // A submission writes one pending record for owner approval and runs
+        // nothing, so it asks the write action on that exact resource only.
+        "submit_agent_plan" => Some(Action::Write),
         "revoke" => Some(Action::Write),
         _ => None,
     }
@@ -1652,6 +1655,14 @@ mod tests {
         );
         assert_eq!(
             provider_operation_action("inspect", "revoke"),
+            Some(elastos_runtime::capability::Action::Write)
+        );
+        assert_eq!(
+            build_capability_resource("inspect", "submit_agent_plan", &request).unwrap(),
+            "elastos://inspect/submit_agent_plan"
+        );
+        assert_eq!(
+            provider_operation_action("inspect", "submit_agent_plan"),
             Some(elastos_runtime::capability::Action::Write)
         );
         assert!(build_capability_resource("inspect", "raw", &request).is_err());

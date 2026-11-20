@@ -23,6 +23,10 @@ pub(super) struct InspectActionRequestRecord {
     pub(super) kind: String,
     pub(super) request_id: String,
     pub(super) principal_id: String,
+    /// The agent that submitted an agent plan for `principal_id`, its owner.
+    /// Absent on an Inspector action, whose principal made the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) requester_id: Option<String>,
     pub(super) session_id: String,
     pub(super) id: String,
     pub(super) operation: String,
@@ -61,21 +65,23 @@ fn pending_request_view(record: InspectActionRequestRecord) -> Option<serde_json
     if !agent_plan && record.kind != INSPECT_ACTION_KIND {
         return None;
     }
-    let current = inspect_action_request_binding(
-        &record.request_id,
-        &record.principal_id,
-        &record.id,
-        &record.operation,
-        &record.plan,
-        &record.request,
-    );
     let binding = if agent_plan {
+        let current = super::agent_plan::agent_plan_request_binding(&record)?;
         if current.truncated {
             return None;
         }
         current
     } else {
-        record.request_binding.clone().unwrap_or(current)
+        record.request_binding.clone().unwrap_or_else(|| {
+            inspect_action_request_binding(
+                &record.request_id,
+                &record.principal_id,
+                &record.id,
+                &record.operation,
+                &record.plan,
+                &record.request,
+            )
+        })
     };
     let mut view = serde_json::json!({
         "schema": record.schema,
@@ -214,6 +220,7 @@ mod tests {
             kind: INSPECT_ACTION_KIND.to_string(),
             request_id: request_id.to_string(),
             principal_id: "person:test".to_string(),
+            requester_id: None,
             session_id: "session:test".to_string(),
             id: "capsule:test".to_string(),
             operation: "write".to_string(),

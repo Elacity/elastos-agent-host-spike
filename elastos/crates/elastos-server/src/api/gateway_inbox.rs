@@ -124,6 +124,42 @@ pub(super) async fn append_inbox_requests(
     }
 }
 
+/// Test-only: the entries `append_inbox_requests` gives `principal_id` on a
+/// Home with no ports, as (id, kind, body).
+#[cfg(test)]
+pub(crate) async fn inbox_request_entries_for_test(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    proof_binding_id: Option<&str>,
+    kind: crate::auth::PrincipalKind,
+) -> Vec<(String, String, String)> {
+    let state = GatewayState {
+        provider_registry: None,
+        collaboration_chat_product_port: None,
+        collaboration_presence_product_port: None,
+        carrier_endpoint: None,
+        collaboration_discovery_service: None,
+        browser_internet: Default::default(),
+        identity_manager: Arc::new(std::sync::OnceLock::new()),
+        cache_dir: data_dir.to_path_buf(),
+        data_dir: data_dir.to_path_buf(),
+    };
+    let context = HomeLaunchTokenContext::for_test(
+        principal_id,
+        "session:inbox-test",
+        proof_binding_id.map(str::to_string),
+        "grant:inbox-test",
+        kind,
+    );
+    let mut notifications = HomeNotificationsSummary::default();
+    append_inbox_requests(&state, &context, Vec::new(), &mut notifications).await;
+    notifications
+        .entries
+        .into_iter()
+        .map(|entry| (entry.id, entry.kind, entry.body))
+        .collect()
+}
+
 /// Hosted access decisions and their history. They are the owner's alone, so
 /// anyone else gets none.
 #[cfg(unix)]
