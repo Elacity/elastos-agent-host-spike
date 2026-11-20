@@ -967,7 +967,7 @@ impl Supervisor {
         archive.unpack(staged.path())?;
         std::fs::write(staged.path().join(CACHED_CID_FILE), format!("{}\n", cid))?;
         write_artifact_sha256_receipt(staged.path(), sha256)?;
-        crate::setup::record_install_cid(staged.path(), dest);
+        crate::setup::record_install_cid(&self.data_dir, staged.path(), dest);
         let retired = parent.join(format!(".capsule-retired-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&retired);
         if dest.exists() {

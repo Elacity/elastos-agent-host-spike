@@ -105,18 +105,35 @@ pub fn domain_separated_sign(
     (hex::encode(sig.to_bytes()), did)
 }
 
+/// The digest a domain-separated signature covers:
+/// SHA-256 of `domain`, one zero byte, and `payload`.
+pub fn domain_separated_digest(domain: &str, payload: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(payload);
+    hasher.finalize().into()
+}
+
+/// The Ed25519 check over `digest`, run every time: no earlier result is
+/// reused. The bundle signature check's refusal path asks this, so each of
+/// its failures does the same check.
+pub fn verify_digest_uncached(
+    key: &ed25519_dalek::VerifyingKey,
+    digest: &[u8; 32],
+    signature: &ed25519_dalek::Signature,
+) -> Result<(), ed25519_dalek::SignatureError> {
+    key.verify_strict(digest, signature)
+}
+
 pub fn verify_domain_separated_signature(
     signer_did: &str,
     domain: &str,
     payload: &[u8],
     signature_hex: &str,
 ) -> anyhow::Result<()> {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(domain.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(payload);
-    let digest: [u8; 32] = hasher.finalize().into();
+    let digest = domain_separated_digest(domain, payload);
     let verifying_key = decode_did_key(signer_did)?;
     let signature = hex::decode(signature_hex)
         .map_err(|err| anyhow::anyhow!("Invalid signature hex: {err}"))?;

@@ -113,11 +113,12 @@ impl SignatureVerifier {
     }
 
     /// Whether `key` is one of the trusted keys. Membership only: this is NOT
-    /// a signature check. Ask it only of a key that has already verified the
-    /// signature in question; a key that is merely named beside some bytes is
-    /// a claim, and a trusted name proves nothing about who signed.
+    /// a signature check. A key that is merely named beside some bytes is a
+    /// claim, and a trusted name proves nothing about who signed. Every
+    /// trusted key is read, so the answer takes the same work wherever `key`
+    /// sits in the list.
     pub fn trusts(&self, key: &VerifyingKey) -> bool {
-        self.trusted_keys.contains(key)
+        self.trusted_keys.iter().filter(|t| *t == key).count() > 0
     }
 }
 
