@@ -18,9 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::carrier::{
     start_carrier_node_with_registry, CarrierGossipProvider, CarrierNode, CarrierProviderInvoker,
 };
-use crate::content::{FetchReceipt, FetchResult};
 
-const VOICE_ROW: &str = "open: waits for Rong (verb or WebSpace files)";
 const FILE_BYTES: &[u8] = b"carrier contract file bytes";
 
 #[derive(Debug)]
@@ -35,7 +33,6 @@ struct FileObservation {
     bytes: Vec<u8>,
     sender_did: String,
     answer: Value,
-    receipt: FetchReceipt,
 }
 
 // The four verbs are addressed by DID or topic. Backend coordinates stay inside
@@ -60,6 +57,10 @@ trait CarrierUnderTest: Send + Sync {
         bytes: &[u8],
         sender_id: Option<&str>,
     ) -> Result<Value, ProviderError>;
+    // Not a verb: a probe for today's refusal of a send that is not
+    // topic-addressed.
+    async fn send_to_peer_only(&self, peer_did: &str, bytes: &[u8])
+        -> Result<Value, ProviderError>;
     async fn request_file(
         &self,
         cid: &str,
@@ -395,6 +396,19 @@ impl CarrierUnderTest for CurrentCarrier {
         self.send_message(topic, bytes, sender_id).await
     }
 
+    async fn send_to_peer_only(
+        &self,
+        peer_did: &str,
+        bytes: &[u8],
+    ) -> Result<Value, ProviderError> {
+        Self::gossip(
+            &self.sender_registry,
+            json!({"op":"gossip_send", "peer_did":peer_did,
+                "message":base64::engine::general_purpose::STANDARD.encode(bytes)}),
+        )
+        .await
+    }
+
     async fn request_file(
         &self,
         cid: &str,
@@ -413,16 +427,6 @@ impl CarrierUnderTest for CurrentCarrier {
             .map_err(|_| ProviderError::Provider("invalid file body".into()))?;
         let received_cid = content_cid(&bytes);
         assert_eq!(received_cid, cid);
-        let receipt = FetchReceipt::new(
-            cid,
-            from_peer_did,
-            bytes.len() as u64,
-            true,
-            FetchResult::Ok,
-            1,
-            1,
-        )
-        .map_err(ProviderError::Provider)?;
         Ok(FileObservation {
             bytes,
             sender_did: answer["data"]["sender_did"]
@@ -430,7 +434,6 @@ impl CarrierUnderTest for CurrentCarrier {
                 .unwrap_or_default()
                 .into(),
             answer,
-            receipt,
         })
     }
 
@@ -633,6 +636,13 @@ async fn m3_message_topic_address(carrier: &dyn CarrierUnderTest) {
     let (answer, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, None).await;
     assert_eq!(answer["status"], "ok");
     assert_eq!(received.bytes, sent);
+    // a send carrying only a peer DID and no topic is refused today
+    let refused = carrier
+        .send_to_peer_only(carrier.peer_did(), sent)
+        .await
+        .unwrap();
+    assert_eq!(refused["status"], "error");
+    assert_eq!(refused["code"], "not_joined");
 }
 
 async fn m4_message_private_answer(carrier: &dyn CarrierUnderTest) {
@@ -646,9 +656,19 @@ async fn m4_message_private_answer(carrier: &dyn CarrierUnderTest) {
 
 async fn n1_notification_bytes_no_reply(carrier: &dyn CarrierUnderTest) {
     let sent = b"notice:contract bytes";
-    let (answer, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
+    let (_, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
     assert_eq!(received.bytes, sent);
-    assert!(answer["data"].get("body").is_none());
+    // After the round trip the neighbour link is up, so this acknowledgement
+    // is the complete send answer: status, data.remote_peer_count and the
+    // runtime's transfer metadata, no reply body and no further keys.
+    let answer = carrier.notify(NOTICE_TOPIC, sent, None).await.unwrap();
+    let remote_peer_count = answer["data"]["remote_peer_count"].clone();
+    let runtime_transfer = answer["_runtime_transfer"].clone();
+    assert_eq!(
+        answer,
+        json!({"status":"ok","data":{"remote_peer_count":remote_peer_count},
+            "_runtime_transfer":runtime_transfer})
+    );
 }
 
 // open: sender identity is not supplied by the backend at this layer; signed message types bind the signer above it
@@ -671,6 +691,13 @@ async fn n3_notification_topic_address(carrier: &dyn CarrierUnderTest) {
     let (answer, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
     assert_eq!(answer["status"], "ok");
     assert_eq!(received.bytes, sent);
+    // a send carrying only a peer DID and no topic is refused today
+    let refused = carrier
+        .send_to_peer_only(carrier.peer_did(), sent)
+        .await
+        .unwrap();
+    assert_eq!(refused["status"], "error");
+    assert_eq!(refused["code"], "not_joined");
 }
 
 async fn n4_notification_private_answer(carrier: &dyn CarrierUnderTest) {
@@ -720,24 +747,18 @@ async fn f4_file_request_responder_private_answer(carrier: &dyn CarrierUnderTest
     assert_no_topology(&file.answer, carrier);
 }
 
-async fn f5_file_request_responder_receipt(carrier: &dyn CarrierUnderTest) {
+// open: the file-request receipt comes from the product fetch path (distinct-holder fetch), which this suite does not drive yet
+async fn f5_file_request_responder_receipt_open_today(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
         .request_file(&cid, carrier.peer_did())
         .await
         .unwrap();
-    let receipt = serde_json::to_value(&file.receipt).unwrap();
-    assert_eq!(receipt["requested_cid"], cid);
-    assert_eq!(receipt["peer_did"], carrier.peer_did());
-    assert_eq!(receipt["bytes_received"], FILE_BYTES.len());
-    assert_eq!(receipt["verified"], true);
-    assert_eq!(receipt["result"]["status"], "ok");
-    assert_eq!(receipt["attempt"], 1);
-    assert_eq!(receipt["time"], 1);
+    assert!(file.answer["data"].get("receipt").is_none());
 }
 
+// open: waits for Rong (verb or WebSpace files)
 async fn v1_voice_open(carrier: &dyn CarrierUnderTest) {
-    assert_eq!(VOICE_ROW, "open: waits for Rong (verb or WebSpace files)");
     let answer = carrier.voice_probe().await.unwrap();
     assert_eq!(answer["status"], "error");
     assert_eq!(answer["code"], "unknown_op");
@@ -771,7 +792,7 @@ async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>)
             F2 => f2_file_request_responder_authenticated_did(carrier).await,
             F3 => f3_file_request_responder_unknown_did(carrier).await,
             F4 => f4_file_request_responder_private_answer(carrier).await,
-            F5 => f5_file_request_responder_receipt(carrier).await,
+            F5 => f5_file_request_responder_receipt_open_today(carrier).await,
             V1 => v1_voice_open(carrier).await,
         }
     }
@@ -847,7 +868,10 @@ current_row_test!(
     carrier_contract_f4_file_request_responder_private_answer_holds,
     F4
 );
-current_row_test!(carrier_contract_f5_file_request_responder_receipt_holds, F5);
+current_row_test!(
+    carrier_contract_f5_file_request_responder_receipt_open_today,
+    F5
+);
 current_row_test!(carrier_contract_v1_voice_open_today, V1);
 
 fn walk_rust(path: &Path, files: &mut Vec<PathBuf>) {
