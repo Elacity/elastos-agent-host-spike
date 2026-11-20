@@ -63,6 +63,10 @@
           <span class="settings-sidebar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6.5" height="6.5" rx="1.2"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.2"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.2"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.2"/></svg></span>
           <span class="settings-sidebar-text">Models</span>
         </button>
+        <button class="settings-sidebar-item disable-context-menu disable-user-select" type="button" data-el-drawer-close data-settings="agents">
+          <span class="settings-sidebar-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3"/><path d="M6 19c.6-3 2.6-4.5 6-4.5S17.4 16 18 19"/></svg></span>
+          <span class="settings-sidebar-text">Agents</span>
+        </button>
         <button class="settings-sidebar-item disable-context-menu disable-user-select" type="button" data-el-drawer-close data-settings="about">
           <span class="settings-sidebar-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="12" rx="1.5"/><path d="M8 20h8M12 17v3"/></svg>
@@ -364,6 +368,26 @@
                 </div>
               </div>
             </div>
+          </section>
+        </section>
+        <section class="settings-content" data-settings="agents" aria-labelledby="agents-title">
+          <section class="pc2-section" aria-labelledby="agents-title">
+            <h1 id="agents-title" class="pc2-section-title">Agents</h1>
+            <div class="pc2-group"><div class="pc2-group-row">
+                <p id="agents-status" class="pc2-card-sublabel" role="status" aria-live="polite"></p>
+                <div id="agents-list" aria-live="polite"></div>
+                <button id="agent-allow" class="pc2-btn" type="button" hidden>Allow agents on this Home</button>
+                <div id="agent-form" hidden>
+                <label class="pc2-card-label" for="agent-name">Name</label>
+                <input id="agent-name" class="pc2-input" type="text" maxlength="64" autocomplete="off" spellcheck="false" aria-label="Agent name">
+                <label class="pc2-card-label" for="agent-host">Agent host</label>
+                <input id="agent-host" class="pc2-input" type="text" maxlength="128" autocomplete="off" spellcheck="false" aria-label="Agent host" value="agent-host">
+                <div class="system-inline-row">
+                  <button id="agent-create" class="pc2-btn" type="button">Create agent</button>
+                </div>
+                </div>
+                <button id="agent-retry" class="pc2-btn pc2-btn-secondary" type="button" hidden>Retry</button>
+            </div></div>
           </section>
         </section>
         <section class="settings-content" data-settings="about" aria-labelledby="device-title">

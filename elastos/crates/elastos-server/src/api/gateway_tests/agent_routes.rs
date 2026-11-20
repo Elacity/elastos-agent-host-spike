@@ -303,6 +303,11 @@ mod on {
         let (_, listed) = call(&app, LIST, token, None).await;
         let listed: Value = serde_json::from_str(&listed).unwrap();
         assert_eq!(listed, json!({ "agents": [created] }));
+        assert_eq!(
+            listed["agents"][0]["active"],
+            json!(false),
+            "the_list_returns_whether_each_agent_is_on"
+        );
 
         // A body with a missing or unknown field, and an Agent Host the
         // signed release does not list.
@@ -580,6 +585,13 @@ mod on {
             StatusCode::OK
         );
         assert_eq!(launch(&agent_id).unwrap().unwrap().actor(), agent_id);
+        let (_, listed_on) = call(&installed.app, LIST, token, None).await;
+        let listed_on: Value = serde_json::from_str(&listed_on).unwrap();
+        assert_eq!(
+            listed_on["agents"][0]["active"],
+            json!(true),
+            "the_list_returns_whether_each_agent_is_on"
+        );
         let on_file: Value =
             serde_json::from_slice(&std::fs::read(agent_file(data)).unwrap()).unwrap();
         assert!(on_file["agents"][0].get("active").is_none());
@@ -602,6 +614,13 @@ mod on {
         let off_file: Value =
             serde_json::from_slice(&std::fs::read(agent_file(data)).unwrap()).unwrap();
         assert_eq!(off_file["agents"][0]["active"], json!(false));
+        let (_, listed_off) = call(&installed.app, LIST, token, None).await;
+        let listed_off: Value = serde_json::from_str(&listed_off).unwrap();
+        assert_eq!(
+            listed_off["agents"][0]["active"],
+            json!(false),
+            "the_list_returns_whether_each_agent_is_on"
+        );
     }
 
     #[tokio::test]
