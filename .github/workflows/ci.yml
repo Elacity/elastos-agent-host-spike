@@ -512,13 +512,42 @@ jobs:
         run: test -x /usr/sbin/lsof || sudo ln -s "$(command -v lsof)" /usr/sbin/lsof
       - name: stand-in effects journeys
         working-directory: lab/agent-conformance
-        run: cargo test --locked --test effects standin_
+        run: |
+          cargo test --locked --test effects standin_
+          cargo test --locked --test effects cancelled_instance_settles_with_reason_sibling_completes
+          cargo test --locked --test effects killed_worker_settlement_recorded_without_retry
+          cargo test --locked --test effects two_instances_overlap_with_separate_grants
       - name: plan approval tests
         working-directory: lab/plan-approval
-        run: cargo test --locked
+        run: |
+          cargo test --locked
+          python3 -I falsify.py
       - name: model-provider process tests build
         working-directory: capsules/model-provider
         run: cargo test --locked --test process --no-run
+
+  lab-wasm-capsule:
+    name: lab-wasm-capsule
+    # The byte pin is for an arm64 Mac with this lane's Rust 1.91 toolchain.
+    runs-on: macos-15
+    timeout-minutes: 60
+    needs: fork-gate
+    env:
+      RUST_TEST_THREADS: '2'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591
+        with:
+          toolchain: 1.91.0
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      - name: wasm capsule lab gate
+        working-directory: lab/wasm-capsule
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
 
   test-elastos:
     name: test-elastos
@@ -1937,7 +1966,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
     steps:
       - name: every job passed or was skipped by its own guard
         env:

@@ -1003,16 +1003,13 @@ fn model_multiline_basic_string_escape_is_a_link() {
 
 #[test]
 fn model_unknown_hex_escape_is_refused() {
-    // Cargo has no `\x` escape, so the manifest cannot be read and the check
-    // stops with Cargo's own reason.
+    // Cargo 1.95 accepts `\x69` in this package name and resolves it to this
+    // crate. Keep the historical row name so its F-GB-xhex plant stays bound.
     let hex =
         dependency_manifest("gb = { package = \"grant-bind\\x69ng\", version = \"1.2.3\" }\n");
     assert!(!hex.contains("grant-binding"));
     assert!(hex.contains("\\x69"));
-    assert_cargo_rejects(
-        &hex,
-        "missing escaped value, expected `b`, `f`, `n`, `r`, `\\`, `\"`, `u`, `U`",
-    );
+    assert!(cargo_toml_path_depends_on_grant_binding(&hex));
 }
 
 #[test]
@@ -1111,12 +1108,13 @@ fn model_line_ending_escape_is_a_link() {
         dependency_manifest("gb = { package = '''grant-bindi\\\nng''', version = '1.2.3' }\n");
     assert!(!literal.contains("grant-binding"));
     assert_cargo_rejects(&literal, "in package name: `grant-bindi");
-    // A continuation inside the inline table is a line ending Cargo refuses.
+    // Cargo 1.95 parses a line ending in this inline table as a missing comma;
+    // keep both line-ending variants pinned to its current refusal.
     for broken in [
         package_manifest("[dependencies]\ngb = { package = \"\"\"grant-binding\"\"\", path = \"../../grant-bindi\\\nng\" }\n"),
         package_manifest("[dependencies]\ngb = { package = \"\"\"grant-binding\"\"\", path = \"../../grant-bindi\\\r\nng\" }\n"),
     ] {
-        assert_cargo_rejects(&broken, "newlines are unsupported in inline tables");
+        assert_cargo_rejects(&broken, "missing comma between key-value pairs");
     }
 }
 

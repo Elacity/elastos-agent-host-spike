@@ -1,6 +1,7 @@
-# plan-approval lab: preview returns the plan hash and writes nothing
+# plan-approval lab: preview and plan-bound approval
 
-This crate is the preview half of the agent plan approval slice. It follows
+This crate models preview, owner approval and execution against the agent
+conformance stand-in (M1 check A15a). It follows
 [`docs/AGENT_ARCHITECTURE.md`](../../docs/AGENT_ARCHITECTURE.md), Request flow
 step 5:
 
@@ -16,21 +17,28 @@ This crate calls `agent_conformance::standin_runtime` and does not copy it.
 There is one stand-in and one hasher. The June planner path is an open question
 with Sash via Flint; this crate names no planner and guesses no path.
 
-A passing run gives the Runtime no A15 credit. Approval binding (step 8, where
-an allow-once decision authorises one exact operation, and principle 16, "A
-visible approval card is not the grant authority") is a later slice; RA-4 and
-RA-5 stay open.
+`approve` sends the plan hash shown to the owner through the stand-in's
+owner-only grant route. `execute` sends the hash of the exact plan bytes to the
+stand-in's validate route. A grant for plan B refuses plan A and spends nothing;
+an approved allow-once grant spends on its matching plan. The binding test
+proves this stand-in behavior and its falsifier removes the binding compare.
+The Runtime earns no A15 credit from this lab result. RA-4 and RA-5 remain open.
 
 ## Layout
 
-- `src/lib.rs`: `Preview`, `preview` and `preview_makes_no_effect`.
+- `src/lib.rs`: `Preview`, `preview`, `approve`, `execute` and their journey tests.
+- `falsifiers.json`: the binding-compare plant and its named failing test.
 
 ## Checks
 
+From `lab/plan-approval`, run:
+
 ```bash
-cargo fmt --manifest-path lab/plan-approval/Cargo.toml -- --check
-cargo test --locked --manifest-path lab/plan-approval/Cargo.toml --lib preview_makes_no_effect -- --exact
+cargo fmt -- --check
+cargo test --locked
+python3 -I falsify.py
 ```
 
-The two plants for this slice are hand-run and recorded in `LOG.md`; this lane
-has no `falsifiers.json`.
+The two preview plants were hand-run and recorded in `LOG.md`. The binding
+plant runs from this lane's falsifier list and restores the source after its
+named test fails.
