@@ -104,7 +104,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "ensure_home_target_package",
             call: "Home install",
             class: "n/a",
-            trust_root: "release-signature",
+            trust_root: "components-json-in-data-dir",
             verified_when: "at-every-start",
             evidence: ["ensure_capsule_compo", "nent_for_home_launch("].concat(),
             os_path: "",
@@ -603,9 +603,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/serve_cmd.rs",
             function: "shell_capsule_command",
             call: "command",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::new", "(shell_path)"].concat(),
             os_path: "",
         },
@@ -653,9 +653,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/server_infra.rs",
             function: "spawn_browser_local_exit",
             call: "command",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::", "new(path)"].concat(),
             os_path: "",
         },
@@ -663,9 +663,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/server_infra.rs",
             function: "spawn_browser_local_exit",
             call: "spawn()",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::", "new(path)"].concat(),
             os_path: "",
         },
@@ -723,9 +723,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/setup.rs",
             function: "probe_arm64_model_engine",
             call: "command",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-install-only",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::", "new(path)"].concat(),
             os_path: "",
         },
@@ -733,9 +733,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/setup.rs",
             function: "probe_arm64_model_engine",
             call: "spawn()",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-install-only",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::", "new(path)"].concat(),
             os_path: "",
         },
@@ -773,9 +773,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/setup/browser_config.rs",
             function: "generate_with_migration",
             call: "command",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-install-only",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::", "new(node)"].concat(),
             os_path: "",
         },
@@ -783,9 +783,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/setup/browser_config.rs",
             function: "generate_with_migration",
             call: "spawn()",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-install-only",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::", "new(node)"].concat(),
             os_path: "",
         },
@@ -793,9 +793,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/setup/browser_config.rs",
             function: "probe_native_host",
             call: "command",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::n", "ew(program)"].concat(),
             os_path: "",
         },
@@ -803,9 +803,9 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/setup/browser_config.rs",
             function: "probe_native_host",
             call: "spawn()",
-            class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-every-start",
+            class: "other",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::n", "ew(program)"].concat(),
             os_path: "",
         },
@@ -972,6 +972,96 @@ fn columns() -> Vec<TrustColumn> {
     ]
 }
 
+/// The caller-side check a row relies on. The row's function spawns a program
+/// path it receives as a parameter, so the row records what that function
+/// checks (none), and the caller named here performs the check. `check` must
+/// appear in `caller_function` in `caller_file`.
+struct Handoff {
+    file: &'static str,
+    function: &'static str,
+    call: &'static str,
+    caller_file: &'static str,
+    caller_function: &'static str,
+    check: String,
+}
+
+fn handoffs() -> Vec<Handoff> {
+    vec![
+        Handoff {
+            file: "elastos-server/src/serve_cmd.rs",
+            function: "shell_capsule_command",
+            call: "command",
+            caller_file: "elastos-server/src/serve_cmd.rs",
+            caller_function: "run_serve",
+            check: ["verify_component_", "binary(\"shell\""].concat(),
+        },
+        Handoff {
+            file: "elastos-server/src/server_infra.rs",
+            function: "spawn_browser_local_exit",
+            call: "command",
+            caller_file: "elastos-server/src/server_infra.rs",
+            caller_function: "setup_server_infrastructure_impl",
+            check: ["verify_provider_", "binary(\"browser-local-exit\""].concat(),
+        },
+        Handoff {
+            file: "elastos-server/src/server_infra.rs",
+            function: "spawn_browser_local_exit",
+            call: "spawn()",
+            caller_file: "elastos-server/src/server_infra.rs",
+            caller_function: "setup_server_infrastructure_impl",
+            check: ["verify_provider_", "binary(\"browser-local-exit\""].concat(),
+        },
+        Handoff {
+            file: "elastos-server/src/setup.rs",
+            function: "probe_arm64_model_engine",
+            call: "command",
+            caller_file: "elastos-server/src/setup.rs",
+            caller_function: "write_cache_metadata",
+            check: ["local_model_engine_", "receipt_args("].concat(),
+        },
+        Handoff {
+            file: "elastos-server/src/setup.rs",
+            function: "probe_arm64_model_engine",
+            call: "spawn()",
+            caller_file: "elastos-server/src/setup.rs",
+            caller_function: "write_cache_metadata",
+            check: ["local_model_engine_", "receipt_args("].concat(),
+        },
+        Handoff {
+            file: "elastos-server/src/setup/browser_config.rs",
+            function: "generate_with_migration",
+            call: "command",
+            caller_file: "elastos-server/src/setup/browser_config.rs",
+            caller_function: "configure",
+            check: ["host_program(data, ", "\"node\")"].concat(),
+        },
+        Handoff {
+            file: "elastos-server/src/setup/browser_config.rs",
+            function: "generate_with_migration",
+            call: "spawn()",
+            caller_file: "elastos-server/src/setup/browser_config.rs",
+            caller_function: "configure",
+            check: ["host_program(data, ", "\"node\")"].concat(),
+        },
+        Handoff {
+            file: "elastos-server/src/setup/browser_config.rs",
+            function: "probe_native_host",
+            call: "command",
+            caller_file: "elastos-server/src/setup/browser_config.rs",
+            caller_function: "native_host_available",
+            check: ["verify_installed_", "component_binary("].concat(),
+        },
+        Handoff {
+            file: "elastos-server/src/setup/browser_config.rs",
+            function: "probe_native_host",
+            call: "spawn()",
+            caller_file: "elastos-server/src/setup/browser_config.rs",
+            caller_function: "native_host_available",
+            check: ["verify_installed_", "component_binary("].concat(),
+        },
+    ]
+}
+
 #[test]
 fn trust_columns_cover_each_loader_and_bind_to_source() {
     let listed = rows();
@@ -1054,6 +1144,121 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             );
         }
     }
+
+    // Each handoff row records caller input, and the check it names stays in
+    // the named caller.
+    let mut handed = BTreeSet::new();
+    for handoff in &handoffs() {
+        let key = (handoff.file, handoff.function, handoff.call);
+        assert!(handed.insert(key), "duplicate handoff key: {key:?}");
+        assert!(overlay.contains(&key), "handoff lacks overlay row: {key:?}");
+        let column = columns
+            .iter()
+            .find(|column| (column.file, column.function, column.call) == key)
+            .unwrap();
+        assert_eq!(
+            column.class, "other",
+            "handoff row no longer records caller input: {key:?}"
+        );
+        let text = &sources[handoff.caller_file];
+        let code = source::code_only(text);
+        assert!(
+            text.match_indices(handoff.check.as_str())
+                .any(|(at, _)| source::enclosing_fn(&code, at) == handoff.caller_function),
+            "caller check moved out of {}::{} for {key:?}",
+            handoff.caller_file,
+            handoff.caller_function
+        );
+    }
+
+    // Count each expression in the functions with several loader sites. A
+    // matching expression elsewhere in the same function cannot stand in for
+    // a changed site.
+    for (file, function, expression, expected) in [
+        (
+            "elastos-server/src/main.rs",
+            "open_browser",
+            ["Command::", "new(cmd)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/main.rs",
+            "open_browser",
+            ["Command::", "new(\"open\")"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&binary_path, config)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, did_config)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, block_graph_config)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, object_config)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, webspace_config)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, media_config)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, generic_chain_config)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, Default::default())"].concat(),
+            5,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, exit_config)"].concat(),
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["ProviderBridge::", "spawn(&path, wallet_config)"].concat(),
+            1,
+        ),
+    ] {
+        let text = &sources[file];
+        let code = source::code_only(text);
+        let found = text
+            .match_indices(&expression)
+            .filter(|(at, _)| source::enclosing_fn(&code, *at) == function)
+            .count();
+        assert_eq!(
+            found, expected,
+            "changed source expression count: {file}::{function} {expression}"
+        );
+    }
 }
 
 #[test]
@@ -1080,18 +1285,18 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(columns.len(), 95);
     assert_eq!(classes.get("n/a"), Some(&46));
     assert_eq!(classes.get("os-tool"), Some(&2));
-    assert_eq!(classes.get("other"), Some(&28));
+    assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
-    assert_eq!(classes.get("release-component"), Some(&14));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&27));
+    assert_eq!(classes.get("release-component"), Some(&5));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&19));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&49));
+    assert_eq!(roots.get("none"), Some(&58));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&10));
+    assert_eq!(roots.get("release-signature"), Some(&9));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&27));
-    assert_eq!(times.get("at-install-only"), Some(&14));
+    assert_eq!(times.get("at-every-start"), Some(&22));
+    assert_eq!(times.get("at-install-only"), Some(&10));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&49));
+    assert_eq!(times.get("never"), Some(&58));
     assert_eq!(to_gate, 42);
 }
