@@ -200,16 +200,13 @@ stays the same record.
 
 ## Declared asks
 
-`asks.json` lists every per-step ask this guest makes, as a proposal kind and a
-resource pattern. It is an auditable declaration, not the policy check: the
-Runtime enforces each grant, and a capsule receives only what it was granted.
-The declaration names no URL, no host route and no `Users/` path; the model
-resource is named, not routed. The manifest `asks` name `write` and `read` on
+The manifest `asks` are this guest's maximum: `write` and `read` on
 `localhost://Users/self/.AppData/Agents/agent-host/*`. The Runtime reads that
-maximum. Approval and policy decide each request. Every routed pattern in this
-file names the launching principal, `Users/self`. The scenarios observe every
-proposal kind. An observed resource is the resource that scenario passed. This file
-stays until upstream confirms the manifest contract.
+row. Approval and policy decide each request. The row names the launching
+principal, `Users/self`, and names no URL, no host route and no other
+`Users/` path. The scenarios observe every proposal kind. An observed
+resource is the resource that scenario passed. Upstream still confirms
+whether this row is the sole declared maximum.
 
 ## Build and test
 

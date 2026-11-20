@@ -23,6 +23,10 @@ pub(super) struct InspectActionRequestRecord {
     pub(super) kind: String,
     pub(super) request_id: String,
     pub(super) principal_id: String,
+    /// The agent that submitted an agent plan for `principal_id`, its owner.
+    /// Absent on an Inspector action, whose principal made the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) requester_id: Option<String>,
     pub(super) session_id: String,
     pub(super) id: String,
     pub(super) operation: String,
@@ -61,21 +65,23 @@ fn pending_request_view(record: InspectActionRequestRecord) -> Option<serde_json
     if !agent_plan && record.kind != INSPECT_ACTION_KIND {
         return None;
     }
-    let current = inspect_action_request_binding(
-        &record.request_id,
-        &record.principal_id,
-        &record.id,
-        &record.operation,
-        &record.plan,
-        &record.request,
-    );
     let binding = if agent_plan {
+        let current = super::agent_plan::agent_plan_request_binding(&record)?;
         if current.truncated {
             return None;
         }
         current
     } else {
-        record.request_binding.clone().unwrap_or(current)
+        record.request_binding.clone().unwrap_or_else(|| {
+            inspect_action_request_binding(
+                &record.request_id,
+                &record.principal_id,
+                &record.id,
+                &record.operation,
+                &record.plan,
+                &record.request,
+            )
+        })
     };
     let mut view = serde_json::json!({
         "schema": record.schema,
@@ -121,6 +127,55 @@ pub(super) fn claim_pending_inspect_action_record(
         anyhow::bail!("Inspector action request belongs to a different principal");
     }
     record.status = claim_status.to_string();
+    record.updated_at = updated_at;
+    write_inspect_action_record_unlocked(data_dir, &record)?;
+    Ok(record)
+}
+
+/// Claims one pending agent plan for its owner under the store lock. The card's
+/// whole binding must equal both the stored and the recomputed one, so a changed
+/// plan becomes stale and claims nothing. The passkey check runs before any
+/// state write: a failed passkey leaves the record pending, and a second click
+/// finds it claimed.
+pub(super) fn claim_pending_agent_plan_for_owner(
+    data_dir: &Path,
+    request_id: &str,
+    owner_id: &str,
+    approver_is_human: bool,
+    card_binding: &serde_json::Value,
+    updated_at: u64,
+    consume_step_up: impl FnOnce(&InspectActionRequestRecord) -> anyhow::Result<()>,
+) -> anyhow::Result<InspectActionRequestRecord> {
+    let _guard = inspect_action_store_lock()?;
+    let mut record = read_inspect_action_record_unlocked(data_dir, request_id)?;
+    if record.kind != AGENT_PLAN_KIND {
+        anyhow::bail!("agent plan has a different kind");
+    }
+    if !approver_is_human
+        || record.principal_id != owner_id
+        || record.requester_id.as_deref() == Some(owner_id)
+    {
+        anyhow::bail!(
+            "an agent plan is approved by its owner, never the requesting agent or another person"
+        );
+    }
+    if record.status != "pending" {
+        anyhow::bail!("agent plan is not pending");
+    }
+    let card: EspRequestBinding = serde_json::from_value(card_binding.clone())
+        .map_err(|err| anyhow::anyhow!("agent plan card binding is invalid: {err}"))?;
+    consume_step_up(&record)?;
+    if record.request_binding.as_ref() != Some(&card)
+        || super::agent_plan::agent_plan_request_binding(&record) != Some(card.clone())
+    {
+        let message = "agent plan changed before Inbox approval; it is stale";
+        record.status = "stale".to_string();
+        record.error = Some(message.to_string());
+        record.updated_at = updated_at;
+        write_inspect_action_record_unlocked(data_dir, &record)?;
+        anyhow::bail!(message);
+    }
+    record.status = "approved".to_string();
     record.updated_at = updated_at;
     write_inspect_action_record_unlocked(data_dir, &record)?;
     Ok(record)
@@ -214,6 +269,7 @@ mod tests {
             kind: INSPECT_ACTION_KIND.to_string(),
             request_id: request_id.to_string(),
             principal_id: "person:test".to_string(),
+            requester_id: None,
             session_id: "session:test".to_string(),
             id: "capsule:test".to_string(),
             operation: "write".to_string(),

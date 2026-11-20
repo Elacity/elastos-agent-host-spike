@@ -1398,7 +1398,9 @@ jobs:
       # the job's fresh intermediates; it runs before the capacity reservation so the
       # reclaim measures the disk this build has already used.
       - name: B4-R named localhost decision tests
-        timeout-minutes: 25
+        # 20 Nov: the cold debug build alone took 25m04s on the hosted Mac (run 44658596104)
+        # and hit the old 25-minute limit after the tests had already started passing.
+        timeout-minutes: 45
         working-directory: elastos
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/b4r-s4-target
