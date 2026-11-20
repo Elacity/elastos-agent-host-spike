@@ -128,13 +128,14 @@ pub(super) fn append_inspect_action_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at,
+            ..Default::default()
         });
     }
 }
 
-/// One Inbox card for a pending agent plan: every stored step, the gate preview
-/// and the full binding hash. No approve action exists yet, so the card carries
-/// none.
+/// One Inbox card for a pending agent plan: every stored step, the gate preview,
+/// the full binding hash and the exact binding the click sends back. The owner
+/// alone approves it; a writing step says it needs a fresh passkey.
 fn append_agent_plan_notification(
     notifications: &mut HomeNotificationsSummary,
     request: &serde_json::Value,
@@ -177,7 +178,11 @@ fn append_agent_plan_notification(
         kind: AGENT_PLAN_KIND.to_string(),
         title: format!("Agent plan for {target}"),
         body: lines.join("\n"),
-        action_ref: None,
+        action_ref: Some(HomeNotificationActionSummary {
+            app: INBOX_CAPSULE_ID.to_string(),
+            action_id: format!("agent-plan-approve-request:{request_id}"),
+        }),
+        request_binding: request.get("request_binding").cloned(),
         severity: "attention".to_string(),
         read: false,
         created_at,
@@ -394,6 +399,39 @@ pub(super) async fn approve_inspect_action_request(
         },
     )?;
     anyhow::bail!(message);
+}
+
+/// Approve the exact card the owner saw: owner alone, one fresh passkey, one claim.
+pub(super) fn approve_agent_plan_request(
+    state: &GatewayState,
+    launch: &RequiredHomeLaunchToken,
+    context: &HomeLaunchTokenContext,
+    request_id: &str,
+    card_binding: &serde_json::Value,
+    step_up_token: Option<&str>,
+) -> anyhow::Result<String> {
+    store::claim_pending_agent_plan_for_owner(
+        &state.data_dir,
+        request_id,
+        context.principal_id(),
+        context.root().kind() == Some(crate::auth::PrincipalKind::Human),
+        card_binding,
+        now_ts(),
+        |record| {
+            let token = step_up_token.ok_or_else(|| {
+                anyhow::anyhow!("fresh passkey is required to approve an agent plan")
+            })?;
+            consume_passkey_step_up_token(
+                &state.data_dir,
+                token,
+                launch,
+                180,
+                "agent_plan.approve",
+                &serde_json::json!({ "request_id": record.request_id }),
+            )
+        },
+    )?;
+    Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
 
 pub(super) fn deny_inspect_action_request(
@@ -850,7 +888,18 @@ mod tests {
         let card = &cards[0];
         assert_eq!(card.kind, AGENT_PLAN_KIND);
         assert_eq!(card.id, format!("agent-plan-request:{}", record.request_id));
-        assert!(card.action_ref.is_none());
+        assert_eq!(
+            card.action_ref
+                .as_ref()
+                .map(|action| action.action_id.as_str()),
+            Some(format!("agent-plan-approve-request:{}", record.request_id).as_str()),
+            "the owner's card carries the one approve action"
+        );
+        assert_eq!(
+            card.request_binding.as_ref(),
+            Some(&serde_json::json!(expected)),
+            "the card carries the exact binding its click sends back"
+        );
         assert_eq!(expected.sha256.len(), 64);
         assert!(card.body.contains(&expected.sha256), "{}", card.body);
         assert!(

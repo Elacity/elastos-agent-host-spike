@@ -858,6 +858,8 @@ struct HomeNotificationEntrySummary {
     body: String,
     #[serde(default)]
     action_ref: Option<HomeNotificationActionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_binding: Option<serde_json::Value>,
     severity: String,
     read: bool,
     created_at: u64,
@@ -923,6 +925,9 @@ struct InboxActionRequest {
     action_id: String,
     #[serde(default)]
     step_up_token: Option<String>,
+    /// An agent-plan approve sends back the exact binding its card showed.
+    #[serde(default)]
+    request_binding: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
