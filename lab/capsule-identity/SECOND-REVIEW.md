@@ -527,7 +527,7 @@ Lane diff: `git diff 1503ac6f4^1 1503ac6f4 -- lab/capsule-identity/` (6 files, +
   (M:1407), set only in `launch` (M:1572, M:1578) from `post_capsules`'s
   `let (name, asks) = self.checked_launch(body)...` (M:1458-1459). `checked_launch` answers
   `signed_asks(&checked)` (M:1544) on the `CheckedBundle` of the one walk (M:1536), after
-  every check; `signed_asks` (M:1614-1620) takes the content of the `asks.json` entry from
+  every check; `signed_asks` (M:1614-1620) takes the content of the `sidecar` entry from
   `entries()`, or `None`. Checked: no `fs::read` in `StandInRuntime` (M:1391-1620; the
   file's `fs::read` lines all come before M:1100), so nothing reads the folder again.
   `asks_of` (M:1515-1519) has the doc "Lab test seam, not a route" (M:1510) and answers
@@ -538,7 +538,7 @@ Lane diff: `git diff 1503ac6f4^1 1503ac6f4 -- lab/capsule-identity/` (6 files, +
   the `StandInRuntime` doc, which now lists `asks_of` as a lab test seam (B:1376).
 - Promise 2 (`standin_hands_an_instance_only_its_signed_asks_bytes`). At the merge
   (`tests/stand_in.rs` M:392), it compares `asks_of` with the committed
-  `fixtures/agent-host/asks.json`, changes one byte on disk (`change_stored_asks`, M:383),
+  `fixtures/agent-host/sidecar`, changes one byte on disk (`change_stored_asks`, M:383),
   asserts `asks_of` still answers the signed bytes (M:411), a second launch refused with
   the name compare's own text, built from `check_name` and naming both CIDs (M:426), one
   listed instance (M:428) and an empty grant view (M:429). Still true at 9bd839491: the
@@ -546,13 +546,13 @@ Lane diff: `git diff 1503ac6f4^1 1503ac6f4 -- lab/capsule-identity/` (6 files, +
   nothing). The run below gives `ok` for it. This review's FOLLOWUP is on what the test can
   catch: see the GAP-REPORT bullet below.
 - Promise 3 (`standin_gives_each_session_its_own_asks`). At the merge (M:433), `agent-host`
-  and a signed `web-app` with no `asks.json` (asserted by its entries) are launched in both
+  and a signed `web-app` with no `sidecar` (asserted by its entries) are launched in both
   orders with fresh keys; `agent-host`'s session answers its bytes, `web-app`'s `None`
   (M:487), an unknown session `None` (M:492), two instances, an empty view (M:495). Still
   true at 9bd839491 (B:563, same text).
 - Promise 4 (F-CI35a, F-CI35b, F-CI35c, each CAUGHT). At the merge, each edits only
   `../../lab/capsule-identity/tests/common/mod.rs`: F-CI35a turns `asks_of` into a read of
-  `asks.json` from the stored folder at call time (anchor M:1519), F-CI35b answers the first
+  `sidecar` from the stored folder at call time (anchor M:1519), F-CI35b answers the first
   instance (M:1518), F-CI35c answers `Some(Vec::new())` (M:1619). The three entries are the
   same at b7c613a10 and at 9bd839491, and their anchors are B:1523, B:1522 and B:1625.
   Runner result at 9bd839491: `summary: 3 CAUGHT of 3` (raw lines below).
@@ -561,7 +561,7 @@ Lane diff: `git diff 1503ac6f4^1 1503ac6f4 -- lab/capsule-identity/` (6 files, +
   the folder again", M:1415), the three rule rows M:1434-1436 and "Not shown" M:1438-1445;
   the interface row "asks read `asks_of`" is M:1377. Its outside claim, "#309 has no asks
   field on any route (RA-1 to RA-7)", was checked with `git grep -i` at `513988ebd` over
-  `lab/runtime-asks/`: no `asks.json`, no `"asks"` key and no asks field in any of the
+  `lab/runtime-asks/`: no `sidecar`, no `"asks"` key and no asks field in any of the
   seven files. The text 035 added holds no `path:line` citation (0 checked). Still true at
   9bd839491: heading B:1436, row B:1404, rules B:1462-1464, "Not shown" B:1466-1473; 036
   (b7c613a10) changed one sentence of the rule to name `CheckedBundle::manifest_name()` for
@@ -593,8 +593,8 @@ Lane diff: `git diff 1503ac6f4^1 1503ac6f4 -- lab/capsule-identity/` (6 files, +
   of 257) was not rerun here, only F-CI35.
 Corrected by task 045, on 2026-10-28: the earlier text said `tests/inventory.rs` passed in the full run below; that run was `--test stand_in --test checked_bundle --test not_admission` only (Cursor's FOLLOWUP on 042).
 
-FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:839 says "a stub that reads the folder again fails", but only a re-read when `asks_of` is called (F-CI35a) fails; a stub that reads `asks.json` from the stored folder again at launch passes both named tests, because no test changes the folder between the walk and the launch; hand check: in `lab/capsule-identity/tests/common/mod.rs:1544` replace `signed_asks(&checked)` with `fs::read(folder.join(ASKS_FILE)).ok()`, run `RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-identity/Cargo.toml --test stand_in -- standin_hands_an_instance_only_its_signed_asks_bytes standin_gives_each_session_its_own_asks` (`test result: ok. 2 passed`), then put the file back.
-Answered by task 044, on 2026-10-28: `standin_takes_the_asks_from_the_walk_not_the_folder` changes the stored `asks.json` between the walk and the launch, and F-CI44a (this stub) is CAUGHT by it. The line's `GAP-REPORT.md:839` is at this section's base `9bd839491`; at task 044's base `6664cc655`, `grep -n "a stub that reads the folder again fails" lab/capsule-identity/GAP-REPORT.md` finds the sentence at `:849`.
+FOLLOWUP: lab/capsule-identity/GAP-REPORT.md:839 says "a stub that reads the folder again fails", but only a re-read when `asks_of` is called (F-CI35a) fails; a stub that reads `sidecar` from the stored folder again at launch passes both named tests, because no test changes the folder between the walk and the launch; hand check: in `lab/capsule-identity/tests/common/mod.rs:1544` replace `signed_asks(&checked)` with `fs::read(folder.join(ASKS_FILE)).ok()`, run `RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-identity/Cargo.toml --test stand_in -- standin_hands_an_instance_only_its_signed_asks_bytes standin_gives_each_session_its_own_asks` (`test result: ok. 2 passed`), then put the file back.
+Answered by task 044, on 2026-10-28: `standin_takes_the_asks_from_the_walk_not_the_folder` changes the stored `sidecar` between the walk and the launch, and F-CI44a (this stub) is CAUGHT by it. The line's `GAP-REPORT.md:839` is at this section's base `9bd839491`; at task 044's base `6664cc655`, `grep -n "a stub that reads the folder again fails" lab/capsule-identity/GAP-REPORT.md` finds the sentence at `:849`.
 
 Principles check:
 
@@ -611,7 +611,7 @@ Principles check:
    change (`git diff --stat 1503ac6f4^1 1503ac6f4`); the code is test code
    (`tests/common/mod.rs:1391` at 1503ac6f4).
 5. Fails closed: not affected. 035 adds no refusal; an unknown session or a bundle with no
-   `asks.json` answers `None` (`tests/common/mod.rs:1515-1519` at 1503ac6f4).
+   `sidecar` answers `None` (`tests/common/mod.rs:1515-1519` at 1503ac6f4).
 6. Self-contained: not affected. No capsule code; the stand-in runs nothing
    (`tests/common/mod.rs:1391` at 1503ac6f4).
 7. Tests prove it: yes. Two named tests (`tests/stand_in.rs:392`, `:433` at 1503ac6f4) and
@@ -632,9 +632,9 @@ nothing.
 
 ```
 baseline: 2 named tests pass without an edit, 0 do not
-F-CI35a CAUGHT                            11s  the planted accept-anything stub: asks_of reads asks.json from the stored folder at call time, so a change on disk after launch reaches the instance
+F-CI35a CAUGHT                            11s  the planted accept-anything stub: asks_of reads sidecar from the stored folder at call time, so a change on disk after launch reaches the instance
 F-CI35b CAUGHT                            14s  asks_of ignores the session and answers the first instance's asks
-F-CI35c CAUGHT                            27s  a bundle with no asks.json is handed Some(Vec::new()), not None
+F-CI35c CAUGHT                            27s  a bundle with no sidecar is handed Some(Vec::new()), not None
 summary: 3 CAUGHT of 3
 ```
 
@@ -945,9 +945,9 @@ Lane diff: `git diff 1421a5ec6^1 1421a5ec6 -- lab/capsule-identity/` (7 files, +
   lines). The 9 older `stand_in` tests run with no hook and give `ok` below.
 - Promise 2 (`standin_takes_the_asks_from_the_walk_not_the_folder`). At the head
   (`tests/stand_in.rs` H:568), the hook is `change_stored_asks_after_the_walk` (H:563,
-  one byte of the stored `asks.json`); the launch must answer `launched` (H:576-577); the
+  one byte of the stored `sidecar`); the launch must answer `launched` (H:576-577); the
   stored file must differ from the fixture bytes the test reads itself (H:571, H:582-586,
-  "the hook must have changed the stored asks.json"); `asks_of` must equal those fixture
+  "the hook must have changed the stored sidecar"); `asks_of` must equal those fixture
   bytes (H:589-593, "a change on disk between the walk and the launch must not reach the
   instance"); one instance and an empty grant view (H:594-595). 035's two tests
   (H:522, H:599) are unchanged: the diff removes no line of `tests/stand_in.rs`. Not a
@@ -1030,7 +1030,7 @@ Principles check:
 
 ```
 baseline: 1 named tests pass without an edit, 0 do not
-F-CI44a CAUGHT                             7s  the 041 review's stub: checked_launch reads asks.json from the stored folder at launch, after the walk, instead of taking it from the checked entries
+F-CI44a CAUGHT                             7s  the 041 review's stub: checked_launch reads sidecar from the stored folder at launch, after the walk, instead of taking it from the checked entries
 F-CI44b CAUGHT                             8s  the after-walk hook is never called, so the test's change on disk never happens
 F-CI44c CAUGHT                             6s  the after-walk hook runs before the walk, so the changed bytes are walked and the name compare (e) refuses the launch
 summary: 3 CAUGHT of 3
@@ -1041,9 +1041,9 @@ summary: 3 CAUGHT of 3
 
 ```
 baseline: 2 named tests pass without an edit, 0 do not
-F-CI35a CAUGHT                             4s  the planted accept-anything stub: asks_of reads asks.json from the stored folder at call time, so a change on disk after launch reaches the instance
+F-CI35a CAUGHT                             4s  the planted accept-anything stub: asks_of reads sidecar from the stored folder at call time, so a change on disk after launch reaches the instance
 F-CI35b CAUGHT                             4s  asks_of ignores the session and answers the first instance's asks
-F-CI35c CAUGHT                             4s  a bundle with no asks.json is handed Some(Vec::new()), not None
+F-CI35c CAUGHT                             4s  a bundle with no sidecar is handed Some(Vec::new()), not None
 summary: 3 CAUGHT of 3
 ```
 
