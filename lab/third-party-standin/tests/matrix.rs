@@ -19,10 +19,11 @@ use serde_json::Value;
 
 use common::{
     action_variant_counts, answer, app_name, assert_base58_vectors, call_inventory,
-    call_with_last_arg, const_expression, field_reads, ident_inventory, item_body, join,
-    load_manifest, manifest_struct_fields, provides_readers, register_signature_returns_nothing,
-    registration_sites, repo_call_inventory, scheme, server_file, sites_json, user_approval_method,
-    validate_fns_mention, verify_signed, walk_text_files, MarkerProvider,
+    call_with_last_arg, calls_in_functions, const_expression, field_reads, ident_inventory,
+    item_body, join, load_manifest, manifest_struct_fields, provides_readers,
+    register_signature_returns_nothing, registration_sites, repo_call_inventory, scheme,
+    server_file, sites_json, user_approval_method, validate_fns_mention, verify_signed,
+    walk_text_files, MarkerProvider,
 };
 
 fn rows_table() -> Value {
@@ -194,8 +195,9 @@ async fn hook1_provider_scheme_from_manifest_is_missing_today() {
     }
 }
 
-/// H1 sites. A new production registration, or a new production reader of the
-/// manifest `provides` field, is the moment this row is flipped with H1.
+/// H1 sites. A new production registration or `.provides` field access is
+/// the moment this row is reviewed with H1. The field shape includes other
+/// types that have a `provides` field.
 #[test]
 fn hook1_registration_and_provides_sites_are_the_known_set_today() {
     let registrations = registration_sites();
@@ -405,8 +407,9 @@ fn hook5_provider_operation_actions_are_the_known_set_today() {
 ///
 /// What exists: `stage_bundle_observed` writes the checked bundle into the
 /// slot and does not start it. `run_bundle` starts a bundle the store already
-/// holds, by its fingerprint. This crate does not depend on the server, so
-/// it cannot call either function.
+/// holds, by its fingerprint. Named calls through their launch path are
+/// counted below. This crate does not depend on the server, so it cannot
+/// call either function.
 ///
 /// Wanted: the signed stand-in installs by its fingerprint and its scheme
 /// answers, with no Runtime source edit that names the app.
@@ -448,6 +451,80 @@ fn hook6_stage_writes_the_slot_and_run_starts_by_fingerprint_today() {
         "this crate does not depend on the server"
     );
     expect_sites("h6_stage_and_run", sites_json(&calls));
+
+    // The named path follows staging into signature checking and slot writing,
+    // and running into bundle admission and component start. A scheme
+    // registration or route call added within these functions changes the row.
+    let registration_or_answer = [
+        join(&["reg", "ister"]),
+        join(&["register_sub_", "provider"]),
+        join(&["register_runtime_", "provider_target"]),
+        join(&["rou", "te"]),
+    ];
+    let mut launch_calls = Vec::new();
+    launch_calls.extend(calls_in_functions(
+        stage,
+        &["stage_bundle_observed", "write_slot"],
+        &[
+            &write_slot,
+            &join(&["check_bundle_", "signature"]),
+            &run_by,
+            &registration_or_answer[0],
+            &registration_or_answer[1],
+            &registration_or_answer[2],
+            &registration_or_answer[3],
+        ],
+    ));
+    launch_calls.extend(calls_in_functions(
+        run,
+        &["run_bundle"],
+        &[
+            &join(&["create_", "runtime"]),
+            &run_by,
+            &registration_or_answer[0],
+            &registration_or_answer[1],
+            &registration_or_answer[2],
+            &registration_or_answer[3],
+        ],
+    ));
+    launch_calls.extend(calls_in_functions(
+        "elastos/crates/elastos-server/src/main.rs",
+        &["create_runtime"],
+        &[
+            &join(&["with_providers_", "and_component"]),
+            &join(&["configure_capsule_", "admission"]),
+            &registration_or_answer[0],
+            &registration_or_answer[1],
+            &registration_or_answer[2],
+            &registration_or_answer[3],
+        ],
+    ));
+    let runtime_file = "elastos/crates/elastos-server/src/runtime.rs";
+    launch_calls.extend(calls_in_functions(
+        runtime_file,
+        &[
+            "check_bundle_signature",
+            "configure_capsule_admission",
+            "run_by_bundle",
+            "run_by_bundle_observed",
+            "start_by_bundle",
+            "start_loaded",
+            "with_providers_and_component",
+        ],
+        &[
+            &join(&["run_by_bundle_", "observed"]),
+            &join(&["start_by_", "bundle"]),
+            &join(&["start_", "loaded"]),
+            &join(&["load_", "admitted"]),
+            &join(&["load_admitted_", "sealed"]),
+            &registration_or_answer[0],
+            &registration_or_answer[1],
+            &registration_or_answer[2],
+            &registration_or_answer[3],
+        ],
+    ));
+    launch_calls.sort();
+    expect_sites("h6_launch_calls", sites_json(&launch_calls));
 }
 
 /// Declared log range and topic message limit. OPEN. Owner: the P2-10 hook

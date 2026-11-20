@@ -77,22 +77,18 @@ pub fn registration_sites() -> Vec<Site> {
 }
 
 pub fn provides_readers() -> Vec<Site> {
+    let field = join(&["pro", "vides"]);
     let mut counts: BTreeMap<(String, String), u32> = BTreeMap::new();
     for (file, source) in production_sources() {
         let blank = blank_source(&source);
         let fns = production_fns(&blank);
-        let impls = manifest_impl_bodies(&blank, &fns);
-        for (function, _) in field_calls(&blank, &fns, "provides", |receiver, at| match receiver {
-            Some("manifest") => true,
-            Some("self") => impls.iter().any(|(start, end)| at >= *start && at < *end),
-            _ => false,
-        }) {
+        for (function, _) in field_calls(&blank, &fns, &field, |_, _| true) {
             *counts.entry((file.clone(), function)).or_insert(0) += 1;
         }
     }
     counts
         .into_iter()
-        .map(|((file, function), count)| Site::new(&file, &function, "manifest.provides", count))
+        .map(|((file, function), count)| Site::new(&file, &function, &format!(".{field}"), count))
         .collect()
 }
 
@@ -149,6 +145,32 @@ pub fn call_inventory(relative: &str, name: &str) -> Vec<Site> {
     counts
         .into_iter()
         .map(|(function, count)| Site::new(relative, &function, name, count))
+        .collect()
+}
+
+/// Calls in explicitly named production functions of one file.
+pub fn calls_in_functions(relative: &str, functions: &[&str], names: &[&str]) -> Vec<Site> {
+    let source = server_file(relative);
+    let blank = blank_source(&source);
+    let fns = production_fns(&blank);
+    for function in functions {
+        assert!(
+            fns.iter()
+                .any(|item| item.name == *function && !item.test_item),
+            "missing production fn {function} in {relative}"
+        );
+    }
+    let mut counts: BTreeMap<(String, String), u32> = BTreeMap::new();
+    for name in names {
+        for (function, _) in method_calls(&blank, &fns, name, false) {
+            if functions.contains(&function.as_str()) {
+                *counts.entry((function, (*name).to_string())).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .map(|((function, label), count)| Site::new(relative, &function, &label, count))
         .collect()
 }
 
@@ -376,31 +398,6 @@ fn production_fns(blank: &str) -> Vec<Item> {
         }
     }
     fns
-}
-
-fn manifest_impl_bodies(blank: &str, fns: &[Item]) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    for at in keyword_positions(blank, "impl") {
-        if fns
-            .iter()
-            .any(|item| at > item.body_start && at < item.body_end)
-        {
-            continue;
-        }
-        if !is_item_keyword(blank, at) {
-            continue;
-        }
-        let header_end = skip_ws(blank, at + "impl".len());
-        let Some((body_start, body_end)) = item_body_span(blank, header_end) else {
-            continue;
-        };
-        let header = &blank[at..body_start];
-        if ident_positions(header, "CapsuleManifest").is_empty() {
-            continue;
-        }
-        ranges.push((body_start, body_end));
-    }
-    ranges
 }
 
 fn test_container_ranges(
@@ -1221,7 +1218,7 @@ mod scanner_rules {
     }
 
     #[test]
-    fn manifest_provides_ignores_a_different_provides_field() {
+    fn provides_field_reads_accept_any_receiver() {
         let source = r#"
             impl CapsuleManifest {
                 fn validate(&self) {
@@ -1236,18 +1233,16 @@ mod scanner_rules {
             fn admit(manifest: &CapsuleManifest, runtime: &ProviderRuntime) {
                 let _ = manifest.provides.clone();
                 let _ = runtime.provides.clone();
+                let capsule = manifest;
+                let _ = capsule.provides.clone();
             }
         "#;
         let blank = blank_source(source);
         let fns = production_fns(&blank);
-        let impls = manifest_impl_bodies(&blank, &fns);
-        let reads = field_calls(&blank, &fns, "provides", |receiver, at| match receiver {
-            Some("manifest") => true,
-            Some("self") => impls.iter().any(|(start, end)| at >= *start && at < *end),
-            _ => false,
-        });
+        let field = join(&["pro", "vides"]);
+        let reads = field_calls(&blank, &fns, &field, |_, _| true);
         let names: Vec<_> = reads.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["validate", "admit"]);
+        assert_eq!(names, ["validate", "show", "admit", "admit", "admit"]);
     }
 
     #[test]

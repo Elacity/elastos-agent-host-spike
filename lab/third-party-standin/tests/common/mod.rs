@@ -170,9 +170,10 @@ pub fn server_file(relative: &str) -> String {
 
 mod scan;
 pub use scan::{
-    action_variant_counts, call_inventory, call_with_last_arg, const_expression, field_reads,
-    ident_inventory, manifest_struct_fields, provides_readers, register_signature_returns_nothing,
-    registration_sites, repo_call_inventory, sites_json, validate_fns_mention,
+    action_variant_counts, call_inventory, call_with_last_arg, calls_in_functions,
+    const_expression, field_reads, ident_inventory, manifest_struct_fields, provides_readers,
+    register_signature_returns_nothing, registration_sites, repo_call_inventory, sites_json,
+    validate_fns_mention,
 };
 
 /// Body of the item whose signature line contains `sig`, up to the next

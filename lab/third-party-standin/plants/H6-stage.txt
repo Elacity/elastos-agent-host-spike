@@ -1,10 +1,14 @@
 id: H6-stage
 file: elastos/crates/elastos-server/src/stage_cmd.rs
 test: hook6_stage_writes_the_slot_and_run_starts_by_fingerprint_today
-note: staging gains a start call; the comment is not the tripwire
+note: staging starts the stored bundle after its signature is written
 --- old
-    after_walk();
+    file.persist(&signature_path)
+        .map_err(|error| store(error.error))?;
 --- new
-    after_walk();
-    let _started = runtime.run_by_bundle(&bundle);
+    file.persist(&signature_path)
+        .map_err(|error| store(error.error))?;
+    let _started = runtime
+        .run_by_bundle(data_dir, &cid.to_string(), Vec::new(), None)
+        .await;
 --- end

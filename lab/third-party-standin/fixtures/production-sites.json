@@ -155,6 +155,19 @@
       "Write": 8
     }
   },
+  "h6_launch_calls": [
+    { "count": 1, "file": "elastos/crates/elastos-server/src/main.rs", "function": "create_runtime", "label": "configure_capsule_admission" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/main.rs", "function": "create_runtime", "label": "with_providers_and_component" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/run_cmd.rs", "function": "run_bundle", "label": "create_runtime" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/run_cmd.rs", "function": "run_bundle", "label": "run_by_bundle" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/runtime.rs", "function": "run_by_bundle", "label": "run_by_bundle_observed" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/runtime.rs", "function": "run_by_bundle_observed", "label": "start_by_bundle" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/runtime.rs", "function": "start_by_bundle", "label": "load_admitted" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/runtime.rs", "function": "start_by_bundle", "label": "load_admitted_sealed" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/runtime.rs", "function": "start_by_bundle", "label": "start_loaded" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/stage_cmd.rs", "function": "stage_bundle_observed", "label": "check_bundle_signature" },
+    { "count": 1, "file": "elastos/crates/elastos-server/src/stage_cmd.rs", "function": "stage_bundle_observed", "label": "write_slot" }
+  ],
   "h6_stage_and_run": [
     {
       "count": 1,
@@ -174,55 +187,67 @@
       "count": 1,
       "file": "elastos/crates/elastos-common/src/manifest.rs",
       "function": "active_fields",
-      "label": "manifest.provides"
+      "label": ".provides"
     },
     {
       "count": 7,
       "file": "elastos/crates/elastos-common/src/manifest.rs",
       "function": "validate",
-      "label": "manifest.provides"
+      "label": ".provides"
     },
     {
       "count": 2,
       "file": "elastos/crates/elastos-server/src/api/gateway_capsule_catalog/contract_audit.rs",
       "function": "audit_manifest",
-      "label": "manifest.provides"
+      "label": ".provides"
+    },
+    {
+      "count": 1,
+      "file": "elastos/crates/elastos-server/src/api/gateway_capsule_catalog/read_model.rs",
+      "function": "capsule_projection_summary",
+      "label": ".provides"
     },
     {
       "count": 1,
       "file": "elastos/crates/elastos-server/src/api/gateway_capsule_catalog/read_model.rs",
       "function": "catalog_capsule_summary",
-      "label": "manifest.provides"
+      "label": ".provides"
     },
     {
-      "count": 2,
+      "count": 4,
       "file": "elastos/crates/elastos-server/src/binaries.rs",
       "function": "admit_with_bin_dir",
-      "label": "manifest.provides"
+      "label": ".provides"
     },
     {
       "count": 1,
       "file": "elastos/crates/elastos-server/src/inspect_provider/dispatch.rs",
       "function": "provided_scheme",
-      "label": "manifest.provides"
+      "label": ".provides"
     },
     {
       "count": 1,
       "file": "elastos/crates/elastos-server/src/inspect_provider/sources.rs",
       "function": "provided_scheme",
-      "label": "manifest.provides"
+      "label": ".provides"
+    },
+    {
+      "count": 2,
+      "file": "elastos/crates/elastos-server/src/setup.rs",
+      "function": "validate_provider_runtime",
+      "label": ".provides"
     },
     {
       "count": 3,
       "file": "elastos/crates/elastos-server/src/supervisor.rs",
       "function": "launch_capsule",
-      "label": "manifest.provides"
+      "label": ".provides"
     },
     {
       "count": 1,
       "file": "elastos/crates/elastos-server/src/supervisor.rs",
       "function": "launch_carrier_service",
-      "label": "manifest.provides"
+      "label": ".provides"
     }
   ],
   "registration": [
