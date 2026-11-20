@@ -24,9 +24,13 @@ sign that printed lab CID, and a check can say whether that key did.
   capsule identity. It is not the Runtime's published name (see
   [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)).
 - The one schema check is the Runtime's own. `capsule.json` at the bundle root
-  is parsed as `elastos_common::CapsuleManifest`, which refuses an unknown
-  field, and then checked with its `validate()`. Each refusal keeps the
-  Runtime's own text. The lab adds no field, no schema and no parser.
+  is read with `elastos_common::PinnedManifest::parse`, the Runtime's reader
+  for a manifest that may pin a requirement by CID (`requires[].cid`). It
+  checks each pin's form, parses everything else as
+  `elastos_common::CapsuleManifest`, which refuses an unknown field, and
+  checks that with its `validate()`. Each refusal keeps the Runtime's own
+  text or code. A pin is checked for its form only: nothing here finds or
+  reads the capsule it names. The lab adds no field, no schema and no parser.
 
 ## The encoding
 
@@ -186,12 +190,22 @@ with an empty, `.` or `..` part, two entries with one path, and one path that
 is both a file and a directory (`a` and `a/b`, in either order). `check_name` checks a
 claimed name by calling `lab_cid`; it computes no name of its own.
 
-The CIDv1 bytes and the base32 text are one marked lab copy inside
-`src/lib.rs` (`cid_bytes`, one encoder, one decoder). The Runtime's `cid`
-0.11 crate lives only in `elastos-server` and `elastos-namespace`, which the
-lab does not link, and any new crate here would make the locks of
-`lab/wasm-capsule` and `lab/agent-conformance` (both path-depend on this
-crate) stale. So the lab adds no crate.
+The CIDv1 bytes and the base32 text are one marked copy (`cid_bytes` and one
+encoder; the claim check reads a CID's text with the Runtime's `cid_form`, so
+the copy has no decoder). Since M2 part B it lives, with the walk and the rest
+of the identity code, in the workspace crate `elastos-bundle-identity`
+(`elastos/crates/elastos-bundle-identity/src/lib.rs`), moved there text for
+text. This crate re-exports that crate's public names and has no encoder of
+its own. `cid_bytes` and the base32 printer (`printed_cid`) are private
+there and are reached through `LabCid`'s printing; `LabCid`'s parsing reads
+the text with `cid_form`, in `elastos-common`, and that crate has the one
+base32 decoder; the two functions that build the tree,
+`encode_entries` and `encode_listed_files`, are public there and re-exported
+here. In the Runtime's workspace the `cid` 0.11 crate is used only by
+`elastos-server` and `elastos-namespace`, which neither this crate nor the
+identity crate links. The move added one dependency here, the identity crate
+itself; the lockfiles of the crates that path-depend on this one gained its
+entry with it.
 
 Each profile setting has a named test and a falsifier (`tests/encoding.rs`;
 every pin is also recomputed by the Python block above, written from these
@@ -340,7 +354,7 @@ local file (such as `.DS_Store`) never reaches a pin. The pins are in
 | `content-sample` | `capsule.json`, `sample.example` | `templates/capsules/viewer-content/content.capsule.json` and `sample.example`, byte for byte | `bafybeieahlroxjdalpmglh227eikmodrjhrlelvzlhylvyt3s65ackiybi` |
 | `web-app` | `capsule.json`, `browser/app.js`, `browser/index.html` | `templates/capsules/web-app/`, byte for byte | `bafybeibc5wcwbtdmjt7qbwbi2rfqvfcfzumivqsoct2ekdqeec2yodqy7q` |
 | `wc001-core` | `capsule.json` | written for this lab | not pinned (below) |
-| `agent-host` | `capsule.json`, `asks.json` | `examples/agent-host/capsule.json` (git blob `3395c59fab00816109d5dd471ccbceaf5d59e191`) and `examples/agent-host/asks.json` (git blob `3f004896c68aa7097d02505920afc6c178b065ff`) at `e11fdafce`, byte for byte; the module is not in the fixture (below) | `bafybeicesxlwcolv5hifwotsyafyyaclaq23gyzwl7esuvhwlownrhatym` |
+| `agent-host` | `capsule.json` | manifest `asks`: `write` then `read` on `localhost://Users/self/.AppData/Agents/agent-host/*`; the module stays out of the fixture | `bafybeigc7v64singgkd4kgnvd63kvqx6nqrpcce6ckoh4odm7mdqw6dnxq` |
 | `provider` | `capsule.json`, `ipfs-provider` | the manifest's fields are those of the JSON in `test_parse_v1_manifest` (`elastos/crates/elastos-common/src/manifest.rs`, about lines 2443-2458); `ipfs-provider` is the ASCII `lab fixture` and a newline, a lab stand-in | `bafybeicmpw5zf373ogbziqix2mj2bagmn5imgj3hy7347nulpmx32kooxe` |
 | `model` | `capsule.json`, `weights.gguf`, `LICENSE`, `LICENSE.base`, `PROVENANCE.md` | the manifest's fields are those of `model_content_fixture` (same file, about lines 1265-1283; synthetic, not a published model package); the four other files are one line of ASCII each, lab stand-ins | `bafybeifh6dj5r5wc2j5kqxz6ukga74y3gi56woglqdzmmcdhqvy7qtljzq` |
 | `provider-variant-a` | `capsule.json`, `ipfs-provider` | `capsule.json` is `provider`'s, byte for byte; `ipfs-provider` is the ASCII `lab fixture aarch64-darwin` and a newline, a lab stand-in | `bafybeig77gyxfd7lldgueo5qtn2o7sjvwdr6txm3f7fc4dl4pyjsuvgoc4` |
@@ -356,16 +370,16 @@ fields and values; the Runtime's own `CapsuleManifest` parses and validates
 both. No provider binary, rootfs, Kubo, GGUF, model URL or model hash is
 copied.
 
-`agent-host` holds the agent-host capsule's own manifest and its declared asks
-(M1 check B2). `git hash-object` of each copy equals the blob id in the table.
-The agent-host lane may change its files later; these copies stay as they are,
-so the pin holds. The manifest's entrypoint, `agent-host.component.wasm`, is
-build output and is never committed (HANDOFF rule 7), so the module is not in
-the fixture: this lab CID covers the two files only and is not the whole
-capsule's name. The lab never parses `asks.json`: to the lab CID it is one more
-payload file. The manifest is a component manifest, so the Runtime's
-`validate()` also requires its `wit_world_sha256` to equal the SHA-256 of
-`elastos/wit/elastos-bus-v1.wit`, which `elastos-common` compiles in
+`agent-host` holds the agent-host capsule's manifest and its declared asks
+(M1 check B2). The declared maximum is the manifest `asks`: `write`, then
+`read`, on `localhost://Users/self/.AppData/Agents/agent-host/*`. That manifest
+is this lab's copy, and the fixture is that manifest. The manifest's entrypoint,
+`agent-host.component.wasm`, is build output and is never committed (HANDOFF
+rule 7), so the module is not in the fixture: this lab CID covers the
+manifest only and is not the whole capsule's name. The manifest is a
+component manifest, so the Runtime's `validate()` also requires its
+`wit_world_sha256` to equal the SHA-256 of `elastos/wit/elastos-bus-v1.wit`,
+which `elastos-common` compiles in
 (`elastos/crates/elastos-common/src/manifest.rs:412` and `:794-800`).
 
 `wc001-core` holds only the manifest. Its entrypoint `capsule.wasm` is wc-001's
@@ -408,9 +422,9 @@ with the first lab CID passes before and after the change.
 | One byte inside a JSON string value of `capsule.json`; the manifest still parses and validates | `one_byte_change_in_the_manifest_changes_the_lab_cid` | F-CI1k |
 | One byte in each web-app payload file in turn, `browser/app.js` included, which is not the entrypoint | `one_byte_change_in_any_payload_file_changes_the_lab_cid` | F-CI1l |
 | A file is added (an empty one too) or removed | `adding_or_removing_a_payload_file_changes_the_lab_cid` | F-CI1l |
-| One byte inside a JSON string value of agent-host's `asks.json`; it is still JSON | `one_byte_change_in_asks_json_changes_the_lab_cid` | F-CI3i, F-CI1l |
+| One byte inside the manifest ask's resource; the manifest still parses and validates | `one_byte_change_in_a_manifest_ask_changes_the_lab_cid` | F-CI3g, F-CI3i (the `asks` array is replaced with `[]` before the name), F-CI1l (that same replacement, and only the manifest and the entrypoint are named) |
 
-So the asks a capsule declares in `asks.json` are inside its lab CID. After
+So the asks a capsule declares in its manifest are inside its lab CID. After
 each change, `check_name` with the old lab CID is refused with both values.
 
 **A claimed name is checked, never trusted.** A name that a URL, a Store row
@@ -440,7 +454,7 @@ claimed)` (`tests/check_name.rs`):
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
-| A wrong lab CID is refused with both values; a claim that is not a lab CID is refused as one, before any bundle is read | `claimed_name_is_checked_never_trusted` | F-CI3g (no comparison), F-CI3h (no `b`), F-CI3k (any CID bytes), F-CI3l (characters outside the alphabet dropped), F-CI3m (uppercase), F-CI3p (order), F-CI18l (no re-encode) |
+| A wrong lab CID is refused with both values; a claim that is not a lab CID is refused as one, before any bundle is read | `claimed_name_is_checked_never_trusted` | F-CI3g (no comparison), F-CI3h (no `b`), F-CI3k (any 59-character text that starts with `bafkrei`), F-CI3l (characters outside the alphabet dropped), F-CI3m (uppercase), F-CI3p (order), F-CI18l (no re-encode) |
 | `lab_cid`'s refusals pass through | `check_name_preserves_lab_cid_refusals` | F-CI3n |
 | `check_name` names the bundle only by calling `lab_cid` | `check_name_uses_the_single_naming_path` | F-CI3o |
 
@@ -549,8 +563,9 @@ the bytes it hands out are the bytes its lab CID names.
   from that same check, and `manifest_name()` hands it out. M2-S2 added the
   manifest's `role` the same way: `manifest_role()` hands out the spelling the
   manifest states, through the infallible `CapsuleRole::as_str`, with no
-  default. `check_manifest` returns both values from its one `CapsuleManifest`
-  parse, so a caller that needs the name or the role never parses
+  default. `check_manifest` returns both values from its one read of the
+  manifest (`PinnedManifest::parse`, which parses the `CapsuleManifest` once),
+  so a caller that needs the name or the role never parses
   `capsule.json` again (P10). Both are identity data the manifest states, not
   a decision.
 - The entries come in the walk's order. The encoder sorts each directory's
@@ -629,13 +644,15 @@ The tests are in `tests/parse.rs`.
 
 ## For a lab that uses the lab CID
 
-Three lab crates outside this lane have a path dependency on this crate. Each
+Four lab crates outside this lane have a path dependency on this crate. Each
 manifest is listed below with what that crate uses: `pins` (its tests pin a
-printed lab CID), `parse` (it reads a printed lab CID with `LabCid`'s parse, or
-makes values with `encode_entries`), or `both`.
+printed lab CID), `parse` (it uses this crate's parse, encode, naming or
+signing calls and pins none: `LabCid`'s parse, `encode_entries`,
+`checked_bundle`, `sign_bundle`), or `both`.
 
 ```text
 lab/agent-conformance/Cargo.toml  parse
+lab/plan-approval/Cargo.toml  parse
 lab/wasm-capsule/Cargo.toml  both
 lab/wasm-capsule/tools/Cargo.toml  pins
 ```
@@ -644,6 +661,10 @@ lab/wasm-capsule/tools/Cargo.toml  pins
   `parse::<LabCid>()` (`src/report.rs`), makes its synthetic values with
   `encode_entries`, and names bundles with `checked_bundle`. It pins no lab
   CID.
+- `lab/plan-approval` (`plan-approval`), a dev-dependency: its tests include
+  `lab/agent-conformance/tests/common/signed_bundle.rs` by path
+  (`src/lib.rs`), which names a bundle with `checked_bundle` and signs it with
+  `sign_bundle`. It pins no lab CID; it names and signs bundles only.
 - `lab/wasm-capsule` (wasm-capsule-lab), the `capsule` package, a
   dev-dependency: its tests pin two lab CIDs (`tests/common/mod.rs`,
   `tests/bundle.rs`) and parse a printed one (`tests/run.rs`).
@@ -651,7 +672,8 @@ lab/wasm-capsule/tools/Cargo.toml  pins
   `lab_cid` (re-exported as `bundle_identity`). The two pins above are of what
   it prints, so a change in what `lab_cid` prints reaches it through them.
 
-Read at `b75ffefdb`. `every_lab_cid_consumer_is_in_the_adoption_note`
+Read at `b75ffefdb`; `lab/plan-approval` read at `03f4c3f5`.
+`every_lab_cid_consumer_is_in_the_adoption_note`
 (`tests/adoption.rs`) keeps the list true, and it reads no TOML itself. It
 lists every git-tracked `Cargo.toml` under `lab/`, at any depth, outside this
 lane (`git ls-files`), and asks Cargo's own reader about each one:
@@ -796,7 +818,7 @@ not loosen, skip or copy the manifest check.
 | --- | --- | --- |
 | The listing of the copy's five files gets the pin, the value `encode_entries` gives for the same files; on a temp copy whose `viewer` is the Runtime type's string, `lab_cid` of the folder equals `encode_listed_files` of that folder's listing | `photo_listing_gets_the_lab_cid_of_its_folder` | F-CI47a (the root is the photo rule's raw-listing CID: the SHA-256 of a `{path,size,sha256}` JSON listing, not of the directory block), F-CI47b (every leaf's Tsize is 0) |
 | README's Python rule recomputes the photo pin | `readme_python_recomputes_every_lab_cid_pin` | F-CI47a |
-| `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime type refuses is read as plain JSON) |
+| `lab_cid` refuses the exact PH6 folder with `ManifestUnparsed`, as the Runtime type does | `lab_cid_refuses_the_photo_manifest_the_runtime_type_refuses` | F-CI1g (a manifest the Runtime's reader does not parse is named all the same) |
 | A listed file over one chunk is refused with its path; one of exactly one chunk is a leaf | `listed_file_over_the_chunk_limit_is_refused` | F-CI47c (`encode_listed_files` has no size refusal) |
 | A listed file over one leaf is still refused, its text names its path, its length and `encode_entries`, and `encode_entries` names the same file from its bytes (task 048) | `listed_file_over_one_leaf_names_the_bytes_call` | F-CI47c |
 | The listing's lab CID gets the one package record from `sign_cid_record`, with the record's exact payload, and `verify_cid_record` passes it; no folder is walked (task 049) | `a_closure_listing_gets_a_package_record_by_its_cid` | F-CI49c |
@@ -954,13 +976,13 @@ lab's stand-in launcher, in test code, calls it
 ([below](#lab-stand-in-launcher-m1-check-b1)).
 
 What the tests show, on the `agent-host` fixture. Its manifest asks for a grant
-through `capabilities`, and it has its `asks.json`. A fresh in-memory test key
+through `asks`. A fresh in-memory test key
 signs it:
 
 - The signature is valid: `verify_name_signature` returns `Ok(())` when that
   key's DID is accepted.
 - After signing, and again after verifying, the bundle's lab CID is still
-  `bafybeices…hatym`, and the parent folder still holds only the bundle folder.
+  `bafybeigc7…6dnxq`, and the parent folder still holds only the bundle folder.
   So no byte the lab CID covers changed, and no file appeared next to the
   bundle. The tests compare before and after. They cannot see a file that
   was written and then removed in between.
@@ -1241,14 +1263,18 @@ web-projection app: role `app`, type `web-projection`), a provider
 | --- | --- | --- |
 | App, provider and model: the folder name does not change the CID, one payload byte does and the old pin is refused with both values, a fresh key's record binds the pin and verifies, and signing changes no byte and no listing | `three_kinds_share_the_package_rules` | F-CI1l, F-CI12a |
 | A WASM app has one closure: one manifest per fixture, no platform directory or platform entrypoint, no second entrypoint | `a_wasm_app_has_one_closure` | F-CI12b |
-| The provider and model pins | `lab_cid_matches_the_pinned_value_for_each_fixture` (`tests/fixtures.rs`) | F-CI1l, F-CI12a |
+| The provider and model pins | `lab_cid_matches_the_pinned_value_for_each_fixture` (`tests/fixtures.rs`) | F-CI1l, F-CI3i, F-CI12a |
 
 The first two tests are in `tests/kinds.rs`. F-CI12a leaves `weights.gguf`
 out of the name while the walk still reads it. F-CI1l (name only the
 manifest and the entrypoint) does not drop `weights.gguf`, because that is
 the model's entrypoint, so F-CI12a is a different edit, not a second entry
-for one edit. F-CI1l also names `three_kinds_share_the_package_rules`, which
-it fails on `web-app`'s pin. F-CI12b turns `wc001-core`'s entrypoint into
+for one edit. F-CI1l also replaces the manifest's `asks` array with `[]`
+before the name, so one byte of an ask leaves the lab CID unchanged, and it
+names `three_kinds_share_the_package_rules`, which it fails on `web-app`'s
+pin. F-CI3i makes that same `asks` replacement and keeps every file, so the
+agent-host pin changes and one byte inside an ask leaves the lab CID
+unchanged. F-CI12b turns `wc001-core`'s entrypoint into
 `aarch64-darwin/capsule.wasm`, in a file the runner restores. The runner
 cannot add a file, so a platform folder added to the fixture tree is proved
 by hand only: with `fixtures/web-app/aarch64-darwin/app.js` added,
@@ -1401,7 +1427,7 @@ second, platform-specific CID through a binding (PRINCIPLES 13). The rule
 keys on the manifest type, not on the label: a `type: data` bundle such as
 `content-sample` binds under `*` or under a platform label. Whether a bundle
 is `wasm` comes from the one manifest check: `check_manifest` returns it
-from its one `CapsuleManifest` parse, and the walk keeps it in the
+from its one read of the manifest (`PinnedManifest::parse`), and the walk keeps it in the
 `CheckedBundle` it makes. Nothing else parses `capsule.json` (P10). The
 payload bytes, the schema and the domain are 015's: `*` is written into the
 payload like any other label. Only "`*` for `wasm`" is a rule; other capsule
@@ -1433,7 +1459,7 @@ admission, launch, rotation or delegation. It runs no build.
 | `agent-host` under `aarch64-darwin` is refused with reason (e2), at signing and in both verifiers | `a_wasm_app_under_a_platform_label_is_refused` | F-CI16a, F-CI16h |
 | `*` with `x86_64-linux` is refused with reason (c), at signing, in the given list and in the binding's list; `*` alone passes | `the_portable_label_stands_alone` | F-CI16b, F-CI16i |
 | `content-sample` (`type: data`) binds under `*` and under `aarch64-darwin`: the rule keys on the manifest type | `a_portable_data_capsule_binds_under_the_portable_label` | F-CI16c |
-| The WASM type comes from the one `CapsuleManifest` parse in `check_manifest`, kept by the seam | `wasm_type_comes_from_the_one_manifest_check` | F-CI16d |
+| The WASM type comes from the one read of the manifest in `check_manifest` (`PinnedManifest::parse`), kept by the seam | `wasm_type_comes_from_the_one_manifest_check` | F-CI16d |
 | Two faults at once, at (e2) and each check next to it ((e), (f), (g)): the earlier check answers | `wasm_variant_refusal_order_is_stable` | F-CI16f, F-CI16g |
 | A limit, not a feature: a signed under `x86_64-linux` and b under `aarch64-darwin`, against the words in their payloads, pass both verifiers with the pinned CIDs | `a_variant_label_is_the_signers_claim` | F-CI17a |
 
@@ -1494,7 +1520,7 @@ one name compare and one record check, never a copy (P10):
 | (b) `pre-CID, not B1 evidence` | `cid` does not parse as `LabCid` (`impl FromStr for LabCid`) | the parse's own reason | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (c) `pre-CID, not B1 evidence` | the store holds no bundle under that CID | "no bundle is stored under" the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (d) | `checked_bundle` of the stored folder refuses (here: `capsule.json` removed after publish) | the walk's own refusal | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
-| (e) | `CheckedBundle::check_name(cid)` refuses: the stored bytes changed after publish (here: one byte of `asks.json`) | the compare's own refusal, naming both CIDs | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
+| (e) | `CheckedBundle::check_name(cid)` refuses: the stored bytes changed after publish (here: one byte of the manifest ask) | the compare's own refusal, naming both CIDs | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (f) | no record's `cid` equals the requested CID | starts "unsigned:" and names the CID | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` |
 | (g) | `verify_checked_package_record` refuses every record that binds the CID: a signer not accepted, an empty accepted list, a flipped signature byte | the first such record's own refusal, in store order | `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch`, `standin_launch_does_not_depend_on_record_order` |
 
@@ -1513,8 +1539,8 @@ list" text, listing no instance.
 
 Only then it adds one instance and answers `{"id", "name", "status":
 "launched", "session_id"}`, with `name` from `CheckedBundle::manifest_name()`,
-the checked manifest's `name` from the one manifest check: the stand-in never
-parses `capsule.json` itself.
+the checked manifest's `name` from the one manifest check. Its typed `asks`
+are parsed from that same checked `capsule.json`.
 `get_capsules` answers `{"capsules": [...]}`, one entry per launched instance
 with `id`, `name`, `status`, `session_id` and `cause` (`null`); a refused
 launch never appears. `standin_launches_a_signed_bundle_by_its_cid` runs the
@@ -1529,7 +1555,7 @@ A valid signature alone yields no grant. The stand-in's grant view,
 `{"scope": "all_sessions_live", "capabilities": [...]}`, one entry per held
 grant with today's five keys (`request_id`, `resource`, `action`, `duration`,
 `granted_at`) and `session_id`. A launch adds no grant, although the
-`agent-host` manifest asks for one in `capabilities` and its record verifies.
+`agent-host` manifest's `asks` name a ceiling and its record verifies.
 The one way a grant exists is `seed_grant(session_id, resource, action,
 duration)`, a lab test seam, not a route: it holds one grant with the next
 `request_id` and `granted_at` from a counter. The seed is there only to show
@@ -1572,7 +1598,7 @@ Each route, field and state, and where it comes from. #309 is draft PR #309,
 | (a) `path` is never a fallback | `standin_launches_by_cid_only` | F-CI32e (a body with `path` is looked up by its folder) |
 | A refused launch leaves no instance | `standin_launches_by_cid_only`, `standin_refuses_an_unsigned_or_mismatched_bundle_before_launch` | F-CI32f (the instance is added before the checks) |
 | A launched answer has its listed instance | `standin_launches_a_signed_bundle_by_its_cid` | F-CI32g (answers launched, adds no instance) |
-| A valid signature alone yields no grant: a launch adds none, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | F-CI33a (a launch grants each `capabilities` entry of the manifest) |
+| A valid signature alone yields no grant: a launch adds none, and the answer and the list hold no grant key | `standin_valid_signature_alone_yields_no_grant` | F-CI33a (a launch grants each action of each ask in the manifest) |
 | The grant view lists every held grant of every session, so it is not a constant | `standin_grant_view_lists_a_seeded_grant`, `standin_grant_view_lists_every_held_grant_of_every_session` | F-CI33b (the view answers no entries whatever is held), F-CI37a (only the first held grant), F-CI37b (only the first held grant's session), F-CI37c (one `request_id` for every grant) |
 | The grant view answers under the `all_sessions_live` marker | `standin_valid_signature_alone_yields_no_grant`, `standin_grant_view_lists_a_seeded_grant` | F-CI33c (the marker dropped) |
 
@@ -1594,12 +1620,12 @@ memory.
 
 ### Asks come only from the signed bytes (M1 check B2, no-schema part)
 
-A launched instance is handed its asks only as the `asks.json` bytes of the
-checked bundle that passed every check above. `checked_launch` takes the
-manifest's `name` (`CheckedBundle::manifest_name()`) and the content of the
-`asks.json` entry (`CheckedBundle::entries()`) from the same `CheckedBundle`,
-the one walk (P10), and the launch keeps that content in the instance, once: `Some(bytes)`, or `None` when
-the bundle has no `asks.json`. Nothing reads the folder again. Task 044 shows
+A launched instance is handed its asks only as the typed `asks` of the checked
+manifest that passed every check above. `checked_launch` takes the manifest's
+`name` (`CheckedBundle::manifest_name()`) and parses `asks` from that same
+checked `capsule.json` (`CheckedBundle::entries()`), the one walk (P10). The
+launch keeps that encoding once: `Some(bytes)`, or `None` when the manifest
+asks for nothing. Nothing reads the folder again. Task 044 shows
 that for the launch itself: `set_after_walk`, a lab test seam, not a route,
 gives `checked_launch` a hook that it calls once on the stored folder, right
 after the one walk and before (e), so a test can change the bytes on disk
@@ -1610,34 +1636,32 @@ The launch answer, the `get_capsules` entry and the grant view keep exactly
 the keys above, with no asks key, and the launch body stays `{"cid"}`.
 
 `standin_hands_an_instance_only_its_signed_asks_bytes` launches the signed
-`agent-host` bundle as in the journey above: its session answers the
-committed `fixtures/agent-host/asks.json` bytes. Then one byte of the stored
-`asks.json` changes. The session still answers the signed bytes, and a second
+`agent-host` bundle as in the journey above: its session answers the typed
+asks of the committed manifest. Then one byte of that ask changes. The
+session still answers the signed asks, and a second
 launch of the same CID is refused by (e), the name compare's own refusal, with
 no new instance and an empty grant view.
 `standin_gives_each_session_its_own_asks` launches `agent-host` and `web-app`
-(which has no `asks.json`), each signed by a fresh test key, in both orders:
+(which declares no asks), each signed by a fresh test key, in both orders:
 the `agent-host` session answers its bytes, the `web-app` session answers
 `None`, and so does an unknown session.
 `standin_takes_the_asks_from_the_walk_not_the_folder` launches the same signed
-bundle with a hook that changes one byte of the stored `asks.json`: the launch
-answers `launched`, the stored `asks.json` no longer equals the committed
-fixture bytes (so the hook ran), and the session answers the committed fixture
-bytes, which the test reads itself. Before task 044, a launch that read
-`asks.json` from the folder after the walk passed both tests above, because
+bundle with a hook that changes one byte of the stored manifest ask: the
+launch answers `launched`, the stored manifest no longer equals the committed
+fixture (so the hook ran), and the session answers the asks the walk read.
+Before task 044, a launch that read the folder after the walk passed both
+tests above, because
 neither changes the folder between the walk and the launch.
 
 | Rule | Named test | Falsifiers |
 | --- | --- | --- |
-| The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads `asks.json` from the stored folder at call time) |
+| The instance keeps the signed bytes from launch; a change on disk after launch does not reach it | `standin_hands_an_instance_only_its_signed_asks_bytes` | F-CI35a (the planted accept-anything stub: `asks_of` reads the manifest asks from the stored folder at call time) |
 | Each session answers its own asks | `standin_gives_each_session_its_own_asks` | F-CI35b (`asks_of` ignores the session and answers the first instance's asks) |
-| A bundle with no `asks.json` is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` for a bundle with no `asks.json`) |
-| A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads `asks.json` from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
+| A manifest that asks for nothing is handed `None`, not empty bytes | `standin_gives_each_session_its_own_asks` | F-CI35c (`Some(Vec::new())` when `asks` is empty) |
+| A change on disk between the walk and the launch does not reach the instance | `standin_takes_the_asks_from_the_walk_not_the_folder` | F-CI44a (the 041 review's stub: `checked_launch` reads the manifest asks from the stored folder at launch), F-CI44b (the hook is never called), F-CI44c (the hook runs before the walk, so (e) refuses) |
 
 Not shown:
 
-- No ask schema, provisional or not, and no parse or field read of
-  `asks.json`: to the stand-in it is bytes.
 - No mapping of an ask to an operation; that is `lab/bus-v2-proposal/`, and
   this lane writes no B2 encoding.
 - No grant from an ask: a launch still adds none (the grant view above).
@@ -1693,8 +1717,8 @@ Kubo's output. The Runtime's CID names a release archive, not the bundle's
 files (see [Why a lab CID](#why-a-lab-cid-and-not-the-runtimes-cid)). The test
 `the_lab_cid_claim_stays_computed_by_the_lab` keeps this: these two sections
 and the module doc of `src/lib.rs` say the claim word for word, this section
-states the gate, and no `*.md` file of the lane outside `tests/` and no file
-under `src/` holds a phrase from its list of equality claims (`EQUALITY_CLAIMS` in
+states the gate, and no `*.md` file of the lane outside `tests/`, no file
+under `src/`, and no file under the identity crate's `src/` holds a phrase from its list of equality claims (`EQUALITY_CLAIMS` in
 `tests/common/mod.rs`), in any case and across line breaks. The scan reads
 every such file that git tracks or would track: an untracked file that git
 does not ignore counts, so a new doc is read before it is committed, and an
@@ -1730,12 +1754,14 @@ RUST_TEST_THREADS=2 cargo test --locked --offline --manifest-path lab/capsule-id
 
 The package is its own workspace (empty `[workspace]` table) with its own
 `Cargo.lock`, so the Runtime's workspace never grows for it. Dependencies:
-`elastos-common` by path (read only, for `CapsuleManifest`), `elastos-identity`
+`elastos-bundle-identity` by path (the identity code: the walk and the
+encoder), `elastos-common` by path (read only, for `CapsuleManifest` and `PinnedManifest`), `elastos-identity`
 by path (read only, for the one `did:key` encoder and decoder), `hex` (since
-task 018 only the tests use it), `serde_json`, `sha2`, `ed25519-dalek` 2.1 with its `rand_core` feature, and
-`rustix` 1.1.4 with its `fs` feature, for safe `openat`, `fstat` and listing
-from a handle (`std` cannot open relative to a handle, and the crate forbids
-`unsafe`). Dev-dependencies: `tempfile` and `rand` 0.8 (the operating system's
+task 018 only the tests use it), `serde_json`, `sha2`, and `ed25519-dalek` 2.1 with its `rand_core` feature.
+`rustix` 1.1.4 with its `fs` feature (safe `openat`, `fstat` and listing
+from a handle: `std` cannot open relative to a handle, and both crates forbid
+`unsafe`) is the identity crate's dependency now; here it is a dev-dependency,
+for the tests that stage and swap entries. Dev-dependencies: `rustix`, `tempfile` and `rand` 0.8 (the operating system's
 generator in tests). There is no dependency on `elastos-server` or
 `elastos-runtime`. All resolve offline from the local cargo cache.
 `zerocopy` is locked at 0.8.62 because 0.8.63's derive crate is not in that
@@ -1753,9 +1779,13 @@ them with its cause.
 
 ```
 Cargo.toml, Cargo.lock   the package, its own workspace and lockfile
-src/lib.rs               checked_bundle, lab_cid, check_name and its checked form,
-                         the encoder, the walk, the test-key signature, the shared
-                         digest, the lab package record and the lab variant binding
+src/lib.rs               the re-export of the identity crate's public names
+                         (checked_bundle, lab_cid, check_name and its checked form,
+                         encode_entries, encode_listed_files; the walk and the
+                         tree builder behind them are in
+                         elastos/crates/elastos-bundle-identity), and this
+                         crate's own: the test-key signature, the shared digest,
+                         the lab package record and the lab variant binding
 fixtures/                content-sample, web-app, wc001-core, agent-host, provider,
                          model, provider-variant-a, provider-variant-b
 consumer-fixtures/       photo-stand-in-photo-set: the photo lane's PH6 fixture,
@@ -1768,12 +1798,13 @@ tests/common/mod.rs      assembly, pins, the bounded call, observers, wc-001 dri
                          the refusal asserts both signature checks share, the
                          key-material scan, the python3 -I run of README's blocks,
                          the cargo metadata scan for lab crates that use this one,
-                         the claim scan of the lane's docs and src/, the check
+                         the claim scan of the lane's docs and src/ and of the
+                         identity crate's src/, the check
                          of the falsifier list's inventory, the lab stand-in
                          launcher (StandInRuntime)
 tests/adoption.rs        the adoption note lists every lab CID consumer; Cargo's
                          reader decides; the scan writes nothing
-tests/bytes.rs           every byte is the name: manifest, payload, asks.json, files
+tests/bytes.rs           every byte is the name: manifest, payload, manifest ask, files
 tests/check_name.rs      a claimed name is checked, never trusted; one naming path
 tests/checked_bundle.rs  the name and the bytes it covers; the checked name check
 tests/claims.rs          the claim stays "Kubo v0.40.1 profile, computed by the lab"
@@ -1797,7 +1828,7 @@ tests/parse.rs           a printed lab CID is read with the one claim check
 tests/refusals.rs        each refusal and its reason
 tests/stand_in.rs        the lab stand-in launches by CID after the publisher check;
                          a valid signature alone yields no grant; an instance
-                         is handed only its signed asks.json bytes
+                         is handed only its checked manifest asks
 tests/variant_binding.rs the signed variant binding outside the bundles
 tests/walk.rs            changes made while a bundle is named; one walk
 falsifiers.json          planted bugs, each caught by named tests
@@ -1857,9 +1888,13 @@ only when every named test fails for its stated reason, never from a build
 error. Every entry edits a file the runner restores after a killed run. Its
 recovery list (`PROVIDER_TARGETS` in `examples/agent-host/falsify.py`) names
 five files of this lane: `src/lib.rs`, `tests/common/mod.rs`,
-`fixtures/wc001-core/capsule.json`, `.gitignore` and `README.md`. F-CI4h
+`fixtures/wc001-core/capsule.json`, `.gitignore` and `README.md`, and a sixth
+outside it: `elastos/crates/elastos-bundle-identity/src/lib.rs`, where the
+identity code lives since it moved there, text for text. F-CI4h
 edits this lane's `.gitignore`, F-CI4i edits this file, and every other entry
-edits one of the first three. Task 014 moved the key-material scan, byte for
+edits one of the first three or the sixth. Where this file says below that
+an entry edits `src/lib.rs`, the edit is in the sixth file if the code it
+names moved. Task 014 moved the key-material scan, byte for
 byte except for `pub(super)`, from `tests/name_signature.rs` into
 `tests/common/mod.rs`, so F-CI4z now edits a restored file, with its `old`,
 `new` and tests unchanged. Task 019's entries edit only `src/lib.rs`
@@ -1933,10 +1968,11 @@ F-CI36b edits `tests/common/mod.rs`, in the stand-in's `check_records`; each
 anchor is a line task 036 added, found exactly once. Task 036 moved seventeen
 older edits, each with its same bug and the same tests. `check_manifest` now
 returns the WASM flag and the manifest's `name`, and the seam reads
-`let (wasm, name) = check_manifest(&manifest.content)?;`, so F-CI1k, F-CI1l,
-F-CI3a, F-CI3b, F-CI3i and F-CI12a anchor on that line, F-CI1f and F-CI9c
+`let (wasm, name) = check_manifest(&manifest.content)?;`, so F-CI1k,
+F-CI3a, F-CI3b and F-CI12a anchor on that line, F-CI1f and F-CI9c
 set an empty name beside the `false` flag, and F-CI1g's fallback returns
-`Ok((false, String::new()))`. `CheckedBundle` gained its `name` field, so
+`Ok((false, String::new()))` (as it was at task 036; see the paragraph on M2
+slice Q1 below for what F-CI1g plants now). `CheckedBundle` gained its `name` field, so
 F-CI9a, F-CI9b, F-CI9d, F-CI9e and F-CI9j build or define it with that field.
 The stand-in's record lookup moved into `check_records`, so F-CI32c now
 replaces the record check there and F-CI32d answers `Ok(())` where no record
@@ -2057,7 +2093,8 @@ F-CI1d prints without the `b`; F-CI1r keeps a second link of one name. F-CI3b
 joins absolute paths as folders (a leading `/` would be refused, not named).
 F-CI3d and F-CI3j keep their edits, with titles that no longer say stream.
 The hex claim check is now the base32 one: F-CI3g skips the compare, F-CI3h
-takes the claim without its `b`, F-CI3k drops the CID-bytes check, F-CI3l
+takes the claim without its `b`, F-CI3k lets through any 59-character text
+that starts with `bafkrei` (a raw leaf's CID is one such text), F-CI3l
 drops characters outside the alphabet first, F-CI3m lowercases the claim
 first, F-CI9i reads the claim itself without the `b`, F-CI4j signs the text
 without the `b`, and F-CI13a to F-CI13c plant their bugs in the parse, which
@@ -2065,13 +2102,31 @@ now keeps the claim check's root. F-CI14d and F-CI14e anchor on
 `MANIFEST_FILE` and `NAME_SIGNATURE_DOMAIN`, since the two constants they
 anchored on are gone. F-CI15ae compares only the `bafybei` start.
 
+M2 slice Q1 (a bundle whose manifest pins a requirement can be named) moved
+ten older edits, each with its same tests. The claim check now calls the
+Runtime's `cid_form` and the identity crate has no decoder, so F-CI3h, F-CI3l,
+F-CI3m and F-CI18l plant around that one call in `lab_cid_digits`, and F-CI9i
+and F-CI13a call `cid_form` themselves. F-CI3k and F-CI13a no longer take any
+CID bytes: each lets through any 59-character text that starts with `bafkrei`,
+whether or not it is a CID at all; a raw leaf's CID is one such text, and it
+is the one their tests use. `check_manifest` now parses with
+`PinnedManifest::parse`, which also calls `validate()`, so there is no parse
+line and no `validate()` line left to edit: F-CI1g and F-CI1h each put an
+early return before that call, `Ok((false, String::new(), String::new()))`
+when the reader's answer is `Unparsed` (F-CI1g) or `Invalid` (F-CI1h), so a
+bundle whose manifest the reader does not parse, or that fails its
+`validate()`, is named all the same. F-CI16c anchors on
+`manifest.capsule_type()`. The edits around the call leave `cid_form`
+itself as it is; its own tests are in `elastos-common`.
+
 Task 016 moved seventeen older edits, each with its same bug and the same
 tests. The seam now keeps `check_manifest`'s answer
 (`let wasm = check_manifest(&manifest.content)?;`), so F-CI1k, F-CI1l,
 F-CI3a, F-CI3b, F-CI3i and F-CI12a anchor on that line, F-CI1f keeps the flag
 `false` when it skips a missing manifest, and F-CI9c's seam keeps no flag.
 `check_manifest` now ends `validate()...?;` and `Ok(wasm)`, so F-CI1h drops
-the `validate()` line and F-CI1g's fallback returns `Ok(false)`.
+the `validate()` line and F-CI1g's fallback returns `Ok(false)` (as they were
+at task 016; the paragraph on M2 slice Q1 above says what both plant now).
 `CheckedBundle` gained its `wasm` field, so F-CI9a, F-CI9b, F-CI9d, F-CI9e and
 F-CI9j build or define it with that field. Check (e2) sits between (e) and
 (f), so F-CI15t swaps (e) and (f) with (e2) after them. Signing now walks with
@@ -2093,6 +2148,17 @@ comment line after `encode_entries(&entries)` in `checked_bundle_observed`
 keeps that call on its own line, as the edits of F-CI1k, F-CI1l, F-CI3a,
 F-CI3b and F-CI3i expect; without it, rustfmt joins the call and the line
 after it.
+
+The review fix of F-CI1l and F-CI3i points those two plants at
+`elastos/crates/elastos-bundle-identity/src/lib.rs`, on
+`let (wasm, name, role) = check_manifest(&manifest.content)?;` and the
+`encode_entries(&entries)` line under it, in `checked_bundle_within_observed`.
+The lab crate re-exports that walk. F-CI3i still checks the manifest, then
+replaces its `asks` array with `[]` in the bytes that are named. F-CI1l still
+keeps only the manifest and the entrypoint, and it makes that same
+replacement, so one byte of an ask leaves the lab CID unchanged. F-CI33a
+grants each action of each ask. F-CI35a and F-CI44a read those asks from the
+stored manifest, `capsule.json`, at call time and at launch.
 
 The canonical runner runs the list. Its `capsule-identity` command builds and
 tests `lab/capsule-identity/Cargo.toml`, runs each named test alone with

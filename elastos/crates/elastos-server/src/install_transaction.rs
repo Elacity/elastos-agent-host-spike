@@ -841,6 +841,25 @@ impl InstallTransaction {
         support::require_installed(self, &journal.support, previous)
     }
 
+    /// Call only after the restart owner proves the recorded Home generation gone.
+    pub(crate) fn repair_restart_support(&self, previous: bool) -> anyhow::Result<()> {
+        let journal = self.read_journal()?.context("release journal missing")?;
+        let restart = journal.restart.as_ref().context("restart record missing")?;
+        anyhow::ensure!(
+            if previous {
+                matches!(
+                    restart.phase,
+                    RestartPhase::PreviousReady | RestartPhase::PreviousRunning
+                )
+            } else {
+                restart.phase == RestartPhase::CandidateReady
+            },
+            "support repair requires the stopped restart generation"
+        );
+        self.validate_scratch(&journal)?;
+        support::repair_installed(self, &journal.support, previous)
+    }
+
     pub(crate) fn abort_pre_activation_restart(&self) -> anyhow::Result<()> {
         let mut journal = self.read_journal()?.context("release journal missing")?;
         anyhow::ensure!(
@@ -1065,6 +1084,10 @@ impl InstallTransaction {
             )?;
         }
         support::require_installed(self, &journal.support, previous)?;
+        // The release is final here: support verification is done and no
+        // rollback can follow, so each support folder that is a component
+        // capsule keeps this release's walk CID.
+        support::record_capsule_folders(self, &journal.support);
         self.cleanup(&journal)
     }
 

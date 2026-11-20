@@ -19,7 +19,11 @@ impl exports::elastos::bus::lifecycle::Guest for BusConformance {
         }
 
         let identity = elastos::bus::identity::context();
-        if identity.principal.as_deref() != Some(PRINCIPAL) {
+        if identity.principal.as_deref() != Some(PRINCIPAL)
+            && !identity.principal.as_deref().is_some_and(|principal| {
+                matches!(principal.strip_prefix("agent:v2:"), Some(id) if id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+            })
+        {
             return Err(elastos::bus::types::BusError::Denied(
                 "Runtime did not bind the conformance principal".to_string(),
             ));

@@ -19,7 +19,10 @@ import { createServer } from "node:http";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
+import { importProductSmokePlaywright, productSmokeLaunchOptions } from "./product-smoke-browser.mjs";
+import { browserWaitTimeoutMs } from "./lib/browser-wait-timeout.mjs";
+import { pointerOnTopPageControl, pressTopPageControl } from "./lib/home-top-page-press.mjs";
 
 import { LONG_PRESS_MS } from "../capsules/home-gui/browser/shell-touch.js";
 import { EXTERNAL_LINK_OPEN_GUARD_MS } from "../capsules/home/browser/home-external-link.js";
@@ -596,16 +599,6 @@ async function listen() {
   return `http://127.0.0.1:${address.port}`;
 }
 
-function playwrightSpecifier() {
-  const configured = process.env.ELASTOS_PLAYWRIGHT_MODULE || "";
-  if (configured) {
-    return configured.startsWith("file:") ? configured : pathToFileURL(resolve(configured)).href;
-  }
-  return pathToFileURL(
-    join(repoRoot, "elastos/tools/browser-playwright-engine/node_modules/playwright/index.js"),
-  ).href;
-}
-
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }
@@ -714,7 +707,42 @@ function geometry() {
   };
 }
 
+// A cold font cache lays text out in the fallback face and a warm cache in
+// Inter, and the two have different metrics. Every capsule declares Inter as
+// an optional face and the fixture serves it with no-store, so this wait
+// cannot warm a later document's cache: it only lets this document's own font
+// load settle before its boxes are read. A frame that is still navigating has
+// no document to settle; the capsule measurements record null for it, while
+// the shell measurement has no catch and fails its check.
+async function waitForDocumentFonts(target) {
+  const timeoutMs = browserWaitTimeoutMs();
+  // A font load that never settles fails the check instead of hanging it.
+  const settled = await target.evaluate(async (limitMs) => {
+    // A frame that is still parsing has no body yet; measure the family the
+    // parsed text uses and keep the wait harmless there.
+    const styled = document.body || document.documentElement;
+    const family = getComputedStyle(styled).fontFamily.split(",")[0].trim();
+    const loading = (async () => {
+      // A family the document does not declare has no face to load; the
+      // measurement then uses the same fallback it always did.
+      if (family) {
+        await document.fonts.load(`16px ${family}`).catch(() => null);
+      }
+      await document.fonts.ready;
+    })();
+    let timer;
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(false), limitMs); });
+    const result = await Promise.race([loading.then(() => true), deadline]);
+    clearTimeout(timer);
+    return result;
+  }, timeoutMs).catch(() => null);
+  if (settled === false) {
+    throw new Error(`document fonts must settle within ${timeoutMs} ms`);
+  }
+}
+
 async function measure(frame, label) {
+  await waitForDocumentFonts(frame);
   const metrics = await frame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX });
   const shape = await frame.evaluate(geometry);
   return { surface: label, ...metrics, geometry: shape };
@@ -860,6 +888,9 @@ async function measureCapsuleFrame(page, target) {
   if (!capsuleFrame) {
     return { capsule: null, capsuleLayout: null };
   }
+  // A frame that is still navigating has no document to settle; the capsule
+  // measurements below already record null in that case.
+  await waitForDocumentFonts(capsuleFrame);
   return {
     capsule: await capsuleFrame.evaluate(measureSurface, { minTarget: MIN_TARGET_PX, minText: MIN_TEXT_PX }).catch(() => null),
     capsuleLayout: await capsuleFrame.evaluate(() => ({
@@ -996,6 +1027,13 @@ function promptCloseFailures(run) {
 const LINK_DESTINATION_ORIGIN = "https://links.example";
 // A press that began inside the guard is held until well after it.
 const EARLY_PRESS_HOLD_MS = EXTERNAL_LINK_OPEN_GUARD_MS + 300;
+// An early press that never reached Open link, or that began after the guard,
+// tested nothing, so it is arranged again with a fresh sheet. A kind gets this
+// many tries in total, and all of them share one stated deadline: the sheet and
+// page waits take the time left, and a turn that runs out fails as the check's
+// own precondition rather than as a guard result.
+const EARLY_PRESS_ATTEMPTS = 3;
+const EARLY_PRESS_TURN_MS = 45_000;
 async function probeExternalLink(page, dir, target) {
   const context = page.context();
   const destinationRequests = [];
@@ -1049,7 +1087,9 @@ async function probeExternalLink(page, dir, target) {
     await sleep(SURFACE_SETTLE_MS);
     const afterSynthetic = { pages: context.pages().length - pagesBefore, requests: destinationRequests.length, sheet: await sheet() };
     const popupOpened = context.waitForEvent("page", { timeout: BOOT_TIMEOUT_MS });
-    await page.locator("#home-link-open").click();
+    // The sheet is drawn over the Library frame: each pointer press on it goes
+    // through the helper, which first sees the pointer reach Home's page.
+    await pressTopPageControl(page.locator("#home-link-open"), { label: "Open link" });
     const popup = await popupOpened;
     await popup.waitForLoadState("domcontentloaded");
     const opened = {
@@ -1065,8 +1105,7 @@ async function probeExternalLink(page, dir, target) {
     // press held past the guard, an early held Space and an early Enter with
     // key repeat open nothing; a fresh tap on the same sheet then opens once.
     const earlyPresses = [];
-    for (const kind of ["pointer", "space", "enter-repeat"]) {
-      const url = `${LINK_DESTINATION_ORIGIN}/early-${kind}`;
+    const earlyPress = async (kind, url, timeLeft) => {
       await page.evaluate(() => {
         const root = document.querySelector("#home-link-prompt");
         const timing = { shownAt: null, pressAt: null };
@@ -1084,11 +1123,17 @@ async function probeExternalLink(page, dir, target) {
         open.addEventListener("keydown", pressed, { capture: true, once: true });
       });
       await ask(url);
-      await page.locator("#home-link-prompt").waitFor({ state: "visible", timeout: BOOT_TIMEOUT_MS });
+      // Watched in the page, frame by frame: the locator wait below re-checks
+      // only every 500 ms once its first tries have passed, which alone can
+      // carry the press past the guard.
+      await page.waitForFunction(() => !document.querySelector("#home-link-prompt").hidden, null, { timeout: timeLeft("the sheet's show") });
+      await page.locator("#home-link-prompt").waitFor({ state: "visible", timeout: timeLeft("the sheet's show") });
       const before = { pages: context.pages().length, requests: destinationRequests.length };
       if (kind === "pointer") {
-        // hover waits until Open link is visible, stable and hit by the pointer.
-        await page.locator("#home-link-open").hover();
+        // The button is pressed once Home's page reports the pointer on it: a
+        // press sent before the browser has drawn the sheet goes to the
+        // Library frame underneath and never reaches Open link.
+        await pointerOnTopPageControl(page.locator("#home-link-open"), { label: "early pointer press" });
         await page.mouse.down();
         await sleep(EARLY_PRESS_HOLD_MS);
         await page.mouse.up();
@@ -1105,30 +1150,113 @@ async function probeExternalLink(page, dir, target) {
       }
       await sleep(SURFACE_SETTLE_MS);
       const timing = await page.evaluate(() => window.__earlyPress);
+      const sheetShown = !(await sheet()).hidden;
+      if (!sheetShown && destinationRequests.length > before.requests) {
+        // The press opened the link. Its tab can be listed a moment after its
+        // request, and it is counted and closed below.
+        await waitFor(() => context.pages().length > before.pages, timeLeft("the tab a press opened"), "the tab a press opened");
+      }
       const press = {
         kind,
         url,
+        // `pressedAfterMs` is what the guard assertion measures: the press must
+        // begin inside the guard. `sheetSeen` and `pressSeen` name which half of
+        // that measurement the page never recorded, for the failure message.
         pressedAfterMs: timing.shownAt === null || timing.pressAt === null ? null : Math.round(timing.pressAt - timing.shownAt),
+        sheetSeen: timing.shownAt !== null,
+        pressSeen: timing.pressAt !== null,
         pages: context.pages().length - before.pages,
         requests: destinationRequests.length - before.requests,
-        sheetShown: !(await sheet()).hidden,
+        sheetShown,
       };
-      earlyPresses.push(press);
       if (!press.sheetShown) {
-        // The early press opened the link: close what it opened and report it.
+        // The press opened the link: close what it opened.
         await Promise.all(context.pages().slice(before.pages).map((opened) => opened.close()));
         await page.bringToFront();
-        continue;
       }
-      const retried = context.waitForEvent("page", { timeout: BOOT_TIMEOUT_MS });
+      return press;
+    };
+    // A fresh tap on the shown sheet opens its address once and takes the
+    // sheet down, which is also how a re-arranged early press starts from a
+    // hidden sheet again.
+    const freshTap = async (press, label, timeLeft) => {
+      const opened = context.waitForEvent("page", { timeout: timeLeft("the fresh tap's page") });
       // A touch tap, not a mouse click: its click can follow pointerup late.
+      await pointerOnTopPageControl(page.locator("#home-link-open"), { label });
       await page.locator("#home-link-open").tap();
-      const retry = await retried;
-      await retry.waitForLoadState("domcontentloaded");
+      const retry = await opened;
+      await retry.waitForLoadState("domcontentloaded", { timeout: timeLeft("the fresh tap's page load") });
       press.retryUrl = retry.url();
       press.retryOpenerIsNull = await retry.evaluate(() => window.opener === null);
       await retry.close();
       await page.bringToFront();
+    };
+    for (const kind of ["pointer", "space", "enter-repeat"]) {
+      const url = `${LINK_DESTINATION_ORIGIN}/early-${kind}`;
+      // One deadline for every try of this kind: each sheet, page and fresh-tap
+      // wait takes only the time left, and a turn that runs out fails as the
+      // unmet precondition it is.
+      const deadline = Date.now() + EARLY_PRESS_TURN_MS;
+      const timeLeft = (what) => {
+        const left = deadline - Date.now();
+        if (left <= 0) {
+          throw new Error(`precondition not met: the early ${kind} press turn used its ${EARLY_PRESS_TURN_MS} ms before ${what}; this is not a guard failure`);
+        }
+        return left;
+      };
+      const attemptPress = async (label, call) => {
+        timeLeft(`starting ${label}`);
+        let result;
+        try {
+          result = await call();
+        } catch (error) {
+          if (deadline - Date.now() <= 0) {
+            throw new Error(`precondition not met: the early ${kind} press turn ran out of its ${EARLY_PRESS_TURN_MS} ms during ${label}; this is not a guard failure. Last error: ${error.message}`);
+          }
+          throw error;
+        }
+        // A try that finishes after the turn's budget is still a missed budget.
+        if (Date.now() > deadline) {
+          throw new Error(`precondition not met: the early ${kind} press turn finished ${label} after its ${EARLY_PRESS_TURN_MS} ms; this is not a guard failure`);
+        }
+        return result;
+      };
+      let press = await attemptPress("try 1", () => earlyPress(kind, url, timeLeft));
+      // Two outcomes tested nothing about the guard, and both are the check's
+      // own precondition rather than a guard result. A likely cause of an
+      // unmeasurable press (`pressedAfterMs: null`) is that Open link never saw
+      // the press, so nothing was held during the guard; the page not recording
+      // the sheet's show is another possible cause, and the log cannot tell the
+      // two apart. Or the press reached Open link only after the guard, so it
+      // was an ordinary press that opened its own address once. Either way the
+      // turn is kept on record and the sheet is shown again for a fresh
+      // address, up to EARLY_PRESS_ATTEMPTS tries within EARLY_PRESS_TURN_MS.
+      // Every other outcome, and the guard's own assertions, stand as they are.
+      const earlier = [];
+      for (let attempt = 2; attempt <= EARLY_PRESS_ATTEMPTS; attempt += 1) {
+        if (press.pressedAfterMs !== null && press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS
+          && !press.sheetShown && press.pages === 1 && press.requests === 1) {
+          earlier.push(press);
+          press = await attemptPress(`try ${attempt}`, () => earlyPress(kind, `${url}-shown-again-${earlier.length}`, timeLeft));
+          continue;
+        }
+        if (press.pressedAfterMs === null && press.sheetShown && press.pages === 0 && press.requests === 0) {
+          earlier.push(press);
+          // The address this sheet shows is opened by the fresh tap, so the
+          // next try starts from a hidden sheet.
+          await attemptPress(`the fresh tap before try ${attempt}`, () => freshTap(press, `fresh tap after the unseen early ${kind} press`, timeLeft));
+          press = await attemptPress(`try ${attempt}`, () => earlyPress(kind, `${url}-press-unseen-${earlier.length}`, timeLeft));
+          continue;
+        }
+        break;
+      }
+      if (earlier.length) press.earlier = earlier;
+      earlyPresses.push(press);
+      if (!press.sheetShown) {
+        // The early press opened the link; that is reported below.
+        continue;
+      }
+      await attemptPress("the fresh tap after the last try", () => freshTap(press, `fresh tap after the early ${kind} press`, timeLeft));
     }
     await ask(`${LINK_DESTINATION_ORIGIN}/escape`);
     await shown("link sheet for Escape");
@@ -1141,7 +1269,7 @@ async function probeExternalLink(page, dir, target) {
     await sleep(3_200);
     await ask(`${LINK_DESTINATION_ORIGIN}/cancel`);
     await shown("link sheet after the cool-down");
-    await page.locator("#home-link-cancel").click();
+    await pressTopPageControl(page.locator("#home-link-cancel"), { label: "Cancel on the link sheet" });
     await sleep(SURFACE_SETTLE_MS);
     const afterCancel = (await sheet()).hidden;
     return {
@@ -1199,18 +1327,38 @@ function externalLinkFailures(run) {
     failures.push(`${label}: Open link must open exactly the address with no opener and no referrer. Got ${JSON.stringify(probe.opened)}`);
   }
   for (const press of probe.earlyPresses) {
-    if (press.pressedAfterMs === null || press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS) {
-      failures.push(`${label}: the early ${press.kind} press must begin inside the ${EXTERNAL_LINK_OPEN_GUARD_MS} ms guard to test it. Got ${JSON.stringify(press)}`);
+    const tries = (press.earlier || []).length + 1;
+    if (press.pressedAfterMs === null) {
+      // The check's own precondition, not the guard: either no press was held
+      // during the guard or the sheet's show went unrecorded, so the guard was
+      // never measured. The message names the half
+      // of the timing the page did not record.
+      const unrecorded = !press.sheetSeen
+        ? "the sheet's show was not observed, so the guard's start is unknown"
+        : "Open link never saw the press";
+      failures.push(`${label}: precondition not met after ${tries} tries: ${unrecorded}, so the early ${press.kind} press inside the ${EXTERNAL_LINK_OPEN_GUARD_MS} ms guard was not tested (this is not a guard failure). Got ${JSON.stringify(press)}`);
+    } else if (press.pressedAfterMs >= EXTERNAL_LINK_OPEN_GUARD_MS) {
+      failures.push(`${label}: precondition not met after ${tries} tries: the early ${press.kind} press began ${press.pressedAfterMs} ms after the sheet showed, past the ${EXTERNAL_LINK_OPEN_GUARD_MS} ms guard, so the guard was not tested (this is not a guard failure). Got ${JSON.stringify(press)}`);
     } else if (press.pages !== 0 || press.requests !== 0 || !press.sheetShown) {
       failures.push(`${label}: an early ${press.kind} press held past the guard must open nothing and keep the sheet. Got ${JSON.stringify(press)}`);
     } else if (press.retryUrl !== press.url || !press.retryOpenerIsNull) {
       failures.push(`${label}: a fresh press after an early ${press.kind} press must open the link once with no opener. Got ${JSON.stringify(press)}`);
     }
+    // A try set aside for a fresh one still had to open the address its sheet
+    // showed when it was tapped afresh.
+    for (const attempt of press.earlier || []) {
+      if (attempt.retryUrl !== undefined && (attempt.retryUrl !== attempt.url || !attempt.retryOpenerIsNull)) {
+        failures.push(`${label}: a fresh press after an early ${attempt.kind} press must open the link once with no opener. Got ${JSON.stringify(attempt)}`);
+      }
+    }
   }
   if (!probe.afterEscape || !probe.duringCooldown || !probe.afterCancel) {
     failures.push(`${label}: Escape and Cancel must close the sheet, and the app must wait out its cool-down. Got ${JSON.stringify({ afterEscape: probe.afterEscape, duringCooldown: probe.duringCooldown, afterCancel: probe.afterCancel })}`);
   }
-  const expectedRequests = [probe.address, ...probe.earlyPresses.map((press) => press.url)];
+  // Every try's address is requested exactly once, in the order the tries ran:
+  // by the press itself when it began after the guard, or by the fresh tap that
+  // took its sheet down otherwise.
+  const expectedRequests = [probe.address, ...probe.earlyPresses.flatMap((press) => [...(press.earlier || []), press].map((attempt) => attempt.url))];
   if (JSON.stringify(probe.destinationRequests) !== JSON.stringify(expectedRequests) || probe.pagesAfter !== probe.pagesBefore) {
     failures.push(`${label}: each destination must be requested once, only after a press that began after the guard. Got ${JSON.stringify(probe.destinationRequests)}`);
   }
@@ -2234,7 +2382,7 @@ async function runBrowserLinkProbe(browser, profile, origin) {
     }));
     await sleep(EXTERNAL_LINK_OPEN_GUARD_MS + 100);
     const pagesBefore = context.pages().length;
-    await page.locator("#home-link-open").click();
+    await pressTopPageControl(page.locator("#home-link-open"), { label: "Open in Browser" });
     await waitFor(
       () => frame.locator('.window[data-target="browser"]').count().then((count) => count > 0),
       BOOT_TIMEOUT_MS,
@@ -3638,10 +3786,10 @@ function summarize(run) {
 
 async function launchEngine(playwright, engineId) {
   const engine = playwright[engineId];
-  const executable = engineId === "chromium" && process.env.ELASTOS_BROWSER_EXECUTABLE
-    ? process.env.ELASTOS_BROWSER_EXECUTABLE
+  const executable = engineId === "chromium"
+    ? (process.env.ELASTOS_BROWSER_EXECUTABLE || productSmokeLaunchOptions().executablePath)
     : engine.executablePath();
-  if (!existsSync(executable)) {
+  if (!executable || !existsSync(executable)) {
     return null;
   }
   const args = engineId === "chromium"
@@ -3676,8 +3824,7 @@ const report = { generatedAt: new Date().toISOString(), origin, source: sourceTr
 const failures = sourceFailures(report.source);
 const skippedEngines = [];
 try {
-  const imported = await import(playwrightSpecifier());
-  const playwright = imported.default || imported;
+  const playwright = await importProductSmokePlaywright();
   for (const engineId of requestedEngines) {
     assert(engineId === "chromium" || engineId === "webkit", `unsupported engine ${engineId}`);
     const browser = await launchEngine(playwright, engineId);
@@ -3709,11 +3856,11 @@ try {
   }
   assert(
     report.runs.length > 0,
-    `home-phone-layout-smoke ran no engine; requested ${requestedEngines.join(",")} but none is installed under elastos/tools/browser-playwright-engine`,
+    `home-phone-layout-smoke ran no engine; requested ${requestedEngines.join(",")} but Playwright Chromium is not installed`,
   );
   assert(
     !requestedEngines.includes("chromium") || report.runs.some((run) => run.engine === "chromium"),
-    "home-phone-layout-smoke needs the chromium engine from elastos/tools/browser-playwright-engine",
+    "home-phone-layout-smoke needs Playwright Chromium",
   );
   report.capsuleErrors = capsuleErrors;
   report.consoleErrors = consoleErrors;

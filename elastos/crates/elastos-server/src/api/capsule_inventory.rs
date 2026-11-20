@@ -874,6 +874,43 @@ pub(crate) mod tests {
         assert!(development_names.contains("gba-ucity"));
     }
 
+    /// A pinned manifest in the capsules folder is absent to Home's reader,
+    /// and its name is absent from the catalog's list. The same capsule
+    /// without the pin is read and listed (the control).
+    #[test]
+    fn a_pinned_manifest_is_absent_from_the_inventory_and_the_catalog_list() {
+        use crate::runtime::tests::{unpinned_manifest, write_fixture_capsule, PINNED_MANIFEST};
+        let data_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            data_dir.path().join("components.json"),
+            serde_json::json!({
+                "external": {"pinned-fixture": {
+                    "install_path": "capsules/pinned-fixture", "platforms": {}
+                }},
+                "capsules": {}, "profiles": {}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let capsules = data_dir.path().join("capsules");
+        let listed = |manifest: &str| {
+            let dir = write_fixture_capsule(&capsules, manifest);
+            let names: Vec<String> = list_active_capsule_manifests(data_dir.path())
+                .into_iter()
+                .map(|manifest| manifest.name)
+                .collect();
+            (
+                load_capsule_manifest(&dir, "pinned-fixture").is_some(),
+                names,
+            )
+        };
+        assert_eq!(
+            listed(&unpinned_manifest()),
+            (true, vec!["pinned-fixture".to_string()])
+        );
+        assert_eq!(listed(PINNED_MANIFEST), (false, Vec::new()));
+    }
+
     #[test]
     fn product_inventory_requires_an_installed_component_and_capsule_contract() {
         let data_dir = tempfile::tempdir().unwrap();

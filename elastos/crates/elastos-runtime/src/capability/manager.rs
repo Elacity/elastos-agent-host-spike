@@ -596,10 +596,41 @@ impl CapabilityManager {
             && !expired
     }
 
+    /// Whether `token` could still validate, read-only, for `caller_capsule_id`:
+    /// every check `validate` makes that a read can make for the token's own
+    /// action and resource, plus the caller. Steps 1-3 (version, signature,
+    /// issuer), 4 (caller), 9 (future-dated) and 11 (classification, refused
+    /// for any ceiling because no classification is supplied) are compared
+    /// here; steps 7, 8, 10 and the read-only form of step 12's use check are
+    /// `can_still_validate`. Steps 5 and 6 (action and resource) are made
+    /// against the token's own values and so always pass: a path may mint a
+    /// token that names a narrower action or resource than its record. The
+    /// Browser operator does exactly that, filing its record for
+    /// `elastos://browser/pages/{page}/input` and minting the token for
+    /// `elastos://browser/pages/{page}/operator/{id}` with the same session.
+    /// The all-sessions live view asks this of each granted record, so a
+    /// grant it lists is one the record's session can still use the token
+    /// for; it is not one that covers the record's own action or resource. No
+    /// use is counted and nothing is audited.
+    pub async fn can_still_validate_for_caller(
+        &self,
+        token: &CapabilityToken,
+        caller_capsule_id: &str,
+    ) -> bool {
+        token.version == CapabilityToken::CURRENT_VERSION
+            && token.verify_signature(&self.verifying_key)
+            && token.issuer == self.public_key_bytes()
+            && token.capsule == caller_capsule_id
+            && !token.issued_at.is_future()
+            && token.constraints.max_classification.is_none()
+            && self.can_still_validate(token).await
+    }
+
     /// Revoke a specific token
-    pub async fn revoke(&self, token_id: TokenId, reason: &str) {
-        self.store.revoke_token(token_id).await;
+    pub async fn revoke(&self, token_id: TokenId, reason: &str) -> std::io::Result<()> {
+        let result = self.store.revoke_token(token_id).await;
         self.audit_log.capability_revoke(&token_id, reason);
+        result
     }
 
     /// Revoke all tokens by advancing the epoch
@@ -668,7 +699,10 @@ impl CapabilityManager {
             .capability_use(&token.id, capsule_id, &token.resource, token.action, false);
         self.audit_log.security_warning(
             "capability_validation_failed",
-            &format!("token {} failed validation: {}", token.id, reason),
+            &format!(
+                "capsule {} presented token {} failed validation: {}",
+                capsule_id, token.id, reason
+            ),
         );
     }
 }
@@ -804,7 +838,7 @@ mod tests {
         );
 
         // Revoke this specific token
-        manager.revoke(token.id, "test revocation").await;
+        manager.revoke(token.id, "test revocation").await.unwrap();
 
         // Token should now be invalid
         let result = manager
@@ -860,7 +894,7 @@ mod tests {
         ));
         assert_eq!(capability_use_count(&manager, false), 1);
 
-        manager.revoke(token.id, "hidden").await;
+        manager.revoke(token.id, "hidden").await.unwrap();
         assert!(matches!(
             tick(false).await,
             Err(ValidationError::TokenRevoked)
@@ -971,7 +1005,7 @@ mod tests {
         let used = manager.validate(&once, "test-capsule", Action::Read, &resource, None);
         used.await.unwrap();
         let revoked = grant(None, None);
-        manager.revoke(revoked.id, "test").await;
+        manager.revoke(revoked.id, "test").await.unwrap();
         let expired = grant(None, Some(SecureTimestamp::at(1)));
 
         assert!(manager.can_still_validate(&live).await, "a live token");
@@ -991,6 +1025,76 @@ mod tests {
             !manager.can_still_validate(&expired).await,
             "an expired token"
         );
+    }
+
+    #[tokio::test]
+    async fn can_still_validate_for_refuses_a_token_validate_would_refuse_first() {
+        let manager = create_test_manager();
+        let resource = ResourceId::new("localhost://Users/self/Documents/test.txt");
+        let mint = || {
+            manager.grant(
+                "test-capsule",
+                resource.clone(),
+                Action::Read,
+                TokenConstraints::default(),
+                None,
+            )
+        };
+        let live = mint();
+        assert!(
+            manager
+                .can_still_validate_for_caller(&live, "test-capsule")
+                .await,
+            "a token this runtime minted for this caller is live"
+        );
+
+        // Each token differs from `live` in one step and is signed again
+        // afterwards, so only the step its message names can refuse it.
+        let mut future_version = mint();
+        future_version.version = CapabilityToken::CURRENT_VERSION + 1;
+        future_version.sign(&manager.signing_key);
+
+        let mut wrong_issuer = mint();
+        wrong_issuer.issuer = [9u8; 32];
+        wrong_issuer.sign(&manager.signing_key);
+
+        let mut future_dated = mint();
+        future_dated.issued_at = SecureTimestamp::after_secs(3600);
+        future_dated.sign(&manager.signing_key);
+
+        // Signed first, then changed: the signature no longer covers it.
+        let mut stale_signature = mint();
+        stale_signature.constraints.delegatable = true;
+
+        let other_caller = manager.grant(
+            "other-capsule",
+            resource.clone(),
+            Action::Read,
+            TokenConstraints::default(),
+            None,
+        );
+
+        let cases = [
+            (future_version, "a token from another version is not live"),
+            (wrong_issuer, "a token from an untrusted issuer is not live"),
+            (future_dated, "a future-dated token is not live"),
+            (
+                stale_signature,
+                "a token whose signature does not verify is not live",
+            ),
+            (
+                other_caller,
+                "a token minted for another caller is not live",
+            ),
+        ];
+        for (token, message) in cases {
+            assert!(
+                !manager
+                    .can_still_validate_for_caller(&token, "test-capsule")
+                    .await,
+                "{message}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1270,7 +1374,7 @@ mod tests {
         );
 
         // Revoke the parent
-        manager.revoke(parent.id, "compromised").await;
+        manager.revoke(parent.id, "compromised").await.unwrap();
 
         // Delegation should fail because parent is revoked
         let result = manager
@@ -1416,7 +1520,7 @@ mod tests {
         // Revoke the token mid-flight
         let mgr = Arc::clone(&manager);
         set.spawn(async move {
-            mgr.revoke(token_id, "concurrent test").await;
+            mgr.revoke(token_id, "concurrent test").await.unwrap();
             Ok(()) // Return Ok so we can join uniformly
         });
 
@@ -1508,7 +1612,7 @@ mod tests {
         for _ in 0..50 {
             let mgr = Arc::clone(&manager);
             set.spawn(async move {
-                mgr.revoke(token_id, "concurrent revoke").await;
+                mgr.revoke(token_id, "concurrent revoke").await.unwrap();
             });
         }
 

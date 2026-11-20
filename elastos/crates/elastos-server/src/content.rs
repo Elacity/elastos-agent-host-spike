@@ -13021,6 +13021,37 @@ mod tests {
         );
     }
 
+    /// The prepare step behind `run --cid`, `serve --cid` and `share` stops
+    /// at its own manifest parse for a pinned manifest: the error is that
+    /// parse's own text, and the parse comes before any folder is made. The
+    /// same manifest without the pin gets past the parse, to the later
+    /// refusal of its type (the control).
+    #[tokio::test]
+    async fn content_prepare_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        use crate::runtime::tests::{unpinned_manifest, PINNED_MANIFEST};
+        let (_data_dir, registry, ipfs, _content) = registry_with_content_and_ipfs().await;
+        let mut errors = Vec::new();
+        for manifest in [PINNED_MANIFEST.to_string(), unpinned_manifest()] {
+            let mut cat_files = ipfs.cat_files.lock().await;
+            cat_files.insert("capsule.json".to_string(), manifest.into_bytes());
+            drop(cat_files);
+            let error = prepare_capsule_from_content_provider(&registry, TEST_CID)
+                .await
+                .unwrap_err();
+            errors.push(error.to_string());
+        }
+        assert!(
+            errors[0].starts_with("unknown field `cid`"),
+            "{}",
+            errors[0]
+        );
+        assert!(
+            errors[1].starts_with("MicroVM capsule opens"),
+            "{}",
+            errors[1]
+        );
+    }
+
     #[tokio::test]
     async fn content_prepare_data_capsule_materializes_verified_manifest_files() {
         let (_data_dir, registry, ipfs, _content) = registry_with_content_and_ipfs().await;

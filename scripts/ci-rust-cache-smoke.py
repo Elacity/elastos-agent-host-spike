@@ -138,10 +138,10 @@ def probe(args, report):
                     CARGO_TARGET_DIR=str(target), CARGO_BUILD_BUILD_DIR=str(build), CARGO_INCREMENTAL="0",
                    RUSTC=tools["rustc"], RUSTC_WRAPPER=tools["sccache"],
                    RUSTC_WORKSPACE_WRAPPER="", RUSTFLAGS="", CARGO_ENCODED_RUSTFLAGS="",
-                   RUSTUP_TOOLCHAIN="1.91.0", ELASTOS_RELEASE_VERSION="probe-one")
+                   RUSTUP_TOOLCHAIN="1.95.0", ELASTOS_RELEASE_VERSION="probe-one")
         report["versions"] = {name: run([binary, "--version"], root, env)
                               for name, binary in tools.items()}
-        for name, expected in (("sccache", "0.18.0"), ("rustc", "1.91.0"), ("cargo", "1.91.0")):
+        for name, expected in (("sccache", "0.18.0"), ("rustc", "1.95.0"), ("cargo", "1.95.0")):
             if report["versions"][name].split()[:2] != [name, expected]:
                 raise RuntimeError(f"expected {name} {expected}, got {report['versions'][name]}")
         report["target_dir"] = str(target)
@@ -244,7 +244,7 @@ def probe(args, report):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sccache", help="sccache 0.18.0 executable (default: PATH)")
-    parser.add_argument("--rustc", help="Rust 1.91.0 compiler (default: PATH)")
+    parser.add_argument("--rustc", help="Rust 1.95.0 compiler (default: PATH)")
     parser.add_argument("--output-json", type=Path, help="also write the result JSON to this path")
     args = parser.parse_args()
     report = {"ok": False}

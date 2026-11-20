@@ -8,12 +8,15 @@
 //!
 //! Route: `stage_probe` stages the viewer probe through
 //! `src/identity.rs::stage_probe`, which runs `capsule_identity::checked_bundle`
-//! (the Runtime's own `CapsuleManifest` parse and `validate`). The control uses
-//! the same staging route with the same manifest minus that one key.
+//! (the Runtime's own reader of a manifest that may pin a requirement,
+//! `PinnedManifest::parse`, which checks each pin, parses the rest as
+//! `CapsuleManifest` and calls `validate`). The control uses the same staging
+//! route with the same manifest minus that one key.
 //!
-//! Handover only: the Runtime manifest requirement type refuses `cid`, so
-//! `requires_cid_is_refused_today` records that refusal. It goes red when the
-//! Runtime reads the field, and the real journey in GAPS.md then takes over.
+//! Handover only: the one bundle check now names a viewer bundle that pins
+//! its content, which `a_viewer_that_pins_its_content_is_staged_and_named`
+//! records, with a pin of the wrong form refused. Nothing launches content
+//! by its CID yet; the real journey in GAPS.md is still owed.
 
 #[allow(dead_code)]
 mod common;
@@ -35,7 +38,7 @@ use std::sync::{LazyLock, Mutex};
 // as `tests/effects.rs` does.
 static PROBE_BUILD: Mutex<()> = Mutex::new(());
 
-const GAP: &str = "gap: M2(e) content capsule named by its CID: the Runtime manifest reader refuses `requires[].cid` (Anders owns elastos-common; Sash's yes before that patch)";
+const GAP: &str = "gap: M2(e) content capsule named by its CID: a bundle that pins its content by CID is named, but no launch reads the pin or finds the content (the start by CID and its requirement closure are not built)";
 
 /// The template pair: the viewer that accepts `content_capsule`, and the
 /// content manifest with the viewer binding that acceptance requires.
@@ -187,28 +190,70 @@ fn manifest_refusal(manifest: &Value) -> String {
     refusal
 }
 
-/// The handover record. The Runtime manifest type parses every staged manifest
-/// (`stage_probe` runs `capsule_identity::checked_bundle`, which runs that
-/// type's own `serde` parse and `validate`), and it refuses `cid` in a
-/// `requires[]` entry. This test is not ignored because it asserts today's
-/// fact; it goes red when the Runtime reads `requires[].cid`.
+/// The handover record, one step on. The bundle check reads a manifest with
+/// the Runtime's own reader of pins (`stage_probe` runs
+/// `capsule_identity::checked_bundle`, which runs `PinnedManifest::parse`), so
+/// a viewer bundle that pins its content by CID is staged and named, and a
+/// pin of the wrong form is refused in that reader's words. This test asserts
+/// today's fact. It launches nothing: no launch reads a pin yet.
 #[test]
-fn requires_cid_is_refused_today() {
+fn a_viewer_that_pins_its_content_is_staged_and_named() {
     let before = content_listing();
     let right = content_cid();
+    let manifest = viewer_manifest(&right);
+    let bytes = probe_bytes();
+    let stage = |home: &ThrowawayHome, manifest: &Value, label: &str| {
+        agent_conformance::identity::stage_probe(
+            home,
+            &bytes,
+            &serde_json::to_vec(manifest).expect("manifest serializes"),
+            label,
+        )
+    };
+
     let home = ThrowawayHome::new().unwrap();
-    let refusal = staging_refusal(&home, &viewer_manifest(&right), "viewer-content-cid");
+    let staged = stage(&home, &manifest, "viewer-content-cid")
+        .expect("the one bundle check names a viewer bundle that pins its content");
+    let named = capsule_identity::lab_cid(&staged.path).expect("the staged bundle has a lab CID");
     assert_eq!(
-        refusal, "probe staging: bundle identity refused",
+        staged.identity.bundle_lab_cid,
+        named.to_string(),
+        "the staged name is the bundle check's name of the staged folder"
+    );
+
+    // The pin is among the named bytes: the same manifest without it, staged
+    // the same way with the same probe, has another name.
+    let mut plain = manifest.clone();
+    plain["requires"][0]
+        .as_object_mut()
+        .expect("the requirement is an object")
+        .remove("cid");
+    let plain_home = ThrowawayHome::new().unwrap();
+    let unpinned = stage(&plain_home, &plain, "viewer-no-pin").expect("the control is a bundle");
+    assert_ne!(
+        unpinned.identity.bundle_lab_cid, staged.identity.bundle_lab_cid,
+        "the pin is not among the bytes the name covers"
+    );
+
+    // A pin that is not a package root in its one spelling (here: capitals)
+    // is refused by the same check, in the Runtime reader's own words.
+    let mut wrong = manifest.clone();
+    wrong["requires"][0]["cid"] = json!(right.to_string().to_uppercase());
+    let wrong_home = ThrowawayHome::new().unwrap();
+    assert_eq!(
+        staging_refusal(&wrong_home, &wrong, "viewer-wrong-pin"),
+        "probe staging: bundle identity refused",
         "the staging refusal is the one bundle check, not a missing file"
     );
-    let said = manifest_refusal(&viewer_manifest(&right));
-    assert!(
-        said.contains("unknown field `cid`") && said.contains("expected `name` or `kind`"),
-        "the refusal must be the manifest reader's own field refusal, got: {said}"
+    assert_eq!(
+        manifest_refusal(&wrong),
+        "the Runtime refuses the pinned manifest capsule.json (pin_form_invalid): requirement \"example-content\""
     );
-    home.finish().expect("finish the throwaway Home");
-    eprintln!("{GAP}\nrefusal now: {said}");
+
+    for home in [home, plain_home, wrong_home] {
+        home.finish().expect("finish the throwaway Home");
+    }
+    eprintln!("{GAP}");
     let later = capsule_identity::checked_bundle(&CONTENT).expect("re-read the content");
     assert_eq!(before, later.entries(), "the staged content is unchanged");
     assert_eq!(
@@ -221,7 +266,8 @@ fn requires_cid_is_refused_today() {
 #[test]
 fn the_plain_staged_probe_is_still_a_bundle() {
     // The control: the same staged viewer manifest with only
-    // `requires[0].cid` removed parses, so the refusal above is that key.
+    // `requires[0].cid` removed is a bundle too, as it was before the bundle
+    // check could read a pin.
     let mut manifest = viewer_manifest(&content_cid());
     manifest["requires"][0]
         .as_object_mut()

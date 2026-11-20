@@ -2,9 +2,18 @@ import { BUTTON_BITS, gamepadMask as readGamepadMask } from "./gba-input.js";
 import { createHomeNavigationClient } from "/apps/home/home-navigation-client.js";
 
 const VIEWER_ID = "gba-emulator";
+// A fetch sanity bound only. The launch core owns the 64 MiB rule.
 const MAX_ROM_BYTES = 64 * 1024 * 1024;
+const LAUNCH_RECORD_NAME = "rom.json";
 const query = new URLSearchParams(window.location.search);
 const homeToken = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("home_token") || "";
+// A by-CID launch serves this page at the Runtime's own address,
+// /launch/<id>/page/<entrypoint>. Its token and the installed app's
+// #home_token look alike, so the address decides: the id is 32 ASCII hex
+// digits in either case and the entrypoint a plain content path, with no
+// encoded slash standing for a segment break.
+const LAUNCH_ADDRESS = /^\/launch\/([0-9a-fA-F]{32})\/page\/(.+)$/;
+const launchMode = launchAddress(window.location.pathname) !== null;
 const homeParentOrigin = query.get("home_origin") || "";
 const homeNavigation = createHomeNavigationClient({ homeToken, homeOrigin: homeParentOrigin });
 if (homeToken && homeParentOrigin && window.top !== window) {
@@ -89,7 +98,7 @@ function setSlotState(slot, saved) {
   const slotStatus = document.getElementById(`slot-status${slot}`);
   loadButton.dataset.saved = String(saved);
   loadButton.title = saved ? `Load state ${slot}` : `State ${slot} is empty`;
-  loadButton.disabled = !gameLoaded || !saved;
+  loadButton.disabled = launchMode || !gameLoaded || !saved;
   slotStatus.textContent = saved ? "Saved" : "Empty";
   slotStatus.dataset.slotState = saved ? "saved" : "empty";
 }
@@ -98,9 +107,10 @@ function setGameControlsEnabled(enabled) {
   pauseButton.disabled = !enabled;
   fastForwardButton.disabled = !enabled;
   for (let slot = 1; slot <= 3; slot += 1) {
-    document.getElementById(`btn-save${slot}`).disabled = !enabled;
+    // A by-CID launch keeps no save state, so its state controls never turn on.
+    document.getElementById(`btn-save${slot}`).disabled = launchMode || !enabled;
     const loadButton = document.getElementById(`btn-load${slot}`);
-    loadButton.disabled = !enabled || loadButton.dataset.saved !== "true";
+    loadButton.disabled = launchMode || !enabled || loadButton.dataset.saved !== "true";
   }
 }
 
@@ -151,7 +161,25 @@ async function loadEngine() {
   return enginePromise;
 }
 
+function launchAddress(pathname) {
+  const match = LAUNCH_ADDRESS.exec(pathname);
+  if (!match) return null;
+  const entrypoint = match[2];
+  // A percent-encoded slash would stand for a segment break here while the
+  // Runtime joins it as one part, so no encoded slash is a launch address.
+  if (/%(?:2f|5c)/i.test(entrypoint)) return null;
+  let decoded;
+  try {
+    decoded = decodeURIComponent(entrypoint);
+  } catch {
+    // An escape the Runtime could not decode is not this page's address.
+    return null;
+  }
+  return plainLaunchContentPath(decoded) ? decoded : null;
+}
+
 function requestedGame() {
+  if (launchMode) return { launch: true };
   const capsule = query.get("capsule");
   if (capsule) return { capsule };
   const objectUri = query.get("objectUri") || query.get("uri");
@@ -181,6 +209,7 @@ async function fetchBytes(path) {
 }
 
 async function readGame(request) {
+  if (request.launch) return readLaunchGame();
   if (request.capsule) {
     return {
       bytes: await fetchBytes(
@@ -197,6 +226,85 @@ async function readGame(request) {
     };
   }
   throw new Error("Choose a GBA game from Library.");
+}
+
+// A content path the launch route can address, as the Runtime's
+// `plain_content_path` requires (`page_launch.rs:118`): one or more plain parts
+// joined by `/`, not empty, no `\`, no control character (`char::is_control` is
+// the Unicode Cc category: C0, DEL and C1), no empty, `.` or `..` part. The
+// Runtime rule has no byte bound, so none is invented here. A lone UTF-16
+// surrogate is refused here too: Rust strings cannot hold one, and
+// `encodeURIComponent` would throw an unnamed error on it.
+function hasLoneSurrogate(text) {
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function plainLaunchContentPath(path) {
+  return (
+    typeof path === "string" &&
+    path.length > 0 &&
+    !path.includes("\\") &&
+    !/\p{Cc}/u.test(path) &&
+    !hasLoneSurrogate(path) &&
+    path.split("/").every((part) => part !== "" && part !== "." && part !== "..")
+  );
+}
+
+// The core writes this one record under elastos://launch/output/; the page reads
+// it at the same name and trusts only the three keys it names.
+async function readLaunchRecord() {
+  const response = await fetch(
+    `/api/viewers/${VIEWER_ID}/launch/output/${LAUNCH_RECORD_NAME}`,
+    { headers: launchHeaders() },
+  );
+  if (!response.ok) throw new Error(`gba_launch_record_missing: ${response.status}`);
+  let record;
+  try {
+    record = await response.json();
+  } catch {
+    throw new Error("gba_launch_record_invalid: not JSON");
+  }
+  if (
+    !record ||
+    typeof record !== "object" ||
+    Object.keys(record).sort().join(",") !== "path,sha256,size" ||
+    !plainLaunchContentPath(record.path) ||
+    !Number.isSafeInteger(record.size) ||
+    record.size <= 0 ||
+    typeof record.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(record.sha256)
+  ) {
+    throw new Error("gba_launch_record_invalid: path, size and sha256 are required");
+  }
+  return record;
+}
+
+// The launch boots the ROM the core recorded, at the recorded path, and refuses
+// bytes that do not match the record. A by-CID launch is play-only: no save.
+async function readLaunchGame() {
+  const record = await readLaunchRecord();
+  const path = record.path.split("/").map(encodeURIComponent).join("/");
+  const bytes = await fetchBytes(`/api/viewers/${VIEWER_ID}/launch/content/${path}`);
+  if (bytes.length !== record.size) {
+    console.warn(`gba_launch_rom_size_mismatch: record ${record.size}, fetched ${bytes.length}`);
+    throw new Error("gba_launch_rom_size_mismatch: the ROM size differs from the launch record");
+  }
+  const sha256 = await sha256Hex(bytes);
+  if (sha256 !== record.sha256) {
+    console.warn(`gba_launch_rom_hash_mismatch: record ${record.sha256}, fetched ${sha256}`);
+    throw new Error("gba_launch_rom_hash_mismatch: the ROM differs from the launch record");
+  }
+  return { bytes, fileName: record.path.split("/").pop() };
 }
 
 async function sha256Hex(bytes) {
@@ -230,7 +338,14 @@ function responseRevision(response) {
   return revision;
 }
 
+// A by-CID launch is play-only: the Runtime keeps no save, save state or
+// library for it, so the page asks no storage route under its token.
+function assertStorageAllowed() {
+  if (launchMode) throw new Error("A launch keeps no saved data.");
+}
+
 async function readStoredData(url) {
+  assertStorageAllowed();
   const response = await fetch(url, { headers: launchHeaders() });
   if (response.status === 404) return { url, revision: null, bytes: null };
   if (!response.ok) throw new Error("Saved data is unavailable. Keep the current game open.");
@@ -265,6 +380,7 @@ function withSaveSession(session, operation) {
 }
 
 async function writeStoredData(session, record, bytes, keepalive = false) {
+  assertStorageAllowed();
   assertSaveSession(session);
   if (!record) throw new Error("Read this save successfully before saving. The live game is unchanged.");
   session.failedWrite = { record, bytes, uncertain: true };
@@ -347,7 +463,7 @@ async function recoverSave() {
 
 async function persistSave(keepalive = false) {
   const session = saveSession;
-  if (!session || !gameLoaded) return;
+  if (launchMode || !session || !session.save || !gameLoaded) return;
   return withSaveSession(session, async () => {
     const bytes = session.engine.getSave();
     if (bytes?.length) await writeStoredData(session, session.save, new Uint8Array(bytes), keepalive);
@@ -369,6 +485,7 @@ async function waitForState(session, slot) {
 }
 
 async function saveState(slot) {
+  assertStorageAllowed();
   const session = saveSession;
   assertSaveSession(session);
   return withSaveSession(session, async () => {
@@ -383,6 +500,7 @@ async function saveState(slot) {
 }
 
 async function loadState(slot) {
+  assertStorageAllowed();
   const session = saveSession;
   assertSaveSession(session);
   return withSaveSession(session, async () => {
@@ -437,7 +555,8 @@ async function openGame(request, title = "GBA Emulator") {
   const saveName = `${romId}.sav`;
   const savePath = `/data/saves/${saveName}`;
   const storageCapsule = storageCapsuleForRequest(request);
-  let saved = await readStoredData(saveUrl(saveName, storageCapsule));
+  // A launch has no save route; asking under a launch token only gets a 401.
+  let saved = request.launch ? null : await readStoredData(saveUrl(saveName, storageCapsule));
   if (sequence !== openSequence) return;
   // Preserve the live game when the final save is refused or uncertain.
   if (previous) {
@@ -451,8 +570,8 @@ async function openGame(request, title = "GBA Emulator") {
     if (previous === saveSession && previous && !paused) previous.engine.resumeGame();
     return;
   }
-  if (previous && saved.url === previous.save.url) saved = { ...previous.save };
-  if (saved.bytes?.length) module.FS.writeFile(savePath, saved.bytes);
+  if (previous && saved?.url === previous.save.url) saved = { ...previous.save };
+  if (saved?.bytes?.length) module.FS.writeFile(savePath, saved.bytes);
   else { try { module.FS.unlink(savePath); } catch { /* First save has no local file. */ } }
   module.FS.writeFile(romPath, bytes);
   if (!module.loadGame(romPath, savePath)) {
@@ -476,18 +595,22 @@ async function openGame(request, title = "GBA Emulator") {
   module.setVolume(0);
   module.setFastForwardMultiplier(1);
   module.resumeGame();
-  homeNavigation.setQuery(request.capsule ? { capsule: request.capsule } : { objectUri: request.objectUri });
+  if (!request.launch) {
+    homeNavigation.setQuery(request.capsule ? { capsule: request.capsule } : { objectUri: request.objectUri });
+  }
   emptyState.hidden = true;
   powerLed.classList.remove("off");
   setGameControlsEnabled(true);
   syncPauseButton();
   fastForwardButton.classList.remove("active");
-  document.title = `${title || fileName} - GBA Emulator - ElastOS`;
+  document.title = request.launch ? "GBA Emulator - ElastOS" : `${title || fileName} - GBA Emulator - ElastOS`;
   showStatus("");
-  const session = saveSession;
-  await refreshStateSlots(session);
-  if (session !== saveSession || sequence !== openSequence) return;
-  startSaveLifecycle();
+  if (!request.launch) {
+    const session = saveSession;
+    await refreshStateSlots(session);
+    if (session !== saveSession || sequence !== openSequence) return;
+    startSaveLifecycle();
+  }
   startInputLoop();
   canvas.focus({ preventScroll: true });
 }
@@ -564,7 +687,7 @@ function bindInput() {
       F6: [loadState, 2],
       F7: [loadState, 3],
     }[event.code];
-    if (gameLoaded && stateShortcut) {
+    if (gameLoaded && !launchMode && stateShortcut) {
       event.preventDefault();
       stateShortcut[0](stateShortcut[1]).catch((error) => showStatus(error.message, true));
       return;
@@ -679,10 +802,10 @@ window.addEventListener("pagehide", () => {
 syncPauseButton();
 syncFullscreenButton();
 bindInput();
-loadInstalledGames().catch(() => {});
+if (!launchMode) loadInstalledGames().catch(() => {});
 const launch = requestedGame();
 if (launch) {
-  const title = query.get("name") || query.get("capsule") || fileNameFromUri(launch.objectUri);
+  const title = launchMode ? "" : query.get("name") || query.get("capsule") || fileNameFromUri(launch.objectUri);
   openGame(launch, title).catch((error) => showStatus(error.message || String(error), true));
 } else {
   homeNavigation.setQuery({});

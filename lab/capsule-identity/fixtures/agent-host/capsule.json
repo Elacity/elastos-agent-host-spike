@@ -12,8 +12,11 @@
   "execution": "component",
   "projections": ["facts"],
   "entrypoint": "agent-host.component.wasm",
-  "capabilities": [
-    "localhost://Users/self/.AppData/Agents/agent-host/*"
+  "asks": [
+    {
+      "resource": "localhost://Users/self/.AppData/Agents/agent-host/*",
+      "actions": ["write", "read"]
+    }
   ],
   "resources": {
     "memory_mb": 16,

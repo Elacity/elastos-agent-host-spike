@@ -83,7 +83,7 @@ use wasm_capsule_audit::{audit, audit_component, Refusal as AuditRefusal};
 const RUNTIME_COMPONENT_RS: &str = "../../../elastos/crates/elastos-server/src/component.rs";
 
 /// The line that opens the Runtime's list of allowed Bus imports, exactly.
-pub const ALLOWED_BUS_IMPORTS_HEAD: &str = "const ALLOWED_BUS_IMPORTS: &[&str] = &[";
+pub const ALLOWED_BUS_IMPORTS_HEAD: &str = "pub const ALLOWED_BUS_IMPORTS: &[&str] = &[";
 
 /// The Runtime's Bus allowlist, in file order: the names in the one
 /// `ALLOWED_BUS_IMPORTS` list in

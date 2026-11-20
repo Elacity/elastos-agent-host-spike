@@ -418,6 +418,31 @@ mod tests {
         assert!(!shell_manager.is_running());
     }
 
+    /// A local shell whose manifest pins a requirement by CID does not
+    /// start: the bootstrap stops at its own manifest parse, which refuses
+    /// the key. Only `PinnedManifest` reads a pin.
+    #[tokio::test]
+    async fn local_shell_bootstrap_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        let (capsule_manager, request_handler, message_channel) = create_test_components().await;
+        let directory = tempfile::tempdir().unwrap();
+        let pinned = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+        std::fs::write(directory.path().join("capsule.json"), pinned).unwrap();
+        let mut shell_manager = test_shell_manager(ShellConfig::local(directory.path()));
+
+        let result = shell_manager
+            .bootstrap(&capsule_manager, &request_handler, &message_channel)
+            .await;
+
+        match result {
+            Err(ShellError::Launch(message)) => {
+                let expected = "Failed to parse shell manifest: unknown field `cid`";
+                assert!(message.starts_with(expected), "{message}");
+            }
+            other => panic!("expected the manifest parse to stop the shell, got {other:?}"),
+        }
+        assert!(capsule_manager.list().await.is_empty());
+    }
+
     #[tokio::test]
     async fn test_shell_manager_cid_bootstrap_fails_closed() {
         let (capsule_manager, request_handler, message_channel) = create_test_components().await;

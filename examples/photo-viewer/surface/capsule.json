@@ -1,0 +1,18 @@
+{
+  "schema": "elastos.capsule/v1",
+  "name": "image-viewer",
+  "version": "0.1.0",
+  "description": "Photos: show the photo-viewer playlist bound to this launch. Render only; no authority of its own.",
+  "author": "local-development",
+  "role": "viewer",
+  "type": "wasm",
+  "runtime_abi": "elastos.runtime-projection/v1",
+  "bus_contract": "elastos.runtime-projection/v1",
+  "execution": "web-projection",
+  "projections": ["web"],
+  "entrypoint": "browser/index.html",
+  "resources": {
+    "memory_mb": 16,
+    "gpu": false
+  }
+}

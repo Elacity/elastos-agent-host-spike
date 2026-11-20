@@ -89,6 +89,33 @@ pub async fn run_capsule(
     Ok(())
 }
 
+/// `elastos run --bundle <cid>`: start a bundle from this Home's store of
+/// bundles named by CID: a program, or content, for which the program of
+/// its viewer starts (the name printed is then that program's, the signer
+/// the content's). The Runtime is made as `stage-bundle` makes it, so
+/// the keys asked are the keys that staging asked. This path fetches nothing
+/// and attaches to no running Runtime, and no bridge handler is installed
+/// here. So a capsule whose manifest has asks has nothing to ask through:
+/// its call to the bridge is answered "unavailable" before any ceiling is
+/// looked at. One without asks is sealed.
+pub async fn run_bundle(cid: &str) -> anyhow::Result<()> {
+    let data_dir = crate::default_data_dir();
+    let runtime = crate::create_runtime(data_dir.join("storage")).await?;
+    let (handle, accepted) = runtime
+        .run_by_bundle(&data_dir, cid, Vec::new(), None)
+        .await?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "cid": cid,
+            "name": handle.manifest.name,
+            "signer_did": accepted.signer_did,
+            "ended": "ok",
+        })
+    );
+    Ok(())
+}
+
 /// Decide whether this `elastos run` invocation hosts a native provider.
 ///
 /// App-capsule behavior is untouched: a `--cid` run and any target that is an
@@ -192,10 +219,9 @@ async fn run_microvm_via_operator_runtime(
         .header("Authorization", format!("Bearer {}", tokens.shell_token))
         .json(&serde_json::json!({
             "name": &manifest.name,
-            "config": {
-                "_elastos_interactive": true,
-                "_elastos_capsule_args": capsule_args,
-            },
+            "config": {},
+            "interactive": true,
+            "capsule_args": capsule_args,
         }))
         .send()
         .await?;
@@ -354,5 +380,89 @@ mod tests {
             .unwrap_err();
             assert!(error.to_string().contains(expected), "{error}");
         }
+    }
+
+    // A manifest whose requirement carries a `cid`: a pin. Only
+    // `PinnedManifest` reads one; the ordinary manifest type refuses the key.
+    const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
+
+    /// A pinned manifest does not start through `run`: the command stops at
+    /// its own manifest parse, with that parse's error and nothing around it.
+    #[tokio::test]
+    async fn run_stops_at_its_manifest_parse_for_a_pinned_requirement() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("capsule.json"), PINNED).unwrap();
+        let error = run_capsule(
+            Some(directory.path().to_path_buf()),
+            None,
+            Vec::new(),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().starts_with("unknown field `cid`"),
+            "{error}"
+        );
+    }
+
+    /// a4 (R6-2a): the three CLI senders put the host keys in the typed
+    /// `interactive` / `capsule_args` fields and carry no `_elastos_` key in
+    /// `config`. These are source pins with exact literals: each body is one
+    /// inline `json!` sent straight to the runtime, with no seam a test can
+    /// hold, and `elastos run` then blocks on Ctrl-C, so no in-process drive
+    /// reaches a literal outcome. A sender that moves a key back turns this
+    /// row red at the pinned line.
+    #[test]
+    fn r6_2a_cli_senders_use_the_typed_fields_and_send_no_host_key() {
+        fn production_text(source: &str) -> &str {
+            let end = source.find("\nmod tests {").unwrap_or(source.len());
+            &source[..end]
+        }
+
+        let run = production_text(include_str!("run_cmd.rs"));
+        assert_eq!(run.matches("\"config\": {},").count(), 1, "run config");
+        assert_eq!(
+            run.matches("\"interactive\": true,").count(),
+            1,
+            "run interactive"
+        );
+        assert_eq!(
+            run.matches("\"capsule_args\": capsule_args,").count(),
+            1,
+            "run capsule_args"
+        );
+        assert_eq!(run.matches("_elastos_").count(), 0, "run host key");
+
+        let capsule = production_text(include_str!("capsule_cmd.rs"));
+        assert_eq!(
+            capsule
+                .matches("\"config\": serde_json::Value::Object(config),")
+                .count(),
+            1,
+            "capsule config"
+        );
+        assert_eq!(
+            capsule.matches("\"interactive\": interactive,").count(),
+            1,
+            "capsule interactive"
+        );
+        assert_eq!(capsule.matches("_elastos_").count(), 0, "capsule host key");
+
+        let shell = production_text(include_str!("../../../capsules/shell/src/main.rs"));
+        assert_eq!(
+            shell.matches("\"config\": config,").count(),
+            1,
+            "shell config"
+        );
+        assert_eq!(
+            shell
+                .matches("\"interactive\": i == last_idx && spec.interactive_target,")
+                .count(),
+            1,
+            "shell interactive"
+        );
+        assert_eq!(shell.matches("_elastos_").count(), 0, "shell host key");
     }
 }

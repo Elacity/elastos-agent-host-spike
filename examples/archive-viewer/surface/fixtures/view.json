@@ -1,0 +1,129 @@
+{
+  "archive": {
+    "size": 4096,
+    "uri": "localhost://Users/self/Downloads/trip.zip"
+  },
+  "entries": [
+    {
+      "compressed_size": 30,
+      "index": 0,
+      "kind": "file",
+      "method": 0,
+      "path": "notes.txt",
+      "status": "listed",
+      "uncompressed_size": 30
+    },
+    {
+      "compressed_size": 0,
+      "index": 1,
+      "kind": "directory",
+      "method": 0,
+      "path": "photos/",
+      "status": "listed",
+      "uncompressed_size": 0
+    },
+    {
+      "compressed_size": 120,
+      "index": 2,
+      "kind": "file",
+      "method": 8,
+      "path": "<img src=x onerror=\"fetch('/api/apps/home/state')\">.txt",
+      "status": "listed",
+      "uncompressed_size": 200
+    },
+    {
+      "compressed_size": 500,
+      "index": 3,
+      "kind": "archive",
+      "method": 8,
+      "path": "inner.zip",
+      "status": "listed",
+      "uncompressed_size": 900
+    },
+    {
+      "compressed_size": 90,
+      "index": 4,
+      "kind": "file",
+      "method": 8,
+      "path": "photos/cat.png",
+      "status": "listed",
+      "uncompressed_size": 4000
+    }
+  ],
+  "previews": [
+    {
+      "blocks": [
+        {
+          "kind": "heading",
+          "level": 1,
+          "spans": [
+            {
+              "style": "plain",
+              "text": "Trip notes"
+            }
+          ]
+        },
+        {
+          "kind": "paragraph",
+          "spans": [
+            {
+              "style": "plain",
+              "text": "Pack "
+            },
+            {
+              "style": "strong",
+              "text": "boots"
+            },
+            {
+              "style": "plain",
+              "text": " and read "
+            },
+            {
+              "style": "code",
+              "text": "<img src=x onerror=\"fetch('/api/apps/home/state')\">"
+            }
+          ]
+        },
+        {
+          "items": [
+            [
+              {
+                "style": "plain",
+                "text": "tent"
+              }
+            ],
+            [
+              {
+                "style": "plain",
+                "text": "stove"
+              }
+            ]
+          ],
+          "kind": "list",
+          "ordered": false
+        },
+        {
+          "kind": "quote",
+          "spans": [
+            {
+              "style": "plain",
+              "text": "Leave early."
+            }
+          ]
+        },
+        {
+          "kind": "rule"
+        }
+      ],
+      "index": 0
+    }
+  ],
+  "schema": "elastos.archive-viewer.view/v1",
+  "skipped": [
+    {
+      "index": 4,
+      "message": "The entry is not text.",
+      "reason": "not_text"
+    }
+  ]
+}

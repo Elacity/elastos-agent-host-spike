@@ -82,6 +82,16 @@ else: raise AssertionError(args)
 """.replace('NATIVE_BYTES', (bytes(header)+os.environ['ELASTOS_RELEASE_VERSION'].encode()).hex())
         output.write_text(cli); output.chmod(0o755)
 '''
+# A loaded rustup can still be writing after grep has seen the first target.
+MOCK_RUSTUP_SLOW = r'''#!/usr/bin/env python3
+import sys, time
+if sys.argv[1:] != ["target", "list", "--installed"]:
+    raise SystemExit("unexpected rustup arguments: %r" % (sys.argv[1:],))
+print("aarch64-apple-darwin", flush=True)
+time.sleep(0.2)
+for index in range(2000):
+    print(f"synthetic-target-{index:04d}")
+'''
 MOCK_MEDIA_BUILD = r'''#!/usr/bin/env python3
 import argparse, hashlib, json, os, pathlib, struct
 
@@ -293,7 +303,7 @@ class PrepareWorkerTest(unittest.TestCase):
         # platform headers and local licence pins instead of upstream downloads.
         inventory_path = scripts / "release-upstream-recipes.json"
         inventory = json.loads(inventory_path.read_text())
-        for name in ("node", "turnserver", "python3", "debugfs", "crosvm"):
+        for name in ("node", "turnserver", "python3", "debugfs", "crosvm", "vhost-device-vsock"):
             for platform, info in external[name]["platforms"].items():
                 binary = scripts / (name + "-" + platform + ".fixture")
                 native_header = bytearray(64)
@@ -387,6 +397,14 @@ class PrepareWorkerTest(unittest.TestCase):
                     self.assertNotIn("strategy", info)
                 if host == "Darwin":
                     self.assertIn("browser-vz-engine-supervisor-darwin-arm64", (self.root / "sign.log").read_text())
+                if setup == "linux-arm64":
+                    self.assertIn("browser-vz-engine-supervisor", manifest["external"])
+                    supervisor = manifest["external"]["browser-vz-engine-supervisor"]["platforms"][setup]
+                    self.assertGreater(supervisor["size"], 0)
+                    calls = [json.loads(line) for line in (self.root / "cargo.log").read_text().splitlines()]
+                    self.assertTrue(any("browser-vz-engine-supervisor" in call["args"] and
+                                        "aarch64-unknown-linux-musl" in call["args"] for call in calls))
+                    self.assertNotIn("browser-vz-engine-supervisor-linux-arm64", (self.root / "sign.log").read_text())
 
     def test_browser_vz_signing_failure_preserves_absent_output(self):
         output, result = self.prepare(env={**self.env, "FAIL_SIGN": "1"})
@@ -1027,6 +1045,26 @@ class PrepareWorkerTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Output already exists", result.stderr)
         self.assertTrue(output.is_symlink())
+
+    def install_rustup_stand_in(self, body):
+        path = self.root / "mock/rustup"
+        path.write_text(body)
+        path.chmod(0o755)
+
+    def test_installed_target_survives_rustup_writing_after_the_match(self):
+        self.install_rustup_stand_in(MOCK_RUSTUP_SLOW)
+        output, result = self.prepare()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((output / "platform-input.json").is_file())
+
+    def test_unreadable_installed_target_list_names_the_reason(self):
+        self.install_rustup_stand_in('#!/bin/sh\nexit 17\n')
+        output, result = self.prepare()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not list installed Rust targets", result.stderr)
+        self.assertFalse(output.exists())
+        calls = [json.loads(line)["args"][0] for line in (self.root / "cargo.log").read_text().splitlines()]
+        self.assertNotIn("build", calls)
 
     def test_three_platform_inputs_admit_with_resolved_cache_and_linux_audit(self):
         for name in LINUX_ONLY:
