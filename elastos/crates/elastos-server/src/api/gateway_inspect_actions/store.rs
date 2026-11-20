@@ -47,31 +47,51 @@ pub(super) fn pending_inspect_action_requests(
     records.sort_by_key(|record| record.created_at);
     Ok(records
         .into_iter()
-        .filter(|record| {
-            record.status == "pending"
-                && record.principal_id == principal_id
-                && record.kind == INSPECT_ACTION_KIND
-        })
-        .map(|record| {
-            serde_json::json!({
-                "schema": record.schema,
-                "request_id": record.request_id,
-                "id": record.id,
-                "operation": record.operation,
-                "plan": record.plan,
-                "request_binding": record.request_binding.unwrap_or_else(|| inspect_action_request_binding(
-                    &record.request_id,
-                    &record.principal_id,
-                    &record.id,
-                    &record.operation,
-                    &record.plan,
-                    &record.request,
-                )),
-                "status": record.status,
-                "created_at": record.created_at,
-            })
-        })
+        .filter(|record| record.status == "pending" && record.principal_id == principal_id)
+        .filter_map(pending_request_view)
         .collect())
+}
+
+/// One pending request as the Inbox reads it. An agent plan carries the stored
+/// step and a binding recomputed from the stored fields, so a plan that changed
+/// after storing shows its new hash. A plan whose binding would be cut is
+/// refused rather than shown in part.
+fn pending_request_view(record: InspectActionRequestRecord) -> Option<serde_json::Value> {
+    let agent_plan = record.kind == AGENT_PLAN_KIND;
+    if !agent_plan && record.kind != INSPECT_ACTION_KIND {
+        return None;
+    }
+    let current = inspect_action_request_binding(
+        &record.request_id,
+        &record.principal_id,
+        &record.id,
+        &record.operation,
+        &record.plan,
+        &record.request,
+    );
+    let binding = if agent_plan {
+        if current.truncated {
+            return None;
+        }
+        current
+    } else {
+        record.request_binding.clone().unwrap_or(current)
+    };
+    let mut view = serde_json::json!({
+        "schema": record.schema,
+        "kind": record.kind,
+        "request_id": record.request_id,
+        "id": record.id,
+        "operation": record.operation,
+        "plan": record.plan,
+        "request_binding": binding,
+        "status": record.status,
+        "created_at": record.created_at,
+    });
+    if agent_plan {
+        view["steps"] = serde_json::json!([record.request]);
+    }
+    Some(view)
 }
 
 pub(super) fn read_inspect_action_record(

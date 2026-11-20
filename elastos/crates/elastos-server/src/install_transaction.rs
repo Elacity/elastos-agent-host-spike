@@ -1084,6 +1084,10 @@ impl InstallTransaction {
             )?;
         }
         support::require_installed(self, &journal.support, previous)?;
+        // The release is final here: support verification is done and no
+        // rollback can follow, so each support folder that is a component
+        // capsule keeps this release's walk CID.
+        support::record_capsule_folders(self, &journal.support);
         self.cleanup(&journal)
     }
 

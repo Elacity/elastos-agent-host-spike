@@ -42,10 +42,10 @@ struct Place {
 }
 
 /// One call found in the sources.
-struct Site {
-    file: String,
-    function: String,
-    label: String,
+pub(super) struct Site {
+    pub(super) file: String,
+    pub(super) function: String,
+    pub(super) label: String,
 }
 
 /// The needle fragments. They are joined only at run time.
@@ -480,7 +480,7 @@ fn every_capsule_load_spawn_and_registration_is_listed_with_its_gate() {
 /// Every `.load`, `.start`, `.load_admitted`, `.load_admitted_sealed`,
 /// `.launch_capsule` and `.register_capsule` call, and every `ProviderBridge`
 /// spawn, in one file's production text.
-fn sites(file: &str, text: &str) -> Vec<Site> {
+pub(super) fn sites(file: &str, text: &str) -> Vec<Site> {
     let mut sites = Vec::new();
     let code = code_only(text);
     for parts in [LOAD_SEALED, LOAD_ADMITTED, START_RESIDENT, LOAD, START] {
@@ -539,7 +539,7 @@ fn sites(file: &str, text: &str) -> Vec<Site> {
 
 /// Keep byte positions, but remove strings and comments before looking for
 /// calls or item boundaries. A quoted example cannot become a caller.
-fn code_only(text: &str) -> String {
+pub(super) fn code_only(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut code = bytes.to_vec();
     let mut i = 0;
@@ -655,7 +655,7 @@ fn receiver_before(text: &str, dot: usize) -> &str {
 }
 
 /// The name of the nearest function above `at`.
-fn enclosing_fn(text: &str, at: usize) -> String {
+pub(super) fn enclosing_fn(text: &str, at: usize) -> String {
     let mut end = at;
     loop {
         let start = text[..end].rfind('\n').map(|index| index + 1).unwrap_or(0);
@@ -705,7 +705,7 @@ fn fn_prefix(prefix: &str) -> bool {
 
 /// A map of every file each crate compiles for production, keyed from the
 /// crates directory, with every `#[cfg(test)]` item removed.
-fn production_sources() -> BTreeMap<String, String> {
+pub(super) fn production_sources() -> BTreeMap<String, String> {
     let crates = fs::canonicalize(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -828,7 +828,7 @@ fn resolve_module(from: &Path, name: &str, path_attr: Option<&str>) -> Option<Pa
 
 /// `text` with every item that carries `#[cfg(test)]` or
 /// `#[cfg(all(test, ...))]` removed.
-fn without_test_items(text: &str) -> String {
+pub(super) fn without_test_items(text: &str) -> String {
     let code = code_only(text);
     let bytes = code.as_bytes();
     let mut out = String::new();
