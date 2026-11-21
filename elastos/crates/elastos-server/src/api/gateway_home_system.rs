@@ -4169,6 +4169,30 @@ fn accepted_contact_for_carrier_source(
     local_did: &str,
     source: &iroh::PublicKey,
 ) -> anyhow::Result<Option<String>> {
+    accepted_contact_for_carrier_match(data_dir, network, context, local_did, |did| {
+        crate::carrier::did_to_public_key(did) == Some(*source)
+    })
+}
+
+fn accepted_contact_for_carrier_did(
+    data_dir: &std::path::Path,
+    network: &crate::collaboration_network::VerifiedCollaborationNetworkProfile,
+    context: &HomeLaunchTokenContext,
+    local_did: &str,
+    source_did: &str,
+) -> anyhow::Result<Option<String>> {
+    accepted_contact_for_carrier_match(data_dir, network, context, local_did, |did| {
+        did == source_did
+    })
+}
+
+fn accepted_contact_for_carrier_match(
+    data_dir: &std::path::Path,
+    network: &crate::collaboration_network::VerifiedCollaborationNetworkProfile,
+    context: &HomeLaunchTokenContext,
+    local_did: &str,
+    matches_sender: impl Fn(&str) -> bool,
+) -> anyhow::Result<Option<String>> {
     let Some(profile) = load_profile_authority_for_context(data_dir, context)? else {
         return Ok(None);
     };
@@ -4184,20 +4208,18 @@ fn accepted_contact_for_carrier_source(
         .snapshot()?
         .contacts()
         .iter()
-        .find(|contact| {
-            crate::carrier::did_to_public_key(contact.remote_presence_device_did()) == Some(*source)
-        })
+        .find(|contact| matches_sender(contact.remote_presence_device_did()))
         .map(|contact| contact.remote_presence_device_did().to_string()))
 }
 
-/// Whether the Carrier peer `source` is an accepted contact of any of
+/// Whether the observed sending Runtime is an accepted contact of any of
 /// `principals` on this Home: the people a published file is for. A store
 /// that cannot be read counts as no contact.
-pub(crate) fn carrier_source_is_contact_of(
+pub(crate) fn carrier_sender_did_is_contact_of(
     data_dir: &std::path::Path,
     network: &crate::collaboration_network::VerifiedCollaborationNetworkProfile,
     principals: &std::collections::BTreeSet<String>,
-    source: &iroh::PublicKey,
+    sender_runtime_did: &str,
 ) -> bool {
     let Ok(Some(local_did)) =
         crate::collaboration_profile_authority::load_existing_device_did(data_dir)
@@ -4211,12 +4233,19 @@ pub(crate) fn carrier_source_is_contact_of(
         .into_iter()
         .filter(|(principal, _)| principals.contains(&principal.principal_id))
         .any(|(principal, _)| {
-            let Some(context) = ctx_or_warn(data_dir, &principal, "carrier_source_is_contact_of")
+            let Some(context) =
+                ctx_or_warn(data_dir, &principal, "carrier_sender_did_is_contact_of")
             else {
                 return false;
             };
-            accepted_contact_for_carrier_source(data_dir, network, &context, &local_did, source)
-                .is_ok_and(|contact| contact.is_some())
+            accepted_contact_for_carrier_did(
+                data_dir,
+                network,
+                &context,
+                &local_did,
+                sender_runtime_did,
+            )
+            .is_ok_and(|contact| contact.is_some())
         })
 }
 
