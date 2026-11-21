@@ -15,6 +15,8 @@ pub mod bundle_admission;
 mod bundle_start_tests;
 pub(crate) mod capsule_record;
 pub mod carrier;
+#[cfg(test)]
+mod carrier_contract_tests;
 pub mod carrier_service;
 pub mod collaboration_carrier;
 pub mod collaboration_config;
@@ -45,6 +47,8 @@ pub mod collaboration_release_network;
 pub mod collaboration_startup;
 pub(crate) mod collaboration_transport;
 pub(crate) mod component;
+#[cfg(test)]
+mod loader_census_tests;
 #[cfg(test)]
 mod start_census_tests;
 // The Runtime's component admission check and its import table, for callers

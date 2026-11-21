@@ -331,6 +331,50 @@ also carry the remote content provider's signed availability receipt; Carrier
 verifies and summarizes that receipt in the peer-selection proof when present,
 including safe peer-selection, quota, repair-worker, and accounting posture
 without exposing raw provider internals.
+A fetch that sets `min_distinct_holders` is a success only when the signed
+receipt set's own receipts show at least that many distinct verified holder
+DIDs for the requested CID. Content counts those DIDs from the receipts. It
+does not read a holder-count field on the availability answer. The signed
+set's required count is the caller's value on a success and on a refusal. An
+availability error that states another count, or omits the count, is signed
+with the caller's count when that count is in 1 to 8 and one receipt can be
+signed. When the availability answer says success but the receipts are
+missing, name another CID, show fewer distinct verified holders than the
+caller required, or cannot be signed, content does not return the bytes. If
+at least one receipt can be signed, the answer is the distinct-holders
+refusal together with the signed
+set of what was observed. If none can, the answer is the existing unavailable
+error. A local copy does not answer this fetch: content uses the existing
+availability path. With `min_distinct_holders` absent, fetch stays local-first
+and that answer is unchanged. A local-only fetch stays on this machine. With
+`min_distinct_holders` set, it returns an error on a local hit and on a local
+miss, and it does not call availability.
+The requester signs the set with its node key under the domain label
+`elastos.content.fetch.receipt-set.v2` and marks it
+`requester-signed-holder-countersigned`. Before it calls availability, Content
+issues a fresh random request nonce and sends it in `serve_request_nonce`.
+Carrier derives a separate holder challenge from that nonce and each attempt
+number; it sends the challenge to the holder and records the signed answer.
+Content keeps its issued request nonce and, at the byte-release boundary,
+derives the expected challenge for each verified row. The row counts only when
+its `serve_nonce` equals that challenge and its holder signature covers that
+challenge, CID, requester DID, and byte count. A matching nonce supplied only
+by an availability answer cannot establish freshness.
+`sign_fetch_receipt_set` refuses a
+receipt that names a CID other than the set's, and it writes
+`observed_distinct_holders` from the distinct verified holder DIDs in the
+receipts. `verify_signed_fetch_receipt_set` checks the signature against the
+requester DID, then refuses a schema other than
+`elastos.content.fetch.receipt-set/v2`, a requested CID that is not a
+canonical SHA2-256 CID, a required holder count outside 1 to 8, an empty
+receipt list, a set with no time, a receipt that names another CID, or an
+observed count that differs from the distinct verified holder DIDs in the
+list. The requester signature binds `serve_request_nonce` in the set. The set
+verifier derives each attempt challenge from that signed request nonce and
+checks the row nonce and holder signature against it. Readers use that verified nested payload for the CID, the counts and
+the receipts. The signed-mode answer does not repeat those values beside the
+signature.
+
 If only the local pin is proven, the honest state is
 `carrier_announced`; if requested replica/live-proof requirements are not met,
 the state is `repair_needed`. Repair-only local announcements omit fetch

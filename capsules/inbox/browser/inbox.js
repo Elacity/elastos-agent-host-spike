@@ -578,6 +578,14 @@
       } else if (typeof actionId === "string" && actionId.startsWith("capability-approve-request:")) {
         actions.appendChild(createActionButton("Approve", actionId, "primary"));
         actions.appendChild(createActionButton("Deny", "capability-deny-request:" + actionId.slice("capability-approve-request:".length), "danger"));
+      } else if (typeof actionId === "string" && actionId.startsWith("agent-plan-approve-request:")) {
+        const requestId = actionId.slice("agent-plan-approve-request:".length);
+        const approveButton = createButton("Approve", () => approveAgentPlan(
+          requestId,
+          entry.request_binding,
+        ), "primary");
+        approveButton.dataset.actionId = actionId;
+        actions.appendChild(approveButton);
       } else if (typeof actionId === "string" && actionId.startsWith("inspect-approve-request:")) {
         const requestId = actionId.slice("inspect-approve-request:".length);
         const approveButton = createButton("Approve", (button) => approveInspectRequest(button, requestId), "primary");
@@ -778,6 +786,27 @@
         requireInspectActionResult(outcome, requestId, "denied");
         setStatus("System action denied.");
         await loadInbox();
+        notifyHome();
+      } finally {
+        setButtonsDisabled(false);
+      }
+    }
+
+    async function approveAgentPlan(requestId, binding) {
+      if (!requestId || !binding || binding.schema !== "elastos.esp.request-binding/v1"
+        || binding.request_id !== requestId || typeof binding.sha256 !== "string"
+        || binding.sha256.length !== 64) {
+        throw new Error("This agent plan card has no exact binding to approve.");
+      }
+      setButtonsDisabled(true);
+      try {
+        const stepUpToken = await requestPasskeyStepUp("agent_plan.approve", { request_id: requestId });
+        const outcome = await inboxAction("agent-plan-approve-request:" + requestId, {
+          request_binding: binding,
+          step_up_token: stepUpToken,
+        });
+        await loadInbox();
+        setStatus(outcome.message || "Agent plan approved.");
         notifyHome();
       } finally {
         setButtonsDisabled(false);

@@ -86,9 +86,9 @@ fn load_capsule_manifest(
     name: &str,
 ) -> anyhow::Result<elastos_common::CapsuleManifest> {
     let manifest_path = capsule_dir.join("capsule.json");
-    let data = std::fs::read_to_string(&manifest_path)
+    let data = elastos_common::capsule_manifest_file::read(&manifest_path)
         .map_err(|e| anyhow!("Failed to read capsule manifest for '{}': {}", name, e))?;
-    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&data)
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&data)
         .map_err(|e| anyhow!("Invalid capsule manifest for '{}': {}", name, e))?;
     manifest
         .validate()
@@ -96,13 +96,13 @@ fn load_capsule_manifest(
     Ok(manifest)
 }
 
-struct ScopedTerminalEnv {
+pub(crate) struct ScopedTerminalEnv {
     cols_prev: Option<std::ffi::OsString>,
     rows_prev: Option<std::ffi::OsString>,
 }
 
 impl ScopedTerminalEnv {
-    fn capture() -> Self {
+    pub(crate) fn capture() -> Self {
         let cols_prev = std::env::var_os("ELASTOS_TERM_COLS");
         let rows_prev = std::env::var_os("ELASTOS_TERM_ROWS");
 

@@ -42,10 +42,10 @@ struct Place {
 }
 
 /// One call found in the sources.
-struct Site {
-    file: String,
-    function: String,
-    label: String,
+pub(super) struct Site {
+    pub(super) file: String,
+    pub(super) function: String,
+    pub(super) label: String,
 }
 
 /// The needle fragments. They are joined only at run time.
@@ -58,6 +58,7 @@ const REGISTER: &[&str] = &["register_", "capsule"];
 const LAUNCH: &[&str] = &["launch_", "capsule"];
 const SPAWN: &[&str] = &["Provider", "Bridge::spawn"];
 const COMMAND_SPAWN: &[&str] = &[".", "spa", "wn()"];
+const CONFINED_EXEC: &[&str] = &["libc::", "execve("];
 
 /// The gate of the paths that B1-R does not cover yet.
 const P2_2: &str = "P2-2 (not gated by B1-R yet)";
@@ -162,6 +163,13 @@ fn places() -> Vec<Place> {
             "spawn()".to_string(),
             1,
             P2_2,
+        ),
+        place(
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "libc::execve".to_string(),
+            1,
+            "B3 S10: admitted rights, checked root identity, bound executable",
         ),
         place(
             "elastos-server/src/carrier.rs",
@@ -282,12 +290,13 @@ fn places() -> Vec<Place> {
             1,
             "caller's trust level (shell bootstrap or LaunchCapsule request)",
         ),
+        // The load moved into load_microvm_capsule, which checks the entrypoint first.
         place(
             "elastos-server/src/serve_cmd.rs",
-            "run_serve",
-            label_of("vm_provider", &load),
+            "load_microvm_capsule",
+            label_of("provider", &load),
             1,
-            P2_2,
+            "entrypoint file checked before MicroVM load; P2-2 authority pending",
         ),
         place(
             "elastos-server/src/serve_cmd.rs",
@@ -470,10 +479,55 @@ fn every_capsule_load_spawn_and_registration_is_listed_with_its_gate() {
     assert!(unlisted.is_empty(), "unlisted callers: {unlisted:#?}");
 }
 
+/// Each row proves that a named check in the load's own function precedes the
+/// listed load. Keep this separate from the authority label: a regular file
+/// check does not establish the capsule's signing authority.
+#[test]
+fn census_preload_checks_run_before_their_loads() {
+    let sources = production_sources();
+    let required_orders = [(
+        "elastos-server/src/serve_cmd.rs",
+        "load_microvm_capsule",
+        "check_entrypoint_file(",
+        "provider.load",
+    )];
+
+    for (file, function, check, load) in required_orders {
+        let code = code_only(sources.get(file).expect("listed load source exists"));
+        let check_sites: Vec<_> = code
+            .match_indices(check)
+            .map(|(at, _)| at)
+            .filter(|&at| enclosing_fn(&code, at) == function)
+            .collect();
+        let load_sites: Vec<_> = code
+            .match_indices(".load(")
+            .map(|(at, _)| at)
+            .filter(|&at| {
+                enclosing_fn(&code, at) == function
+                    && label_of(receiver_before(&code, at), "load") == load
+            })
+            .collect();
+        assert_eq!(
+            check_sites.len(),
+            1,
+            "{file}:{function}: expected one {check}"
+        );
+        assert_eq!(
+            load_sites.len(),
+            1,
+            "{file}:{function}: expected one {load}"
+        );
+        assert!(
+            check_sites[0] < load_sites[0],
+            "{file}:{function}: {check} must precede {load}"
+        );
+    }
+}
+
 /// Every `.load`, `.start`, `.load_admitted`, `.load_admitted_sealed`,
 /// `.launch_capsule` and `.register_capsule` call, and every `ProviderBridge`
 /// spawn, in one file's production text.
-fn sites(file: &str, text: &str) -> Vec<Site> {
+pub(super) fn sites(file: &str, text: &str) -> Vec<Site> {
     let mut sites = Vec::new();
     let code = code_only(text);
     for parts in [LOAD_SEALED, LOAD_ADMITTED, START_RESIDENT, LOAD, START] {
@@ -517,12 +571,19 @@ fn sites(file: &str, text: &str) -> Vec<Site> {
             label: "spawn()".to_string(),
         });
     }
+    for (at, _) in code.match_indices(&joined(CONFINED_EXEC)) {
+        sites.push(Site {
+            file: file.to_string(),
+            function: enclosing_fn(&code, at),
+            label: "libc::execve".to_string(),
+        });
+    }
     sites
 }
 
 /// Keep byte positions, but remove strings and comments before looking for
 /// calls or item boundaries. A quoted example cannot become a caller.
-fn code_only(text: &str) -> String {
+pub(super) fn code_only(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut code = bytes.to_vec();
     let mut i = 0;
@@ -638,7 +699,7 @@ fn receiver_before(text: &str, dot: usize) -> &str {
 }
 
 /// The name of the nearest function above `at`.
-fn enclosing_fn(text: &str, at: usize) -> String {
+pub(super) fn enclosing_fn(text: &str, at: usize) -> String {
     let mut end = at;
     loop {
         let start = text[..end].rfind('\n').map(|index| index + 1).unwrap_or(0);
@@ -688,7 +749,7 @@ fn fn_prefix(prefix: &str) -> bool {
 
 /// A map of every file each crate compiles for production, keyed from the
 /// crates directory, with every `#[cfg(test)]` item removed.
-fn production_sources() -> BTreeMap<String, String> {
+pub(super) fn production_sources() -> BTreeMap<String, String> {
     let crates = fs::canonicalize(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -811,7 +872,7 @@ fn resolve_module(from: &Path, name: &str, path_attr: Option<&str>) -> Option<Pa
 
 /// `text` with every item that carries `#[cfg(test)]` or
 /// `#[cfg(all(test, ...))]` removed.
-fn without_test_items(text: &str) -> String {
+pub(super) fn without_test_items(text: &str) -> String {
     let code = code_only(text);
     let bytes = code.as_bytes();
     let mut out = String::new();

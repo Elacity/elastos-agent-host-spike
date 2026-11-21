@@ -96,6 +96,9 @@ pub fn build_probe(effect: Effect, round: usize) -> Vec<u8> {
         .arg(root.join("scripts/build-component-capsule.sh"))
         .arg(lane.join("probe"))
         .env("RUSTFLAGS", effect.rustflags())
+        // CI sets CARGO_TERM_COLOR=always; colour codes split "Compiling <package>",
+        // so the independent-compile assert below would never match.
+        .env("CARGO_TERM_COLOR", "never")
         .env(
             "AC_PROBE_READ_RESOURCE",
             match effect {

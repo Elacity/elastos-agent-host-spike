@@ -90,8 +90,12 @@ mod gateway_home_update;
 mod gateway_home_wallet_connector;
 #[path = "gateway_inbox.rs"]
 mod gateway_inbox;
+#[cfg(test)]
+pub(crate) use gateway_inbox::inbox_request_entries_for_test;
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
+pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
+pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
 #[path = "gateway_marketplace.rs"]
 mod gateway_marketplace;
 #[path = "gateway_model_remote.rs"]
@@ -214,9 +218,9 @@ pub(super) use gateway_passkey_step_up::{
 pub(crate) use gateway_provider_proxy::runtime_custody_publish_creator_tail_for_test;
 use gateway_provider_proxy::*;
 pub(crate) use gateway_provider_proxy::{
-    resolve_runtime_custody_creator_publish_binding, runtime_custody_buy_via_gateway,
-    runtime_custody_publish_via_gateway, ResolvedProtectedContentMintReceipt,
-    ResolvedProtectedContentVerifiedListing,
+    bus_model_provider_request, resolve_runtime_custody_creator_publish_binding,
+    runtime_custody_buy_via_gateway, runtime_custody_publish_via_gateway,
+    ResolvedProtectedContentMintReceipt, ResolvedProtectedContentVerifiedListing,
 };
 use gateway_room::*;
 pub(crate) use gateway_room::{
@@ -1484,6 +1488,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         || text.contains("auth session is not active")
         || text.contains("auth session not found")
         || text.contains("belongs to a different principal")
+        || text.contains("agent plan is approved by its owner")
     {
         StatusCode::FORBIDDEN
     } else if profile_required.is_some()
@@ -1497,6 +1502,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         || text.contains("is not pending")
         || text.contains("is no longer pending")
         || text.contains("changed before Inbox approval")
+        || text.contains("card binding")
         || text.contains("service access request")
     {
         StatusCode::BAD_REQUEST

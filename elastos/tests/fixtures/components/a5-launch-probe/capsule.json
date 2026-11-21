@@ -15,7 +15,8 @@
     "kind": "agent"
   },
   "capabilities": [
-    "localhost://UsersAI/self/*"
+    "localhost://UsersAI/self/*",
+    "elastos://inspect/submit_agent_plan"
   ],
   "resources": {
     "memory_mb": 16,

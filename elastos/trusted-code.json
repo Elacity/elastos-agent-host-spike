@@ -16,6 +16,8 @@
     "elastos/crates/elastos-server/src/stage_cmd.rs",
     "elastos/crates/elastos-server/src/setup.rs",
     "elastos/crates/elastos-bundle-identity/src/lib.rs",
+    "elastos/crates/elastos-bundle-identity/src/windows_walk.rs",
+    "elastos/crates/elastos-bundle-identity/src/windows_handle.rs",
     "elastos/crates/elastos-common/src/manifest.rs",
     "elastos/crates/elastos-common/src/pinned_manifest.rs",
     "elastos/crates/elastos-common/src/cid_form.rs",

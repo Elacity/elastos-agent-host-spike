@@ -16,13 +16,18 @@ use super::binding::{
 use super::store::{
     write_inspect_action_record, InspectActionRequestRecord, AGENT_PLAN_KIND, INSPECT_ACTION_SCHEMA,
 };
+use crate::esp_binding::EspRequestBinding;
 use crate::inspect_provider::plan_scheme;
 
 /// Identity for a pending agent plan. It comes from Runtime context and never
-/// from the submitted plan.
+/// from the submitted plan: the principal is the owner, the stored person the
+/// agent acts for and who reads and decides the plan; the requester is the
+/// agent; the capsule and session are the component activation the Runtime
+/// started.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct AgentPlanContext<'a> {
     pub(super) principal_id: &'a str,
+    pub(super) requester_id: &'a str,
     pub(super) capsule_id: &'a str,
     pub(super) session_id: &'a str,
 }
@@ -35,9 +40,16 @@ pub(super) fn create_pending_agent_plan_record(
     plan: &Value,
     now: u64,
 ) -> anyhow::Result<InspectActionRequestRecord> {
-    for value in [context.principal_id, context.capsule_id, context.session_id] {
+    for value in [
+        context.principal_id,
+        context.requester_id,
+        context.capsule_id,
+        context.session_id,
+    ] {
         if value.is_empty() || value.trim() != value {
-            anyhow::bail!("agent plan context requires a trimmed principal, capsule and session");
+            anyhow::bail!(
+                "agent plan context requires a trimmed principal, requester, capsule and session"
+            );
         }
     }
     let step = agent_plan_step(plan)?;
@@ -63,36 +75,55 @@ pub(super) fn create_pending_agent_plan_record(
         now,
         &inspect_action_request_nonce(),
     );
-    let request_binding = inspect_action_request_binding(
-        &request_id,
-        context.principal_id,
-        context.capsule_id,
-        operation,
-        &preview,
-        &step,
-    );
-    if request_binding.truncated {
-        anyhow::bail!("agent plan step preview is too large and is refused rather than cut");
-    }
-    let record = InspectActionRequestRecord {
+    let mut record = InspectActionRequestRecord {
         schema: INSPECT_ACTION_SCHEMA.to_string(),
         kind: AGENT_PLAN_KIND.to_string(),
         request_id,
         principal_id: context.principal_id.to_string(),
+        requester_id: Some(context.requester_id.to_string()),
         session_id: context.session_id.to_string(),
         id: context.capsule_id.to_string(),
         operation: operation.to_string(),
         request: step,
         plan: preview,
-        request_binding: Some(request_binding),
+        request_binding: None,
         status: "pending".to_string(),
         created_at: now,
         updated_at: now,
         result: None,
         error: None,
     };
+    let request_binding = agent_plan_request_binding(&record)
+        .ok_or_else(|| anyhow::anyhow!("agent plan requires a requester"))?;
+    if request_binding.truncated {
+        anyhow::bail!("agent plan step preview is too large and is refused rather than cut");
+    }
+    record.request_binding = Some(request_binding);
     write_inspect_action_record(data_dir, &record)?;
     Ok(record)
+}
+
+/// The one binding of an agent plan: the ESP sha256 over its exact typed step
+/// and the identities the Runtime supplied, none read from the submitted plan.
+/// Creating the record stores it; the Inbox recomputes it from the stored
+/// fields. A record with no requester has none.
+pub(super) fn agent_plan_request_binding(
+    record: &InspectActionRequestRecord,
+) -> Option<EspRequestBinding> {
+    let requester = record.requester_id.as_deref()?;
+    Some(inspect_action_request_binding(
+        &record.request_id,
+        &record.principal_id,
+        &record.id,
+        &record.operation,
+        &record.plan,
+        &json!({
+            "owner": record.principal_id,
+            "requester": requester,
+            "session": record.session_id,
+            "step": record.request,
+        }),
+    ))
 }
 
 /// The one typed step a record keeps. More than one step fails closed until the
@@ -143,16 +174,27 @@ mod tests {
     use super::super::store::{pending_inspect_action_requests, read_inspect_action_record};
     use super::*;
 
-    const PRINCIPAL: &str = "person:owner";
+    const PRINCIPAL: &str = "person:local:owner";
+    const REQUESTER: &str = "agent:v2:0123456789abcdef0123456789abcdef";
     const CAPSULE: &str = "capsule:agent-host";
     const SESSION: &str = "session:agent-1";
 
     fn context() -> AgentPlanContext<'static> {
         AgentPlanContext {
             principal_id: PRINCIPAL,
+            requester_id: REQUESTER,
             capsule_id: CAPSULE,
             session_id: SESSION,
         }
+    }
+
+    fn bound_body(body: Value) -> Value {
+        json!({
+            "owner": PRINCIPAL,
+            "requester": REQUESTER,
+            "session": SESSION,
+            "step": { "scheme": "availability", "operation": "status", "request": body },
+        })
     }
 
     fn status_plan(body: Value) -> Value {
@@ -180,12 +222,17 @@ mod tests {
             CAPSULE,
             "status",
             &stored.plan,
-            &json!({ "scheme": "availability", "operation": "status", "request": body }),
+            &bound_body(body.clone()),
         );
         assert_eq!(stored.request_binding.as_ref(), Some(&expected));
         let binding = stored.request_binding.unwrap();
         assert_eq!(binding.principal, PRINCIPAL);
         assert_eq!(stored.principal_id, PRINCIPAL);
+        assert_eq!(stored.requester_id.as_deref(), Some(REQUESTER));
+        assert_eq!(binding.preview["owner"], PRINCIPAL);
+        assert_eq!(binding.preview["requester"], REQUESTER);
+        assert_eq!(binding.preview["session"], SESSION);
+        assert_eq!(binding.preview["step"]["request"], body);
         assert_eq!(binding.capsule, CAPSULE);
         assert_eq!(binding.method, "status");
         assert_eq!(
@@ -258,10 +305,7 @@ mod tests {
                 .unwrap();
         let binding = stored.request_binding.unwrap();
         assert!(!binding.truncated);
-        assert_eq!(
-            binding.preview,
-            json!({ "scheme": "availability", "operation": "status", "request": {} })
-        );
+        assert_eq!(binding.preview, bound_body(json!({})));
 
         let refused = tempfile::tempdir().unwrap();
         let oversize = create_pending_agent_plan_record(
@@ -302,7 +346,11 @@ mod tests {
             session_id: "",
             ..context()
         };
-        for bad in [padded, empty] {
+        let no_requester = AgentPlanContext {
+            requester_id: "",
+            ..context()
+        };
+        for bad in [padded, empty, no_requester] {
             let refused = create_pending_agent_plan_record(dir.path(), &bad, &plan, 1).unwrap_err();
             assert!(refused.to_string().contains("trimmed principal"));
         }

@@ -1,0 +1,14 @@
+id: declared-limits
+file: elastos/crates/elastos-common/src/manifest.rs
+test: hook_declared_limits_are_descriptive_today
+note: a validator read of a limit key; the key stays out of the struct
+--- old
+    if schema.is_object() || schema.is_boolean() {
+        return Ok(());
+    }
+--- new
+    if schema.is_object() || schema.is_boolean() {
+        let _ = schema.get("from_block");
+        return Ok(());
+    }
+--- end

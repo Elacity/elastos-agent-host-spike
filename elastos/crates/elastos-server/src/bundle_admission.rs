@@ -65,6 +65,11 @@ pub const BUNDLE_WALK_BUDGET: Budget = Budget {
     max_path_bytes: 1_024,
 };
 
+const _: () = assert!(
+    BUNDLE_WALK_BUDGET.max_total_bytes
+        <= elastos_common::capsule_manifest_file::MAX_CAPSULE_MANIFEST_BYTES
+);
+
 /// The most bundles one start by CID takes in: the one asked for and every
 /// bundle pinned below it, each counted once however many pins reach it.
 pub const CLOSURE_MAX_MEMBERS: usize = 16;
@@ -436,6 +441,7 @@ pub fn walk_refusal(refusal: Refusal) -> BundleRefusal {
         Refusal::DirectoryOverBlockLimit { .. } => "bundle_walk_directory_over_block_limit",
         Refusal::Changed { .. } => "bundle_walk_changed",
         Refusal::Unreadable { .. } => "bundle_walk_unreadable",
+        Refusal::InvalidRootPath { .. } => "bundle_walk_invalid_root_path",
         Refusal::OverBudget { .. } => "bundle_walk_over_budget",
         Refusal::PinRefused { .. } => "bundle_walk_pin_refused",
         Refusal::NotALabCid { .. } => "bundle_walk_not_a_cid",

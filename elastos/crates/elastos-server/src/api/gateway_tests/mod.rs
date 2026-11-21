@@ -1143,6 +1143,7 @@ async fn wallet_chain_test_state_with_shared_wallet_provider(
 include!("support_providers.rs");
 include!("support_runtime.rs");
 
+mod agent_plan;
 mod agent_routes;
 mod assistant_workspace_v2;
 mod browser_profile;
@@ -1156,6 +1157,7 @@ mod frontdoor;
 mod gateway_browser_route_tests;
 mod gba;
 mod home_agent;
+mod home_authority_inventory;
 mod home_system;
 mod inbox_audit_rows;
 mod inspect;

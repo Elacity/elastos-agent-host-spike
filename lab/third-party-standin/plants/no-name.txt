@@ -1,0 +1,11 @@
+id: no-name
+file: elastos/crates/elastos-runtime/src/provider/registry.rs
+test: runtime_sources_do_not_name_the_stand_in
+--- old
+    /// Register a provider for its schemes
+    pub async fn register(&self, provider: Arc<dyn Provider>) {
+--- new
+    /// Register a provider for its schemes
+    // standin-swap
+    pub async fn register(&self, provider: Arc<dyn Provider>) {
+--- end

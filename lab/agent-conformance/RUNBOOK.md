@@ -801,8 +801,8 @@ keeps its existing grade and labels pending/grant cleanup as unmeasured.
 
 ## Two seeded instances (023)
 
-The rows `two_instances_overlap_with_separate_grants` and
-`instance_grant_does_not_authorise_sibling` each run one shared journey and prove
+The row `two_instances_overlap_with_separate_grants` checks the shared journey,
+including the sibling refusal, and proves
 **process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9**.
 A3 is independent resident capsule instances inside one Runtime
 (https://github.com/Elacity/elastos-runtime/issues/181). Run `run.sh` under the shared

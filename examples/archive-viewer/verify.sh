@@ -5,7 +5,7 @@
 # ComponentProvider with its admission check, the F35 grant stop and the F36
 # fuel gate (the host-test crate), and their falsifiers.
 #
-# Usage: verify.sh [--runtime | --guest-only]
+# Usage: verify.sh [--runtime | --guest-only | --recorded-hash-only]
 #
 # --runtime     also build the component and run the host-test crate and its
 #               runtime falsifiers (this Mac; needs wasm32 and the repository
@@ -72,6 +72,7 @@ install_snapshot_traps() {
 
 RUNTIME=0
 GATE=0
+HASH_ONLY=0
 case "${GATE_LIST:-}" in
     # run-lane.sh exports the gate commands (the substring is `gates-photo`),
     # and older forms may carry the name; either way this is the lane gate.
@@ -86,8 +87,9 @@ else
         case "$1" in
             --runtime) RUNTIME=1 ;;
             --guest-only) RUNTIME=0 ;;
+            --recorded-hash-only) HASH_ONLY=1 ;;
             *)
-                echo "usage: $0 [--runtime | --guest-only]" >&2
+                echo "usage: $0 [--runtime | --guest-only | --recorded-hash-only]" >&2
                 exit 2
                 ;;
         esac
@@ -95,7 +97,7 @@ else
     done
 fi
 # Fail closed: the lane gate must never certify a guest-only run.
-if [[ $GATE -eq 1 && $RUNTIME -ne 1 ]]; then
+if [[ $GATE -eq 1 && $RUNTIME -ne 1 && $HASH_ONLY -eq 0 ]]; then
     echo "verify.sh: the lane gate requires the runtime step; drop --guest-only" >&2
     exit 1
 fi
@@ -105,6 +107,10 @@ fi
 # build cannot match: the record is the pinned-container route.
 HASH_ARTIFACT="${REPO_ROOT}/examples/capsule-kit/repro/reference/archive-viewer.component.wasm"
 hash_gate() { python3 -I "${REPO_ROOT}/examples/capsule-kit/repro/recorded_hash_gate.py" "$@"; }
+hash_gate archive-viewer --artifact "${HASH_ARTIFACT}"
+if [[ $HASH_ONLY -eq 1 ]]; then
+    exit 0
+fi
 
 python3 -I "${VIEWER_DIR}/falsify_restore_test.py"
 python3 -I "${VIEWER_DIR}/falsify_restore_test.py" --falsify
@@ -129,7 +135,6 @@ install_snapshot_traps
 python3 -I "${REPO_ROOT}/examples/capsule-kit/scripts/check-manifest.py" \
     "${VIEWER_DIR}/capsule.json" "${WIT}" archive-viewer
 
-hash_gate archive-viewer --artifact "${HASH_ARTIFACT}"
 hash_gate archive-viewer --artifact "${HASH_ARTIFACT}" --falsify
 
 cargo fmt --manifest-path "${VIEWER_DIR}/Cargo.toml" --all -- --check

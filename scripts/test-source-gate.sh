@@ -10,6 +10,7 @@ cd "$(dirname "$0")/.."
 
 product_data() {
   node scripts/check-product-data.mjs
+  python3 -I scripts/check-generic-runtime-inventory.py
 }
 
 prepush() {

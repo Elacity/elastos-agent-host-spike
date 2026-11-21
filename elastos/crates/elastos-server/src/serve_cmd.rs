@@ -1,10 +1,23 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use elastos_compute::ComputeProvider;
 use elastos_crosvm::{CrosvmConfig, CrosvmProvider};
+use elastos_runtime::capsule::check_entrypoint_file;
 use elastos_runtime::{bootstrap, session};
 use sha2::Digest as _;
+
+async fn load_microvm_capsule(
+    provider: &dyn ComputeProvider,
+    capsule_dir: &Path,
+    manifest: elastos_common::CapsuleManifest,
+) -> anyhow::Result<elastos_compute::CapsuleHandle> {
+    check_entrypoint_file(capsule_dir, &manifest.entrypoint).await?;
+    provider
+        .load(capsule_dir, manifest)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to load capsule: {}", e))
+}
 
 pub async fn run_serve(
     addr: String,
@@ -63,8 +76,8 @@ pub async fn run_serve(
     if let Some(capsule_dir) = capsule_dir {
         let manifest_path = capsule_dir.join("capsule.json");
         if manifest_path.exists() {
-            let manifest_data = tokio::fs::read_to_string(&manifest_path).await?;
-            let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_data)?;
+            let manifest_data = elastos_common::capsule_manifest_file::read(&manifest_path)?;
+            let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&manifest_data)?;
             manifest
                 .validate()
                 .map_err(|e| anyhow::anyhow!("Invalid manifest: {}", e))?;
@@ -97,10 +110,8 @@ pub async fn run_serve(
                 let pending_store = infra.pending_store.clone();
                 let tls_config = infra.tls_config;
 
-                let handle = vm_provider
-                    .load(&capsule_dir, manifest.clone())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load capsule: {}", e))?;
+                let handle =
+                    load_microvm_capsule(&vm_provider, &capsule_dir, manifest.clone()).await?;
 
                 if let Some(vm_id) = vm_provider.get_vm_id(&handle.id).await {
                     let vm_session = create_initial_vm_session(&session_registry, &vm_id).await;
@@ -556,6 +567,74 @@ mod tests {
     use elastos_runtime::primitives::audit::AuditLog;
     use elastos_server::api::middleware::{auth_middleware, shell_only_middleware, ApiState};
     use tower::ServiceExt;
+
+    struct LoadMustNotRun;
+
+    #[async_trait::async_trait]
+    impl ComputeProvider for LoadMustNotRun {
+        fn supports(&self, _capsule_type: &elastos_common::CapsuleType) -> bool {
+            true
+        }
+
+        async fn load(
+            &self,
+            _path: &Path,
+            _manifest: elastos_common::CapsuleManifest,
+        ) -> elastos_common::Result<elastos_compute::CapsuleHandle> {
+            panic!("compute load ran before entrypoint refusal")
+        }
+
+        async fn start(
+            &self,
+            _handle: &elastos_compute::CapsuleHandle,
+        ) -> elastos_common::Result<()> {
+            unreachable!()
+        }
+
+        async fn stop(
+            &self,
+            _handle: &elastos_compute::CapsuleHandle,
+        ) -> elastos_common::Result<()> {
+            unreachable!()
+        }
+
+        async fn status(
+            &self,
+            _handle: &elastos_compute::CapsuleHandle,
+        ) -> elastos_common::Result<elastos_common::CapsuleStatus> {
+            unreachable!()
+        }
+
+        async fn info(
+            &self,
+            _handle: &elastos_compute::CapsuleHandle,
+        ) -> elastos_common::Result<elastos_compute::CapsuleInfo> {
+            unreachable!()
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_microvm_refuses_outside_entrypoint_before_compute_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let capsule = dir.path().join("capsule");
+        std::fs::create_dir(&capsule).unwrap();
+        let outside = dir.path().join("outside.ext4");
+        std::fs::write(&outside, b"outside image").unwrap();
+        std::os::unix::fs::symlink(&outside, capsule.join("rootfs.ext4")).unwrap();
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(include_str!("../../../capsules/shell/capsule.json")).unwrap();
+
+        let error = load_microvm_capsule(&LoadMustNotRun, &capsule, manifest)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Entrypoint rootfs.ext4 leads out of the capsule directory"),
+            "{error}"
+        );
+    }
 
     async fn shell_route_status(
         registry: Arc<session::SessionRegistry>,

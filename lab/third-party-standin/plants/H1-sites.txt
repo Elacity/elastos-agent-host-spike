@@ -1,0 +1,10 @@
+id: H1-sites
+file: elastos/crates/elastos-server/src/server_infra.rs
+test: hook1_registration_and_provides_sites_are_the_known_set_today
+note: one extra production registration call inside register_content_plane
+--- old
+    provider_registry.register(content_provider.clone()).await;
+--- new
+    provider_registry.register(content_provider.clone()).await;
+    provider_registry.register(content_provider.clone()).await;
+--- end

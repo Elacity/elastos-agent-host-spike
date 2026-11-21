@@ -2,20 +2,41 @@
 //!
 //! Moved text for text from `lab/capsule-identity` (M2 part B, slice E1), so that production code
 //! can call the one implementation. It names a bundle or refuses; it admits and launches nothing.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
-use std::ffi::{CString, OsStr};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::ffi::OsStr;
 use std::fmt;
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(windows)]
+use std::io;
+#[cfg(unix)]
 use std::io::{self, Read};
+#[cfg(unix)]
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use elastos_common::{cid_form, CapsuleType, PinnedManifest, PinnedManifestError};
+#[cfg(unix)]
 use rustix::fs::{fstat, openat, Dir, FileType, Mode, OFlags, CWD};
+#[cfg(unix)]
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use std::fs::Metadata;
+
+#[cfg(windows)]
+mod windows_walk;
+// NtCreateFile and handle-based enumeration need a narrow, audited FFI boundary.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_handle;
+#[cfg(windows)]
+use windows_walk::collect_entries;
 
 /// The manifest every bundle holds at its root.
 pub const MANIFEST_FILE: &str = "capsule.json";
@@ -211,6 +232,8 @@ pub enum Refusal {
     /// takes that word with a colon in test output for a harness error, so a
     /// failing assertion that printed this refusal would never count.)
     Unreadable { path: String, reason: String },
+    /// The Windows root path is not an absolute or relative local-disk path.
+    InvalidRootPath { path: String, reason: &'static str },
     /// The walk met more than its [`Budget`] allows. `limit` names which
     /// of the four limits; `path` is the entry at which it was passed.
     /// Nothing past the limit was read.
@@ -346,6 +369,9 @@ impl fmt::Display for Refusal {
             ),
             Refusal::Changed { path } => write!(f, "{path} changed while the bundle was named"),
             Refusal::Unreadable { path, reason } => write!(f, "could not read {path}: {reason}"),
+            Refusal::InvalidRootPath { path, reason } => {
+                write!(f, "invalid bundle root {path:?}: {reason}")
+            }
             Refusal::OverBudget { limit, path } => {
                 write!(f, "{path} passes the walk's limit on {limit}")
             }
@@ -1057,9 +1083,9 @@ fn put_varint(out: &mut Vec<u8>, mut value: u64) {
     out.push(value as u8);
 }
 
-/// The kind of one entry, from its own type: as its folder's listing reports
-/// it, or as `fstat` reports its open handle. Only a directory or a regular
-/// file may be in a bundle; everything else is [`EntryKind::Special`].
+/// The kind of one entry. Unix uses its file type; Windows uses metadata so
+/// every reparse tag is visible. Only directories and regular files are named.
+#[cfg(unix)]
 pub fn entry_kind(file_type: FileType) -> EntryKind {
     if file_type.is_dir() {
         EntryKind::Directory
@@ -1067,6 +1093,22 @@ pub fn entry_kind(file_type: FileType) -> EntryKind {
         EntryKind::RegularFile
     } else {
         EntryKind::Special(special_name(file_type))
+    }
+}
+
+#[cfg(windows)]
+pub fn entry_kind(metadata: &Metadata) -> EntryKind {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        EntryKind::Special("reparse point")
+    } else if metadata.is_dir() {
+        EntryKind::Directory
+    } else if metadata.is_file() {
+        EntryKind::RegularFile
+    } else {
+        EntryKind::Special("special file")
     }
 }
 
@@ -1091,6 +1133,7 @@ pub fn entry_path(parent: &str, name: &OsStr) -> Result<String, Refusal> {
 
 /// One entry of a folder's listing: its name in the folder, its bundle
 /// path, and the type the listing gave it.
+#[cfg(unix)]
 struct Listed {
     name: CString,
     path: String,
@@ -1098,6 +1141,7 @@ struct Listed {
 }
 
 /// A folder the walk is in: its checked handle and the rest of its listing.
+#[cfg(unix)]
 struct Folder {
     handle: OwnedFd,
     listing: std::vec::IntoIter<Listed>,
@@ -1110,6 +1154,7 @@ struct Folder {
 /// entry, checks the open handle, and only then reads or lists that handle.
 /// It goes depth first, so it holds one handle per folder level. The first
 /// refusal stops the walk. Listing order does not matter: the encoder sorts.
+#[cfg(unix)]
 fn collect_entries(
     bundle: &Path,
     observe: &mut dyn FnMut(Moment, &str),
@@ -1158,6 +1203,7 @@ fn collect_entries(
 /// The whole listing of the folder open at `folder`, read from that handle
 /// before any entry in it is opened. `prefix` is the folder's bundle path.
 /// `.` and `..` are the folder itself and its parent, so they are skipped.
+#[cfg(unix)]
 fn list_folder(
     folder: BorrowedFd<'_>,
     prefix: &str,
@@ -1184,6 +1230,7 @@ fn list_folder(
 /// The flags of every open: read only, never follow a link, never wait on a
 /// FIFO, and close on exec. A folder is opened as a folder, so the open
 /// fails unless it is one.
+#[cfg(unix)]
 fn open_flags(kind: EntryKind) -> OFlags {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     if kind == EntryKind::Directory {
@@ -1198,6 +1245,7 @@ fn open_flags(kind: EntryKind) -> OFlags {
 /// listing said. The bundle root is the one entry opened by a path: its
 /// `folder` is the working folder (`CWD`) and its `name` is the root's
 /// path. `path` is the entry's bundle path, for a refusal.
+#[cfg(unix)]
 fn open_checked(
     folder: BorrowedFd<'_>,
     name: impl rustix::path::Arg,
@@ -1221,6 +1269,7 @@ fn open_checked(
 /// no-follow flag, so `ELOOP` means it is now a link: it gets the link's own
 /// refusal. Every other failure keeps the system's own reason. (A folder is
 /// opened as a folder: on macOS a link there fails with "Not a directory".)
+#[cfg(unix)]
 fn open_refusal(path: &str, listed: EntryKind, errno: Errno) -> Refusal {
     if errno == Errno::LOOP && listed == EntryKind::RegularFile {
         Refusal::NotRegularFile {
@@ -1233,6 +1282,7 @@ fn open_refusal(path: &str, listed: EntryKind, errno: Errno) -> Refusal {
 }
 
 /// The bytes of the regular file open at `handle`, read from that handle.
+#[cfg(unix)]
 fn read_file(handle: OwnedFd, path: &str, tally: &mut Tally) -> Result<Vec<u8>, Refusal> {
     let mut content = Vec::new();
     if tally.budget == Budget::UNLIMITED {
@@ -1282,6 +1332,7 @@ fn check_manifest(bytes: &[u8]) -> Result<(bool, String, String), Refusal> {
     Ok((wasm, manifest.name().to_owned(), role))
 }
 
+#[cfg(unix)]
 fn special_name(file_type: FileType) -> &'static str {
     if file_type.is_symlink() {
         "symbolic link"

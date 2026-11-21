@@ -58,6 +58,9 @@ jobs:
           - { name: gba-viewer, run: "bash examples/gba-viewer/verify.sh" }
           # Reported on its own on purpose: this gate has wall-clock tests.
           - { name: bus2-proof, run: "bash examples/bus2-proof/verify.sh" }
+          # fmt, the host tests, clippy, and the component build. Omitted here,
+          # a red agent-host gate stayed unseen until the next hand check.
+          - { name: agent-host, run: "bash examples/agent-host/verify.sh" }
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
