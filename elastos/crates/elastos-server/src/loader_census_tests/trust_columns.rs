@@ -165,10 +165,10 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/carrier.rs",
             function: "start_carrier_node_with_network",
             call: "spawn()",
-            class: "other",
+            class: "n/a",
             trust_root: "none",
             verified_when: "never",
-            evidence: [".spa", "wn()"].concat(),
+            evidence: ["Router::builder", "(endpoint.clone())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -346,9 +346,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_inactive_custody_provider",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: ["checked_native_provider_with_data_dir", "(data_dir, binary_path)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1249,13 +1249,30 @@ fn assert_caller_paths(sources: &BTreeMap<String, String>) {
             .into_iter()
             .find(|column| (column.file, column.function) == row)
             .unwrap();
-        let all_checked = paths
+        let all_callers_checked = paths
             .iter()
             .filter(|path| (path.row_file, path.row_function) == row)
             .all(|path| path.check.is_some());
+        // Custody checks the executable in its own entry, including the
+        // direct ProviderPlane caller that has no separate caller check.
+        let entry_checked =
+            row == (
+                "elastos-server/src/protected_content_runtime.rs",
+                "register_inactive_custody_provider",
+            ) && {
+                let text = &sources[row.0];
+                let code = source::code_only(text);
+                let check = [
+                    "checked_native_provider_with_data_dir",
+                    "(data_dir, binary_path)",
+                ]
+                .concat();
+                text.match_indices(&check)
+                    .any(|(at, _)| source::enclosing_fn(&code, at) == row.1)
+            };
         assert_eq!(
             column.trust_root == "components-json-in-data-dir",
-            all_checked,
+            all_callers_checked || entry_checked,
             "weakest caller path changed for {}::{}",
             row.0,
             row.1
@@ -1542,22 +1559,22 @@ fn trust_column_counts_and_chokepoint_queue() {
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
     assert_eq!(columns.len(), 97);
-    assert_eq!(classes.get("n/a"), Some(&48));
+    assert_eq!(classes.get("n/a"), Some(&49));
     assert_eq!(classes.get("os-tool"), Some(&2));
-    assert_eq!(classes.get("other"), Some(&37));
+    assert_eq!(classes.get("other"), Some(&36));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&53));
+    assert_eq!(roots.get("none"), Some(&52));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&24));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&31));
+    assert_eq!(times.get("at-every-start"), Some(&32));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&53));
-    assert_eq!(to_gate, 30);
+    assert_eq!(times.get("never"), Some(&52));
+    assert_eq!(to_gate, 29);
 }
 
 #[test]
