@@ -23,7 +23,10 @@ const BASELINE: &str = concat!(
     "arch_prctl close exit_group getrandom mmap mprotect ppoll poll rt_sigaction",
 );
 
-const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq";
+// Linux probe rows follow the original model names. `socket` is absent here:
+// the program admits it only for AF_UNIX. `connect`, `sendto` and `bind` stay,
+// because the probe measured them and they do not carry an address family.
+const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
 /// The lab sorts names after it joins declared rights and the baseline.
 pub(super) fn linux_seccomp_list(
@@ -53,6 +56,8 @@ pub(super) fn linux_seccomp_list(
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    const MODEL_PROBE_NAMES: &str = "accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
     // Normalization: only LAB_BASELINE is subtracted from the crate side. The pin set stays as derived.
     // `did` has none. A mismatch prints the symmetric difference. The baseline check does not apply that delta.
@@ -133,7 +138,7 @@ mod tests {
             let (row, next) = (lines[index].trim(), lines[index + 1].trim());
             if !row.starts_with("0x0015") || !next.starts_with("0x0006") || !next.contains("0x7fff0000") { continue; }
             let Some(name) = row.split("# SYS_").nth(1).map(str::trim) else { continue };
-            if ["clone", "clone3", "socketpair", "fcntl", "prlimit64", "futex"].contains(&name) { panic!("{name} is an argument-checked thread call, not an unconditional allow"); }
+            if ["clone", "clone3", "socketpair", "fcntl", "prlimit64", "futex", "socket"].contains(&name) { panic!("{name} is an argument-checked call, not an unconditional allow"); }
             names.insert(name.to_string());
         }
         names
@@ -207,6 +212,10 @@ mod tests {
             let mut commits = String::new();
             for (who, row_arch, call, commit) in LAB_BASELINE {
                 if *who == name && same_arch(*row_arch, arch) { got.remove(*call); commits.push_str(commit); commits.push(' '); }
+            }
+            if name == "model" {
+                // Probe names are not in the lab pin. The test drops them before the comparison.
+                for call in MODEL_PROBE_NAMES.split_whitespace() { got.remove(call); }
             }
             let (crate_only, pin_only): (Vec<_>, Vec<_>) = (got.difference(&lab).cloned().collect(), lab.difference(&got).cloned().collect());
             assert!(crate_only.is_empty() && pin_only.is_empty(), "{name} {arch:?} symmetric difference crate-only {crate_only:?} pin-only {pin_only:?} baseline {commits}");

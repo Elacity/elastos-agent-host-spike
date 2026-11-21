@@ -23,7 +23,11 @@ fn start_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
 }
 
 fn start_shell(fixture: &Fixture, path: &Path, marker: &Path) -> Result<()> {
-    let prepared = crate::setup::verify_installed_component_start(&fixture.data, "shell", path)?;
+    start_in(&fixture.data, path, marker)
+}
+
+fn start_in(data: &Path, path: &Path, marker: &Path) -> Result<()> {
+    let prepared = crate::setup::verify_installed_component_start(data, "shell", path)?;
     let mut command = std::process::Command::new(prepared.exec_path());
     command.arg(marker);
     prepared.attach_std(&mut command, false)?;
@@ -83,6 +87,124 @@ fn checked_provider_refuses_untrusted_release_before_spawn() {
         .verify_at_spawn()
         .unwrap_err()
         .contains("provider signed release admission refused"));
+}
+
+/// A source Home: no installation/, no trusted source, a local shell script.
+fn source_home(
+    config: Option<&str>,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let data = fs::canonicalize(root.path()).unwrap();
+    let path = data.join("bin/shell");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"#!/bin/sh\nprintf ran > \"$1\"\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    if let Some(config) = config {
+        fs::write(data.join("config.toml"), config).unwrap();
+    }
+    (root, data, path)
+}
+
+#[test]
+fn source_home_with_dev_mode_starts_its_component() {
+    let (_root, data, path) = source_home(Some("dev_mode = true\n"));
+    let marker = data.join("ran");
+    start_in(&data, &path, &marker).unwrap();
+    assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
+#[test]
+fn source_home_without_dev_mode_refuses_before_exec() {
+    for config in [
+        None,
+        Some("dev_mode = false\n"),
+        Some("trusted_keys = []\n"),
+    ] {
+        let (_root, data, path) = source_home(config);
+        let marker = data.join("ran");
+        let error = start_in(&data, &path, &marker).unwrap_err().to_string();
+        assert!(
+            error.contains("No trusted source configured"),
+            "{config:?}: {error}"
+        );
+        assert!(!marker.exists(), "{config:?}");
+        // Reading the opt-in never writes a default config.
+        assert_eq!(data.join("config.toml").exists(), config.is_some());
+    }
+}
+
+#[test]
+fn source_home_dev_mode_symlink_is_no_opt_in() {
+    let (root, data, path) = source_home(None);
+    let elsewhere = root.path().join("elsewhere.toml");
+    fs::write(&elsewhere, "dev_mode = true\n").unwrap();
+    symlink(&elsewhere, data.join("config.toml")).unwrap();
+    let marker = data.join("ran");
+    let error = start_in(&data, &path, &marker).unwrap_err().to_string();
+    assert!(error.contains("No trusted source configured"), "{error}");
+    assert!(!marker.exists());
+}
+
+#[test]
+fn source_home_opt_in_read_never_creates_a_config() {
+    // The config can vanish between any two steps of a check; a gone file,
+    // or even a gone data directory, must stay gone.
+    let (root, data, path) = source_home(None);
+    let missing = root.path().join("removed-data-dir");
+    for data in [data, missing] {
+        let error = crate::setup::verify_installed_component_start(&data, "shell", &path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("No trusted source configured"), "{error}");
+        assert!(!data.join("config.toml").exists(), "{}", data.display());
+    }
+    assert!(!root.path().join("removed-data-dir").exists());
+}
+
+#[test]
+fn source_home_opt_in_must_be_a_small_regular_file_with_a_toml_bool() {
+    for (case, config) in [
+        ("string", "dev_mode = \"true\"\n".to_string()),
+        ("integer", "dev_mode = 1\n".to_string()),
+        ("parse error", "dev_mode = true\nbroken = [\n".to_string()),
+        (
+            "oversize",
+            format!("dev_mode = true\n#{}\n", "x".repeat(70 * 1024)),
+        ),
+    ] {
+        let (_root, data, path) = source_home(Some(&config));
+        let error = start_in(&data, &path, &data.join("ran"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("No trusted source configured"),
+            "{case}: {error}"
+        );
+    }
+    let (_root, data, path) = source_home(None);
+    fs::create_dir(data.join("config.toml")).unwrap();
+    let error = start_in(&data, &path, &data.join("ran"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("No trusted source configured"),
+        "directory: {error}"
+    );
+}
+
+#[test]
+fn installed_home_with_dev_mode_is_still_checked() {
+    let (fixture, path, marker) = start_fixture();
+    fs::write(fixture.data.join("config.toml"), "dev_mode = true\n").unwrap();
+    fs::write(&path, b"#!/bin/sh\nprintf replaced > \"$1\"\n").unwrap();
+    let error = start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Installed component binary verification failed"),
+        "{error}"
+    );
+    assert!(!marker.exists());
 }
 
 #[test]
@@ -1159,4 +1281,14 @@ fn data_root_accepts_owned_group_writable_mode_and_descendants_stay_strict() {
     assert!(check_data_root(&data).is_err());
     assert!(check_parents(&data, &child, false).is_err());
     set(&data, 0o700);
+}
+
+#[test]
+fn source_home_dev_mode_does_not_admit_a_native_provider() {
+    // dev_mode starts a component unchecked; a native provider has no signed
+    // digest to pin its spawn-time check to, so it stays refused.
+    let (_root, data, path) = source_home(Some("dev_mode = true\n"));
+    let checked = crate::binaries::checked_native_provider_with_data_dir(&data, &path);
+    let error = checked.verify_at_spawn().unwrap_err();
+    assert!(error.contains("no signed release digest"), "{error}");
 }

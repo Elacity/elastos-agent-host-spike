@@ -14,9 +14,11 @@ use std::path::Path;
 use elastos_bundle_identity::{checked_bundle_within, CheckedBundle, LabCid};
 
 use crate::bundle_admission::{
-    bundle_signature_path, bundle_slot, walk_refusal, BundleRefusal, BUNDLE_WALK_BUDGET,
+    bundle_signature_path, bundle_slot, walk_refusal, AcceptedSignature, BundleRefusal,
+    BUNDLE_WALK_BUDGET,
 };
 use crate::runtime::Runtime;
+use elastos_compute::CapsuleHandle;
 
 /// What staging did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,19 @@ pub fn bundle_cid(folder: &Path) -> Result<String, BundleRefusal> {
     checked_bundle_within(folder, BUNDLE_WALK_BUDGET)
         .map(|bundle| bundle.cid().to_string())
         .map_err(walk_refusal)
+}
+
+/// A legacy Component folder selects a staged bundle by its walked CID.
+/// Execution uses only the staged slot, after its publisher and full pinned
+/// closure pass the same checks as `run --bundle`.
+pub async fn run_staged_folder(
+    runtime: &Runtime,
+    data_dir: &Path,
+    folder: &Path,
+    args: Vec<String>,
+) -> Result<(CapsuleHandle, AcceptedSignature), BundleRefusal> {
+    let cid = bundle_cid(folder)?;
+    runtime.run_by_bundle(data_dir, &cid, args, None).await
 }
 
 /// Stage the bundle in `folder`, signed by the file at `signature`, into the

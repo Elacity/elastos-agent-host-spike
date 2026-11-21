@@ -128,6 +128,38 @@ async function startResourceTurn(assistant, offer, prompt, tokens) {
     return { run, terminal: settled };
   } catch (error) { reject(error); throw error; }
 }
+async function resourceRunStatus(assistant, runId) {
+  const result = await assistant.evaluate(async id => {
+    const token = new URLSearchParams(location.hash.slice(1)).get("home_token");
+    const response = await fetch("/api/provider/model/runs_get", { method: "POST", headers: {
+      "x-elastos-home-token": token, "Content-Type": "application/json",
+    }, signal: AbortSignal.timeout(35000), body: JSON.stringify({ run_id: id, request_id: `model-v1:${Date.now()}:${crypto.randomUUID()}` }) });
+    return { ok: response.ok, payload: await response.json() };
+  }, runId);
+  assert(result.ok && result.payload.status === "ok", `Cannot check model run ${runId}: ${JSON.stringify(result.payload)}`);
+  assert.equal(result.payload.data.run_id, runId);
+  return result.payload.data.status;
+}
+async function runningResourceTurn(assistant, offer, first, prompt, label, { beforeStatus = async () => undefined, maxAttempts = 3 } = {}) {
+  let lastStatus = "unknown";
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (attempt > 1) await assistant.locator('#agent-composer-send[data-mode="send"]').waitFor({ state: "visible", timeout: 10000 });
+    const turn = attempt === 1 ? first : await startResourceTurn(assistant, offer, prompt, 1024);
+    const observed = await beforeStatus();
+    const deadline = Date.now() + 15000;
+    do {
+      lastStatus = await resourceRunStatus(assistant, turn.run.run_id);
+      if (lastStatus === "running") return { turn, observed, attempts: attempt };
+      if (lastStatus !== "prepared") break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < deadline);
+    assert.notEqual(lastStatus, "prepared", `${label} turn ${attempt} stayed prepared beyond 15 seconds`);
+    assert(["completed", "failed", "cancelled", "settlement_unknown"].includes(lastStatus),
+      `${label} turn ${attempt} has unexpected status ${lastStatus}`);
+    await turn.terminal;
+  }
+  assert.fail(`${label} never caught a running model turn in ${maxAttempts} attempts (last status: ${lastStatus})`);
+}
 async function resourceReply(assistant, offer, label) {
   await assistant.locator('#agent-composer-send[data-mode="send"]').waitFor({ state: "visible", timeout: 10000 });
   await configureTokens(assistant, 16);
@@ -163,9 +195,10 @@ async function resourceLifecycle(assistant, offer, context) {
     await selectModel(second, offer);
     await configureTokens(second, 16);
     subcheck = "owner_start";
-    const owner = await startResourceTurn(assistant, offer, longPrompt, 1024);
-    assert(!owner.run.terminal && ["prepared", "running"].includes(owner.run.status));
+    const ownerCandidate = await startResourceTurn(assistant, offer, longPrompt, 1024);
     await resourceAction("engine_running");
+    const { turn: owner, attempts: ownerAttempts } = await runningResourceTurn(assistant, offer, ownerCandidate, longPrompt, "Stop");
+    assert(!owner.run.terminal && ["prepared", "running"].includes(owner.run.status));
     subcheck = "busy";
     const busy = await startResourceTurn(second, offer, "Say hello.", 16);
     const refused = await busy.terminal;
@@ -176,17 +209,19 @@ async function resourceLifecycle(assistant, offer, context) {
     resourceTurns.push({ stage: "busy", run_id: busy.run.run_id, status: refused.status, code: refused.error.code });
     results.model_busy = "passed";
     subcheck = "stop";
+    const { turn: stopping } = await runningResourceTurn(assistant, offer, owner, longPrompt, "Stop",
+      { maxAttempts: 4 - ownerAttempts });
     const cancelled = page.waitForResponse(response => {
       if (!response.url().endsWith("/api/provider/model/runs_cancel") || response.request().frame() !== assistant) return false;
-      return response.request().postDataJSON()?.run_id === owner.run.run_id;
+      return response.request().postDataJSON()?.run_id === stopping.run.run_id;
     }, { timeout: 30000 });
     cancelled.catch(() => {});
     await assistant.locator('#agent-composer-send[data-mode="stop"]').click();
     assert((await cancelled).ok());
-    const stopped = await owner.terminal;
+    const stopped = await stopping.terminal;
     assert.equal(stopped.status, "cancelled", "Stop confirms the exact live run's settlement");
     await resourceAction("engine_stopped");
-    resourceTurns.push({ stage: "stop", run_id: owner.run.run_id, status: stopped.status });
+    resourceTurns.push({ stage: "stop", run_id: stopping.run.run_id, status: stopped.status });
     results.model_stop = "passed";
   } finally { await secondPage.close(); }
   subcheck = "stop_recovery";
@@ -204,10 +239,11 @@ async function resourceLifecycle(assistant, offer, context) {
   subcheck = "crash";
   await assistant.locator("#agent-harness-new-chat").click();
   await configureTokens(assistant, 1024);
-  const crashing = await startResourceTurn(assistant, offer, longPrompt, 1024);
-  assert(!crashing.run.terminal);
+  const crashCandidate = await startResourceTurn(assistant, offer, longPrompt, 1024);
   await assistant.waitForFunction(() => /\S/.test([...document.querySelectorAll(".agent-msg-agent .agent-msg-body")].at(-1)?.innerText ?? ""), null, { timeout: 60000 });
-  const doomed = await resourceAction("engine_running");
+  const { turn: crashing, observed: doomed } = await runningResourceTurn(assistant, offer, crashCandidate, longPrompt, "Crash",
+    { beforeStatus: () => resourceAction("engine_running") });
+  assert(!crashing.run.terminal);
   await resourceAction("crash_engine");
   const failed = await crashing.terminal;
   assert.equal(failed.status, "failed");
