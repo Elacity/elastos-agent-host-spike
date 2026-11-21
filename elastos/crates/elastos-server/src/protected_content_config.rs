@@ -1239,7 +1239,7 @@ pub(crate) mod tests {
             }))
             .unwrap()
         };
-        let runtime = data_dir.join("runtime");
+        let runtime = data_dir.join("fixture-runtime-bin");
         let runtime_bytes = b"fixture runtime";
         std::fs::write(&runtime, runtime_bytes).unwrap();
         let components = std::fs::read(data_dir.join("components.json")).unwrap();

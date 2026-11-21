@@ -35,16 +35,58 @@ const UNPACKED_SET_BYTES: u64 = 4352 * 1024 * 1024;
 // Unit tests unpack small fixtures, so they do not ask for the full set's room.
 const UNPACK_ESTIMATE: u64 = if cfg!(test) { 0 } else { UNPACKED_SET_BYTES };
 
+#[derive(Debug)]
+pub(crate) struct BrowserVmImageInvalid(anyhow::Error);
+
+impl BrowserVmImageInvalid {
+    pub(crate) fn new(error: anyhow::Error) -> Self {
+        Self(error)
+    }
+}
+
+impl std::fmt::Display for BrowserVmImageInvalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for BrowserVmImageInvalid {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct VmImageEntry {
+pub(super) struct VmImageEntry {
     path: String,
     size: u64,
     sha256: String,
     cid: String,
+    kernel: VmImageFile,
+    initrd: VmImageFile,
 }
 
-fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VmImageFile {
+    path: String,
+    size: u64,
+    sha256: String,
+}
+
+fn valid_image_file(entry: &VmImageFile, path: &str) -> bool {
+    entry.path == path
+        && entry.size > 0
+        && entry.size <= MAX_ARCHIVE_SIZE
+        && entry.sha256.len() == 64
+        && entry
+            .sha256
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+pub(super) fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
     let entry = info.extra.get("vm_image");
     ensure!(
         entry.is_some() || info.cid.is_none(),
@@ -65,18 +107,42 @@ fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
             && cid.codec() == 0x55
             && cid.hash().code() == 0x12
             && cid.hash().digest() == hex::decode(&entry.sha256)?.as_slice()
-            && cid.to_string() == entry.cid,
+            && cid.to_string() == entry.cid
+            && valid_image_file(&entry.kernel, "vmlinux")
+            && valid_image_file(&entry.initrd, "initrd"),
         "Browser signed VM image entry is invalid"
     );
     Ok(Some(entry))
 }
 
-fn verify_signed_image(bundle: &Path, info: &PlatformInfo, digest: &str) -> anyhow::Result<()> {
+fn verify_signed_image(
+    bundle: &Path,
+    info: &PlatformInfo,
+    digests: &[String; 3],
+) -> anyhow::Result<()> {
     if let Some(entry) = signed_image(info)? {
-        ensure!(
-            fs::metadata(bundle.join(&entry.path))?.len() == entry.size && digest == entry.sha256,
-            "Browser extracted image differs from signed VM image entry"
-        );
+        for (path, size, hash, digest) in [
+            (&entry.path, entry.size, &entry.sha256, &digests[0]),
+            (
+                &entry.kernel.path,
+                entry.kernel.size,
+                &entry.kernel.sha256,
+                &digests[1],
+            ),
+            (
+                &entry.initrd.path,
+                entry.initrd.size,
+                &entry.initrd.sha256,
+                &digests[2],
+            ),
+        ] {
+            if fs::metadata(bundle.join(path))?.len() != size || digest != hash {
+                return Err(BrowserVmImageInvalid::new(anyhow::anyhow!(
+                    "Browser extracted image differs from signed VM image entry: {path}"
+                ))
+                .into());
+            }
+        }
     }
     Ok(())
 }
@@ -752,7 +818,7 @@ fn verify_installed_with_cancel(
         cancelled,
         || verify_payload_with_cancel(&dest, platform, cancelled),
     )?;
-    verify_signed_image(&dest, info, &digests[0])?;
+    verify_signed_image(&dest, info, &digests)?;
     if let Some(entry) = signed_image(info)? {
         let recorded: Value = serde_json::from_slice(&fs::read(dest.join(SIGNED_IMAGE))?)?;
         let release_cid = signed_release_cid(data)?;
@@ -1012,7 +1078,7 @@ fn install_archive_reader(
         "Browser image archive is missing a required image-set file"
     );
     let digests = verify_payload_with_cancel(&bundle, platform, Some(cancelled))?;
-    verify_signed_image(&bundle, info, &digests[0])?;
+    verify_signed_image(&bundle, info, &digests)?;
     if let Some(entry) = signed_image(info)? {
         fs::write(
             bundle.join(SIGNED_IMAGE),
@@ -1178,7 +1244,7 @@ fn available_space(path: &Path) -> anyhow::Result<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use sha2::Digest;
 
@@ -1233,6 +1299,67 @@ mod tests {
         serde_json::from_value(json!({"external":{NAME:{"install_path":INSTALL_PATH,"platforms":{"darwin-arm64":info}}},"profiles":{}})).unwrap()
     }
 
+    pub(crate) fn install_signed_browser_vm_image_fixture(data: &Path) {
+        let rootfs = b"signed-image";
+        let (archive, mut info) = archive(&fixture(rootfs));
+        info.cid = Some(super::super::catalog_head_cid(&archive).unwrap());
+        info.extra.insert(
+            "vm_image".into(),
+            json!({
+                "path":"rootfs.ext4", "size":rootfs.len(), "sha256":sha(rootfs),
+                "cid":super::super::catalog_head_cid(rootfs).unwrap(),
+                "kernel":{"path":"vmlinux","size":6,"sha256":sha(b"kernel")},
+                "initrd":{"path":"initrd","size":6,"sha256":sha(b"initrd")}
+            }),
+        );
+        let platform = super::super::detect_platform();
+        let manifest_path = data.join("components.json");
+        let mut components: Value = if manifest_path.exists() {
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap()
+        } else {
+            json!({"external":{},"profiles":{}})
+        };
+        components["external"][NAME] = json!({
+            "install_path":INSTALL_PATH,"platforms":{(platform.clone()):info}
+        });
+        fs::write(&manifest_path, serde_json::to_vec(&components).unwrap()).unwrap();
+        crate::protected_content_config::tests::sign_test_install(data);
+        install_archive(data, &archive, &info, &platform).unwrap();
+        verify_installed(data, &info, &platform).unwrap();
+    }
+
+    #[tokio::test]
+    async fn signed_image_fixture_keeps_existing_rows_admitted() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("components.json"),
+            serde_json::to_vec(&json!({
+                "external":{"browser-vz-engine-supervisor":{
+                    "install_path":"bin/browser-vz-engine-supervisor","platforms":{}
+                }},
+                "profiles":{"browser-host":{"components":["browser-vz-engine-supervisor"]}}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        install_signed_browser_vm_image_fixture(temp.path());
+        let admitted = super::super::admit_installed_components(
+            temp.path(),
+            super::super::FirstPartyCarrierContext::Runtime,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(admitted
+            .manifest
+            .external
+            .contains_key("browser-vz-engine-supervisor"));
+        assert!(admitted.manifest.external.contains_key(NAME));
+        drop(admitted);
+        super::super::ensure_browser_vm_image_for_local_engine(temp.path())
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn signed_image_install_refuses_changed_bytes_and_missing_entry() {
         let temp = tempfile::tempdir().unwrap();
@@ -1248,10 +1375,60 @@ mod tests {
             "vm_image".into(),
             json!({"path":"rootfs.ext4", "size":12,
             "sha256":sha(b"signed-image"),
-            "cid":super::super::catalog_head_cid(b"signed-image").unwrap()}),
+            "cid":super::super::catalog_head_cid(b"signed-image").unwrap(),
+            "kernel":{"path":"vmlinux","size":6,"sha256":sha(b"kernel")},
+            "initrd":{"path":"initrd","size":6,"sha256":sha(b"initrd")}}),
+        );
+        let mut cidless = info.clone();
+        cidless
+            .extra
+            .get_mut("vm_image")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .retain(|key, _| key != "cid");
+        assert!(
+            install_archive(temp.path(), &original, &cidless, "darwin-arm64")
+                .unwrap_err()
+                .to_string()
+                .contains("cid")
         );
         install_archive(temp.path(), &original, &info, "darwin-arm64").unwrap();
         verify_installed(temp.path(), &info, "darwin-arm64").unwrap();
+        let installed = temp.path().join(INSTALL_PATH);
+        let original_receipt = fs::read(installed.join(RECEIPT)).unwrap();
+        for (name, role) in [("vmlinux", "kernel"), ("initrd", "initrd")] {
+            let path = installed.join(name);
+            let original_file = fs::read(&path).unwrap();
+            fs::write(&path, b"forged").unwrap();
+            let mut receipt: Value = serde_json::from_slice(&original_receipt).unwrap();
+            receipt[role]["sha256"] = json!(sha(b"forged"));
+            fs::write(
+                installed.join(RECEIPT),
+                serde_json::to_vec(&receipt).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                installed.join(RECEIPT_HASH),
+                super::super::compute_sha256_checksum(&installed.join(RECEIPT)).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                verify_installed(temp.path(), &info, "darwin-arm64")
+                    .unwrap_err()
+                    .to_string()
+                    .contains(name),
+                "{name}"
+            );
+            fs::write(&path, original_file).unwrap();
+            fs::write(installed.join(RECEIPT), &original_receipt).unwrap();
+            fs::write(
+                installed.join(RECEIPT_HASH),
+                super::super::compute_sha256_checksum(&installed.join(RECEIPT)).unwrap(),
+            )
+            .unwrap();
+            verify_installed(temp.path(), &info, "darwin-arm64").unwrap();
+        }
         let (changed, mut changed_info) = archive(&fixture(b"changed-image"));
         changed_info.cid = info.cid.clone();
         changed_info.extra = info.extra.clone();
@@ -1262,6 +1439,32 @@ mod tests {
                 .contains("differs from signed VM image entry")
         );
         verify_installed(temp.path(), &info, "darwin-arm64").unwrap();
+        for (name, bytes) in [
+            ("vmlinux", b"forged".as_slice()),
+            ("initrd", b"forged".as_slice()),
+        ] {
+            let mut files = fixture(b"signed-image");
+            let file = files.iter_mut().find(|(file, _)| file == name).unwrap();
+            file.1 = bytes.to_vec();
+            let mut receipt: Value = serde_json::from_slice(&files[0].1).unwrap();
+            let role = if name == "vmlinux" {
+                "kernel"
+            } else {
+                "initrd"
+            };
+            receipt[role]["sha256"] = json!(sha(bytes));
+            files[0].1 = serde_json::to_vec(&receipt).unwrap();
+            let (forged, mut forged_info) = archive(&files);
+            forged_info.extra = info.extra.clone();
+            assert!(
+                install_archive(temp.path(), &forged, &forged_info, "darwin-arm64")
+                    .unwrap_err()
+                    .to_string()
+                    .contains(name),
+                "{name}"
+            );
+            verify_installed(temp.path(), &info, "darwin-arm64").unwrap();
+        }
     }
 
     #[test]
@@ -1807,8 +2010,28 @@ mod tests {
             #[cfg(unix)]
             std::os::unix::fs::symlink(source.join(file), data.join(alias)).unwrap();
         }
-        // An absent components file and a source manifest without a released image
-        // both preserve a complete existing installation without a fetch path.
+        // A non-dev Home refuses a manually staged image without a release.
+        assert!(
+            super::super::ensure_browser_vm_image_for_local_engine(&data)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("installed signed release")
+        );
+        fs::write(
+            data.join("components.json"),
+            br#"{"external":{},"profiles":{}}"#,
+        )
+        .unwrap();
+        assert!(
+            super::super::ensure_browser_vm_image_for_local_engine(&data)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("installed signed release")
+        );
+        fs::write(data.join("config.toml"), b"dev_mode = true\n").unwrap();
+        // Explicit source Home mode admits a complete local image without a fetch path.
         super::super::ensure_browser_vm_image_for_local_engine(&data)
             .await
             .unwrap();
@@ -1836,7 +2059,7 @@ mod tests {
         let err = super::super::ensure_browser_vm_image_for_local_engine(&fresh)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("browser-vm-image metadata"));
+        assert!(err.to_string().contains("installed signed release"));
         assert!(!fresh.exists());
     }
 
