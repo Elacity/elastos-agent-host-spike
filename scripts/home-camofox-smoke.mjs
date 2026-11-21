@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readChatSummary } from "./chat-summary-smoke-client.mjs";
+import { readChatSummary, readLaunchToken, redactLaunchTokens } from "./chat-summary-smoke-client.mjs";
 
 const CAMOFOX_BASE = process.env.CAMOFOX_BASE || "http://localhost:9377";
 const ELASTOS_BASE_URL = (process.env.ELASTOS_BASE_URL || "http://localhost:8090").replace(/\/+$/, "");
@@ -34,6 +34,10 @@ function assert(condition, message, details = null) {
     error.details = details;
     throw error;
   }
+}
+
+function frameLaunchToken(actor) {
+  return `(${readLaunchToken.toString()})(win.location.href, win.location.origin, ${JSON.stringify(actor)})`;
 }
 
 class SkipCase extends Error {
@@ -276,8 +280,7 @@ async function launchShellTarget(tabId, target) {
 
 async function inboxAction(tabId, actionId) {
   const launched = await launchShellTarget(tabId, "inbox");
-  const token = new URL(launched.route, HOST_ORIGIN).searchParams.get("home_token");
-  assert(token, "Inbox launch did not return a home token", launched);
+  const token = readLaunchToken(launched.route, HOST_ORIGIN, "inbox");
   return evaluate(
     tabId,
     `fetch("/api/apps/inbox/actions", {
@@ -499,7 +502,7 @@ async function openElastosUri(tabId, uri) {
   await openShellTarget(tabId, "chat-room");
   const sent = await waitFor(async () => {
     const result = await frameState(tabId, "chat-room", `(() => {
-      const homeToken = new URLSearchParams(win.location.hash.slice(1)).get("home_token") || "";
+      const homeToken = ${frameLaunchToken("chat-room")};
       if (!homeToken) return { ok: false };
       const message = { type: "home:open-uri", uri: ${JSON.stringify(uri)}, homeToken };
       win.eval("window.parent.postMessage(" + JSON.stringify(message) + ", window.location.origin)");
@@ -576,7 +579,7 @@ async function deleteDocumentWorkingCopy(tabId, docDid) {
     return { ok: true, skipped: true };
   }
   return frameState(tabId, "documents", `(async () => {
-    const homeToken = new URLSearchParams(win.location.hash.replace(/^#/, "")).get("home_token") || "";
+    const homeToken = ${frameLaunchToken("documents")};
     const response = await fetch("/api/provider/documents/delete", {
       method: "POST",
       headers: {
@@ -598,17 +601,17 @@ async function runCase(name, fn) {
     console.log(`PASS ${name}`);
   } catch (error) {
     if (error.skip) {
-      console.log(`SKIP ${name}: ${error.message}`);
+      console.log(redactLaunchTokens(`SKIP ${name}: ${error.message}`));
       return;
     }
     const state = tabId ? await shellState(tabId).catch(() => null) : null;
     console.error(`FAIL ${name}`);
-    console.error(error.message);
+    console.error(redactLaunchTokens(error.message));
     if (error.details) {
-      console.error(JSON.stringify(error.details, null, 2));
+      console.error(redactLaunchTokens(JSON.stringify(error.details, null, 2)));
     }
     if (state) {
-      console.error(JSON.stringify(state, null, 2));
+      console.error(redactLaunchTokens(JSON.stringify(state, null, 2)));
     }
     throw error;
   } finally {
@@ -730,7 +733,7 @@ async function main() {
     await runCase("home-cli-copy-stays-plain", async (tabId) => {
       const launched = await launchShellTarget(tabId, "home-cli");
       const route = new URL(launched.route, HOST_ORIGIN).toString();
-      assert(route.includes("home_token="), "Home CLI launch did not mint an app token", launched);
+      readLaunchToken(launched.route, HOST_ORIGIN, "home-cli");
       await evaluate(tabId, `(() => { window.location.href = ${JSON.stringify(route)}; return true; })()`);
       await waitForSelector(tabId, "#xterm-terminal", 20_000);
       await delay(1200);
@@ -868,7 +871,7 @@ async function main() {
         system,
       );
       const overlayReset = await frameState(tabId, "system", `(async () => {
-        const token = new URL(win.location.href).searchParams.get("home_token") || "";
+        const token = ${frameLaunchToken("system")};
         const response = await fetch("/api/apps/system/appearance/background-overlay", {
           method: "POST",
           headers: {
@@ -896,7 +899,7 @@ async function main() {
       }, 8000, 300);
       assert(overlayResetApplied, "Home did not apply the reset background overlay setting", await shellState(tabId));
       const overlayOn = await frameState(tabId, "system", `(async () => {
-        const token = new URL(win.location.href).searchParams.get("home_token") || "";
+        const token = ${frameLaunchToken("system")};
         const response = await fetch("/api/apps/system/appearance/background-overlay", {
           method: "POST",
           headers: {
@@ -930,7 +933,7 @@ async function main() {
       }, 8000, 300);
       assert(overlayApplied, "Home did not apply the enabled background overlay opacity setting", await shellState(tabId));
       const overlayOff = await frameState(tabId, "system", `(async () => {
-        const token = new URL(win.location.href).searchParams.get("home_token") || "";
+        const token = ${frameLaunchToken("system")};
         const response = await fetch("/api/apps/system/appearance/background-overlay", {
           method: "POST",
           headers: {
@@ -958,7 +961,7 @@ async function main() {
       }, 8000, 300);
       assert(overlayRestored, "Home did not restore the disabled background overlay setting", await shellState(tabId));
       const oversizedUpload = await frameState(tabId, "system", `(async () => {
-        const token = new URL(win.location.href).searchParams.get("home_token") || "";
+        const token = ${frameLaunchToken("system")};
         const body = new Uint8Array(6 * 1024 * 1024);
         body[0] = 0x89;
         body[1] = 0x50;
@@ -1375,7 +1378,8 @@ async function main() {
         const routes = await evaluate(tabId, `(() => [...document.querySelectorAll('.window[data-target="documents"] .window-frame')]
           .map((frame) => frame.getAttribute("src") || ""))()`);
         return routes.some((route) => (
-          route.startsWith("/apps/documents/?home_token=") &&
+          route.startsWith("/apps/documents/") &&
+          (() => { try { readLaunchToken(route, HOST_ORIGIN, "documents"); return true; } catch { return false; } })() &&
           route.includes("cid=" + TEST_DOCUMENT_CID) &&
           route.includes("view=read") &&
           route.includes("uri=elastos%3A%2F%2F" + TEST_DOCUMENT_CID)
@@ -1435,7 +1439,7 @@ async function main() {
       // Documents offers no Publish control; publish through the provider so the
       // receiving path for documents published earlier stays covered.
       const publishState = await frameState(tabId, "documents", `(async () => {
-        const homeToken = new URLSearchParams(win.location.hash.replace(/^#/, "")).get("home_token") || "";
+        const homeToken = ${frameLaunchToken("documents")};
         const response = await fetch("/api/provider/documents/publish", {
           method: "POST",
           headers: {
@@ -1456,7 +1460,7 @@ async function main() {
       assert(isDocumentPublished(publishState), "Documents did not publish a revision", publishState);
 
       const publishedRecord = await frameState(tabId, "documents", `(async () => {
-        const homeToken = new URLSearchParams(win.location.hash.replace(/^#/, "")).get("home_token") || "";
+        const homeToken = ${frameLaunchToken("documents")};
         const response = await fetch("/api/provider/documents/get", {
           method: "POST",
           headers: {
@@ -1565,7 +1569,8 @@ async function main() {
         const routes = await evaluate(tabId, `(() => [...document.querySelectorAll('.window[data-target="documents"] .window-frame')]
           .map((frame) => frame.getAttribute("src") || ""))()`);
         return routes.some((route) => (
-          route.startsWith("/apps/documents/?home_token=") &&
+          route.startsWith("/apps/documents/") &&
+          (() => { try { readLaunchToken(route, HOST_ORIGIN, "documents"); return true; } catch { return false; } })() &&
           route.includes("cid=" + cid) &&
           route.includes("view=read") &&
           route.includes("uri=" + encodeURIComponent(uri))
@@ -1619,7 +1624,7 @@ async function main() {
             query: {},
             homeToken: "not-a-valid-token",
           });
-          const homeToken = new URLSearchParams(win.location.hash.slice(1)).get("home_token") || "";
+          const homeToken = ${frameLaunchToken("documents")};
           sendFromFrame({
             type: "home:open-target",
             target: "system",
@@ -1644,7 +1649,7 @@ async function main() {
       let authorized = null;
       const authorizedSent = await waitFor(async () => {
         authorized = await frameState(tabId, "chat-room", `(() => {
-          const homeToken = new URLSearchParams(win.location.hash.slice(1)).get("home_token") || "";
+          const homeToken = ${frameLaunchToken("chat-room")};
           const message = {
             type: "home:open-uri",
             uri: ${JSON.stringify(uri)},
@@ -2415,6 +2420,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error.stack || error.message || String(error));
+  console.error(redactLaunchTokens(error.stack || error.message || String(error)));
   process.exitCode = 1;
 });
