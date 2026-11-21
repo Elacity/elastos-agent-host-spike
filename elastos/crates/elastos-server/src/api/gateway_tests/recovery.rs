@@ -233,6 +233,31 @@ async fn full_recovery_setup_preserves_identity_and_requires_successful_profile_
         .required_actions
         .iter()
         .any(|action| action == "download_recovery_kit_with_profile"));
+    let protector_created_at = crate::auth::load_principal_root_protection(
+        dir.path(),
+        &principal.principal_id,
+        &principal.localhost_root,
+    )
+    .unwrap()
+    .expect("the older Recovery Kit has root protection")
+    .protectors
+    .first()
+    .expect("the older Recovery Kit has a protector")
+    .created_at;
+    // Profile coverage is rejected if its export time precedes this stored
+    // protector. A backward wall-clock step can temporarily cause that case.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let now = crate::auth::now_ts();
+        if now >= protector_created_at {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "wall clock did not reach Recovery Kit protector creation time within 120 seconds: now={now}, created_at={protector_created_at}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let restarted = gateway_router(wallet_test_state(dir.path()).await);
     let (first, second) = tokio::join!(
         export_full_recovery_bundle_response(&restarted, dir.path(), &authority, &principal,),
