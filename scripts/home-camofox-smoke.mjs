@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { readChatSummary } from "./chat-summary-smoke-client.mjs";
+
 const CAMOFOX_BASE = process.env.CAMOFOX_BASE || "http://localhost:9377";
 const ELASTOS_BASE_URL = (process.env.ELASTOS_BASE_URL || "http://localhost:8090").replace(/\/+$/, "");
 const HOME_URL = process.env.HOME_URL || `${ELASTOS_BASE_URL}/apps/home/`;
@@ -304,13 +306,7 @@ async function cleanupRoomState(tabId) {
 
 async function chatSummary(tabId) {
   const launched = await launchShellTarget(tabId, "chat-room");
-  const token = new URL(launched.route, HOST_ORIGIN).searchParams.get("home_token");
-  assert(token, "Chat launch did not return a home token", launched);
-  const response = await fetch(`${HOST_ORIGIN}/api/apps/chat-room/summary`, {
-    headers: { origin: "null", "x-elastos-home-token": token },
-  });
-  if (!response.ok) throw new Error(`Chat summary failed: ${response.status}`);
-  return response.json();
+  return readChatSummary(launched.route, HOST_ORIGIN);
 }
 
 async function waitForSelector(tabId, selector, timeoutMs = 15_000) {
