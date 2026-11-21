@@ -37,6 +37,19 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # testing a profile the Runtime never launches.
 CANONICAL_PARAMS = ("PROVIDER_EXECUTABLE", "STORAGE_ROOT", "STORAGE_PARENT")
 
+# M1a: the model profile alone also names these measured inputs
+# (capsules/wallet-provider/tests/confine.rs, measured_model_form). An unbound
+# ``(param ...)`` is #f and sandbox-exec exits 65, so every run binds each to a
+# path under the empty, root-owned /private/var/empty that no probe can create:
+# the grant is inert and each probe sees denials at least as strict as the
+# Runtime's. Profiles that do not name them ignore the extra ``-D``.
+MODEL_ONLY_PARAMS = (
+    ("MODEL", "ENGINE", "ENGINE_BUNDLE")
+    + tuple(f"MODEL_ANCESTOR_{i}" for i in range(19))
+    + tuple(f"{kind}_SOCKET_{i}" for i in range(64) for kind in ("BROKER", "ENGINE"))
+)
+INERT_PARAM_ROOT = "/private/var/empty/elastos-redteam-unbound"
+
 # ``python3 -I`` runs the gate, so the current directory is neither importable
 # nor reliable: find the repo and the profile under test from this file alone.
 # lab/redteam/py/sbx.py -> parents[3] is the repo root.
@@ -150,6 +163,7 @@ def run(
         f"STORAGE_ROOT={os.fspath(storage_root)}",
         "-D",
         f"STORAGE_PARENT={os.fspath(storage_parent)}",
+        *[a for n in MODEL_ONLY_PARAMS for a in ("-D", f"{n}={INERT_PARAM_ROOT}/{n}")],
         "-f",
         os.fspath(profile),
         os.fspath(launch_exe),

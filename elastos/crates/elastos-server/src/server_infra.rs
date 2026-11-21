@@ -4059,9 +4059,6 @@ mod tests {
     /// admits its executable against the served Home's signed release.
     #[cfg(unix)]
     fn install_signed_providers(data_dir: &Path, providers: &[(&str, &Path)]) -> Vec<PathBuf> {
-        use elastos_common::localhost::{
-            publisher_release_head_path, publisher_release_manifest_path,
-        };
         use sha2::{Digest as _, Sha256};
         let bin_dir = data_dir.join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -4102,6 +4099,20 @@ mod tests {
         }))
         .unwrap();
         fs::write(data_dir.join("components.json"), &components).unwrap();
+        sign_test_home(data_dir);
+        installed
+    }
+
+    /// Sign this Home's current components.json into a publisher-signed
+    /// release with a trusted source, as an installed Home has. Native
+    /// provider starts admit their executable against this release.
+    #[cfg(unix)]
+    fn sign_test_home(data_dir: &Path) {
+        use elastos_common::localhost::{
+            publisher_release_head_path, publisher_release_manifest_path,
+        };
+        use sha2::{Digest as _, Sha256};
+        let components = fs::read(data_dir.join("components.json")).unwrap();
         let cid = |bytes: &[u8]| {
             cid::Cid::new_v1(
                 0x55,
@@ -4163,7 +4174,6 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        installed
     }
 
     /// A stdio provider that answers every request with the fixed import CID,
@@ -4613,6 +4623,10 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+        // Startup admits model-provider against this Home's signed release
+        // (binaries::resolve_verified_native_provider_binary), as on an
+        // installed Home; without one, admission refuses before spawn.
+        sign_test_home(&root);
         // One hosted offer answers status without a local model slot.
         let config_root = root.join("providers/model-provider");
         fs::create_dir_all(&config_root).unwrap();

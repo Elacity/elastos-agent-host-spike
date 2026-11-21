@@ -411,6 +411,24 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-server/src/run_cmd.rs",
+            "run_bundle",
+            "bundle start",
+            "WASM bundle",
+            "CID+DID+closure",
+            "P2-2",
+            1,
+        ),
+        row(
+            "elastos-server/src/run_cmd.rs",
+            "run_staged_component",
+            "staged folder start",
+            "WASM bundle",
+            "CID+DID+closure",
+            "P2-8",
+            1,
+        ),
+        row(
             "elastos-server/src/runtime.rs",
             "run_by_bundle_observed",
             "bundle start",
@@ -835,6 +853,15 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/stage_cmd.rs",
+            "run_staged_folder",
+            "bundle start",
+            "WASM bundle",
+            "CID+DID+closure",
+            "P2-2",
+            1,
+        ),
+        row(
+            "elastos-server/src/stage_cmd.rs",
             "stage_bundle",
             "signed stage",
             "bundle stage",
@@ -943,10 +970,14 @@ fn found(sources: &BTreeMap<String, String>) -> BTreeMap<(String, String, String
         // Joined at run time, so this file never holds the literal call that
         // bundle_start_tests counts across the server sources.
         let bundle_start = [".start_by", "_bundle("].concat();
+        let bundle_run = [".run_by", "_bundle("].concat();
+        let staged_folder = ["::run_staged", "_folder("].concat();
         for (label, needle) in [
             ("command", "Command::new("),
             ("content import", "prepare_capsule_from_content_provider("),
             ("bundle start", bundle_start.as_str()),
+            ("bundle start", bundle_run.as_str()),
+            ("staged folder start", staged_folder.as_str()),
             ("folder start", ".run_signer("),
             ("Home install", "ensure_capsule_component_for_home_launch("),
             ("release capsule", "verify_installed_release_capsule("),

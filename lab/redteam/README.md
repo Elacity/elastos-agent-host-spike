@@ -172,6 +172,35 @@ The honesty tests prove these rules through unittest itself:
 - `test_expected_failures_are_recorded_findings`: every expected-failure probe
   names a finding file that exists.
 
+## Accepted named rights (model profile only)
+
+Four model-provider allows are owner-approved named rights, not escapes.
+`py/named_rights.py` lists each with its finding id, its decision line in
+`~/Sparks/office/DECISIONS.md` and its M1a lab measurement
+(`evidence/b3-m1a-rights/probe/`):
+
+- `CRITICAL-cc-model-confine-051`, `model-engine-process`:
+  `(allow process-fork)`. Decision line 4497 (20 Nov 2026, launch inputs,
+  "start its own engine process"); measurement row X2.
+- `CRITICAL-cc-model-confine-064`, `model-gpu`: the one
+  `iokit-open-user-client` line for `AGXDeviceUserClient` and
+  `IOSurfaceRootUserClient`. Decision line 4468 (20 Nov 2026, the GPU right);
+  measurement row X5. The probe may open the IOSurfaceRoot client only.
+- `CRITICAL-cc-model-confine-059`, `model-device-reads`: the `/dev/urandom`
+  read line and the `/dev/null` read-and-write-data line. Decision lines
+  4525-4526 (21 Nov 2026, device permissions); measurement PROOFS.txt:68-72.
+- `CRITICAL-cc-model-confine-069`, `model-null-write`: the `/dev/null`
+  read-and-write-data line, and no other `/dev` write. Same decision;
+  measurement PROOFS.txt:70-71.
+
+A right applies only to a launch of the live
+`capsules/model-provider/confine.sb`, only while that file carries each named
+line exactly once and no other allow of the same operation, and only for the
+measured probe line. Then the probe writes no finding and the model deny test
+becomes the named-right check. Anything wider falls back to a CRITICAL
+finding, and `test_model_allows_only_named_rights` in the fork, IOKit, device
+read and device write probes fails the gate. Wallet and did keep every deny.
+
 ## Files
 
 - `README.md`: this file, the lane goal and guards (a) to (e).
@@ -181,6 +210,7 @@ The honesty tests prove these rules through unittest itself:
 - `py/sbx.py`: the one `sandbox-exec` runner and its profile-error rule (P10,
   one copy). It takes any profile path; the planned did and model-provider
   profile probes reuse it. Not a test: its name does not match `test*.py`.
+- `py/named_rights.py`: the accepted named rights above. Not a test.
 - `py/test_confine_wallet_profile.py`: the wallet probe above.
 - `py/test_wasm_capsule_receipt.py`: task 003's probe of the wasm-capsule
   receipt hash binding (PR #124).

@@ -432,6 +432,26 @@ fn columns() -> Vec<TrustColumn> {
             os_path: "",
         },
         TrustColumn {
+            file: "elastos-server/src/run_cmd.rs",
+            function: "run_bundle",
+            call: "bundle start",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
+            evidence: [".run_b", "y_bundle(&data_dir"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/run_cmd.rs",
+            function: "run_staged_component",
+            call: "staged folder start",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
+            evidence: ["::run_staged", "_folder("].concat(),
+            os_path: "",
+        },
+        TrustColumn {
             file: "elastos-server/src/runtime.rs",
             function: "run_by_bundle_observed",
             call: "bundle start",
@@ -899,6 +919,16 @@ fn columns() -> Vec<TrustColumn> {
             trust_root: "components-json-in-data-dir",
             verified_when: "at-every-start",
             evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/stage_cmd.rs",
+            function: "run_staged_folder",
+            call: "bundle start",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
+            evidence: ["runtime.run_b", "y_bundle(data_dir, &cid"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1551,8 +1581,8 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 98);
-    assert_eq!(classes.get("n/a"), Some(&49));
+    assert_eq!(columns.len(), 101);
+    assert_eq!(classes.get("n/a"), Some(&52));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1562,11 +1592,11 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("none"), Some(&49));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&28));
-    assert_eq!(roots.get("staged-cid"), Some(&5));
+    assert_eq!(roots.get("staged-cid"), Some(&8));
     assert_eq!(times.get("at-every-start"), Some(&31));
     assert_eq!(times.get("at-overlay-creation"), Some(&4));
     assert_eq!(times.get("at-install-only"), Some(&8));
-    assert_eq!(times.get("at-stage-and-start"), Some(&6));
+    assert_eq!(times.get("at-stage-and-start"), Some(&9));
     assert_eq!(times.get("never"), Some(&49));
     assert_eq!(to_gate, 30);
 }
@@ -1626,5 +1656,72 @@ fn installed_component_start_callers_keep_the_signed_gate() {
                 == "provision_custody_node_with_installed_provider"
         }),
         "custody start must admit the resolver's selected binary"
+    );
+}
+
+/// A start path that runs a component with no check, only on an owner's opt-in.
+struct DevOptIn {
+    file: &'static str,
+    function: &'static str,
+    evidence: &'static str,
+    trust_root: &'static str,
+    verified_when: &'static str,
+    note: &'static str,
+}
+
+fn dev_opt_ins() -> Vec<DevOptIn> {
+    vec![DevOptIn {
+        file: "elastos-server/src/setup.rs",
+        function: "verify_installed_component_start",
+        evidence: "VerifiedExecutable::unchecked(path)",
+        trust_root: "none",
+        verified_when: "never",
+        note: "dev-only explicit opt-in: source Home with config.toml dev_mode = true",
+    }]
+}
+
+#[test]
+fn dev_opt_in_start_is_one_honest_row_behind_the_installed_release() {
+    let sources = source::production_sources();
+    let rows = dev_opt_ins();
+    assert_eq!(rows.len(), 1);
+    for row in &rows {
+        assert_eq!((row.trust_root, row.verified_when), ("none", "never"));
+        assert!(row.note.starts_with("dev-only explicit opt-in"));
+        let text = &sources[row.file];
+        let code = source::code_only(text);
+        let at = |needle: &str| {
+            let found: Vec<usize> = text
+                .match_indices(needle)
+                .map(|(at, _)| at)
+                .filter(|at| source::enclosing_fn(&code, *at) == row.function)
+                .collect();
+            assert_eq!(found.len(), 1, "{needle} in {}::{}", row.file, row.function);
+            found[0]
+        };
+        // A Home with a release never reaches the opt-in; the opt-in is
+        // asked before the unchecked start.
+        let release = at("let Some(source) = installed_release_source(data_dir)? else {");
+        let opt_in = at("if !source_home_dev_mode(data_dir) {");
+        let unchecked = at(row.evidence);
+        let signed = at("read_signed_release(data_dir, &runtime, &source, false)");
+        assert!(release < opt_in && opt_in < unchecked && unchecked < signed);
+    }
+    // No other production code starts a component unchecked.
+    let callers: Vec<_> = sources
+        .iter()
+        .flat_map(|(file, text)| {
+            let code = source::code_only(text);
+            text.match_indices("VerifiedExecutable::unchecked(")
+                .map(|(at, _)| (file.clone(), source::enclosing_fn(&code, at)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        callers,
+        [(
+            "elastos-server/src/setup.rs".to_string(),
+            "verify_installed_component_start".to_string()
+        )]
     );
 }
