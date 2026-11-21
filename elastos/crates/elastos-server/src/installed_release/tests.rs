@@ -1406,9 +1406,7 @@ fn source_home_dev_mode_does_not_admit_a_native_provider() {
 /// Home's components.json. Generic (no product names), shared by tests that
 /// need a Home with a signed installed release.
 pub(crate) fn sign_test_install(data_dir: &Path) {
-    use elastos_common::localhost::{
-        publisher_release_head_path, publisher_release_manifest_path,
-    };
+    use elastos_common::localhost::{publisher_release_head_path, publisher_release_manifest_path};
     let cid = |bytes: &[u8]| {
         cid::Cid::new_v1(
             0x55,

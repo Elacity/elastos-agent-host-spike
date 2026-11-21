@@ -110,9 +110,50 @@ jobs:
           def sha(path):
               with path.open('rb') as stream:
                   return hashlib.file_digest(stream, 'sha256').hexdigest()
+          def raw_cid(digest):
+              return 'b' + base64.b32encode(b'\x01\x55\x12\x20' + digest).decode().lower().rstrip('=')
+          def descriptor(path):
+              digest = bytes.fromhex(sha(path))
+              return {'cid': raw_cid(digest), 'sha256': digest.hex(), 'size': path.stat().st_size}
           def env(home):
               return {**observer.cli_environment(home), 'XDG_DATA_HOME': str(home / '.local/share'),
                       'ELASTOS_DATA_DIR': str(home / '.local/share/elastos')}
+          def sign_install(home, data, runtime):
+              # Use the same disposable-key Runtime signer as the CI update-hop fixture.
+              key = data / '.ci-publisher.key'
+              key.write_text(os.urandom(32).hex())
+              key.chmod(0o600)
+              def sign(payload, domain):
+                  canonical = json.dumps(payload, sort_keys=True, separators=(',', ':'),
+                                         ensure_ascii=False, allow_nan=False).encode()
+                  reply = subprocess.run([str(runtime), 'sign-payload', '--domain', domain, '--key', str(key)],
+                                         input=canonical, capture_output=True, env=env(home), cwd=home, timeout=30)
+                  assert reply.returncode == 0, 'fixture release signing failed'
+                  signature = json.loads(reply.stdout)
+                  return {'payload': payload, 'signature': signature['signature'], 'signer_did': signature['signer_did']}
+              try:
+                  version = subprocess.run([str(runtime), '--version'], capture_output=True, text=True,
+                                           env=env(home), cwd=home, timeout=30, check=True).stdout.strip().removeprefix('elastos ')
+                  assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?', version)
+                  release = json.dumps(sign({'schema': 'elastos.release/v1', 'version': version, 'channel': 'stable',
+                      'platforms': {'x86_64-linux': {'binary': descriptor(runtime),
+                                                     'components': descriptor(data / 'components.json')}}},
+                      'elastos.release.v1'), sort_keys=True, separators=(',', ':')).encode()
+                  head = json.dumps(sign({'schema': 'elastos.release.head/v1', 'version': version, 'channel': 'stable',
+                      'latest_release_cid': raw_cid(hashlib.sha256(release).digest()),
+                      'release_sha256': hashlib.sha256(release).hexdigest()},
+                      'elastos.release.head.v1'), sort_keys=True, separators=(',', ':')).encode()
+                  publisher = data / 'ElastOS/SystemServices/Publisher'
+                  publisher.mkdir(mode=0o700, parents=True, exist_ok=True)
+                  (publisher / 'release.json').write_bytes(release)
+                  (publisher / 'release-head.json').write_bytes(head)
+                  (data / 'sources.json').write_text(json.dumps({'schema': 'elastos.trusted-sources/v1',
+                      'default_source': 'holder-ci', 'sources': [{'name': 'holder-ci',
+                      'publisher_dids': [json.loads(head)['signer_did']], 'channel': 'stable',
+                      'installed_version': version, 'install_path': str(runtime),
+                      'head_cid': raw_cid(hashlib.sha256(head).digest())}]}))
+              finally:
+                  key.unlink(missing_ok=True)
           def port(kind=socket.SOCK_STREAM):
               with socket.socket(socket.AF_INET, kind) as probe:
                   probe.bind(('127.0.0.1', 0))
@@ -296,6 +337,7 @@ jobs:
                   (data / 'config.toml').write_text('carrier_bind_addr = "127.0.0.1:' + str(carrier_port) + '"\n'
                       'gateway_public_publisher_bootstrap = true\ngateway_allowed_hosts = ["127.0.0.1"]\n')
                   (data / 'config.toml').chmod(0o600)
+                  sign_install(home, data, runtime)
                   command(home, [str(runtime), 'node', 'info', '--json'], role + '-identity')
                   if role != 'consumer':
                       kubo_env = {**env(home), 'IPFS_PATH': str(data / 'ipfs-repo')}
