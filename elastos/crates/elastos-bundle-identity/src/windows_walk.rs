@@ -1,18 +1,19 @@
-//! Windows bundle walk. Checked directory handles pin every path component.
+//! Windows bundle walk. Each child opens relative to its checked parent handle.
 
 use std::ffi::OsString;
-use std::fs::{self, File, Metadata, OpenOptions};
-use std::io::{self, Read};
-use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::fs::{File, OpenOptions};
+use std::io::Read;
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_SHARE_READ,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 use super::{
-    entry_path, shown, unreadable, Budget, BundleEntry, EntryKind, Moment, Refusal, Tally,
+    entry_kind, entry_path, shown, unreadable, windows_handle, Budget, BundleEntry, EntryKind,
+    Moment, Refusal, Tally,
 };
 
 struct Listed {
@@ -22,33 +23,22 @@ struct Listed {
 }
 
 struct Folder {
-    _handle: File,
-    disk_path: PathBuf,
+    handle: File,
     listing: std::vec::IntoIter<Listed>,
 }
 
-fn kind(meta: &Metadata) -> EntryKind {
-    if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+fn listed_kind(attributes: u32) -> EntryKind {
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         EntryKind::Special("reparse point")
-    } else if meta.is_dir() {
+    } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
         EntryKind::Directory
-    } else if meta.is_file() {
-        EntryKind::RegularFile
     } else {
-        EntryKind::Special("special file")
+        EntryKind::RegularFile
     }
 }
 
-// OPEN_REPARSE_POINT protects the last component. Every earlier component has
-// already been checked and is held with no write/delete sharing.
-fn open_checked(disk_path: &Path, listed: EntryKind, path: &str) -> Result<File, Refusal> {
-    let handle = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-        .open(disk_path)
-        .map_err(|error| unreadable(path, error))?;
-    match kind(&handle.metadata().map_err(|error| unreadable(path, error))?) {
+fn checked(handle: File, listed: EntryKind, path: &str) -> Result<File, Refusal> {
+    match entry_kind(&handle.metadata().map_err(|error| unreadable(path, error))?) {
         EntryKind::Special(kind) => Err(Refusal::NotRegularFile {
             path: shown(path),
             kind,
@@ -58,26 +48,33 @@ fn open_checked(disk_path: &Path, listed: EntryKind, path: &str) -> Result<File,
     }
 }
 
-fn local_root(bundle: &Path) -> Result<(PathBuf, Vec<File>), Refusal> {
-    let absolute = std::path::absolute(bundle).map_err(|error| unreadable("", error))?;
+fn bad_root(bundle: &Path, reason: &'static str) -> Refusal {
+    Refusal::InvalidRootPath {
+        path: bundle.display().to_string(),
+        reason,
+    }
+}
+
+fn local_root(bundle: &Path) -> Result<(File, Vec<File>), Refusal> {
+    if matches!(bundle.components().next(), Some(Component::RootDir)) {
+        return Err(bad_root(bundle, "drive letter required"));
+    }
+    if matches!(bundle.components().next(), Some(Component::Prefix(prefix))
+        if matches!(prefix.kind(), Prefix::Disk(_)) && !bundle.has_root())
+    {
+        return Err(bad_root(bundle, "drive-relative path"));
+    }
+    let absolute = std::path::absolute(bundle).map_err(|_| bad_root(bundle, "invalid path"))?;
     let mut components = absolute.components();
     let Some(Component::Prefix(prefix)) = components.next() else {
-        return Err(unreadable(
-            "",
-            io::Error::other("bundle needs a local disk path"),
-        ));
+        return Err(bad_root(bundle, "local disk path required"));
     };
-    let Prefix::Disk(drive) = prefix.kind() else {
-        return Err(unreadable(
-            "",
-            io::Error::other("bundle needs a local disk path"),
-        ));
+    let drive = match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+        _ => return Err(bad_root(bundle, "local disk path required")),
     };
     if !matches!(components.next(), Some(Component::RootDir)) {
-        return Err(unreadable(
-            "",
-            io::Error::other("bundle needs a rooted disk path"),
-        ));
+        return Err(bad_root(bundle, "rooted disk path required"));
     }
     let mut names = Vec::new();
     for component in components {
@@ -87,39 +84,80 @@ fn local_root(bundle: &Path) -> Result<(PathBuf, Vec<File>), Refusal> {
                 names.pop();
             }
             Component::CurDir => {}
-            _ => return Err(unreadable("", io::Error::other("invalid bundle path"))),
+            _ => return Err(bad_root(bundle, "invalid path component")),
         }
     }
-    // Verbatim opens preserve names that Win32 would trim or treat as DOS devices.
     let mut disk_path = PathBuf::from(format!(r"\\?\{}:\", drive as char));
-    let mut handles = vec![open_checked(&disk_path, EntryKind::Directory, "")?];
-    for name in names {
+    // Ancestors deny delete but allow normal writes. The bundle tree denies both.
+    let volume_share = if names.is_empty() {
+        FILE_SHARE_READ
+    } else {
+        FILE_SHARE_READ | FILE_SHARE_WRITE
+    };
+    let volume = OpenOptions::new()
+        .read(true)
+        .share_mode(volume_share)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(&disk_path)
+        .map_err(|error| unreadable(&disk_path.display().to_string(), error))?;
+    let mut parent = checked(
+        volume,
+        EntryKind::Directory,
+        &disk_path.display().to_string(),
+    )?;
+    let mut ancestors = Vec::new();
+    let count = names.len();
+    for (index, name) in names.into_iter().enumerate() {
+        let share = if index + 1 == count {
+            FILE_SHARE_READ
+        } else {
+            FILE_SHARE_READ | FILE_SHARE_WRITE
+        };
+        let child = windows_handle::open_child(&parent, &name, true, share)
+            .map_err(|error| unreadable(&disk_path.join(&name).display().to_string(), error))?;
         disk_path.push(name);
-        handles.push(open_checked(&disk_path, EntryKind::Directory, "")?);
+        let child = checked(
+            child,
+            EntryKind::Directory,
+            &disk_path.display().to_string(),
+        )?;
+        ancestors.push(parent);
+        parent = child;
     }
-    Ok((disk_path, handles))
+    Ok((parent, ancestors))
 }
 
 fn list_folder(
-    disk_path: &Path,
+    handle: &File,
     prefix: &str,
     tally: &mut Tally,
 ) -> Result<std::vec::IntoIter<Listed>, Refusal> {
+    checked_kind_for_listing(handle, prefix)?;
     let mut listing = Vec::new();
-    for item in fs::read_dir(disk_path).map_err(|error| unreadable(prefix, error))? {
-        let item = item.map_err(|error| unreadable(prefix, error))?;
-        let name = item.file_name();
+    for (name, attributes) in
+        windows_handle::list(handle).map_err(|error| unreadable(prefix, error))?
+    {
         let name_bytes = name.to_string_lossy().len();
         tally.entry(prefix, name_bytes)?;
         let path = entry_path(prefix, &name)?;
-        let meta = fs::symlink_metadata(item.path()).map_err(|error| unreadable(&path, error))?;
         listing.push(Listed {
             name,
             path,
-            kind: kind(&meta),
+            kind: listed_kind(attributes),
         });
     }
     Ok(listing.into_iter())
+}
+
+fn checked_kind_for_listing(handle: &File, path: &str) -> Result<(), Refusal> {
+    match entry_kind(&handle.metadata().map_err(|error| unreadable(path, error))?) {
+        EntryKind::Directory => Ok(()),
+        EntryKind::Special(kind) => Err(Refusal::NotRegularFile {
+            path: shown(path),
+            kind,
+        }),
+        _ => Err(Refusal::Changed { path: shown(path) }),
+    }
 }
 
 fn read_file(mut handle: File, path: &str, tally: &mut Tally) -> Result<Vec<u8>, Refusal> {
@@ -152,14 +190,10 @@ pub(super) fn collect_entries(
     observe: &mut dyn FnMut(Moment, &str),
     tally: &mut Tally,
 ) -> Result<Vec<BundleEntry>, Refusal> {
-    let (root_path, mut root_handles) = local_root(bundle)?;
-    let root = root_handles.pop().expect("volume root was opened");
-    // Earlier root components stay pinned until the whole walk ends.
-    let _root_ancestors = root_handles;
-    let listing = list_folder(&root_path, "", tally)?;
+    let (root, _root_ancestors) = local_root(bundle)?;
+    let listing = list_folder(&root, "", tally)?;
     let mut folders = vec![Folder {
-        _handle: root,
-        disk_path: root_path,
+        handle: root,
         listing,
     }];
     let mut entries = Vec::new();
@@ -175,16 +209,15 @@ pub(super) fn collect_entries(
             tally.folder(&path)?;
         }
         observe(Moment::BeforeOpen, &path);
-        let disk_path = folder.disk_path.join(name);
-        let handle = open_checked(&disk_path, kind, &path)?;
+        let share = FILE_SHARE_READ;
+        let handle =
+            windows_handle::open_child(&folder.handle, &name, kind == EntryKind::Directory, share)
+                .map_err(|error| unreadable(&path, error))?;
+        let handle = checked(handle, kind, &path)?;
         observe(Moment::AfterCheck, &path);
         if kind == EntryKind::Directory {
-            let listing = list_folder(&disk_path, &path, tally)?;
-            folders.push(Folder {
-                _handle: handle,
-                disk_path,
-                listing,
-            });
+            let listing = list_folder(&handle, &path, tally)?;
+            folders.push(Folder { handle, listing });
         } else {
             let content = read_file(handle, &path, tally)?;
             entries.push(BundleEntry { path, content });

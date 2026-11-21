@@ -2,7 +2,7 @@
 //!
 //! Moved text for text from `lab/capsule-identity` (M2 part B, slice E1), so that production code
 //! can call the one implementation. It names a bundle or refuses; it admits and launches nothing.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 #[cfg(unix)]
 use std::ffi::CString;
@@ -27,10 +27,14 @@ use rustix::fs::{fstat, openat, Dir, FileType, Mode, OFlags, CWD};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
-use std::fs::FileType;
+use std::fs::Metadata;
 
 #[cfg(windows)]
 mod windows_walk;
+// NtCreateFile and handle-based enumeration need a narrow, audited FFI boundary.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_handle;
 #[cfg(windows)]
 use windows_walk::collect_entries;
 
@@ -228,6 +232,8 @@ pub enum Refusal {
     /// takes that word with a colon in test output for a harness error, so a
     /// failing assertion that printed this refusal would never count.)
     Unreadable { path: String, reason: String },
+    /// The Windows root path is not an absolute or relative local-disk path.
+    InvalidRootPath { path: String, reason: &'static str },
     /// The walk met more than its [`Budget`] allows. `limit` names which
     /// of the four limits; `path` is the entry at which it was passed.
     /// Nothing past the limit was read.
@@ -363,6 +369,9 @@ impl fmt::Display for Refusal {
             ),
             Refusal::Changed { path } => write!(f, "{path} changed while the bundle was named"),
             Refusal::Unreadable { path, reason } => write!(f, "could not read {path}: {reason}"),
+            Refusal::InvalidRootPath { path, reason } => {
+                write!(f, "invalid bundle root {path:?}: {reason}")
+            }
             Refusal::OverBudget { limit, path } => {
                 write!(f, "{path} passes the walk's limit on {limit}")
             }
@@ -1074,9 +1083,8 @@ fn put_varint(out: &mut Vec<u8>, mut value: u64) {
     out.push(value as u8);
 }
 
-/// The kind of one entry, from its own type: as its folder's listing reports
-/// it, or as `fstat` reports its open handle. Only a directory or a regular
-/// file may be in a bundle; everything else is [`EntryKind::Special`].
+/// The kind of one entry. Unix uses its file type; Windows uses metadata so
+/// every reparse tag is visible. Only directories and regular files are named.
 #[cfg(unix)]
 pub fn entry_kind(file_type: FileType) -> EntryKind {
     if file_type.is_dir() {
@@ -1089,12 +1097,15 @@ pub fn entry_kind(file_type: FileType) -> EntryKind {
 }
 
 #[cfg(windows)]
-pub fn entry_kind(file_type: FileType) -> EntryKind {
-    if file_type.is_symlink() {
+pub fn entry_kind(metadata: &Metadata) -> EntryKind {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         EntryKind::Special("reparse point")
-    } else if file_type.is_dir() {
+    } else if metadata.is_dir() {
         EntryKind::Directory
-    } else if file_type.is_file() {
+    } else if metadata.is_file() {
         EntryKind::RegularFile
     } else {
         EntryKind::Special("special file")
