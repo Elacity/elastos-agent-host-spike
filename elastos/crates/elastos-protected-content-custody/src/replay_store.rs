@@ -446,6 +446,17 @@ impl DurableReplayClaimStoreV1 {
         )
     }
 
+    /// Windows has no supported durable replay store; the test helper refuses
+    /// with the same typed error as every other store operation there.
+    #[cfg(all(test, windows))]
+    fn claim_claim_only_record(
+        &self,
+        _record: StoredNodeReleaseRecordV1,
+        _now: u64,
+    ) -> Result<(), ReplayClaimError> {
+        require_supported_store()
+    }
+
     #[cfg(all(test, unix))]
     fn claim_claim_only_record(
         &self,
