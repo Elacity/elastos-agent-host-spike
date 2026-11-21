@@ -1653,7 +1653,7 @@ fn dev_opt_in_start_is_one_honest_row_behind_the_installed_release() {
         let release = at("let Some(source) = installed_release_source(data_dir)? else {");
         let opt_in = at("if !source_home_dev_mode(data_dir) {");
         let unchecked = at(row.evidence);
-        let signed = at("read_signed_release(data_dir, &runtime, &source, false)");
+        let signed = at("read_signed_release(data_dir, &runtime, &source, false, true)");
         assert!(release < opt_in && opt_in < unchecked && unchecked < signed);
     }
     // No other production code starts a component unchecked.
