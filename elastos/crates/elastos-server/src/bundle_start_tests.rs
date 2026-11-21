@@ -3329,7 +3329,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     let own = || {
         Some(tokens::page(
             &data,
-            &format!("elastos://launch/{id}"),
+            &format!("elastos://launch/{id}/pictures"),
             "page",
         ))
     };
@@ -3347,7 +3347,51 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     .await;
     assert_eq!((status, body), (StatusCode::OK, b"a picture".to_vec()));
 
+    let (status, _, body) = send(open(&cid, Some(tokens::home(&data)))).await;
+    assert_eq!(status, StatusCode::OK);
+    let second: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    assert_ne!(id, second_id);
+    let (status, _, body) = send(read(
+        format!("/api/launch/{second_id}/content/{ENTRYPOINT}"),
+        own(),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+
     let other = "0".repeat(32);
+    let wrong_content = tokens::page(&data, &format!("elastos://launch/{id}/another-set"), "page");
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(wrong_content),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+    let wrong_launch = tokens::page(&data, &format!("elastos://launch/{other}/pictures"), "page");
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(wrong_launch),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
     for (uri, token) in [
         (format!("/api/launch/{id}/content/{ENTRYPOINT}"), None),
         (
@@ -3358,15 +3402,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
             format!("/api/launch/{id}/content/{ENTRYPOINT}"),
             Some(tokens::page(
                 &data,
-                &format!("elastos://launch/{other}"),
-                "page",
-            )),
-        ),
-        (
-            format!("/api/launch/{id}/content/{ENTRYPOINT}"),
-            Some(tokens::page(
-                &data,
-                &format!("elastos://launch/{id}"),
+                &format!("elastos://launch/{id}/pictures"),
                 "another-page",
             )),
         ),

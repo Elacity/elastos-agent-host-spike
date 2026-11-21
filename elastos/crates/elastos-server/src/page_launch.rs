@@ -42,6 +42,8 @@ pub(crate) struct Started {
     pub launch: Option<Arc<LaunchContent>>,
     /// The page the content pins, for a start of content.
     pub page: Option<Page>,
+    /// The content name from the admitted root manifest.
+    pub content_name: Option<String>,
 }
 
 /// The page a content pins, as the start's walk read it: its name, its
@@ -58,6 +60,7 @@ pub(crate) struct Page {
 pub(crate) struct Kept {
     principal: String,
     page: String,
+    content_name: String,
     /// The page's entrypoint and files, as the walk read them.
     entrypoint: String,
     page_files: BTreeMap<String, Vec<u8>>,
@@ -75,6 +78,7 @@ pub struct Opened {
     pub id: String,
     pub page: String,
     pub entrypoint: String,
+    pub content_name: String,
 }
 
 /// Why a launch was not opened for a page.
@@ -179,6 +183,7 @@ pub(crate) fn take_place(table: &PageLaunches, principal: &str) -> Result<Place,
     let one = Kept {
         principal: principal.to_string(),
         page: String::new(),
+        content_name: String::new(),
         entrypoint: String::new(),
         page_files: BTreeMap::new(),
         launch: None,
@@ -243,7 +248,9 @@ impl Runtime {
             .start_by_bundle(data_dir, cid, Vec::new(), person, budget, |_| {})
             .await
             .map_err(OpenRefusal::Start)?;
-        let (Some(launch), Some(page)) = (started.launch, started.page) else {
+        let (Some(launch), Some(page), Some(content_name)) =
+            (started.launch, started.page, started.content_name)
+        else {
             return Err(OpenRefusal::NotContent);
         };
         if !plain_content_path(&page.entrypoint) {
@@ -255,6 +262,7 @@ impl Runtime {
         // `Place` gives it back. Were it gone, the open says so by name.
         let one = kept.get_mut(&place.id).ok_or(OpenRefusal::PlaceLost)?;
         one.page = page.name.clone();
+        one.content_name = content_name.clone();
         one.entrypoint = page.entrypoint.clone();
         one.page_files = page.files;
         one.launch = Some(launch);
@@ -264,6 +272,7 @@ impl Runtime {
             id: place.id.clone(),
             page: page.name,
             entrypoint: page.entrypoint,
+            content_name,
         })
     }
 
@@ -315,6 +324,12 @@ impl Runtime {
         let kept = kept_ones(&self.page_launches);
         let one = kept.get(id)?;
         one.launch.as_ref().map(|_| one.page.clone())
+    }
+
+    pub(crate) fn kept_launch_content_name(&self, id: &str) -> Option<String> {
+        let kept = kept_ones(&self.page_launches);
+        let one = kept.get(id)?;
+        one.launch.as_ref().map(|_| one.content_name.clone())
     }
 
     #[cfg(test)]

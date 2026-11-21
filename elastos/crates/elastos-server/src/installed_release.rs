@@ -52,7 +52,7 @@ pub(crate) fn load_or_migrate_for_update(
     require_current_source(data, source)?;
     let root = data.join("installation");
     let stage = data.join(MIGRATION);
-    if consumed_present(data)? {
+    if consumed_present(data, false)? {
         let admitted = read_pair(
             data,
             binary,
@@ -138,7 +138,7 @@ pub(crate) fn read_without_migration_for_update(
 ) -> Result<InstalledRelease> {
     require_no_pending(binary)?;
     require_current_source(data, source)?;
-    if consumed_present(data)? {
+    if consumed_present(data, false)? {
         read_pair(
             data,
             binary,
@@ -169,19 +169,29 @@ pub(crate) fn read_signed_components(
     source: &TrustedSource,
     repair_version: bool,
 ) -> Result<Vec<u8>> {
-    read_signed_release(data, binary, source, repair_version).map(|(_, components)| components)
+    read_signed_release(data, binary, source, repair_version, false)
+        .map(|(_, components)| components)
 }
 
 /// The installed signed release envelope bytes and the components it binds.
+/// Host starts admit only the update controller's claimed generation while a journal is pending.
 pub(crate) fn read_signed_release(
     data: &Path,
     binary: &Path,
     source: &TrustedSource,
     repair_version: bool,
+    for_host_start: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    require_no_pending(binary)?;
+    if for_host_start {
+        crate::install_transaction::authorize_host_start(data, binary)?;
+    } else {
+        require_no_pending(binary)?;
+    }
     require_current_source(data, source)?;
-    let private = consumed_present(data)?;
+    let private = consumed_present(
+        data,
+        for_host_start && InstallTransaction::has_pending_recovery(binary),
+    )?;
     let (head, release) = if private {
         (
             installation_release_head_path(data),
@@ -225,7 +235,7 @@ pub(crate) fn read_for_setup(
     guard.require_binary(binary)?;
     require_no_pending(binary)?;
     require_current_source(data, source)?;
-    anyhow::ensure!(consumed_present(data)?, "{REPAIR}");
+    anyhow::ensure!(consumed_present(data, false)?, "{REPAIR}");
     read_pair_and_binary(
         data,
         binary,
@@ -529,7 +539,7 @@ fn present(path: &Path) -> Result<bool> {
     }
 }
 
-fn consumed_present(data: &Path) -> Result<bool> {
+fn consumed_present(data: &Path, allow_update_scratch: bool) -> Result<bool> {
     let root = data.join("installation");
     if !present(&root)? {
         return Ok(false);
@@ -537,7 +547,14 @@ fn consumed_present(data: &Path) -> Result<bool> {
     check_directory(&root, true)?;
     let mut count = 0;
     for entry in fs::read_dir(root)? {
-        let name = entry?.file_name();
+        let entry = entry?;
+        let name = entry.file_name();
+        if allow_update_scratch
+            && (name == ".elastos.update-stage" || name == ".elastos.update-rollback")
+        {
+            check_directory(&entry.path(), true)?;
+            continue;
+        }
         anyhow::ensure!(name == HEAD || name == RELEASE, "{REPAIR}");
         count += 1;
     }
@@ -681,7 +698,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn publish_stage(data: &Path, binary: &Path, stage: &Path, root: &Path) -> Result<()> {
     require_no_pending(binary)?;
-    anyhow::ensure!(!consumed_present(data)?, "{REPAIR}");
+    anyhow::ensure!(!consumed_present(data, false)?, "{REPAIR}");
     sync(stage)?;
     fs::rename(stage, root)?;
     sync(data)
