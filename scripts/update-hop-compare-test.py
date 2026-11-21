@@ -3294,11 +3294,12 @@ class PreviousReleaseInstallTests(unittest.TestCase):
             target.start()
             self.addCleanup(target.stop)
 
-    def published(self, case, home_components=None):
+    def published(self, case, home_components=None, with_did=False):
         """The pinned release as Runtime installs it, its signed release and components, and the pin."""
         root = self.root / case
         installed, stage, optional = root / "installed", root / "stage", root / "optional"
-        home_components = list(observer.CLI_SETUP_COMPONENTS if home_components is None else home_components)
+        home_components = list((name for name in observer.CLI_SETUP_COMPONENTS if with_did or name not in observer.CLI_DID_SETUP)
+                               if home_components is None else home_components)
         builder = re.search(r"(?ms)^create_capsule_tar\(\) \{\n.*?^\}\n", Path(__file__).with_name("publish-release.sh").read_text())[0]
 
         def put(path, raw, mode):
@@ -3337,6 +3338,14 @@ class PreviousReleaseInstallTests(unittest.TestCase):
             put((installed if name in home_components else optional) / "bin" / name, natives[name], 0o755)
             external[name] = {"install_path": "bin/" + name, "platforms": {self.PLATFORM: entry(
                 natives[name], name + "-" + self.PLATFORM, install_path="bin/" + name)}}
+        if with_did:
+            name = "did-provider"
+            natives[name] = b"native did-provider"
+            put(installed / "bin" / name, natives[name], 0o755)
+            did = observer.cli_json(Path(__file__).resolve().parents[1] / "capsules/did-provider/capsule.json")
+            external[name] = {"install_path": "bin/" + name, "platforms": {self.PLATFORM: entry(
+                natives[name], name + "-" + self.PLATFORM, install_path="bin/" + name)},
+                "provider_runtime": {"provides": did["provides"]}}
         external["localhost-provider"]["capsule_metadata"] = metadata
         # Kubo's upstream archive is not rebuilt; setup's receipts bind what it extracted.
         natives["kubo"] = b"kubo executable"
@@ -3417,6 +3426,28 @@ class PreviousReleaseInstallTests(unittest.TestCase):
             observer.cli_qualified_home(support, self.PLATFORM, name)
         self.assertEqual({name: (support / "bin" / name).read_bytes() for name in fixture["natives"]}, fixture["natives"])
         self.assertFalse((fixture["root"] / "home").exists())
+
+    def test_new_did_helper_is_absent_from_previous_release_but_checked_when_shared(self):
+        old = self.published("before-did")
+        self.install(old)
+        support = old["root"] / "previous/support"
+        components = observer.cli_json(support / "components.json")
+        self.assertNotIn("did-provider", components["external"])
+        self.assertNotIn("did-provider", components["profiles"]["home"]["components"])
+        self.assertFalse((support / "bin/did-provider").exists())
+        self.assertFalse((support / "capsules/did-provider/capsule.json").exists())
+        self.assertIn("did-provider", observer.CLI_SETUP_COMPONENTS)
+
+        shared = self.published("with-did", with_did=True)
+        self.install(shared)
+        shared_support = shared["root"] / "previous/support"
+        self.assertEqual((shared_support / "bin/did-provider").read_bytes(), shared["natives"]["did-provider"])
+        self.assertEqual(observer.cli_json(shared_support / "capsules/did-provider/capsule.json")["name"], "did-provider")
+
+        changed = self.published("with-did-changed", with_did=True)
+        (changed["installed"] / "bin/did-provider").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "did-provider-.* differs from its signed hash"):
+            self.install(changed)
 
     def test_setup_selects_both_protected_providers_and_custody_like_upstream(self):
         fixture = self.published("setup-argv")
