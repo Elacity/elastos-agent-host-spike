@@ -523,6 +523,10 @@ XDG_DATA_HOME="${TEST_ROOT}/consumer-data"
 DATA_DIR="${XDG_DATA_HOME}/elastos"
 [[ ! -e "$DATA_DIR" && ! -L "$DATA_DIR" ]]
 mkdir -p "${DATA_DIR}/bin"
+# A source Home has no signed release, so it starts installed components (the
+# Home CLI renderer below) only with its owner's explicit dev_mode opt-in, as
+# setup-source-home.sh sets it.
+printf 'dev_mode = true\n' > "${DATA_DIR}/config.toml"
 cp "${PUBLISHER_DATA_DIR}/components.json" "${DATA_DIR}/components.json"
 # A source setup reads the pinned signed model catalogue beside its manifest.
 if [[ -f "${REPO_ROOT}/model-catalog.json" ]]; then

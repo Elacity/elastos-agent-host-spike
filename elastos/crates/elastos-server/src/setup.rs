@@ -20,6 +20,7 @@ pub(crate) use browser_config::linux_host_setup_message;
 pub(crate) use browser_config::repair_browser_host_components_for_open;
 mod browser_linux;
 mod browser_vm_image;
+pub mod verified_executable;
 pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
 pub(crate) use browser_vm_image::verified_seed_identity as verified_browser_vm_seed_identity;
 #[cfg(unix)]
@@ -954,6 +955,26 @@ fn missing_manifest_message() -> String {
         .to_string()
 }
 
+/// The owner's explicit opt-in: `dev_mode = true` (a TOML bool) in a regular,
+/// non-symlink `{data_dir}/config.toml`. Read-only; anything else is no opt-in.
+fn source_home_dev_mode(data_dir: &Path) -> bool {
+    const MAX_CONFIG: u64 = 64 * 1024;
+    let read = || -> anyhow::Result<bool> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(data_dir.join("config.toml"))?;
+        anyhow::ensure!(file.metadata()?.is_file() && file.metadata()?.len() <= MAX_CONFIG);
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(file, MAX_CONFIG + 1), &mut text)?;
+        anyhow::ensure!(text.len() as u64 <= MAX_CONFIG);
+        let config: toml::Table = toml::from_str(&text)?;
+        Ok(config.get("dev_mode").and_then(toml::Value::as_bool) == Some(true))
+    };
+    read().unwrap_or(false)
+}
+
 fn missing_trusted_source_error() -> anyhow::Error {
     anyhow::anyhow!(
         "No trusted source configured.\n\
@@ -1033,6 +1054,7 @@ fn installed_component_entry(
     data_dir: &Path,
     name: &str,
     path: &Path,
+    signed_bytes: Option<&[u8]>,
 ) -> anyhow::Result<InstalledComponentEntry> {
     let Some(install_root) = installed_component_root_for_path(data_dir, name, path) else {
         anyhow::bail!(
@@ -1043,15 +1065,18 @@ fn installed_component_entry(
     };
 
     let manifest_path = install_root.join("components.json");
-    let manifest_bytes = fs::read(&manifest_path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot verify installed component '{}' at {}: failed to read {}: {}",
-            name,
-            path.display(),
-            manifest_path.display(),
-            e
-        )
-    })?;
+    let manifest_bytes = match signed_bytes {
+        Some(bytes) => bytes.to_vec(),
+        None => fs::read(&manifest_path).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot verify installed component '{}' at {}: failed to read {}: {}",
+                name,
+                path.display(),
+                manifest_path.display(),
+                e
+            )
+        })?,
+    };
     let mut manifest: ComponentsManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|e| {
             anyhow::anyhow!(
@@ -1111,7 +1136,7 @@ pub fn verify_installed_component_binary(
     name: &str,
     path: &Path,
 ) -> anyhow::Result<String> {
-    let entry = installed_component_entry(data_dir, name, path)?;
+    let entry = installed_component_entry(data_dir, name, path, None)?;
     verify_installed_component_bytes(name, path, &entry)?;
     Ok(entry.checksum)
 }
@@ -1143,9 +1168,68 @@ fn verify_installed_component_bytes(
 /// bytes, a binary extracted from a signed archive by the receipts bound when
 /// setup verified and extracted that archive into the component's capsule metadata.
 pub fn verify_installed_component(data_dir: &Path, name: &str, path: &Path) -> anyhow::Result<()> {
-    let entry = installed_component_entry(data_dir, name, path)?;
+    let entry = installed_component_entry(data_dir, name, path, None)?;
+    verify_installed_component_with_entry(name, path, &entry)
+}
+
+/// Admit executable bytes from the current publisher-signed installed release.
+/// Call immediately before an installed component starts. A source Home has no
+/// release; it starts the file unchecked only when its owner set `dev_mode = true`.
+pub fn verify_installed_component_start(
+    data_dir: &Path,
+    name: &str,
+    path: &Path,
+) -> anyhow::Result<verified_executable::VerifiedExecutable> {
+    let Some(source) = installed_release_source(data_dir)? else {
+        if !source_home_dev_mode(data_dir) {
+            return Err(missing_trusted_source_error());
+        }
+        tracing::warn!("dev_mode = true: starting source Home component '{name}' unchecked");
+        return verified_executable::VerifiedExecutable::unchecked(path);
+    };
+    let runtime = fs::canonicalize(&source.install_path)?;
+    let (_, manifest) =
+        crate::installed_release::read_signed_release(data_dir, &runtime, &source, false)?;
+    let entry = installed_component_entry(data_dir, name, path, Some(&manifest))
+        .context("Installed component manifest verification failed")?;
+    let checksum = if entry.platform_info.extract_path.is_some() {
+        // The archive receipt is separate from the executable's bytes. The
+        // held descriptor below makes the only executable byte check at start.
+        if name == "home-cli" && path == entry.install_root.join("capsules/home-cli/bin/home-cli") {
+            verify_home_cli_receipts(&entry)
+                .context("Installed component binary verification failed")?;
+        } else {
+            anyhow::bail!("Installed component binary verification failed: installed archive executable has no signed digest");
+        }
+        signed_executable_checksum(&entry.platform_info)
+            .ok_or_else(|| anyhow::anyhow!("installed archive executable has no signed digest"))?
+    } else {
+        &entry.checksum
+    };
+    verified_executable::VerifiedExecutable::prepare(path, checksum)
+        .context("Installed component binary verification failed")
+}
+
+fn verify_installed_component_with_entry(
+    name: &str,
+    path: &Path,
+    entry: &InstalledComponentEntry,
+) -> anyhow::Result<()> {
     if entry.platform_info.extract_path.is_none() {
-        return verify_installed_component_bytes(name, path, &entry);
+        return verify_installed_component_bytes(name, path, entry);
+    }
+    if name == "home-cli" && path == entry.install_root.join("capsules/home-cli/bin/home-cli") {
+        let file = fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            file.file_type().is_file(),
+            "Home CLI executable is not a regular file"
+        );
+        let executable_checksum = verify_home_cli_receipts(entry)?;
+        anyhow::ensure!(
+            bare_sha256(&compute_sha256_checksum(path)?) == bare_sha256(executable_checksum),
+            "Home CLI executable differs from its signed release digest"
+        );
+        return Ok(());
     }
     let metadata = entry.component.capsule_metadata.as_ref().ok_or_else(|| {
         anyhow::anyhow!("archive component '{name}' has no capsule metadata receipt")
@@ -1187,6 +1271,23 @@ pub fn verify_installed_component(data_dir: &Path, name: &str, path: &Path) -> a
         path.display()
     );
     Ok(())
+}
+
+fn signed_executable_checksum(info: &PlatformInfo) -> Option<&str> {
+    info.extra.get("executable_checksum")?.as_str()
+}
+
+fn verify_home_cli_receipts(entry: &InstalledComponentEntry) -> anyhow::Result<&str> {
+    let bundle = entry.install_root.join("capsules/home-cli");
+    let executable_checksum = signed_executable_checksum(&entry.platform_info)
+        .ok_or_else(|| anyhow::anyhow!("Home CLI signed executable digest is missing"))?;
+    anyhow::ensure!(
+        read_artifact_sha256_receipt(&bundle)? == bare_sha256(&entry.checksum)
+            && fs::read_to_string(bundle.join(CACHED_EXECUTABLE_SHA_FILE))?.trim()
+                == bare_sha256(executable_checksum),
+        "Home CLI executable receipt differs from its signed release digest"
+    );
+    Ok(executable_checksum)
 }
 
 /// Where a single-file archive component's executable lies inside its capsule
@@ -1242,6 +1343,9 @@ fn write_archive_executable_receipt(
 }
 
 fn installed_component_root_for_path(data_dir: &Path, name: &str, path: &Path) -> Option<PathBuf> {
+    if name == "home-cli" && path == data_dir.join("capsules/home-cli/bin/home-cli") {
+        return Some(data_dir.to_path_buf());
+    }
     // Browser host setup executes this exact release-owned script through Python.
     if name == "browser-vm-linux-network"
         && path == data_dir.join("scripts/browser-vm-linux-network.py")
@@ -1387,7 +1491,8 @@ pub(crate) fn admit_installed_components(
     };
     let binary = fs::canonicalize(&source.install_path)?;
     let (release, bytes) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)
+            .context(crate::installed_release::REPAIR)?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
         &source.publisher_dids,
@@ -2103,6 +2208,17 @@ fn write_cache_metadata(
 ) -> anyhow::Result<()> {
     if !dest.is_dir() {
         return Ok(());
+    }
+    if name == "home-cli" {
+        let executable = dest.join("bin/home-cli");
+        anyhow::ensure!(
+            executable.is_file(),
+            "Home CLI executable missing from signed archive"
+        );
+        fs::write(
+            dest.join(CACHED_EXECUTABLE_SHA_FILE),
+            format!("{}\n", bare_sha256(&compute_sha256_checksum(&executable)?)),
+        )?;
     }
 
     #[cfg(unix)]
