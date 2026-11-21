@@ -346,7 +346,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_inactive_custody_provider",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: [
                 "checked_native_provider_with_data_dir",
@@ -640,7 +640,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_availability_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: [
                 "checked_native_provider_with_data_dir",
@@ -654,7 +654,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_chain_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: [
                 "checked_native_provider_with_data_dir",
@@ -668,7 +668,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_ipfs_provider_plane_with_role",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: [
                 "checked_native_provider_with_data_dir",
@@ -1297,13 +1297,23 @@ fn assert_caller_paths(sources: &BTreeMap<String, String>) {
             text.match_indices(&check)
                 .any(|(at, _)| source::enclosing_fn(&code, at) == row.1)
         };
-        assert_eq!(
-            column.trust_root == "components-json-in-data-dir",
-            all_callers_checked || entry_checked,
-            "weakest caller path changed for {}::{}",
-            row.0,
-            row.1
-        );
+        // Hosted planes admit against the served Home's signed release in their own entry
+        // (checked_native_provider_with_data_dir -> verify_installed_component_start).
+        if entry_checked {
+            assert_eq!(
+                column.trust_root, "release-signature",
+                "hosted plane no longer records its signed-release admission: {}::{}",
+                row.0, row.1
+            );
+        } else {
+            assert_eq!(
+                column.trust_root == "components-json-in-data-dir",
+                all_callers_checked,
+                "weakest caller path changed for {}::{}",
+                row.0,
+                row.1
+            );
+        }
     }
     for path in paths.iter().filter(|path| path.check.is_some()) {
         let check = path.check.as_ref().unwrap();
@@ -1591,11 +1601,11 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("other"), Some(&36));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&15));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("none"), Some(&49));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&24));
+    assert_eq!(roots.get("release-signature"), Some(&28));
     assert_eq!(roots.get("staged-cid"), Some(&4));
     assert_eq!(times.get("at-every-start"), Some(&35));
     assert_eq!(times.get("at-install-only"), Some(&8));
