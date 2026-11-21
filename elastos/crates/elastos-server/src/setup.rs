@@ -955,6 +955,26 @@ fn missing_manifest_message() -> String {
         .to_string()
 }
 
+/// The owner's explicit opt-in: `dev_mode = true` (a TOML bool) in a regular,
+/// non-symlink `{data_dir}/config.toml`. Read-only; anything else is no opt-in.
+fn source_home_dev_mode(data_dir: &Path) -> bool {
+    const MAX_CONFIG: u64 = 64 * 1024;
+    let read = || -> anyhow::Result<bool> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(data_dir.join("config.toml"))?;
+        anyhow::ensure!(file.metadata()?.is_file() && file.metadata()?.len() <= MAX_CONFIG);
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(file, MAX_CONFIG + 1), &mut text)?;
+        anyhow::ensure!(text.len() as u64 <= MAX_CONFIG);
+        let config: toml::Table = toml::from_str(&text)?;
+        Ok(config.get("dev_mode").and_then(toml::Value::as_bool) == Some(true))
+    };
+    read().unwrap_or(false)
+}
+
 fn missing_trusted_source_error() -> anyhow::Error {
     anyhow::anyhow!(
         "No trusted source configured.\n\
@@ -1153,13 +1173,20 @@ pub fn verify_installed_component(data_dir: &Path, name: &str, path: &Path) -> a
 }
 
 /// Admit executable bytes from the current publisher-signed installed release.
-/// Call immediately before an installed component starts.
+/// Call immediately before an installed component starts. A source Home has no
+/// release; it starts the file unchecked only when its owner set `dev_mode = true`.
 pub fn verify_installed_component_start(
     data_dir: &Path,
     name: &str,
     path: &Path,
 ) -> anyhow::Result<verified_executable::VerifiedExecutable> {
-    let source = installed_release_source(data_dir)?.ok_or_else(missing_trusted_source_error)?;
+    let Some(source) = installed_release_source(data_dir)? else {
+        if !source_home_dev_mode(data_dir) {
+            return Err(missing_trusted_source_error());
+        }
+        tracing::warn!("dev_mode = true: starting source Home component '{name}' unchecked");
+        return verified_executable::VerifiedExecutable::unchecked(path);
+    };
     let runtime = fs::canonicalize(&source.install_path)?;
     let (_, manifest) =
         crate::installed_release::read_signed_release(data_dir, &runtime, &source, false)?;

@@ -350,18 +350,28 @@ and that answer is unchanged. A local-only fetch stays on this machine. With
 `min_distinct_holders` set, it returns an error on a local hit and on a local
 miss, and it does not call availability.
 The requester signs the set with its node key under the domain label
-`elastos.content.fetch.receipt-set.v1` and marks it
-`requester-signed-not-holder-countersigned`: its own statement after its CID
-check, not a holder countersignature. `sign_fetch_receipt_set` refuses a
+`elastos.content.fetch.receipt-set.v2` and marks it
+`requester-signed-holder-countersigned`. Before it calls availability, Content
+issues a fresh random request nonce and sends it in `serve_request_nonce`.
+Carrier derives a separate holder challenge from that nonce and each attempt
+number; it sends the challenge to the holder and records the signed answer.
+Content keeps its issued request nonce and, at the byte-release boundary,
+derives the expected challenge for each verified row. The row counts only when
+its `serve_nonce` equals that challenge and its holder signature covers that
+challenge, CID, requester DID, and byte count. A matching nonce supplied only
+by an availability answer cannot establish freshness.
+`sign_fetch_receipt_set` refuses a
 receipt that names a CID other than the set's, and it writes
 `observed_distinct_holders` from the distinct verified holder DIDs in the
 receipts. `verify_signed_fetch_receipt_set` checks the signature against the
 requester DID, then refuses a schema other than
-`elastos.content.fetch.receipt-set/v1`, a requested CID that is not a
+`elastos.content.fetch.receipt-set/v2`, a requested CID that is not a
 canonical SHA2-256 CID, a required holder count outside 1 to 8, an empty
 receipt list, a set with no time, a receipt that names another CID, or an
 observed count that differs from the distinct verified holder DIDs in the
-list. Readers use that verified nested payload for the CID, the counts and
+list. The requester signature binds `serve_request_nonce` in the set. The set
+verifier derives each attempt challenge from that signed request nonce and
+checks the row nonce and holder signature against it. Readers use that verified nested payload for the CID, the counts and
 the receipts. The signed-mode answer does not repeat those values beside the
 signature.
 

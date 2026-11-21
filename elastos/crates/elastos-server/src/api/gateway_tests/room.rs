@@ -3102,6 +3102,7 @@ struct AttachFixture {
     content: Arc<RecordingPublishContent>,
     registry: Arc<ProviderRegistry>,
     port: crate::collaboration_product::CollaborationChatProductPort,
+    profile: crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
 }
 
 async fn attach_fixture() -> AttachFixture {
@@ -3126,6 +3127,7 @@ async fn attach_fixture() -> AttachFixture {
     let app = gateway_router(state);
     let token =
         projection_launch_token_for_authority_context(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
+    let profile = load_profile_for_authority(dir.path(), &authority);
     AttachFixture {
         dir,
         app,
@@ -3134,6 +3136,7 @@ async fn attach_fixture() -> AttachFixture {
         content,
         registry,
         port,
+        profile,
     }
 }
 
@@ -3353,10 +3356,29 @@ async fn community_attach_keeps_the_publication_when_the_post_fails_and_retries_
     );
     assert_eq!(rename["status"], "ok", "{rename}");
     home.write("Documents/moved.txt", b"changed!");
-    tokio::time::sleep(std::time::Duration::from_secs(
-        crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS + 1,
-    ))
-    .await;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(
+            2 * crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS + 5,
+        );
+    loop {
+        match home
+            .port
+            .check_message_allowed(&home.profile, crate::auth::now_ts())
+        {
+            Ok(()) => break,
+            Err(error) => assert!(
+                error
+                    .downcast_ref::<crate::collaboration_rate_limit::CommunitySendRateLimited>()
+                    .is_some(),
+                "unexpected send-window error: {error}"
+            ),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "send window did not roll over"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let (status, retried) = home
         .attach("Documents/report.txt", "chat-attach:report")
         .await;

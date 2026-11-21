@@ -22,7 +22,7 @@ use crate::runtime::tests::{
     component_manifest_json, component_with_extra_import, quiet_component, BusConformanceProvider,
 };
 use crate::runtime::Runtime;
-use crate::stage_cmd::{bundle_cid, stage_bundle};
+use crate::stage_cmd::{bundle_cid, run_staged_folder, stage_bundle};
 use axum::body::Body;
 use axum::http::{header::AUTHORIZATION, Request, StatusCode};
 use elastos_bundle_identity::Budget;
@@ -436,6 +436,67 @@ fn manifest_with(name: &str, key: &str, value: serde_json::Value) -> String {
     let mut json: serde_json::Value = serde_json::from_str(&manifest(name)).unwrap();
     json.as_object_mut().unwrap().insert(key.to_string(), value);
     json.to_string()
+}
+
+/// The legacy folder selector has no authority of its own. Its CID must
+/// identify a staged bundle before any Component starts.
+#[tokio::test]
+async fn legacy_component_unsigned_folder_is_refused() {
+    let publisher = key(111);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("unsigned", &manifest("unsigned"), &quiet_component());
+    let refusal = run_staged_folder(&home.runtime, &home.data(), &folder, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "bundle_missing");
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
+#[tokio::test]
+async fn legacy_component_substituted_hash_is_refused() {
+    let publisher = key(112);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("changed", &manifest("changed"), &quiet_component());
+    let cid = home.stage(&folder, &publisher).await;
+    home.overwrite(&cid, ENTRYPOINT, b"substituted component");
+    let refusal = run_staged_folder(&home.runtime, &home.data(), &folder, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "bundle_cid_mismatch");
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
+#[tokio::test]
+async fn legacy_component_wrong_publisher_did_is_refused() {
+    let publisher = key(113);
+    let foreign = key(114);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("foreign", &manifest("foreign"), &quiet_component());
+    let cid = home.stage(&folder, &publisher).await;
+    fs::write(
+        bundle_signature_path(&home.data(), &cid.parse().unwrap()),
+        signed(&cid, &foreign),
+    )
+    .unwrap();
+    let refusal = run_staged_folder(&home.runtime, &home.data(), &folder, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(refusal.code(), "bundle_signature_not_accepted");
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
+#[tokio::test]
+async fn legacy_component_correctly_signed_cid_starts() {
+    let publisher = key(115);
+    let home = Home::trusting(&[&publisher]).await;
+    let folder = home.bundle("signed", &manifest("signed"), &quiet_component());
+    let cid = home.stage(&folder, &publisher).await;
+    let (handle, accepted) = run_staged_folder(&home.runtime, &home.data(), &folder, Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(bundle_cid(&folder).unwrap(), cid);
+    assert_eq!(handle.manifest.name, "signed");
+    assert_eq!(accepted.signer_did, did(&publisher.verifying_key()));
 }
 
 /// The bus fixture component: it calls the bridge once when it runs for
