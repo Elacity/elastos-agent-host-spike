@@ -507,6 +507,25 @@ async fn legacy_chat_room_summary_requires_chat_launch_even_with_home_cookie() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
+
+    // Handler proof: the front door admits this same-origin Home cookie.
+    let home = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/chat-room/summary")
+                .header(COOKIE, signed_home_cookie_for_room_test(&authority))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(home.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(home.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"chat_room_summary_requires_chat_launch");
+
     let capsule_summary = |token: String| {
         app.clone().oneshot(
             test_browser_request("localhost:61180", "null")
@@ -539,23 +558,6 @@ async fn legacy_chat_room_summary_requires_chat_launch_even_with_home_cookie() {
     .unwrap();
     assert_eq!(chat.status(), StatusCode::OK);
 
-    let home = app
-        .clone()
-        .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .uri("/api/apps/chat-room/summary")
-                .header(COOKIE, signed_home_cookie_for_room_test(&authority))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(home.status(), StatusCode::FORBIDDEN);
-    let body = axum::body::to_bytes(home.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert_eq!(body.as_ref(), b"chat_room_summary_requires_chat_launch");
-
     let home_page = app
         .clone()
         .oneshot(
@@ -569,6 +571,7 @@ async fn legacy_chat_room_summary_requires_chat_launch_even_with_home_cookie() {
         .unwrap();
     assert_eq!(home_page.status(), StatusCode::OK);
 
+    // Front-door check: an opaque Home token is refused before the Chat handler.
     let opaque_home = app
         .oneshot(
             test_browser_request("localhost:61180", "null")
