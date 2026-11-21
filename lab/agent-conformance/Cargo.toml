@@ -29,6 +29,7 @@ rustix = { version = "=1.1.4", features = ["fs"] }
 # A7). Lab only: the Runtime core never names this crate. It is a normal
 # dependency because the stand-in module is part of this crate's library.
 grant-binding = { path = "../grant-binding" }
+elastos-common = { path = "../../elastos/crates/elastos-common" }
 
 [dev-dependencies]
 ed25519-dalek = "2.1"

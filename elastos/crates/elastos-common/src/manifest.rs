@@ -1242,7 +1242,7 @@ pub struct ProviderRight {
 }
 
 /// The right ids the Runtime's confinement generator approves.
-pub const APPROVED_RIGHT_IDS: [&str; 2] = ["storage", "bound-executable"];
+pub const APPROVED_RIGHT_IDS: [&str; 3] = ["storage", "bound-executable", "model-gpu"];
 
 impl ProviderAuthority {
     fn validate(&self) -> Result<(), String> {

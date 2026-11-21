@@ -68,6 +68,7 @@ SIBLING_NAME = "test_stale_call_sibling_instance_replay_is_refused"
 CLEAN_NAME = "test_clean_full_ceiling_reserve_succeeds"
 PATH_NAME = "test_stale_call_use_path_is_refused"
 IDENTITY_NAME = "test_stale_call_identity_replay_is_refused"
+UNCERTAIN_NAME = "test_uncertain_outcome_due_timeout_keeps_hold"
 LINK_NAME = "redteam_manifest_is_not_a_grant_link"
 TIMEOUT_NAME = "test_immediate_timeout_after_unknown_is_refused"
 TIMEOUT_FINDING = REPO / "lab" / "redteam" / "findings" / "grant-binding-003.md"
@@ -76,13 +77,14 @@ TIMEOUT_OK_PANIC = "immediate timeout returned Ok"
 TIMEOUT_FREED_PANIC = "immediate timeout freed the hold"
 TIMEOUT_OK_OBSERVED = "timeout_hold returned Ok"
 TIMEOUT_FREED_OBSERVED = "timeout_hold freed the hold"
-PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME, PATH_NAME, IDENTITY_NAME)
+PROBE_NAMES = (SESSION_NAME, SIBLING_NAME, CLEAN_NAME, PATH_NAME, IDENTITY_NAME, UNCERTAIN_NAME)
 STALE_NAMES = (SESSION_NAME, SIBLING_NAME)
 REPO_MARKER = "@@REDTEAM_REPO@@"
-# Manifest texts the link plant hands to the owner's detector.
-NAME_ONLY_MANIFEST = 'name = "grant-binding"'
-AUDIT_SHAPED_MANIFEST = 'audit = { path = "../wasm-capsule/audit" }'
-PATH_MANIFEST = 'grant-binding = { path = "lab/grant-binding" }'
+# Valid package manifests: the current detector asks Cargo for dependency names.
+MANIFEST_HEADER = '[package]\nname = "escape-probe"\nversion = "0.0.0"\nedition = "2021"\n\n[workspace]\n'
+NAME_ONLY_MANIFEST = MANIFEST_HEADER.replace('escape-probe', 'grant-binding')
+AUDIT_SHAPED_MANIFEST = MANIFEST_HEADER + '\n[dependencies]\naudit = { path = "../wasm-capsule-audit", package = "wasm-capsule-audit" }\n'
+PATH_MANIFEST = MANIFEST_HEADER + '\n[dependencies]\ngb = { path = "../grant-binding", package = "grant-binding" }\n'
 # Cargo decodes \\u0069. The raw bytes do not contain grant-binding.
 ESCAPED_MANIFEST = """\
 [package]
@@ -148,8 +150,8 @@ COMPILE_NEW = "        let _: u32 = \"compile error\";\n        Call { instance 
 
 REPLAY_RS = r"""//! Stale-call probe. Public API only. The crate's ledger stays private.
 
-use grant_binding::ledger::{ReserveRefuse, SettleOutcome, SettleRefuse};
-use grant_binding::{GuestRequest, Handle, Refuse, Rights, Verifier};
+use grant_binding::ledger::{ReleaseRefuse, ReserveRefuse, SettleOutcome, SettleRefuse, TimeoutRefuse};
+use grant_binding::{BudgetAsk, GuestRequest, Handle, Refuse, Rights, Verifier};
 
 fn rights() -> Rights {
     Rights {
@@ -188,6 +190,9 @@ fn test_stale_call_session_replay_is_refused() {
         .expect("grant before the session change");
     assert_eq!(decision.session, "session-a");
     assert_eq!(decision.owned_root, "UsersAI/agent-1/notes");
+    verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 5 }, 5)
+        .expect("admit owner budget");
 
     verifier
         .host_set_session(instance, "session-b")
@@ -199,7 +204,6 @@ fn test_stale_call_session_replay_is_refused() {
     assert_eq!(refusal, Refuse::Session);
     assert_eq!(refusal.to_string(), "session does not match the grant");
 
-    verifier.admit(5);
     let reserved = match verifier.reserve(&call, &request, 5) {
         Err(refusal) => refusal,
         Ok(_) => panic!("accepted replay: reserve returned Ok"),
@@ -244,6 +248,9 @@ fn test_stale_call_sibling_instance_replay_is_refused() {
     let decision = verifier.use_grant(call, &request).expect("owner grant");
     assert_eq!(decision.instance, owner);
     assert_eq!(decision.session, "session-a");
+    verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 5 }, 5)
+        .expect("admit owner budget");
 
     let sibling = verifier.register_instance("agent-1", "session-a");
     assert_ne!(sibling, owner);
@@ -255,7 +262,6 @@ fn test_stale_call_sibling_instance_replay_is_refused() {
     assert_eq!(refusal, Refuse::Instance);
     assert_eq!(refusal.to_string(), "instance does not match the grant");
 
-    verifier.admit(5);
     let reserved = match verifier.reserve(&sibling_call, &request, 5) {
         Err(refusal) => refusal,
         Ok(_) => panic!("accepted replay: reserve returned Ok"),
@@ -296,7 +302,9 @@ fn test_clean_full_ceiling_reserve_succeeds() {
     let request = guest(handle);
     let call = verifier.open_call(instance);
     verifier.use_grant(call, &request).expect("grant");
-    verifier.admit(5);
+    verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 5 }, 5)
+        .expect("admit owner budget");
     match verifier.reserve(&call, &request, 5) {
         Ok(_) => {}
         Err(err) => panic!("full ceiling reserve failed without a refused replay: {err}"),
@@ -373,16 +381,19 @@ fn test_immediate_timeout_after_unknown_is_refused() {
         .expect("bind");
     let request = guest(handle);
     let call = verifier.open_call(instance);
-    verifier.admit(4);
+    verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 4 }, 4)
+        .expect("admit owner budget");
     let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier.set_verifier_deadline(5);
     let unknown = verifier
         .settle(&call, &request, reservation, SettleOutcome::Unknown)
         .expect_err("unknown outcome");
     assert_eq!(unknown, SettleRefuse::UnknownOutcome);
     assert_eq!(unknown.to_string(), "unknown outcome keeps the hold");
-    match verifier.timeout_hold(&call, &request, reservation) {
-        Ok(()) => panic!("immediate timeout returned Ok"),
-        Err(refusal) => assert!(!refusal.to_string().is_empty()),
+    match verifier.timeout_hold(&call, &request, reservation, 4) {
+        Ok(_) => panic!("immediate timeout returned Ok"),
+        Err(refusal) => assert_eq!(refusal, TimeoutRefuse::Early),
     }
     match verifier.reserve(&call, &request, 1) {
         Err(ReserveRefuse::OverCeiling { .. }) => {}
@@ -391,18 +402,50 @@ fn test_immediate_timeout_after_unknown_is_refused() {
 }
 
 #[test]
+fn test_uncertain_outcome_due_timeout_keeps_hold() {
+    let mut verifier = Verifier::new();
+    let instance = verifier.register_instance("agent-1", "session-a");
+    let handle = verifier
+        .bind_grant(instance, "UsersAI/agent-1/notes", rights())
+        .expect("bind");
+    let request = guest(handle);
+    let call = verifier.open_call(instance);
+    verifier
+        .admit_ask(&call, &request, BudgetAsk { amount: 4 }, 4)
+        .expect("admit owner budget");
+    let reservation = verifier.reserve(&call, &request, 4).expect("reserve");
+    verifier.set_verifier_deadline(5);
+    assert_eq!(
+        verifier.settle(&call, &request, reservation, SettleOutcome::Unknown),
+        Err(SettleRefuse::UnknownOutcome)
+    );
+    let record = verifier
+        .timeout_hold(&call, &request, reservation, 5)
+        .expect("deadline reached");
+    assert_eq!(record.to_string(), "timed out, outcome unknown");
+    assert_eq!(
+        verifier.release(&call, &request, reservation),
+        Err(ReleaseRefuse::Uncertain)
+    );
+    assert_eq!(
+        verifier.reserve(&call, &request, 1),
+        Err(ReserveRefuse::OverCeiling { ceiling: 4, held: 4, asked: 1 })
+    );
+    assert_eq!(
+        verifier.settle(&call, &request, reservation, SettleOutcome::Known(3)),
+        Ok(3)
+    );
+    verifier.reserve(&call, &request, 4).expect("measured settle ended the hold");
+}
+
+#[test]
 fn redteam_manifest_is_not_a_grant_link() {
     let repo = "@@REDTEAM_REPO@@";
     let baked = format!("{repo}/lab/redteam/Cargo.toml");
     let chosen = std::env::var("REDTEAM_MANIFEST").unwrap_or(baked);
     let path = std::path::Path::new(&chosen);
-    if !path.is_file() {
-        return;
-    }
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     assert!(
-        !grant_binding::link::cargo_toml_path_depends_on_grant_binding(&text),
+        !grant_binding::link::manifest_depends_on_grant_binding(path),
         "lab/redteam/Cargo.toml has a path dependency on grant-binding"
     );
 }
@@ -573,8 +616,8 @@ def write_timeout_finding(observed, finding):
 def handle_timeout(real_error, outcome, finding):
     """Classify one immediate-timeout result.
 
-    A set ``real_error`` is raised and writes nothing. A pass deletes a
-    stale finding. An Ok panic writes ``timeout_hold returned Ok``. A freed
+    A set ``real_error`` is raised and writes nothing. A pass preserves the
+    historical finding and its rerun status. An Ok panic writes ``timeout_hold returned Ok``. A freed
     hold writes ``timeout_hold freed the hold``. Both panics, any other
     failure, and an error raise and leave the destination unchanged.
     """
@@ -586,8 +629,6 @@ def handle_timeout(real_error, outcome, finding):
         raise ProbeError(f"timeout outcome was error: {outcome.detail}")
     path = Path(finding)
     if outcome.kind == "passed":
-        if path.is_file():
-            path.unlink()
         return "refused", None
     if outcome.kind != "failed":
         raise ProbeError(f"timeout outcome was {outcome.kind}")
@@ -877,13 +918,22 @@ def require_suite_manifest_unset():
 
 
 def write_link_manifest(work, package, text):
-    """Write a temp manifest for the link plant.
+    """Write a Cargo-readable temp package for the link plant.
 
     The file is neither ``lab/redteam/Cargo.toml`` nor the package manifest.
     """
-    fd, name = tempfile.mkstemp(prefix="link-manifest-", suffix=".toml", dir=work)
-    os.close(fd)
-    path = Path(name).resolve()
+    for name in ("grant-binding", "wasm-capsule-audit"):
+        stub = Path(work) / name
+        if not stub.exists():
+            (stub / "src").mkdir(parents=True)
+            (stub / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "0.0.0"\nedition = "2021"\n\n[workspace]\n'
+            )
+            (stub / "src" / "lib.rs").write_text("// Temporary Cargo dependency.\n")
+    root = Path(tempfile.mkdtemp(prefix="link-manifest-", dir=work)).resolve()
+    (root / "src").mkdir()
+    (root / "src" / "lib.rs").write_text("// Temporary Cargo package.\n")
+    path = root / "Cargo.toml"
     assert_outside(path)
     package_manifest = (Path(package) / "Cargo.toml").resolve()
     redteam_manifest = (REPO / "lab" / "redteam" / "Cargo.toml").resolve()
@@ -1154,10 +1204,15 @@ class GrantReplayProbe(unittest.TestCase):
         """A grant on the call opened before the identity change is refused after it."""
         self.check_real(IDENTITY_NAME)
 
+    def test_uncertain_outcome_due_timeout_keeps_hold(self):
+        """A due timeout records unknown, keeps the hold, and refuses release until measured settle."""
+        self.check_real(UNCERTAIN_NAME)
+
     def test_immediate_timeout_after_unknown_is_refused(self):
         """Reserve, settle Unknown, then timeout_hold with nothing between them.
 
-        A refusal leaves no finding. An Ok panic records grant-binding-003.
+        A refusal keeps the finding and records the passing rerun. An Ok
+        panic records grant-binding-003.
         ``setUp`` raises ``real_error`` only for ``PROBE_NAMES``, so this
         method raises it itself. This method does not start cargo.
         """
@@ -1184,7 +1239,7 @@ class GrantReplayProbe(unittest.TestCase):
                 evidence(self.real.output),
             )
         if status == "refused":
-            self.assertFalse(TIMEOUT_FINDING.exists())
+            self.assertTrue(TIMEOUT_FINDING.exists())
             self.assertIsNone(text)
             print("immediate timeout: refused", file=sys.stderr, flush=True)
             return
@@ -1214,7 +1269,7 @@ class GrantReplayProbe(unittest.TestCase):
         start = REPLAY_RS.find("fn test_immediate_timeout_after_unknown_is_refused")
         identity = REPLAY_RS.find("fn test_stale_call_identity_replay_is_refused")
         self.assertGreater(start, identity)
-        end = REPLAY_RS.find("fn redteam_manifest_is_not_a_grant_link", start)
+        end = REPLAY_RS.find("fn test_uncertain_outcome_due_timeout_keeps_hold", start)
         self.assertGreater(end, start)
         body = REPLAY_RS[start:end]
         self.assertNotIn("\nfn ", body)
@@ -1232,11 +1287,11 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertNotIn("release", body)
         self.assertNotIn("reserve", body[unknown:timeout])
         self.assertIn(
-            "use grant_binding::ledger::{ReserveRefuse, SettleOutcome, SettleRefuse};",
+            "use grant_binding::ledger::{ReleaseRefuse, ReserveRefuse, SettleOutcome, SettleRefuse, TimeoutRefuse};",
             REPLAY_RS,
         )
         self.assertIn(
-            "use grant_binding::{GuestRequest, Handle, Refuse, Rights, Verifier};",
+            "use grant_binding::{BudgetAsk, GuestRequest, Handle, Refuse, Rights, Verifier};",
             REPLAY_RS,
         )
 
@@ -1328,7 +1383,7 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertEqual(after, before)
 
     def test_timeout_finding_contract(self):
-        """A pass deletes a stale finding. Each panic writes its own line and the live pin.
+        """A pass preserves a historical finding. Each panic writes its own line and the live pin.
 
         No cargo run. A leftover finding, a swapped observed line, or a wrong
         commit or digest fails.
@@ -1391,7 +1446,7 @@ class GrantReplayProbe(unittest.TestCase):
             )
             self.assertEqual(status, "refused")
             self.assertIsNone(text)
-            self.assertFalse(passed.exists())
+            self.assertEqual(passed.read_text(), stale(TIMEOUT_OK_OBSERVED))
 
             ok_path = root / "ok.md"
             ok_path.write_text(stale(TIMEOUT_FREED_OBSERVED))
@@ -1925,7 +1980,7 @@ class GrantReplayProbe(unittest.TestCase):
         self.assertNotIn(REPO_MARKER, text)
         self.assertIn(str(REPO), text)
         self.assertIn(
-            "grant_binding::link::cargo_toml_path_depends_on_grant_binding",
+            "grant_binding::link::manifest_depends_on_grant_binding",
             text,
         )
         self.assertIn(LINK_NAME, text)
@@ -1992,14 +2047,7 @@ class GrantReplayProbe(unittest.TestCase):
         """Lay the dependency at grant-binding and the probe whose path decodes to it."""
         dependency = self.work / "grant-binding"
         probe = self.work / "escaped-probe"
-        self._lay_crate(
-            dependency,
-            "[package]\n"
-            'name = "grant-binding"\n'
-            'version = "0.0.0"\n'
-            'edition = "2021"\n',
-            "pub fn f() {}\n",
-        )
+        self.assertTrue((dependency / "Cargo.toml").is_file())
         self._lay_crate(probe, ESCAPED_MANIFEST, "pub fn g() {}\n")
         return probe
 
@@ -2012,7 +2060,7 @@ class GrantReplayProbe(unittest.TestCase):
     def test_escaped_path_dependency_matches_cargo(self):
         """Cargo resolves the escaped path. The raw text does not name the crate.
 
-        The owner's detector reads that raw text. A pass writes
+        The detector resolves Cargo metadata. A pass writes
         grant-binding-002. A caught failure writes nothing to
         caught-escape.md, leaves grant-binding-002.md unchanged, and says
         the detector returned true. An error propagates. A false detector

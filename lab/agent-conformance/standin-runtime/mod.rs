@@ -197,8 +197,8 @@ impl RunBinding {
 /// the bundle path, the publisher's signature and the accepted list, beside
 /// the CID it was admitted under.
 ///
-/// It also keeps the asks the signed bundle declares. They come from
-/// `asks.json` inside the bytes the admitted lab CID covers, read by the one
+/// It also keeps the manifest asks the signed bundle declares. They come from
+/// `capsule.json` in the bytes the admitted lab CID covers, read by the one
 /// walk, so they hold only when that signature verifies (M1 check B2).
 struct Admitted {
     cid: LabCid,
@@ -208,21 +208,7 @@ struct Admitted {
     bundle: PathBuf,
     sig: NameSignature,
     accepted: Vec<String>,
-    asks: Vec<Ask>,
-}
-
-/// One ask a signed bundle declares, as `asks.json` gives it.
-///
-/// Provisional: this schema mirrors the #464 draft and is not that draft's
-/// final form. The file is `{"schema": "elastos.agent-host.asks/v1", "asks":
-/// [{"kind": <kind>, "resource": <resource>}]}`. It sits in the bundle beside
-/// `capsule.json`, so the signed lab CID covers it. `kind` is the request's
-/// action, lowercased as the request route lowercases it, and `resource` is
-/// the request's resource: the route stores a request only when both match
-/// one ask exactly.
-struct Ask {
-    kind: String,
-    resource: String,
+    asks: Vec<elastos_common::ManifestAsk>,
 }
 
 /// One launched guest. `post_capsules` is the only writer of `instances`: it
@@ -1557,11 +1543,9 @@ impl StandIn {
     /// its own text; a signature or name refusal is status 403 with its own
     /// text. A refused admission stores nothing. `Ok(())` grants nothing.
     ///
-    /// The asks that request route checks come from `asks.json` in those same
-    /// checked bytes (M1 check B2): the row takes `CheckedBundle::entry` of
-    /// the walked file, and a schema it does not read, or no such file, is
-    /// status 400 with its own text. No asks are taken from disk a second
-    /// time and none come from this call's arguments.
+    /// The asks the request route checks are the typed `asks` of the checked
+    /// `capsule.json` (M1 check B2). A manifest with no asks is status 400.
+    /// No asks are taken from disk a second time.
     ///
     /// A `content` manifest is content, never code: it opens by CID as
     /// content and never runs as code, so it is refused here with status 403
@@ -1649,11 +1633,11 @@ impl StandIn {
     /// compare. The launch names the instance from the row's checked manifest
     /// name. A launch adds one `Starting` instance and no grant.
     ///
-    /// Those bytes carry the asks too (M1 check B2). Any changed byte, the
-    /// `asks.json` bytes included, leaves the bundle under a new lab CID, so
-    /// this walk's `check_name` refuses it with the row's name and no ask is
-    /// read from a bundle other than the one admitted. A refusal keeps the
-    /// launch, its instance and its grants out.
+    /// Those bytes carry the asks too (M1 check B2). Any changed byte, a
+    /// typed ask in `capsule.json` included, leaves the bundle under a new
+    /// lab CID, so this walk's `check_name` refuses it with the row's name
+    /// and no ask is read from a bundle other than the one admitted. A
+    /// refusal keeps the launch, its instance and its grants out.
     pub fn post_capsules(
         &mut self,
         caller: Caller<'_>,
@@ -1855,12 +1839,10 @@ impl StandIn {
     /// The one declared-ask check. `post_capability_request` is its route.
     ///
     /// Traces the live instance's session to the lab CID its launch started,
-    /// then to that admitted row's signed asks. `resource` is the body's
-    /// resource unchanged; `action` is already lowercased by the route, as an
-    /// ask's `kind` is when the row is admitted. One ask covers the request
-    /// when both fields are equal, so no prefix and no other action covers
-    /// it. A request that matches no such ask is status 403 with one reason; this
-    /// method reads no disk and stores nothing.
+    /// then to that admitted row's manifest asks. `resource` is unchanged and
+    /// `action` is already lowercased. One ask covers the request when its
+    /// resource is equal and its actions contain that word. No prefix covers
+    /// it. This method reads no disk and stores nothing. The shell grant decides.
     fn declared_ask(
         &self,
         session_id: &str,
@@ -1873,11 +1855,14 @@ impl StandIn {
             .find(|instance| instance.id == session_id)
             .map(|instance| instance.started_cid)
             .ok_or_else(|| unknown_instance(session_id))?;
-        let asks = &self.admit_row(cid)?.asks;
-        if asks
-            .iter()
-            .any(|ask| ask.kind == action && ask.resource == resource)
-        {
+        let asks = self.admit_row(cid)?.asks.clone();
+        if asks.iter().any(|ask| {
+            ask.resource == resource
+                && ask
+                    .actions
+                    .iter()
+                    .any(|declared| declared.as_str() == action)
+        }) {
             return Ok(());
         }
         Err((
@@ -2503,79 +2488,30 @@ fn check_bundle(
     Ok(checked)
 }
 
-/// The first key in `object` that is not one of `allowed`, in the object's
-/// own order. `None` means every key is known.
-fn unknown_key<'a>(object: &'a Map<String, Value>, allowed: &[&str]) -> Option<&'a str> {
-    object
-        .keys()
-        .map(String::as_str)
-        .find(|key| !allowed.contains(key))
-}
-
-/// The asks of one checked bundle, from the `asks.json` the walk read.
-///
-/// Provisional, mirrors the #464 draft: the schema is
-/// `elastos.agent-host.asks/v1` and each ask is `{"kind": ..., "resource":
-/// ...}`. This reads only `CheckedBundle::entry`, so it judges the bytes the
-/// one walk named and the name signature covers, and it reads no folder. Each
-/// `kind` is lowercased exactly as the request route lowercases an action, so
-/// coverage is the route's own compare. A missing file, a file that is not
-/// JSON, another schema, a missing field or an empty list is status 400 with
-/// its own text. The file object may hold only `schema` and `asks`, and each
-/// ask only `kind` and `resource`: any other key is status 400 with
-/// `asks.json carries an unknown key: ` plus that key, and it stores nothing.
-fn admitted_asks(checked: &CheckedBundle) -> Result<Vec<Ask>, (u16, String)> {
-    const ASKS_FILE: &str = "asks.json";
-    const ASKS_SCHEMA: &str = "elastos.agent-host.asks/v1";
-    const ASKS_KEYS: [&str; 2] = ["schema", "asks"];
-    const ASK_KEYS: [&str; 2] = ["kind", "resource"];
-    const BAD_ASKS: &str = "asks.json does not follow the provisional ask schema";
-
+/// The ceiling is the typed `asks` of the walked `capsule.json`.
+/// A manifest with no asks is status 400. This reads `CheckedBundle::entry` only.
+fn admitted_asks(
+    checked: &CheckedBundle,
+) -> Result<Vec<elastos_common::ManifestAsk>, (u16, String)> {
     let bytes = checked
-        .entry(ASKS_FILE)
-        .ok_or_else(|| (400, format!("bundle declares no {ASKS_FILE}")))?;
-    let file = serde_json::from_slice::<Value>(bytes).ok();
-    let refuse_unknown = |key: &str| (400, format!("asks.json carries an unknown key: {key}"));
-    if let Some(key) = file
-        .as_ref()
-        .and_then(Value::as_object)
-        .and_then(|object| unknown_key(object, &ASKS_KEYS))
-    {
-        return Err(refuse_unknown(key));
+        .entry(capsule_identity::MANIFEST_FILE)
+        .ok_or_else(|| {
+            (
+                400,
+                format!("bundle declares no {}", capsule_identity::MANIFEST_FILE),
+            )
+        })?;
+    let manifest: elastos_common::CapsuleManifest =
+        serde_json::from_slice(bytes).map_err(|error| {
+            (
+                400,
+                format!("the Runtime's CapsuleManifest refused to parse capsule.json: {error}"),
+            )
+        })?;
+    if manifest.asks.is_empty() {
+        return Err((400, "the signed manifest declares no asks".to_owned()));
     }
-    let bad = || (400, BAD_ASKS.to_owned());
-    let schema = file
-        .as_ref()
-        .and_then(|file| file.get("schema"))
-        .and_then(Value::as_str);
-    let asks = file
-        .as_ref()
-        .and_then(|file| file.get("asks"))
-        .and_then(Value::as_array);
-    let (Some(schema), Some(asks)) = (schema, asks) else {
-        return Err(bad());
-    };
-    if schema != ASKS_SCHEMA {
-        return Err(bad());
-    }
-    for ask in asks {
-        let object = ask.as_object().ok_or_else(bad)?;
-        if let Some(key) = unknown_key(object, &ASK_KEYS) {
-            return Err(refuse_unknown(key));
-        }
-    }
-    if asks.is_empty() {
-        return Err(bad());
-    }
-    asks.iter()
-        .map(|ask| {
-            Some(Ask {
-                kind: ask.get("kind")?.as_str()?.to_lowercase(),
-                resource: ask.get("resource")?.as_str()?.to_owned(),
-            })
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(bad)
+    Ok(manifest.asks)
 }
 
 /// The role a manifest names for content. Content opens by CID as content
@@ -2958,6 +2894,10 @@ fn stop_reason(body: &Value) -> Result<&str, (u16, String)> {
 }
 
 #[cfg(test)]
+#[path = "../tests/common/manifest_asks.rs"]
+mod manifest_asks;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
@@ -2969,16 +2909,10 @@ mod tests {
     use tempfile::TempDir;
 
     /// The committed `agent-host` fixture: a real bundle the walk accepts.
-    const AGENT_HOST_FILES: [(&str, &[u8]); 2] = [
-        (
-            "capsule.json",
-            include_bytes!("../../capsule-identity/fixtures/agent-host/capsule.json"),
-        ),
-        (
-            "asks.json",
-            include_bytes!("../../capsule-identity/fixtures/agent-host/asks.json"),
-        ),
-    ];
+    const AGENT_HOST_FILES: [(&str, &[u8]); 1] = [(
+        "capsule.json",
+        include_bytes!("../../capsule-identity/fixtures/agent-host/capsule.json"),
+    )];
 
     /// One signed fixture bundle in a fresh tempdir, its accepted publisher
     /// and the key that signed it. A second `Shared` is a second bundle with
@@ -3043,10 +2977,7 @@ mod tests {
     /// A second signed bundle with other bytes and so another lab CID.
     fn other_bundle() -> Shared {
         let other = Shared::new();
-        let asks = other.path().join("asks.json");
-        let mut bytes = fs::read(&asks).expect("read asks.json");
-        bytes.push(b'\n');
-        fs::write(&asks, &bytes).expect("change the second bundle");
+        flip_manifest_description(other.path());
         other
     }
 
@@ -3082,21 +3013,23 @@ mod tests {
         );
     }
 
-    /// Replaces the fixture's `asks.json` with exactly `asks`, in that order,
-    /// before the bundle is signed. A test that needs another declared set
-    /// gives it here; the committed file stays the fixture the other lanes
-    /// read.
+    /// Replaces the fixture's asks with exactly `asks`, in that order, before
+    /// the bundle is signed. The manifest gets the typed rows.
     fn declare_asks(root: &Path, asks: &[(&str, &str)]) {
-        let listed = asks
-            .iter()
-            .map(|(resource, kind)| json!({ "kind": kind, "resource": resource }))
-            .collect::<Vec<_>>();
-        let file = json!({ "schema": "elastos.agent-host.asks/v1", "asks": listed });
-        fs::write(
-            root.join("asks.json"),
-            serde_json::to_vec_pretty(&file).expect("encode the fixture asks"),
-        )
-        .expect("write the fixture asks");
+        super::manifest_asks::write_typed_manifest_asks(root, asks);
+    }
+
+    /// Flips one letter of the manifest description. The walk still accepts
+    /// the bundle and its lab CID changes.
+    fn flip_manifest_description(root: &Path) {
+        let path = root.join("capsule.json");
+        let mut bytes = fs::read(&path).expect("read capsule.json");
+        let at = bytes
+            .windows(b"Journal".len())
+            .position(|window| window == b"Journal")
+            .expect("the manifest description names the journal");
+        bytes[at] ^= 0x20;
+        fs::write(&path, &bytes).expect("flip one byte of the manifest description");
     }
 
     /// A fresh Ed25519 test key. Nothing writes it or keeps a seed.
@@ -4119,10 +4052,7 @@ mod tests {
         let before = checked_bundle(shared.path())
             .expect("the walk names the bundle before the change")
             .cid();
-        let asks = shared.path().join("asks.json");
-        let mut bytes = fs::read(&asks).expect("read asks.json");
-        bytes[0] ^= 0x01;
-        fs::write(&asks, &bytes).expect("flip one byte of asks.json");
+        flip_manifest_description(shared.path());
         let mut standin = StandIn::new();
         let refused = standin.admit_resident(shared.path(), &sig, &shared.accepted, Start::Ok);
         let after = checked_bundle(shared.path())
@@ -4198,10 +4128,7 @@ mod tests {
         let mut standin = StandIn::new();
         admit_shared(&shared, &mut standin, Start::Ok);
         let admitted_cid = shared.cid();
-        let asks = shared.path().join("asks.json");
-        let mut bytes = fs::read(&asks).expect("read asks.json");
-        bytes[0] ^= 0x01;
-        fs::write(&asks, &bytes).expect("flip one byte of asks.json after admission");
+        flip_manifest_description(shared.path());
         let launch = standin.post_capsules(Caller::Shell, &json!({ "cid": admitted_cid }));
         let now = checked_bundle(shared.path())
             .expect("the walk names the changed bundle")

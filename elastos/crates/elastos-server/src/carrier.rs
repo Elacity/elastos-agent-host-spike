@@ -62,6 +62,7 @@ use elastos_runtime::provider::{
     ResourceResponse,
 };
 
+use crate::content::{FetchFailureReason, FetchReceipt, FetchResult, SignedHolderServeReceipt};
 use crate::operator_control::{
     load_operator_control, OperatorHandler, OperatorRuntimeContext, OPERATOR_ALPN,
 };
@@ -2411,7 +2412,15 @@ async fn handle_file_stream(
                 )
                 .await
             } else {
-                let network = gossip_state.lock().await.browser_exit_network.clone();
+                let (network, signing_key) = {
+                    let state = gossip_state.lock().await;
+                    (
+                        state.browser_exit_network.clone(),
+                        (msg.data["target"] == "content" && msg.data["operation"] == "fetch")
+                            .then(|| state.signing_key.clone())
+                            .flatten(),
+                    )
+                };
                 carrier_provider_invoke_registry(
                     &registry,
                     &msg.data,
@@ -2420,6 +2429,7 @@ async fn handle_file_stream(
                         data_dir,
                         network: network.as_ref(),
                     },
+                    signing_key.as_ref(),
                 )
                 .await?
             };
@@ -2986,6 +2996,7 @@ async fn carrier_provider_invoke_registry(
     data: &serde_json::Value,
     source_endpoint_id: &iroh::PublicKey,
     caller: CarrierProviderCaller<'_>,
+    signing_key: Option<&ed25519_dalek::SigningKey>,
 ) -> Result<serde_json::Value> {
     let source = data
         .get("source")
@@ -3082,10 +3093,45 @@ async fn carrier_provider_invoke_registry(
         }
     }
     match result {
-        Ok(result) => Ok(serde_json::json!({
+        Ok(mut result) => {
+            if let (Some(signing_key), "content", "fetch", CarrierProviderCaller::Peer { .. }) =
+                (signing_key, target, operation, caller)
+            {
+                let serve_nonce = request.get("serve_nonce").and_then(|value| value.as_str());
+                let whole_cid = request
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .is_empty()
+                    && request
+                        .get("bounded_read")
+                        .and_then(|value| value.as_bool())
+                        != Some(true);
+                if whole_cid {
+                    if let (Some(nonce), Some(cid)) = (
+                        serve_nonce,
+                        request.get("cid").and_then(|value| value.as_str()),
+                    ) {
+                        if let Ok(bytes) = remote_content_provider_response_bytes(&result) {
+                            if let Ok(signed) = crate::content::sign_holder_serve_receipt(
+                                signing_key,
+                                cid,
+                                &source_endpoint_did,
+                                bytes.len() as u64,
+                                nonce,
+                                now_secs(),
+                            ) {
+                                result["_runtime_serve_receipt"] = serde_json::to_value(signed)?;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(serde_json::json!({
             "ok": true,
             "result": result,
-        })),
+            }))
+        }
         // A whole read past its bound is final for the caller; say so with a
         // fixed token instead of backend text.
         Err(err)
@@ -4676,6 +4722,43 @@ impl CarrierAvailabilityProvider {
             Ok(bound) => bound,
             Err(err) => return Ok(carrier_availability_error("invalid_request", err)),
         };
+        let cid_verified = path.is_empty() && bound.is_none();
+        let required_distinct = match fetch_min_distinct_holders(request) {
+            Ok(required) => required,
+            Err(err) => return Ok(carrier_availability_error("invalid_request", err)),
+        };
+        // The mode's claim rests on the helper's CID check, which runs only
+        // for a whole-CID read.
+        if required_distinct > 0 && !cid_verified {
+            return Ok(carrier_availability_error(
+                "invalid_request",
+                "min_distinct_holders requires a whole-CID fetch",
+            ));
+        }
+        let request_nonce = if required_distinct > 0 {
+            match request
+                .get("serve_request_nonce")
+                .and_then(|value| value.as_str())
+            {
+                Some(nonce) if crate::content::serve_attempt_nonce(nonce, 1).is_some() => {
+                    Some(nonce)
+                }
+                _ => {
+                    return Ok(carrier_availability_error(
+                        "invalid_request",
+                        "distinct-holder fetch requires a Content serve request nonce",
+                    ))
+                }
+            }
+        } else {
+            None
+        };
+        let mut holder_receipts: Vec<FetchReceipt> = Vec::new();
+        if required_distinct > 0 {
+            if let Err(err) = crate::content::require_fetch_receipt_cid(cid) {
+                return Ok(carrier_availability_error("invalid_cid", err));
+            }
+        }
         let topic_name = content_availability_topic_name(cid);
         {
             let mut state = self.state.lock().await;
@@ -4707,6 +4790,9 @@ impl CarrierAvailabilityProvider {
 
         let deadline = tokio::time::Instant::now() + self.discovery_wait;
         let mut tried = HashSet::new();
+        // Counts every pass that selects a candidate, including one the filter
+        // hands back again. The distinct-DID set alone does not bound that.
+        let mut fetch_attempts = 0usize;
         let mut errors = Vec::new();
         // Every holder failed in transit (deadline, connect, lost stream) and
         // none refused or answered badly: the caller may try the read again.
@@ -4744,38 +4830,81 @@ impl CarrierAvailabilityProvider {
                 .into_iter()
                 .find(|replica| !tried.contains(&replica.node_did));
             if let Some(mut replica) = next {
-                if tried.len() >= MAX_CARRIER_REPLICATION_CANDIDATES {
+                // The cap bounds every pass, including after "not enough
+                // holders yet". The deadline stops a holder already tried.
+                // It does not skip an announced holder that has not been tried.
+                if fetch_walk_should_stop(
+                    fetch_attempts,
+                    tried.len(),
+                    tried.contains(&replica.node_did),
+                    required_distinct,
+                    deadline,
+                ) {
                     break;
                 }
+                fetch_attempts += 1;
                 tried.insert(replica.node_did.clone());
-                match fetch_content_via_carrier_provider_invocation(
-                    &registry,
-                    &replica.node_did,
-                    &replica.connect_ticket,
-                    cid,
-                    path,
-                    bound,
-                )
-                .await
-                {
-                    Ok((bytes, remote_transfer)) => {
-                        self.record_peer_reputation(&replica.node_did, true).await;
-                        return Ok(serde_json::json!({
-                            "status": "ok",
-                            "data": {
-                                "data": base64::engine::general_purpose::STANDARD.encode(bytes),
-                                "availability": {
-                                    "status": "network_available",
-                                    "provider": "carrier-availability",
-                                    "policy": "carrier_provider_invoke",
-                                    "replicas": 1,
-                                    "transport": "carrier-provider-plane",
-                                    "node_did": replica.node_did,
-                                    "remote_transfer": remote_transfer,
-                                    "checked_at": now_secs(),
-                                }
+                let attempt = tried.len() as u8;
+                let serve_nonce = request_nonce
+                    .and_then(|nonce| crate::content::serve_attempt_nonce(nonce, attempt));
+                let serve = serve_nonce
+                    .as_deref()
+                    .map(|nonce| (self_did.as_str(), nonce));
+                match holder_answer_or_empty_failure(
+                    required_distinct,
+                    fetch_content_via_carrier_provider_invocation(
+                        &registry,
+                        &replica.node_did,
+                        &replica.connect_ticket,
+                        cid,
+                        path,
+                        bound,
+                        serve,
+                    )
+                    .await,
+                ) {
+                    Ok((bytes, remote_transfer, countersignature)) => {
+                        // Mode off marks the holder and returns before any receipt.
+                        // The record call writes nothing in that mode.
+                        let mode_off = required_distinct == 0;
+                        if mode_off {
+                            self.record_peer_reputation(&replica.node_did, true).await;
+                        }
+                        let enough = match record_holder_answer(
+                            &mut holder_receipts,
+                            required_distinct,
+                            cid,
+                            &replica.node_did,
+                            FetchResult::Ok,
+                            bytes.len() as u64,
+                            attempt,
+                            serve_nonce.as_deref(),
+                            countersignature,
+                        ) {
+                            Ok(enough) => enough,
+                            Err(_) => {
+                                // A holder answer that the receipt type cannot
+                                // hold is that holder's failure, not a caller error.
+                                self.record_peer_reputation(&replica.node_did, false).await;
+                                only_transit_failures = false;
+                                errors.push("holder answer could not be recorded".to_string());
+                                continue;
                             }
-                        }));
+                        };
+                        if !mode_off {
+                            self.record_peer_reputation(&replica.node_did, true).await;
+                        }
+                        if !enough {
+                            continue;
+                        }
+                        return Ok(carrier_fetch_success_response(
+                            &bytes,
+                            &replica.node_did,
+                            remote_transfer,
+                            cid_verified,
+                            &holder_receipts,
+                            required_distinct,
+                        ));
                     }
                     Err(err) => {
                         warn!(
@@ -4783,6 +4912,26 @@ impl CarrierAvailabilityProvider {
                             error = %err,
                             "Carrier availability fetch from holder failed"
                         );
+                        if let Some(corrupt) = err.downcast_ref::<CarrierHolderCorruptBytes>() {
+                            record_corrupt_holder(
+                                &mut holder_receipts,
+                                required_distinct,
+                                cid,
+                                &replica.node_did,
+                                corrupt.bytes_received,
+                                attempt,
+                            );
+                        }
+                        if let Some(unsigned) = err.downcast_ref::<CarrierHolderUnsignedServe>() {
+                            record_unsigned_holder(
+                                &mut holder_receipts,
+                                required_distinct,
+                                cid,
+                                &replica.node_did,
+                                unsigned.bytes_received,
+                                attempt,
+                            );
+                        }
                         let mut final_err = err.to_string();
                         let mut in_transit = carrier_read_failed_in_transit(&err);
                         if let Some(data_dir) = self.data_dir.as_deref() {
@@ -4795,35 +4944,72 @@ impl CarrierAvailabilityProvider {
                             {
                                 TrustedSourceBootstrapRefresh::Fresh(live_ticket) => {
                                     replica.connect_ticket = live_ticket;
-                                    match fetch_content_via_carrier_provider_invocation(
-                                        &registry,
-                                        &replica.node_did,
-                                        &replica.connect_ticket,
-                                        cid,
-                                        path,
-                                        bound,
-                                    )
-                                    .await
-                                    {
-                                        Ok((bytes, remote_transfer)) => {
-                                            self.record_peer_reputation(&replica.node_did, true)
+                                    match holder_answer_or_empty_failure(
+                                        required_distinct,
+                                        fetch_content_via_carrier_provider_invocation(
+                                            &registry,
+                                            &replica.node_did,
+                                            &replica.connect_ticket,
+                                            cid,
+                                            path,
+                                            bound,
+                                            serve,
+                                        )
+                                        .await,
+                                    ) {
+                                        Ok((bytes, remote_transfer, countersignature)) => {
+                                            let mode_off = required_distinct == 0;
+                                            if mode_off {
+                                                self.record_peer_reputation(
+                                                    &replica.node_did,
+                                                    true,
+                                                )
                                                 .await;
-                                            return Ok(serde_json::json!({
-                                                "status": "ok",
-                                                "data": {
-                                                    "data": base64::engine::general_purpose::STANDARD.encode(bytes),
-                                                    "availability": {
-                                                        "status": "network_available",
-                                                        "provider": "carrier-availability",
-                                                        "policy": "carrier_provider_invoke",
-                                                        "replicas": 1,
-                                                        "transport": "carrier-provider-plane",
-                                                        "node_did": replica.node_did,
-                                                        "remote_transfer": remote_transfer,
-                                                        "checked_at": now_secs(),
-                                                    }
+                                            }
+                                            let enough = match record_holder_answer(
+                                                &mut holder_receipts,
+                                                required_distinct,
+                                                cid,
+                                                &replica.node_did,
+                                                FetchResult::Ok,
+                                                bytes.len() as u64,
+                                                attempt,
+                                                serve_nonce.as_deref(),
+                                                countersignature,
+                                            ) {
+                                                Ok(enough) => enough,
+                                                Err(_) => {
+                                                    self.record_peer_reputation(
+                                                        &replica.node_did,
+                                                        false,
+                                                    )
+                                                    .await;
+                                                    only_transit_failures = false;
+                                                    errors.push(
+                                                        "holder answer could not be recorded"
+                                                            .to_string(),
+                                                    );
+                                                    continue;
                                                 }
-                                            }));
+                                            };
+                                            if !mode_off {
+                                                self.record_peer_reputation(
+                                                    &replica.node_did,
+                                                    true,
+                                                )
+                                                .await;
+                                            }
+                                            if !enough {
+                                                continue;
+                                            }
+                                            return Ok(carrier_fetch_success_response(
+                                                &bytes,
+                                                &replica.node_did,
+                                                remote_transfer,
+                                                cid_verified,
+                                                &holder_receipts,
+                                                required_distinct,
+                                            ));
                                         }
                                         Err(retry_err) => {
                                             warn!(
@@ -4831,6 +5017,30 @@ impl CarrierAvailabilityProvider {
                                                 error = %retry_err,
                                                 "Carrier availability fetch after bootstrap refresh failed"
                                             );
+                                            if let Some(corrupt) = retry_err
+                                                .downcast_ref::<CarrierHolderCorruptBytes>(
+                                            ) {
+                                                record_corrupt_holder(
+                                                    &mut holder_receipts,
+                                                    required_distinct,
+                                                    cid,
+                                                    &replica.node_did,
+                                                    corrupt.bytes_received,
+                                                    attempt,
+                                                );
+                                            }
+                                            if let Some(unsigned) = retry_err
+                                                .downcast_ref::<CarrierHolderUnsignedServe>(
+                                            ) {
+                                                record_unsigned_holder(
+                                                    &mut holder_receipts,
+                                                    required_distinct,
+                                                    cid,
+                                                    &replica.node_did,
+                                                    unsigned.bytes_received,
+                                                    attempt,
+                                                );
+                                            }
                                             final_err = retry_err.to_string();
                                             // Any refusal for this holder keeps it permanent.
                                             in_transit &=
@@ -4855,10 +5065,23 @@ impl CarrierAvailabilityProvider {
                     }
                 }
             }
+            // No announced holder is left untried. The deadline ends the wait
+            // for another announcement.
             if tokio::time::Instant::now() >= deadline {
                 break;
             }
             tokio::time::sleep(CONTENT_AVAILABILITY_DISCOVERY_POLL).await;
+        }
+        // A rule refusal names what was proven. With no holder answer yet, the
+        // existing transit/unavailable codes stay truthful and retryable.
+        if required_distinct > 0
+            && !holder_receipts.is_empty()
+            && distinct_holder_count(&holder_receipts) < usize::from(required_distinct)
+        {
+            return Ok(carrier_distinct_holder_error(
+                &holder_receipts,
+                required_distinct,
+            ));
         }
         if errors.is_empty() {
             return Ok(carrier_availability_error(
@@ -4876,6 +5099,248 @@ impl CarrierAvailabilityProvider {
             format!("Carrier content fetch failed: {}", errors.join(" | ")),
         ))
     }
+}
+
+/// Optional requester-side rule for the M3 demonstration: succeed only when
+/// this many distinct authenticated holder DIDs each served verified bytes.
+/// Absent means off, so the ordinary Get path keeps its first-success answer.
+fn fetch_min_distinct_holders(request: &serde_json::Value) -> Result<u8, String> {
+    let Some(value) = request.get("min_distinct_holders") else {
+        return Ok(0);
+    };
+    value
+        .as_u64()
+        .filter(|required| {
+            (1..=u64::from(crate::content::MAX_FETCH_RECEIPT_ATTEMPTS)).contains(required)
+        })
+        .map(|required| required as u8)
+        .ok_or_else(|| "min_distinct_holders must be between 1 and 8".to_string())
+}
+
+/// Bytes a holder returned for a CID they do not hash to. The count feeds the
+/// refusal receipt; the bytes and the holder's text are not kept.
+#[derive(Debug)]
+struct CarrierHolderCorruptBytes {
+    bytes_received: u64,
+}
+
+impl std::fmt::Display for CarrierHolderCorruptBytes {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "holder returned bytes for a different CID")
+    }
+}
+
+impl std::error::Error for CarrierHolderCorruptBytes {}
+
+#[derive(Debug)]
+struct CarrierHolderUnsignedServe {
+    bytes_received: u64,
+}
+
+impl std::fmt::Display for CarrierHolderUnsignedServe {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "holder did not provide a valid serve countersignature"
+        )
+    }
+}
+
+impl std::error::Error for CarrierHolderUnsignedServe {}
+
+/// Peer DIDs, never addresses or tickets, with verified bytes for one CID.
+fn distinct_holder_count(receipts: &[FetchReceipt]) -> usize {
+    receipts
+        .iter()
+        .filter_map(|receipt| receipt.counted_holder_did())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// Stops one pass of the holder walk. The cap counts passes, not only new
+/// peer DIDs, so a filter that keeps returning one holder cannot spin. The
+/// deadline stops a candidate the walk already tried. It does not skip an
+/// announced holder that has not been tried, in either mode: that holder
+/// still runs after the window. `required_distinct` is accepted so a caller
+/// can show the mode, and the decision does not branch on it.
+fn fetch_walk_should_stop(
+    fetch_attempts: usize,
+    tried_len: usize,
+    candidate_already_tried: bool,
+    required_distinct: u8,
+    deadline: tokio::time::Instant,
+) -> bool {
+    if fetch_attempts >= MAX_CARRIER_REPLICATION_CANDIDATES
+        || tried_len >= MAX_CARRIER_REPLICATION_CANDIDATES
+    {
+        return true;
+    }
+    // The mode is not a stop. An untried announced holder runs after the window.
+    let _ = required_distinct;
+    candidate_already_tried && tokio::time::Instant::now() >= deadline
+}
+
+/// A verified empty answer cannot be recorded: `FetchReceipt::Ok` requires
+/// bytes, and a failed receipt cannot say the bytes were verified. Fail the
+/// holder instead. Mode off keeps the empty answer as an ordinary success.
+fn holder_answer_or_empty_failure(
+    required_distinct: u8,
+    result: Result<(
+        Vec<u8>,
+        Option<serde_json::Value>,
+        Option<SignedHolderServeReceipt>,
+    )>,
+) -> Result<(
+    Vec<u8>,
+    Option<serde_json::Value>,
+    Option<SignedHolderServeReceipt>,
+)> {
+    match result {
+        Ok((bytes, _, _)) if required_distinct > 0 && bytes.is_empty() => {
+            Err(anyhow::anyhow!("holder returned an empty answer"))
+        }
+        other => other,
+    }
+}
+
+fn record_unsigned_holder(
+    receipts: &mut Vec<FetchReceipt>,
+    required: u8,
+    cid: &str,
+    node_did: &str,
+    bytes_received: u64,
+    attempt: u8,
+) {
+    let _ = record_holder_answer(
+        receipts,
+        required,
+        cid,
+        node_did,
+        FetchResult::Failed(FetchFailureReason::NoCountersignature),
+        bytes_received,
+        attempt,
+        None,
+        None,
+    );
+}
+
+/// Records a CID mismatch. Zero bytes are not `RefusedCorrupt` (that variant
+/// requires unverified bytes), so they are an invalid response: unverified,
+/// empty, and a closed reason. A record failure does not abort the fetch.
+fn record_corrupt_holder(
+    receipts: &mut Vec<FetchReceipt>,
+    required: u8,
+    cid: &str,
+    node_did: &str,
+    bytes_received: u64,
+    attempt: u8,
+) {
+    let result = if bytes_received == 0 {
+        FetchResult::Failed(FetchFailureReason::InvalidResponse)
+    } else {
+        FetchResult::RefusedCorrupt
+    };
+    let _ = record_holder_answer(
+        receipts,
+        required,
+        cid,
+        node_did,
+        result,
+        bytes_received,
+        attempt,
+        None,
+        None,
+    );
+}
+
+/// Adds one holder answer to the requester's receipts and reports whether the
+/// mode now has enough distinct holders. A failure can never be recorded as
+/// verified bytes: `FetchReceipt::new` derives that from `result`.
+#[allow(clippy::too_many_arguments)]
+fn record_holder_answer(
+    receipts: &mut Vec<FetchReceipt>,
+    required: u8,
+    cid: &str,
+    node_did: &str,
+    result: FetchResult,
+    bytes_received: u64,
+    attempt: u8,
+    serve_nonce: Option<&str>,
+    countersignature: Option<SignedHolderServeReceipt>,
+) -> Result<bool, String> {
+    if required == 0 {
+        return Ok(true);
+    }
+    receipts.push(FetchReceipt::new_with(
+        cid,
+        node_did,
+        bytes_received,
+        matches!(result, FetchResult::Ok),
+        result,
+        attempt,
+        now_secs(),
+        serve_nonce,
+        countersignature,
+    )?);
+    Ok(distinct_holder_count(receipts) >= usize::from(required))
+}
+
+fn carrier_fetch_success_response(
+    bytes: &[u8],
+    node_did: &str,
+    remote_transfer: Option<serde_json::Value>,
+    cid_verified: bool,
+    receipts: &[FetchReceipt],
+    required: u8,
+) -> serde_json::Value {
+    let mut availability = serde_json::json!({
+        "status": "network_available",
+        "provider": "carrier-availability",
+        "policy": "carrier_provider_invoke",
+        "replicas": 1,
+        "transport": "carrier-provider-plane",
+        "node_did": node_did,
+        "remote_transfer": remote_transfer,
+        "cid_verified": cid_verified,
+        "checked_at": now_secs(),
+    });
+    if required > 0 {
+        availability["policy"] = serde_json::json!("carrier_provider_invoke_distinct_holders");
+        availability["replicas"] = serde_json::json!(distinct_holder_count(receipts) as u32);
+        availability["distinct_holders"] = serde_json::json!(distinct_holder_count(receipts));
+        availability["required_distinct_holders"] = serde_json::json!(required);
+        availability["receipt_attestation"] =
+            serde_json::json!(crate::content::FETCH_RECEIPT_SET_ATTESTATION);
+        availability["receipts"] =
+            serde_json::to_value(receipts).unwrap_or(serde_json::Value::Null);
+    }
+    serde_json::json!({
+        "status": "ok",
+        "data": {
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "availability": availability,
+        }
+    })
+}
+
+/// A refusal that keeps the receipts: the caller sees which peer DIDs served
+/// verified bytes and which holder answered for a different CID.
+fn carrier_distinct_holder_error(receipts: &[FetchReceipt], required: u8) -> serde_json::Value {
+    serde_json::json!({
+        "status": "error",
+        "code": "carrier_fetch_distinct_holders",
+        "message": format!(
+            "Carrier content fetch verified {} distinct holder(s); {} required",
+            distinct_holder_count(receipts),
+            required
+        ),
+        "data": {
+            "distinct_holders": distinct_holder_count(receipts),
+            "required_distinct_holders": required,
+            "receipt_attestation": crate::content::FETCH_RECEIPT_SET_ATTESTATION,
+            "receipts": serde_json::to_value(receipts).unwrap_or(serde_json::Value::Null),
+        },
+    })
 }
 
 /// Bound one Content read forwarded to a holder: a closed file range or a
@@ -4973,7 +5438,12 @@ async fn fetch_content_via_carrier_provider_invocation(
     cid: &str,
     path: &str,
     bound: Option<BoundedContentRead>,
-) -> Result<(Vec<u8>, Option<serde_json::Value>)> {
+    serve: Option<(&str, &str)>,
+) -> Result<(
+    Vec<u8>,
+    Option<serde_json::Value>,
+    Option<SignedHolderServeReceipt>,
+)> {
     validate_content_cid(cid).map_err(anyhow::Error::msg)?;
     validate_carrier_content_path(path).map_err(anyhow::Error::msg)?;
 
@@ -4988,6 +5458,9 @@ async fn fetch_content_via_carrier_provider_invocation(
     }
     if let Some(bound) = bound {
         bound.apply(&mut request);
+    }
+    if let Some((_, nonce)) = serve {
+        request["serve_nonce"] = serde_json::Value::String(nonce.to_owned());
     }
 
     let response = registry
@@ -5028,7 +5501,40 @@ async fn fetch_content_via_carrier_provider_invocation(
             bytes.len()
         );
     }
-    Ok((bytes, remote_transfer))
+    if path.is_empty()
+        && bound.is_none()
+        && !crate::content::verify_carrier_content_cid(cid, &bytes)?
+    {
+        return Err(anyhow::Error::new(CarrierHolderCorruptBytes {
+            bytes_received: bytes.len() as u64,
+        })
+        .context("holder returned bytes for a different CID"));
+    }
+    let countersignature = if let Some((requester_did, nonce)) = serve {
+        let signed = response.get("_runtime_serve_receipt").and_then(|value| {
+            serde_json::from_value::<SignedHolderServeReceipt>(value.clone()).ok()
+        });
+        let valid = signed.as_ref().is_some_and(|signed| {
+            crate::content::verify_holder_serve_receipt(
+                signed,
+                holder_did,
+                cid,
+                requester_did,
+                bytes.len() as u64,
+                nonce,
+            )
+            .is_ok()
+        });
+        if !valid {
+            return Err(anyhow::Error::new(CarrierHolderUnsignedServe {
+                bytes_received: bytes.len() as u64,
+            }));
+        }
+        signed
+    } else {
+        None
+    };
+    Ok((bytes, remote_transfer, countersignature))
 }
 
 async fn ensure_content_via_carrier_provider_invocation(
@@ -6246,10 +6752,9 @@ fn content_availability_replicas_with_reputation(
 ) -> Vec<CarrierAvailabilityReplica> {
     let mut replicas = Vec::new();
     for message in messages {
-        let Ok((envelope, signer_did)) = crate::crypto::verify_signed_json_envelope_against_dids(
+        let Ok((envelope, signer_did)) = crate::crypto::verify_self_signed_json_envelope(
             message.content.as_bytes(),
             CONTENT_AVAILABILITY_ANNOUNCEMENT_DOMAIN,
-            &[],
         ) else {
             continue;
         };
@@ -7948,6 +8453,7 @@ impl CarrierProviderInvoker {
             &message.data,
             &peer_endpoint.id(),
             CarrierProviderCaller::Loopback,
+            None,
         )
         .await
         .map_err(|err| {
@@ -8940,6 +9446,7 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    const TEST_REQUEST_NONCE: &str = "fedcba9876543210fedcba9876543210";
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
 
     #[test]
@@ -9523,6 +10030,17 @@ pub(crate) mod tests {
             &self,
             request: &serde_json::Value,
         ) -> Result<serde_json::Value, ProviderError> {
+            if request.get("op").and_then(|value| value.as_str()) == Some("add_bytes") {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(request["data"].as_str().unwrap())
+                    .unwrap();
+                let cid = if bytes == b"carrier provider bytes" {
+                    "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp"
+                } else {
+                    "QmRSEtAyq7Xgr5YCFVWuYsBdqbR5X9fJDsdpNQuvm9yaic"
+                };
+                return Ok(serde_json::json!({ "status": "ok", "data": { "cid": cid } }));
+            }
             if request.get("op").and_then(|value| value.as_str()) != Some("cat") {
                 return Ok(serde_json::json!({
                     "status": "error",
@@ -9707,11 +10225,21 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct MockCarrierProviderPlaneInvoker {
         requests: Mutex<Vec<serde_json::Value>>,
+        holder_keys: StdMutex<HashMap<String, [u8; 32]>>,
+        requester_did: StdMutex<Option<String>>,
+        unsigned_tickets: Vec<String>,
+        replay_nonce: Option<(String, String)>,
         fail_ensure: bool,
         /// Connect tickets whose `ensure` always fails (a dead peer).
         fail_tickets: Vec<String>,
         /// Connect tickets whose bounded fetch fails in transit.
         transit_tickets: StdMutex<Vec<String>>,
+        wrong_tickets: Vec<String>,
+        /// Connect tickets whose fetch answer is zero bytes.
+        empty_tickets: Vec<String>,
+        /// Connect tickets that wait before answering a fetch. The wait can
+        /// outlast the caller's discovery window.
+        delay_tickets: Vec<(String, Duration)>,
         reject_admission: bool,
         omit_admission_receipt: bool,
     }
@@ -9732,6 +10260,10 @@ pub(crate) mod tests {
                 }
                 ProviderCarrierRoute::PeerDid { .. } => "",
             };
+            let holder_did = match route {
+                ProviderCarrierRoute::ConnectTicket { peer_did, .. } => peer_did.as_deref(),
+                ProviderCarrierRoute::PeerDid { .. } => None,
+            };
             self.requests.lock().await.push(serde_json::json!({
                 "ticket": ticket,
                 "source": invocation.source.as_str(),
@@ -9740,6 +10272,13 @@ pub(crate) mod tests {
                 "request": request,
             }));
             if invocation.transfer == ProviderTransfer::Stream {
+                if let Some((_, delay)) = self
+                    .delay_tickets
+                    .iter()
+                    .find(|(name, _)| name.as_str() == ticket)
+                {
+                    tokio::time::sleep(*delay).await;
+                }
                 if self.fail_tickets.iter().any(|dead| dead == ticket) {
                     return Err(ProviderError::Provider("mock remote fetch failed".into()));
                 }
@@ -9755,28 +10294,65 @@ pub(crate) mod tests {
                         "mock answer deadline passed",
                     )));
                 }
-                return Ok(serde_json::json!({
+                let bytes: &[u8] = if self.empty_tickets.iter().any(|empty| empty == ticket) {
+                    b""
+                } else if self.wrong_tickets.iter().any(|bad| bad == ticket) {
+                    b"wrong holder bytes"
+                } else {
+                    b"carrier provider bytes"
+                };
+                let mut answer = serde_json::json!({
                     "status": "ok",
                     "data": {
                         "cid": "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
                         "stream": {
                             "schema": "elastos.provider.stream/v1",
                             "encoding": "base64-chunks",
-                            "total_bytes": 22,
+                            "total_bytes": bytes.len(),
                             "completed": true,
                             "chunks": [
                                 {
                                     "index": 0,
                                     "offset": 0,
-                                    "length": 22,
-                                    "data": base64::engine::general_purpose::STANDARD.encode(
-                                        b"carrier provider bytes",
-                                    ),
+                                    "length": bytes.len(),
+                                    "data": base64::engine::general_purpose::STANDARD.encode(bytes),
                                 }
                             ],
                         }
                     }
-                }));
+                });
+                if let (Some(nonce), Some(holder_did)) = (
+                    request.get("serve_nonce").and_then(|value| value.as_str()),
+                    holder_did,
+                ) {
+                    if !self
+                        .unsigned_tickets
+                        .iter()
+                        .any(|unsigned| unsigned == ticket)
+                    {
+                        let seed = self.holder_keys.lock().unwrap().get(holder_did).copied();
+                        let requester = self.requester_did.lock().unwrap().clone();
+                        if let (Some(seed), Some(requester)) = (seed, requester) {
+                            let (key, _) = elastos_identity::derive_did(&seed);
+                            let signed = crate::content::sign_holder_serve_receipt(
+                                &key,
+                                request["cid"].as_str().unwrap(),
+                                &requester,
+                                bytes.len() as u64,
+                                self.replay_nonce
+                                    .as_ref()
+                                    .filter(|(name, _)| name == ticket)
+                                    .map(|(_, previous)| previous.as_str())
+                                    .unwrap_or(nonce),
+                                now_secs(),
+                            )
+                            .unwrap();
+                            answer["_runtime_serve_receipt"] =
+                                serde_json::to_value(signed).unwrap();
+                        }
+                    }
+                }
+                return Ok(answer);
             }
             if invocation.transfer == ProviderTransfer::Json && invocation.op == "admission" {
                 let admission = serde_json::json!({
@@ -10642,6 +11218,7 @@ pub(crate) mod tests {
             &request,
             &source_endpoint,
             CarrierProviderCaller::Loopback,
+            None,
         )
         .await
         .unwrap();
@@ -10687,7 +11264,7 @@ pub(crate) mod tests {
             data_dir: data_dir.path(),
             network: None,
         };
-        let response = carrier_provider_invoke_registry(&registry, &request, &source, peer)
+        let response = carrier_provider_invoke_registry(&registry, &request, &source, peer, None)
             .await
             .unwrap();
         assert_eq!(response["ok"], true);
@@ -10698,7 +11275,7 @@ pub(crate) mod tests {
         let mut forged = request;
         forged["request"]["_runtime_invocation"]["carrier"] =
             serde_json::json!({"source_endpoint_did":"forged"});
-        let refused = carrier_provider_invoke_registry(&registry, &forged, &source, peer)
+        let refused = carrier_provider_invoke_registry(&registry, &forged, &source, peer, None)
             .await
             .unwrap();
         assert_eq!(refused["ok"], false);
@@ -13892,6 +14469,7 @@ pub(crate) mod tests {
                 data_dir: data_dir.path(),
                 network: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -13899,6 +14477,86 @@ pub(crate) mod tests {
         assert_eq!(answer["ok"], false, "{answer}");
         assert_eq!(answer["code"], CARRIER_PEER_REFUSED);
         assert!(!answer.to_string().contains("c2VjcmV0"));
+    }
+
+    #[tokio::test]
+    async fn holder_signs_the_bytes_it_served() {
+        let data_dir = tempfile::tempdir().unwrap();
+        crate::library::publish_cid_for_test(data_dir.path(), FIXTURE_CID);
+        let registry = ProviderRegistry::new();
+        register_pinned_ipfs(&registry).await;
+        registry
+            .register_sub_provider("content", Arc::new(MockCarrierContentProvider))
+            .await
+            .unwrap();
+        let (holder_key, holder_did) = elastos_identity::derive_did(&[171; 32]);
+        let source = authenticated_test_source_endpoint();
+        let requester_did = public_key_to_did(&source).unwrap();
+        let nonce = "1234567890abcdef1234567890abcdef";
+        let request = serde_json::json!({
+            "source": "carrier-availability", "target": "content", "operation": "fetch",
+            "transfer": "json",
+            "request": {
+                "op": "fetch", "cid": FIXTURE_CID, "local_only": true,
+                "serve_nonce": nonce,
+                "_runtime_invocation": {
+                    "schema":"elastos.provider.invocation/v1", "source":"carrier-availability",
+                    "target":"content", "op":"fetch",
+                    "capability":"provider:carrier-availability->content:fetch",
+                    "transport":"carrier-provider-plane", "carrier":null, "transfer":"json",
+                    "range":null, "progress":null
+                }
+            }
+        });
+        let peer = CarrierProviderCaller::Peer {
+            data_dir: data_dir.path(),
+            network: None,
+        };
+        let answer =
+            carrier_provider_invoke_registry(&registry, &request, &source, peer, Some(&holder_key))
+                .await
+                .unwrap();
+        assert_eq!(answer["ok"], true, "{answer}");
+        let bytes = remote_content_provider_response_bytes(&answer["result"]).unwrap();
+        let signed: SignedHolderServeReceipt =
+            serde_json::from_value(answer["result"]["_runtime_serve_receipt"].clone()).unwrap();
+        assert_eq!(bytes.len(), 22);
+        assert_eq!(signed.payload.bytes, bytes.len() as u64);
+        assert_eq!(signed.signer_did, holder_did);
+        crate::content::verify_holder_serve_receipt(
+            &signed,
+            &holder_did,
+            FIXTURE_CID,
+            &requester_did,
+            22,
+            nonce,
+        )
+        .unwrap();
+
+        for changed in [
+            serde_json::json!({"serve_nonce": null}),
+            serde_json::json!({"path": "notes.txt"}),
+            serde_json::json!({"bounded_read": true, "range": {"start": 0, "end": 21}}),
+        ] {
+            let mut unsigned_request = request.clone();
+            for (key, value) in changed.as_object().unwrap() {
+                unsigned_request["request"][key] = value.clone();
+            }
+            let answer = carrier_provider_invoke_registry(
+                &registry,
+                &unsigned_request,
+                &source,
+                peer,
+                Some(&holder_key),
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer["ok"], true, "{answer}");
+            assert!(
+                answer["result"].get("_runtime_serve_receipt").is_none(),
+                "{answer}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -15109,6 +15767,7 @@ pub(crate) mod tests {
             &request,
             &authenticated_test_source_endpoint(),
             CarrierProviderCaller::Loopback,
+            None,
         )
         .await
         .unwrap();
@@ -15168,6 +15827,7 @@ pub(crate) mod tests {
             &request,
             &authenticated_test_source_endpoint(),
             CarrierProviderCaller::Loopback,
+            None,
         )
         .await
         .unwrap();
@@ -15212,6 +15872,7 @@ pub(crate) mod tests {
             &request,
             &authenticated_test_source_endpoint(),
             CarrierProviderCaller::Loopback,
+            None,
         )
         .await
         .unwrap();
@@ -15256,6 +15917,7 @@ pub(crate) mod tests {
             &request,
             &authenticated_test_source_endpoint(),
             CarrierProviderCaller::Loopback,
+            None,
         )
         .await
         .unwrap();
@@ -15269,19 +15931,26 @@ pub(crate) mod tests {
         let registry = ProviderRegistry::new();
         let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
         registry.set_carrier_invoker(invoker.clone()).await;
+        registry
+            .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+            .await
+            .unwrap();
 
-        let (bytes, remote_transfer) = fetch_content_via_carrier_provider_invocation(
-            &registry,
-            "did:key:z6MkholderFixture",
-            "ticket:internal-secret",
-            "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
-            "docs/readme.md",
-            None,
-        )
-        .await
-        .unwrap();
+        let (bytes, remote_transfer, countersignature) =
+            fetch_content_via_carrier_provider_invocation(
+                &registry,
+                "did:key:z6MkholderFixture",
+                "ticket:internal-secret",
+                "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp",
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
 
         assert_eq!(bytes, b"carrier provider bytes");
+        assert!(countersignature.is_none());
         let remote_transfer = remote_transfer.expect("Carrier invocation must emit transfer");
         assert_eq!(remote_transfer["transport"], "carrier-provider-plane");
         assert_eq!(remote_transfer["source"], "carrier-availability");
@@ -15302,7 +15971,8 @@ pub(crate) mod tests {
         assert_eq!(requests[0]["target"], "content");
         assert_eq!(requests[0]["request"]["local_only"], true);
         assert_eq!(requests[0]["request"]["transfer"], "stream");
-        assert_eq!(requests[0]["request"]["path"], "docs/readme.md");
+        assert!(requests[0]["request"].get("path").is_none());
+        assert!(requests[0]["request"].get("serve_nonce").is_none());
         assert_eq!(
             requests[0]["request"]["_runtime_invocation"]["transport"],
             "carrier-provider-plane"
@@ -15311,6 +15981,1115 @@ pub(crate) mod tests {
             requests[0]["request"]["_runtime_invocation"]["transfer"],
             "stream"
         );
+    }
+
+    #[tokio::test]
+    async fn carrier_only_consumer_verifies_holder_without_local_ipfs() {
+        let registry = ProviderRegistry::new();
+        registry
+            .set_carrier_invoker(Arc::new(MockCarrierProviderPlaneInvoker::default()))
+            .await;
+        let (bytes, _, _) = fetch_content_via_carrier_provider_invocation(
+            &registry,
+            "did:key:z6MkholderFixture",
+            "ticket:internal-secret",
+            "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp",
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bytes, b"carrier provider bytes");
+    }
+
+    #[tokio::test]
+    async fn test_carrier_provider_invocation_refuses_different_bytes() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let registry = ProviderRegistry::new();
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            wrong_tickets: vec!["ticket:first".into(), "ticket:second".into()],
+            ..Default::default()
+        });
+        registry.set_carrier_invoker(invoker.clone()).await;
+        registry
+            .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+            .await
+            .unwrap();
+        for ticket in ["ticket:first", "ticket:second"] {
+            let result = fetch_content_via_carrier_provider_invocation(
+                &registry,
+                "did:key:z6MkholderFixture",
+                ticket,
+                cid,
+                "",
+                None,
+                None,
+            )
+            .await;
+            assert!(result.unwrap_err().to_string().contains("different CID"));
+        }
+        let requests = invoker.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["ticket"], "ticket:first");
+        assert_eq!(requests[1]["ticket"], "ticket:second");
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_skips_mismatched_holders() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        for (seed, second_wrong) in [(73u8, true), (76u8, false)] {
+            let (local_sk, local_did) = elastos_identity::derive_did(&[seed; 32]);
+            let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+                .secret_key(iroh::SecretKey::from_bytes(&local_sk.to_bytes()))
+                .bind()
+                .await
+                .unwrap();
+            let memory_lookup = MemoryLookup::new();
+            endpoint
+                .address_lookup()
+                .unwrap()
+                .add(memory_lookup.clone());
+            let gossip = spawn_carrier_gossip(&endpoint);
+            let state = Arc::new(Mutex::new(GossipState::new(
+                endpoint.clone(),
+                gossip,
+                memory_lookup,
+                Some(local_sk),
+                Some(local_did),
+            )));
+            let now = now_secs();
+            let (first, first_did) =
+                signed_content_availability_message(cid, [seed + 1; 32], "ticket:first", "", now);
+            let (second, second_did) = signed_content_availability_message(
+                cid,
+                [seed + 2; 32],
+                "ticket:second",
+                "",
+                now - 1,
+            );
+            let topic = content_availability_topic_name(cid);
+            {
+                let mut guard = state.lock().await;
+                guard.joined_topics.insert(topic.clone());
+                guard
+                    .buffers
+                    .lock()
+                    .await
+                    .insert(topic, test_topic_buffer([first, second], 0));
+            }
+            let registry = Arc::new(ProviderRegistry::new());
+            let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+                wrong_tickets: if second_wrong {
+                    vec!["ticket:first".into(), "ticket:second".into()]
+                } else {
+                    vec!["ticket:first".into()]
+                },
+                ..Default::default()
+            });
+            registry.set_carrier_invoker(invoker.clone()).await;
+            registry
+                .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+                .await
+                .unwrap();
+            let provider = CarrierAvailabilityProvider::with_provider_registry(
+                state,
+                Arc::downgrade(&registry),
+            )
+            .with_discovery_wait(Duration::from_millis(20));
+            let response = provider
+                .send_raw(&serde_json::json!({"op": "fetch", "cid": cid}))
+                .await
+                .unwrap();
+            let requests = invoker.requests.lock().await;
+            assert_eq!(
+                requests
+                    .iter()
+                    .map(|request| request["ticket"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["ticket:first", "ticket:second"]
+            );
+            let reputation = provider.peer_reputation.lock().await;
+            assert_eq!(reputation[&first_did].failures, 1);
+            if second_wrong {
+                assert_eq!(response["status"], "error", "{response}");
+                assert!(response["data"].is_null());
+                assert_eq!(reputation[&second_did].failures, 1);
+            } else {
+                assert_eq!(response["status"], "ok", "{response}");
+                assert_eq!(
+                    response["data"]["data"],
+                    base64::engine::general_purpose::STANDARD.encode(b"carrier provider bytes")
+                );
+                assert_eq!(response["data"]["availability"]["cid_verified"], true);
+                let availability = &response["data"]["availability"];
+                assert!(
+                    availability.get("receipts").is_none()
+                        && availability.get("receipt_attestation").is_none(),
+                    "mode off keeps the ordinary answer: {availability}"
+                );
+                assert_eq!(reputation[&second_did].successes, 1);
+            }
+            endpoint.close().await;
+        }
+    }
+
+    /// Builds a consumer whose topic buffer holds the given announcements and
+    /// whose provider registry routes fetches to the given mock plane.
+    async fn distinct_holder_fetch_fixture(
+        seed: u8,
+        cid: &str,
+        messages: Vec<GossipMessage>,
+        invoker: Arc<MockCarrierProviderPlaneInvoker>,
+    ) -> (
+        CarrierAvailabilityProvider,
+        Arc<ProviderRegistry>,
+        iroh::Endpoint,
+    ) {
+        distinct_holder_fetch_fixture_with_ipfs(seed, cid, messages, invoker, None).await
+    }
+
+    async fn distinct_holder_fetch_fixture_with_ipfs(
+        seed: u8,
+        cid: &str,
+        messages: Vec<GossipMessage>,
+        invoker: Arc<MockCarrierProviderPlaneInvoker>,
+        ipfs: Option<Arc<dyn Provider>>,
+    ) -> (
+        CarrierAvailabilityProvider,
+        Arc<ProviderRegistry>,
+        iroh::Endpoint,
+    ) {
+        let (local_sk, local_did) = elastos_identity::derive_did(&[seed; 32]);
+        let holder_dids: HashSet<String> = content_availability_replicas(&messages, cid)
+            .into_iter()
+            .map(|replica| replica.node_did)
+            .collect();
+        for candidate in 0..=u8::MAX {
+            let (_, did) = elastos_identity::derive_did(&[candidate; 32]);
+            if holder_dids.contains(&did) {
+                invoker
+                    .holder_keys
+                    .lock()
+                    .unwrap()
+                    .insert(did, [candidate; 32]);
+            }
+        }
+        *invoker.requester_did.lock().unwrap() = Some(local_did.clone());
+        let endpoint = Endpoint::builder(iroh::endpoint::presets::N0)
+            .secret_key(iroh::SecretKey::from_bytes(&local_sk.to_bytes()))
+            .bind()
+            .await
+            .unwrap();
+        let memory_lookup = MemoryLookup::new();
+        endpoint
+            .address_lookup()
+            .unwrap()
+            .add(memory_lookup.clone());
+        let gossip = spawn_carrier_gossip(&endpoint);
+        let state = Arc::new(Mutex::new(GossipState::new(
+            endpoint.clone(),
+            gossip,
+            memory_lookup,
+            Some(local_sk),
+            Some(local_did),
+        )));
+        let topic = content_availability_topic_name(cid);
+        {
+            let mut guard = state.lock().await;
+            guard.joined_topics.insert(topic.clone());
+            guard
+                .buffers
+                .lock()
+                .await
+                .insert(topic, test_topic_buffer(messages, 0));
+        }
+        let registry = Arc::new(ProviderRegistry::new());
+        registry.set_carrier_invoker(invoker).await;
+        registry
+            .register_sub_provider(
+                "ipfs",
+                ipfs.unwrap_or_else(|| Arc::new(MockCarrierIpfsProvider) as Arc<dyn Provider>),
+            )
+            .await
+            .unwrap();
+        let provider =
+            CarrierAvailabilityProvider::with_provider_registry(state, Arc::downgrade(&registry))
+                .with_discovery_wait(Duration::from_millis(20));
+        (provider, registry, endpoint)
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_accepts_two_distinct_honest_holders() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (first, first_did) =
+            signed_content_availability_message(cid, [82; 32], "ticket:first", "", now);
+        let (second, second_did) =
+            signed_content_availability_message(cid, [83; 32], "ticket:second", "", now);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(81, cid, vec![first, second], invoker.clone()).await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "ok", "{response}");
+        let availability = &response["data"]["availability"];
+        assert_eq!(
+            availability["policy"],
+            "carrier_provider_invoke_distinct_holders"
+        );
+        assert_eq!(availability["distinct_holders"], 2);
+        assert_eq!(availability["required_distinct_holders"], 2);
+        assert_eq!(availability["replicas"], 2);
+        assert_eq!(availability["cid_verified"], true);
+        assert_eq!(
+            availability["receipt_attestation"],
+            crate::content::FETCH_RECEIPT_SET_ATTESTATION
+        );
+        let receipts = availability["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 2, "{availability}");
+        let mut peers: Vec<&str> = receipts
+            .iter()
+            .map(|receipt| receipt["peer_did"].as_str().unwrap())
+            .collect();
+        peers.sort_unstable();
+        let mut expected = vec![first_did.as_str(), second_did.as_str()];
+        expected.sort_unstable();
+        assert_eq!(peers, expected);
+        assert!(receipts.iter().all(|receipt| {
+            receipt["requested_cid"] == cid
+                && receipt["verified"] == true
+                && receipt["bytes_received"] == 22
+                && receipt["result"]["status"] == "ok"
+        }));
+        assert_eq!(receipts[0]["attempt"], 1);
+        assert_eq!(receipts[1]["attempt"], 2);
+        assert!(receipts
+            .iter()
+            .all(|receipt| receipt["countersignature"].is_object()));
+        assert_ne!(
+            receipts[0]["countersignature"]["payload"]["nonce"],
+            receipts[1]["countersignature"]["payload"]["nonce"]
+        );
+        assert_eq!(invoker.requests.lock().await.len(), 2);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn distinct_holder_fetch_counts_two_countersigned_holders() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (first, first_did) =
+            signed_content_availability_message(cid, [147; 32], "ticket:first", "", now);
+        let (second, second_did) =
+            signed_content_availability_message(cid, [148; 32], "ticket:second", "", now - 1);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(146, cid, vec![first, second], invoker.clone()).await;
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch", "cid": cid, "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "ok", "{response}");
+        let availability = &response["data"]["availability"];
+        assert_eq!(availability["replicas"], 2);
+        assert_eq!(availability["distinct_holders"], 2);
+        assert_eq!(
+            availability["receipt_attestation"],
+            crate::content::FETCH_RECEIPT_SET_ATTESTATION
+        );
+        let receipts = availability["receipts"].as_array().unwrap();
+        let requests = invoker.requests.lock().await;
+        let (_, requester_did) = elastos_identity::derive_did(&[146; 32]);
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(requests.len(), 2);
+        for (index, holder_did) in [first_did, second_did].iter().enumerate() {
+            let issued =
+                crate::content::serve_attempt_nonce(TEST_REQUEST_NONCE, (index + 1) as u8).unwrap();
+            assert_eq!(
+                receipts[index]["serve_nonce"],
+                requests[index]["request"]["serve_nonce"]
+            );
+            assert_eq!(receipts[index]["serve_nonce"], issued);
+            let signed: crate::content::SignedHolderServeReceipt =
+                serde_json::from_value(receipts[index]["countersignature"].clone()).unwrap();
+            crate::content::verify_holder_serve_receipt(
+                &signed,
+                holder_did,
+                cid,
+                &requester_did,
+                22,
+                requests[index]["request"]["serve_nonce"].as_str().unwrap(),
+            )
+            .unwrap();
+        }
+        assert_ne!(
+            requests[0]["request"]["serve_nonce"],
+            requests[1]["request"]["serve_nonce"]
+        );
+        drop(requests);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_refuses_two_addresses_for_one_peer() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (first, first_did) =
+            signed_content_availability_message(cid, [84; 32], "ticket:address-a", "", now);
+        let (second, second_did) =
+            signed_content_availability_message(cid, [84; 32], "ticket:address-b", "", now);
+        // Same signing key, two announced tickets: two addresses, one holder.
+        assert_eq!(first_did, second_did);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(85, cid, vec![first, second], invoker.clone()).await;
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            provider.send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            })),
+        )
+        .await
+        .expect("a repeated candidate must not spin the fetch")
+        .unwrap();
+
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], "carrier_fetch_distinct_holders");
+        assert_eq!(response["data"]["distinct_holders"], 1);
+        assert_eq!(response["data"]["required_distinct_holders"], 2);
+        assert_eq!(
+            response["data"]["receipt_attestation"],
+            crate::content::FETCH_RECEIPT_SET_ATTESTATION
+        );
+        let receipts = response["data"]["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 1, "{response}");
+        assert_eq!(receipts[0]["peer_did"], first_did);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        // One peer, one invocation: the second address was never a new holder.
+        assert_eq!(invoker.requests.lock().await.len(), 1);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_refuses_when_one_holder_lies() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (honest, honest_did) =
+            signed_content_availability_message(cid, [86; 32], "ticket:honest", "", now);
+        let (liar, liar_did) =
+            signed_content_availability_message(cid, [87; 32], "ticket:liar", "", now);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            wrong_tickets: vec!["ticket:liar".into()],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(88, cid, vec![honest, liar], invoker.clone()).await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], "carrier_fetch_distinct_holders");
+        assert_eq!(response["data"]["distinct_holders"], 1);
+        let receipts = response["data"]["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 2, "{response}");
+        let mut rows: Vec<(String, bool, u64, String)> = receipts
+            .iter()
+            .map(|receipt| {
+                (
+                    receipt["result"]["status"].as_str().unwrap().to_string(),
+                    receipt["verified"].as_bool().unwrap(),
+                    receipt["bytes_received"].as_u64().unwrap(),
+                    receipt["peer_did"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("ok".to_string(), true, 22, honest_did),
+                ("refused-corrupt".to_string(), false, 18, liar_did),
+            ]
+        );
+        assert_eq!(invoker.requests.lock().await.len(), 2);
+        endpoint.close().await;
+    }
+
+    #[test]
+    fn test_fetch_walk_stops_a_repeated_candidate() {
+        let ahead = tokio::time::Instant::now() + Duration::from_secs(60);
+        let past = tokio::time::Instant::now() - Duration::from_millis(1);
+        assert!(!fetch_walk_should_stop(0, 0, false, 2, ahead));
+        assert!(
+            !fetch_walk_should_stop(1, 1, true, 2, ahead),
+            "one repeat is still inside the attempt cap"
+        );
+        // The cap stops a repeat while the window is still open, in either mode.
+        assert!(fetch_walk_should_stop(
+            MAX_CARRIER_REPLICATION_CANDIDATES,
+            1,
+            true,
+            2,
+            ahead,
+        ));
+        assert!(fetch_walk_should_stop(
+            MAX_CARRIER_REPLICATION_CANDIDATES,
+            1,
+            true,
+            0,
+            ahead,
+        ));
+        // The cap also bounds a holder that has not been tried.
+        assert!(fetch_walk_should_stop(
+            MAX_CARRIER_REPLICATION_CANDIDATES,
+            1,
+            false,
+            2,
+            ahead,
+        ));
+        // A repeat stops after the deadline, in either mode.
+        assert!(fetch_walk_should_stop(1, 1, true, 2, past));
+        assert!(fetch_walk_should_stop(1, 1, true, 0, past));
+        // The deadline never skips an announced holder that has not been tried.
+        assert!(!fetch_walk_should_stop(1, 1, false, 2, past));
+        assert!(!fetch_walk_should_stop(1, 1, false, 0, past));
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_tries_announced_holder_after_slow_holder() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let discovery = Duration::from_millis(40);
+        let hold = Duration::from_millis(150);
+        assert!(hold > discovery);
+        // The slow holder is announced first in rank, so it is tried first
+        // and uses the whole discovery window. The second holder is already
+        // announced before the fetch starts.
+        let (slow, slow_did) =
+            signed_content_availability_message(cid, [108; 32], "ticket:slow", "", now);
+        let (honest, honest_did) =
+            signed_content_availability_message(cid, [109; 32], "ticket:honest", "", now - 1);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            delay_tickets: vec![("ticket:slow".to_string(), hold)],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(110, cid, vec![slow, honest], invoker.clone()).await;
+        let provider = provider.with_discovery_wait(discovery);
+        let started = std::time::Instant::now();
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() >= hold,
+            "the first holder must use up the discovery window, elapsed {:?}",
+            started.elapsed()
+        );
+        assert_eq!(response["status"], "ok", "{response}");
+        let availability = &response["data"]["availability"];
+        assert_eq!(availability["distinct_holders"], 2);
+        assert_eq!(availability["required_distinct_holders"], 2);
+        let receipts = availability["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 2, "{availability}");
+        assert_eq!(receipts[0]["peer_did"], slow_did);
+        assert_eq!(receipts[0]["attempt"], 1);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["bytes_received"], 22);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        assert_eq!(receipts[1]["peer_did"], honest_did);
+        assert_eq!(receipts[1]["attempt"], 2);
+        assert_eq!(receipts[1]["verified"], true);
+        assert_eq!(receipts[1]["bytes_received"], 22);
+        assert_eq!(receipts[1]["result"]["status"], "ok");
+        let requests = invoker.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["ticket"], "ticket:slow");
+        assert_eq!(requests[1]["ticket"], "ticket:honest");
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_succeeds_past_an_empty_holder() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (first, first_did) =
+            signed_content_availability_message(cid, [91; 32], "ticket:honest-a", "", now);
+        let (empty, empty_did) =
+            signed_content_availability_message(cid, [92; 32], "ticket:empty", "", now - 1);
+        let (third, third_did) =
+            signed_content_availability_message(cid, [93; 32], "ticket:honest-b", "", now - 2);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            empty_tickets: vec!["ticket:empty".into()],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(94, cid, vec![first, empty, third], invoker.clone())
+                .await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "ok", "{response}");
+        let availability = &response["data"]["availability"];
+        assert_eq!(availability["distinct_holders"], 2);
+        let receipts = availability["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 3, "{availability}");
+        assert_eq!(receipts[0]["peer_did"], first_did);
+        assert_eq!(receipts[0]["attempt"], 1);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        assert_eq!(receipts[1]["peer_did"], empty_did);
+        assert_eq!(receipts[1]["attempt"], 2);
+        assert_eq!(receipts[1]["bytes_received"], 0);
+        assert_eq!(receipts[1]["verified"], false);
+        assert_eq!(receipts[1]["result"]["status"], "failed");
+        assert_eq!(receipts[1]["result"]["reason_code"], "invalid_response");
+        assert_eq!(receipts[2]["peer_did"], third_did);
+        assert_eq!(receipts[2]["attempt"], 3);
+        assert_eq!(receipts[2]["verified"], true);
+        assert_eq!(receipts[2]["result"]["status"], "ok");
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| receipt["verified"] == true)
+                .count(),
+            2
+        );
+        let reputation = provider.peer_reputation.lock().await;
+        assert_eq!(reputation[&empty_did].failures, 1);
+        assert_eq!(reputation[&empty_did].successes, 0);
+        assert_eq!(reputation[&first_did].successes, 1);
+        assert_eq!(reputation[&third_did].successes, 1);
+        assert_eq!(invoker.requests.lock().await.len(), 3);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_keeps_honest_receipt_when_holder_is_empty() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (honest, honest_did) =
+            signed_content_availability_message(cid, [95; 32], "ticket:honest", "", now);
+        let (empty, empty_did) =
+            signed_content_availability_message(cid, [96; 32], "ticket:empty", "", now - 1);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            empty_tickets: vec!["ticket:empty".into()],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(97, cid, vec![honest, empty], invoker.clone()).await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], "carrier_fetch_distinct_holders");
+        assert_ne!(response["code"], "invalid_request");
+        assert_eq!(response["data"]["distinct_holders"], 1);
+        let receipts = response["data"]["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 2, "{response}");
+        assert_eq!(receipts[0]["peer_did"], honest_did);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        assert_eq!(receipts[1]["peer_did"], empty_did);
+        assert_eq!(receipts[1]["bytes_received"], 0);
+        assert_eq!(receipts[1]["verified"], false);
+        assert_eq!(receipts[1]["result"]["reason_code"], "invalid_response");
+        let reputation = provider.peer_reputation.lock().await;
+        assert_eq!(reputation[&honest_did].successes, 1);
+        assert_eq!(reputation[&empty_did].failures, 1);
+        assert_eq!(reputation[&empty_did].successes, 0);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_succeeds_after_a_lie_with_two_more_holders() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (liar, liar_did) =
+            signed_content_availability_message(cid, [98; 32], "ticket:liar", "", now);
+        let (second, second_did) =
+            signed_content_availability_message(cid, [99; 32], "ticket:second", "", now - 1);
+        let (third, third_did) =
+            signed_content_availability_message(cid, [100; 32], "ticket:third", "", now - 2);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            wrong_tickets: vec!["ticket:liar".into()],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(101, cid, vec![liar, second, third], invoker.clone())
+                .await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "ok", "{response}");
+        let availability = &response["data"]["availability"];
+        assert_eq!(availability["distinct_holders"], 2);
+        let receipts = availability["receipts"].as_array().unwrap();
+        assert_eq!(receipts.len(), 3, "{availability}");
+        assert_eq!(receipts[0]["peer_did"], liar_did);
+        assert_eq!(receipts[0]["verified"], false);
+        assert_eq!(receipts[0]["result"]["status"], "refused-corrupt");
+        assert_eq!(receipts[1]["peer_did"], second_did);
+        assert_eq!(receipts[1]["verified"], true);
+        assert_eq!(receipts[1]["result"]["status"], "ok");
+        assert_eq!(receipts[2]["peer_did"], third_did);
+        assert_eq!(receipts[2]["verified"], true);
+        assert_eq!(receipts[2]["result"]["status"], "ok");
+        assert_eq!(invoker.requests.lock().await.len(), 3);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_refuses_min_distinct_holders_out_of_range() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(102, cid, Vec::new(), invoker.clone()).await;
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(9),
+            serde_json::json!("2"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            let response = provider
+                .send_raw(&serde_json::json!({
+                    "op": "fetch",
+                    "cid": cid,
+                    "min_distinct_holders": value,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(response["status"], "error", "{value}: {response}");
+            assert_eq!(response["code"], "invalid_request", "{value}: {response}");
+            assert!(
+                response["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("between 1 and 8"),
+                "{response}"
+            );
+        }
+        assert!(invoker.requests.lock().await.is_empty());
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_refuses_partial_read_when_mode_is_on() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let (provider, _registry, endpoint) = distinct_holder_fetch_fixture(
+            103,
+            cid,
+            Vec::new(),
+            Arc::new(MockCarrierProviderPlaneInvoker::default()),
+        )
+        .await;
+        for request in [
+            serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "path": "notes.txt",
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }),
+            serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE,
+                "bounded_read": true,
+                "range": { "start": 0, "end": 3 }
+            }),
+        ] {
+            let response = provider.send_raw(&request).await.unwrap();
+            assert_eq!(response["code"], "invalid_request", "{response}");
+            assert!(
+                response["message"].as_str().unwrap().contains("whole-CID"),
+                "{response}"
+            );
+        }
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_carrier_availability_fetch_accepts_one_required_holder() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (holder, holder_did) =
+            signed_content_availability_message(cid, [104; 32], "ticket:only", "", now);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(105, cid, vec![holder], invoker.clone()).await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 1, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(response["status"], "ok", "{response}");
+        let receipts = response["data"]["availability"]["receipts"]
+            .as_array()
+            .unwrap();
+        assert_eq!(receipts.len(), 1, "{response}");
+        assert_eq!(receipts[0]["peer_did"], holder_did);
+        assert_eq!(receipts[0]["verified"], true);
+        assert_eq!(receipts[0]["attempt"], 1);
+        assert_eq!(receipts[0]["result"]["status"], "ok");
+        assert_eq!(response["data"]["availability"]["distinct_holders"], 1);
+        assert_eq!(invoker.requests.lock().await.len(), 1);
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn requester_verifies_holder_did_before_receipt_counts() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let (_, holder_did) = elastos_identity::derive_did(&[131; 32]);
+        let (_, requester_did) = elastos_identity::derive_did(&[130; 32]);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        *invoker.requester_did.lock().unwrap() = Some(requester_did.clone());
+        invoker
+            .holder_keys
+            .lock()
+            .unwrap()
+            .insert(holder_did.clone(), [132; 32]);
+        let registry = ProviderRegistry::new();
+        registry.set_carrier_invoker(invoker.clone()).await;
+        registry
+            .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+            .await
+            .unwrap();
+        let nonce = "1234567890abcdef1234567890abcdef";
+        let serve = Some((requester_did.as_str(), nonce));
+        let err = fetch_content_via_carrier_provider_invocation(
+            &registry,
+            &holder_did,
+            "ticket:holder",
+            cid,
+            "",
+            None,
+            serve,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.downcast_ref::<CarrierHolderUnsignedServe>().is_some());
+        invoker
+            .holder_keys
+            .lock()
+            .unwrap()
+            .insert(holder_did.clone(), [131; 32]);
+        let (bytes, _, signed) = fetch_content_via_carrier_provider_invocation(
+            &registry,
+            &holder_did,
+            "ticket:holder",
+            cid,
+            "",
+            None,
+            serve,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bytes, b"carrier provider bytes");
+        assert_eq!(signed.unwrap().signer_did, holder_did);
+        let requests = invoker.requests.lock().await;
+        assert_eq!(requests[0]["request"]["serve_nonce"], nonce);
+        assert_eq!(requests[1]["request"]["serve_nonce"], nonce);
+    }
+
+    #[tokio::test]
+    async fn requester_refuses_unsigned_served_bytes() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let (_, holder_did) = elastos_identity::derive_did(&[139; 32]);
+        let (_, requester_did) = elastos_identity::derive_did(&[140; 32]);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            unsigned_tickets: vec!["ticket:unsigned".into()],
+            ..Default::default()
+        });
+        *invoker.requester_did.lock().unwrap() = Some(requester_did.clone());
+        invoker
+            .holder_keys
+            .lock()
+            .unwrap()
+            .insert(holder_did.clone(), [139; 32]);
+        let registry = ProviderRegistry::new();
+        registry.set_carrier_invoker(invoker).await;
+        registry
+            .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+            .await
+            .unwrap();
+        let err = fetch_content_via_carrier_provider_invocation(
+            &registry,
+            &holder_did,
+            "ticket:unsigned",
+            cid,
+            "",
+            None,
+            Some((&requester_did, "1234567890abcdef1234567890abcdef")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<CarrierHolderUnsignedServe>()
+                .unwrap()
+                .bytes_received,
+            22
+        );
+    }
+
+    #[tokio::test]
+    async fn requester_refuses_a_replayed_nonce() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let (_, holder_did) = elastos_identity::derive_did(&[141; 32]);
+        let (_, requester_did) = elastos_identity::derive_did(&[142; 32]);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            replay_nonce: Some((
+                "ticket:replay".into(),
+                "1234567890abcdef1234567890abcdef".into(),
+            )),
+            ..Default::default()
+        });
+        *invoker.requester_did.lock().unwrap() = Some(requester_did.clone());
+        invoker
+            .holder_keys
+            .lock()
+            .unwrap()
+            .insert(holder_did.clone(), [141; 32]);
+        let registry = ProviderRegistry::new();
+        registry.set_carrier_invoker(invoker).await;
+        registry
+            .register_sub_provider("ipfs", Arc::new(MockCarrierIpfsProvider))
+            .await
+            .unwrap();
+        let err = fetch_content_via_carrier_provider_invocation(
+            &registry,
+            &holder_did,
+            "ticket:replay",
+            cid,
+            "",
+            None,
+            Some((&requester_did, "fedcba0987654321fedcba0987654321")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<CarrierHolderUnsignedServe>()
+                .unwrap()
+                .bytes_received,
+            22
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_holder_fetch_does_not_count_an_unsigned_holder() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (honest, honest_did) =
+            signed_content_availability_message(cid, [133; 32], "ticket:honest", "", now);
+        let (unsigned, unsigned_did) =
+            signed_content_availability_message(cid, [134; 32], "ticket:unsigned", "", now - 1);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            unsigned_tickets: vec!["ticket:unsigned".into()],
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(135, cid, vec![honest, unsigned], invoker).await;
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch", "cid": cid, "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            response["code"], "carrier_fetch_distinct_holders",
+            "{response}"
+        );
+        assert_eq!(response["data"]["distinct_holders"], 1);
+        let rows = response["data"]["receipts"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["peer_did"], honest_did);
+        assert!(rows[0]["countersignature"].is_object());
+        assert_eq!(rows[1]["peer_did"], unsigned_did);
+        assert_eq!(rows[1]["verified"], false);
+        assert_eq!(rows[1]["bytes_received"], 22);
+        assert_eq!(rows[1]["result"]["reason_code"], "no_countersignature");
+        endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn distinct_holder_fetch_refuses_a_countersignature_for_the_previous_nonce() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (honest, _) =
+            signed_content_availability_message(cid, [136; 32], "ticket:honest", "", now);
+        let (replay, replay_did) =
+            signed_content_availability_message(cid, [137; 32], "ticket:replay", "", now - 1);
+        let previous = "1234567890abcdef1234567890abcdef";
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
+            replay_nonce: Some(("ticket:replay".into(), previous.into())),
+            ..Default::default()
+        });
+        let (provider, _registry, endpoint) =
+            distinct_holder_fetch_fixture(138, cid, vec![honest, replay], invoker.clone()).await;
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch", "cid": cid, "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            response["code"], "carrier_fetch_distinct_holders",
+            "{response}"
+        );
+        assert_eq!(response["data"]["distinct_holders"], 1);
+        let rows = response["data"]["receipts"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0]["countersignature"].is_object());
+        assert_eq!(rows[1]["peer_did"], replay_did);
+        assert_eq!(rows[1]["result"]["reason_code"], "no_countersignature");
+        let requests = invoker.requests.lock().await;
+        assert_ne!(requests[1]["request"]["serve_nonce"], previous);
+        endpoint.close().await;
+    }
+
+    struct LocalMissCarrierIpfs;
+
+    #[async_trait::async_trait]
+    impl Provider for LocalMissCarrierIpfs {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider(
+                "mock ipfs provider only supports raw operations".into(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &'static str {
+            "local-miss-carrier-ipfs"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            if request.get("op").and_then(|value| value.as_str()) == Some("add_bytes") {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(request["data"].as_str().unwrap())
+                    .unwrap();
+                let cid = if bytes == b"carrier provider bytes" {
+                    "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp"
+                } else {
+                    "QmRSEtAyq7Xgr5YCFVWuYsBdqbR5X9fJDsdpNQuvm9yaic"
+                };
+                return Ok(serde_json::json!({ "status": "ok", "data": { "cid": cid } }));
+            }
+            Err(ProviderError::Provider("mock content path missing".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_content_fetch_refuses_malformed_min_distinct_holders() {
+        let cid = "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp";
+        let now = now_secs();
+        let (honest, _) =
+            signed_content_availability_message(cid, [106; 32], "ticket:honest", "", now);
+        let invoker = Arc::new(MockCarrierProviderPlaneInvoker::default());
+        let (provider, registry, endpoint) = distinct_holder_fetch_fixture_with_ipfs(
+            107,
+            cid,
+            vec![honest],
+            invoker.clone(),
+            Some(Arc::new(LocalMissCarrierIpfs) as Arc<dyn Provider>),
+        )
+        .await;
+        let provider: Arc<dyn Provider> = Arc::new(provider);
+        registry
+            .register_sub_provider("availability", provider)
+            .await
+            .unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let content = crate::content::ContentProvider::new(
+            data_dir.path().to_path_buf(),
+            Arc::downgrade(&registry),
+        );
+        for malformed in [
+            serde_json::json!("2"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            let err = content
+                .send_raw(&serde_json::json!({
+                    "op": "fetch",
+                    "cid": cid,
+                    "min_distinct_holders": malformed,
+                }))
+                .await
+                .expect_err("a malformed distinct-holder value must be refused");
+            let text = err.to_string();
+            assert!(
+                text.contains("invalid_request"),
+                "malformed {malformed} was treated as an ordinary fetch: {text}"
+            );
+            assert!(text.contains("between 1 and 8"), "{text}");
+        }
+        assert_eq!(
+            invoker.requests.lock().await.len(),
+            0,
+            "the refusal happens before any holder fetch"
+        );
+        endpoint.close().await;
     }
 
     #[tokio::test]
@@ -15326,6 +17105,7 @@ pub(crate) mod tests {
             "ticket:internal-secret",
             "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
             "docs/readme.md",
+            None,
             None,
         )
         .await
@@ -15495,12 +17275,8 @@ pub(crate) mod tests {
     async fn test_carrier_replication_stops_when_remote_admission_rejects() {
         let registry = ProviderRegistry::new();
         let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
-            requests: Mutex::new(Vec::new()),
-            fail_ensure: false,
-            fail_tickets: Vec::new(),
-            transit_tickets: Default::default(),
             reject_admission: true,
-            omit_admission_receipt: false,
+            ..Default::default()
         });
         registry.set_carrier_invoker(invoker.clone()).await;
         let replica = CarrierAvailabilityReplica {
@@ -15554,12 +17330,8 @@ pub(crate) mod tests {
     async fn test_carrier_replication_rejects_unsigned_remote_admission() {
         let registry = ProviderRegistry::new();
         let invoker = Arc::new(MockCarrierProviderPlaneInvoker {
-            requests: Mutex::new(Vec::new()),
-            fail_ensure: false,
-            fail_tickets: Vec::new(),
-            transit_tickets: Default::default(),
-            reject_admission: false,
             omit_admission_receipt: true,
+            ..Default::default()
         });
         registry.set_carrier_invoker(invoker.clone()).await;
         let replica = CarrierAvailabilityReplica {
@@ -16344,6 +18116,7 @@ pub(crate) mod tests {
             response["data"]["availability"]["policy"],
             "carrier_provider_invoke"
         );
+        assert_eq!(response["data"]["availability"]["cid_verified"], false);
         let requests = invoker.requests.lock().await;
         assert!(
             requests

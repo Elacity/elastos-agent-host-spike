@@ -15,6 +15,42 @@ use store::{
     InspectActionRequestRecord, AGENT_PLAN_KIND, INSPECT_ACTION_KIND, INSPECT_ACTION_SCHEMA,
 };
 
+/// The one entry point an agent's Bus submission uses: write the pending
+/// agent plan record and return it. The record's principal is the owner, so
+/// it is the owner's to read and decide; the agent is its requester. Every
+/// identity is the caller's Runtime context; the submitted plan cannot name
+/// one. Nothing here runs a step.
+pub(crate) fn submit_pending_agent_plan(
+    data_dir: &FsPath,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+    plan: &serde_json::Value,
+    now: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let context = agent_plan::AgentPlanContext {
+        principal_id: owner_id,
+        requester_id,
+        capsule_id,
+        session_id,
+    };
+    let record = agent_plan::create_pending_agent_plan_record(data_dir, &context, plan, now)?;
+    Ok(serde_json::json!({
+        "schema": INSPECT_ACTION_SCHEMA,
+        "status": "pending",
+        "request_id": record.request_id,
+        "id": record.id,
+        "operation": record.operation,
+        "request": record.request,
+        "plan": record.plan,
+        "request_binding": record.request_binding,
+        "principal_id": record.principal_id,
+        "requester_id": record.requester_id,
+        "created_at": record.created_at,
+    }))
+}
+
 pub(super) async fn gateway_inspect_action_request(
     state: &GatewayState,
     context: &HomeLaunchTokenContext,
@@ -92,13 +128,14 @@ pub(super) fn append_inspect_action_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at,
+            ..Default::default()
         });
     }
 }
 
-/// One Inbox card for a pending agent plan: every stored step, the gate preview
-/// and the full binding hash. No approve action exists yet, so the card carries
-/// none.
+/// One Inbox card for a pending agent plan: every stored step, the gate preview,
+/// the full binding hash and the exact binding the click sends back. The owner
+/// alone approves it; a writing step says it needs a fresh passkey.
 fn append_agent_plan_notification(
     notifications: &mut HomeNotificationsSummary,
     request: &serde_json::Value,
@@ -141,7 +178,11 @@ fn append_agent_plan_notification(
         kind: AGENT_PLAN_KIND.to_string(),
         title: format!("Agent plan for {target}"),
         body: lines.join("\n"),
-        action_ref: None,
+        action_ref: Some(HomeNotificationActionSummary {
+            app: INBOX_CAPSULE_ID.to_string(),
+            action_id: format!("agent-plan-approve-request:{request_id}"),
+        }),
+        request_binding: request.get("request_binding").cloned(),
         severity: "attention".to_string(),
         read: false,
         created_at,
@@ -358,6 +399,210 @@ pub(super) async fn approve_inspect_action_request(
         },
     )?;
     anyhow::bail!(message);
+}
+
+/// Approve the exact card the owner saw: owner alone, one fresh passkey, one claim.
+pub(super) fn approve_agent_plan_request(
+    state: &GatewayState,
+    launch: &RequiredHomeLaunchToken,
+    context: &HomeLaunchTokenContext,
+    request_id: &str,
+    card_binding: &serde_json::Value,
+    step_up_token: Option<&str>,
+) -> anyhow::Result<String> {
+    store::claim_pending_agent_plan_for_owner(
+        &state.data_dir,
+        request_id,
+        context.principal_id(),
+        context.root().kind() == Some(crate::auth::PrincipalKind::Human),
+        card_binding,
+        now_ts(),
+        |record| {
+            let token = step_up_token.ok_or_else(|| {
+                anyhow::anyhow!("fresh passkey is required to approve an agent plan")
+            })?;
+            consume_passkey_step_up_token(
+                &state.data_dir,
+                token,
+                launch,
+                180,
+                "agent_plan.approve",
+                &serde_json::json!({ "request_id": record.request_id }),
+            )
+        },
+    )?;
+    Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
+}
+
+/// Claim the stored step, audit the claim, then let its settlement outlive the
+/// Inbox request. A stopped process still leaves a one-way claim.
+pub(super) async fn dispatch_approved_agent_plan(
+    state: &GatewayState,
+    context: &HomeLaunchTokenContext,
+    request_id: &str,
+) -> anyhow::Result<String> {
+    let record = match store::claim_approved_agent_plan_for_dispatch(
+        &state.data_dir,
+        request_id,
+        context.principal_id(),
+        now_ts(),
+    ) {
+        Ok(record) => record,
+        Err(err) => {
+            if err.is::<store::AgentPlanClaimStale>() {
+                let record = read_inspect_action_record(&state.data_dir, request_id)?;
+                append_agent_plan_dispatch_audit(&state.data_dir, &record, "stale")?;
+            }
+            return Err(err);
+        }
+    };
+    let data_dir = state.data_dir.clone();
+    if let Err(err) = append_agent_plan_dispatch_audit(&data_dir, &record, "started") {
+        settle_agent_plan_dispatch(
+            &data_dir,
+            record,
+            "not_sent",
+            serde_json::json!({"status": "not_sent", "code": "claim_audit_error"}),
+        )?;
+        return Err(err);
+    }
+    let task = tokio::spawn(async move {
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            crate::resource_bridge::dispatch_agent_plan_step(
+                &record.request_id,
+                &record.principal_id,
+                record.requester_id.as_deref().unwrap_or_default(),
+                &record.id,
+                &record.session_id,
+                &data_dir,
+                &record.request,
+            ),
+        )
+        .await;
+        let (status, result) = match response {
+            Ok(response)
+                if response["type"] == "resource_result"
+                    && response["result"]["status"]
+                        .as_str()
+                        .is_none_or(|status| status == "ok") =>
+            {
+                ("completed", response["result"].clone())
+            }
+            Ok(response) if response["code"] == "provider_error" => (
+                "unknown",
+                serde_json::json!({"status": "unknown", "code": "provider_transport_error"}),
+            ),
+            Ok(response) if response["type"] == "resource_result" => (
+                "failed",
+                serde_json::json!({"status": "error", "code": "provider_result_error"}),
+            ),
+            Ok(response) => (
+                "refused",
+                serde_json::json!({"status": "refused", "code": response["code"].as_str().unwrap_or("authority_refused")}),
+            ),
+            Err(_) => (
+                "unknown",
+                serde_json::json!({"status": "unknown", "code": "provider_timeout"}),
+            ),
+        };
+        settle_agent_plan_dispatch(&data_dir, record, status, result)
+    });
+    task.await
+        .map_err(|err| anyhow::anyhow!("agent plan settlement task failed: {err}"))?
+}
+
+fn settle_agent_plan_dispatch(
+    data_dir: &FsPath,
+    mut record: InspectActionRequestRecord,
+    status: &str,
+    result: serde_json::Value,
+) -> anyhow::Result<String> {
+    record.status = status.to_string();
+    record.result = Some(result);
+    record.updated_at = now_ts();
+    write_inspect_action_record(data_dir, &record)?;
+    append_agent_plan_dispatch_audit(data_dir, &record, status)?;
+    Ok(format!("Agent plan dispatch {status}."))
+}
+
+fn append_agent_plan_dispatch_audit(
+    data_dir: &FsPath,
+    record: &InspectActionRequestRecord,
+    status: &str,
+) -> anyhow::Result<()> {
+    let event_type = match status {
+        "started" => "agent_plan.dispatch.started",
+        "completed" => "agent_plan.dispatch.completed",
+        "failed" => "agent_plan.dispatch.failed",
+        "refused" => "agent_plan.dispatch.refused",
+        "not_sent" => "agent_plan.dispatch.not_sent",
+        "stale" => "agent_plan.dispatch.stale",
+        _ => "agent_plan.dispatch.unknown",
+    };
+    append_provider_effect_audit(
+        data_dir,
+        ProviderEffectAuditInput {
+            capsule_id: &record.id,
+            event_type,
+            principal_id: &record.principal_id,
+            session_id: &record.session_id,
+            request_id: &record.request_id,
+            result: status,
+            reason: if status == "started" {
+                "Owner-approved agent plan claimed by Runtime"
+            } else {
+                "Owner-approved agent plan settled by Runtime"
+            },
+        },
+    )
+}
+
+#[cfg(test)]
+pub(in crate::api::gateway) fn rebind_agent_plan_for_test(
+    data_dir: &FsPath,
+    request_id: &str,
+) -> anyhow::Result<()> {
+    let mut record = read_inspect_action_record(data_dir, request_id)?;
+    record.request_binding = agent_plan::agent_plan_request_binding(&record);
+    write_inspect_action_record(data_dir, &record)
+}
+
+pub(crate) fn agent_plan_result_for_requester(
+    data_dir: &FsPath,
+    request_id: &str,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let record = read_inspect_action_record(data_dir, request_id)?;
+    if record.kind != AGENT_PLAN_KIND
+        || record.principal_id != owner_id
+        || record.requester_id.as_deref() != Some(requester_id)
+        || record.id != capsule_id
+        || record.session_id != session_id
+    {
+        anyhow::bail!("agent plan result belongs to a different requester or activation");
+    }
+    if !matches!(
+        record.status.as_str(),
+        "completed" | "failed" | "refused" | "unknown"
+    ) {
+        anyhow::bail!("agent plan has no settled result");
+    }
+    let binding = record
+        .request_binding
+        .as_ref()
+        .filter(|binding| agent_plan::agent_plan_request_binding(&record).as_ref() == Some(binding))
+        .ok_or_else(|| anyhow::anyhow!("agent plan result binding is invalid"))?;
+    Ok(serde_json::json!({
+        "schema": "elastos.agent-plan.result/v1",
+        "request_id": record.request_id,
+        "status": record.status,
+        "request_binding": binding,
+        "dispatch_result": record.result,
+    }))
 }
 
 pub(super) fn deny_inspect_action_request(
@@ -635,6 +880,7 @@ async fn create_inspect_action_request(
         kind: INSPECT_ACTION_KIND.to_string(),
         request_id,
         principal_id: context.principal_id().to_string(),
+        requester_id: None,
         session_id: context.session_id().to_string(),
         id: id.to_string(),
         operation: operation.to_string(),
@@ -738,13 +984,16 @@ mod tests {
     }
 
     const PLAN_PRINCIPAL: &str = "person:owner";
+    const PLAN_REQUESTER: &str = "agent:v2:planrequester";
     const PLAN_CAPSULE: &str = "capsule:agent-host";
+    const PLAN_SESSION: &str = "session:agent-1";
 
     fn plan_context() -> agent_plan::AgentPlanContext<'static> {
         agent_plan::AgentPlanContext {
             principal_id: PLAN_PRINCIPAL,
+            requester_id: PLAN_REQUESTER,
             capsule_id: PLAN_CAPSULE,
-            session_id: "session:agent-1",
+            session_id: PLAN_SESSION,
         }
     }
 
@@ -772,7 +1021,12 @@ mod tests {
             None,
             "status",
             ["elastos://availability/status".to_string()],
-            &stored_step(request),
+            &serde_json::json!({
+                "owner": PLAN_PRINCIPAL,
+                "requester": PLAN_REQUESTER,
+                "session": PLAN_SESSION,
+                "step": stored_step(request),
+            }),
         )
     }
 
@@ -805,7 +1059,18 @@ mod tests {
         let card = &cards[0];
         assert_eq!(card.kind, AGENT_PLAN_KIND);
         assert_eq!(card.id, format!("agent-plan-request:{}", record.request_id));
-        assert!(card.action_ref.is_none());
+        assert_eq!(
+            card.action_ref
+                .as_ref()
+                .map(|action| action.action_id.as_str()),
+            Some(format!("agent-plan-approve-request:{}", record.request_id).as_str()),
+            "the owner's card carries the one approve action"
+        );
+        assert_eq!(
+            card.request_binding.as_ref(),
+            Some(&serde_json::json!(expected)),
+            "the card carries the exact binding its click sends back"
+        );
         assert_eq!(expected.sha256.len(), 64);
         assert!(card.body.contains(&expected.sha256), "{}", card.body);
         assert!(

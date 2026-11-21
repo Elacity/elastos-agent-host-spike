@@ -22,6 +22,14 @@ contains CRITICAL and names the commit from ``git log -1 --format=%H HEAD
 is appended to ``CRITICAL.md``. With no allow, this module writes neither
 file.
 
+One model allow is not an escape: ``named_rights`` names it
+(``CRITICAL-cc-model-confine-051``, the model helper's engine process,
+approved 20 Nov 2026 and measured as probe row X2). On the live model
+profile only, an allow that stays inside that right writes no finding;
+the model deny test becomes the named-right check, and
+``test_model_allows_only_named_rights`` fails the gate on any model allow
+beyond it. Wallet and did keep the deny.
+
 A recorded allow keeps the gate green. The deny test is an expected
 failure and its docstring names that finding file (README guard b).
 Each confirmed allow is written before the next profile is classified.
@@ -48,6 +56,7 @@ from functools import wraps
 from pathlib import Path
 from unittest.mock import patch
 
+import named_rights
 import sbx
 from test_confine_mach import (
     HarnessError as MachHarnessError,
@@ -442,11 +451,26 @@ def observe(case_cls):
     written and marked. A refusal before any allow writes nothing.
     """
     case_cls.recorded_allows = {}
+    case_cls.named_rights = {}
+    # The accepted rights belong to this run of the class only.
+    case_cls.addClassCleanup(setattr, case_cls, "named_rights", {})
     confirmed = []
     for profile in PROFILES:
         result = fork_under(profile["path"])
         outcome = classify(result)
         if outcome != "allow":
+            continue
+        right = named_rights.accepted(IDS[profile["name"]], profile["path"], result)
+        if right is not None:
+            case_cls.named_rights[profile["name"]] = right
+            named_rights.mark_named(
+                case_cls,
+                f"test_{profile['name']}_fork_is_denied",
+                right,
+                profile["path"],
+                fork_under,
+                classify,
+            )
             continue
         confirmed.append((profile, result))
         # Snapshot: a later append must not change the list this call recorded.
@@ -482,6 +506,15 @@ def tearDownModule():
     require_unchanged(START_SHA)
 
 
+def skip_when_tools_missing(case):
+    """The one skip: a missing ``/usr/bin/sandbox-exec`` or ``/usr/bin/cc``."""
+    if type(case).skip_reason:
+        case.skipTest(type(case).skip_reason)
+    case.binary = type(case).binary
+    case.root = type(case).root
+    case.parent = type(case).parent
+
+
 class ForkProbe(unittest.TestCase):
     """The helper under the live profiles, and the allow plant."""
 
@@ -490,6 +523,7 @@ class ForkProbe(unittest.TestCase):
     root = None
     parent = None
     recorded_allows = {}
+    named_rights = {}
 
     @classmethod
     def setUpClass(cls):
@@ -498,6 +532,7 @@ class ForkProbe(unittest.TestCase):
         cls.root = None
         cls.parent = None
         cls.recorded_allows = {}
+        cls.named_rights = {}
         if cls.skip_reason:
             return
         cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-fork-parent-"))
@@ -508,11 +543,7 @@ class ForkProbe(unittest.TestCase):
         observe(cls)
 
     def setUp(self):
-        if type(self).skip_reason:
-            self.skipTest(type(self).skip_reason)
-        self.binary = type(self).binary
-        self.root = type(self).root
-        self.parent = type(self).parent
+        skip_when_tools_missing(self)
 
     def test_cc_and_sandbox_present_or_skip(self):
         """This class runs only when both binaries exist.
@@ -624,7 +655,10 @@ class ForkProbe(unittest.TestCase):
                 with self.subTest(profile=profile["name"]):
                     text = profile["path"].read_text(encoding="utf-8")
                     baseline = self._source_for_plant(profile["name"], text)
-                    if profile["name"] not in type(self).recorded_allows:
+                    if (
+                        profile["name"] not in type(self).recorded_allows
+                        and profile["name"] not in type(self).named_rights
+                    ):
                         self.assertEqual(text.count("(allow process-fork)"), 0)
                         self.assertEqual(text.count(DENY_DEFAULT), 1)
                         self.assertEqual(baseline, text)
@@ -697,6 +731,9 @@ class ForkProbe(unittest.TestCase):
         file is not edited. One exact plant line is removed from the copy
         so the append is still that one line.
         """
+        right = type(self).named_rights.get(name)
+        if right is not None:
+            return named_rights.strip_named_forms(right, text)
         finding = type(self).recorded_allows.get(name)
         if finding is None:
             if "(allow process-fork)" in text:
@@ -715,6 +752,84 @@ class ForkProbe(unittest.TestCase):
         if occurrences == 1:
             text = text.replace(ALLOW_FORK, "", 1)
         return text
+
+
+class ForkNamedRight(unittest.TestCase):
+    """The model's accepted named right, checked against the live files.
+
+    It compiles the helper and launches it under the live model profile on
+    its own, so the injected-suite checks of ``ForkProbe`` do not run it.
+    It skips only when ``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skip_reason = skip_reason()
+        if cls.skip_reason:
+            return
+        cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-fork-named-parent-"))
+        cls.root = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-fork-named-root-"))
+        cls.addClassCleanup(shutil.rmtree, cls.parent, ignore_errors=True)
+        cls.addClassCleanup(shutil.rmtree, cls.root, ignore_errors=True)
+        cls.binary = compile_fork(cls.parent, cls.root, HELPER_C)
+
+    def setUp(self):
+        skip_when_tools_missing(self)
+
+    def _launch(self, profile):
+        return run_sandboxed(self.binary, self.root, self.parent, profile)
+
+    def test_model_allows_only_named_rights(self):
+        """A model fork allow must be the accepted named right, nothing wider.
+
+        A deny is stricter and passes. An allow beyond the right fails the
+        gate here, although ``observe`` records it as an ordinary finding.
+        Wallet and did still deny.
+        """
+        model = sbx.REPO_ROOT / "capsules/model-provider/confine.sb"
+        result = self._launch(model)
+        for name in ("wallet", "did"):
+            path = next(item["path"] for item in PROFILES if item["name"] == name)
+            self.assertEqual(classify(self._launch(path)), "deny", name)
+        if classify(result) == "deny":
+            return
+        right = named_rights.accepted(IDS["model"], model, result)
+        self.assertIsNotNone(right, f"model fork allow beyond its named right: {result.stdout!r}")
+        self.assertEqual(right.finding, IDS["model"])
+
+    def test_falsifier_model_beyond_named_right_is_caught(self):
+        """A further fork form on a model copy fails the named-right check.
+
+        ``(allow process*)``, a filtered ``(allow process-fork ...)``, the
+        named form twice, and the named form dropped each fail ``require``.
+        A copy launched for real is never accepted as the live profile, and
+        neither is the wallet profile.
+        """
+        model = sbx.REPO_ROOT / "capsules/model-provider/confine.sb"
+        right = named_rights.RIGHTS[IDS["model"]]
+        text = model.read_text(encoding="utf-8")
+        stdout = "fork=1 errno=0\n"
+        self.assertIs(named_rights.require(right, text, stdout), right)
+        with self.assertRaises(named_rights.NamedRightExceeded):
+            named_rights.require(right, text, "fork=0 errno=0\n")
+        directory = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-fork-named-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        for label, planted in (
+            ("process-star", text + "(allow process*)\n"),
+            ("filtered", text + '(allow process-fork (literal "/bin/sh"))\n'),
+            ("twice", text + right.forms[0] + "\n"),
+            ("dropped", named_rights.strip_named_forms(right, text)),
+        ):
+            with self.subTest(plant=label):
+                with self.assertRaises(named_rights.NamedRightExceeded):
+                    named_rights.require(right, planted, stdout)
+        copy = write_copy(directory, "model-copy", text)
+        launched = self._launch(copy)
+        self.assertEqual(classify(launched), "allow")
+        self.assertIsNone(named_rights.accepted(IDS["model"], copy, launched))
+        wallet = self._launch(sbx.WALLET_CONFINE_SB)
+        self.assertIsNone(named_rights.accepted(IDS["wallet"], sbx.WALLET_CONFINE_SB, wallet))
+        self.assertIsNone(named_rights.accepted(IDS["model"], sbx.WALLET_CONFINE_SB, wallet))
 
 
 class ForkRules(unittest.TestCase):
@@ -1581,6 +1696,8 @@ class ForkRules(unittest.TestCase):
         Only their deny tests expect failure. The plant still runs, including
         the wallet deletion, and nothing skips.
         """
+        # Python 3.15 Path.is_file calls os.path.isfile; keep data paths real.
+        real_isfile = os.path.isfile
         method_names = unittest.defaultTestLoader.getTestCaseNames(ForkProbe)
         scenarios = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
         for allowed in scenarios:
@@ -1646,7 +1763,11 @@ class ForkRules(unittest.TestCase):
                     START_SHA, {}, clear=True
                 ), patch.object(sbx, "REPO_ROOT", repo), patch.object(
                     sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
-                ), patch.object(os.path, "isfile", return_value=True), patch(
+                ), patch.object(
+                    os.path, "isfile",
+                    side_effect=lambda path: os.fspath(path) in (CC, sbx.SANDBOX_EXEC)
+                    or real_isfile(path),
+                ), patch(
                     __name__ + ".compile_fork", side_effect=injected_compile
                 ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
                     sbx, "run", side_effect=injected_sandbox

@@ -1001,7 +1001,7 @@
         }
       ],
       "tests": [
-        "instance_grant_does_not_authorise_sibling",
+        "two_instances_overlap_with_separate_grants",
         "attach_secret_stays_in_memory"
       ]
     },
@@ -1613,6 +1613,54 @@
       ],
       "tests": [
         "declared_network_manifest_is_refused"
+      ]
+    },
+    {
+      "id": "F-ac-u10-s9",
+      "title": "remove the requested read from the fixture manifest asks",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/tests/common/signed_bundle.rs",
+          "old": "const REQUESTED_ACTIONS: &[&str] = &[\"read\", \"write\"];",
+          "new": "const REQUESTED_ACTIONS: &[&str] = &[\"write\"];"
+        }
+      ],
+      "tests": [
+        "fixture_writer_declares_the_requested_read"
+      ]
+    },
+    {
+      "id": "F-ac-u10-s10",
+      "title": "change the admitted ask resource by reading the manifest again after admission",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "        let asks = self.admit_row(cid)?.asks.clone();\n",
+          "new": "        let bundle = self.admit_row(cid)?.bundle.clone();\n        let asks = admitted_asks(&checked_bundle(&bundle).map_err(|refusal| (400, said(&refusal)))?)?;\n"
+        }
+      ],
+      "tests": [
+        "admitted_ask_keeps_its_resource_after_the_manifest_changes"
+      ]
+    },
+    {
+      "id": "F-ac-u10-s11",
+      "title": "add an invalid manifest ask when the signed manifest declares none",
+      "command": "agent-conformance",
+      "expect": "caught",
+      "edits": [
+        {
+          "file": "../../lab/agent-conformance/standin-runtime/mod.rs",
+          "old": "    if manifest.asks.is_empty() {\n        return Err((400, \"the signed manifest declares no asks\".to_owned()));\n    }\n",
+          "new": "    let mut manifest = manifest;\n    if manifest.asks.is_empty() {\n        manifest.asks.push(elastos_common::ManifestAsk {\n            resource: \"localhost://Public/not-declared\".to_owned(),\n            actions: vec![elastos_common::AskAction::Read],\n        });\n    }\n"
+        }
+      ],
+      "tests": [
+        "standin_refuses_to_admit_a_bundle_whose_asks_do_not_follow_the_schema"
       ]
     }
   ]

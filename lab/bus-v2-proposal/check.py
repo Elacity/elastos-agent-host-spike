@@ -20,6 +20,27 @@ CITATION = re.compile(
 
 DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
 
+# A prose backtick span that looks like code is a claim: the same line must
+# hold a path:line citation. These marks, a dotted chain and a keyword are code
+# shapes. A plain identifier and a file name are not.
+CODE_MARKS = ("::", "->", "=", "(", ")", "[", "]", "+", "*", "&", "|", "%", "^")
+SPACED_OPERATOR = re.compile(r"\s[-/<>]\s")
+DOTTED_CHAIN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+FILE_NAME = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}")
+FILE_EXTENSIONS = frozenset(
+    ("rs", "json", "toml", "md", "wit", "py", "js", "mjs", "html", "css", "txt",
+     "yaml", "yml", "lock", "sh", "wasm", "example", "pb", "bin", "ts", "c", "h")
+)
+CODE_WORDS = frozenset(
+    ("fn", "let", "mut", "pub", "impl", "struct", "enum", "trait", "const",
+     "static", "use", "mod", "match", "if", "else", "for", "while", "loop",
+     "return", "self", "super", "crate", "as", "in", "where", "dyn", "ref",
+     "move", "unsafe", "async", "await", "type", "interface", "world",
+     "resource", "record", "variant", "flags", "tuple", "list", "option",
+     "result", "future", "stream", "func", "include", "export", "import",
+     "constructor")
+)
+
 # Section 0 states each core-call proposal once. Each group starts with a
 # heading, and its propose lines stand under that heading.
 SECTION_0 = "## 0. What this proposes"
@@ -425,17 +446,23 @@ def commit_exists(root, sha):
 
 
 def _spans(text):
+    """Return CommonMark code span contents from matching backtick runs."""
     spans = []
-    cursor = 0
-    while True:
-        opened = text.find("`", cursor)
-        if opened < 0:
-            return spans
-        closed = text.find("`", opened + 1)
-        if closed < 0:
-            return spans
-        spans.append(text[opened + 1:closed])
-        cursor = closed + 1
+    runs = list(re.finditer(r"`+", text))
+    opener = 0
+    while opener < len(runs):
+        closer = opener + 1
+        while closer < len(runs) and len(runs[closer].group()) != len(runs[opener].group()):
+            closer += 1
+        if closer == len(runs):
+            opener += 1
+            continue
+        content = re.sub(r"\r\n?|\n", " ", text[runs[opener].end():runs[closer].start()])
+        if content.startswith(" ") and content.endswith(" ") and not content.isspace():
+            content = content[1:-1]
+        spans.append(content)
+        opener = closer + 1
+    return spans
 
 
 def _pinned_lines(root, sha, rel):
@@ -959,13 +986,13 @@ QUOTE_TARGETS = (
     ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:355", "`elastos/crates/elastos-server/src/api/gateway_model_service.rs:355`", None),
     ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1452", GATEWAY_RANGE_MARKER, None),
     ("elastos/crates/elastos-server/src/api/gateway_model_service.rs:1454", GATEWAY_RANGE_MARKER, None),
-    ("examples/agent-host/asks.json:4", "`examples/agent-host/asks.json:4`", None),
-    ("examples/agent-host/asks.json:5", "`examples/agent-host/asks.json:5`", None),
-    ("examples/agent-host/asks.json:6", "`examples/agent-host/asks.json:6`", None),
+    ("examples/agent-host/capsule.json:15", "`examples/agent-host/capsule.json:15`", None),
+    ("examples/agent-host/capsule.json:16", "`examples/agent-host/capsule.json:16`", None),
+    ("examples/agent-host/capsule.json:17", "`examples/agent-host/capsule.json:17`", None),
     ("elastos/crates/elastos-server/src/provider_resource.rs:422", "`elastos/crates/elastos-server/src/provider_resource.rs:422`", None),
-    ("examples/agent-host/asks.json:7", "`examples/agent-host/asks.json:7`", None),
-    ("examples/agent-host/asks.json:8", "`examples/agent-host/asks.json:8`", None),
-    ("examples/agent-host/asks.json:9", "`examples/agent-host/asks.json:9`", None),
+    ("examples/agent-host/capsule.json:18", "`examples/agent-host/capsule.json:18`", None),
+    ("examples/agent-host/capsule.json:19", "`examples/agent-host/capsule.json:19`", None),
+    ("examples/agent-host/capsule.json:20", "`examples/agent-host/capsule.json:20`", None),
     ("elastos/crates/elastos-compute/src/exec_vm.rs:43", "`elastos/crates/elastos-compute/src/exec_vm.rs:43`", None),
     ("elastos/crates/elastos-compute/src/exec_vm.rs:49", "`elastos/crates/elastos-compute/src/exec_vm.rs:49`", None),
     ("elastos/crates/elastos-compute/src/exec_vm.rs:130", "`elastos/crates/elastos-compute/src/exec_vm.rs:130`", None),
@@ -974,7 +1001,7 @@ QUOTE_TARGETS = (
     ("elastos/crates/elastos-server/src/provider_resource.rs:163", "`elastos/crates/elastos-server/src/provider_resource.rs:163`", None),
     ("elastos/crates/elastos-server/src/provider_resource.rs:164", "`elastos/crates/elastos-server/src/provider_resource.rs:164`", None),
     ("elastos/crates/elastos-server/src/provider_resource.rs:165", "`elastos/crates/elastos-server/src/provider_resource.rs:165`", None),
-    ("examples/agent-host/asks.json:12", "`examples/agent-host/asks.json:12`", None),
+    ("examples/agent-host/capsule.json:21", "`examples/agent-host/capsule.json:21`", None),
     ("elastos/crates/elastos-server/src/provider_resource.rs:379", "`elastos/crates/elastos-server/src/provider_resource.rs:379`", None),
     ("elastos/crates/elastos-server/src/provider_resource.rs:382", "`elastos/crates/elastos-server/src/provider_resource.rs:382`", None),
     ("elastos/crates/elastos-server/src/resource_bridge.rs:696", "`elastos/crates/elastos-server/src/resource_bridge.rs:696`", None),
@@ -1409,6 +1436,65 @@ def pin_allows_structural_reads(pin_reason, pinned):
     return pin_reason is None and pinned
 
 
+def _indent_width(line):
+    """Return the column width of LINE's leading spaces and tabs."""
+    return sum(
+        4 if char == "\t" else 1
+        for char in line[:len(line) - len(line.lstrip(" \t"))]
+    )
+
+
+def _file_name(span):
+    """True when SPAN is a file name with a known extension."""
+    if FILE_NAME.fullmatch(span) is None:
+        return False
+    return span.rsplit(".", 1)[1] in FILE_EXTENSIONS
+
+
+def code_shaped(span):
+    """True when SPAN looks like code rather than one identifier or file name."""
+    if any(mark in span for mark in CODE_MARKS) or SPACED_OPERATOR.search(span):
+        return True
+    if _file_name(span):
+        return False
+    if DOTTED_CHAIN.fullmatch(span) is not None:
+        return True
+    return span in CODE_WORDS
+
+
+def code_span_refusals(text):
+    """Return one refusal per code-shaped prose span with no line citation.
+
+    A prose line holds its own evidence: a code-shaped span on a line that also
+    holds a path:line citation is supported. An indented line quotes source and
+    is not prose, a fence and an HTML comment hold no prose, and a heading is
+    not checked. A plain identifier and a file name are not code-shaped.
+    """
+    refusals = []
+    lines = text.splitlines()
+    try:
+        records = classify_lines(lines)
+    except ValueError:
+        # The structural refusal owns a malformed draft; proposal_refusals
+        # reports that one reason.
+        return refusals
+    for index, (kind, _, visible) in enumerate(records):
+        if kind != TEXT or _indent_width(lines[index]) > 3:
+            continue
+        spans = _spans(visible)
+        if any((match := CITATION.fullmatch(span)) and match.group("start")
+               for span in spans):
+            continue
+        for span in spans:
+            match = CITATION.fullmatch(span)
+            if (match is None or match.group("start") is None) and code_shaped(span):
+                refusals.append(
+                    "refuse: line %d has a code-shaped span and no path:line "
+                    "citation: `%s`" % (index + 1, span)
+                )
+    return refusals
+
+
 def problems(root):
     """Return one refusal per bad pin, citation or section 0 rule, pin first.
 
@@ -1436,12 +1522,13 @@ def problems(root):
         for span in _spans(text):
             match = CITATION.fullmatch(span)
             if match is None:
-                # Deliberate: only path:line backtick spans are citations.
+                # Deliberate: only recognized backtick locations are checked.
                 continue
             reason = _refusal(root, match, sha)
             if reason is not None:
                 refusals.append(reason)
                 refused_spans.add(span)
+        refusals.extend(code_span_refusals(text))
         refusals.extend(_quote_refusals(root, text, sha, refused_spans))
         refusals.extend(a3_claim_refusals(text))
     refusals.extend(proposal_refusals(text))

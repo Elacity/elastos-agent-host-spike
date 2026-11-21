@@ -1,0 +1,8 @@
+id: H1-noprovider
+file: elastos/crates/elastos-runtime/src/provider/registry.rs
+test: hook1_provider_scheme_from_manifest_is_missing_today
+--- old
+            .ok_or_else(|| ProviderError::NoProvider(scheme.clone()))?;
+--- new
+            .ok_or_else(|| ProviderError::InvalidUri(scheme.clone()))?;
+--- end

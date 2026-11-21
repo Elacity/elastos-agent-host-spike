@@ -2,9 +2,10 @@
   "schema": "elastos.capsule/v1",
   "name": "agent-host",
   "version": "0.1.0",
-  "description": "Journal fold in an elastos.component/v1 guest. It asks for exactly two grants, write and read, on its own task journal under Users/self/.AppData/Agents/agent-host/, and writes that journal only with them. No tool body and no Home icon.",
+  "description": "Agent Host journal and document plan guest. It asks for write and read on its own task journal, and write on the exact Runtime plan submit resource. The document plan waits for owner approval. No Home icon.",
   "author": "local-development",
   "role": "app",
+  "agent": {"kind": "agent"},
   "type": "wasm",
   "runtime_abi": "elastos.component/v1",
   "bus_contract": "elastos:bus@v1",
@@ -14,8 +15,16 @@
   "entrypoint": "agent-host.component.wasm",
   "asks": [
     {
-      "resource": "localhost://Users/self/.AppData/Agents/agent-host/*",
+      "resource": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
       "actions": ["write", "read"]
+    },
+    {
+      "resource": "elastos://inspect/submit_agent_plan",
+      "actions": ["write"]
+    },
+    {
+      "resource": "localhost://UsersAI/self/Documents/*",
+      "actions": ["write"]
     }
   ],
   "resources": {

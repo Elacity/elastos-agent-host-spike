@@ -1561,6 +1561,8 @@ class SemRules(unittest.TestCase):
         Only their deny tests expect failure. The plant still runs, including
         the wallet deletion, and nothing skips.
         """
+        # Python 3.15 Path.is_file calls os.path.isfile; keep data paths real.
+        real_isfile = os.path.isfile
         method_names = unittest.defaultTestLoader.getTestCaseNames(SemProbe)
         scenarios = ((), ("wallet",), ("did",), ("model",), ("wallet", "did", "model"))
         for allowed in scenarios:
@@ -1615,7 +1617,11 @@ class SemRules(unittest.TestCase):
                     START_SHA, {}, clear=True
                 ), patch.object(sbx, "REPO_ROOT", repo), patch.object(
                     sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
-                ), patch.object(os.path, "isfile", return_value=True), patch(
+                ), patch.object(
+                    os.path, "isfile",
+                    side_effect=lambda path: os.fspath(path) in (CC, sbx.SANDBOX_EXEC)
+                    or real_isfile(path),
+                ), patch(
                     __name__ + ".compile_sem", side_effect=injected_compile
                 ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
                     sbx, "run", side_effect=injected_sandbox
