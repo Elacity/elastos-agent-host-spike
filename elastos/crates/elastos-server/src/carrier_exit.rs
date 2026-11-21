@@ -1,6 +1,7 @@
 //! Runtime-owned admission for a peer's use of a locally issued Browser Exit grant.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -79,7 +80,8 @@ pub(super) struct BrowserExitAuthority {
 }
 
 impl BrowserExitAuthority {
-    pub async fn read(&self) -> Result<BrowserExitGrant> {
+    /// Reads the grant against the caller's one reading for this admission.
+    pub async fn read_at(&self, now: u64) -> Result<BrowserExitGrant> {
         let authority = self.clone();
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
@@ -89,7 +91,7 @@ impl BrowserExitAuthority {
                     &authority.network,
                     &authority.source,
                     &authority.request,
-                    crate::auth::now_ts(),
+                    now,
                 )
             }),
         )
@@ -97,11 +99,29 @@ impl BrowserExitAuthority {
         .context("Exit authority check deadline")??
     }
 
+    /// Reads the grant at a fresh reading, for a recheck of its own.
+    pub async fn read(&self) -> Result<BrowserExitGrant> {
+        self.read_at(crate::auth::now_ts()).await
+    }
+
     pub async fn until_revoked(&self, original: &BrowserExitGrant) -> Result<()> {
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             anyhow::ensure!(self.read().await? == *original, "Exit grant changed");
         }
+    }
+}
+
+/// The grant read behind one Exit admission. The admission reads the grant
+/// once with its one reading; the post-admission recheck is a distinct
+/// decision and reads once more with its own fresh reading.
+pub(crate) trait ExitGrantReader {
+    fn read_grant_at(&self, now: u64) -> impl Future<Output = Result<BrowserExitGrant>>;
+}
+
+impl ExitGrantReader for BrowserExitAuthority {
+    async fn read_grant_at(&self, now: u64) -> Result<BrowserExitGrant> {
+        self.read_at(now).await
     }
 }
 

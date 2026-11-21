@@ -1386,6 +1386,13 @@ mod tests {
                     .envelope_sha256,
                 prepared.envelope_sha256
             );
+            // The send window closes by monotonic age, so a record inside it
+            // is not pruned on a wall reading alone.
+            fixture
+                .core
+                .advance_send_window(std::time::Duration::from_secs(
+                    crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS,
+                ));
             fixture
                 .port
                 .prepare_message(
@@ -1818,6 +1825,13 @@ mod tests {
             let later = prepared.expires_at
                 + elastos_common::collaboration_protocol::MAX_COLLABORATION_CLOCK_SKEW_SECS
                 + 1;
+            // The send window closes by monotonic age, so a record inside it
+            // is not pruned on a wall reading alone.
+            fixture
+                .core
+                .advance_send_window(std::time::Duration::from_secs(
+                    crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS,
+                ));
             fixture
                 .port
                 .prepare_message(
@@ -1929,6 +1943,13 @@ mod tests {
         std::fs::remove_dir(&blocked_temp).unwrap();
         // The existing Expired row also needs a durable write before prune.
         assert!(failed.is_err());
+        // The send window closes by monotonic age, so a record inside it is
+        // not pruned on a wall reading alone.
+        fixture
+            .core
+            .advance_send_window(std::time::Duration::from_secs(
+                crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS,
+            ));
         fixture
             .port
             .prepare_message(

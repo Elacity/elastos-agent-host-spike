@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use elastos_common::collaboration_protocol::{
@@ -63,6 +64,45 @@ pub(crate) const MAX_CONVERSATION_HISTORY_MESSAGES: usize = 200;
 pub(crate) const MAX_CONVERSATION_HISTORY_BYTES: usize = 1024 * 1024;
 pub(crate) const CONVERSATION_HISTORY_RETENTION_SECS: u64 = 24 * 60 * 60;
 
+/// The monotonic age floor of one governed outgoing message. The send window
+/// measures elapsed time on this alone.
+#[derive(Clone, Debug)]
+struct SendAnchor {
+    /// The sender Profile this send spends the rule's budget for.
+    profile: String,
+    /// The instant this process started its own clock for this message.
+    since: Instant,
+    /// Age already elapsed when the anchor was made: zero for a message this
+    /// process admitted, the stored wall age once for a restored record.
+    prior: Duration,
+}
+
+impl SendAnchor {
+    fn admitted(profile: String) -> Self {
+        Self {
+            profile,
+            since: Instant::now(),
+            prior: Duration::ZERO,
+        }
+    }
+
+    fn restored(profile: String, prior: Duration) -> Self {
+        Self {
+            profile,
+            since: Instant::now(),
+            prior,
+        }
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.prior.saturating_add(self.since.elapsed())
+    }
+
+    fn elapsed_secs(&self) -> u64 {
+        self.elapsed().as_secs()
+    }
+}
+
 pub(crate) struct CollaborationCore {
     authority: DefaultConversationDeviceAuthority,
     operation_capsule: String,
@@ -72,6 +112,21 @@ pub(crate) struct CollaborationCore {
     mutation_mutex: Mutex<()>,
     /// Counted from stored outgoing messages, so only a saved message counts.
     sends_per_window: usize,
+    /// The monotonic age floor of each outgoing Community message the send
+    /// window governs, keyed by request id. The window's elapsed time is
+    /// `prior + since.elapsed()` and nothing else: a wall-clock step cannot
+    /// shorten or lengthen it once the anchor exists. `prior` is zero for a
+    /// message this process admitted; for a record restored from disk (which
+    /// has no monotonic history) it is the stored wall age at the moment the
+    /// anchor is made, and the wall stamp is never read for that record again.
+    ///
+    /// A profile holds at most `sends_per_window` live anchors, because the
+    /// window refuses the send that would exceed that count, and an anchor
+    /// exists only for a stored governed record inside the window. So the map
+    /// is bounded by the outgoing table's own cap, and no live anchor is ever
+    /// evicted to make room: a check that would need one is refused with the
+    /// same rate-limit answer.
+    send_anchors: Mutex<HashMap<String, SendAnchor>>,
     receive_rate: ProfileRateLimiter,
     presence_receive_rate: ProfileRateLimiter,
     /// Serializes receive-rate admission through its durable commit and count.
@@ -461,6 +516,7 @@ impl CollaborationCore {
             community_membership,
             mutation_mutex: Mutex::new(()),
             sends_per_window: COMMUNITY_SENDS_PER_WINDOW,
+            send_anchors: Mutex::new(HashMap::new()),
             receive_rate: ProfileRateLimiter::new(
                 COMMUNITY_RECEIVES_PER_SENDER_PER_WINDOW,
                 COMMUNITY_RATE_WINDOW_SECS,
@@ -1526,6 +1582,12 @@ impl CollaborationCore {
             let value = self.outgoing_handle(&record, prepared.verified_message().clone());
             state.outgoing.push(record);
             ensure_state_fits(state)?;
+            if payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                self.record_send_anchor(
+                    &operation.request_id,
+                    sender_profile.document().profile_did.as_str(),
+                )?;
+            }
             Ok(Mutation {
                 value,
                 changed: true,
@@ -1535,53 +1597,174 @@ impl CollaborationCore {
 
     /// Whether this Profile may send one more Community message now, without
     /// sending: work that must not be lost to a refused send checks first.
+    ///
+    /// The stored state and the window are read and updated under the same
+    /// process and file locks a send commits under, so a precheck racing a
+    /// send cannot prune that send's anchor from an older state snapshot.
     pub(crate) fn check_community_send_allowed(
         &self,
         sender_profile_did: &str,
         now: u64,
     ) -> anyhow::Result<()> {
-        let state = self.load_state()?.unwrap_or_else(|| self.empty_state());
-        self.check_community_send_window(&state, sender_profile_did, now)?;
-        Ok(())
+        self.with_mutation(None, |state| {
+            self.check_community_send_window(state, sender_profile_did, now)?;
+            Ok(Mutation {
+                value: (),
+                changed: false,
+            })
+        })
     }
 
-    /// Counts this Profile's stored Community messages created in the last
+    /// Counts this Profile's stored Community messages still inside the
     /// window. Stored state is the count, so an unsaved send never counts and
     /// a saved one always does, across restarts too.
+    ///
+    /// Elapsed time is the anchor's monotonic age and nothing else, so a wall
+    /// step neither shortens nor lengthens the window. A record this process
+    /// did not admit has no monotonic history: its stored wall stamp seeds an
+    /// anchor exactly once, at the first check that sees it, and no decision
+    /// after that reads the wall clock.
     fn check_community_send_window(
         &self,
         state: &CoreState,
         sender_profile_did: &str,
         now: u64,
     ) -> Result<(), CommunitySendRateLimited> {
-        let window_start = now.saturating_sub(COMMUNITY_RATE_WINDOW_SECS);
-        let recent = state
-            .outgoing
-            .iter()
-            .filter(|entry| {
-                entry.local_product_projection != OutgoingProductProjectionState::Retired
-            })
-            .filter_map(|entry| {
-                serde_json::from_str::<SignedCollaborationMessage>(&entry.envelope).ok()
-            })
-            .filter(|message| {
-                message.payload.payload_type == COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE
-                    && message.payload.sender_profile_did == sender_profile_did
-                    && message.payload.created_at > window_start
-            })
-            .map(|message| message.payload.created_at);
-        let (count, oldest) = recent.fold((0, u64::MAX), |(count, oldest), created_at| {
-            (count + 1, oldest.min(created_at))
-        });
+        let mut anchors = self
+            .send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut recent_ids = HashSet::new();
+        let mut count = 0;
+        let mut oldest_elapsed = 0;
+        for entry in state.outgoing.iter().filter(|entry| {
+            entry.local_product_projection != OutgoingProductProjectionState::Retired
+        }) {
+            let Ok(message) = serde_json::from_str::<SignedCollaborationMessage>(&entry.envelope)
+            else {
+                continue;
+            };
+            if message.payload.payload_type != COMMUNITY_RATE_LIMITED_PAYLOAD_TYPE {
+                continue;
+            }
+            let request_id = &entry.operation.request_id;
+            let sender_profile = &message.payload.sender_profile_did;
+            let elapsed = match anchors.get(request_id) {
+                Some(anchor) => anchor.elapsed_secs(),
+                None => {
+                    let wall_elapsed = now.saturating_sub(message.payload.created_at);
+                    if wall_elapsed >= COMMUNITY_RATE_WINDOW_SECS {
+                        continue;
+                    }
+                    Self::remember_anchor(
+                        &mut anchors,
+                        request_id,
+                        sender_profile,
+                        SendAnchor::restored(
+                            sender_profile.clone(),
+                            Duration::from_secs(wall_elapsed),
+                        ),
+                        self.sends_per_window,
+                    )?;
+                    wall_elapsed
+                }
+            };
+            if elapsed >= COMMUNITY_RATE_WINDOW_SECS {
+                continue;
+            }
+            recent_ids.insert(request_id.clone());
+            if message.payload.sender_profile_did != sender_profile_did {
+                continue;
+            }
+            count += 1;
+            oldest_elapsed = oldest_elapsed.max(elapsed);
+        }
+        anchors.retain(|request_id, _| recent_ids.contains(request_id));
         if count < self.sends_per_window {
             return Ok(());
         }
         Err(CommunitySendRateLimited {
-            retry_after_secs: oldest
-                .saturating_add(COMMUNITY_RATE_WINDOW_SECS)
-                .saturating_sub(now)
+            retry_after_secs: COMMUNITY_RATE_WINDOW_SECS
+                .saturating_sub(oldest_elapsed)
                 .max(1),
         })
+    }
+
+    /// Anchors one admitted governed send, pruning what has left the window.
+    fn record_send_anchor(
+        &self,
+        request_id: &str,
+        sender_profile_did: &str,
+    ) -> Result<(), CommunitySendRateLimited> {
+        let mut anchors = self
+            .send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Self::remember_anchor(
+            &mut anchors,
+            request_id,
+            sender_profile_did,
+            SendAnchor::admitted(sender_profile_did.to_string()),
+            self.sends_per_window,
+        )
+    }
+
+    /// Inserts one anchor after evicting the anchors whose window has closed.
+    ///
+    /// An anchor whose window is still open is never evicted: a wall step would
+    /// then reach a record with no monotonic history and decide on wall time.
+    /// A profile's live anchors are bounded by the rule's own send count, so a
+    /// send that would need more than that is refused with the rate-limit
+    /// answer instead.
+    fn remember_anchor(
+        anchors: &mut HashMap<String, SendAnchor>,
+        request_id: &str,
+        sender_profile_did: &str,
+        anchor: SendAnchor,
+        sends_per_window: usize,
+    ) -> Result<(), CommunitySendRateLimited> {
+        anchors.retain(|_, anchor| anchor.elapsed_secs() < COMMUNITY_RATE_WINDOW_SECS);
+        let live: Vec<u64> = anchors
+            .values()
+            .filter(|existing| existing.profile == sender_profile_did)
+            .map(SendAnchor::elapsed_secs)
+            .collect();
+        if live.len() >= sends_per_window {
+            let oldest = live.iter().copied().max().unwrap_or(0);
+            return Err(CommunitySendRateLimited {
+                retry_after_secs: COMMUNITY_RATE_WINDOW_SECS.saturating_sub(oldest).max(1),
+            });
+        }
+        anchors.insert(request_id.to_string(), anchor);
+        Ok(())
+    }
+
+    /// Treat `by` as elapsed monotonic send-window time, as a real wait would.
+    #[cfg(test)]
+    pub(crate) fn advance_send_window(&self, by: std::time::Duration) {
+        let mut anchors = self
+            .send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for anchor in anchors.values_mut() {
+            anchor.prior = anchor.prior.saturating_add(by);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn send_anchor_count(&self) -> usize {
+        self.send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_send_anchor(&self, request_id: &str) -> bool {
+        self.send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(request_id)
     }
 
     #[cfg(test)]
@@ -2405,7 +2588,18 @@ impl CollaborationCore {
                 now,
             )?;
         }
-        prune_terminal_state(state, now)
+        // Terminal pruning is a wall-clock retirement, but a record whose send
+        // window is still open by monotonic age must survive it: dropping the
+        // record would drop its count and open the window that `now` cannot see.
+        let window_open = self
+            .send_anchors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(_, anchor)| anchor.elapsed_secs() < COMMUNITY_RATE_WINDOW_SECS)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<HashSet<_>>();
+        prune_terminal_state(state, now, &window_open)
     }
 
     fn load_state(&self) -> anyhow::Result<Option<CoreState>> {
@@ -3317,7 +3511,11 @@ fn validate_sha256_label(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn prune_terminal_state(state: &mut CoreState, now: u64) -> anyhow::Result<bool> {
+fn prune_terminal_state(
+    state: &mut CoreState,
+    now: u64,
+    window_open: &HashSet<String>,
+) -> anyhow::Result<bool> {
     let outgoing_before = state.outgoing.len();
     let tombstones_before = state.incoming_tombstones.len();
     let mut retained_outgoing = Vec::with_capacity(state.outgoing.len());
@@ -3325,8 +3523,12 @@ fn prune_terminal_state(state: &mut CoreState, now: u64) -> anyhow::Result<bool>
         let expires_at = stored_message_expiry(&entry.envelope)?;
         // Transport expiry cannot discard a saved intent before its consumer
         // records the local projection or acknowledges an expired Presence.
+        // A record still inside its monotonic send window is not transport
+        // expiry either: `now` may have stepped past it while its window is
+        // open, and dropping it would drop its window count.
         if entry.local_product_projection == OutgoingProductProjectionState::Pending
             || expires_at.saturating_add(MAX_COLLABORATION_CLOCK_SKEW_SECS) >= now
+            || window_open.contains(&entry.operation.request_id)
         {
             retained_outgoing.push(entry);
         }
@@ -3748,6 +3950,24 @@ mod tests {
             payload,
             now,
             ttl_secs,
+        )
+    }
+
+    fn prepare_from(
+        core: &CollaborationCore,
+        profile: &crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
+        request_id: &str,
+        payload: serde_json::Value,
+        now: u64,
+    ) -> anyhow::Result<DurableOutgoingMessage> {
+        let payload_type = "elastos.chat.message/v1";
+        core.prepare_profile_outgoing(
+            profile_operation(request_id, profile, payload_type, &payload),
+            profile,
+            payload_type,
+            payload,
+            now,
+            TTL,
         )
     }
 
@@ -5773,6 +5993,9 @@ mod tests {
             restarted.load_state().unwrap().unwrap().outgoing.len(),
             MAX_UNRESOLVED_OUTGOING + 1
         );
+        // The freshly prepared record's send window closes by monotonic age,
+        // so only then does a wall reading past its expiry prune it.
+        restarted.advance_send_window(std::time::Duration::from_secs(COMMUNITY_RATE_WINDOW_SECS));
         restarted
             .with_mutation(Some(at_boundary + 1), |_| {
                 Ok(Mutation {
@@ -6037,6 +6260,10 @@ mod tests {
             .unwrap();
         }
         let before = fs::read(core.state_path()).unwrap();
+        // The wall readings here stand for elapsed real time, and the window
+        // measures real time on its monotonic anchors, so the anchors advance
+        // with them.
+        core.advance_send_window(std::time::Duration::from_secs(1));
         let error = prepare(
             &core,
             "burst-over",
@@ -6063,6 +6290,7 @@ mod tests {
         )
         .unwrap();
         // The window slides.
+        core.advance_send_window(std::time::Duration::from_secs(COMMUNITY_RATE_WINDOW_SECS));
         prepare(
             &core,
             "burst-over",
@@ -6071,6 +6299,430 @@ mod tests {
             TTL,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn community_send_window_measures_elapsed_monotonic_time_across_wall_steps() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        for index in 0..COMMUNITY_SENDS_PER_WINDOW {
+            prepare(
+                &core,
+                &format!("window-{index}"),
+                serde_json::json!({"body":format!("message {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        // The wall clock steps back 30 s between two sends. No monotonic time
+        // has passed, so the next send is still inside the window.
+        let refused = prepare(
+            &core,
+            "window-after-step",
+            serde_json::json!({"body":"after step"}),
+            NOW.saturating_sub(30),
+            TTL,
+        )
+        .unwrap_err();
+        assert!(
+            refused.downcast_ref::<CommunitySendRateLimited>().is_some(),
+            "a backward wall step must not reopen the send window"
+        );
+        // The wall clock steps 30 s forward instead. The messages are still
+        // inside their monotonic window, so the send is refused: a forward
+        // step must not shorten the window either.
+        let refused = prepare(
+            &core,
+            "window-after-forward-step",
+            serde_json::json!({"body":"after forward step"}),
+            NOW + 30,
+            TTL,
+        )
+        .unwrap_err();
+        assert!(
+            refused.downcast_ref::<CommunitySendRateLimited>().is_some(),
+            "a forward wall step must not shorten the send window"
+        );
+        // The retry shape the Linux build hits: the wall reading is still 30 s
+        // behind the sends, but a full window of monotonic time has elapsed.
+        // Elapsed monotonic time governs, so the send is admitted.
+        core.advance_send_window(std::time::Duration::from_secs(
+            COMMUNITY_RATE_WINDOW_SECS + 1,
+        ));
+        prepare(
+            &core,
+            "window-after-step",
+            serde_json::json!({"body":"after step"}),
+            NOW.saturating_sub(30),
+            TTL,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn community_send_anchors_are_bounded_and_govern_only_chat() {
+        let fixture = Fixture::new();
+        let mut core = fixture.core();
+        core.sends_per_window = usize::MAX;
+        // Presence is prepared through the same outgoing path but the send
+        // window does not govern it, so it is never anchored.
+        let presence = serde_json::json!({});
+        core.prepare_outgoing(
+            operation(
+                &core,
+                "presence-anchor",
+                crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+                &presence,
+                TTL,
+            ),
+            SERVICE,
+            crate::collaboration_presence::PRESENCE_PAYLOAD_TYPE,
+            presence,
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        assert_eq!(
+            core.send_anchor_count(),
+            0,
+            "a presence send must not be anchored"
+        );
+        // Two governed sends are anchored; once a full window of monotonic
+        // time has passed, the next insert prunes them.
+        for index in 0..2 {
+            prepare(
+                &core,
+                &format!("bounded-{index}"),
+                serde_json::json!({"body":format!("bounded {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        assert_eq!(core.send_anchor_count(), 2);
+        core.advance_send_window(std::time::Duration::from_secs(
+            COMMUNITY_RATE_WINDOW_SECS + 1,
+        ));
+        prepare(
+            &core,
+            "bounded-after",
+            serde_json::json!({"body":"after"}),
+            NOW,
+            TTL,
+        )
+        .unwrap();
+        assert_eq!(
+            core.send_anchor_count(),
+            1,
+            "anchors older than the window must be evicted on insert"
+        );
+
+        // The live set is bounded by the rule's own send count: the window
+        // refuses the send that would exceed it, and no anchor is evicted.
+        let bound_fixture = Fixture::new();
+        let bound_core = bound_fixture.core();
+        for index in 0..COMMUNITY_SENDS_PER_WINDOW {
+            prepare(
+                &bound_core,
+                &format!("bound-{index}"),
+                serde_json::json!({"body":format!("bound {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        assert_eq!(bound_core.send_anchor_count(), COMMUNITY_SENDS_PER_WINDOW);
+        assert!(prepare(
+            &bound_core,
+            "bound-over",
+            serde_json::json!({"body":"over"}),
+            NOW,
+            TTL,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("Slow down"));
+        assert_eq!(
+            bound_core.send_anchor_count(),
+            COMMUNITY_SENDS_PER_WINDOW,
+            "a refused send must not evict a live anchor"
+        );
+    }
+
+    #[test]
+    fn community_send_anchor_bound_never_evicts_a_live_anchor() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let device_did = core.authority.local_device_did();
+        // Seven Profiles of the same device, each at the rule's own limit: 35
+        // live anchors, more than the old global cap of 32.
+        let profiles = (0..7u8)
+            .map(|index| {
+                let mut seed = fixture.device_key.to_bytes();
+                seed[0] ^= index.wrapping_add(1);
+                seed[31] ^= 0xa5;
+                let profile_key = SigningKey::from_bytes(&seed);
+                crate::collaboration_profile_authority::signed_profile_document_for_test(
+                    &profile_key,
+                    &format!("Bound Profile {index}"),
+                    None,
+                    1,
+                    None,
+                    1_800_000_000,
+                    vec![device_did.clone()],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for (profile_index, profile) in profiles.iter().enumerate() {
+            for send_index in 0..COMMUNITY_SENDS_PER_WINDOW {
+                prepare_from(
+                    &core,
+                    profile,
+                    &format!("limit-{profile_index}-{send_index}"),
+                    serde_json::json!({"body":format!("{profile_index}/{send_index}")}),
+                    NOW,
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(
+            core.send_anchor_count(),
+            profiles.len() * COMMUNITY_SENDS_PER_WINDOW,
+            "every live anchor must survive, however many Profiles are at the limit"
+        );
+        for profile_index in 0..profiles.len() {
+            assert!(
+                core.has_send_anchor(&format!("limit-{profile_index}-0")),
+                "the oldest anchor of Profile {profile_index} must survive"
+            );
+        }
+        // A backward wall step must not admit a send or drop a live anchor:
+        // the window is still full by monotonic age.
+        let refused = prepare_from(
+            &core,
+            &profiles[0],
+            "backward-step",
+            serde_json::json!({"body":"backward step"}),
+            NOW.saturating_sub(30),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refused.contains("Slow down"), "{refused}");
+        assert_eq!(
+            core.send_anchor_count(),
+            profiles.len() * COMMUNITY_SENDS_PER_WINDOW
+        );
+        for profile_index in 0..profiles.len() {
+            assert!(core.has_send_anchor(&format!("limit-{profile_index}-0")));
+        }
+        // Only monotonic expiry reopens the window.
+        core.advance_send_window(std::time::Duration::from_secs(COMMUNITY_RATE_WINDOW_SECS));
+        prepare_from(
+            &core,
+            &profiles[0],
+            "after-monotonic-window",
+            serde_json::json!({"body":"after"}),
+            NOW + COMMUNITY_RATE_WINDOW_SECS,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn community_send_window_prune_does_not_open_a_live_window() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        for index in 0..COMMUNITY_SENDS_PER_WINDOW {
+            let outgoing = prepare(
+                &core,
+                &format!("prune-{index}"),
+                serde_json::json!({"body":format!("prune {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+            complete_projection(&core, &outgoing);
+        }
+        // A forward wall step past the message TTL and the skew tolerance may
+        // prune transport-expired records, but never one whose send window is
+        // still open by monotonic age: dropping it would open the window.
+        let stepped = NOW + TTL + MAX_COLLABORATION_CLOCK_SKEW_SECS + 1;
+        core.with_mutation(Some(stepped), |_| {
+            Ok(Mutation {
+                value: (),
+                changed: false,
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            core.load_state().unwrap().unwrap().outgoing.len(),
+            COMMUNITY_SENDS_PER_WINDOW,
+            "a live window must survive wall-based terminal pruning"
+        );
+        assert_eq!(core.send_anchor_count(), COMMUNITY_SENDS_PER_WINDOW);
+        let refused = prepare(
+            &core,
+            "after-forward-step",
+            serde_json::json!({"body":"after step"}),
+            stepped,
+            TTL,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(refused.contains("Slow down"), "{refused}");
+        // Only monotonic expiry reopens the window, and then the records are
+        // transport-expired and prune as before.
+        core.advance_send_window(std::time::Duration::from_secs(COMMUNITY_RATE_WINDOW_SECS));
+        prepare(
+            &core,
+            "after-monotonic-window",
+            serde_json::json!({"body":"after window"}),
+            stepped,
+            TTL,
+        )
+        .unwrap();
+        assert_eq!(core.send_anchor_count(), 1);
+    }
+
+    #[test]
+    fn community_send_window_precheck_shares_the_send_lock() {
+        let fixture = Fixture::new();
+        let core = Arc::new(fixture.core());
+        for index in 0..COMMUNITY_SENDS_PER_WINDOW - 1 {
+            prepare(
+                &core,
+                &format!("precheck-{index}"),
+                serde_json::json!({"body":format!("message {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        let profile_did = core
+            .authority
+            .sender_profile_for_test()
+            .unwrap()
+            .document()
+            .profile_did
+            .clone();
+        // A precheck reads the stored state and updates the window under the
+        // same locks a send commits under. The file lock is held here, so the
+        // worker can only reach its state read after taking the mutation
+        // mutex: observing it there proves the precheck takes that lock.
+        let file_guard = lock_owner_only_file(&core.lock_path()).unwrap();
+        let checking = core.clone();
+        let did = profile_did.clone();
+        let worker = std::thread::spawn(move || checking.check_community_send_allowed(&did, NOW));
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        while core.mutation_mutex.try_lock().is_ok() {
+            assert!(
+                Instant::now() < deadline,
+                "the send-window precheck ran without the send lock"
+            );
+            std::thread::yield_now();
+        }
+        drop(file_guard);
+        worker.join().unwrap().unwrap();
+
+        // Two concurrent sends for one profile: the window admits one and
+        // refuses the other, and the admitted send keeps its anchor.
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let sends = ["race-a", "race-b"]
+            .into_iter()
+            .map(|request_id| {
+                let core = core.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    let result = prepare(
+                        &core,
+                        request_id,
+                        serde_json::json!({"body":request_id}),
+                        NOW,
+                        TTL,
+                    );
+                    (request_id, result)
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        let results = sends
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        let admitted = results
+            .iter()
+            .filter(|(_, result)| result.is_ok())
+            .map(|(request_id, _)| *request_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            admitted.len(),
+            1,
+            "exactly one of two concurrent sends is admitted"
+        );
+        let refused = results
+            .iter()
+            .find(|(_, result)| result.is_err())
+            .expect("the other concurrent send is refused");
+        assert!(
+            refused
+                .1
+                .as_ref()
+                .unwrap_err()
+                .downcast_ref::<CommunitySendRateLimited>()
+                .is_some(),
+            "the refused send must be the rate limit"
+        );
+        assert!(
+            core.has_send_anchor(admitted[0]),
+            "the admitted send's anchor must survive the concurrent race"
+        );
+        assert!(
+            prepare(
+                &core,
+                "race-over",
+                serde_json::json!({"body":"over"}),
+                NOW,
+                TTL
+            )
+            .unwrap_err()
+            .downcast_ref::<CommunitySendRateLimited>()
+            .is_some(),
+            "the window must still be full after the race"
+        );
+    }
+
+    #[test]
+    fn community_send_window_counts_restored_messages_from_their_stored_stamp() {
+        let fixture = Fixture::new();
+        let sender = fixture.core();
+        for index in 0..COMMUNITY_SENDS_PER_WINDOW {
+            prepare(
+                &sender,
+                &format!("restored-{index}"),
+                serde_json::json!({"body":format!("message {index}")}),
+                NOW,
+                TTL,
+            )
+            .unwrap();
+        }
+        // A new process has no anchors; the stored wall stamp seeds one per
+        // governed record once, so the window still counts the sends.
+        let restarted = fixture.core();
+        let refused = prepare(
+            &restarted,
+            "restored-over",
+            serde_json::json!({"body":"over"}),
+            NOW,
+            TTL,
+        )
+        .unwrap_err();
+        assert!(
+            refused.downcast_ref::<CommunitySendRateLimited>().is_some(),
+            "messages restored from disk must still count inside their window"
+        );
+        assert_eq!(restarted.send_anchor_count(), COMMUNITY_SENDS_PER_WINDOW);
     }
 
     #[test]
