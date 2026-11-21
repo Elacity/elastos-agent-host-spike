@@ -50,6 +50,7 @@ pub(super) struct Site {
 
 /// The needle fragments. They are joined only at run time.
 const LOAD: &[&str] = &["lo", "ad"];
+const LOAD_VERIFIED: &[&str] = &["load_", "verified"];
 const START: &[&str] = &["sta", "rt"];
 const START_RESIDENT: &[&str] = &["start_", "resident"];
 const LOAD_ADMITTED: &[&str] = &["load_", "admitted"];
@@ -309,9 +310,9 @@ fn places() -> Vec<Place> {
         place(
             "elastos-server/src/serve_cmd.rs",
             "load_microvm_capsule",
-            label_of("provider", &load),
+            label_of("provider", &joined(LOAD_VERIFIED)),
             1,
-            "entrypoint file checked before MicroVM load; P2-2 authority pending",
+            "signed VM image checked before load",
         ),
         place(
             "elastos-server/src/serve_cmd.rs",
@@ -504,7 +505,7 @@ fn census_preload_checks_run_before_their_loads() {
         "elastos-server/src/serve_cmd.rs",
         "load_microvm_capsule",
         "check_entrypoint_file(",
-        "provider.load",
+        "provider.load_verified",
     )];
 
     for (file, function, check, load) in required_orders {
@@ -515,11 +516,11 @@ fn census_preload_checks_run_before_their_loads() {
             .filter(|&at| enclosing_fn(&code, at) == function)
             .collect();
         let load_sites: Vec<_> = code
-            .match_indices(".load(")
+            .match_indices(".load_verified(")
             .map(|(at, _)| at)
             .filter(|&at| {
                 enclosing_fn(&code, at) == function
-                    && label_of(receiver_before(&code, at), "load") == load
+                    && label_of(receiver_before(&code, at), "load_verified") == load
             })
             .collect();
         assert_eq!(
@@ -545,7 +546,14 @@ fn census_preload_checks_run_before_their_loads() {
 pub(super) fn sites(file: &str, text: &str) -> Vec<Site> {
     let mut sites = Vec::new();
     let code = code_only(text);
-    for parts in [LOAD_SEALED, LOAD_ADMITTED, START_RESIDENT, LOAD, START] {
+    for parts in [
+        LOAD_SEALED,
+        LOAD_ADMITTED,
+        LOAD_VERIFIED,
+        START_RESIDENT,
+        LOAD,
+        START,
+    ] {
         let method = joined(parts);
         let needle = [".", method.as_str(), "("].concat();
         for (at, _) in code.match_indices(&needle) {

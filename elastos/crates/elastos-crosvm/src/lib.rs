@@ -36,6 +36,7 @@ pub use config::{CrosvmConfig, VmConfig};
 pub use network::NetworkConfig;
 pub use provider::CrosvmProvider;
 pub use proxy::TcpProxy;
+pub use rootfs::RootfsManager;
 pub use vm::RunningVm;
 
 /// Check process access to the supported KVM API before admitting a local VM.

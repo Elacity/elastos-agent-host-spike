@@ -37,17 +37,17 @@ const UNPACK_ESTIMATE: u64 = if cfg!(test) { 0 } else { UNPACKED_SET_BYTES };
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct VmImageEntry {
-    path: String,
-    size: u64,
-    sha256: String,
-    cid: String,
+pub(crate) struct VmImageEntry {
+    pub(crate) path: String,
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
+    pub(crate) cid: String,
 }
 
-fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
+pub(crate) fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
     let entry = info.extra.get("vm_image");
     ensure!(
-        entry.is_some() || info.cid.is_none(),
+        entry.is_some() || info.strategy.as_deref() != Some(NAME) || info.cid.is_none(),
         "Browser image has no signed VM image entry"
     );
     let Some(entry) = entry else { return Ok(None) };
