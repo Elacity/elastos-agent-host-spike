@@ -147,7 +147,7 @@ pub fn list(handle: &File) -> io::Result<Vec<(OsString, u32)>> {
                     .read_unaligned()
             };
             let len = info.FileNameLength as usize;
-            if len % 2 != 0 || len > bytes - offset - name_at {
+            if !len.is_multiple_of(2) || len > bytes - offset - name_at {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid directory name",
@@ -172,7 +172,10 @@ pub fn list(handle: &File) -> io::Result<Vec<(OsString, u32)>> {
             if next == 0 {
                 break;
             }
-            if next < size_of::<FILE_ID_BOTH_DIR_INFO>() || next > bytes - offset || next % 2 != 0 {
+            if next < size_of::<FILE_ID_BOTH_DIR_INFO>()
+                || next > bytes - offset
+                || !next.is_multiple_of(2)
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid directory offset",
