@@ -6,11 +6,15 @@ use std::path::Path;
 pub(crate) const PROFILE_HEAD: [&str; 3] = ["(version 1)", "(deny default)", "(deny network*)"];
 /// The right ids the shared contract names. A declared-rights file may claim
 /// only these.
-pub(crate) const CONTRACT_RIGHTS: [&str; 2] = ["storage", "bound-executable"];
+pub(crate) const CONTRACT_RIGHTS: [&str; 3] = ["storage", "bound-executable", "model-gpu"];
 /// The platform-baseline ids the shared contract names. A declared-rights file
 /// may claim only these under its platform baseline; they are the Runtime
 /// platform baseline for the provider executable on macOS, not approved rights.
-pub(crate) const PLATFORM_BASELINE_IDS: [&str; 2] = ["startup-root-directory", "startup-sysctl"];
+pub(crate) const PLATFORM_BASELINE_IDS: [&str; 3] = [
+    "startup-root-directory",
+    "startup-sysctl",
+    "model-launch-inputs",
+];
 /// The sentence a declared-rights file gives for its own role.
 pub(crate) const DECLARED_RIGHTS_ROLE: &str =
     "lab stand-in for the Runtime generator's input, not a manifest field";
