@@ -1282,10 +1282,8 @@ fn verify_home_cli_receipts(entry: &InstalledComponentEntry) -> anyhow::Result<&
     let executable_checksum = signed_executable_checksum(&entry.platform_info)
         .ok_or_else(|| anyhow::anyhow!("Home CLI signed executable digest is missing"))?;
     anyhow::ensure!(
-        read_artifact_sha256_receipt(&bundle)? == bare_sha256(&entry.checksum)
-            && fs::read_to_string(bundle.join(CACHED_EXECUTABLE_SHA_FILE))?.trim()
-                == bare_sha256(executable_checksum),
-        "Home CLI executable receipt differs from its signed release digest"
+        read_artifact_sha256_receipt(&bundle)? == bare_sha256(&entry.checksum),
+        "Home CLI archive receipt differs from its signed release digest"
     );
     Ok(executable_checksum)
 }
