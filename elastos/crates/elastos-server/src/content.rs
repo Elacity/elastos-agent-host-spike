@@ -3819,17 +3819,21 @@ impl ContentProvider {
             .map_err(|_| ProviderError::Provider("content receipt signer unavailable".into()))?;
         if for_request.iter().any(|receipt| {
             receipt.verified
-                && receipt.countersignature.as_ref().is_none_or(|signed| {
-                    verify_holder_serve_receipt(
-                        signed,
-                        &receipt.peer_did,
-                        &receipt.requested_cid,
-                        &requester_did,
-                        receipt.bytes_received,
-                        &signed.payload.nonce,
-                    )
-                    .is_err()
-                })
+                && receipt
+                    .serve_nonce
+                    .as_deref()
+                    .zip(receipt.countersignature.as_ref())
+                    .is_none_or(|(nonce, signed)| {
+                        verify_holder_serve_receipt(
+                            signed,
+                            &receipt.peer_did,
+                            &receipt.requested_cid,
+                            &requester_did,
+                            receipt.bytes_received,
+                            nonce,
+                        )
+                        .is_err()
+                    })
         }) {
             return Ok(DistinctHolderGate::Unproven);
         }
@@ -6351,6 +6355,9 @@ pub struct FetchReceipt {
     result: FetchResult,
     attempt: u8,
     time: u64,
+    /// Nonce issued by the requester collector for this holder attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    serve_nonce: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     countersignature: Option<SignedHolderServeReceipt>,
 }
@@ -6386,6 +6393,8 @@ struct FetchReceiptWire {
     result: FetchResult,
     attempt: u8,
     time: u64,
+    #[serde(default)]
+    serve_nonce: Option<String>,
     #[serde(default)]
     countersignature: Option<SignedHolderServeReceipt>,
 }
@@ -6425,6 +6434,7 @@ impl FetchReceipt {
             attempt,
             time,
             None,
+            None,
         )
     }
 
@@ -6437,6 +6447,7 @@ impl FetchReceipt {
         result: FetchResult,
         attempt: u8,
         time: u64,
+        serve_nonce: Option<&str>,
         countersignature: Option<SignedHolderServeReceipt>,
     ) -> Result<Self, String> {
         require_fetch_receipt_cid(requested_cid)?;
@@ -6447,6 +6458,9 @@ impl FetchReceipt {
         }
         if time == 0 {
             return Err("fetch receipt requires a time".into());
+        }
+        if serve_nonce.is_some_and(|nonce| !valid_serve_nonce(nonce)) {
+            return Err("fetch receipt requires a valid serve nonce".into());
         }
         match &result {
             FetchResult::Ok if !verified || bytes_received == 0 => {
@@ -6478,6 +6492,7 @@ impl FetchReceipt {
             result,
             attempt,
             time,
+            serve_nonce: serve_nonce.map(str::to_owned),
             countersignature,
         })
     }
@@ -6493,10 +6508,12 @@ impl FetchReceipt {
     /// The signed set verifier checks its cryptographic and requester binding.
     pub(crate) fn counted_holder_did(&self) -> Option<&str> {
         let signed = self.countersignature.as_ref()?;
+        let nonce = self.serve_nonce.as_deref()?;
         (self.verified
             && signed.signer_did == self.peer_did
             && signed.payload.cid == self.requested_cid
-            && signed.payload.bytes == self.bytes_received)
+            && signed.payload.bytes == self.bytes_received
+            && signed.payload.nonce == nonce)
             .then_some(self.peer_did.as_str())
     }
 
@@ -6515,6 +6532,7 @@ impl FetchReceipt {
             wire.result,
             wire.attempt,
             wire.time,
+            wire.serve_nonce.as_deref(),
             wire.countersignature,
         )?;
         if receipt.encode_canonical().map_err(|err| err.to_string())? != encoded {
@@ -6538,6 +6556,7 @@ impl<'de> Deserialize<'de> for FetchReceipt {
             wire.result,
             wire.attempt,
             wire.time,
+            wire.serve_nonce.as_deref(),
             wire.countersignature,
         )
         .map_err(serde::de::Error::custom)
@@ -6676,13 +6695,16 @@ pub fn verify_signed_fetch_receipt_set(
             let signed = receipt.countersignature.as_ref().ok_or_else(|| {
                 ProviderError::Provider("verified fetch receipt requires a countersignature".into())
             })?;
+            let nonce = receipt.serve_nonce.as_deref().ok_or_else(|| {
+                ProviderError::Provider("verified fetch receipt requires a collector nonce".into())
+            })?;
             verify_holder_serve_receipt(
                 signed,
                 &receipt.peer_did,
                 &receipt.requested_cid,
                 requester_did,
                 receipt.bytes_received,
-                &signed.payload.nonce,
+                nonce,
             )?;
         }
     }
@@ -10084,6 +10106,7 @@ mod tests {
             FetchResult::Ok,
             attempt,
             time,
+            Some(&nonce),
             Some(signed),
         )
         .unwrap()
@@ -10400,8 +10423,8 @@ mod tests {
         ]
     }
 
-    /// Existing mock answers use fixed holder keys. Bind their rows to the
-    /// requester key created by each isolated test Home.
+    /// Existing mock answers use fixed holder keys. Act as the collector:
+    /// issue a nonce and bind holder rows to each isolated test Home's key.
     fn bind_mock_holder_rows(value: &mut Value, requester_did: &str) {
         if let Some(rows) = value.as_array_mut() {
             for row in rows {
@@ -10429,6 +10452,7 @@ mod tests {
                                 time,
                             )
                             .unwrap();
+                            object.insert("serve_nonce".into(), json!(nonce));
                             object.insert(
                                 "countersignature".into(),
                                 serde_json::to_value(signed).unwrap(),
@@ -10549,6 +10573,40 @@ mod tests {
     }
 
     #[test]
+    fn content_boundary_refuses_a_replayed_holder_nonce() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let mut receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        receipt.serve_nonce = Some("abcdef0123456789abcdef0123456789".into());
+        let mut availability = json!({"receipts": [receipt]});
+        let result = ContentProvider::settle_distinct_holder_success(
+            Some(data_dir.path()),
+            TEST_CID,
+            1,
+            &mut availability,
+        )
+        .unwrap();
+        assert!(matches!(result, DistinctHolderGate::Unproven));
+    }
+
+    #[test]
+    fn content_boundary_refuses_a_row_without_collector_nonce() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let mut receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        receipt.serve_nonce = None;
+        let mut availability = json!({"receipts": [receipt]});
+        let result = ContentProvider::settle_distinct_holder_success(
+            Some(data_dir.path()),
+            TEST_CID,
+            1,
+            &mut availability,
+        )
+        .unwrap();
+        assert!(matches!(result, DistinctHolderGate::Unproven));
+    }
+
+    #[test]
     fn distinct_holder_refusal_does_not_sign_a_foreign_cid_row() {
         let data_dir = tempfile::tempdir().unwrap();
         let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
@@ -10634,6 +10692,26 @@ mod tests {
             "requester-signed-holder-countersigned"
         );
         assert_eq!(parsed.signer_did, requester_did);
+    }
+
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_replayed_holder_nonce() {
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let mut receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        receipt.serve_nonce = Some("abcdef0123456789abcdef0123456789".into());
+        let payload = consistent_receipt_set(vec![receipt], TEST_CID);
+        let (signed, requester_did) = sign_payload_with_test_key(payload);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_row_without_collector_nonce() {
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let mut receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        receipt.serve_nonce = None;
+        let payload = consistent_receipt_set(vec![receipt], TEST_CID);
+        let (signed, requester_did) = sign_payload_with_test_key(payload);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
     }
 
     /// A changed byte in one receipt refuses: the signature covers every row.

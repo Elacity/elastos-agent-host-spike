@@ -4859,6 +4859,7 @@ impl CarrierAvailabilityProvider {
                             FetchResult::Ok,
                             bytes.len() as u64,
                             attempt,
+                            serve_nonce.as_deref(),
                             countersignature,
                         ) {
                             Ok(enough) => enough,
@@ -4954,6 +4955,7 @@ impl CarrierAvailabilityProvider {
                                                 FetchResult::Ok,
                                                 bytes.len() as u64,
                                                 attempt,
+                                                serve_nonce.as_deref(),
                                                 countersignature,
                                             ) {
                                                 Ok(enough) => enough,
@@ -5199,6 +5201,7 @@ fn record_unsigned_holder(
         bytes_received,
         attempt,
         None,
+        None,
     );
 }
 
@@ -5227,6 +5230,7 @@ fn record_corrupt_holder(
         bytes_received,
         attempt,
         None,
+        None,
     );
 }
 
@@ -5242,6 +5246,7 @@ fn record_holder_answer(
     result: FetchResult,
     bytes_received: u64,
     attempt: u8,
+    serve_nonce: Option<&str>,
     countersignature: Option<SignedHolderServeReceipt>,
 ) -> Result<bool, String> {
     if required == 0 {
@@ -5255,6 +5260,7 @@ fn record_holder_answer(
         result,
         attempt,
         now_secs(),
+        serve_nonce,
         countersignature,
     )?);
     Ok(distinct_holder_count(receipts) >= usize::from(required))
@@ -16275,6 +16281,10 @@ pub(crate) mod tests {
         assert_eq!(receipts.len(), 2);
         assert_eq!(requests.len(), 2);
         for (index, holder_did) in [first_did, second_did].iter().enumerate() {
+            assert_eq!(
+                receipts[index]["serve_nonce"],
+                requests[index]["request"]["serve_nonce"]
+            );
             let signed: crate::content::SignedHolderServeReceipt =
                 serde_json::from_value(receipts[index]["countersignature"].clone()).unwrap();
             crate::content::verify_holder_serve_receipt(
