@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::collections::{BTreeMap, VecDeque};
 use std::env;
 #[cfg(unix)]

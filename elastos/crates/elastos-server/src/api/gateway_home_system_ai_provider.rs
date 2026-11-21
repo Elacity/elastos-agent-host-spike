@@ -1119,6 +1119,7 @@ mod parse_tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn staged_discard_waits_for_inflight_setup_and_ends_its_pending_decision() {
         use crate::api::model_provider_egress_decision::{ConnectionScope, EgressScope};
 

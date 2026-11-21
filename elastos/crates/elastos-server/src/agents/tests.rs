@@ -1,6 +1,8 @@
 //! Tests for the agent file. Rules that need the feature on are in
 //! `feature_on`; the rest run in every build.
 
+#![cfg(unix)]
+
 use super::*;
 use serde_json::{json, Value};
 

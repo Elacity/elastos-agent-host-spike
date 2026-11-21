@@ -1732,6 +1732,7 @@ mod tests {
     /// agent exists), and it does not name the cargo feature, which is read
     /// in one place only (`agents::build_allows`).
     #[tokio::test]
+    #[cfg(unix)]
     async fn a_vm_launch_refuses_a_stored_agents_principal() {
         let Some((_home, agents)) =
             crate::agents::tests::home_with_agents_if_built(1, "bafkreia5probe")
@@ -2045,6 +2046,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[cfg(unix)]
     async fn on_demand_chat_home_launch_uses_carrier_and_refuses_checksum_mismatch() {
         let capsule = include_bytes!("../../../../capsules/chat-room/capsule.json");
         let page = b"<!doctype html><title>Chat fixture</title>";
@@ -3032,6 +3034,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[cfg(unix)]
     async fn signed_home_supervisor_admits_records_before_any_acquisition() {
         let root = tempfile::tempdir().unwrap();
         // The installed signed release lists records and also a registry capsule.

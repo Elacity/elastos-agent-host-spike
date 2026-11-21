@@ -2285,6 +2285,7 @@ fn optional_release_object_cid(head: &serde_json::Value) -> anyhow::Result<Optio
 
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use super::*;
     use crate::sources::save_trusted_sources;
 

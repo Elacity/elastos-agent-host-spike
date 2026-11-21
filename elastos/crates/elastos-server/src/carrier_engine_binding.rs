@@ -358,6 +358,48 @@ pub(crate) use egress::{
     bind as bind_egress, connect as connect_egress, remove as remove_egress, serve as serve_egress,
 };
 
+#[cfg(windows)]
+pub(crate) async fn bind_egress(
+    _data_dir: &std::path::Path,
+    _peer: iroh::PublicKey,
+    _page: &str,
+    _generation: &str,
+    _stream_id: &str,
+    _path: &std::path::Path,
+) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser Engine egress is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(windows)]
+pub(crate) async fn remove_egress(
+    _data_dir: &std::path::Path,
+    _page: &str,
+    _generation: &str,
+) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser Engine egress is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(windows)]
+pub(crate) async fn connect_egress(
+    _endpoint: &iroh::Endpoint,
+    _owner: &RemoteEngineOwner,
+    _stream_id: &str,
+) -> Result<crate::carrier::BrowserCarrierStream> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser Engine egress is unsupported on Windows",
+    )
+    .into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

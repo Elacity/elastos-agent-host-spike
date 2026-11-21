@@ -402,8 +402,13 @@ fn parent_process_id() -> Option<u32> {
     }
 }
 
+#[cfg(unix)]
 struct SavedTermios(libc::termios);
 
+#[cfg(windows)]
+struct SavedTermios;
+
+#[cfg(unix)]
 fn enable_host_raw_mode() -> Option<SavedTermios> {
     unsafe {
         let mut original: libc::termios = std::mem::zeroed();
@@ -439,11 +444,20 @@ fn enable_host_raw_mode() -> Option<SavedTermios> {
     }
 }
 
+#[cfg(windows)]
+fn enable_host_raw_mode() -> Option<SavedTermios> {
+    None
+}
+
+#[cfg(unix)]
 fn restore_host_terminal(saved: SavedTermios) {
     unsafe {
         libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &saved.0);
     }
 }
+
+#[cfg(windows)]
+fn restore_host_terminal(_saved: SavedTermios) {}
 
 /// Public wrapper for raw mode — used by run_cmd, chat_cmd, and home_cmd.
 /// Returns a guard that restores the terminal on drop.

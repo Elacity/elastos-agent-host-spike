@@ -10473,6 +10473,7 @@ async fn test_private_engine_request_requires_share_before_inbox_approval() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_inbox_request_copy_matches_engine_or_exit_and_exact_approval() {
     for (engine, service_name, offer_name, approval_text) in [
@@ -10940,6 +10941,7 @@ async fn test_only_an_admin_approves_an_offer_its_listing_marks_hosted() {
     assert!(request["grant_expires_at"].is_u64(), "{saved}");
 }
 
+#[cfg(unix)]
 async fn services_contact_pending_engine_request(
     left: &std::path::Path,
     right: &std::path::Path,
@@ -11024,6 +11026,7 @@ impl Provider for ServicesEngineProbeProvider {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_remote_engine_signed_approval_retains_scoped_execution_grant() {
     let left = tempfile::tempdir().unwrap();
@@ -11412,6 +11415,7 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
 
 /// wiring row: pins which store resolve reads; not a fail-closed proof
 /// (Rong 1106 sec. 3).
+#[cfg(unix)]
 #[tokio::test]
 async fn p2a_i_a_wiring_loop_resolve_reads_the_listing_store() {
     let left = tempfile::tempdir().unwrap();

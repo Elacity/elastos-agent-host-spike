@@ -2600,7 +2600,7 @@ fn valid_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) mod tests;
 
 #[cfg(all(test, windows))]

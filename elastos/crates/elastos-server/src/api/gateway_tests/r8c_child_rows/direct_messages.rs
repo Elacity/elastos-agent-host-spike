@@ -9,6 +9,8 @@
 //! `decide_contact_request` (gateway_inbox.rs:691). The rows call it
 //! themselves, as `home_launch` does when Home opens.
 
+#![cfg(unix)]
+
 use super::*;
 use crate::collaboration_direct_messages::{DirectSendAuthority, DirectSendIntent};
 use crate::collaboration_discovery_runtime::CollaborationDiscoveryService;

@@ -18,6 +18,10 @@ fn unsupported() -> std::io::Error {
 }
 
 impl Owner {
+    pub(crate) fn lock(&self) -> Result<crate::host_lock::FileLock> {
+        Err(unsupported().into())
+    }
+
     pub(crate) fn read(_data_dir: &Path) -> Result<Self> {
         Err(unsupported().into())
     }

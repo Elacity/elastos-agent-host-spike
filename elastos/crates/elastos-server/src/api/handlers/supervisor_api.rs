@@ -796,6 +796,7 @@ mod tests {
     /// the planted handler could not change this row's literal. It is skipped
     /// by name in that build.
     #[tokio::test]
+    #[cfg(unix)]
     async fn r6_2b_an_agent_shaped_payload_launches_as_the_person_and_touches_no_agent_root() {
         let Some((home, agents)) =
             crate::agents::tests::home_with_agents_if_built(1, "bafkreia5probe")
@@ -1092,6 +1093,7 @@ mod tests {
 
     /// Stage one verified host artifact at <data_dir>/bin/<name> and return
     /// the on-disk platform entry that pins its bytes.
+    #[cfg(unix)]
     fn f35_stage_component(data_dir: &Path, name: &str, source: &Path) -> serde_json::Value {
         let dest = data_dir.join("bin").join(name);
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -1195,6 +1197,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn f35_fixture() -> F35Fixture {
         use crate::setup::{CapsuleEntry, ComponentsManifest};
         let crosvm = f35_host_file("ELASTOS_F35_CROSVM");
@@ -1342,6 +1345,7 @@ mod tests {
     /// find them.
     #[tokio::test]
     #[ignore = "F3.5 needs /dev/kvm; run the KVM receipt with --ignored"]
+    #[cfg(unix)]
     async fn two_people_launching_a_vm_get_two_bridge_principals() {
         // Independent literals, derived outside Rust:
         // printf %s '<id>' | shasum -a 256 | cut -c1-24

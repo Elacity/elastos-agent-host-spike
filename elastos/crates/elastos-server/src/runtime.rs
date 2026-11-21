@@ -3492,6 +3492,7 @@ pub(crate) mod tests {
     /// An installed Home whose config.toml still says `dev_mode = true` (the
     /// earlier default) admits only its signed release's capsules and capsules
     /// signed by the release publisher.
+    #[cfg(unix)]
     #[tokio::test]
     async fn installed_release_refuses_unsigned_and_foreign_signed_local_capsules() {
         let mut home = crate::installed_release::tests::Fixture::new();
@@ -4487,6 +4488,7 @@ pub(crate) mod tests {
 
     /// A Runtime with the component provider, the real resource bridge, and a
     /// stored Agent whose root has principal-root protection, as on a Home.
+    #[cfg(unix)]
     struct AgentHostRuntime {
         runtime: Arc<Runtime>,
         capability_manager: Arc<CapabilityManager>,
@@ -4499,6 +4501,7 @@ pub(crate) mod tests {
         _temp: tempfile::TempDir,
     }
 
+    #[cfg(unix)]
     async fn agent_host_runtime() -> AgentHostRuntime {
         use crate::bundle_admission::tests::key;
         use crate::stage_cmd::bundle_cid;
@@ -4580,6 +4583,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn agent_host_journal(fx: &AgentHostRuntime) -> (String, String) {
         let root =
             crate::auth::principal_stored_localhost_root(Some(&fx.data_dir), &fx.agent_id).unwrap();
@@ -4587,6 +4591,7 @@ pub(crate) mod tests {
         (root, journal)
     }
 
+    #[cfg(unix)]
     fn launch_agent_host(
         fx: &AgentHostRuntime,
     ) -> tokio::task::JoinHandle<elastos_common::Result<elastos_compute::CapsuleHandle>> {
@@ -4657,6 +4662,7 @@ pub(crate) mod tests {
     }
 
     /// The guest journals its activation before asking to submit a plan.
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_writes_and_reads_its_journal_through_the_real_bridge() {
@@ -4751,6 +4757,7 @@ pub(crate) mod tests {
 
     /// A task whose stored journal is format 1: the guest's run fails with
     /// exactly the text the person sees, and the stored object is not touched.
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_refuses_a_format_1_journal_with_its_reason() {
@@ -4823,6 +4830,7 @@ pub(crate) mod tests {
 
     /// The shell denies both journal requests: the guest finishes before a
     /// submit ask, sends no resource call, and stores nothing.
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_stores_nothing_when_its_journal_grants_are_denied() {
@@ -5004,6 +5012,7 @@ pub(crate) mod tests {
     /// before the provider is reached; the audit names B as the caller of the
     /// failed use and `wrong_capsule` as the reason. A's own invoke is the
     /// control: the provider is called exactly once, for A.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sibling_token_refused() {
         if !crate::agents::build_allows() {

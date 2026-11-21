@@ -3,6 +3,8 @@
 //! Every case drives the real Inbox action route with a Home launch token and a
 //! fresh passkey step-up token bound to the request.
 
+#![cfg(unix)]
+
 use super::*;
 use crate::api::gateway::submit_pending_agent_plan;
 use std::path::Path;

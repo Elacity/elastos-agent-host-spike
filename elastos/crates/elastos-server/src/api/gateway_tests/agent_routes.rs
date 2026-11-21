@@ -2,6 +2,8 @@
 //!
 //! `off` runs in a build without the feature and `on` in a build with it.
 
+#![cfg(unix)]
+
 use super::*;
 
 const ENABLE: &str = "/api/apps/system/agents/enable";

@@ -1259,6 +1259,7 @@ async fn test_unadvertised_and_stale_artifacts_404_and_nested_paths_400() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_linked_receipt_metadata_and_artifacts_503() {
     use std::os::unix::fs::symlink;
@@ -1307,6 +1308,7 @@ async fn test_linked_receipt_metadata_and_artifacts_503() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_unsafe_or_oversized_receipt_503() {
     use std::os::unix::fs::PermissionsExt;

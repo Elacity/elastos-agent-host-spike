@@ -2289,6 +2289,7 @@ mod hosted_hint_tests {
 
 #[cfg(test)]
 mod validate_fixture_tests {
+    #![cfg(unix)]
     use super::{load_hosted_validate_fixtures, parse_loopback_http_url};
 
     fn write_validate_fixtures(data_dir: &std::path::Path, body: &str) {

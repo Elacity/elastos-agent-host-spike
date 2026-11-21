@@ -2259,6 +2259,7 @@ pub(crate) mod tests {
     /// Installs the launch probe as this Home's signed Agent Host, under the
     /// publisher key the release fixture already uses. Create and launch both
     /// walk this one directory.
+    #[cfg(unix)]
     fn install_probe_as_signed_agent_host() -> crate::installed_release::tests::Fixture {
         use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
 
@@ -2436,6 +2437,7 @@ pub(crate) mod tests {
     /// instance is the other agent's id, and both run the one installed host.
     /// A created agent starts off, so the owner turns each one on through
     /// `POST /api/apps/system/agents/activate` before it launches.
+    #[cfg(unix)]
     #[tokio::test]
     async fn two_route_created_ids_one_host() {
         if crate::agents::require_build().is_err() {

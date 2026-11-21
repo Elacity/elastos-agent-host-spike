@@ -18,7 +18,15 @@ mod browser_config;
 pub use browser_config::browser_available;
 pub(crate) use browser_config::linux_host_setup_message;
 pub(crate) use browser_config::repair_browser_host_components_for_open;
+#[cfg(unix)]
 mod browser_linux;
+#[cfg(windows)]
+#[path = "setup/browser_linux_windows.rs"]
+mod browser_linux;
+#[cfg(unix)]
+mod browser_vm_image;
+#[cfg(windows)]
+#[path = "setup/browser_vm_image_windows.rs"]
 mod browser_vm_image;
 pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
 pub(crate) use browser_vm_image::verified_seed_identity as verified_browser_vm_seed_identity;
@@ -2845,7 +2853,7 @@ fn write_install_cid_ledger(data_dir: &Path, dir: &Path, cid: Option<&str>) -> a
     Ok(())
 }
 
-#[cfg(all(test, windows))]
+#[cfg(windows)]
 fn write_install_cid_ledger(
     _data_dir: &Path,
     _dir: &Path,
@@ -5282,6 +5290,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #![cfg(unix)]
     use super::*;
     use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};
     use elastos_common::{CapsuleManifest, CapsuleRole};

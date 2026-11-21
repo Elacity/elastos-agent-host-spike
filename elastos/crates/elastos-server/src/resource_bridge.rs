@@ -607,6 +607,7 @@ pub(crate) struct ModelDispatchBudget {
 /// Must be called BEFORE starting the VM so the socket exists when crosvm launches.
 /// Reads `RequestEnvelope` JSON lines, dispatches to providers,
 /// writes `ResponseEnvelope` JSON lines back.
+#[cfg(unix)]
 pub async fn spawn_resource_bridge(
     socket_path: &Path,
     _provider_registry: Arc<ProviderRegistry>,
@@ -692,6 +693,20 @@ pub async fn spawn_resource_bridge(
     });
 
     Ok(())
+}
+
+#[cfg(windows)]
+pub async fn spawn_resource_bridge(
+    _socket_path: &Path,
+    _provider_registry: Arc<ProviderRegistry>,
+    _session_token: String,
+    _bridge_ctx: Option<BridgeContext>,
+) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "microVM resource bridge is unsupported on Windows",
+    )
+    .into())
 }
 
 /// Parse an action string into a capability Action.
@@ -7443,6 +7458,7 @@ pub(crate) mod tests {
     /// The shipped Agent Host asks for two journal grants and one plan submit
     /// grant. These grants cannot delete `.AppData`, the root, or the journal.
     #[tokio::test]
+    #[cfg(unix)]
     async fn the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root() {
         let manifest: elastos_common::CapsuleManifest =
             serde_json::from_str(include_str!("../../../../examples/agent-host/capsule.json"))
@@ -8268,6 +8284,7 @@ pub(crate) mod tests {
     /// A Home with agents on and one stored agent, and that agent's bridge:
     /// (home, bridge, provider, requesting agent, owner). `None` in a build
     /// without agents.
+    #[cfg(unix)]
     async fn submit_agent_plan_context() -> Option<(
         crate::agents::tests::Home,
         BridgeContext,
@@ -8379,6 +8396,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_submit_records_one_bound_pending_plan_and_no_effect() {
         let Some((home, ctx, provider, requester, owner)) = submit_agent_plan_context().await
         else {
@@ -8469,6 +8487,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     #[ignore = "reads Agent Host preview bytes; run examples/agent-host/run-e2e.sh"]
+    #[cfg(unix)]
     async fn a15r_june_plan_stores_and_shows_the_document_step_bytes() {
         let Some((home, ctx, provider, _requester, owner)) = submit_agent_plan_context().await
         else {
@@ -8528,6 +8547,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_submit_requires_the_right_agent_identity_and_stored_owner() {
         let Some((home, ctx, _provider, requester, owner)) = submit_agent_plan_context().await
         else {
@@ -8611,6 +8631,7 @@ pub(crate) mod tests {
     // The Inbox listing that Inbox, Home's summary and Home events read: the
     // owner's holds the plan's card, and the agent's own holds none.
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_plan_card_reaches_owner_not_agent() {
         let Some((home, ctx, _provider, requester, owner)) = submit_agent_plan_context().await
         else {
@@ -8662,6 +8683,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_submit_refused_while_agents_are_off() {
         let Some((home, ctx, provider, _requester, _owner)) = submit_agent_plan_context().await
         else {
@@ -8673,6 +8695,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_submit_refused_for_a_retired_agent() {
         let Some((home, ctx, provider, requester, _owner)) = submit_agent_plan_context().await
         else {

@@ -2393,6 +2393,19 @@ fn runtime_media_tool_matches(
     }
 }
 
+#[cfg(windows)]
+fn runtime_media_tool_matches(
+    _source: &mut RuntimeMediaToolSource,
+    _destination: &Path,
+    _name: &str,
+) -> anyhow::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private media tool verification is unsupported on Windows",
+    )
+    .into())
+}
+
 #[cfg(unix)]
 fn create_private_file_atomically(
     path: &Path,

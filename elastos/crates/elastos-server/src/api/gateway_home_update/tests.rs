@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::super::gateway_home_update::{
     check_matches_source, choice_matches, system_runtime_update_summary_with_cache,
     system_update_failure, SystemUpdateApplyRequest, UpdateCheckCache, UpdateCheckKey,

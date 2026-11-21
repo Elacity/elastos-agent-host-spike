@@ -806,6 +806,7 @@ fn decode(value: &str, label: &str) -> anyhow::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use super::*;
     use crate::collaboration_discovery_runtime::tests::signed_profile;
     use crate::collaboration_profile_authority::signed_profile_document_for_test;

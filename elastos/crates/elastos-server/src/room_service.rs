@@ -5838,6 +5838,7 @@ fn unlock_state_file(lock: FileLock) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use super::*;
 
     fn test_room_authorization(principal: &str) -> RoomSessionAuthorization {

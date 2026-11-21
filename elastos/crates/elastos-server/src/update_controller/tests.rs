@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::host_lock::test_support::SpawnedWhileOpen;
 use elastos_common::localhost::{

@@ -316,6 +316,7 @@ fn local_vm_selected_with_override(
     }))
 }
 
+#[cfg(unix)]
 fn ensure_viewer_ingress(data: &Path) -> anyhow::Result<()> {
     let path = data.join("config/browser-viewer-ingress.json");
     if path.symlink_metadata().is_ok() {
@@ -335,9 +336,20 @@ fn ensure_viewer_ingress(data: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn ensure_viewer_ingress(_data: &Path) -> anyhow::Result<()> {
+    Err(super::windows_unsupported("Browser viewer ingress setup"))
+}
+
+#[cfg(unix)]
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn executable(_path: &Path) -> bool {
+    false
 }
 
 fn host_program(data: &Path, name: &str) -> Option<PathBuf> {
@@ -474,6 +486,7 @@ pub(super) fn pending_download_bytes(
 /// release-owned Browser host files an earlier release installed, so neither
 /// Runtime nor the installer's Linux host step acts on them. Browser profiles
 /// under `Users/` belong to their owner and stay.
+#[cfg(unix)]
 fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Result<()> {
     let browser_installed = data.join("capsules/browser").is_dir();
     let selection = data.join("config/browser-engine-adapter.json");
@@ -547,6 +560,11 @@ fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Res
         println!("Browser is not available on this computer yet.");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn retire_host(_data: &Path, _manifest: &super::ComponentsManifest) -> anyhow::Result<()> {
+    Err(super::windows_unsupported("Browser host retirement"))
 }
 
 pub(super) fn configure(data: &Path, platform: &str, release_image: bool) -> anyhow::Result<()> {
@@ -655,6 +673,7 @@ fn generate(
     generate_with_migration(data, platform, release_image, node, turn, false)
 }
 
+#[cfg(unix)]
 fn generate_with_migration(
     data: &Path,
     platform: &str,
@@ -709,8 +728,23 @@ fn generate_with_migration(
     Ok(())
 }
 
+#[cfg(windows)]
+fn generate_with_migration(
+    _data: &Path,
+    _platform: &str,
+    _release_image: bool,
+    _node: &Path,
+    _turn: &Path,
+    _replace_selection: bool,
+) -> anyhow::Result<()> {
+    Err(super::windows_unsupported(
+        "Browser local Engine configuration",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use super::*;
     use serde_json::Value;
     use sha2::Digest;

@@ -1206,6 +1206,20 @@ pub(in crate::api::gateway) async fn attach_remote_engine_stream(
     Ok(receipt)
 }
 
+#[cfg(windows)]
+pub(in crate::api::gateway) async fn attach_remote_engine_stream(
+    _data_dir: &FsPath,
+    _owner: &crate::carrier::browser_engine_binding::RemoteEngineOwner,
+    _endpoint: &iroh::Endpoint,
+    _receipt: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser Engine stream attachment is unsupported on Windows",
+    )
+    .into())
+}
+
 #[cfg(unix)]
 async fn spawn_browser_runtime_stream_listener(
     path: &FsPath,
@@ -1708,6 +1722,7 @@ fn scrub_browser_stream_authority_fields(value: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use super::*;
     use serde_json::json;
 
