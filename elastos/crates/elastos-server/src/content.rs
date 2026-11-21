@@ -3681,7 +3681,7 @@ impl ContentProvider {
             hop.progress = None;
         }
 
-        let response = match registry
+        let mut response = match registry
             .invoke_provider(ProviderInvocation {
                 source: source.to_string(),
                 target: "availability".to_string(),
@@ -3744,19 +3744,35 @@ impl ContentProvider {
         if transfer.bounded_read {
             check_bounded_availability_payload(&response, transfer)?;
         }
-        let payload = provider_response_payload(&response, "availability provider", transfer)?;
         let whole_object = path.is_empty() && !transfer.bounded_read && transfer.range.is_none();
         if whole_object {
-            let bytes = match &payload {
-                ContentFetchPayload::Bytes(data) => base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?,
-                ContentFetchPayload::Stream(stream) => provider_stream_payload_bytes(stream)?,
+            let verified = match transfer.transfer {
+                ProviderTransfer::Stream => verify_carrier_content_cid_stream(
+                    cid,
+                    response.pointer("/data/stream").ok_or_else(|| {
+                        ProviderError::Provider(
+                            "availability response missing stream payload".into(),
+                        )
+                    })?,
+                )?,
+                _ => verify_carrier_content_cid_base64(
+                    cid,
+                    response
+                        .pointer("/data/data")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            ProviderError::Provider(
+                                "availability response missing base64 data".into(),
+                            )
+                        })?,
+                )?,
             };
-            if !verify_carrier_content_cid(cid, &bytes)? {
+            if !verified {
                 return Err(ProviderError::Provider("availability CID mismatch".into()));
             }
         }
+        let payload =
+            provider_response_payload_owned(&mut response, "availability provider", transfer)?;
         let mut availability = response
             .get("data")
             .and_then(|data| data.get("availability"))
@@ -9195,11 +9211,21 @@ fn provider_response_ok(response: &Value, operation: &str) -> Result<(), Provide
 // import profiles used by Content from the received bytes, before returning
 // them to the caller. A CID with another codec or import recipe fails closed.
 pub(crate) fn verify_carrier_content_cid(cid: &str, bytes: &[u8]) -> Result<bool, ProviderError> {
-    if bytes.len() > IMPORT_EXACT_MAX_BYTES {
-        return Err(ProviderError::Provider(
-            "content exceeds exact-CID read limit".into(),
-        ));
-    }
+    verify_carrier_content_cid_reader(cid, bytes)
+}
+
+fn verify_carrier_content_cid_base64(cid: &str, data: &str) -> Result<bool, ProviderError> {
+    let reader = base64::read::DecoderReader::new(
+        data.as_bytes(),
+        &base64::engine::general_purpose::STANDARD,
+    );
+    verify_carrier_content_cid_reader(cid, reader)
+}
+
+fn verify_carrier_content_cid_reader(
+    cid: &str,
+    mut reader: impl Read,
+) -> Result<bool, ProviderError> {
     let requested = cid::Cid::try_from(cid)
         .map_err(|err| ProviderError::Provider(format!("invalid content CID: {err}")))?;
     if requested.to_string() != cid {
@@ -9208,13 +9234,97 @@ pub(crate) fn verify_carrier_content_cid(cid: &str, bytes: &[u8]) -> Result<bool
     if requested.hash().code() != 0x12 || requested.hash().digest().len() != 32 {
         return Ok(false);
     }
-    match (requested.version(), requested.codec()) {
-        (cid::Version::V1, 0x55) => Ok(file_cid(bytes, cid::Version::V1, true) == requested),
-        (cid::Version::V0, 0x70) => Ok(file_cid(bytes, cid::Version::V0, false) == requested),
-        (cid::Version::V1, 0x70) => Ok(file_cid(bytes, cid::Version::V1, true) == requested
-            || file_cid(bytes, cid::Version::V1, false) == requested),
-        _ => Ok(false),
+    if !matches!(
+        (requested.version(), requested.codec()),
+        (cid::Version::V1, 0x55) | (cid::Version::V0 | cid::Version::V1, 0x70)
+    ) {
+        return Ok(false);
     }
+    let mut reducer = FileCidReducer::new(&requested);
+    feed_file_cid_reader(&mut reducer, &mut reader)?;
+    Ok(reducer.matches(&requested))
+}
+
+fn feed_file_cid_reader(
+    reducer: &mut FileCidReducer,
+    reader: &mut impl Read,
+) -> Result<u64, ProviderError> {
+    let mut buffer = [0u8; 32 * 1024];
+    let mut length = 0u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?;
+        if count == 0 {
+            return Ok(length);
+        }
+        length = length
+            .checked_add(count as u64)
+            .ok_or_else(|| ProviderError::Provider("availability data length overflow".into()))?;
+        reducer.push(&buffer[..count]);
+    }
+}
+
+fn verify_carrier_content_cid_stream(cid: &str, stream: &Value) -> Result<bool, ProviderError> {
+    let requested = cid::Cid::try_from(cid)
+        .map_err(|err| ProviderError::Provider(format!("invalid content CID: {err}")))?;
+    let invalid = |detail: &str| ProviderError::Provider(format!("availability stream {detail}"));
+    if requested.to_string() != cid
+        || requested.hash().code() != 0x12
+        || requested.hash().digest().len() != 32
+        || !matches!(
+            (requested.version(), requested.codec()),
+            (cid::Version::V1, 0x55) | (cid::Version::V0 | cid::Version::V1, 0x70)
+        )
+    {
+        return Ok(false);
+    }
+    if stream.get("schema").and_then(Value::as_str) != Some("elastos.provider.stream/v1")
+        || stream.get("encoding").and_then(Value::as_str) != Some("base64-chunks")
+        || stream.get("completed").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(invalid("has invalid header"));
+    }
+    let chunks = stream
+        .get("chunks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("requires chunks"))?;
+    let mut reducer = FileCidReducer::new(&requested);
+    let mut offset = 0u64;
+    for (index, chunk) in chunks.iter().enumerate() {
+        if chunk.get("index").and_then(Value::as_u64) != Some(index as u64)
+            || chunk.get("offset").and_then(Value::as_u64) != Some(offset)
+        {
+            return Err(invalid("chunk index or offset mismatch"));
+        }
+        let data = chunk
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("chunk requires base64 data"))?;
+        let mut reader = base64::read::DecoderReader::new(
+            data.as_bytes(),
+            &base64::engine::general_purpose::STANDARD,
+        );
+        let length = feed_file_cid_reader(&mut reducer, &mut reader)?;
+        if chunk
+            .get("length")
+            .and_then(Value::as_u64)
+            .is_some_and(|v| v != length)
+        {
+            return Err(invalid("chunk length mismatch"));
+        }
+        offset = offset
+            .checked_add(length)
+            .ok_or_else(|| invalid("length overflow"))?;
+    }
+    if stream
+        .get("total_bytes")
+        .and_then(Value::as_u64)
+        .is_some_and(|v| v != offset)
+    {
+        return Err(invalid("total length mismatch"));
+    }
+    Ok(reducer.matches(&requested))
 }
 
 const UNIXFS_CHUNK_BYTES: usize = 262_144;
@@ -9225,6 +9335,62 @@ struct FileCidNode {
     cid: cid::Cid,
     file_size: u64,
     dag_size: u64,
+}
+
+// Keep at most one partial UnixFS chunk plus compact leaf metadata. Base64
+// payloads are decoded through this reducer without a second whole-file copy.
+struct FileCidReducer {
+    version: cid::Version,
+    raw: Vec<FileCidNode>,
+    legacy: Vec<FileCidNode>,
+    partial: Vec<u8>,
+    raw_enabled: bool,
+    legacy_enabled: bool,
+}
+
+impl FileCidReducer {
+    fn new(requested: &cid::Cid) -> Self {
+        Self {
+            version: requested.version(),
+            raw: Vec::new(),
+            legacy: Vec::new(),
+            partial: Vec::with_capacity(UNIXFS_CHUNK_BYTES),
+            raw_enabled: requested.version() == cid::Version::V1,
+            legacy_enabled: requested.codec() == 0x70,
+        }
+    }
+
+    fn push(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let count = bytes.len().min(UNIXFS_CHUNK_BYTES - self.partial.len());
+            self.partial.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.partial.len() == UNIXFS_CHUNK_BYTES {
+                self.push_leaf();
+            }
+        }
+    }
+
+    fn push_leaf(&mut self) {
+        if self.raw_enabled {
+            self.raw
+                .push(file_leaf(&self.partial, cid::Version::V1, true));
+        }
+        if self.legacy_enabled {
+            self.legacy
+                .push(file_leaf(&self.partial, self.version, false));
+        }
+        self.partial.clear();
+    }
+
+    fn matches(mut self, requested: &cid::Cid) -> bool {
+        if !self.partial.is_empty() || (self.raw.is_empty() && self.legacy.is_empty()) {
+            self.push_leaf();
+        }
+        (self.raw_enabled && file_cid_from_leaves(self.raw, cid::Version::V1) == *requested)
+            || (self.legacy_enabled
+                && file_cid_from_leaves(self.legacy, self.version) == *requested)
+    }
 }
 
 fn pb_varint(out: &mut Vec<u8>, mut value: u64) {
@@ -9317,6 +9483,7 @@ fn file_cid_from_leaves(mut level: Vec<FileCidNode>, version: cid::Version) -> c
     level.pop().expect("file has one root").cid
 }
 
+#[cfg(test)]
 fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
     let level: Vec<FileCidNode> = if bytes.is_empty() {
         vec![file_leaf(bytes, version, raw)]
@@ -9396,6 +9563,33 @@ fn provider_response_payload(
             response,
             provider_name,
         )?)),
+    }
+}
+
+fn provider_response_payload_owned(
+    response: &mut Value,
+    provider_name: &str,
+    transfer: &ContentFetchTransfer,
+) -> Result<ContentFetchPayload, ProviderError> {
+    let field = match transfer.transfer {
+        ProviderTransfer::Stream => "stream",
+        _ => "data",
+    };
+    let value = response
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+        .and_then(|data| data.remove(field))
+        .ok_or_else(|| {
+            ProviderError::Provider(format!("{provider_name} response missing {field} payload"))
+        })?;
+    match transfer.transfer {
+        ProviderTransfer::Stream => Ok(ContentFetchPayload::Stream(value)),
+        _ => match value {
+            Value::String(data) => Ok(ContentFetchPayload::Bytes(data)),
+            _ => Err(ProviderError::Provider(format!(
+                "{provider_name} response {field} is not a string"
+            ))),
+        },
     }
 }
 
@@ -10105,6 +10299,53 @@ mod tests {
                 assert!(!verify_carrier_content_cid(raw_cid, &bytes).unwrap());
             }
         }
+    }
+
+    #[test]
+    fn carrier_cid_check_streams_file_above_64_mib() {
+        use std::io::{Seek, SeekFrom};
+
+        // Kubo 0.42.0, with the same pinned recipe as the 0.40.1 vectors:
+        // `ipfs add --only-hash --quieter --pin=false --hash=sha2-256
+        //  --chunker=size-262144 --max-file-links=174 --cid-version=1
+        //  --raw-leaves=true` on a 67,108,865-byte all-zero file.
+        const SIZE: u64 = 64 * 1024 * 1024 + 1;
+        const CID: &str = "bafybeifky37h74hoftm3v3ecyfh5bg6ozwbplp7bavvbjf2ari2jbqtuyu";
+        let mut file = tempfile::tempfile().unwrap();
+        file.set_len(SIZE).unwrap();
+        assert!(verify_carrier_content_cid_reader(CID, &mut file).unwrap());
+
+        file.rewind().unwrap();
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = base64::write::EncoderWriter::new(
+                &mut encoded,
+                &base64::engine::general_purpose::STANDARD,
+            );
+            std::io::copy(&mut file, &mut encoder).unwrap();
+            encoder.finish().unwrap();
+        }
+        let encoded = String::from_utf8(encoded).unwrap();
+        assert!(verify_carrier_content_cid_base64(CID, &encoded).unwrap());
+        let mut stream = json!({
+            "schema": "elastos.provider.stream/v1",
+            "encoding": "base64-chunks",
+            "completed": true,
+            "total_bytes": SIZE,
+            "chunks": [{"index": 0, "offset": 0, "length": SIZE, "data": encoded}],
+        });
+        assert!(verify_carrier_content_cid_stream(CID, &stream).unwrap());
+        if let Value::String(data) = &mut stream["chunks"][0]["data"] {
+            data.replace_range(0..1, "B");
+        } else {
+            panic!("stream chunk data is a string");
+        }
+        assert!(!verify_carrier_content_cid_stream(CID, &stream).unwrap());
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[1]).unwrap();
+        file.rewind().unwrap();
+        assert!(!verify_carrier_content_cid_reader(CID, &mut file).unwrap());
     }
 
     #[test]
