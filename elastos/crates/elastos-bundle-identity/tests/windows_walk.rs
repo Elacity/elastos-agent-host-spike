@@ -31,9 +31,12 @@ impl TestTree {
     fn bundle(&self) -> PathBuf {
         let root = self.0.join("bundle");
         fs::create_dir(&root).unwrap();
+        // Use the same valid web-app bundle as the Unix walk tests. Its
+        // manifest is independent of the Component WIT hash.
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/components/asks-nothing/bundle");
-        for name in ["capsule.json", "asks-nothing.component.wasm"] {
+            .join("../../../lab/capsule-identity/fixtures/web-app");
+        fs::create_dir(root.join("browser")).unwrap();
+        for name in ["capsule.json", "browser/app.js", "browser/index.html"] {
             fs::copy(fixture.join(name), root.join(name)).unwrap();
         }
         root
