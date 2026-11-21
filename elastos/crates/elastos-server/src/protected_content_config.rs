@@ -955,6 +955,9 @@ async fn provision_custody_node_with_installed_provider(
     inactive_root: &Path,
     issuer: RuntimeOperationIssuerKeyV1,
 ) -> anyhow::Result<ProvisionedCustodyProviderPublicKeys> {
+    #[cfg(windows)]
+    crate::protected_content_runtime::require_isolated_provider("custody")?;
+
     let Some(binary) = crate::binaries::resolve_verified_native_provider_binary_with_data_dir(
         data_dir,
         "custody-provider",

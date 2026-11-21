@@ -1163,11 +1163,32 @@ pub fn unresolved_release_audit_records(
         .collect()
 }
 
+#[cfg(windows)]
+pub(crate) fn require_isolated_provider(provider: &'static str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{provider} provider process isolation is unsupported on Windows"),
+    ))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_unisolated_providers() {
+    for provider in ["custody", "decrypt"] {
+        let error = require_isolated_provider(provider).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains(provider));
+    }
+}
+
 pub async fn register_inactive_custody_provider(
     registry: &Arc<ProviderRegistry>,
     binary_path: &Path,
     data_dir: &Path,
 ) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    require_isolated_provider("custody")?;
+
     let state_root = inactive_custody_state_root(data_dir);
     validate_inactive_custody_state_root(&state_root)?;
     let base_path = state_root
@@ -1240,6 +1261,9 @@ pub async fn register_protected_content_decrypt_provider(
     binary_path: &Path,
     runtime_operation_issuer: RuntimeOperationIssuerKeyV1,
 ) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    require_isolated_provider("decrypt")?;
+
     let bridge = Arc::new(
         ProviderBridge::spawn(
             binary_path,
