@@ -799,7 +799,7 @@ impl Supervisor {
         Ok(())
     }
 
-    async fn load_capsule_manifest(
+    pub(crate) async fn load_capsule_manifest(
         &self,
         name: &str,
     ) -> Result<(PathBuf, elastos_common::CapsuleManifest)> {
@@ -813,6 +813,11 @@ impl Supervisor {
         .with_context(|| format!("reading capsule.json for '{name}'"))?;
         let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&manifest_data)
             .with_context(|| format!("parsing capsule.json for '{name}'"))?;
+        anyhow::ensure!(
+            manifest.name == name,
+            "launch_name_not_walked: requested '{name}', walked '{}'",
+            manifest.name
+        );
         Ok((capsule_dir, manifest))
     }
 

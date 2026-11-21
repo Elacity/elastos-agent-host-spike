@@ -430,7 +430,7 @@ fn rows() -> Vec<AuthorityRow> {
             "principal_from_capsule_name",
             "require_internal_shell_launch_grant_principal",
             1,
-            "app-grant:OPEN; conditional: admits Home when the name resolves to home",
+            "app-grant:walked manifest name binds grant; admits Home only when the walked name is home",
         ),
         row(
             ROUTES,
@@ -444,7 +444,7 @@ fn rows() -> Vec<AuthorityRow> {
             "open_launch",
             "require_internal_shell_launch_grant_for_any_context",
             1,
-            "app-grant:OPEN P2-4 follow-up",
+            "app-grant:verified CID opens one content launch; page grant binds its launch id and walked content name",
         ),
         row(
             VIEWER,
@@ -465,7 +465,7 @@ fn rows() -> Vec<AuthorityRow> {
             "supervisor_launch_principal_from_input",
             "require_internal_shell_launch_grant_principal",
             1,
-            "app-grant:OPEN; conditional: admits Home when the name resolves to home",
+            "app-grant:installed manifest name binds grant; admits Home only when the walked name is home",
         ),
         row(
             VIEWER,
@@ -1253,13 +1253,12 @@ fn viewer_launch_read_starts_with_its_bound_gate_and_existing_rows_remain() {
         !gate_body.contains(&format!("{home_gate}(")),
         "launch-bound gate also accepts a Home session"
     );
-    assert_eq!(
-        rows()
-            .iter()
-            .filter(|row| row.authority.contains("OPEN"))
-            .count(),
-        5
-    );
+    let open_rows: Vec<_> = rows()
+        .into_iter()
+        .filter(|row| row.authority.contains("OPEN"))
+        .map(|row| row.function)
+        .collect();
+    assert_eq!(open_rows, ["home_launch", "home_launch_content"]);
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_tests/launch_reads.rs");
     let text = fs::read_to_string(path).unwrap();

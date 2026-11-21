@@ -503,8 +503,21 @@ pub(super) async fn launch_runtime_backed_home_target(
         });
     }
 
-    let capsule_dir = resolve_capsule_dir(data_dir, target)?;
-    let manifest = crate::api::capsule_inventory::load_capsule_manifest(&capsule_dir, target)?;
+    let Some(capsule_dir) = resolve_capsule_dir(data_dir, target) else {
+        return Some(GatewayRuntimeLaunchOutcome {
+            status: "failed".into(),
+            capsule_id: None,
+            detail: Some("launch_name_not_walked".into()),
+        });
+    };
+    let Some(manifest) = crate::api::capsule_inventory::load_capsule_manifest(&capsule_dir, target)
+    else {
+        return Some(GatewayRuntimeLaunchOutcome {
+            status: "failed".into(),
+            capsule_id: None,
+            detail: Some("launch_name_not_walked".into()),
+        });
+    };
     if !manifest.role.is_shell_launchable() || manifest.capsule_type == CapsuleType::Data {
         return None;
     }
@@ -2141,7 +2154,9 @@ mod tests {
                 .is_none()
         );
         let outcome = launch_runtime_backed_home_target(data_dir, "pinned-fixture", &context).await;
-        assert!(outcome.is_none());
+        let outcome = outcome.expect("a named launch refusal");
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.detail.as_deref(), Some("launch_name_not_walked"));
         assert!(!crate::runtime_control::home_runtime_coord_path(data_dir).exists());
         assert!(!data_dir.join("managed-runtimes").exists());
     }
