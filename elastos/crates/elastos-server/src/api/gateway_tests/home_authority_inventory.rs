@@ -221,7 +221,6 @@ fn rows() -> Vec<AuthorityRow> {
     const SITE: &str = "elastos-server/src/api/gateway_site.rs";
     const CONNECTORS: &str = "elastos-server/src/api/gateway_wallet_connectors.rs";
     const HOME_CONNECTOR: &str = "elastos-server/src/api/gateway_home_wallet_connector.rs";
-    const MARKETPLACE: &str = "elastos-server/src/api/gateway_marketplace.rs";
     let row = |file, function, gate, count, authority| AuthorityRow {
         file,
         function,
@@ -427,13 +426,6 @@ fn rows() -> Vec<AuthorityRow> {
             "runtime-admin:claim_pending+complete_authentication",
         ),
         row(
-            ROOM,
-            "chat_room_summary",
-            "require_home_token",
-            1,
-            "app-grant:OPEN P2-4 follow-up",
-        ),
-        row(
             ROUTES,
             "principal_from_capsule_name",
             "require_internal_shell_launch_grant_principal",
@@ -616,8 +608,6 @@ fn rows() -> Vec<AuthorityRow> {
             "home-own:catalog read"),
         row(CATALOG, "capsule_interfaces", "require_capsule_catalog_token", 1,
             "home-own:interface read"),
-        row(MARKETPLACE, "marketplace_catalog", "require_capsule_catalog_token", 1,
-            "app-grant:OPEN; catalog read"),
         row(HOME_CONNECTOR, "home_wallet_connector_evm_link_challenge", "require_home_wallet_connector_authority", 1,
             "delegates:wallet via connector authority"),
         row(HOME_CONNECTOR, "home_wallet_connector_evm_link_verify", "require_home_wallet_connector_authority", 1,
@@ -1268,7 +1258,7 @@ fn viewer_launch_read_starts_with_its_bound_gate_and_existing_rows_remain() {
             .iter()
             .filter(|row| row.authority.contains("OPEN"))
             .count(),
-        7
+        5
     );
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_tests/launch_reads.rs");

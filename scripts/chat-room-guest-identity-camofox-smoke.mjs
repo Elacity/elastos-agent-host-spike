@@ -214,12 +214,23 @@ async function inboxAction(tabId, actionId) {
 }
 
 async function cleanupRoomState(tabId) {
-  const summary = await browserJson(HOME_USER_ID, tabId, "/api/apps/chat-room/summary");
+  const summary = await chatSummary(tabId);
   if (Array.isArray(summary.pending_requests)) {
     for (const request of summary.pending_requests) {
       await inboxAction(tabId, `room-deny-request:${request.request_id}`);
     }
   }
+}
+
+async function chatSummary(tabId) {
+  const launched = await launchShellTarget(tabId, "chat-room");
+  const token = new URL(launched.route, HOST_ORIGIN).searchParams.get("home_token");
+  assert(token, "Chat launch did not return a home token", launched);
+  const response = await fetch(`${HOST_ORIGIN}/api/apps/chat-room/summary`, {
+    headers: { origin: "null", "x-elastos-home-token": token },
+  });
+  if (!response.ok) throw new Error(`Chat summary failed: ${response.status}`);
+  return response.json();
 }
 
 async function shellFrameState(tabId) {
@@ -334,7 +345,7 @@ async function main() {
     }, 12_000, 500);
 
     const requestId = await waitForValue(async () => {
-      const summary = await browserJson(HOME_USER_ID, shellTab, "/api/apps/chat-room/summary");
+      const summary = await chatSummary(shellTab);
       const request = summary.pending_requests?.find((entry) => entry.display_name === "Guest QA");
       return request?.request_id || null;
     }, 12_000, 500);
