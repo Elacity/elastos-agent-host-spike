@@ -204,11 +204,29 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-server/src/binaries.rs",
+            "new",
+            "command",
+            "checked own Runtime launch",
+            "signed release+held executable",
+            "P2-8",
+            1,
+        ),
+        row(
+            "elastos-server/src/binaries.rs",
+            "spawn",
+            "spawn()",
+            "checked own Runtime launch",
+            "signed release+held executable",
+            "P2-8",
+            1,
+        ),
+        row(
             "elastos-server/src/chat_cmd.rs",
             "return_to_home_if_requested",
             "command",
             "host process",
-            "none",
+            "signed release+held executable",
             "P2-8",
             1,
         ),
@@ -226,7 +244,7 @@ fn rows() -> Vec<Row> {
             "run_action",
             "command",
             "host process",
-            "none",
+            "signed release+held executable",
             "P2-8",
             1,
         ),
@@ -235,7 +253,7 @@ fn rows() -> Vec<Row> {
             "run_capsule_action",
             "command",
             "host process",
-            "none",
+            "signed release+held executable",
             "P2-8",
             1,
         ),
@@ -523,7 +541,7 @@ fn rows() -> Vec<Row> {
             "ensure_managed_runtime",
             "command",
             "host process",
-            "none",
+            "signed release+held executable",
             "P2-8",
             1,
         ),
@@ -532,7 +550,7 @@ fn rows() -> Vec<Row> {
             "ensure_managed_runtime",
             "spawn()",
             "host process",
-            "none",
+            "signed release+held executable",
             "P2-8",
             1,
         ),
@@ -986,6 +1004,7 @@ fn every_executable_loader_has_an_authority_row() {
                 | "CID"
                 | "DID"
                 | "checksum"
+                | "signed release+held executable"
                 | "none"
                 | "admitted rights+checked directory+bound executable"
         ));

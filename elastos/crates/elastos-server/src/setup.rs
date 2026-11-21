@@ -1183,6 +1183,22 @@ pub fn verify_installed_component_start(
         .context("Installed component binary verification failed")
 }
 
+/// Admit this Home's own Runtime executable against its signed release, then
+/// hold the checked bytes through process creation.
+pub fn verify_own_runtime_start(
+    data_dir: &Path,
+    path: &Path,
+) -> anyhow::Result<verified_executable::VerifiedExecutable> {
+    let source = installed_release_source(data_dir)?.ok_or_else(missing_trusted_source_error)?;
+    let release = crate::installed_release::read_without_migration(data_dir, path, &source)
+        .context("Own Runtime signed release admission failed")?;
+    verified_executable::VerifiedExecutable::prepare(
+        path,
+        &format!("sha256:{}", release.binary_sha256),
+    )
+    .context("Own Runtime binary verification failed")
+}
+
 fn verify_installed_component_with_entry(
     name: &str,
     path: &Path,

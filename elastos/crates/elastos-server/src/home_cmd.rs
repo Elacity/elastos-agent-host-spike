@@ -2083,10 +2083,10 @@ async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Resu
         }
         ActionLaunch::External(args) => {
             let exe = std::env::current_exe().context("current exe unavailable")?;
-            let status = Command::new(exe)
-                .args(args)
-                .env("ELASTOS_PARENT_SURFACE", "home")
-                .status()?;
+            let mut command =
+                elastos_server::binaries::OwnRuntimeCommand::new(&default_data_dir(), &exe)?;
+            command.args(args).env("ELASTOS_PARENT_SURFACE", "home");
+            let status = command.status()?;
             let exit = status
                 .code()
                 .map(|code| code.to_string())
@@ -2106,7 +2106,8 @@ async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Resu
 /// Launch a dynamically discovered capsule by name.
 async fn run_capsule_action(capsule_name: &str) -> anyhow::Result<String> {
     let exe = std::env::current_exe().context("current exe unavailable")?;
-    let status = Command::new(exe)
+    let mut command = elastos_server::binaries::OwnRuntimeCommand::new(&default_data_dir(), &exe)?;
+    command
         .args([
             "capsule",
             capsule_name,
@@ -2114,8 +2115,8 @@ async fn run_capsule_action(capsule_name: &str) -> anyhow::Result<String> {
             "interactive",
             "--interactive",
         ])
-        .env("ELASTOS_PARENT_SURFACE", "home")
-        .status()?;
+        .env("ELASTOS_PARENT_SURFACE", "home");
+    let status = command.status()?;
     if status.success() {
         Ok(format!("Returned home from {}.", capsule_name))
     } else {

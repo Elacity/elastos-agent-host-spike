@@ -247,7 +247,14 @@ fn places() -> Vec<Place> {
             "ensure_managed_runtime",
             "spawn()".to_string(),
             1,
-            "managed Runtime process: gateway owner start lock",
+            "managed Runtime: signed release, held executable, owner start lock",
+        ),
+        place(
+            "elastos-server/src/binaries.rs",
+            "spawn",
+            "spawn()".to_string(),
+            1,
+            "own Runtime: signed release and held executable",
         ),
         place(
             "elastos-server/src/server_infra.rs",

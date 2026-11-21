@@ -31,6 +31,100 @@ fn start_shell(fixture: &Fixture, path: &Path, marker: &Path) -> Result<()> {
     Ok(())
 }
 
+fn own_runtime_fixture() -> (Fixture, std::path::PathBuf) {
+    let mut fixture = Fixture::new();
+    fixture.set_runtime_binary(b"#!/bin/sh\nprintf ran > \"$1\"\n");
+    let marker = fixture.data.join("own-runtime-ran");
+    (fixture, marker)
+}
+
+#[test]
+fn signed_own_runtime_starts_through_status_and_spawn() {
+    let (fixture, marker) = own_runtime_fixture();
+    let mut command =
+        crate::binaries::OwnRuntimeCommand::new(&fixture.data, &fixture.binary).unwrap();
+    command.arg(&marker);
+    assert!(command.status().unwrap().success());
+    assert_eq!(fs::read(&marker).unwrap(), b"ran");
+    fs::remove_file(&marker).unwrap();
+    let mut command =
+        crate::binaries::OwnRuntimeCommand::new(&fixture.data, &fixture.binary).unwrap();
+    command.arg(&marker);
+    assert!(command.spawn().unwrap().wait().unwrap().success());
+    assert_eq!(fs::read(&marker).unwrap(), b"ran");
+}
+
+#[test]
+fn own_runtime_refuses_changed_binary_before_both_start_routes() {
+    let (fixture, marker) = own_runtime_fixture();
+    fs::write(&fixture.binary, b"#!/bin/sh\nprintf replaced > \"$1\"\n").unwrap();
+    for route in ["status", "spawn"] {
+        let error = crate::binaries::OwnRuntimeCommand::new(&fixture.data, &fixture.binary)
+            .err()
+            .expect("changed binary must be refused");
+        assert!(
+            format!("{error:#}").contains("Own Runtime signed release admission failed"),
+            "{route}: {error:#}"
+        );
+        assert!(!marker.exists(), "{route} started the changed binary");
+    }
+}
+
+#[test]
+fn own_runtime_refuses_wrong_path_before_spawn() {
+    let (fixture, marker) = own_runtime_fixture();
+    let wrong = fixture.data.join("wrong-runtime");
+    fs::copy(&fixture.binary, &wrong).unwrap();
+    let error = crate::binaries::OwnRuntimeCommand::new(&fixture.data, &wrong)
+        .err()
+        .expect("wrong path must be refused");
+    assert!(error
+        .to_string()
+        .contains("Own Runtime signed release admission failed"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn own_runtime_refuses_changed_signed_release_before_spawn() {
+    let (fixture, marker) = own_runtime_fixture();
+    let mut head: Value = serde_json::from_slice(&fixture.head).unwrap();
+    head["signature"] = json!("invalid signature");
+    fs::write(
+        publisher_release_head_path(&fixture.data),
+        serde_json::to_vec(&head).unwrap(),
+    )
+    .unwrap();
+    let error = crate::binaries::OwnRuntimeCommand::new(&fixture.data, &fixture.binary)
+        .err()
+        .expect("changed signed release must be refused");
+    assert!(format!("{error:#}").contains("Own Runtime signed release admission failed"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn own_runtime_without_signed_release_refuses_like_installed_components() {
+    let (fixture, _) = own_runtime_fixture();
+    fs::remove_file(fixture.data.join("sources.json")).unwrap();
+    let error = crate::binaries::OwnRuntimeCommand::new(&fixture.data, &fixture.binary)
+        .err()
+        .expect("unsigned Home cannot start an installed executable");
+    assert!(error.to_string().contains("No trusted source configured"));
+}
+
+#[test]
+fn own_runtime_starts_held_bytes_after_path_swap() {
+    let (fixture, marker) = own_runtime_fixture();
+    let mut command =
+        crate::binaries::OwnRuntimeCommand::new(&fixture.data, &fixture.binary).unwrap();
+    command.arg(&marker);
+    let replacement = fixture.data.join("replacement-runtime");
+    fs::write(&replacement, b"#!/bin/sh\nprintf replaced > \"$1\"\n").unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&replacement, &fixture.binary).unwrap();
+    assert!(command.status().unwrap().success());
+    assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
 #[test]
 fn installed_component_start_accepts_signed_release() {
     let (fixture, path, marker) = start_fixture();
@@ -380,6 +474,20 @@ impl Fixture {
         };
         fixture.publish();
         fixture
+    }
+
+    fn set_runtime_binary(&mut self, bytes: &[u8]) {
+        fs::write(&self.binary, bytes).unwrap();
+        let mut release: Value = serde_json::from_slice(&self.release).unwrap();
+        release["payload"]["platforms"][crate::update::detect_release_platform()]["binary"] =
+            descriptor(bytes);
+        self.release = signed(release["payload"].take(), "elastos.release.v1", 71);
+        let mut head: Value = serde_json::from_slice(&self.head).unwrap();
+        head["payload"]["latest_release_cid"] = json!(raw_cid(&self.release));
+        head["payload"]["release_sha256"] = json!(hex::encode(Sha256::digest(&self.release)));
+        self.head = signed(head["payload"].take(), "elastos.release.head.v1", 71);
+        self.source.head_cid = raw_cid(&self.head);
+        self.publish();
     }
 
     fn publish(&self) {

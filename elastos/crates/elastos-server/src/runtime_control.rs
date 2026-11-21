@@ -1311,7 +1311,11 @@ async fn ensure_managed_runtime(
         .map_err(|e| anyhow::anyhow!("Failed to create runtime log: {}", e))?;
 
     // 5. Spawn managed runtime as detached background process
-    let mut child = std::process::Command::new(&self_exe);
+    let mut child = crate::binaries::OwnRuntimeCommand::new(data_dir, &self_exe)?;
+    anyhow::ensure!(
+        child.checksum().trim_start_matches("sha256:") == binary_sha256,
+        "Own Runtime binary changed before managed start"
+    );
     child
         .arg("serve")
         .arg("--addr")

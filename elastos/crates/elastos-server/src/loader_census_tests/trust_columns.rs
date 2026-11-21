@@ -202,13 +202,33 @@ fn columns() -> Vec<TrustColumn> {
             os_path: "",
         },
         TrustColumn {
+            file: "elastos-server/src/binaries.rs",
+            function: "new",
+            call: "command",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new(prepared.exec_path())"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/binaries.rs",
+            function: "spawn",
+            call: "spawn()",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["self.command.spawn()"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
             file: "elastos-server/src/chat_cmd.rs",
             function: "return_to_home_if_requested",
             call: "command",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command:", ":new(exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["OwnRuntimeCommand::new(&default_data_dir(), &exe)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -226,9 +246,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_action",
             call: "command",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command:", ":new(exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["OwnRuntimeCommand::new(&default_data_dir(), &exe)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -236,9 +256,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_capsule_action",
             call: "command",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command:", ":new(exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["OwnRuntimeCommand::new(&default_data_dir(), &exe)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -556,9 +576,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "ensure_managed_runtime",
             call: "command",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(&self_exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["OwnRuntimeCommand::new(data_dir, &self_exe)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -566,9 +586,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "ensure_managed_runtime",
             call: "spawn()",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(&self_exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: [".spawn()"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1553,27 +1573,27 @@ fn trust_column_counts_and_chokepoint_queue() {
     let to_gate = columns
         .iter()
         .filter(|column| {
-            matches!(column.class, "release-component" | "other")
+            matches!(column.class, "release-component" | "other" | "own-binary")
                 && matches!(column.trust_root, "none" | "components-json-in-data-dir")
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 97);
-    assert_eq!(classes.get("n/a"), Some(&49));
+    assert_eq!(columns.len(), 99);
+    assert_eq!(classes.get("n/a"), Some(&51));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&36));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&52));
+    assert_eq!(roots.get("none"), Some(&47));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&24));
+    assert_eq!(roots.get("release-signature"), Some(&31));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&32));
+    assert_eq!(times.get("at-every-start"), Some(&39));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&52));
+    assert_eq!(times.get("never"), Some(&47));
     assert_eq!(to_gate, 29);
 }
 
@@ -1611,4 +1631,41 @@ fn installed_component_start_callers_keep_the_signed_gate() {
         }),
         "custody start must admit the resolver's selected binary"
     );
+}
+
+#[test]
+fn own_runtime_start_callers_use_the_checked_launch_point() {
+    let sources = source::production_sources();
+    for (file, function, start) in [
+        (
+            "elastos-server/src/chat_cmd.rs",
+            "return_to_home_if_requested",
+            "command.status()",
+        ),
+        (
+            "elastos-server/src/home_cmd.rs",
+            "run_action",
+            "command.status()",
+        ),
+        (
+            "elastos-server/src/home_cmd.rs",
+            "run_capsule_action",
+            "command.status()",
+        ),
+        (
+            "elastos-server/src/runtime_control.rs",
+            "ensure_managed_runtime",
+            ".spawn()",
+        ),
+    ] {
+        let text = &sources[file];
+        let code = source::code_only(text);
+        for needle in ["OwnRuntimeCommand::new", start] {
+            assert!(
+                text.match_indices(needle)
+                    .any(|(at, _)| source::enclosing_fn(&code, at) == function),
+                "own Runtime start lost {needle}: {file}::{function}"
+            );
+        }
+    }
 }

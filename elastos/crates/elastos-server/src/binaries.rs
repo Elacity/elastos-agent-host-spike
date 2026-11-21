@@ -1,10 +1,54 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus};
 
 use elastos_common::{CapsuleManifest, ProviderAuthority};
 use elastos_runtime::provider::CheckedExecutable;
 
 use crate::{setup, sources::default_data_dir};
+
+/// The one launch point for a child of this Runtime executable. The prepared
+/// descriptor or private copy stays alive until the start call returns.
+pub struct OwnRuntimeCommand {
+    command: Command,
+    prepared: setup::verified_executable::VerifiedExecutable,
+}
+
+impl OwnRuntimeCommand {
+    pub fn new(data_dir: &Path, path: &Path) -> anyhow::Result<Self> {
+        let prepared = setup::verify_own_runtime_start(data_dir, path)?;
+        let command = Command::new(prepared.exec_path());
+        Ok(OwnRuntimeCommand { command, prepared })
+    }
+
+    pub fn checksum(&self) -> &str {
+        self.prepared.checksum()
+    }
+
+    pub fn status(&mut self) -> anyhow::Result<ExitStatus> {
+        self.prepared.attach_std(&mut self.command, false)?;
+        Ok(self.command.status()?)
+    }
+
+    pub fn spawn(&mut self) -> anyhow::Result<Child> {
+        self.prepared.attach_std(&mut self.command, false)?;
+        Ok(self.command.spawn()?)
+    }
+}
+
+impl std::ops::Deref for OwnRuntimeCommand {
+    type Target = Command;
+
+    fn deref(&self) -> &Command {
+        &self.command
+    }
+}
+
+impl std::ops::DerefMut for OwnRuntimeCommand {
+    fn deref_mut(&mut self) -> &mut Command {
+        &mut self.command
+    }
+}
 
 /// Bind a native provider start to the current publisher-signed release.
 /// A failed admission stays a refused executable until the bridge reports it.

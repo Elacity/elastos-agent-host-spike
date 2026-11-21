@@ -1750,7 +1750,9 @@ fn return_to_home_if_requested(home_requested: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     let exe = std::env::current_exe()?;
-    let status = std::process::Command::new(exe).arg("home").status()?;
+    let mut command = elastos_server::binaries::OwnRuntimeCommand::new(&default_data_dir(), &exe)?;
+    command.arg("home");
+    let status = command.status()?;
     if !status.success() {
         anyhow::bail!(
             "failed to return Home (exit {})",
