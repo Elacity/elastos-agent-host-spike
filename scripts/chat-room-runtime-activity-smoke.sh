@@ -3,15 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_URL="${ELASTOS_BASE_URL:-http://127.0.0.1:8090}"
-COOKIE_JAR="$(mktemp /tmp/elastos-home-smoke-cookies.XXXXXX)"
-trap 'rm -f "$COOKIE_JAR"' EXIT
-
-curl -fsS -c "$COOKIE_JAR" "${BASE_URL}/apps/home/" >/dev/null
-curl -fsS -b "$COOKIE_JAR" -X POST "${BASE_URL}/api/apps/home/runtime/ensure" >/dev/null
+CLI_LAUNCH_TOKEN="${ELASTOS_CLI_LAUNCH_TOKEN:?set ELASTOS_CLI_LAUNCH_TOKEN to a home-cli grant}"
+# The named Home is running before this activity check starts.
 
 launch_json=$(
   curl -fsS \
-    -b "$COOKIE_JAR" \
+    -H "x-elastos-home-token: ${CLI_LAUNCH_TOKEN}" \
     -X POST \
     -H 'content-type: application/json' \
     "${BASE_URL}/api/apps/home/launch" \
@@ -22,7 +19,7 @@ sleep 1
 
 system_launch_json=$(
   curl -fsS \
-    -b "$COOKIE_JAR" \
+    -H "x-elastos-home-token: ${CLI_LAUNCH_TOKEN}" \
     -X POST \
     -H 'content-type: application/json' \
     "${BASE_URL}/api/apps/home/launch" \
