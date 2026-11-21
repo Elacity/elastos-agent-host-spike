@@ -75,14 +75,28 @@ grant-binding. `cargo fmt` and `cargo test --locked` use this manifest.
 ## How to run
 
 ```
-python3 -I -m unittest discover -s lab/redteam/py
+cd lab/redteam
+python3 -I -m unittest discover -s py
 ```
 
 `-I` means the current directory is not importable. The tests find the repo
-root from `__file__` (`parents[3]`), and `discover -s lab/redteam/py` puts
+root from `__file__` (`parents[3]`), and `discover -s py` puts
 that folder on `sys.path`, so `import sbx` works. Report the pass, skip and
 fail counts: an all-skip run also exits 0, so the exit code alone is not a
 pass (guard d).
+
+The grant replay driver uses the current grant-bound budget admission and
+verifier deadline APIs. Its uncertain-outcome row checks that a due timeout
+keeps the hold and that release is refused until a measured settle. The Wasm
+swap driver calls the current three-argument `verify_bundle` and still proves
+that removing the signature check accepts a swapped module. The agent-host
+honesty probe reads the live asks declaration from `capsule.json`.
+
+When an outer sandbox prevents `sandbox-exec` from applying even a permissive
+stock profile, the shared runner reports SKIPPED. A profile-specific error
+still fails. The loopback probe also reports SKIPPED when the host refuses a
+stock loopback listener, because its positive control cannot run. The other
+tests still run and the skip count stays visible in the suite result.
 
 ## Wallet `confine.sb` probe
 
@@ -162,7 +176,7 @@ The honesty tests prove these rules through unittest itself:
 
 - `README.md`: this file, the lane goal and guards (a) to (e).
 - `.gitignore`: `*.key` and `*.seed` (guard e), and Python caches.
-- `findings/`: findings land here. It holds only `.gitkeep` on a clean run.
+- `findings/`: findings and their current rerun outcomes stay here.
 - `CRITICAL.md`: not present. The first CRITICAL finding creates it (guard c).
 - `py/sbx.py`: the one `sandbox-exec` runner and its profile-error rule (P10,
   one copy). It takes any profile path; the planned did and model-provider

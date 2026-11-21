@@ -89,6 +89,20 @@ pub(crate) fn build_allows() -> bool {
     cfg!(feature = "prototype-agents")
 }
 
+fn build_allows_for_home(data_dir: &Path) -> bool {
+    build_allows() || {
+        #[cfg(test)]
+        {
+            tests::dispatch_fixture_enabled(data_dir)
+        }
+        #[cfg(not(test))]
+        {
+            let _ = data_dir;
+            false
+        }
+    }
+}
+
 /// A named refusal. The text is the whole reason, and nothing was written.
 #[derive(Debug)]
 pub(crate) struct Refused(pub(crate) String);
@@ -1068,7 +1082,9 @@ pub(crate) fn stored_agent(
     owner_id: &str,
     agent_id: &str,
 ) -> anyhow::Result<StoredAgent> {
-    require_build()?;
+    if !build_allows_for_home(data_dir) {
+        return refused(FEATURE_OFF);
+    }
     let opened = open(data_dir, false)?;
     if opened.file.enabled.is_none() {
         return refused(NOT_ENABLED);
@@ -1105,7 +1121,7 @@ pub(crate) fn stored_agent_for_root(
     principal_id: &str,
     localhost_root: &str,
 ) -> anyhow::Result<Option<StoredAgent>> {
-    if !build_allows() {
+    if !build_allows_for_home(data_dir) {
         return Ok(None);
     }
     let opened = open(data_dir, false)?;
@@ -1179,7 +1195,7 @@ pub(crate) fn stored_wrap(
 /// while agents are on for this Home. It never fails: an agent fault leaves the
 /// owner's own load exactly as it was. A record already present stays one.
 pub(crate) fn merge_into(data_dir: &Path, state: &mut crate::auth::AuthState) {
-    if !build_allows() {
+    if !build_allows_for_home(data_dir) {
         return;
     }
     let Ok(AgentFile::Loaded(file)) = load(data_dir, &state.principals) else {
@@ -1207,7 +1223,7 @@ pub(crate) fn without_agent_roots(
     data_dir: &Path,
     state: &crate::auth::AuthState,
 ) -> Option<crate::auth::AuthState> {
-    if !build_allows() {
+    if !build_allows_for_home(data_dir) {
         return None;
     }
     // The file's records are read here, never through the sign-in loader: a

@@ -49,12 +49,13 @@
 //! only after a granted dispatch. The guest does not run the test.
 //! A journal append writes the whole encoding with a revision precondition,
 //! only with a write grant for the agent's own journal. The guest asks the
-//! Runtime for exactly two grants, write and read, on that journal; they are
-//! held in memory and never stored. A lost reply is `settlement_unknown`;
+//! Runtime for write and read grants on that journal; they are held in memory
+//! and never stored. A lost reply is `settlement_unknown`;
 //! resume reads the head back and nothing is appended until it settles. The
-//! WASM guest runs that fold inside Wasmtime and exits. It calls a provider
-//! only for its own journal, and with no grant it sends nothing. It has no
-//! Home window.
+//! WASM guest runs that fold inside Wasmtime and exits. It submits one
+//! prepared document edit to the Runtime for owner approval through a separate
+//! Bus submit grant, after its activation journal is stored and read back.
+//! Preview has no provider effect. It has no Home window.
 
 #[cfg(target_arch = "wasm32")]
 wit_bindgen::generate!({
@@ -3906,8 +3907,8 @@ struct JournalGrants {
 }
 
 /// Ask the Runtime for exactly two grants on this agent's own journal: write,
-/// then read. Nothing else is asked for. A refusal leaves that grant empty,
-/// returns its reason, and writes that reason into the journal. A denied ask,
+/// then read. This function asks for no other grant. A refusal leaves that
+/// grant empty, returns its reason, and writes that reason into the journal. A denied ask,
 /// an invalid ask, and an unknown outcome stay different reasons. Nothing is
 /// sent with an empty grant.
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -3989,6 +3990,90 @@ trait ResourceBus {
         body: &[u8],
         grant: &str,
     ) -> Result<Vec<u8>, BusFailure>;
+}
+
+/// The prepared document edit becomes one typed provider step. The observed
+/// whole file supplies the write bytes; the proposal supplies the path and
+/// replacement. Building this preview has no Bus call and changes no step.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn preview_document_plan(
+    _bus: &mut impl ResourceBus,
+    journal: &Journal,
+    step_id: u64,
+) -> Result<serde_json::Value, &'static str> {
+    let step = journal
+        .steps
+        .iter()
+        .find(|step| step.id == step_id && step.state == StepState::Prepared)
+        .ok_or("prepared document step required")?;
+    if step.kind != ProposalKind::Edit || step.seen_version.is_none() {
+        return Err("prepared document edit required");
+    }
+    let observed = current_observed_text(&journal.events, &step.resource)
+        .ok_or("whole document observation required")?;
+    if current_observation(&journal.events, &step.resource).map(|row| row.version)
+        != step.seen_version
+        || observed.matches(&step.old).count() != 1
+    {
+        return Err("document observation changed");
+    }
+    let content = observed.replacen(&step.old, &step.new, 1).into_bytes();
+    Ok(serde_json::json!({
+        "steps": [{
+            "scheme": "localhost",
+            "operation": "write",
+            "request": {"path": step.resource, "content": content},
+        }],
+    }))
+}
+
+/// Submit only a one-step plan through the granted Bus invoke. The Runtime
+/// owns the pending record, the owner, and the later approval decision.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn submit_document_plan(
+    bus: &mut impl ResourceBus,
+    plan: &serde_json::Value,
+) -> Result<serde_json::Value, &'static str> {
+    let [step] = plan
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("one step required")?
+        .as_slice()
+    else {
+        return Err("one step required");
+    };
+    if step.get("scheme").and_then(serde_json::Value::as_str) != Some("localhost")
+        || step.get("operation").and_then(serde_json::Value::as_str) != Some("write")
+        || !step
+            .get("request")
+            .is_some_and(serde_json::Value::is_object)
+    {
+        return Err("document write step required");
+    }
+    const RESOURCE: &str = "elastos://inspect/submit_agent_plan";
+    let grant = bus
+        .request_grant(
+            RESOURCE,
+            "write",
+            "Submit one document plan for owner approval",
+        )
+        .map_err(|_| "submit grant refused")?;
+    if grant.is_empty() {
+        return Err("submit grant invalid");
+    }
+    let body = serde_json::to_vec(plan).map_err(|_| "plan encoding failed")?;
+    let reply = bus
+        .invoke(RESOURCE, "submit_agent_plan", &body, &grant)
+        .map_err(|_| "plan submission failed")?;
+    let result: serde_json::Value =
+        serde_json::from_slice(&reply).map_err(|_| "submit reply invalid")?;
+    if result["status"] != "ok"
+        || result["data"]["status"] != "pending"
+        || result["data"]["request"] != *step
+    {
+        return Err("submit reply did not bind the proposed step");
+    }
+    Ok(result)
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -4580,6 +4665,9 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut folded = journal.clone();
+        // This repeat-compaction check concerns the retained snapshot and
+        // skill. The earlier denied read added a separate refusal record.
+        folded.events.retain(|node| !is_refusal_record(node));
         let folded_epoch = folded.epoch;
         if compact(&mut folded, COMPACTION_SUMMARY)
             || folded.epoch != folded_epoch
@@ -4983,6 +5071,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         let edit = propose_edit(&mut seen, resource, "two", "three", Some(2)).map_err(|_| {
             elastos::bus::types::BusError::Invalid("a current edit was refused".to_string())
         })?;
+        let plan = preview_document_plan(&mut WasmBus, &seen, edit)
+            .map_err(|reason| elastos::bus::types::BusError::Invalid(reason.to_string()))?;
         let step = seen
             .steps
             .iter()
@@ -8206,6 +8296,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             &mut cursor,
             grants.write.as_ref(),
         );
+        let journal_written = matches!(appended, AppendOutcome::Written);
         let followed = match (&grants.write, appended) {
             (None, AppendOutcome::Denied) => {
                 grants.write_reason.is_some()
@@ -8249,6 +8340,11 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             return Err(elastos::bus::types::BusError::Invalid(
                 "the journal append did not follow its grants".to_string(),
             ));
+        }
+        if journal_written {
+            // An admitted agent proposes only after its activation journal is
+            // stored and read back. A refused submit ask leaves it running.
+            let _ = submit_document_plan(&mut WasmBus, &plan);
         }
         Ok(())
     }
@@ -8492,6 +8588,9 @@ struct ManifestDeclaredAsk {
 
 #[cfg(test)]
 fn manifest_resource_refusal(resource: &str) -> Option<&'static str> {
+    if resource == "elastos://inspect/submit_agent_plan" {
+        return None;
+    }
     let Some(path) = resource.strip_prefix("localhost://") else {
         return ask_resource_refusal(resource).or(Some("asks url"));
     };
@@ -9599,6 +9698,100 @@ mod sparks_http {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct PlanBus {
+        asks: Vec<(String, String)>,
+        invokes: Vec<(String, String, Vec<u8>)>,
+    }
+
+    impl ResourceBus for PlanBus {
+        fn request_grant(
+            &mut self,
+            resource: &str,
+            action: &str,
+            _reason: &str,
+        ) -> Result<String, BusFailure> {
+            self.asks.push((resource.to_string(), action.to_string()));
+            Ok("submit-grant".to_string())
+        }
+
+        fn invoke(
+            &mut self,
+            resource: &str,
+            operation: &str,
+            body: &[u8],
+            grant: &str,
+        ) -> Result<Vec<u8>, BusFailure> {
+            assert_eq!(grant, "submit-grant");
+            self.invokes
+                .push((resource.to_string(), operation.to_string(), body.to_vec()));
+            let plan: serde_json::Value =
+                serde_json::from_slice(body).map_err(|_| BusFailure::Invalid)?;
+            serde_json::to_vec(&serde_json::json!({
+                "status": "ok",
+                "data": {"status": "pending", "request": plan["steps"][0]},
+            }))
+            .map_err(|_| BusFailure::Other)
+        }
+    }
+
+    #[test]
+    fn a15r_june_plan_preview_and_submit_keep_the_document_step() {
+        let mut journal = empty_journal();
+        let document = "localhost://Users/self/Documents/note.txt";
+        assert!(observe(&mut journal, document, 2, "two lines"));
+        let edit = propose_edit(&mut journal, document, "two", "three", Some(2)).unwrap();
+        let mut bus = PlanBus::default();
+        let plan = preview_document_plan(&mut bus, &journal, edit).unwrap();
+        assert!(
+            bus.asks.is_empty() && bus.invokes.is_empty(),
+            "preview has no effect"
+        );
+        assert_eq!(journal.steps[0].state, StepState::Prepared);
+        let proposed = serde_json::to_vec(&plan["steps"][0]).unwrap();
+        assert_eq!(plan["steps"][0]["request"]["path"], document);
+        assert_eq!(
+            plan["steps"][0]["request"]["content"],
+            serde_json::json!(b"three lines")
+        );
+        let result = submit_document_plan(&mut bus, &plan).unwrap();
+        assert_eq!(
+            bus.asks,
+            [("elastos://inspect/submit_agent_plan".into(), "write".into())]
+        );
+        assert_eq!(bus.invokes.len(), 1);
+        assert_eq!(bus.invokes[0].0, "elastos://inspect/submit_agent_plan");
+        assert_eq!(bus.invokes[0].1, "submit_agent_plan");
+        let sent: serde_json::Value = serde_json::from_slice(&bus.invokes[0].2).unwrap();
+        assert_eq!(serde_json::to_vec(&sent["steps"][0]).unwrap(), proposed);
+        assert_eq!(
+            serde_json::to_vec(&result["data"]["request"]).unwrap(),
+            proposed
+        );
+        assert_eq!(journal.steps[0].state, StepState::Prepared);
+        if let Some(path) = std::env::var_os("A15R_PREVIEW_STEP_PATH") {
+            std::fs::write(std::path::PathBuf::from(path), &proposed)
+                .expect("write the planner's exact preview step");
+        }
+    }
+
+    #[test]
+    fn a15r_june_plan_refuses_two_steps_before_any_bus_call() {
+        let mut journal = empty_journal();
+        let document = "localhost://Users/self/Documents/note.txt";
+        assert!(observe(&mut journal, document, 1, "two lines"));
+        let edit = propose_edit(&mut journal, document, "two", "three", Some(1)).unwrap();
+        let mut bus = PlanBus::default();
+        let mut plan = preview_document_plan(&mut bus, &journal, edit).unwrap();
+        let second = plan["steps"][0].clone();
+        plan["steps"].as_array_mut().unwrap().push(second);
+        assert_eq!(
+            submit_document_plan(&mut bus, &plan),
+            Err("one step required")
+        );
+        assert!(bus.asks.is_empty() && bus.invokes.is_empty());
+    }
 
     // Sweep gaps (reports/guard-sweep.md): the child and grant checks.
 
@@ -11410,12 +11603,27 @@ mod tests {
         assert!(project_tree_hash(&[("/tmp/style.css", "body{}")]).is_none());
         assert!(project_tree_hash(&[]).is_none());
         let signer = include_str!("../../../elastos/crates/elastos-server/src/runtime.rs");
-        // The Runtime hashes admitted component bytes, and reads the file
-        // only when those bytes were not already taken. The old comment
-        // ("Compute content hash (hash the entrypoint file)") left in d5d568375.
-        assert!(signer.contains(
-            "Hash the entrypoint: the bytes already read for a component, the file otherwise."
-        ));
+        let rule_at = signer
+            .find(
+                "Hash the entrypoint: the bytes already read for a component, the file otherwise.",
+            )
+            .expect("entrypoint hash rule");
+        let verify_at = signer[rule_at..]
+            .find("Verify signature; the matched trusted key names the signer.")
+            .expect("signature check after the entrypoint hash");
+        let rule = &signer[rule_at..rule_at + verify_at];
+        assert!(
+            rule.contains("Some(bytes) => hash_content(bytes),"),
+            "a component admission hashes the entrypoint bytes already read"
+        );
+        assert!(
+            rule.contains("let entrypoint_path = path.join(&manifest.entrypoint);"),
+            "any other admission hashes the entrypoint file"
+        );
+        assert!(
+            rule.contains("hash_content(&tokio::fs::read(&entrypoint_path)"),
+            "the entrypoint file is the hashed bytes"
+        );
     }
 
     #[test]
@@ -20245,8 +20453,8 @@ mod tests {
         out
     }
 
-    /// The manifest permits a localhost `Users/self` ceiling. These cases
-    /// refuse other schemes, host paths, user routes, secrets, and extra fields.
+    /// The manifest permits its own journal and the exact submit resource.
+    /// These cases refuse other schemes, host paths, secrets and extra fields.
     #[test]
     fn asks_declare_no_urls_secrets_or_users_paths() {
         let parsed = parse_manifest_asks(MANIFEST_JSON);
@@ -20643,7 +20851,9 @@ mod tests {
         );
         let asks = parse_manifest_asks(MANIFEST_JSON)
             .unwrap_or_else(|reason| panic!("the manifest asks are refused: {reason}"));
-        assert_eq!(asks.len(), 1, "the manifest lists one ask");
+        assert_eq!(asks.len(), 2, "the manifest lists journal and submit asks");
+        assert_eq!(asks[1].resource, "elastos://inspect/submit_agent_plan");
+        assert_eq!(asks[1].actions, ["write"]);
         let ask = &asks[0];
         (ask.resource.clone(), ask.actions.clone())
     }

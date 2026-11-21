@@ -854,8 +854,8 @@ check reads metadata only and leaves the build tree outside its selection.
 
 ## 023 — two granted Home directories
 
-`two_instances_overlap_with_separate_grants` and
-`instance_grant_does_not_authorise_sibling` exercise
+`two_instances_overlap_with_separate_grants` exercises both own grants and
+the sibling refusal in one journey. It proves
 **process isolation, not A3 (A3 needs resident instances in one Runtime); lab half of A6 and A9**.
 A3 is independent resident capsule instances inside one Runtime
 (https://github.com/Elacity/elastos-runtime/issues/181). Two hash-named builds use the

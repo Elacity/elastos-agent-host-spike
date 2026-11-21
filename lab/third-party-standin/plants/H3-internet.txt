@@ -1,0 +1,9 @@
+id: H3-internet
+file: elastos/crates/elastos-server/src/api/gateway_browser_wallet_reads.rs
+test: hook3_chain_read_internet_gate_is_the_known_call_today
+note: the internet gate's request_missing argument, not the error sentence
+--- old
+    let internet = gateway_browser_internet::effect_for_authority(state, authority, false)
+--- new
+    let internet = gateway_browser_internet::effect_for_authority(state, authority, true)
+--- end

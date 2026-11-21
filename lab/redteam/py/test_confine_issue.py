@@ -2293,6 +2293,8 @@ class IssueRules(unittest.TestCase):
         The observation rule runs after the probe, with its findings present.
         An existing CRITICAL.md from another probe also stays unchanged.
         """
+        # Python 3.15 Path.is_file calls os.path.isfile; keep data paths real.
+        real_isfile = os.path.isfile
         method_names = unittest.defaultTestLoader.getTestCaseNames(IssueProbe)
         scenarios = [({}, None), ({}, b"CRITICAL fixture from another probe\n")]
         for profile_name in ("wallet", "did", "model"):
@@ -2373,7 +2375,11 @@ class IssueRules(unittest.TestCase):
                     START_SHA, {}, clear=True
                 ), patch.object(sbx, "REPO_ROOT", repo), patch.object(
                     sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
-                ), patch.object(os.path, "isfile", return_value=True), patch(
+                ), patch.object(
+                    os.path, "isfile",
+                    side_effect=lambda path: os.fspath(path) in (CC, sbx.SANDBOX_EXEC)
+                    or real_isfile(path),
+                ), patch(
                     __name__ + ".compile_issue", side_effect=injected_compile
                 ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
                     sbx, "run", side_effect=injected_sandbox

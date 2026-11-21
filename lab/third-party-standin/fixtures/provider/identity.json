@@ -1,0 +1,5 @@
+{
+  "content_sha256": "f5046c31a75eacf4631e42c19c24abf6a398ace42ec4c6fd52fae269c95487d7",
+  "signature_note": "Runtime capsule signature over the manifest and this content hash. The signature admits these bytes. It grants nothing.",
+  "signer_did": "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+}

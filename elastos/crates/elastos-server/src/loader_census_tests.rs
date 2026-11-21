@@ -69,6 +69,15 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "libc::execve",
+            "confined provider",
+            "admitted rights+checked directory+bound executable",
+            "B3 S10",
+            1,
+        ),
+        row(
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_confined_model_linux",
             "command",
@@ -565,8 +574,8 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/serve_cmd.rs",
-            "run_serve",
-            "vm_provider.load",
+            "load_microvm_capsule",
+            "provider.load",
             "VM capsule",
             "none",
             "P2-8",
@@ -989,10 +998,16 @@ fn every_executable_loader_has_an_authority_row() {
     let found = found(&sources);
     let mut listed = BTreeSet::new();
     for row in rows() {
-        assert!(matches!(row.check_id, "P2-2" | "P2-8"));
+        assert!(matches!(row.check_id, "P2-2" | "P2-8" | "B3 S10"));
         assert!(matches!(
             row.checks,
-            "CID+DID+closure" | "CID+DID" | "CID" | "DID" | "checksum" | "none"
+            "CID+DID+closure"
+                | "CID+DID"
+                | "CID"
+                | "DID"
+                | "checksum"
+                | "none"
+                | "admitted rights+checked directory+bound executable"
         ));
         assert!(!row.kind.is_empty());
         let key = (

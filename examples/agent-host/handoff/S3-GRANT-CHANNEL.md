@@ -1,6 +1,6 @@
 # How the guest gets its journal grant: options
 
-**Decided 20 Oct: option B.** Sasha chose the `capabilities` import, reversing answer 3. The guest asks for exactly two grants, read and write, on its own journal; the manifest declares only `.AppData/Agents/<agent-id>/*`. Built on `claude/s3-guest-journal` (PR #9). The grant type is now `JournalGrant`.
+**Decided 20 Oct: option B.** Sasha chose the `capabilities` import, reversing answer 3. The guest asks for write and read on its own journal. The document planner later asks for a separate submit grant. The manifest declares the journal path and the exact plan submit resource. The journal grant type is `JournalGrant`.
 
 Written 20 Oct 2026 for PR #9, questions 1 and 2. No code. Sasha decides.
 
@@ -36,7 +36,7 @@ Written 20 Oct 2026 for PR #9, questions 1 and 2. No code. Sasha decides.
 ## My recommendation: B
 
 - It is the only option with **no shipping Runtime change**. Every check already runs: the `Users/self` scoping, the manifest bound, the pending request, the shell decision, the audit event, and the one-resource-one-action token.
-- The guest asks for exactly two tokens: `write` and `read` on `localhost://Users/self/.AppData/Agents/<agent-id>/tasks/<task-id>/journal`. A token for anything else is useless to it, because the bridge checks the token's resource on every call.
+- The journal path needs two tokens: `write` and `read` on `localhost://Users/self/.AppData/Agents/<agent-id>/tasks/<task-id>/journal`. The document plan uses a separate submit token. The bridge checks each token's resource on every call.
 - It keeps the guest rules: a grant in memory, sent in `invoke-request.grant`, never journaled. Only where the grant comes from changes.
 - Cost: the import list gains `capabilities`, which reverses answer 3. That is why this is your call.
 

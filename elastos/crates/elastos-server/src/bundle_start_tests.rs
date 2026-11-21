@@ -3896,37 +3896,39 @@ async fn ceiling_is_signed() {
     );
 }
 
-/// B2-file. The lab's `asks.json` is bytes in the closure and never authority
-/// at a start by CID. A bundle whose `capsule.json` declares no asks starts
-/// sealed with that file beside its manifest: the admitted manifest's asks
-/// stay empty, its ceiling is empty, and no handler sees the component's
-/// call. And no file of the server reads a file by that name: the start has
-/// one source of asks, the `capsule.json` the walk checked.
+/// A start by CID takes asks from the signed manifest. A stray sidecar in
+/// the same bundle is walked as bytes and is not applied: the admitted asks
+/// stay empty and the start stays sealed. The same ask declared in
+/// `capsule.json` reaches the shell and, once granted, the provider.
 #[tokio::test]
-async fn a_lab_asks_json_beside_the_bundle_is_never_read_by_the_start() {
+async fn a_start_by_cid_takes_asks_from_the_signed_manifest() {
     use crate::bundle_admission::admit_bundle_manifest;
     use elastos_bundle_identity::checked_bundle_within as walk;
     let publisher = key(102);
     let home = Home::trusting(&[&publisher]).await;
     let folder = home.bundle("lab-asks", &manifest("lab-asks"), &calling_component());
-    // An ask for the resource the component requests, in the file the lab's
-    // agent-host declares its asks in. The start must not take it.
-    let lab = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
-    fs::write(folder.join("asks.json"), lab.to_string()).unwrap();
+    let sidecar = concat!("asks", ".json");
+    let stray = br#"[{"resource":"elastos://test/bus/probe","actions":["read"]}]"#;
+    fs::write(folder.join(sidecar), stray).unwrap();
     let cid = home.stage(&folder, &publisher).await;
 
-    // The file is in the closure and adds nothing to the manifest.
     let slot = bundle_slot(&home.data(), &cid.parse().unwrap());
     let checked = walk(&slot, BUNDLE_WALK_BUDGET).unwrap();
-    assert!(checked.entry("asks.json").is_some(), "read as bytes");
     let admitted = admit_bundle_manifest(&checked).unwrap();
-    assert!(admitted.manifest.asks.is_empty());
+    assert_eq!(
+        checked.entry(sidecar),
+        Some(stray.as_slice()),
+        "the sidecar is bytes in the walked bundle"
+    );
+    assert!(
+        admitted.manifest.asks.is_empty(),
+        "a sidecar is not a reader"
+    );
     assert_eq!(
         admitted.manifest.resource_authority_bounds(),
         Vec::<String>::new()
     );
 
-    // And the capsule runs sealed: its call never reaches a handler.
     let refusal = home.run(&cid, Some(PERSON)).await.unwrap_err();
     assert!(
         refusal
@@ -3936,17 +3938,9 @@ async fn a_lab_asks_json_beside_the_bundle_is_never_read_by_the_start() {
     );
     assert_eq!(home.calls(), Vec::new(), "no handler saw the call");
 
-    // The control, through the real bridge: the same bundle with the same
-    // `asks.json` beside its manifest, and the same ask declared in the
-    // `capsule.json` the walk checks, reaches the shell; granted there its
-    // read reaches the provider and it ends well. So the sealed run above is
-    // the start taking the manifest's asks and not the file's.
+    let lab = serde_json::json!([{"resource": "elastos://test/bus/probe", "actions": ["read"]}]);
     let bridge = RealBridge::trusting(&[&publisher]).await;
-    let control = bridge.bundle(
-        "lab-asks-declared",
-        &manifest_with("lab-asks", "asks", lab.clone()),
-    );
-    fs::write(control.join("asks.json"), lab.to_string()).unwrap();
+    let control = bridge.bundle("lab-asks-declared", &manifest_with("lab-asks", "asks", lab));
     let declared = bridge.stage(&control, &publisher).await;
     assert_eq!(
         bridge
@@ -3954,25 +3948,134 @@ async fn a_lab_asks_json_beside_the_bundle_is_never_read_by_the_start() {
             .await,
         "lab-asks"
     );
+}
 
-    // No file of the server reads that name; this test file is the only one
-    // that writes it, and only to prove it is ignored.
+/// No file in this repo carries the retired sidecar name, and no Rust
+/// source compiles that name with `include_str` or `include_bytes`. A
+/// production server source that names it as its own path fails here.
+#[test]
+fn census_retired_ask_filename_stays_with_its_owners() {
+    let name = concat!("asks", ".json");
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("repo root");
     let mut files = Vec::new();
-    rust_files(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut files,
+    walk_repo(repo, &mut files);
+
+    let mut named = Vec::new();
+    let mut includes = Vec::new();
+    for path in &files {
+        let relative = repo_rel(repo, path);
+        if path.file_name().and_then(|file| file.to_str()) == Some(name) {
+            named.push(relative.clone());
+        }
+        if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            let text = fs::read_to_string(path).unwrap_or_default();
+            if rust_include_names(&text, name) {
+                includes.push(relative);
+            }
+        }
+    }
+    named.sort();
+    includes.sort();
+    assert!(named.is_empty(), "the retired sidecar is back: {named:?}");
+    assert!(
+        includes.is_empty(),
+        "a Rust source compiles the retired sidecar: {includes:?}"
     );
-    let mut readers: Vec<String> = files
-        .iter()
-        .filter(|path| {
-            fs::read_to_string(path)
-                .expect("read")
-                .contains("\"asks.json\"")
-        })
-        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
-        .collect();
-    readers.sort();
-    assert_eq!(readers, ["bundle_start_tests.rs"]);
+
+    let server = repo.join("elastos/crates/elastos-server/src");
+    let mut sidecar = Vec::new();
+    for path in &files {
+        if !path.starts_with(&server) || path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+        {
+            continue;
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|file| file.to_str())
+            .unwrap_or("");
+        if file_name.ends_with("tests.rs")
+            || path.components().any(|part| part.as_os_str() == "tests")
+        {
+            continue;
+        }
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if whole_token(&text, name) {
+            sidecar.push(repo_rel(repo, path));
+        }
+    }
+    assert!(
+        sidecar.is_empty(),
+        "a server source names the retired sidecar: {sidecar:?}"
+    );
+}
+
+fn walk_repo(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for item in entries {
+        let path = item.expect("entry").path();
+        if path
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            continue;
+        }
+        if path.is_dir() {
+            if matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some(".git" | "target" | "target-build" | "target-capsules" | "node_modules")
+            ) {
+                continue;
+            }
+            walk_repo(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
+}
+
+fn repo_rel(repo: &Path, path: &Path) -> String {
+    path.strip_prefix(repo)
+        .expect("path is inside the repo")
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn rust_include_names(text: &str, name: &str) -> bool {
+    for marker in ["include_str!", "include_bytes!"] {
+        let mut rest = text;
+        while let Some(at) = rest.find(marker) {
+            let window = &rest[at..];
+            let end = window.len().min(marker.len() + 80);
+            if window[..end].contains(name) {
+                return true;
+            }
+            rest = &rest[at + marker.len()..];
+        }
+    }
+    false
+}
+
+fn whole_token(text: &str, name: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    while let Some(at) = text[start..].find(name) {
+        let abs = start + at;
+        let before_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphanumeric();
+        let after = abs + name.len();
+        let after_ok = after == bytes.len() || !bytes[after].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + name.len();
+    }
+    false
 }
 
 /// R-grants-nothing. A component signed by a trusted publisher, whose signed
