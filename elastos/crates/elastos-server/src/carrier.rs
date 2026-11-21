@@ -4735,6 +4735,24 @@ impl CarrierAvailabilityProvider {
                 "min_distinct_holders requires a whole-CID fetch",
             ));
         }
+        let request_nonce = if required_distinct > 0 {
+            match request
+                .get("serve_request_nonce")
+                .and_then(|value| value.as_str())
+            {
+                Some(nonce) if crate::content::serve_attempt_nonce(nonce, 1).is_some() => {
+                    Some(nonce)
+                }
+                _ => {
+                    return Ok(carrier_availability_error(
+                        "invalid_request",
+                        "distinct-holder fetch requires a Content serve request nonce",
+                    ))
+                }
+            }
+        } else {
+            None
+        };
         let mut holder_receipts: Vec<FetchReceipt> = Vec::new();
         if required_distinct > 0 {
             if let Err(err) = crate::content::require_fetch_receipt_cid(cid) {
@@ -4827,7 +4845,8 @@ impl CarrierAvailabilityProvider {
                 fetch_attempts += 1;
                 tried.insert(replica.node_did.clone());
                 let attempt = tried.len() as u8;
-                let serve_nonce = (required_distinct > 0).then(random_serve_nonce);
+                let serve_nonce = request_nonce
+                    .and_then(|nonce| crate::content::serve_attempt_nonce(nonce, attempt));
                 let serve = serve_nonce
                     .as_deref()
                     .map(|nonce| (self_did.as_str(), nonce));
@@ -5516,12 +5535,6 @@ async fn fetch_content_via_carrier_provider_invocation(
         None
     };
     Ok((bytes, remote_transfer, countersignature))
-}
-
-fn random_serve_nonce() -> String {
-    let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).expect("OS entropy source unavailable for serve nonce");
-    hex::encode(bytes)
 }
 
 async fn ensure_content_via_carrier_provider_invocation(
@@ -9434,6 +9447,7 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    const TEST_REQUEST_NONCE: &str = "fedcba9876543210fedcba9876543210";
     const NONCANONICAL_ALIAS_DID: &str = "did:key:z2DQYePVrytqCLfdq5VSDGtksAZC9NAt75iCed5WwSKKVXt";
 
     #[test]
@@ -16202,7 +16216,7 @@ pub(crate) mod tests {
             .send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 2
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16263,7 +16277,7 @@ pub(crate) mod tests {
             distinct_holder_fetch_fixture(146, cid, vec![first, second], invoker.clone()).await;
         let response = provider
             .send_raw(&serde_json::json!({
-                "op": "fetch", "cid": cid, "min_distinct_holders": 2
+                "op": "fetch", "cid": cid, "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16281,10 +16295,13 @@ pub(crate) mod tests {
         assert_eq!(receipts.len(), 2);
         assert_eq!(requests.len(), 2);
         for (index, holder_did) in [first_did, second_did].iter().enumerate() {
+            let issued =
+                crate::content::serve_attempt_nonce(TEST_REQUEST_NONCE, (index + 1) as u8).unwrap();
             assert_eq!(
                 receipts[index]["serve_nonce"],
                 requests[index]["request"]["serve_nonce"]
             );
+            assert_eq!(receipts[index]["serve_nonce"], issued);
             let signed: crate::content::SignedHolderServeReceipt =
                 serde_json::from_value(receipts[index]["countersignature"].clone()).unwrap();
             crate::content::verify_holder_serve_receipt(
@@ -16324,7 +16341,7 @@ pub(crate) mod tests {
             provider.send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 2
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             })),
         )
         .await
@@ -16368,7 +16385,7 @@ pub(crate) mod tests {
             .send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 2
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16467,7 +16484,7 @@ pub(crate) mod tests {
             .send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 2
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16521,7 +16538,7 @@ pub(crate) mod tests {
             .send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 2
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16580,7 +16597,7 @@ pub(crate) mod tests {
             .send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 2
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16627,7 +16644,7 @@ pub(crate) mod tests {
             .send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 2
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16700,12 +16717,12 @@ pub(crate) mod tests {
                 "op": "fetch",
                 "cid": cid,
                 "path": "notes.txt",
-                "min_distinct_holders": 2
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }),
             serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 2,
+                "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE,
                 "bounded_read": true,
                 "range": { "start": 0, "end": 3 }
             }),
@@ -16734,7 +16751,7 @@ pub(crate) mod tests {
             .send_raw(&serde_json::json!({
                 "op": "fetch",
                 "cid": cid,
-                "min_distinct_holders": 1
+                "min_distinct_holders": 1, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16907,7 +16924,7 @@ pub(crate) mod tests {
             distinct_holder_fetch_fixture(135, cid, vec![honest, unsigned], invoker).await;
         let response = provider
             .send_raw(&serde_json::json!({
-                "op": "fetch", "cid": cid, "min_distinct_holders": 2
+                "op": "fetch", "cid": cid, "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
@@ -16944,7 +16961,7 @@ pub(crate) mod tests {
             distinct_holder_fetch_fixture(138, cid, vec![honest, replay], invoker.clone()).await;
         let response = provider
             .send_raw(&serde_json::json!({
-                "op": "fetch", "cid": cid, "min_distinct_holders": 2
+                "op": "fetch", "cid": cid, "min_distinct_holders": 2, "serve_request_nonce": TEST_REQUEST_NONCE
             }))
             .await
             .unwrap();
