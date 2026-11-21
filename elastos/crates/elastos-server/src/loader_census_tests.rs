@@ -1092,6 +1092,23 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
             "checked_native_provider_with_data_dir",
             "verify_installed_component_start(",
         ),
+        // A hosted plane admits against the Home it serves, never the
+        // default Home.
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_ipfs_provider_plane_with_role",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_availability_provider_plane",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
+            "elastos-server/src/protected_content_runtime.rs",
+            "register_inactive_custody_provider",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
     ] {
         let text = &sources[file];
         let code = source::code_only(text);
