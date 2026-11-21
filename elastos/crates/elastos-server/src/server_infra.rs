@@ -595,10 +595,13 @@ pub(crate) async fn register_chain_provider_plane(
         anyhow::bail!("protected-content chain configuration names no protected_content_network");
     }
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
-    let bridge =
-        provider::ProviderBridge::spawn(&checked_native_provider(binary_path), generic_config)
-            .await
-            .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
+    // Admit against the signed release of the Home this chain plane serves.
+    let bridge = provider::ProviderBridge::spawn(
+        &checked_native_provider_with_data_dir(data_dir, binary_path),
+        generic_config,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
     match bridge
         .request(provider::bridge::ProviderRequest::Init { config })
         .await

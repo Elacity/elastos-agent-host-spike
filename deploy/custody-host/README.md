@@ -69,6 +69,32 @@ apt/dpkg, no shell beyond busybox ash. See the Dockerfile and the task
 report for the full build-strategy rationale (stripped binaries, BuildKit
 cache mounts, the image-as-source-of-truth pattern for the data volume).
 
+## The signed release (trusted source)
+
+Every installed component start verifies the publisher's signed release
+first: the Runtime checks the release head and release envelope against the
+publisher pinned in `sources.json`, then checks `components.json` and the
+component's executable against what that release signed. Custody
+provisioning (`provision-custody-node` starting `custody-provider`) is one of
+those starts, so a node with no trusted source refuses it with "No trusted
+source configured".
+
+A real custody host gets its trusted source by installing ElastOS: the
+stamped installer pins the publisher, then `elastos setup` installs that
+publisher's signed release. Provision the node only after that install.
+
+This image builds from source, so it plays the publisher itself. The builder
+stage runs `sign-harness-release.py`, which makes a throwaway Ed25519
+publisher key, signs one release binding the exact stripped `elastos` binary
+and stamped `components.json` the image ships, writes the publisher's
+`release-head.json` and `release.json` (under
+`ElastOS/SystemServices/Publisher/`) and a `sources.json` pinning that
+publisher, then deletes the key. The image carries only these public signed
+files, under `/opt/elastos-image/`, and `entrypoint.sh` syncs them into the
+data volume with `bin/` and `components.json`. Each image build has a new
+publisher. The Runtime's checks are the same for the harness as for a real
+install.
+
 ## Env contract
 
 Exactly one variable is required on **every** boot:

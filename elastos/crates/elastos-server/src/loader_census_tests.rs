@@ -1107,6 +1107,11 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
             "checked_native_provider_with_data_dir(data_dir, binary_path)",
         ),
         (
+            "elastos-server/src/server_infra.rs",
+            "register_chain_provider_plane",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
             "elastos-server/src/protected_content_runtime.rs",
             "register_inactive_custody_provider",
             "checked_native_provider_with_data_dir(data_dir, binary_path)",
