@@ -402,6 +402,10 @@ pub(crate) async fn call(
     let ticket = grant["connect_ticket"]
         .as_str()
         .context("Engine ticket required")?;
+    let peer_did = super::public_key_to_did(&endpoint)?;
+    registry
+        .remember_carrier_peer_ticket(&peer_did, ticket)
+        .await?;
     request["op"] = json!(operation);
     request["grant_id"] = grant["grant_id"].clone();
     request["principal_id"] = grant["principal_id"].clone();
@@ -414,14 +418,14 @@ pub(crate) async fn call(
             transfer: ProviderTransfer::Json,
             range: None,
             progress: None,
-            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::ConnectTicket {
-                connect_ticket: ticket.into(),
-                peer_did: Some(super::public_key_to_did(&endpoint)?),
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did,
                 timeout_ms: Some(if matches!(operation, "prepare_launch" | "launch") {
                     60_000
                 } else {
                     5_000
                 }),
+                reply_wait_ms: None,
             }),
         })
         .await

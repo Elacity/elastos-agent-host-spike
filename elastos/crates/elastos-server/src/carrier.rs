@@ -5463,6 +5463,9 @@ async fn fetch_content_via_carrier_provider_invocation(
         request["serve_nonce"] = serde_json::Value::String(nonce.to_owned());
     }
 
+    registry
+        .remember_carrier_peer_ticket(holder_did, ticket)
+        .await?;
     let response = registry
         .invoke_provider(ProviderInvocation {
             source: "carrier-availability".to_string(),
@@ -5472,10 +5475,10 @@ async fn fetch_content_via_carrier_provider_invocation(
             transfer: ProviderTransfer::Stream,
             range: None,
             progress: None,
-            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::ConnectTicket {
-                connect_ticket: ticket.to_string(),
-                peer_did: Some(holder_did.to_string()),
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did: holder_did.to_string(),
                 timeout_ms: Some(5_000),
+                reply_wait_ms: None,
             }),
         })
         .await
@@ -5544,10 +5547,13 @@ async fn ensure_content_via_carrier_provider_invocation(
     source_request: &serde_json::Value,
 ) -> Result<CarrierReplicationProof> {
     validate_content_cid(cid).map_err(anyhow::Error::msg)?;
-    let route = ProviderCarrierRoute::ConnectTicket {
-        connect_ticket: replica.connect_ticket.clone(),
-        peer_did: Some(replica.node_did.clone()),
+    registry
+        .remember_carrier_peer_ticket(&replica.node_did, &replica.connect_ticket)
+        .await?;
+    let route = ProviderCarrierRoute::PeerDid {
+        peer_did: replica.node_did.clone(),
         timeout_ms: Some(5_000),
+        reply_wait_ms: None,
     };
     let admission =
         content_admission_via_carrier_provider_invocation(registry, &route, cid, source_request)
@@ -8353,6 +8359,8 @@ pub struct CarrierProviderInvoker {
     peer_endpoint: Option<Endpoint>,
     provider_registry: Weak<ProviderRegistry>,
     peer_clients: Mutex<BTreeMap<iroh::PublicKey, Arc<CarrierClient>>>,
+    ticket_routes: Mutex<BTreeMap<iroh::PublicKey, Vec<iroh::EndpointAddr>>>,
+    ticket_lookup: Option<MemoryLookup>,
 }
 
 #[derive(Debug, Clone)]
@@ -8383,8 +8391,13 @@ impl CarrierProviderInvoker {
     /// discovery. This form can resolve foreign peer-DID routes but deliberately
     /// has no same-endpoint dispatcher.
     pub fn with_carrier_endpoint(endpoint: Endpoint) -> Self {
+        let ticket_lookup = MemoryLookup::new();
+        if let Ok(lookup) = endpoint.address_lookup() {
+            lookup.add(ticket_lookup.clone());
+        }
         Self {
             peer_endpoint: Some(endpoint),
+            ticket_lookup: Some(ticket_lookup),
             ..Self::default()
         }
     }
@@ -8397,9 +8410,8 @@ impl CarrierProviderInvoker {
         provider_registry: Weak<ProviderRegistry>,
     ) -> Self {
         Self {
-            peer_endpoint: Some(endpoint),
             provider_registry,
-            ..Self::default()
+            ..Self::with_carrier_endpoint(endpoint)
         }
     }
 
@@ -8469,6 +8481,110 @@ impl CarrierProviderInvoker {
     }
 }
 
+impl CarrierProviderInvoker {
+    async fn invoke_ticket_endpoints(
+        &self,
+        endpoints: Vec<iroh::EndpointAddr>,
+        peer_did: Option<&str>,
+        timeout_secs: u64,
+        invocation: &ProviderInvocation,
+        request: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, ProviderError> {
+        let peer_endpoint = self.peer_endpoint.as_ref().ok_or_else(|| {
+            ProviderError::Unavailable(
+                "Carrier peer routing is not available on this Runtime".to_string(),
+            )
+        })?;
+        let mut endpoints = endpoints;
+        if let Some(peer_did) = peer_did {
+            endpoints.retain(|endpoint| carrier_endpoint_matches_peer(endpoint, peer_did));
+            if endpoints.is_empty() {
+                return Err(ProviderError::Provider(
+                    "Carrier provider invocation peer_did does not match connect_ticket"
+                        .to_string(),
+                ));
+            }
+        }
+        if endpoints.is_empty() {
+            return Err(ProviderError::Provider(
+                "Carrier provider invocation connect_ticket has no endpoints".to_string(),
+            ));
+        }
+        if endpoints
+            .iter()
+            .any(|endpoint| endpoint.id == peer_endpoint.id())
+        {
+            return self
+                .invoke_loopback_provider(peer_endpoint, invocation, request)
+                .await;
+        }
+
+        let mut errors = Vec::new();
+        // An effect-free bounded read whose every endpoint failed only
+        // in transit reports a typed I/O error, so its caller may repeat it.
+        let bounded = bounded_content_fetch(invocation, &request);
+        let mut transit_kind = Some(std::io::ErrorKind::ConnectionAborted);
+        for (index, endpoint) in endpoints.into_iter().enumerate() {
+            let peer = endpoint.id;
+            match self
+                .connected_client(peer_endpoint, endpoint, timeout_secs)
+                .await
+            {
+                Ok(client) => {
+                    let invoke = client.invoke_provider(invocation, request.clone());
+                    // A bounded Content read carries no effect, so its answer
+                    // gets the same budget as the connect and a silent holder
+                    // yields to the next one. Every other operation keeps its
+                    // open-ended answer: cutting it could discard a receipt for
+                    // an effect that is still running on the peer.
+                    let result = if bounded {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(timeout_secs),
+                            invoke,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                self.forget_peer(peer).await;
+                                errors.push(format!(
+                                    "ticket[{index}] response deadline of {timeout_secs}s passed"
+                                ));
+                                transit_kind = transit_kind.map(|_| std::io::ErrorKind::TimedOut);
+                                continue;
+                            }
+                        }
+                    } else {
+                        invoke.await
+                    };
+                    match result {
+                        Ok(response) => return Ok(response),
+                        Err(err) => {
+                            self.forget_peer(peer).await;
+                            errors.push(carrier_provider_public_invoke_error(index, &err));
+                            if err.downcast_ref::<CarrierTransportFailure>().is_none() {
+                                transit_kind = None;
+                            }
+                            // A lost create reply may hide accepted work. A later
+                            // endpoint's refusal cannot settle that first attempt.
+                            if invocation.target == "model" && invocation.op == "runs_create" {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(err) => errors.push(carrier_provider_public_connect_error(index, &err)),
+            }
+        }
+
+        let message = format!("Carrier provider invocation failed: {}", errors.join(" | "));
+        Err(match transit_kind.filter(|_| bounded) {
+            Some(kind) => ProviderError::Io(std::io::Error::new(kind, message)),
+            None => ProviderError::Provider(message),
+        })
+    }
+}
+
 fn carrier_provider_public_connect_error(index: usize, err: &anyhow::Error) -> String {
     tracing::warn!(
         ticket_index = index,
@@ -8492,6 +8608,31 @@ fn carrier_provider_public_invoke_error(index: usize, err: &anyhow::Error) -> St
 
 #[async_trait::async_trait]
 impl ProviderCarrierInvoker for CarrierProviderInvoker {
+    async fn remember_peer_ticket(
+        &self,
+        peer_did: &str,
+        ticket: &str,
+    ) -> std::result::Result<(), ProviderError> {
+        let peer = did_to_public_key(peer_did).ok_or_else(|| {
+            ProviderError::Provider("Carrier provider invocation peer_did is invalid".into())
+        })?;
+        let endpoints = decode_ticket_endpoints(ticket);
+        if endpoints.is_empty() || endpoints.iter().any(|addr| addr.id != peer) {
+            return Err(ProviderError::Provider(
+                "Carrier provider invocation peer_did does not match connect_ticket".into(),
+            ));
+        }
+        let lookup = self.ticket_lookup.as_ref().ok_or_else(|| {
+            ProviderError::Unavailable(
+                "Carrier peer routing is not available on this Runtime".into(),
+            )
+        })?;
+        for addr in &endpoints {
+            lookup.add_endpoint_info(addr.clone());
+        }
+        self.ticket_routes.lock().await.insert(peer, endpoints);
+        Ok(())
+    }
     async fn invoke_carrier_provider(
         &self,
         route: &ProviderCarrierRoute,
@@ -8505,101 +8646,14 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
                 peer_did,
                 ..
             } => {
-                let peer_endpoint = self.peer_endpoint.as_ref().ok_or_else(|| {
-                    ProviderError::Unavailable(
-                        "Carrier peer routing is not available on this Runtime".to_string(),
-                    )
-                })?;
-                let mut endpoints = decode_ticket_endpoints(connect_ticket);
-                if let Some(peer_did) = peer_did.as_deref() {
-                    endpoints.retain(|endpoint| carrier_endpoint_matches_peer(endpoint, peer_did));
-                    if endpoints.is_empty() {
-                        return Err(ProviderError::Provider(
-                            "Carrier provider invocation peer_did does not match connect_ticket"
-                                .to_string(),
-                        ));
-                    }
-                }
-                if endpoints.is_empty() {
-                    return Err(ProviderError::Provider(
-                        "Carrier provider invocation connect_ticket has no endpoints".to_string(),
-                    ));
-                }
-                if endpoints
-                    .iter()
-                    .any(|endpoint| endpoint.id == peer_endpoint.id())
-                {
-                    return self
-                        .invoke_loopback_provider(peer_endpoint, invocation, request)
-                        .await;
-                }
-
-                let mut errors = Vec::new();
-                // An effect-free bounded read whose every endpoint failed only
-                // in transit reports a typed I/O error, so its caller may repeat it.
-                let bounded = bounded_content_fetch(invocation, &request);
-                let mut transit_kind = Some(std::io::ErrorKind::ConnectionAborted);
-                for (index, endpoint) in endpoints.into_iter().enumerate() {
-                    let peer = endpoint.id;
-                    match self
-                        .connected_client(peer_endpoint, endpoint, timeout_secs)
-                        .await
-                    {
-                        Ok(client) => {
-                            let invoke = client.invoke_provider(invocation, request.clone());
-                            // A bounded Content read carries no effect, so its answer
-                            // gets the same budget as the connect and a silent holder
-                            // yields to the next one. Every other operation keeps its
-                            // open-ended answer: cutting it could discard a receipt for
-                            // an effect that is still running on the peer.
-                            let result = if bounded {
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_secs(timeout_secs),
-                                    invoke,
-                                )
-                                .await
-                                {
-                                    Ok(result) => result,
-                                    Err(_) => {
-                                        self.forget_peer(peer).await;
-                                        errors.push(format!(
-                                            "ticket[{index}] response deadline of {timeout_secs}s passed"
-                                        ));
-                                        transit_kind =
-                                            transit_kind.map(|_| std::io::ErrorKind::TimedOut);
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                invoke.await
-                            };
-                            match result {
-                                Ok(response) => return Ok(response),
-                                Err(err) => {
-                                    self.forget_peer(peer).await;
-                                    errors.push(carrier_provider_public_invoke_error(index, &err));
-                                    if err.downcast_ref::<CarrierTransportFailure>().is_none() {
-                                        transit_kind = None;
-                                    }
-                                    // A lost create reply may hide accepted work. A later
-                                    // endpoint's refusal cannot settle that first attempt.
-                                    if invocation.target == "model"
-                                        && invocation.op == "runs_create"
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        Err(err) => errors.push(carrier_provider_public_connect_error(index, &err)),
-                    }
-                }
-
-                let message = format!("Carrier provider invocation failed: {}", errors.join(" | "));
-                Err(match transit_kind.filter(|_| bounded) {
-                    Some(kind) => ProviderError::Io(std::io::Error::new(kind, message)),
-                    None => ProviderError::Provider(message),
-                })
+                self.invoke_ticket_endpoints(
+                    decode_ticket_endpoints(connect_ticket),
+                    peer_did.as_deref(),
+                    timeout_secs,
+                    invocation,
+                    request,
+                )
+                .await
             }
             ProviderCarrierRoute::PeerDid {
                 peer_did,
@@ -8622,6 +8676,17 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
                 if public_key == peer_endpoint.id() {
                     return self
                         .invoke_loopback_provider(peer_endpoint, invocation, request)
+                        .await;
+                }
+                if let Some(endpoints) = self.ticket_routes.lock().await.get(&public_key).cloned() {
+                    return self
+                        .invoke_ticket_endpoints(
+                            endpoints,
+                            Some(peer_did),
+                            timeout_secs,
+                            invocation,
+                            request,
+                        )
                         .await;
                 }
                 let client = self
@@ -10225,6 +10290,7 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct MockCarrierProviderPlaneInvoker {
         requests: Mutex<Vec<serde_json::Value>>,
+        tickets: Mutex<HashMap<String, String>>,
         holder_keys: StdMutex<HashMap<String, [u8; 32]>>,
         requester_did: StdMutex<Option<String>>,
         unsigned_tickets: Vec<String>,
@@ -10248,6 +10314,17 @@ pub(crate) mod tests {
 
     #[async_trait::async_trait]
     impl ProviderCarrierInvoker for MockCarrierProviderPlaneInvoker {
+        async fn remember_peer_ticket(
+            &self,
+            peer_did: &str,
+            ticket: &str,
+        ) -> std::result::Result<(), ProviderError> {
+            self.tickets
+                .lock()
+                .await
+                .insert(peer_did.into(), ticket.into());
+            Ok(())
+        }
         async fn invoke_carrier_provider(
             &self,
             route: &ProviderCarrierRoute,
@@ -10256,13 +10333,20 @@ pub(crate) mod tests {
         ) -> std::result::Result<serde_json::Value, ProviderError> {
             let ticket = match route {
                 ProviderCarrierRoute::ConnectTicket { connect_ticket, .. } => {
-                    connect_ticket.as_str()
+                    connect_ticket.clone()
                 }
-                ProviderCarrierRoute::PeerDid { .. } => "",
+                ProviderCarrierRoute::PeerDid { peer_did, .. } => self
+                    .tickets
+                    .lock()
+                    .await
+                    .get(peer_did)
+                    .cloned()
+                    .unwrap_or_default(),
             };
+            let ticket = ticket.as_str();
             let holder_did = match route {
                 ProviderCarrierRoute::ConnectTicket { peer_did, .. } => peer_did.as_deref(),
-                ProviderCarrierRoute::PeerDid { .. } => None,
+                ProviderCarrierRoute::PeerDid { peer_did, .. } => Some(peer_did.as_str()),
             };
             self.requests.lock().await.push(serde_json::json!({
                 "ticket": ticket,
@@ -12531,6 +12615,7 @@ pub(crate) mod tests {
         peer_endpoint: Endpoint,
         gate: Arc<StallGate>,
         gated: std::collections::BTreeSet<u64>,
+        tickets: Mutex<BTreeMap<String, String>>,
         peer_clients:
             tokio::sync::Mutex<std::collections::BTreeMap<iroh::PublicKey, Arc<CarrierClient>>>,
     }
@@ -12547,6 +12632,7 @@ pub(crate) mod tests {
                 peer_endpoint,
                 gate,
                 gated,
+                tickets: Mutex::new(BTreeMap::new()),
                 peer_clients: tokio::sync::Mutex::new(std::collections::BTreeMap::new()),
             }
         }
@@ -12587,22 +12673,42 @@ pub(crate) mod tests {
 
     #[async_trait::async_trait]
     impl ProviderCarrierInvoker for GatedAnswerInvoker {
+        async fn remember_peer_ticket(
+            &self,
+            peer_did: &str,
+            ticket: &str,
+        ) -> std::result::Result<(), ProviderError> {
+            self.inner.remember_peer_ticket(peer_did, ticket).await?;
+            self.tickets
+                .lock()
+                .await
+                .insert(peer_did.into(), ticket.into());
+            Ok(())
+        }
         async fn invoke_carrier_provider(
             &self,
             route: &ProviderCarrierRoute,
             invocation: &ProviderInvocation,
             request: serde_json::Value,
         ) -> std::result::Result<serde_json::Value, ProviderError> {
-            let ProviderCarrierRoute::ConnectTicket {
-                connect_ticket,
-                peer_did,
-                ..
-            } = route
-            else {
-                return self
-                    .inner
-                    .invoke_carrier_provider(route, invocation, request)
-                    .await;
+            let (connect_ticket, peer_did) = match route {
+                ProviderCarrierRoute::ConnectTicket {
+                    connect_ticket,
+                    peer_did,
+                    ..
+                } => (connect_ticket.clone(), peer_did.as_deref()),
+                ProviderCarrierRoute::PeerDid { peer_did, .. } => {
+                    let ticket = self.tickets.lock().await.get(peer_did).cloned();
+                    match ticket {
+                        Some(ticket) => (ticket, Some(peer_did.as_str())),
+                        None => {
+                            return self
+                                .inner
+                                .invoke_carrier_provider(route, invocation, request)
+                                .await
+                        }
+                    }
+                }
             };
             if !bounded_content_fetch(invocation, &request) {
                 return self
@@ -12610,8 +12716,8 @@ pub(crate) mod tests {
                     .invoke_carrier_provider(route, invocation, request)
                     .await;
             }
-            let mut endpoints = decode_ticket_endpoints(connect_ticket);
-            if let Some(peer_did) = peer_did.as_deref() {
+            let mut endpoints = decode_ticket_endpoints(&connect_ticket);
+            if let Some(peer_did) = peer_did {
                 endpoints.retain(|endpoint| carrier_endpoint_matches_peer(endpoint, peer_did));
             }
             if endpoints.is_empty() {
@@ -13928,6 +14034,36 @@ pub(crate) mod tests {
                 timeout_ms: Some(5_000),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn test_registered_ticket_peer_did_reaches_only_matching_peer() {
+        let fixture = peer_did_route_fixture(109, 110).await;
+        let ticket = encode_ticket_for(fixture.remote_addr.clone());
+        let (_, unknown_did) = elastos_identity::derive_did(&[111u8; 32]);
+        let err = fixture
+            .local_registry
+            .remember_carrier_peer_ticket(&unknown_did, &ticket)
+            .await
+            .expect_err("a foreign ticket cannot register for this DID");
+        assert!(matches!(err, ProviderError::Provider(_)));
+        assert!(fixture.remote_requests.lock().unwrap().is_empty());
+
+        fixture
+            .local_registry
+            .remember_carrier_peer_ticket(&fixture.remote_did, &ticket)
+            .await
+            .unwrap();
+        let response = fixture
+            .local_registry
+            .invoke_provider(peer_did_invocation(&fixture.remote_did))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "ok");
+        assert_eq!(fixture.remote_requests.lock().unwrap().len(), 1);
+
+        shutdown_test_carrier_node(fixture.remote_node).await;
+        shutdown_test_carrier_node(fixture.local_node).await;
     }
 
     #[tokio::test]

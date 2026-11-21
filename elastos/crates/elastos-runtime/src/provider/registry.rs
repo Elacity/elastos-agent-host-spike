@@ -590,6 +590,14 @@ pub struct ProviderInvocation {
 /// Runtime plug-in point for Carrier provider-plane transport.
 #[async_trait::async_trait]
 pub trait ProviderCarrierInvoker: Send + Sync {
+    /// Give an adapter a peer's private connection coordinates before DID routing.
+    async fn remember_peer_ticket(
+        &self,
+        _peer_did: &str,
+        _ticket: &str,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
     /// Send an already Runtime-enveloped provider request to a remote Carrier peer.
     async fn invoke_carrier_provider(
         &self,
@@ -862,6 +870,19 @@ impl ProviderRegistry {
     /// Register the Runtime-owned Carrier provider-plane invoker.
     pub async fn set_carrier_invoker(&self, invoker: Arc<dyn ProviderCarrierInvoker>) {
         *self.carrier_invoker.write().await = Some(invoker);
+    }
+
+    pub async fn remember_carrier_peer_ticket(
+        &self,
+        peer_did: &str,
+        ticket: &str,
+    ) -> Result<(), ProviderError> {
+        let invoker = self.carrier_invoker.read().await.clone().ok_or_else(|| {
+            ProviderError::Unavailable(
+                "Carrier peer routing is not available on this Runtime".into(),
+            )
+        })?;
+        invoker.remember_peer_ticket(peer_did, ticket).await
     }
 
     /// Register a provider for its schemes
