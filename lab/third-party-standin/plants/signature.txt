@@ -1,0 +1,8 @@
+id: signature
+file: lab/third-party-standin/fixtures/provider/capsule.json
+test: signed_manifests_verify_with_the_public_test_key
+--- old
+  "description": "Lab stand-in for a third-party swap provider.",
+--- new
+  "description": "Mab stand-in for a third-party swap provider.",
+--- end

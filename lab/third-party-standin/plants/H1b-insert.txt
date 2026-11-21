@@ -1,0 +1,8 @@
+id: H1b-insert
+file: elastos/crates/elastos-runtime/src/provider/registry.rs
+test: hook1b_duplicate_scheme_registration_replaces_the_first_today
+--- old
+            providers.insert(scheme.to_string(), provider.clone());
+--- new
+            let _ = providers.entry(scheme.to_string()).or_insert_with(|| provider.clone());
+--- end

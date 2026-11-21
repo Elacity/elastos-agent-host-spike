@@ -1001,7 +1001,7 @@
         }
       ],
       "tests": [
-        "instance_grant_does_not_authorise_sibling",
+        "two_instances_overlap_with_separate_grants",
         "attach_secret_stays_in_memory"
       ]
     },
