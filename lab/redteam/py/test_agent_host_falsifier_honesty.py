@@ -65,7 +65,7 @@ ASK_FILE = "capsule.json"
 PLAN_SUBMIT_RESOURCE = "elastos://inspect/submit_agent_plan"
 ASK_ACTIONS = ("read", "write", "execute", "message", "delete", "admin")
 CAPSULE_SCHEMA = "elastos.capsule/v1"
-MANIFEST_KEYS = set("schema name version description author role type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources".split())
+MANIFEST_KEYS = set("schema name version description author role agent type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources".split())
 MANIFEST_ACTIONS = set(ASK_ACTIONS)
 PRINCIPAL_MARKER = "<principal>"
 
@@ -251,6 +251,8 @@ def asks_problems(read):
         return [problem("", "asks is missing")]
     if any(key not in MANIFEST_KEYS for key in document):
         return [problem("", "asks unknown field")]
+    if "agent" in document and document["agent"] != {"kind": "agent"}:
+        return [problem("", "asks agent declaration")]
     if "schema" not in document:
         return [problem("", "asks schema missing")]
     if document["schema"] != CAPSULE_SCHEMA:
@@ -728,6 +730,10 @@ class ProbeControls(unittest.TestCase):
         self.assertEqual(encoded({"name": "agent-host"}), problem("", "asks is missing"))
         self.assertEqual(encoded({"asks": GOOD_ASKS["asks"], "extra": 1}),
                          problem("", "asks unknown field"))
+        self.assertEqual(encoded({"asks": GOOD_ASKS["asks"], "agent": {"kind": "agent"}}), [])
+        for bad in ({"kind": "person"}, {"kind": "agent", "principal": "x"}, {}, "agent", None):
+            self.assertEqual(encoded({"asks": GOOD_ASKS["asks"], "agent": bad}),
+                             problem("", "asks agent declaration"))
         self.assertEqual(encoded({"asks": GOOD_ASKS["asks"], "schema": None}),
                          problem("", "asks schema unsupported"))
         self.assertEqual(problems_in(tree(asks=b'{"asks":[] }'), "asks"),
