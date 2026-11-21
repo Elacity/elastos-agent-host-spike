@@ -596,7 +596,9 @@ pub trait ProviderCarrierInvoker: Send + Sync {
         _peer_did: &str,
         _ticket: &str,
     ) -> Result<(), ProviderError> {
-        Ok(())
+        Err(ProviderError::Unavailable(
+            "Carrier invoker cannot remember peer tickets".into(),
+        ))
     }
     /// Send an already Runtime-enveloped provider request to a remote Carrier peer.
     async fn invoke_carrier_provider(
@@ -3687,6 +3689,40 @@ mod tests {
                 }
             }))
         }
+    }
+
+    #[tokio::test]
+    async fn invoker_without_ticket_storage_refuses_before_remote_call() {
+        let registry = ProviderRegistry::new();
+        let invoker = Arc::new(MockCarrierInvoker::default());
+        registry.set_carrier_invoker(invoker.clone()).await;
+        let peer_did = "did:key:peer-that-needs-a-ticket";
+        let result: Result<serde_json::Value, ProviderError> = async {
+            registry
+                .remember_carrier_peer_ticket(peer_did, "ticket:private-coordinates")
+                .await?;
+            registry
+                .invoke_provider(ProviderInvocation {
+                    source: "test".into(),
+                    target: "content".into(),
+                    op: "fetch".into(),
+                    request: serde_json::json!({"op":"fetch"}),
+                    transfer: ProviderTransfer::Json,
+                    range: None,
+                    progress: None,
+                    transport: ProviderInvocationTransport::Carrier(
+                        ProviderCarrierRoute::PeerDid {
+                            peer_did: peer_did.into(),
+                            timeout_ms: Some(5_000),
+                            reply_wait_ms: None,
+                        },
+                    ),
+                })
+                .await
+        }
+        .await;
+        assert!(matches!(result, Err(ProviderError::Unavailable(_))));
+        assert!(invoker.requests.lock().await.is_empty());
     }
 
     #[test]
