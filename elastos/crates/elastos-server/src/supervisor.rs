@@ -785,12 +785,6 @@ impl Supervisor {
                     return Err(error);
                 }
             }
-            let overlay_path = self
-                .crosvm_config
-                .rootfs_cache_dir
-                .join("overlays")
-                .join(format!("{}.ext4", handle));
-            let _ = tokio::fs::remove_file(&overlay_path).await;
             tracing::warn!(
                 "Reaped exited capsule '{}' and unregistered provider route",
                 handle
@@ -1050,16 +1044,16 @@ impl Supervisor {
 
         // VM path — the release must publish crosvm and a guest kernel for this platform
         let rootfs_base = checked_vm_rootfs_base(&capsule_dir, &manifest).await?;
+        let platform = crate::setup::detect_platform();
+        if let Some(reason) = Self::microvm_unavailable(&self.registry, &platform) {
+            bail!("{reason}. Cannot launch capsule '{name}'.");
+        }
         let (image, sha256) = crate::setup::checked_vm_image(
             &self.data_dir,
             &capsule_dir,
             name,
             &manifest.entrypoint,
         )?;
-        let platform = crate::setup::detect_platform();
-        if let Some(reason) = Self::microvm_unavailable(&self.registry, &platform) {
-            bail!("{reason}. Cannot launch capsule '{name}'.");
-        }
         // VM path — hard require KVM
         if !elastos_crosvm::is_supported() {
             bail!("/dev/kvm not available — crosvm requires KVM. Cannot launch capsule '{name}'.");
@@ -1200,9 +1194,10 @@ impl Supervisor {
 
         let overlays = RootfsManager::new(&self.crosvm_config.rootfs_cache_dir);
         overlays.init().await?;
-        vm_config.rootfs_path = overlays
+        let (overlay_path, rootfs_file) = overlays
             .create_verified_overlay(&handle, &image, &rootfs_base, &sha256)
             .await?;
+        vm_config.rootfs_path = overlay_path;
 
         let provides = manifest.provides.clone();
 
@@ -1244,7 +1239,7 @@ impl Supervisor {
         }
 
         // Start the VM (after bridge socket is listening)
-        let mut vm = RunningVm::new(vm_config, manifest, socket_path);
+        let mut vm = RunningVm::new(vm_config, manifest, socket_path, Some(rootfs_file));
         vm.start(&self.crosvm_config.crosvm_bin)
             .await
             .map_err(|e| anyhow::anyhow!("VM boot failed for '{}': {}", name, e))?;
@@ -1397,14 +1392,6 @@ impl Supervisor {
                 vm.stop()
                     .await
                     .map_err(|e| anyhow::anyhow!("VM stop failed for '{}': {}", capsule.name, e))?;
-
-                // Clean up rootfs overlay
-                let overlay_path = self
-                    .crosvm_config
-                    .rootfs_cache_dir
-                    .join("overlays")
-                    .join(format!("{}.ext4", handle));
-                let _ = tokio::fs::remove_file(&overlay_path).await;
             }
             CapsuleBackend::HostProcess => {
                 // Carrier service child process is killed when CarrierServiceProvider
@@ -1456,13 +1443,6 @@ impl Supervisor {
                     }
                 };
 
-                // Clean up rootfs overlay
-                let overlay_path = self
-                    .crosvm_config
-                    .rootfs_cache_dir
-                    .join("overlays")
-                    .join(format!("{}.ext4", handle));
-                let _ = tokio::fs::remove_file(&overlay_path).await;
                 code
             }
             CapsuleBackend::HostProcess => {
@@ -2741,6 +2721,7 @@ mod tests {
             VmConfig::from_manifest(&manifest, &capsule_dir, &capsule_dir.join("vmlinux")),
             manifest.clone(),
             socket_dir.join(format!("{handle}.sock")),
+            None,
         );
         RunningCapsule {
             name: "storage-provider".to_string(),

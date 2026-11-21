@@ -1,6 +1,7 @@
 //! Rootfs caching and overlay management
 
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::{fs, io, io::Seek, io::Write};
 
@@ -47,7 +48,7 @@ impl RootfsManager {
         image: &fs::File,
         source: &Path,
         expected_sha256: &str,
-    ) -> Result<PathBuf> {
+    ) -> Result<(PathBuf, fs::File)> {
         let overlay_path = self.overlay_dir.join(format!("{}.ext4", vm_id));
         let mut input = image
             .try_clone()
@@ -55,15 +56,15 @@ impl RootfsManager {
         let source = source.to_path_buf();
         let expected_sha256 = expected_sha256.to_owned();
         let output = overlay_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
+        let file = tokio::task::spawn_blocking(move || -> Result<fs::File> {
             input
                 .rewind()
                 .map_err(|e| ElastosError::Storage(e.to_string()))?;
-            let mut target = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&output)
-                .map_err(|e| ElastosError::Storage(format!("Stale VM overlay refused: {e}")))?;
+            let mut target = open_anonymous_overlay(&output).map_err(|e| {
+                ElastosError::Storage(format!(
+                    "Stale VM overlay refused or anonymous disk unavailable: {e}"
+                ))
+            })?;
             let copied = (|| -> io::Result<()> {
                 let mut hash = Sha256::new();
                 let mut chunk = [0; 64 * 1024];
@@ -82,41 +83,22 @@ impl RootfsManager {
                 }
                 let opened = input.metadata()?;
                 let selected = fs::symlink_metadata(&source)?;
-                #[cfg(unix)]
+                if !selected.file_type().is_file()
+                    || opened.dev() != selected.dev()
+                    || opened.ino() != selected.ino()
                 {
-                    use std::os::unix::fs::MetadataExt;
-                    if !selected.file_type().is_file()
-                        || opened.dev() != selected.dev()
-                        || opened.ino() != selected.ino()
-                    {
-                        return Err(io::Error::other(
-                            "VM image path replaced after verification",
-                        ));
-                    }
+                    return Err(io::Error::other(
+                        "VM image path replaced after verification",
+                    ));
                 }
                 target.sync_all()
             })();
-            if copied.is_err() {
-                let _ = fs::remove_file(&output);
-            }
-            copied.map_err(|e| ElastosError::Storage(e.to_string()))
+            copied.map_err(|e| ElastosError::Storage(e.to_string()))?;
+            Ok(target)
         })
         .await
         .map_err(|e| ElastosError::Storage(e.to_string()))??;
-        Ok(overlay_path)
-    }
-
-    /// Remove an overlay for a VM
-    pub async fn remove_overlay(&self, vm_id: &str) -> Result<()> {
-        let overlay_path = self.overlay_dir.join(format!("{}.ext4", vm_id));
-
-        if overlay_path.exists() {
-            tokio::fs::remove_file(&overlay_path)
-                .await
-                .map_err(|e| ElastosError::Storage(format!("Failed to remove overlay: {}", e)))?;
-        }
-
-        Ok(())
+        Ok((overlay_path, file))
     }
 
     /// Get or create a persistent data disk for a capsule.
@@ -195,6 +177,36 @@ impl RootfsManager {
     }
 }
 
+fn open_anonymous_overlay(path: &Path) -> io::Result<fs::File> {
+    if fs::symlink_metadata(path).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "overlay exists",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let dir = fs::File::open(path.parent().unwrap())?;
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { fs::File::from_raw_fd(fd) })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        tempfile::tempfile_in(path.parent().unwrap())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,11 +232,15 @@ mod tests {
         let manager = RootfsManager::new(temp.path().join("cache"));
         manager.init().await.unwrap();
         let digest = format!("{:x}", Sha256::digest(b"signed image"));
-        let overlay = manager
+        let (overlay, mut file) = manager
             .create_verified_overlay("valid", &image, &source, &digest)
             .await
             .unwrap();
-        assert_eq!(fs::read(overlay).unwrap(), b"signed image");
+        assert!(!overlay.exists());
+        file.rewind().unwrap();
+        let mut checked = Vec::new();
+        io::Read::read_to_end(&mut file, &mut checked).unwrap();
+        assert_eq!(checked, b"signed image");
         fs::write(&source, b"other  image").unwrap();
         assert!(manager
             .create_verified_overlay("changed", &image, &source, &digest)
@@ -254,6 +270,29 @@ mod tests {
         assert_eq!(
             fs::read(manager.overlay_dir().join("stale.ext4")).unwrap(),
             b"old"
+        );
+    }
+
+    #[tokio::test]
+    async fn swapped_overlay_path_cannot_change_boot_disk() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("rootfs.ext4");
+        fs::write(&source, b"signed image").unwrap();
+        let image = fs::File::open(&source).unwrap();
+        let manager = RootfsManager::new(temp.path().join("cache"));
+        manager.init().await.unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"signed image"));
+        let (overlay, mut file) = manager
+            .create_verified_overlay("swapped", &image, &source, &digest)
+            .await
+            .unwrap();
+        fs::write(&overlay, b"attacker data").unwrap();
+        file.rewind().unwrap();
+        let mut boot_disk = Vec::new();
+        io::Read::read_to_end(&mut file, &mut boot_disk).unwrap();
+        assert_eq!(
+            boot_disk, b"signed image",
+            "path swap changed the boot disk"
         );
     }
 

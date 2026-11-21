@@ -85,6 +85,7 @@ mod tests {
     use elastos_compute::ComputeProvider;
     use elastos_crosvm::{CrosvmConfig, CrosvmProvider, RootfsManager};
     use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek};
 
     fn row(bytes: &[u8]) -> PlatformInfo {
         let digest = format!("{:x}", Sha256::digest(bytes));
@@ -104,11 +105,15 @@ mod tests {
         let (image, digest) = open_signed_image(temp.path(), "rootfs.ext4", &info).unwrap();
         let overlays = RootfsManager::new(temp.path().join("cache"));
         overlays.init().await.unwrap();
-        let overlay = overlays
+        let (overlay, mut file) = overlays
             .create_verified_overlay("valid", &image, &image_path, &digest)
             .await
             .unwrap();
-        assert_eq!(fs::read(overlay).unwrap(), b"signed image");
+        assert!(!overlay.exists());
+        file.rewind().unwrap();
+        let mut checked = Vec::new();
+        file.read_to_end(&mut checked).unwrap();
+        assert_eq!(checked, b"signed image");
         let kernel = temp.path().join("vmlinux");
         fs::write(&kernel, b"ext4 virtio_blk virtio_pci").unwrap();
         let binary = temp.path().join("crosvm");

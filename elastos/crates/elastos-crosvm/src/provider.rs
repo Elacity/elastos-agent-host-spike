@@ -39,7 +39,7 @@ impl CrosvmProvider {
     ) -> Result<CapsuleHandle> {
         let id = CapsuleId::new(format!("microvm-{}", uuid::Uuid::new_v4()));
         let mut config = VmConfig::from_manifest(&manifest, path, &self.config.kernel_path);
-        let overlay = self
+        let (overlay, rootfs_file) = self
             .rootfs_manager
             .create_verified_overlay(
                 &config.vm_id,
@@ -49,7 +49,8 @@ impl CrosvmProvider {
             )
             .await?;
         config.rootfs_path = overlay;
-        self.load_with_overlay(manifest, id, config).await
+        self.load_with_overlay(manifest, id, config, rootfs_file)
+            .await
     }
 
     async fn load_with_overlay(
@@ -57,6 +58,7 @@ impl CrosvmProvider {
         manifest: CapsuleManifest,
         id: CapsuleId,
         mut vm_config: VmConfig,
+        rootfs_file: std::fs::File,
     ) -> Result<CapsuleHandle> {
         if manifest.capsule_type != CapsuleType::MicroVM {
             return Err(ElastosError::Compute(
@@ -80,7 +82,7 @@ impl CrosvmProvider {
                 );
             }
         }
-        let vm = RunningVm::new(vm_config, manifest.clone(), socket_path);
+        let vm = RunningVm::new(vm_config, manifest.clone(), socket_path, Some(rootfs_file));
         self.vms.write().await.insert(id.clone(), vm);
         Ok(CapsuleHandle {
             id,
@@ -151,8 +153,6 @@ impl ComputeProvider for CrosvmProvider {
 
         if let Some(vm) = vms.get_mut(&handle.id) {
             vm.stop().await?;
-
-            self.rootfs_manager.remove_overlay(&vm.config.vm_id).await?;
         }
 
         Ok(())
