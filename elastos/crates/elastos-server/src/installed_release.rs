@@ -21,7 +21,7 @@ const MAX_COMPONENTS: u64 = 4 * 1024 * 1024;
 const MIGRATION: &str = ".elastos.installation-migrate";
 const HEAD: &str = "release-head.json";
 const RELEASE: &str = "release.json";
-const REPAIR: &str = "Installed release inputs require repair. Preserve the installation files and ask the operator to restore the verified signed pair.";
+pub(crate) const REPAIR: &str = "Installed release inputs require repair. Preserve the installation files and ask the operator to restore the verified signed pair.";
 
 pub(crate) struct InstalledRelease {
     pub(crate) head: Vec<u8>,
@@ -201,14 +201,16 @@ pub(crate) fn read_signed_release(
         &release,
         private,
         repair_version,
-    )?;
-    let components = read_regular(&data.join("components.json"), MAX_COMPONENTS, false)?;
+    )
+    .context("Installed release envelope verification failed")?;
+    let components = read_regular(&data.join("components.json"), MAX_COMPONENTS, false)
+        .context("Installed component manifest verification failed")?;
     admit_descriptor(
         &release["payload"]["platforms"][crate::update::detect_release_platform()]["components"],
         &hex::encode(Sha256::digest(&components)),
         components.len() as u64,
     )
-    .context(REPAIR)?;
+    .context("Installed component manifest verification failed")?;
     Ok((installed.release, components))
 }
 
