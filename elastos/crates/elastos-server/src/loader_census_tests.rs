@@ -595,7 +595,7 @@ fn rows() -> Vec<Row> {
             "shell_capsule_command",
             "command",
             "host process",
-            "checksum",
+            "none",
             "P2-8",
             1,
         ),

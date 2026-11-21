@@ -15,10 +15,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod browser_config;
+mod catalogue_release_cache;
 pub use browser_config::browser_available;
 pub(crate) use browser_config::linux_host_setup_message;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use browser_config::linux_host_setup_message_with_kvm;
 pub(crate) use browser_config::repair_browser_host_components_for_open;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use catalogue_release_cache::verification_count as catalogue_release_verification_count;
 mod browser_linux;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use browser_linux::SETUP_MESSAGE as BROWSER_SETUP_MESSAGE;
 mod browser_vm_image;
 pub mod verified_executable;
 pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
@@ -1190,7 +1197,31 @@ pub fn verify_installed_component_start(
     let runtime = fs::canonicalize(&source.install_path)?;
     let (_, manifest) =
         crate::installed_release::read_signed_release(data_dir, &runtime, &source, false, true)?;
-    let entry = installed_component_entry(data_dir, name, path, Some(&manifest))
+    prepare_installed_component(data_dir, name, path, &manifest)
+}
+
+/// Catalogue presentation reuses only a verified release envelope. The
+/// executable is still held and checked against its signed digest on each read.
+pub(crate) fn verify_installed_component_catalogue(
+    data_dir: &Path,
+    name: &str,
+    path: &Path,
+) -> anyhow::Result<verified_executable::VerifiedExecutable> {
+    let Some(source) = installed_release_source(data_dir)? else {
+        return verify_installed_component_start(data_dir, name, path);
+    };
+    let runtime = fs::canonicalize(&source.install_path)?;
+    let manifest = catalogue_release_cache::verified_components(data_dir, &runtime, &source)?;
+    prepare_installed_component(data_dir, name, path, &manifest)
+}
+
+fn prepare_installed_component(
+    data_dir: &Path,
+    name: &str,
+    path: &Path,
+    manifest: &[u8],
+) -> anyhow::Result<verified_executable::VerifiedExecutable> {
+    let entry = installed_component_entry(data_dir, name, path, Some(manifest))
         .context("Installed component manifest verification failed")?;
     let checksum = if entry.platform_info.extract_path.is_some() {
         // The archive receipt is separate from the executable's bytes. The
@@ -1281,10 +1312,16 @@ fn verify_home_cli_receipts(entry: &InstalledComponentEntry) -> anyhow::Result<&
     let bundle = entry.install_root.join("capsules/home-cli");
     let executable_checksum = signed_executable_checksum(&entry.platform_info)
         .ok_or_else(|| anyhow::anyhow!("Home CLI signed executable digest is missing"))?;
-    anyhow::ensure!(
-        read_artifact_sha256_receipt(&bundle)? == bare_sha256(&entry.checksum),
-        "Home CLI archive receipt differs from its signed release digest"
-    );
+    // Older installs predate the archive receipt. Its presence is checked,
+    // while the signed executable digest admits the held bytes either way.
+    match read_artifact_sha256_receipt(&bundle) {
+        Ok(receipt) => anyhow::ensure!(
+            receipt == bare_sha256(&entry.checksum),
+            "Home CLI archive receipt differs from its signed release digest"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     Ok(executable_checksum)
 }
 

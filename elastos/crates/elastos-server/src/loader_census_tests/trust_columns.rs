@@ -1582,7 +1582,7 @@ fn installed_component_start_callers_keep_the_signed_gate() {
         browser
             .match_indices(&start_gate)
             .all(|(at, _)| { source::enclosing_fn(&browser_code, at) != "browser_available" }),
-        "catalogue Browser availability must not verify the release envelope"
+        "browser_available remains pure; the catalogue host check owns release verification"
     );
     for (file, function) in [
         ("elastos-server/src/home_cmd.rs", "run_home_cli_renderer"),
