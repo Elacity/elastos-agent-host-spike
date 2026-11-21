@@ -19,6 +19,8 @@ on:
       - elastos/Cargo.lock
       - elastos/crates/elastos-runtime/src/provider/registry.rs
       - elastos/crates/elastos-server/src/ipfs.rs
+      - elastos/crates/elastos-server/src/carrier.rs
+      - elastos/crates/elastos-server/src/content.rs
       - elastos/crates/elastos-server/src/server_infra.rs
       - elastos/crates/elastos-server/src/gateway_entry.rs
       - elastos/crates/elastos-server/src/gateway_cmd.rs
