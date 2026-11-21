@@ -131,6 +131,7 @@ impl ProviderPlane {
     }
 
     /// Spawn the provider capsule and publish it on its registry target.
+    #[cfg(unix)]
     async fn register(
         self,
         registry: &Arc<ProviderRegistry>,

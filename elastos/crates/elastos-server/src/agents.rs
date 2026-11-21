@@ -51,7 +51,7 @@ use crate::auth::{
 };
 use crate::host_lock::FileLock;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests;
 
 pub(crate) const AGENT_RECORDS_SCHEMA: &str = "elastos.agent.records/v1";
@@ -91,11 +91,11 @@ pub(crate) fn build_allows() -> bool {
 
 fn build_allows_for_home(data_dir: &Path) -> bool {
     build_allows() || {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         {
             tests::dispatch_fixture_enabled(data_dir)
         }
-        #[cfg(not(test))]
+        #[cfg(not(all(test, unix)))]
         {
             let _ = data_dir;
             false

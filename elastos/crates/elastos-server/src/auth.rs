@@ -13527,6 +13527,7 @@ pub(crate) mod tests {
         }
     }
     use elastos_runtime::auth::PasskeyWebAuthnBinding;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -17898,6 +17899,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn update_owned_offline_upgrade_migrates_before_commit_and_preserves_release_recovery() {
         use crate::install_transaction::{InstallTransaction, ReleaseFile};
@@ -18891,6 +18893,7 @@ pub(crate) mod tests {
     /// call site, in file order: an Agent record refused under the own
     /// `Users/` root of its id, with the refusal reason and the unchanged
     /// record and file asserted per row.
+    #[cfg(unix)]
     #[test]
     fn agent_record_binding_sites_table() {
         struct Site {

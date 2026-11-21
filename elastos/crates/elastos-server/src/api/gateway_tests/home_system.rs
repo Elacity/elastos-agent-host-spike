@@ -10990,6 +10990,7 @@ async fn services_contact_pending_engine_request(
         .to_string()
 }
 
+#[cfg(unix)]
 #[derive(Default)]
 struct ServicesEngineProbeProvider {
     execution: super::remote_engine::RemoteEngineFixture,
@@ -10998,6 +10999,7 @@ struct ServicesEngineProbeProvider {
     entered: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
+#[cfg(unix)]
 #[async_trait::async_trait]
 impl Provider for ServicesEngineProbeProvider {
     fn schemes(&self) -> Vec<&'static str> {
