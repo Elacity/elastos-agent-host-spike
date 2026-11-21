@@ -3,6 +3,159 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 
 use serde_json::{json, Value};
 
+fn start_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
+    let mut fixture = Fixture::new();
+    let path = fixture.data.join("bin/shell");
+    let marker = fixture.data.join("ran");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let script = b"#!/bin/sh\nprintf ran > \"$1\"\n";
+    fs::write(&path, script).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(fixture.data.join("components.json"), serde_json::to_vec(&json!({
+        "schema":"elastos.components/v1", "external":{"shell":{
+            "install_path":"bin/shell", "platforms":{(crate::setup::detect_platform()):{
+                "install_path":"bin/shell", "checksum":format!("sha256:{}", hex::encode(Sha256::digest(script)))
+            }}
+        }}, "capsules":{}, "profiles":{}
+    })).unwrap()).unwrap();
+    fixture.bind_components();
+    (fixture, path, marker)
+}
+
+fn start_shell(fixture: &Fixture, path: &Path, marker: &Path) -> Result<()> {
+    crate::setup::verify_installed_component_start(&fixture.data, "shell", path)?;
+    anyhow::ensure!(std::process::Command::new(path)
+        .arg(marker)
+        .status()?
+        .success());
+    Ok(())
+}
+
+#[test]
+fn installed_component_start_accepts_signed_release() {
+    let (fixture, path, marker) = start_fixture();
+    start_shell(&fixture, &path, &marker).unwrap();
+    assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
+#[test]
+fn installed_component_start_refuses_changed_envelope_before_exec() {
+    let (fixture, path, marker) = start_fixture();
+    let mut head: Value = serde_json::from_slice(&fixture.head).unwrap();
+    head["signature"] = json!("invalid signature");
+    fs::write(
+        publisher_release_head_path(&fixture.data),
+        serde_json::to_vec(&head).unwrap(),
+    )
+    .unwrap();
+    let error = start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Installed release envelope verification failed"),
+        "{error}"
+    );
+    assert!(!marker.exists());
+}
+
+#[test]
+fn installed_component_start_refuses_changed_release_cid_before_exec() {
+    let (fixture, path, marker) = start_fixture();
+    let mut release: Value = serde_json::from_slice(&fixture.release).unwrap();
+    release["payload"]["version"] = json!("0.7.1");
+    fs::write(
+        publisher_release_manifest_path(&fixture.data),
+        signed(release["payload"].take(), "elastos.release.v1", 71),
+    )
+    .unwrap();
+    let error = start_shell(&fixture, &path, &marker).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Installed release envelope verification failed"));
+    assert!(format!("{error:#}").contains("CID"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn installed_component_start_refuses_changed_head_cid_before_exec() {
+    let (fixture, path, marker) = start_fixture();
+    let mut head: Value = serde_json::from_slice(&fixture.head).unwrap();
+    head["payload"]["note"] = json!("changed after install");
+    fs::write(
+        publisher_release_head_path(&fixture.data),
+        signed(head["payload"].take(), "elastos.release.head.v1", 71),
+    )
+    .unwrap();
+    let error = start_shell(&fixture, &path, &marker).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Installed release envelope verification failed"));
+    assert!(format!("{error:#}").contains("CID"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn installed_component_start_refuses_changed_manifest_before_exec() {
+    let (fixture, path, marker) = start_fixture();
+    let mut manifest = fs::read(fixture.data.join("components.json")).unwrap();
+    manifest.push(b' ');
+    fs::write(fixture.data.join("components.json"), manifest).unwrap();
+    let error = start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Installed component manifest verification failed"),
+        "{error}"
+    );
+    assert!(!marker.exists());
+}
+
+#[test]
+fn installed_component_start_refuses_changed_binary_before_exec() {
+    let (fixture, path, marker) = start_fixture();
+    fs::write(&path, b"#!/bin/sh\nprintf replaced > \"$1\"\n").unwrap();
+    let error = start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Installed component binary verification failed"),
+        "{error}"
+    );
+    assert!(!marker.exists());
+}
+
+#[test]
+fn installed_home_cli_executable_uses_signed_archive_receipt() {
+    let mut fixture = Fixture::new();
+    let bundle = fixture.data.join("capsules/home-cli");
+    let binary = bundle.join("bin/home-cli");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    fs::write(&binary, b"signed renderer").unwrap();
+    let checksum = format!("sha256:{}", hex::encode(Sha256::digest(b"signed archive")));
+    fs::write(fixture.data.join("components.json"), serde_json::to_vec(&json!({
+        "schema":"elastos.components/v1", "external":{"home-cli":{
+            "install_path":"capsules/home-cli", "platforms":{(crate::setup::detect_platform()):{
+                "install_path":"capsules/home-cli", "extract_path":"home-cli", "checksum":checksum
+            }}
+        }}, "capsules":{}, "profiles":{}
+    })).unwrap()).unwrap();
+    crate::setup::write_artifact_sha256_receipt(&bundle, &checksum).unwrap();
+    fs::write(
+        bundle.join(".elastos-executable-sha256"),
+        hex::encode(Sha256::digest(b"signed renderer")),
+    )
+    .unwrap();
+    fixture.bind_components();
+    crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary).unwrap();
+    fs::write(&binary, b"changed renderer").unwrap();
+    assert!(
+        crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary)
+            .unwrap_err()
+            .to_string()
+            .contains("binary verification failed")
+    );
+}
+
 pub(crate) struct Fixture {
     _root: tempfile::TempDir,
     pub(crate) data: std::path::PathBuf,

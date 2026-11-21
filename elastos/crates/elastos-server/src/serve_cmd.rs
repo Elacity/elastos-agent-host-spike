@@ -342,7 +342,11 @@ pub async fn run_serve(
         .await;
 
     let _shell_child = if let Some(shell_path) = crate::find_installed_provider_binary("shell") {
-        if let Err(e) = crate::verify_component_binary("shell", &shell_path) {
+        if let Err(e) = crate::setup::verify_installed_component_start(
+            &crate::sources::default_data_dir(),
+            "shell",
+            &shell_path,
+        ) {
             tracing::warn!("Skipping shell capsule due to verification failure: {}", e);
             None
         } else {

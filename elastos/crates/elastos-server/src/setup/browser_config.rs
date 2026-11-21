@@ -214,7 +214,7 @@ pub fn browser_available(platform: &str) -> bool {
 
 fn native_host_available(data: &Path) -> anyhow::Result<()> {
     let program = data.join("bin/browser-vz-engine-supervisor");
-    super::verify_installed_component_binary(data, "browser-vz-engine-supervisor", &program)?;
+    super::verify_installed_component_start(data, "browser-vz-engine-supervisor", &program)?;
     probe_native_host(&program, data, std::time::Duration::from_secs(2))
 }
 

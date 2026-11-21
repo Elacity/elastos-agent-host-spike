@@ -1033,6 +1033,7 @@ fn installed_component_entry(
     data_dir: &Path,
     name: &str,
     path: &Path,
+    signed_bytes: Option<&[u8]>,
 ) -> anyhow::Result<InstalledComponentEntry> {
     let Some(install_root) = installed_component_root_for_path(data_dir, name, path) else {
         anyhow::bail!(
@@ -1043,15 +1044,18 @@ fn installed_component_entry(
     };
 
     let manifest_path = install_root.join("components.json");
-    let manifest_bytes = fs::read(&manifest_path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot verify installed component '{}' at {}: failed to read {}: {}",
-            name,
-            path.display(),
-            manifest_path.display(),
-            e
-        )
-    })?;
+    let manifest_bytes = match signed_bytes {
+        Some(bytes) => bytes.to_vec(),
+        None => fs::read(&manifest_path).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot verify installed component '{}' at {}: failed to read {}: {}",
+                name,
+                path.display(),
+                manifest_path.display(),
+                e
+            )
+        })?,
+    };
     let mut manifest: ComponentsManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|e| {
             anyhow::anyhow!(
@@ -1111,7 +1115,7 @@ pub fn verify_installed_component_binary(
     name: &str,
     path: &Path,
 ) -> anyhow::Result<String> {
-    let entry = installed_component_entry(data_dir, name, path)?;
+    let entry = installed_component_entry(data_dir, name, path, None)?;
     verify_installed_component_bytes(name, path, &entry)?;
     Ok(entry.checksum)
 }
@@ -1143,9 +1147,49 @@ fn verify_installed_component_bytes(
 /// bytes, a binary extracted from a signed archive by the receipts bound when
 /// setup verified and extracted that archive into the component's capsule metadata.
 pub fn verify_installed_component(data_dir: &Path, name: &str, path: &Path) -> anyhow::Result<()> {
-    let entry = installed_component_entry(data_dir, name, path)?;
+    let entry = installed_component_entry(data_dir, name, path, None)?;
+    verify_installed_component_with_entry(name, path, &entry)
+}
+
+/// Admit executable bytes from the current publisher-signed installed release.
+/// Call immediately before an installed component starts.
+pub fn verify_installed_component_start(
+    data_dir: &Path,
+    name: &str,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let source = installed_release_source(data_dir)?.ok_or_else(missing_trusted_source_error)?;
+    let runtime = fs::canonicalize(&source.install_path)?;
+    let (_, manifest) =
+        crate::installed_release::read_signed_release(data_dir, &runtime, &source, false)?;
+    let entry = installed_component_entry(data_dir, name, path, Some(&manifest))
+        .context("Installed component manifest verification failed")?;
+    verify_installed_component_with_entry(name, path, &entry)
+        .context("Installed component binary verification failed")
+}
+
+fn verify_installed_component_with_entry(
+    name: &str,
+    path: &Path,
+    entry: &InstalledComponentEntry,
+) -> anyhow::Result<()> {
     if entry.platform_info.extract_path.is_none() {
-        return verify_installed_component_bytes(name, path, &entry);
+        return verify_installed_component_bytes(name, path, entry);
+    }
+    if name == "home-cli" && path == entry.install_root.join("capsules/home-cli/bin/home-cli") {
+        let bundle = entry.install_root.join("capsules/home-cli");
+        let file = fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            file.file_type().is_file(),
+            "Home CLI executable is not a regular file"
+        );
+        anyhow::ensure!(
+            read_artifact_sha256_receipt(&bundle)? == bare_sha256(&entry.checksum)
+                && bare_sha256(&compute_sha256_checksum(path)?)
+                    == fs::read_to_string(bundle.join(CACHED_EXECUTABLE_SHA_FILE))?.trim(),
+            "Home CLI executable differs from its signed archive receipt"
+        );
+        return Ok(());
     }
     let metadata = entry.component.capsule_metadata.as_ref().ok_or_else(|| {
         anyhow::anyhow!("archive component '{name}' has no capsule metadata receipt")
@@ -1242,6 +1286,9 @@ fn write_archive_executable_receipt(
 }
 
 fn installed_component_root_for_path(data_dir: &Path, name: &str, path: &Path) -> Option<PathBuf> {
+    if name == "home-cli" && path == data_dir.join("capsules/home-cli/bin/home-cli") {
+        return Some(data_dir.to_path_buf());
+    }
     // Browser host setup executes this exact release-owned script through Python.
     if name == "browser-vm-linux-network"
         && path == data_dir.join("scripts/browser-vm-linux-network.py")
@@ -2102,6 +2149,17 @@ fn write_cache_metadata(
 ) -> anyhow::Result<()> {
     if !dest.is_dir() {
         return Ok(());
+    }
+    if name == "home-cli" {
+        let executable = dest.join("bin/home-cli");
+        anyhow::ensure!(
+            executable.is_file(),
+            "Home CLI executable missing from signed archive"
+        );
+        fs::write(
+            dest.join(CACHED_EXECUTABLE_SHA_FILE),
+            format!("{}\n", bare_sha256(&compute_sha256_checksum(&executable)?)),
+        )?;
     }
 
     #[cfg(unix)]

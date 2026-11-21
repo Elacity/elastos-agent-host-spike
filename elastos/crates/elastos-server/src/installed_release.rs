@@ -201,14 +201,16 @@ pub(crate) fn read_signed_release(
         &release,
         private,
         repair_version,
-    )?;
-    let components = read_regular(&data.join("components.json"), MAX_COMPONENTS, false)?;
+    )
+    .context("Installed release envelope verification failed")?;
+    let components = read_regular(&data.join("components.json"), MAX_COMPONENTS, false)
+        .context("Installed component manifest verification failed")?;
     admit_descriptor(
         &release["payload"]["platforms"][crate::update::detect_release_platform()]["components"],
         &hex::encode(Sha256::digest(&components)),
         components.len() as u64,
     )
-    .context(REPAIR)?;
+    .context("Installed component manifest verification failed")?;
     Ok((installed.release, components))
 }
 

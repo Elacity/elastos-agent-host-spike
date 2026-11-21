@@ -1672,6 +1672,7 @@ fn run_home_cli_renderer(
     session: &HomeSession,
 ) -> anyhow::Result<()> {
     let renderer = resolve_home_cli_renderer_program(data_dir)?;
+    crate::setup::verify_installed_component_start(data_dir, HOME_CLI_CAPSULE_NAME, &renderer)?;
     let status = Command::new(&renderer)
         .arg(&session.uri_root)
         .env("ELASTOS_API", api_url)
