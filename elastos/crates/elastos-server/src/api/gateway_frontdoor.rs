@@ -185,11 +185,12 @@ pub(super) async fn gateway_admission(
     let path = request.uri().path();
     let method = request.method();
     let refused = || {
-        (
-            StatusCode::FORBIDDEN,
-            "Gateway request requires an admitted host and caller",
-        )
-            .into_response()
+        let reason = if matches!(path, "/api/apps/home/launch" | "/api/home/launch/content") {
+            "home_page_only"
+        } else {
+            "Gateway request requires an admitted host and caller"
+        };
+        (StatusCode::FORBIDDEN, reason).into_response()
     };
     if !frontdoor.allows_host(headers)
         || headers.contains_key("origin") && single_header(headers, "origin").is_none()
@@ -275,6 +276,20 @@ pub(super) async fn gateway_admission(
     if !public && !sign_in && !ticket && !runtime_session {
         match gateway_home_token::require_gateway_launch_for(&state.data_dir, headers, path) {
             Ok(()) => {}
+            Err(err) if matches!(path, "/api/apps/home/launch" | "/api/home/launch/content") => {
+                let reason = err.to_string();
+                return match reason.as_str() {
+                    "home_cli_launch_grant_mismatch" => {
+                        (StatusCode::FORBIDDEN, "home_cli_launch_grant_mismatch").into_response()
+                    }
+                    gateway_home_token::GATEWAY_AGENT_REFUSAL => (
+                        StatusCode::FORBIDDEN,
+                        gateway_home_token::GATEWAY_AGENT_REFUSAL,
+                    )
+                        .into_response(),
+                    _ => refused(),
+                };
+            }
             Err(_) if browser_api_path(path) => {
                 if let Some(err) =
                     gateway_home_token::browser_launch_reopen_error(&state.data_dir, headers)

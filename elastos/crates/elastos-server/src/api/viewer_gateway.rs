@@ -13,12 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::gateway::{
-    content_type, gateway_attach_runtime_token, issue_home_launch_token_with_context,
-    issue_launch_page_token, load_live_runtime_coords,
-    require_home_projection_launch_token_context, require_home_token_context,
-    require_home_viewer_launch_token_context, require_launch_bound_token,
-    viewer_object_shell_description, viewer_object_shell_title, GatewayState,
-    HomeLaunchTokenContext,
+    content_type, gateway_attach_runtime_token, issue_home_projection_launch_token_with_context,
+    issue_launch_page_token, load_live_runtime_coords, require_home_page_or_cli_launch_context,
+    require_home_projection_launch_token_context, require_home_viewer_launch_token_context,
+    require_launch_bound_token, viewer_object_shell_description, viewer_object_shell_title,
+    GatewayState, HomeLaunchTokenContext,
 };
 
 #[derive(Debug, Serialize)]
@@ -1060,7 +1059,7 @@ pub async fn home_launch_content(
     headers: HeaderMap,
     Json(request): Json<HomeLaunchContentRequest>,
 ) -> Response {
-    let context = match require_home_token_context(&state.data_dir, &headers) {
+    let context = match require_home_page_or_cli_launch_context(&state.data_dir, &headers) {
         Ok(context) => context,
         Err(err) => return viewer_error_response(err),
     };
@@ -1107,7 +1106,7 @@ async fn open_at_runtime(
             .await
             .map_err(|_| unavailable("runtime attach failed"))?;
     let grant =
-        issue_home_launch_token_with_context(data_dir, super::gateway::HOME_CAPSULE_ID, context)
+        issue_home_projection_launch_token_with_context(data_dir, "home", "home-shell", context)
             .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
     let answer = client
         .post(format!("{}/api/launch/open", coords.api_url))
@@ -1166,7 +1165,9 @@ pub(super) fn viewer_error_response(err: anyhow::Error) -> Response {
         return response;
     }
     let text = err.to_string();
-    let status = if text.contains("not found") {
+    let status = if text == "home_page_only" || text == "home_cli_launch_grant_mismatch" {
+        StatusCode::FORBIDDEN
+    } else if text.contains("not found") {
         StatusCode::NOT_FOUND
     } else if text.contains("home launch token") {
         StatusCode::UNAUTHORIZED

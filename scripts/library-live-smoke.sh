@@ -4,26 +4,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAY_URL="${ELASTOS_GATEWAY_URL:-https://elastos.elacitylabs.com}"
 GATEWAY_URL="${GATEWAY_URL%/}"
-HOME_TOKEN="${ELASTOS_HOME_TOKEN:-}"
-HOME_COOKIE="${ELASTOS_HOME_COOKIE:-${ELASTOS_COOKIE:-}}"
-HOME_COOKIE_JAR="${ELASTOS_HOME_COOKIE_JAR:-${ELASTOS_COOKIE_JAR:-}}"
-CURL_HOME_AUTH_ARGS=()
+CLI_LAUNCH_TOKEN="${ELASTOS_CLI_LAUNCH_TOKEN:-}"
 
 usage() {
     cat <<EOF
-Usage: ELASTOS_HOME_TOKEN=<signed-home-token> $(basename "$0")
+Usage: ELASTOS_CLI_LAUNCH_TOKEN=<home-cli-grant> $(basename "$0")
 
-Live Library proof for a signed Home session. The script asks Home to launch
+Live Library proof for a signed CLI launch grant. The script asks Runtime to launch
 Library, extracts the Library-scoped launch token, then verifies the app-facing
 provider path: roots, write, publish, status, share, trash, and cleanup.
-Without a signed session it still verifies the public Library shell/modules so
-stale static deployments are caught.
+The CLI grant is required for this proof. The script checks public Library
+shell/modules for stale static deployment before the signed provider path.
 
 Environment:
   ELASTOS_GATEWAY_URL       Default: https://elastos.elacitylabs.com
-  ELASTOS_HOME_TOKEN        Signed Home token for the active user
-  ELASTOS_HOME_COOKIE       Cookie header containing home-session=<token>
-  ELASTOS_HOME_COOKIE_JAR   curl cookie jar containing home-session
+  ELASTOS_CLI_LAUNCH_TOKEN  Signed home-cli grant for the active user
 EOF
 }
 
@@ -34,31 +29,11 @@ need_cmd() {
     }
 }
 
-configure_home_auth() {
-    if [[ -n "$HOME_TOKEN" ]]; then
-        CURL_HOME_AUTH_ARGS=(-H "x-elastos-home-token: ${HOME_TOKEN}")
-        return 0
-    fi
-    if [[ -n "$HOME_COOKIE" ]]; then
-        CURL_HOME_AUTH_ARGS=(-H "Cookie: ${HOME_COOKIE}")
-        return 0
-    fi
-    if [[ -n "$HOME_COOKIE_JAR" ]]; then
-        if [[ ! -f "$HOME_COOKIE_JAR" ]]; then
-            echo "[library-live-smoke] cookie jar does not exist: $HOME_COOKIE_JAR" >&2
-            exit 2
-        fi
-        CURL_HOME_AUTH_ARGS=(-b "$HOME_COOKIE_JAR")
-        return 0
-    fi
-    return 1
-}
-
 post_home_json() {
     local path="$1"
     local body="$2"
     curl -fsS \
-        "${CURL_HOME_AUTH_ARGS[@]}" \
+        -H "x-elastos-home-token: ${CLI_LAUNCH_TOKEN}" \
         -H "content-type: application/json" \
         -d "$body" \
         "${GATEWAY_URL}${path}"
@@ -219,22 +194,22 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
+if [[ -z "$CLI_LAUNCH_TOKEN" ]]; then
+    echo "[library-live-smoke] signed provider path needs ELASTOS_CLI_LAUNCH_TOKEN with a home-cli grant" >&2
+    exit 1
+fi
+
 need_cmd curl
 need_cmd grep
 
 verify_public_library_assets
-
-if ! configure_home_auth; then
-    echo "[library-live-smoke] signed provider path skipped: set ELASTOS_HOME_TOKEN, ELASTOS_HOME_COOKIE, or ELASTOS_HOME_COOKIE_JAR from a signed Home session"
-    exit 0
-fi
 
 need_cmd base64
 need_cmd jq
 need_cmd node
 need_cmd python3
 
-echo "[library-live-smoke] launch Library from signed Home session"
+echo "[library-live-smoke] launch Library from signed CLI grant"
 launch="$(post_home_json "/api/apps/home/launch" '{"target":"library","query":{}}')"
 route="$(jq -r '.route // empty' <<<"$launch")"
 LIBRARY_TOKEN="$(
