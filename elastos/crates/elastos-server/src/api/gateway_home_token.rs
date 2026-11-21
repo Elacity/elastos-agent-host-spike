@@ -631,19 +631,23 @@ pub(crate) fn require_home_viewer_launch_token_context(
     Ok((required.launch_context.selected_resource, required.context))
 }
 
-pub(crate) fn require_internal_shell_launch_grant_for_any_context(
+pub(crate) fn require_internal_shell_content_open_context(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
-    allowed_apps: &[&str],
 ) -> anyhow::Result<HomeLaunchTokenContext> {
-    require_home_launch_token_for_any_from_with_origin(
+    let required = require_home_launch_token_for_any_from_with_origin(
         data_dir,
         headers,
-        allowed_apps,
+        &["home-shell"],
         None,
         HomeLaunchOriginPolicy::InternalShell,
-    )
-    .map(|required| required.context)
+    )?;
+    if required.launch_context.selected_resource != "home"
+        || required.launch_context.authority_actor != HOME_CAPSULE_ID
+    {
+        anyhow::bail!("home_shell_content_open_grant_mismatch");
+    }
+    Ok(required.context)
 }
 
 /// The same signed grant check as its sibling, but it hands back the typed
@@ -749,6 +753,60 @@ pub(crate) fn require_home_token_context(
     .map(|required| required.context)
 }
 
+/// Launch and content open use the document at `/home/`, or a CLI grant
+/// naming `home-cli`. The Home session alone cannot act as an internal client.
+pub(crate) fn require_home_page_or_cli_launch_context(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+) -> anyhow::Result<HomeLaunchTokenContext> {
+    if headers.contains_key("origin")
+        || headers.contains_key("referer")
+        || headers.contains_key("sec-fetch-site")
+    {
+        require_home_page_launch_request(headers)?;
+        return require_home_token_context(data_dir, headers);
+    }
+    let required = require_home_launch_token_for_any_from_with_origin(
+        data_dir,
+        headers,
+        &["home-cli"],
+        None,
+        HomeLaunchOriginPolicy::InternalShell,
+    )
+    .map_err(|_| anyhow::anyhow!("home_page_only"))?;
+    if required.launch_context.selected_resource != "home-launch"
+        || required.launch_context.authority_actor != HOME_CAPSULE_ID
+    {
+        anyhow::bail!("home_cli_launch_grant_mismatch");
+    }
+    Ok(required.context)
+}
+
+fn require_home_page_launch_request(headers: &HeaderMap) -> anyhow::Result<()> {
+    let page = (|| {
+        let origin = home_browser_origin(headers)?;
+        let presented = single_browser_header(headers, "origin")?
+            .ok_or_else(|| anyhow::anyhow!("missing origin"))?;
+        let referer = single_browser_header(headers, "referer")?
+            .ok_or_else(|| anyhow::anyhow!("missing referer"))?;
+        let site = single_browser_header(headers, "sec-fetch-site")?
+            .ok_or_else(|| anyhow::anyhow!("missing fetch site"))?;
+        let page = url::Url::parse(referer)?;
+        anyhow::ensure!(
+            presented == origin
+                && site == "same-origin"
+                && page.origin().ascii_serialization() == origin
+                && page.path() == "/home/"
+                && page.username().is_empty()
+                && page.password().is_none()
+                && page.fragment().is_none(),
+            "wrong Home page"
+        );
+        Ok::<_, anyhow::Error>(())
+    })();
+    page.map_err(|_| anyhow::anyhow!("home_page_only"))
+}
+
 /// A launch token the Browser page can renew. Other failures stay opaque.
 #[derive(Debug)]
 pub(in crate::api) enum HomeLaunchTokenError {
@@ -824,6 +882,9 @@ pub(super) fn require_gateway_launch_for(
     headers: &HeaderMap,
     path: &str,
 ) -> anyhow::Result<()> {
+    if matches!(path, "/api/apps/home/launch" | "/api/home/launch/content") {
+        return require_home_page_or_cli_launch_context(data_dir, headers).map(|_| ());
+    }
     match launch_read_page(path) {
         Some(page) => require_launch_bound_token(data_dir, headers, page, false).map(|_| ()),
         None => require_gateway_launch(data_dir, headers),
@@ -845,7 +906,11 @@ pub(super) fn require_gateway_launch(
     }
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&token)?;
     let envelope: HomeLaunchTokenEnvelope = serde_json::from_slice(&bytes)?;
-    let actor = &envelope.payload.launch_context.executable_actor;
+    let launch = &envelope.payload.launch_context;
+    let actor = &launch.executable_actor;
+    if (actor == "home-cli" && launch.selected_resource == "home-launch") || actor == "home-shell" {
+        anyhow::bail!("home_launch_grant_scope_mismatch");
+    }
     let required = require_home_launch_token_for_any_from_with_origin(
         data_dir,
         headers,
@@ -3074,5 +3139,104 @@ mod tests {
         let refused = require_gateway_launch(dir.path(), &fence_home_headers(&agent_token, false))
             .expect_err("an agent principal is refused");
         assert_eq!(refused.to_string(), FENCE_AGENT_REFUSAL);
+    }
+
+    #[test]
+    fn home_page_launch_gate_names_other_callers_and_keeps_cli_grant_narrow() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = issue_local_runtime_home_launch_token(dir.path(), HOME_CAPSULE_ID).unwrap();
+        let cli = issue_home_projection_launch_token_with_context(
+            dir.path(),
+            "home-launch",
+            "home-cli",
+            &local_home_launch_token_context(dir.path()).unwrap(),
+        )
+        .unwrap();
+        let mut page = HeaderMap::new();
+        page.insert("host", "localhost:61180".parse().unwrap());
+        page.insert("origin", "http://localhost:61180".parse().unwrap());
+        page.insert("sec-fetch-site", "same-origin".parse().unwrap());
+        page.insert("referer", "http://localhost:61180/home/".parse().unwrap());
+        page.insert("x-elastos-home-token", home.parse().unwrap());
+        require_home_page_or_cli_launch_context(dir.path(), &page).unwrap();
+
+        let mut other_page = page.clone();
+        other_page.insert(
+            "referer",
+            "http://localhost:61180/apps/system/".parse().unwrap(),
+        );
+        assert_eq!(
+            require_home_page_or_cli_launch_context(dir.path(), &other_page)
+                .unwrap_err()
+                .to_string(),
+            "home_page_only"
+        );
+        let mut headless_home = HeaderMap::new();
+        headless_home.insert("x-elastos-home-token", home.parse().unwrap());
+        assert_eq!(
+            require_home_page_or_cli_launch_context(dir.path(), &headless_home)
+                .unwrap_err()
+                .to_string(),
+            "home_page_only"
+        );
+
+        let mut cli_headers = HeaderMap::new();
+        cli_headers.insert("x-elastos-home-token", cli.parse().unwrap());
+        require_home_page_or_cli_launch_context(dir.path(), &cli_headers).unwrap();
+        assert!(require_gateway_launch(dir.path(), &cli_headers).is_err());
+        page.insert("x-elastos-home-token", cli.parse().unwrap());
+        assert!(require_home_token_context(dir.path(), &page).is_err());
+        assert!(require_internal_shell_content_open_context(dir.path(), &cli_headers).is_err());
+        let projected_cli = issue_home_projection_launch_token_with_context(
+            dir.path(),
+            "other-resource",
+            "home-cli",
+            &local_home_launch_token_context(dir.path()).unwrap(),
+        )
+        .unwrap();
+        cli_headers.insert("x-elastos-home-token", projected_cli.parse().unwrap());
+        assert_eq!(
+            require_home_page_or_cli_launch_context(dir.path(), &cli_headers)
+                .unwrap_err()
+                .to_string(),
+            "home_cli_launch_grant_mismatch"
+        );
+    }
+
+    #[test]
+    fn shell_content_open_grant_is_bound_to_its_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(dir.path()).unwrap();
+        let shell = issue_home_projection_launch_token_with_context(
+            dir.path(),
+            "home",
+            "home-shell",
+            &context,
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-elastos-home-token", shell.parse().unwrap());
+        require_internal_shell_content_open_context(dir.path(), &headers).unwrap();
+        assert!(require_gateway_launch(dir.path(), &headers).is_err());
+        assert!(require_home_page_or_cli_launch_context(dir.path(), &headers).is_err());
+        assert!(
+            require_internal_shell_launch_grant_principal(dir.path(), &headers, &["system"])
+                .is_err()
+        );
+
+        let wrong = issue_home_projection_launch_token_with_context(
+            dir.path(),
+            "system",
+            "home-shell",
+            &context,
+        )
+        .unwrap();
+        headers.insert("x-elastos-home-token", wrong.parse().unwrap());
+        assert_eq!(
+            require_internal_shell_content_open_context(dir.path(), &headers)
+                .unwrap_err()
+                .to_string(),
+            "home_shell_content_open_grant_mismatch"
+        );
     }
 }

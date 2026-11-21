@@ -90,6 +90,17 @@ shell launch-grant transfer uses a separate non-browser validation path. Runtime
 rejects missing or conflicting provenance, v2, v3, mixed-shape, expired, and
 substituted tokens. A Home session cookie alone cannot mint an app token.
 
+The two Home launch operations, `POST /api/apps/home/launch` and
+`POST /api/home/launch/content`, accept the Home session only from the `/home/`
+document. These requests carry the exact destination `Origin`, a `/home/`
+`Referer`, and `Sec-Fetch-Site: same-origin`; another page receives
+`home_page_only`. The Home document sends its referrer only to its own origin.
+The native CLI uses its own app-scoped launch grants. Its `home-cli` grant for
+these two operations selects `home-launch`; that grant can ask the gateway to
+launch or open content without browser provenance. For content
+open, the gateway gives the Runtime a `home-shell` projection grant bound to
+`home`; the Runtime accepts that grant only on its internal content-open hop.
+
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers
 appropriate to their document or asset role.

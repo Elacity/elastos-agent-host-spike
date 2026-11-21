@@ -101,9 +101,8 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
         "x-elastos-home-token",
         asked[0]["token"].as_str().unwrap().parse().unwrap(),
     );
-    let person =
-        require_internal_shell_launch_grant_for_any_context(dir.path(), &grant, &[HOME_CAPSULE_ID])
-            .expect("a grant for home");
+    let person = require_internal_shell_content_open_context(dir.path(), &grant)
+        .expect("the shell's content-open grant");
     assert_eq!(
         person.principal_id(),
         authority.principal_id,
@@ -129,6 +128,88 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
         expires > issued && expires - issued <= 15 * 60,
         "fifteen minutes at most: {issued} to {expires}"
     );
+}
+
+#[tokio::test]
+async fn content_open_gate_accepts_page_and_cli_before_runtime_lookup() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority(dir.path());
+    let (status, body) = open(&app, "bafy-good", Some(&home_cookie(&authority)), None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, b"local runtime is not running");
+
+    let cli = cli_home_launch_grant(dir.path());
+    let answer = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/home/launch/content")
+                .header(HOST, "localhost:61180")
+                .header("x-elastos-home-token", cli)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"cid":"bafy-good"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn content_open_names_non_home_page_and_accepts_cli_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let authority = passkey_authority(dir.path());
+    let runtime = start_fake_runtime(
+        dir.path(),
+        Arc::new(TokioMutex::new(FakePeerBus::default())),
+        "launch-open-cli",
+    )
+    .await;
+    let other = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/home/launch/content")
+                .header(HOST, "localhost:61180")
+                .header("origin", "http://localhost:61180")
+                .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/apps/system/")
+                .header(COOKIE, home_cookie(&authority))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"cid":"bafy-good"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(other.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        axum::body::to_bytes(other.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+        "home_page_only"
+    );
+    assert!(runtime.kept_launch_reads.lock().await.is_empty());
+
+    let cli = cli_home_launch_grant(dir.path());
+    let opened = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/home/launch/content")
+                .header(HOST, "localhost:61180")
+                .header("x-elastos-home-token", cli)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"cid":"bafy-good"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opened.status(), StatusCode::OK);
+    assert_eq!(runtime.kept_launch_reads.lock().await.len(), 1);
 }
 
 /// D2a-address. The page's address takes each part of the entrypoint

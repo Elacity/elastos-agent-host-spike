@@ -43,13 +43,14 @@ pub(super) async fn home_launch(
     Json(req): Json<HomeLaunchRequest>,
     platform: &str,
 ) -> Result<Json<HomeLaunchResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let context = require_home_launch_token_context(&state.data_dir, &headers, HOME_CAPSULE_ID)
-        .map_err(|err| {
-            (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": err.to_string() })),
-            )
-        })?;
+    let context =
+        gateway_home_token::require_home_page_or_cli_launch_context(&state.data_dir, &headers)
+            .map_err(|err| {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": err.to_string() })),
+                )
+            })?;
 
     // Old Home bookmarks launch the canonical app. Normalize before package
     // resolution and token creation; existing run actor bindings stay intact.

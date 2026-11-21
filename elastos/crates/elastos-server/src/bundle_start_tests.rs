@@ -3309,7 +3309,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
         "no Home token, nothing opened"
     );
     assert_eq!(home.runtime.kept_launch_count(), 0);
-    let (status, _, body) = send(open(&cid, Some(tokens::home(&data)))).await;
+    let (status, _, body) = send(open(&cid, Some(tokens::shell(&data)))).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let opened: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let (id, page) = (
@@ -3347,7 +3347,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     .await;
     assert_eq!((status, body), (StatusCode::OK, b"a picture".to_vec()));
 
-    let (status, _, body) = send(open(&cid, Some(tokens::home(&data)))).await;
+    let (status, _, body) = send(open(&cid, Some(tokens::shell(&data)))).await;
     assert_eq!(status, StatusCode::OK);
     let second: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let second_id = second["id"].as_str().unwrap();
@@ -3424,7 +3424,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     let program = home
         .staged("core", &manifest("core"), &quiet_component(), &publisher)
         .await;
-    let (status, _, body) = send(open(&program, Some(tokens::home(&data)))).await;
+    let (status, _, body) = send(open(&program, Some(tokens::shell(&data)))).await;
     assert_eq!(
         (status, body),
         (StatusCode::BAD_REQUEST, b"not_content".to_vec())
@@ -4174,7 +4174,7 @@ async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tamper
             .method("POST")
             .uri("/api/launch/open")
             .header("content-type", "application/json")
-            .header("x-elastos-home-token", tokens::home(&data))
+            .header("x-elastos-home-token", tokens::shell(&data))
             .body(Body::from(serde_json::json!({"cid": cid}).to_string()))
             .unwrap()
     };
@@ -4259,7 +4259,7 @@ struct ServerHome {
     app: axum::Router,
     shell_token: String,
     shell_id: String,
-    home_token: String,
+    open_grant: String,
 }
 
 impl ServerHome {
@@ -4277,13 +4277,13 @@ impl ServerHome {
             bridge.pending.clone(),
             Some(bridge.data()),
         );
-        let home_token = crate::api::routes::kept_launch_test_tokens::home(&bridge.data());
+        let open_grant = crate::api::routes::kept_launch_test_tokens::shell(&bridge.data());
         ServerHome {
             bridge,
             app,
             shell_token: shell.token,
             shell_id: shell.id.to_string(),
-            home_token,
+            open_grant,
         }
     }
 
@@ -4320,7 +4320,7 @@ impl ServerHome {
         let (app, shell, token) = (
             self.app.clone(),
             self.shell_token.clone(),
-            self.home_token.clone(),
+            self.open_grant.clone(),
         );
         let body = serde_json::json!({"cid": cid}).to_string();
         tokio::spawn(async move {
@@ -4463,7 +4463,7 @@ async fn a_valid_signature_grants_nothing_on_the_server_home() {
         &home.shell_token,
         "POST",
         "/api/launch/open",
-        Some(&home.home_token),
+        Some(&home.open_grant),
         Some(&body),
     )
     .await;

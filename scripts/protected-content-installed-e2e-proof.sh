@@ -35,8 +35,8 @@
 #                        the new config.
 #   wallet-setup       - creates/imports a managed wallet account over HTTP
 #                        for the creator and buyer principals (each needs a
-#                        pre-obtained signed Home session -- see "Home-token
-#                        login sequence" below), waits for the operator's
+#                        pre-obtained signed home-cli grant -- see "HTTP launch
+#                        authority" below), waits for the operator's
 #                        one-time funding transfer (polled via the chain
 #                        evidence RPCs), then sets each principal's default
 #                        eip155 transaction-intent account so the mint/buy
@@ -120,31 +120,15 @@
 #                        finalize, in that order (the only order that keeps
 #                        every later phase's prerequisites satisfied).
 #
-# Home-token login sequence (read before running any HTTP phase):
-# there is no headless/curl-only way to mint the FIRST Home session --
-# `require_home_token_context` (api/gateway_home_token.rs:392) demands a
-# same-origin browser request carrying a token whose signature chains back
-# to a real authenticated session grant, and the only routes that ever mint
-# that first grant are the passkey/WebAuthn ceremony endpoints
-# (`/api/auth/passkey/register/*` and `/api/auth/passkey/authenticate/*`,
-# wired in api/gateway.rs:614-629) -- a real hardware/platform authenticator
-# ceremony, not scriptable from this file. So: the OPERATOR logs into Home
-# once in a real browser (first passkey registration bootstraps the initial
-# Admin), then supplies the resulting Home session to this script exactly
-# the way scripts/library-live-smoke.sh already does it: --home-token (or
-# $ELASTOS_HOME_TOKEN) for the raw `x-elastos-home-token` value, or
-# --home-cookie/$ELASTOS_HOME_COOKIE for a `home-session=<token>` Cookie
-# header, or --home-cookie-jar/$ELASTOS_HOME_COOKIE_JAR for a curl cookie
-# jar holding it. Every phase past that point is headless: it calls
-# `POST /api/apps/home/launch {"target": <capsule>}` with that base
-# credential (api/gateway.rs:925, handler api/gateway_home_runtime.rs:3) to
+# HTTP launch authority: each principal supplies its own signed home-cli
+# grant through --cli-launch-token, --buyer-cli-launch-token, and
+# --denial-cli-launch-token (or matching environment variables). Home's page
+# retains the Home session token. The script calls
+# `POST /api/apps/home/launch {"target": <capsule>}` with the CLI grant to
 # mint a capsule-scoped projection token, which the handler appends to the
 # response `route` as a URL FRAGMENT, not a query parameter --
-# `#home_token=<token>` (api/gateway_home_runtime.rs:154-177
-# `append_home_launch_token_to_route`). This script extracts it from the
-# fragment; note library-live-smoke.sh's `url.searchParams.get("home_token")`
-# extraction reads the query string and would silently return empty against
-# this handler's current fragment-based shape.
+# `#home_token=<token>` (`api/gateway_home_runtime.rs`). This script extracts
+# that fragment before making the app-scoped requests.
 #
 # import-recovery-key finding: `POST /api/apps/wallet/wallet/accounts/
 # import-recovery-key` (gateway_wallet_app.rs:174) does accept raw key
@@ -340,15 +324,9 @@ RUNTIME_CUSTODY_VIEWER_SESSION_UNAVAILABLE_MESSAGE="Runtime custody viewer sessi
 GATEWAY_URL="${ELASTOS_GATEWAY_URL:-http://localhost:61180}"
 GATEWAY_URL="${GATEWAY_URL%/}"
 
-CREATOR_HOME_TOKEN="${ELASTOS_HOME_TOKEN:-}"
-CREATOR_HOME_COOKIE="${ELASTOS_HOME_COOKIE:-}"
-CREATOR_HOME_COOKIE_JAR="${ELASTOS_HOME_COOKIE_JAR:-}"
-BUYER_HOME_TOKEN="${ELASTOS_BUYER_HOME_TOKEN:-}"
-BUYER_HOME_COOKIE="${ELASTOS_BUYER_HOME_COOKIE:-}"
-BUYER_HOME_COOKIE_JAR="${ELASTOS_BUYER_HOME_COOKIE_JAR:-}"
-DENIAL_HOME_TOKEN="${ELASTOS_DENIAL_HOME_TOKEN:-}"
-DENIAL_HOME_COOKIE="${ELASTOS_DENIAL_HOME_COOKIE:-}"
-DENIAL_HOME_COOKIE_JAR="${ELASTOS_DENIAL_HOME_COOKIE_JAR:-}"
+CREATOR_CLI_LAUNCH_TOKEN="${ELASTOS_CLI_LAUNCH_TOKEN:-}"
+BUYER_CLI_LAUNCH_TOKEN="${ELASTOS_BUYER_CLI_LAUNCH_TOKEN:-}"
+DENIAL_CLI_LAUNCH_TOKEN="${ELASTOS_DENIAL_CLI_LAUNCH_TOKEN:-}"
 
 CREATOR_RECOVERY_KEY=""
 CREATOR_STEP_UP_TOKEN=""
@@ -416,12 +394,11 @@ for the full rationale of each step):
   1. provision            (client artifact/composition/chain-config ceremony)
   2. preflight             (Carrier dial + readiness proof against the 3 nodes)
   3. chain-config-real     (only if pointing at a real chain deployment)
-  4. log into Home once in a real browser, for THREE principals (creator,
-     buyer, and a denial principal used by drill-replica/negative); capture
-     each resulting Home session (see "Home-token login sequence" in the
-     header comment)
-  5. wallet-setup           (needs --home-token/--buyer-home-token/
-                             --denial-home-token; the operator must complete
+  4. obtain a signed home-cli grant for THREE principals (creator, buyer,
+     and a denial principal used by drill-replica/negative); see "HTTP launch
+     authority" in the header comment
+  5. wallet-setup           (needs --cli-launch-token/--buyer-cli-launch-token/
+                             --denial-cli-launch-token; the operator must complete
                              the funding transfer this phase waits for, for
                              all three principals -- the denial principal
                              needs its own small funded balance too, or
@@ -461,11 +438,9 @@ chain-config-real only:
 HTTP/journey phases (wallet-setup, mint, availability, buy, open,
 drill-*, negative, restart, cleanup, all):
   --gateway-url <url>               Installed client gateway base URL. Default: $ELASTOS_GATEWAY_URL or http://localhost:61180
-  --home-token <token>              Creator's signed Home session token (x-elastos-home-token). Default: $ELASTOS_HOME_TOKEN
-  --home-cookie <cookie>            Creator's `home-session=<token>` Cookie header. Default: $ELASTOS_HOME_COOKIE
-  --home-cookie-jar <path>          Creator's curl cookie jar holding home-session. Default: $ELASTOS_HOME_COOKIE_JAR
-  --buyer-home-token/--buyer-home-cookie/--buyer-home-cookie-jar   Same, for the buyer principal ($ELASTOS_BUYER_HOME_*)
-  --denial-home-token/--denial-home-cookie/--denial-home-cookie-jar   Same, for the negative-case denial principal ($ELASTOS_DENIAL_HOME_*)
+  --cli-launch-token <token>        Creator's signed home-cli grant. Default: $ELASTOS_CLI_LAUNCH_TOKEN
+  --buyer-cli-launch-token <token>  Buyer's signed home-cli grant. Default: $ELASTOS_BUYER_CLI_LAUNCH_TOKEN
+  --denial-cli-launch-token <token> Denial principal's signed home-cli grant. Default: $ELASTOS_DENIAL_CLI_LAUNCH_TOKEN
   --content-path <path>             File to mint (required for --phase mint)
   --copies <n>                      Runtime custody copies. Default: 3
   --price-wei <n>                   Runtime custody price in wei (string). Default: 1000000000000000
@@ -539,41 +514,20 @@ while [ $# -gt 0 ]; do
         GATEWAY_URL="${2%/}"
         shift 2
         ;;
-    --home-token)
-        CREATOR_HOME_TOKEN="${2:-}"
+    --cli-launch-token)
+        CREATOR_CLI_LAUNCH_TOKEN="${2:-}"
         shift 2
         ;;
-    --home-cookie)
-        CREATOR_HOME_COOKIE="${2:-}"
+    --buyer-cli-launch-token)
+        BUYER_CLI_LAUNCH_TOKEN="${2:-}"
         shift 2
         ;;
-    --home-cookie-jar)
-        CREATOR_HOME_COOKIE_JAR="${2:-}"
+    --denial-cli-launch-token)
+        DENIAL_CLI_LAUNCH_TOKEN="${2:-}"
         shift 2
         ;;
-    --buyer-home-token)
-        BUYER_HOME_TOKEN="${2:-}"
-        shift 2
-        ;;
-    --buyer-home-cookie)
-        BUYER_HOME_COOKIE="${2:-}"
-        shift 2
-        ;;
-    --buyer-home-cookie-jar)
-        BUYER_HOME_COOKIE_JAR="${2:-}"
-        shift 2
-        ;;
-    --denial-home-token)
-        DENIAL_HOME_TOKEN="${2:-}"
-        shift 2
-        ;;
-    --denial-home-cookie)
-        DENIAL_HOME_COOKIE="${2:-}"
-        shift 2
-        ;;
-    --denial-home-cookie-jar)
-        DENIAL_HOME_COOKIE_JAR="${2:-}"
-        shift 2
+    --home-token|--home-cookie|--home-cookie-jar|--buyer-home-token|--buyer-home-cookie|--buyer-home-cookie-jar|--denial-home-token|--denial-home-cookie|--denial-home-cookie-jar)
+        fail "$1 supplies Home page authority; use the matching --cli-launch-token grant"
         ;;
     --content-path)
         CONTENT_PATH="${2:-}"
@@ -942,63 +896,36 @@ curl_call() {
     rm -f "$tmp" "${tmp}.stderr"
 }
 
-# Sets HOME_AUTH_CURL_ARGS (an array of curl -H/-b args) from one
-# principal's token/cookie/cookie-jar triple, or fail()s naming exactly
-# which flag (or matching env var) the operator needs to supply -- see the
-# header comment's "Home-token login sequence". flag_infix/env_infix are
-# "" for the base creator (--home-token / $ELASTOS_HOME_TOKEN) or
-# "buyer-"/"BUYER_", "denial-"/"DENIAL_" for the other two principals.
-compute_home_auth_args() {
-    local token="$1" cookie="$2" jar="$3" human_label="$4" flag_infix="$5" env_infix="$6"
-    HOME_AUTH_CURL_ARGS=()
-    if [ -n "$token" ]; then
-        HOME_AUTH_CURL_ARGS=(-H "x-elastos-home-token: ${token}")
-        return 0
-    fi
-    if [ -n "$cookie" ]; then
-        HOME_AUTH_CURL_ARGS=(-H "Cookie: ${cookie}")
-        return 0
-    fi
-    if [ -n "$jar" ]; then
-        [ -f "$jar" ] || fail "$human_label cookie jar does not exist: $jar"
-        HOME_AUTH_CURL_ARGS=(-b "$jar")
-        return 0
-    fi
-    fail "$human_label has no signed Home session; pass --${flag_infix}home-token / --${flag_infix}home-cookie / --${flag_infix}home-cookie-jar (or \$ELASTOS_${env_infix}HOME_TOKEN / \$ELASTOS_${env_infix}HOME_COOKIE / \$ELASTOS_${env_infix}HOME_COOKIE_JAR), obtained per the header comment's Home-token login sequence"
-}
-
 compute_creator_auth_args() {
-    compute_home_auth_args "$CREATOR_HOME_TOKEN" "$CREATOR_HOME_COOKIE" "$CREATOR_HOME_COOKIE_JAR" "creator" "" ""
-    CREATOR_AUTH_ARGS=("${HOME_AUTH_CURL_ARGS[@]}")
+    [ -n "$CREATOR_CLI_LAUNCH_TOKEN" ] || fail "creator needs --cli-launch-token or ELASTOS_CLI_LAUNCH_TOKEN"
+    CREATOR_AUTH_ARGS=(-H "x-elastos-home-token: ${CREATOR_CLI_LAUNCH_TOKEN}")
 }
 
 compute_buyer_auth_args() {
-    compute_home_auth_args "$BUYER_HOME_TOKEN" "$BUYER_HOME_COOKIE" "$BUYER_HOME_COOKIE_JAR" "buyer" "buyer-" "BUYER_"
-    BUYER_AUTH_ARGS=("${HOME_AUTH_CURL_ARGS[@]}")
+    [ -n "$BUYER_CLI_LAUNCH_TOKEN" ] || fail "buyer needs --buyer-cli-launch-token or ELASTOS_BUYER_CLI_LAUNCH_TOKEN"
+    BUYER_AUTH_ARGS=(-H "x-elastos-home-token: ${BUYER_CLI_LAUNCH_TOKEN}")
 }
 
 compute_denial_auth_args() {
-    compute_home_auth_args "$DENIAL_HOME_TOKEN" "$DENIAL_HOME_COOKIE" "$DENIAL_HOME_COOKIE_JAR" "denial" "denial-" "DENIAL_"
-    DENIAL_AUTH_ARGS=("${HOME_AUTH_CURL_ARGS[@]}")
+    [ -n "$DENIAL_CLI_LAUNCH_TOKEN" ] || fail "denial needs --denial-cli-launch-token or ELASTOS_DENIAL_CLI_LAUNCH_TOKEN"
+    DENIAL_AUTH_ARGS=(-H "x-elastos-home-token: ${DENIAL_CLI_LAUNCH_TOKEN}")
 }
 
-# gateway_launch TARGET [home-auth curl-args...] -- POSTs
+# gateway_launch TARGET [CLI grant curl-args...] -- POSTs
 # /api/apps/home/launch, extracts the capsule-scoped projection token from
 # the response route's #home_token=... FRAGMENT (never the query string;
-# see the header comment), sets LAUNCH_TOKEN. sec-fetch-site: same-origin
-# alone satisfies require_exact_home_browser_origin's same-origin-
-# provenance check without needing to match GATEWAY_URL's scheme exactly.
+# see the header comment), sets LAUNCH_TOKEN. The home-cli grant uses the
+# internal client path and carries no browser provenance.
 gateway_launch() {
     local target="$1"
     shift
     local body
     body="$(python3 -c 'import json,sys; print(json.dumps({"target": sys.argv[1], "query": {}}))' "$target")"
-    log "+ curl -X POST ${GATEWAY_URL}/api/apps/home/launch --data '${body}' [home-auth headers redacted]"
+    log "+ curl -X POST ${GATEWAY_URL}/api/apps/home/launch --data '${body}' [CLI grant redacted]"
     curl_call POST "${GATEWAY_URL}/api/apps/home/launch" \
         "$@" \
         -H "content-type: application/json" \
         -H "Host: $(gateway_host)" \
-        -H "sec-fetch-site: same-origin" \
         --data "$body"
     record_transcript POST "/api/apps/home/launch" "$body" "$CURL_HTTP_CODE" "$CURL_BODY"
     case "$CURL_HTTP_CODE" in

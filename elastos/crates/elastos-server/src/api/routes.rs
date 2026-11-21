@@ -7237,12 +7237,8 @@ pub async fn open_launch(
         StatusCode::SERVICE_UNAVAILABLE,
         "no data folder for launches".to_string(),
     ))?;
-    let person = super::gateway::require_internal_shell_launch_grant_for_any_context(
-        &data_dir,
-        &headers,
-        &[super::gateway::HOME_CAPSULE_ID],
-    )
-    .map_err(|err| (StatusCode::UNAUTHORIZED, err.to_string()))?;
+    let person = super::gateway::require_internal_shell_content_open_context(&data_dir, &headers)
+        .map_err(|err| (StatusCode::UNAUTHORIZED, err.to_string()))?;
     match runtime
         .open_for_page(&data_dir, &req.cid, person.principal_id())
         .await
@@ -7397,6 +7393,17 @@ pub(crate) mod kept_launch_test_tokens {
         let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
         super::super::gateway::issue_home_launch_token_with_context(data_dir, "home", &context)
             .unwrap()
+    }
+
+    pub(crate) fn shell(data_dir: &std::path::Path) -> String {
+        let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
+        super::super::gateway::issue_home_projection_launch_token_with_context(
+            data_dir,
+            "home",
+            "home-shell",
+            &context,
+        )
+        .unwrap()
     }
 
     /// A page's token bound to `resource`, with `page` as its executable.

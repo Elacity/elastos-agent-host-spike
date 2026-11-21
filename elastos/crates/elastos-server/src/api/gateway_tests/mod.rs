@@ -67,8 +67,16 @@ fn test_browser_request(host: &'static str, origin: &'static str) -> axum::http:
     if origin == "null" {
         request
     } else {
-        request.header("sec-fetch-site", "same-origin")
+        request
+            .header("sec-fetch-site", "same-origin")
+            .header("referer", "http://localhost:61180/home/")
     }
+}
+
+fn cli_home_launch_grant(data_dir: &std::path::Path) -> String {
+    let context = local_home_launch_token_context(data_dir).unwrap();
+    issue_home_projection_launch_token_with_context(data_dir, "home-launch", "home-cli", &context)
+        .unwrap()
 }
 
 /// Reads Home events once from `cursor` and reports whether Inbox changed.
