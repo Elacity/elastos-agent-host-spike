@@ -165,7 +165,10 @@ class BrowserImagePackageTest(unittest.TestCase):
                 info = overlay["external"]["browser-vm-image"]["platforms"][platform]
                 self.assertEqual(info, {"install_path": "browser-vm/image-set", "extract_path": "browser-vm-image",
                     "strategy": "browser-vm-image", "release_path": "browser/image.tar.gz",
-                    "checksum": "sha256:" + sha(content), "size": len(content)})
+                    "checksum": "sha256:" + sha(content), "size": len(content),
+                    "vm_image": {"path": "rootfs.ext4", "size": len(self.payloads["rootfs.ext4"]),
+                                 "sha256": sha(self.payloads["rootfs.ext4"]),
+                                 "cid": "b" + __import__("base64").b32encode(bytes.fromhex("01551220" + sha(self.payloads["rootfs.ext4"]))).decode().lower().rstrip("=")}})
                 self.assertEqual(json.loads(self.metadata.read_bytes()), overlay)
                 self.assertEqual(content[4:8], bytes(4), "gzip time must be reproducible")
                 with tarfile.open(self.archive, "r:gz") as archive:
