@@ -2751,7 +2751,7 @@ fn random_hex(bytes_len: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A ceiling of resource patterns alone: any action on each, as a
@@ -7438,7 +7438,7 @@ mod tests {
             manifest.resource_authority_bounds(),
             vec![
                 elastos_common::AuthorityBound {
-                    resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
+                    resource: "localhost://UsersAI/self/.AppData/Agents/agent-host/*".to_string(),
                     actions: Some(vec![
                         elastos_common::AskAction::Write,
                         elastos_common::AskAction::Read,
@@ -7454,13 +7454,16 @@ mod tests {
                 },
             ]
         );
-        let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
-        ctx.manifest_capabilities = manifest.resource_authority_bounds();
+        let temp = tempfile::tempdir().unwrap();
+        let owner = "person:local:journal-owner";
+        crate::auth::store_test_human_principal(temp.path(), owner);
+        let agent = crate::agents::tests::plant_for_dispatch(temp.path(), owner, owner);
+        let (ctx, _) = submit_plan_bridge(temp.path(), &agent).await;
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
-        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let root = crate::auth::principal_stored_localhost_root(Some(temp.path()), &agent).unwrap();
         let journal = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
-        let journal_self = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        let journal_self = "localhost://UsersAI/self/.AppData/Agents/agent-host/tasks/demo/journal";
         let first = journal_write(
             &ctx,
             &journal,
@@ -7476,12 +7479,12 @@ mod tests {
         ];
         for (uri, refused) in [
             (
-                "localhost://Users/self/.AppData",
+                "localhost://UsersAI/self/.AppData",
                 "manifest_capability_denied",
             ),
-            ("localhost://Users/self", "manifest_capability_denied"),
+            ("localhost://UsersAI/self", "manifest_capability_denied"),
             (
-                "localhost://Users/self/.AppData/Agents",
+                "localhost://UsersAI/self/.AppData/Agents",
                 "manifest_capability_denied",
             ),
             (journal_self, "manifest_capability_denied"),
@@ -7501,8 +7504,8 @@ mod tests {
                 let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
                 assert_eq!(response["response"]["code"], refused, "delete {uri}");
             }
-            // Asking for a delete grant is refused at once, with no approval:
-            // by the Agents rule inside the area, by the manifest bound outside it.
+            // The signed ask lists write and read only, so delete is refused
+            // before any grant can be approved.
             let ask = serde_json::json!({
                 "id": 69,
                 "request": {
@@ -7514,12 +7517,10 @@ mod tests {
             })
             .to_string();
             let asked = handle_request(&ask, &Some(ctx.clone())).await.unwrap();
-            let expected = if uri.contains("/.AppData/Agents") {
-                "operation_not_allowed"
-            } else {
-                "manifest_capability_denied"
-            };
-            assert_eq!(asked["response"]["code"], expected, "{uri}");
+            assert_eq!(
+                asked["response"]["code"], "manifest_capability_denied",
+                "{uri}"
+            );
         }
         // Delete is outside the ask's actions, so the manifest refuses the
         // invoke. The provider sees no request.
@@ -7539,7 +7540,7 @@ mod tests {
         assert_eq!(response["response"]["code"], "manifest_capability_denied");
         assert!(provider.requests().await.is_empty());
         assert!(journal_path(&temp, &journal).is_file());
-        assert!(temp.path().join("Users").is_dir());
+        assert!(temp.path().join("UsersAI").is_dir());
     }
 
     #[tokio::test]
@@ -8279,6 +8280,52 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// The stored Agent guest writes and reads its own task journal before it
+    /// submits the planner's exact one-step plan through the same bridge.
+    pub(crate) async fn a15r_guest_journal_and_submit(
+        data_dir: &Path,
+        agent: &str,
+        alias: &str,
+        plan: &serde_json::Value,
+    ) -> (serde_json::Value, String, String, String) {
+        let (ctx, provider) = submit_plan_bridge(data_dir, agent).await;
+        let scoped = scope_current_user_alias(alias, Some(agent), Some(data_dir)).unwrap();
+        assert!(scoped.starts_with("localhost://UsersAI/"));
+        assert!(scope_current_user_alias(
+            "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal",
+            Some(agent),
+            Some(data_dir),
+        )
+        .is_err());
+        let written = journal_write(
+            &ctx,
+            &scoped,
+            alias,
+            b"agent journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(written["response"]["result"]["status"], "ok", "{written}");
+        let read = handle_request(
+            &journal_read_line(61, alias, bridge_token(&ctx, &scoped, Action::Read)),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["response"]["result"]["status"], "ok", "{read}");
+        assert_eq!(
+            read["response"]["result"]["data"]["content"],
+            serde_json::json!(b"agent journal v1"),
+        );
+        let response = submit_with_write(&ctx, 81, plan).await;
+        assert_eq!(
+            response["response"]["type"], "resource_result",
+            "{response}"
+        );
+        assert!(provider.requests().await.is_empty());
+        (response, scoped, ctx.capsule_id, ctx.session_id)
     }
 
     /// The submission is refused for `reason`; no record is written and no

@@ -4393,20 +4393,51 @@ pub(crate) mod tests {
     }
 
     /// A Runtime with the component provider, the real resource bridge, and a
-    /// person whose root has principal-root protection, as on a Home.
+    /// stored Agent whose root has principal-root protection, as on a Home.
     struct AgentHostRuntime {
         runtime: Arc<Runtime>,
         capability_manager: Arc<CapabilityManager>,
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         audit_log: Arc<AuditLog>,
         data_dir: std::path::PathBuf,
+        agent_id: String,
+        folder: std::path::PathBuf,
+        _home: crate::agents::tests::Home,
         _temp: tempfile::TempDir,
     }
 
-    const AGENT_HOST_PERSON: &str = "person:local:agent-host-e2e";
-
     async fn agent_host_runtime() -> AgentHostRuntime {
+        use crate::bundle_admission::tests::key;
+        use crate::stage_cmd::bundle_cid;
         let temp = tempfile::tempdir().unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host");
+        let folder = temp.path().join("agent-host");
+        std::fs::create_dir_all(&folder).unwrap();
+        let component = std::fs::read(source.join("agent-host.component.wasm")).unwrap();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(source.join("capsule.json")).unwrap()).unwrap();
+        assert_eq!(
+            manifest.agent.as_ref().map(|agent| agent.kind),
+            Some(elastos_common::AgentKind::Agent),
+        );
+        let publisher = key(108);
+        elastos_runtime::signature::sign_capsule(
+            &publisher,
+            &mut manifest,
+            &hash_content(&component),
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(folder.join("agent-host.component.wasm"), component).unwrap();
+        let cid = bundle_cid(&folder).unwrap();
+        let (home, agents) = crate::agents::tests::home_with_agents_if_built(1, &cid)
+            .expect("Agent Host guest rows need agents built");
+        let agent_id = agents.into_iter().next().unwrap();
+        let data_dir = home.path().to_path_buf();
         let storage = Arc::new(
             LocalFSProvider::new(temp.path().join("storage"))
                 .await
@@ -4419,7 +4450,11 @@ pub(crate) mod tests {
             Some(component_provider),
         ));
         runtime
-            .configure_capsule_admission(temp.path(), &[], true)
+            .configure_capsule_admission(
+                &data_dir,
+                &[hex::encode(publisher.verifying_key().to_bytes())],
+                false,
+            )
             .await
             .unwrap();
         let audit_log = Arc::new(AuditLog::new());
@@ -4431,9 +4466,6 @@ pub(crate) mod tests {
         let pending_store = Arc::new(
             elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
         );
-        let data_dir = temp.path().join("runtime-data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-        crate::auth::store_test_principal_root_protection(&data_dir, AGENT_HOST_PERSON);
         runtime
             .set_provider_registry(
                 Arc::new(ProviderRegistry::new()),
@@ -4448,12 +4480,16 @@ pub(crate) mod tests {
             pending_store,
             audit_log,
             data_dir,
+            agent_id,
+            folder,
+            _home: home,
             _temp: temp,
         }
     }
 
-    fn agent_host_journal() -> (String, String) {
-        let root = crate::auth::principal_localhost_root(AGENT_HOST_PERSON);
+    fn agent_host_journal(fx: &AgentHostRuntime) -> (String, String) {
+        let root =
+            crate::auth::principal_stored_localhost_root(Some(&fx.data_dir), &fx.agent_id).unwrap();
         let journal = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
         (root, journal)
     }
@@ -4462,17 +4498,23 @@ pub(crate) mod tests {
         fx: &AgentHostRuntime,
     ) -> tokio::task::JoinHandle<elastos_common::Result<elastos_compute::CapsuleHandle>> {
         let runtime = fx.runtime.clone();
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host");
+        let agent_id = fx.agent_id.clone();
+        let folder = fx.folder.clone();
+        let data_dir = fx.data_dir.clone();
         tokio::spawn(async move {
+            let admission = crate::agent_admission::admit_launch(
+                &data_dir,
+                &data_dir,
+                Some(crate::agents::tests::OWNER_ID),
+                Some(&agent_id),
+                crate::agent_admission::walk_launch(&folder).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
             runtime
-                .run_local_with_principal(
-                    &dir,
-                    Vec::new(),
-                    Some(crate::resource_bridge::BridgePrincipal::for_test(
-                        AGENT_HOST_PERSON,
-                    )),
-                )
+                .run_local_admitted(&folder, Vec::new(), admission)
                 .await
+                .map(|(handle, _)| handle)
         })
     }
 
@@ -4526,7 +4568,7 @@ pub(crate) mod tests {
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_writes_and_reads_its_journal_through_the_real_bridge() {
         let fx = agent_host_runtime().await;
-        let (root, journal) = agent_host_journal();
+        let (root, journal) = agent_host_journal(&fx);
         let mut launch = launch_agent_host(&fx);
         let mut asked = Vec::new();
         for _ in 0..3 {
@@ -4571,7 +4613,7 @@ pub(crate) mod tests {
         );
         let plain = crate::auth::read_principal_root_object(
             &fx.data_dir,
-            AGENT_HOST_PERSON,
+            &fx.agent_id,
             &root,
             &journal,
             &path,
@@ -4620,7 +4662,7 @@ pub(crate) mod tests {
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_refuses_a_format_1_journal_with_its_reason() {
         let fx = agent_host_runtime().await;
-        let (root, journal) = agent_host_journal();
+        let (root, journal) = agent_host_journal(&fx);
         let hex: String = AGENT_HOST_FORMAT_1_JOURNAL.concat();
         let old: Vec<u8> = (0..hex.len())
             .step_by(2)
@@ -4632,7 +4674,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         crate::auth::write_principal_root_object(
             &fx.data_dir,
-            AGENT_HOST_PERSON,
+            &fx.agent_id,
             &root,
             &journal,
             &path,
@@ -4677,7 +4719,7 @@ pub(crate) mod tests {
         );
         let stored = crate::auth::read_principal_root_object(
             &fx.data_dir,
-            AGENT_HOST_PERSON,
+            &fx.agent_id,
             &root,
             &journal,
             &path,
@@ -4692,7 +4734,7 @@ pub(crate) mod tests {
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_stores_nothing_when_its_journal_grants_are_denied() {
         let fx = agent_host_runtime().await;
-        let (_root, journal) = agent_host_journal();
+        let (_root, journal) = agent_host_journal(&fx);
         let mut launch = launch_agent_host(&fx);
         for _ in 0..2 {
             let pending = next_pending(&fx.pending_store, &mut launch).await;
