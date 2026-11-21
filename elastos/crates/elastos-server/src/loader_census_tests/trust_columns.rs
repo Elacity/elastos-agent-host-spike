@@ -42,11 +42,23 @@ fn columns() -> Vec<TrustColumn> {
         TrustColumn {
             file: "elastos-runtime/src/provider/failure_record.rs",
             function: "launch",
-            call: "libc::execve",
+            call: "libc::fexecve",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["libc::execve", "(path.as_ptr()"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["libc::fexecve", "(executable_fd"].concat(),
+            os_path: "",
+        },
+        // Installed-component start (slice 2): the held descriptor matched the
+        // signed release digest in VerifiedExecutable::prepare.
+        TrustColumn {
+            file: "elastos-server/src/setup/verified_executable.rs",
+            function: "attach_std",
+            call: "libc::fexecve",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["libc::fexecve", "(fd, argv_ptrs"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -54,9 +66,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_command",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["mut comman", "d: Command"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["prepared.configure_", "command(&mut command)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -64,9 +76,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_confined_model_linux",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -74,8 +86,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_confined_model_with_engine_bundle",
             call: "command",
             class: "os-tool",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: ["Command::new(\"/usr", "/bin/sandbox-exec\")"].concat(),
             os_path: "/usr/bin/sandbox-exec",
         },
@@ -84,9 +96,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_with_owned_helpers",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -94,9 +106,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_with_timeouts",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1464,7 +1476,13 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             ["ProviderBridge::", "spawn(&path, Default::default())"].concat(),
-            5,
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["&checked_native_provider", "(&path)"].concat(),
+            4,
         ),
         (
             "elastos-server/src/server_infra.rs",
@@ -1523,23 +1541,23 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 96);
-    assert_eq!(classes.get("n/a"), Some(&47));
+    assert_eq!(columns.len(), 97);
+    assert_eq!(classes.get("n/a"), Some(&48));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&59));
+    assert_eq!(roots.get("none"), Some(&53));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&17));
+    assert_eq!(roots.get("release-signature"), Some(&24));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&24));
+    assert_eq!(times.get("at-every-start"), Some(&31));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&59));
-    assert_eq!(to_gate, 34);
+    assert_eq!(times.get("never"), Some(&53));
+    assert_eq!(to_gate, 30);
 }
 
 #[test]

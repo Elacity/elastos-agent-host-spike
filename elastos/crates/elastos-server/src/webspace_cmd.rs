@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -1116,7 +1115,8 @@ async fn spawn_webspace_bridge() -> anyhow::Result<WebSpaceBridge> {
     Ok(WebSpaceBridge { bridge })
 }
 
-fn resolve_webspace_provider_binary() -> anyhow::Result<PathBuf> {
+fn resolve_webspace_provider_binary() -> anyhow::Result<elastos_runtime::provider::CheckedExecutable>
+{
     crate::resolve_verified_native_provider_binary("webspace-provider")?.ok_or_else(|| {
         anyhow::anyhow!("webspace-provider not installed.\n\nRun first:\n\n  elastos setup")
     })

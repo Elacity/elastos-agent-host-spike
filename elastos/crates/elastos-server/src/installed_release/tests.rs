@@ -8,7 +8,7 @@ fn start_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
     let path = fixture.data.join("bin/shell");
     let marker = fixture.data.join("ran");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let script = b"#!/bin/sh\nprintf ran > \"$1\"\n";
+    let script = b"#!/bin/sh\nif [ $# -gt 0 ]; then printf ran > \"$1\"; else read -r _; printf '{\"status\":\"ok\"}\\n'; read -r _; printf '{\"status\":\"ok\"}\\n'; fi\n";
     fs::write(&path, script).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     fs::write(fixture.data.join("components.json"), serde_json::to_vec(&json!({
@@ -36,6 +36,53 @@ fn installed_component_start_accepts_signed_release() {
     let (fixture, path, marker) = start_fixture();
     start_shell(&fixture, &path, &marker).unwrap();
     assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
+#[tokio::test]
+async fn signed_checked_provider_starts() {
+    let (fixture, path, _) = start_fixture();
+    let checked = crate::binaries::checked_native_provider_with_data_dir(&fixture.data, &path);
+    let bridge = elastos_runtime::provider::ProviderBridge::spawn(&checked, Default::default())
+        .await
+        .unwrap();
+    bridge.shutdown().await.unwrap();
+}
+
+#[test]
+fn checked_provider_uses_signed_release_pin_at_spawn() {
+    let (fixture, path, _) = start_fixture();
+    let checked = crate::binaries::checked_native_provider_with_data_dir(&fixture.data, &path);
+    checked.verify_at_spawn().unwrap();
+    fs::write(&path, b"#!/bin/sh\nprintf replaced\n").unwrap();
+    assert_eq!(
+        checked.verify_at_spawn().unwrap_err(),
+        "provider executable differs from verified release checksum"
+    );
+    fs::remove_file(&path).unwrap();
+    let replacement = fixture.data.join("replacement");
+    fs::write(&replacement, b"#!/bin/sh\nprintf ran\n").unwrap();
+    symlink(&replacement, &path).unwrap();
+    assert_eq!(
+        checked.verify_at_spawn().unwrap_err(),
+        "provider executable symlink is refused"
+    );
+}
+
+#[test]
+fn checked_provider_refuses_untrusted_release_before_spawn() {
+    let (fixture, path, _) = start_fixture();
+    let mut head: Value = serde_json::from_slice(&fixture.head).unwrap();
+    head["signature"] = json!("invalid signature");
+    fs::write(
+        publisher_release_head_path(&fixture.data),
+        serde_json::to_vec(&head).unwrap(),
+    )
+    .unwrap();
+    let checked = crate::binaries::checked_native_provider_with_data_dir(&fixture.data, &path);
+    assert!(checked
+        .verify_at_spawn()
+        .unwrap_err()
+        .contains("provider signed release admission refused"));
 }
 
 #[test]

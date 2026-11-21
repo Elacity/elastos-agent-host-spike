@@ -18,6 +18,9 @@ pub struct VerifiedExecutable {
     #[cfg(target_os = "macos")]
     _private_dir: tempfile::TempDir,
     exec_path: PathBuf,
+    /// The signed release digest these held bytes matched. A native provider
+    /// start pins its spawn-time check to this same digest.
+    checksum: String,
 }
 
 impl VerifiedExecutable {
@@ -48,6 +51,7 @@ impl VerifiedExecutable {
             Ok(Self {
                 file: unsafe { File::from_raw_fd(fd) },
                 exec_path: format!("/proc/self/fd/{fd}").into(),
+                checksum: checksum.to_owned(),
             })
         }
         #[cfg(target_os = "macos")]
@@ -76,6 +80,7 @@ impl VerifiedExecutable {
             Ok(Self {
                 _private_dir: private_dir,
                 exec_path,
+                checksum: checksum.to_owned(),
             })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -84,6 +89,11 @@ impl VerifiedExecutable {
 
     pub fn exec_path(&self) -> &Path {
         &self.exec_path
+    }
+
+    /// The signed release digest the held bytes matched.
+    pub fn checksum(&self) -> &str {
+        &self.checksum
     }
 
     /// Attach after the caller has set all arguments and environment changes.

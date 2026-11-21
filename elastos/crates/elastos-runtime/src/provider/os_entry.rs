@@ -88,7 +88,7 @@ const MACOS_NO_SPAWN: &str =
 pub(super) fn start_provider(
     provider: RuntimeProviderId,
     authority: &ProviderAuthority,
-    executable: &Path,
+    executable: &super::CheckedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
@@ -117,7 +117,7 @@ fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
 fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
-    executable: &Path,
+    executable: &super::CheckedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
@@ -151,7 +151,7 @@ fn dispatch(
 fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
-    executable: &Path,
+    executable: &super::CheckedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
@@ -216,11 +216,11 @@ fn refuse_unsupported_os(
 fn dispatch(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
-    executable: &Path,
+    executable: &super::CheckedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
-    refuse_unsupported_os(provider, admitted, executable, checked, stdio)
+    refuse_unsupported_os(provider, admitted, executable.path(), checked, stdio)
 }
 
 #[cfg(test)]
@@ -323,7 +323,7 @@ mod tests {
     #[test]
     fn unsupported_dispatch_only_calls_the_refusal() {
         let production = production_source();
-        let call = "refuse_unsupported_os(provider, admitted, executable, checked, stdio)";
+        let call = "refuse_unsupported_os(provider, admitted, executable.path(), checked, stdio)";
         assert_eq!(production.matches(call).count(), 1);
         let at = production.find(call).unwrap();
         let head = production[..at].rfind("fn dispatch").unwrap();
@@ -529,7 +529,7 @@ mod tests {
             start_provider(
                 RuntimeProviderId::Did,
                 &authority,
-                &program,
+                &super::super::CheckedExecutable::for_test(&program),
                 checked_directory(dir.path()),
                 stdio(),
             )
@@ -553,7 +553,7 @@ mod tests {
             start_provider(
                 RuntimeProviderId::Did,
                 &authority,
-                &program,
+                &super::super::CheckedExecutable::for_test(&program),
                 checked_directory(dir.path()),
                 stdio(),
             )

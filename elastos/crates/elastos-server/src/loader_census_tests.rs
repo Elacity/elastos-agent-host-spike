@@ -64,17 +64,26 @@ fn rows() -> Vec<Row> {
             "spawn_command",
             "spawn()",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
         row(
             "elastos-runtime/src/provider/failure_record.rs",
             "launch",
-            "libc::execve",
+            "libc::fexecve",
             "confined provider",
             "admitted rights+checked directory+bound executable",
             "B3 S10",
+            1,
+        ),
+        row(
+            "elastos-server/src/setup/verified_executable.rs",
+            "attach_std",
+            "libc::fexecve",
+            "installed component",
+            "checksum",
+            "P2-8",
             1,
         ),
         row(
@@ -82,7 +91,7 @@ fn rows() -> Vec<Row> {
             "spawn_confined_model_linux",
             "command",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -91,7 +100,7 @@ fn rows() -> Vec<Row> {
             "spawn_confined_model_with_engine_bundle",
             "command",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -100,7 +109,7 @@ fn rows() -> Vec<Row> {
             "spawn_with_owned_helpers",
             "command",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -109,7 +118,7 @@ fn rows() -> Vec<Row> {
             "spawn_with_timeouts",
             "command",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -998,3 +1007,120 @@ fn every_executable_loader_has_an_authority_row() {
     assert!(missing.is_empty(), "unlisted loaders: {missing:#?}");
 }
 mod trust_columns;
+
+#[test]
+fn native_provider_spawn_routes_keep_the_checked_executable() {
+    let sources = source::production_sources();
+    for (file, function, needle) in [
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_command",
+            "prepared.configure_command(&mut command)",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_linux",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_linux",
+            "Command::new(prepared.exec_path())",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_linux",
+            "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_with_engine_bundle",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_with_engine_bundle",
+            "command.arg(\"-p\").arg(policy).arg(prepared.exec_path())",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_with_engine_bundle",
+            "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_owned_helpers",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_owned_helpers",
+            "Command::new(prepared.exec_path())",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_owned_helpers",
+            "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_timeouts",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_timeouts",
+            "Command::new(prepared.exec_path())",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_timeouts",
+            "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "verify_at_spawn()\n        .map_err(LaunchError::BeforeFork)",
+        ),
+        (
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "libc::fexecve(executable_fd, argv.as_ptr(), envp.as_ptr())",
+        ),
+        (
+            "elastos-server/src/binaries.rs",
+            "checked_native_provider_with_data_dir",
+            "verify_installed_component_start(",
+        ),
+        // A hosted plane admits against the Home it serves, never the
+        // default Home.
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_ipfs_provider_plane_with_role",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_availability_provider_plane",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_chain_provider_plane",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
+            "elastos-server/src/protected_content_runtime.rs",
+            "register_inactive_custody_provider",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+    ] {
+        let text = &sources[file];
+        let code = source::code_only(text);
+        assert!(
+            text.match_indices(needle)
+                .any(|(at, _)| source::enclosing_fn(&code, at) == function),
+            "checked executable route missing: {file}::{function} -> {needle}"
+        );
+    }
+}

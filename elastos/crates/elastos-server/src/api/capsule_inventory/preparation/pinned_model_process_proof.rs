@@ -676,7 +676,7 @@ async fn native_exact_profile_lifecycle(model: &'static PinnedModel) {
             .expect("explicit ELASTOS_TEST_MODEL_PROVIDER_PATH proof prerequisite"),
     );
     let bridge = Arc::new(
-        ProviderBridge::spawn(&binary, config.clone())
+        ProviderBridge::spawn(&crate::test_support::fixture_executable(&binary), config.clone())
             .await
             .unwrap(),
     );
@@ -699,7 +699,7 @@ async fn native_exact_profile_lifecycle(model: &'static PinnedModel) {
             .shutdown()
             .await
             .expect("native model provider reaped");
-        let restarted = Arc::new(ProviderBridge::spawn(&binary, config).await.unwrap());
+        let restarted = Arc::new(ProviderBridge::spawn(&crate::test_support::fixture_executable(&binary), config).await.unwrap());
         task_children.lock().unwrap().push(restarted.clone());
         assert_pinned_replay(&restarted, &proof).await;
         proof.active_delta_bytes
@@ -1030,7 +1030,7 @@ async fn pinned_reply_and_restart(
         local_model_startup_profile(&crate::setup::detect_platform()).unwrap(),
         "startup offer carries this host's Runtime-owned profile"
     );
-    let bridge = Arc::new(ProviderBridge::spawn(binary, config.clone()).await.unwrap());
+    let bridge = Arc::new(ProviderBridge::spawn(&crate::test_support::fixture_executable(binary), config.clone()).await.unwrap());
     children.lock().unwrap().push(bridge.clone());
     drop(worker);
     let proof = pinned_runs_and_active_cancel(model, bridge.clone(), offer.clone(), deadline).await;
@@ -1044,7 +1044,7 @@ async fn pinned_reply_and_restart(
         .unwrap();
     assert_eq!(restarted_config.extra, config.extra);
     let restarted = Arc::new(
-        ProviderBridge::spawn(binary, restarted_config)
+        ProviderBridge::spawn(&crate::test_support::fixture_executable(binary), restarted_config)
             .await
             .unwrap(),
     );

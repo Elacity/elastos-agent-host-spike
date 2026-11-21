@@ -1074,7 +1074,7 @@ fn validated_custody_node_label(value: &str, label: &str) -> anyhow::Result<Stri
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1210,7 +1210,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn sign_test_install(data_dir: &Path) {
+    pub(crate) fn sign_test_install(data_dir: &Path) {
         use elastos_common::localhost::{
             publisher_release_head_path, publisher_release_manifest_path,
         };
