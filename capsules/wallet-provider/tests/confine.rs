@@ -980,10 +980,16 @@ const MODEL_B3_SUITE_CASES: [(&str, SuiteClass); 17] = [
 fn model_suite_start(profile: &Path, binary: &Path, base: &Path) -> ConfinedProvider {
     let bindings = canonical_bindings(MODEL_PROVIDER, base, binary);
     create_shared_ancestors(&bindings);
-    let paths: Vec<(&str, &Path)> = bindings
+    let inert = model_inert_bindings(MODEL_PROVIDER);
+    let mut paths: Vec<(&str, &Path)> = bindings
         .iter()
         .map(|(binding, path)| (*binding, path.as_path()))
         .collect();
+    paths.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
     ConfinedProvider::start_under(profile, &paths, binary)
 }
 
@@ -1358,10 +1364,16 @@ fn model_unbound_exec_denial(profile: &Path, binary: &Path, label: &str) -> Suit
         "{label}: the unbound executable must be byte-identical"
     );
     let before = fs::read(&copy).expect("snapshot the copied executable");
-    let bindings: Vec<(&str, &Path)> = canonical
+    let inert = model_inert_bindings(MODEL_PROVIDER);
+    let mut bindings: Vec<(&str, &Path)> = canonical
         .iter()
         .map(|(name, path)| (*name, path.as_path()))
         .collect();
+    bindings.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
     let mut refused = ConfinedProvider::start_under(profile, &bindings, &copy);
     let exit = refused.wait_for_exit();
     assert_eq!(
@@ -2070,6 +2082,37 @@ fn standin_host_refusal(
     }
 }
 
+/// M1a: the model profile also names measured inputs beyond the three
+/// canonical parameters (`measured_model_form`). An unbound `(param ...)` is
+/// `#f` and sandbox-exec exits 65, so the stand-in binds each to a path under
+/// the empty, root-owned /private/var/empty that nothing here can create. The
+/// grants stay inert, at least as strict as the Runtime's own inputs. Other
+/// providers get no extra binding.
+fn model_inert_bindings(name: &str) -> Vec<(String, PathBuf)> {
+    if name != MODEL_PROVIDER {
+        return Vec::new();
+    }
+    let mut names = vec![
+        "MODEL".to_owned(),
+        "ENGINE".to_owned(),
+        "ENGINE_BUNDLE".to_owned(),
+    ];
+    names.extend((0..19).map(|index| format!("MODEL_ANCESTOR_{index}")));
+    for slot in 0..64 {
+        names.push(format!("BROKER_SOCKET_{slot}"));
+        names.push(format!("ENGINE_SOCKET_{slot}"));
+    }
+    names
+        .into_iter()
+        .map(|binding| {
+            let path = PathBuf::from(format!(
+                "/private/var/empty/elastos-redteam-unbound/{binding}"
+            ));
+            (binding, path)
+        })
+        .collect()
+}
+
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
 ///
 /// This function is a lane copy that is to move under the one shared stand-in,
@@ -2190,10 +2233,16 @@ fn standin_spawn_confined_provider(
             let profile = profile_dir.join(format!("{name}-standin.sb"));
             write_generated_profile(name, declared, &profile)?;
             create_shared_ancestors(&canonical);
-            let bindings: Vec<(&str, &Path)> = canonical
+            let inert = model_inert_bindings(name);
+            let mut bindings: Vec<(&str, &Path)> = canonical
                 .iter()
                 .map(|(binding, path)| (*binding, path.as_path()))
                 .collect();
+            bindings.extend(
+                inert
+                    .iter()
+                    .map(|(binding, path)| (binding.as_str(), path.as_path())),
+            );
             ConfinedProvider::start_under(&profile, &bindings, binary_path)
         }
         StandinPolicy::Seccomp(allow) => {
@@ -7250,10 +7299,16 @@ struct B3Provider {
 fn standin_oracle_start(name: &str, binary: &Path, root: &Path) -> ConfinedProvider {
     let bindings = canonical_bindings(name, root, binary);
     create_shared_ancestors(&bindings);
-    let paths: Vec<(&str, &Path)> = bindings
+    let inert = model_inert_bindings(name);
+    let mut paths: Vec<(&str, &Path)> = bindings
         .iter()
         .map(|(binding, path)| (*binding, path.as_path()))
         .collect();
+    paths.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
     ConfinedProvider::start_under(&confine_oracle_path(name), &paths, binary)
 }
 
