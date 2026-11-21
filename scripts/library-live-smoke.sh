@@ -210,7 +210,7 @@ if [[ -n "${1:-}" ]]; then
 fi
 
 if [[ -z "$CLI_LAUNCH_TOKEN" ]]; then
-    echo "[library-live-smoke] signed provider path needs ELASTOS_CLI_LAUNCH_TOKEN from 'elastos home --cli-launch-token' in the owner Home terminal" >&2
+    echo "[library-live-smoke] signed provider path needs ELASTOS_CLI_LAUNCH_TOKEN from an isolated harness with gateway-owned Home terminal auth context" >&2
     exit 1
 fi
 

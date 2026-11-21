@@ -9165,7 +9165,8 @@ pub async fn production_after() {
         let end = cfg_test_item_end(&body[open..]);
         let match_block = &body[open..open + end];
         let bytes = match_block.as_bytes();
-        let (mut braces, mut parens, mut brackets, mut outer_arms) = (0, 0, 0, 0);
+        let (mut braces, mut parens, mut brackets, mut outer_arms, mut total_arms) =
+            (0, 0, 0, 0, 0);
         let mut index = 0;
         while index < bytes.len() {
             match bytes[index] {
@@ -9214,6 +9215,7 @@ pub async fn production_after() {
                     index += 1;
                 }
                 b'=' if bytes.get(index + 1) == Some(&b'>') => {
+                    total_arms += 1;
                     if braces == 1 && parens == 0 && brackets == 0 {
                         outer_arms += 1;
                     }
@@ -9222,8 +9224,9 @@ pub async fn production_after() {
                 _ => index += 1,
             }
         }
-        // Only the five arms of this match count. Nested error-response arms
-        // cannot compensate for removing an outer admission decision.
+        // Nested error-response arms cannot compensate for removing an outer
+        // admission decision; the total also pins those nested mappings.
         assert_eq!(outer_arms, 5, "gateway outer admission match arms");
+        assert_eq!(total_arms, 8, "gateway total admission match arms");
     }
 }

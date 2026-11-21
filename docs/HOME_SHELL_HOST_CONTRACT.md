@@ -100,11 +100,19 @@ these two operations selects `home-launch`; that grant can ask the gateway to
 launch or open content without browser provenance. For content
 open, the gateway gives the Runtime a `home-shell` projection grant bound to
 `home`; the Runtime accepts that grant only on its internal content-open hop.
-The local owner can run `elastos home --cli-launch-token` inside the authenticated
-Home terminal to print this session-bound grant. The CLI verifies the active admin
-passkey session before it asks the existing projection issuer to sign the grant.
-Headless checks pass it as `ELASTOS_CLI_LAUNCH_TOKEN`; the public journey smoke
-obtains it from that CLI command when the variable is absent.
+Today, `home_cmd::run` calls the CLI grant issuer only when an
+`elastos home --cli-launch-token` process has the gateway-owned terminal
+auth environment.
+The gateway supplies that environment to its `elastos home` TUI child; the TUI
+does not offer a host shell or a grant-mint action. The owner therefore has no
+reachable product action to mint this grant. This is a known gap for the CTO.
+An isolated harness can run the command with that environment; the issuer then
+checks the live session grant and admin passkey binding before signing. The
+public journey smoke attempts this command when `ELASTOS_CLI_LAUNCH_TOKEN` is
+absent, so that auto-mint path needs such a harness. The issuer trusts the
+process environment and the local auth store as a same-user authority boundary:
+a same-user process with those values and auth-store access can mint the bearer
+grant, and its holder can replay it on the two headless launch operations.
 
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers
