@@ -3824,10 +3824,10 @@ fn journal_id_ok(id: &str) -> bool {
         && !id.ends_with('.')
 }
 
-/// The one place a task journal lives. The guest names only `Users/self`.
-/// The Runtime scopes that to the launching person.
+/// The one place a task journal lives. The stored Agent names its own
+/// `UsersAI/self` root, which the Runtime scopes to that Agent.
 #[cfg(any(test, target_arch = "wasm32"))]
-const JOURNAL_ROOT: &str = "localhost://Users/self/.AppData/Agents/";
+const JOURNAL_ROOT: &str = "localhost://UsersAI/self/.AppData/Agents/";
 
 #[cfg(any(test, target_arch = "wasm32"))]
 fn journal_resource(agent_id: &str, task_id: &str) -> Result<String, &'static str> {
@@ -8366,7 +8366,7 @@ const MANIFEST_JSON: &str = include_str!("../capsule.json");
 const CAPSULE_SCHEMA: &str = "elastos.capsule/v1";
 
 #[cfg(test)]
-const MANIFEST_KEYS: &str = " schema name version description author role type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources ";
+const MANIFEST_KEYS: &str = " schema name version description author role agent type runtime_abi bus_contract wit_world_sha256 execution projections entrypoint asks resources ";
 
 /// The one marker a declared pattern may hold: the user-namespace root,
 /// `Users/<one name>`. The declaration names no person and no host path.
@@ -8627,6 +8627,12 @@ fn parse_manifest_asks(text: &str) -> Result<Vec<ManifestDeclaredAsk>, &'static 
         .any(|key| !MANIFEST_KEYS.contains(&format!(" {key} ")))
     {
         return Err("asks unknown field");
+    }
+    if document
+        .get("agent")
+        .is_some_and(|value| value != &serde_json::json!({"kind": "agent"}))
+    {
+        return Err("asks agent declaration");
     }
     let schema = document.get("schema").ok_or("asks schema missing")?;
     let schema = schema.as_str().ok_or("asks schema type")?;
@@ -9776,6 +9782,15 @@ mod tests {
         if let Some(path) = std::env::var_os("A15R_PREVIEW_STEP_PATH") {
             std::fs::write(std::path::PathBuf::from(path), &proposed)
                 .expect("write the planner's exact preview step");
+        }
+        if let Some(path) = std::env::var_os("A15R_SUBMIT_PLAN_PATH") {
+            std::fs::write(std::path::PathBuf::from(path), &bus.invokes[0].2)
+                .expect("write the planner's exact submitted plan");
+        }
+        if let Some(path) = std::env::var_os("A15R_JOURNAL_PATH") {
+            let journal = journal_cursor("agent-host", "demo").unwrap();
+            std::fs::write(std::path::PathBuf::from(path), journal.resource)
+                .expect("write the guest's journal URI");
         }
     }
 
@@ -17221,7 +17236,7 @@ mod tests {
     fn a_journal_id_is_letters_digits_and_dashes() {
         assert_eq!(
             journal_resource("demo-agent", "task-1").unwrap(),
-            "localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal"
+            "localhost://UsersAI/self/.AppData/Agents/demo-agent/tasks/task-1/journal"
         );
         assert!(journal_resource("a9-", &"x".repeat(64)).is_ok());
         assert!(journal_resource("agent.v2", "task_1").is_ok());
@@ -20564,6 +20579,12 @@ mod tests {
                 "asks unknown field",
             ),
             (
+                format!(
+                    r#"{{"schema":"{CAPSULE_SCHEMA}","agent":{{"kind":"human"}},"asks":[{{"actions":["read"],"resource":"localhost://UsersAI/self/.AppData/Agents/agent-host/*"}}]}}"#
+                ),
+                "asks agent declaration",
+            ),
+            (
                 format!(r#"{{"schema":"{CAPSULE_SCHEMA}","asks":{{}}}}"#),
                 "asks list type",
             ),
@@ -20982,13 +21003,13 @@ mod tests {
             .expect("the ask resource ends with a directory wildcard");
         assert_eq!(
             own_root,
-            "localhost://Users/self/.AppData/Agents/agent-host/"
+            "localhost://UsersAI/self/.AppData/Agents/agent-host/"
         );
         assert!(
             !journal_manifest_ask_fits(
                 &resource,
                 &["write", "read"],
-                "localhost://Users/self/.AppData/Agents/other-agent/tasks/t/journal",
+                "localhost://UsersAI/self/.AppData/Agents/other-agent/tasks/t/journal",
                 "write"
             ),
             "the journal row names this capsule's own root"
@@ -21004,12 +21025,12 @@ mod tests {
         assert!(actions.iter().any(|action| action == "read"));
         assert_eq!(
             own,
-            "localhost://Users/self/.AppData/Agents/agent-host/tasks/t/journal"
+            "localhost://UsersAI/self/.AppData/Agents/agent-host/tasks/t/journal"
         );
         assert!(resource_covers(root, &own));
         assert!(!resource_covers(
             root,
-            "localhost://Users/other/.AppData/Agents/agent-host/tasks/t/journal",
+            "localhost://UsersAI/other/.AppData/Agents/agent-host/tasks/t/journal",
         ));
     }
 
@@ -21023,7 +21044,7 @@ mod tests {
         assert!(resource_covers(root, &own));
         assert!(!resource_covers(
             root,
-            "localhost://Users/self/.AppData/Agents/agent-hostX/tasks/t/journal",
+            "localhost://UsersAI/self/.AppData/Agents/agent-hostX/tasks/t/journal",
         ));
     }
 
