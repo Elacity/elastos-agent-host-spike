@@ -114,8 +114,10 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
     page.insert("x-elastos-home-token", token.parse().unwrap());
     page.insert(HOST, "localhost:61180".parse().unwrap());
     page.insert("origin", "null".parse().unwrap());
-    let (id, _, _) = require_launch_bound_token(dir.path(), &page, "image-viewer", false).unwrap();
+    let (id, content_name, _, _) =
+        require_launch_bound_token(dir.path(), &page, "image-viewer", false).unwrap();
     assert_eq!(id, LAUNCH);
+    assert_eq!(content_name, "photo-set");
     let refused = require_home_launch_token_for_any_context(dir.path(), &page, &["image-viewer"])
         .unwrap_err();
     assert!(

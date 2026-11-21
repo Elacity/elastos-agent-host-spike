@@ -12859,7 +12859,7 @@ async fn viewer_gate_routes_keep_viewer_actor_and_content_selection() {
     let home = authority.home_token.clone();
     let other_projection = token("other-viewer", "other-viewer");
     let other_launch = token(
-        &format!("elastos://launch/{}", "cd".repeat(16)),
+        &format!("elastos://launch/{}/photo-set", "cd".repeat(16)),
         "other-viewer",
     );
     let gba = token(GBA_EMULATOR_CAPSULE_ID, GBA_EMULATOR_CAPSULE_ID);
@@ -12867,11 +12867,11 @@ async fn viewer_gate_routes_keep_viewer_actor_and_content_selection() {
     let gba_item = token("demo-rom", GBA_EMULATOR_CAPSULE_ID);
     let archive_item = token("archive-item", "archive-manager");
     let gba_launch = token(
-        &format!("elastos://launch/{}", "ab".repeat(16)),
+        &format!("elastos://launch/{}/photo-set", "ab".repeat(16)),
         GBA_EMULATOR_CAPSULE_ID,
     );
     let archive_launch = token(
-        &format!("elastos://launch/{}", "ab".repeat(16)),
+        &format!("elastos://launch/{}/photo-set", "ab".repeat(16)),
         "archive-manager",
     );
     let home_request = test_browser_request("localhost:61180", "http://localhost:61180")
