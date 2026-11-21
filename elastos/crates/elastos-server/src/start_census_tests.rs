@@ -58,7 +58,8 @@ const REGISTER: &[&str] = &["register_", "capsule"];
 const LAUNCH: &[&str] = &["launch_", "capsule"];
 const SPAWN: &[&str] = &["Provider", "Bridge::spawn"];
 const COMMAND_SPAWN: &[&str] = &[".", "spa", "wn()"];
-const CONFINED_EXEC: &[&str] = &["libc::", "execve("];
+const CONFINED_EXEC: &[&str] = &["libc::f", "execve("];
+const PATH_EXEC: &[&str] = &["libc::", "execve("];
 
 /// The gate of the paths that B1-R does not cover yet.
 const P2_2: &str = "P2-2 (not gated by B1-R yet)";
@@ -167,7 +168,7 @@ fn places() -> Vec<Place> {
         place(
             "elastos-runtime/src/provider/failure_record.rs",
             "launch",
-            "libc::execve".to_string(),
+            "libc::fexecve".to_string(),
             1,
             "B3 S10: admitted rights, checked root identity, bound executable",
         ),
@@ -571,12 +572,17 @@ pub(super) fn sites(file: &str, text: &str) -> Vec<Site> {
             label: "spawn()".to_string(),
         });
     }
-    for (at, _) in code.match_indices(&joined(CONFINED_EXEC)) {
-        sites.push(Site {
-            file: file.to_string(),
-            function: enclosing_fn(&code, at),
-            label: "libc::execve".to_string(),
-        });
+    for (needle, label) in [
+        (CONFINED_EXEC, "libc::fexecve"),
+        (PATH_EXEC, "libc::execve"),
+    ] {
+        for (at, _) in code.match_indices(&joined(needle)) {
+            sites.push(Site {
+                file: file.to_string(),
+                function: enclosing_fn(&code, at),
+                label: label.to_string(),
+            });
+        }
     }
     sites
 }

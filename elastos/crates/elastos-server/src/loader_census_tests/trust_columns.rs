@@ -42,11 +42,11 @@ fn columns() -> Vec<TrustColumn> {
         TrustColumn {
             file: "elastos-runtime/src/provider/failure_record.rs",
             function: "launch",
-            call: "libc::execve",
+            call: "libc::fexecve",
             class: "n/a",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["libc::execve", "(path.as_ptr()"].concat(),
+            evidence: ["libc::fexecve", "(executable_fd"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -56,7 +56,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["mut comman", "d: Command"].concat(),
+            evidence: ["prepared.configure_", "command(&mut command)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -66,7 +66,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::new", "(binary_path.path())"].concat(),
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -86,7 +86,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::new", "(binary_path.path())"].concat(),
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -96,7 +96,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::new", "(binary_path.path())"].concat(),
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {

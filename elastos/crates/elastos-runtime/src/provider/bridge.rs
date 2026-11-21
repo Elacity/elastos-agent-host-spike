@@ -23,11 +23,30 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 
+use super::checked_executable::PreparedExecutable;
 use super::registry::{
     EntryType, Provider, ProviderError, ResourceAction, ResourceEntry, ResourceRequest,
     ResourceResponse,
 };
 use super::CheckedExecutable;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_VERIFY_SWAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn swap_after_verify() {
+    AFTER_VERIFY_SWAP.with(|slot| {
+        if let Some(swap) = slot.borrow_mut().take() {
+            swap();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn swap_after_verify() {}
 
 /// Timeout for provider requests (30 seconds)
 pub(super) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -229,6 +248,7 @@ fn model_file_policy(
         .map(Path::to_path_buf)
         .collect::<std::collections::BTreeSet<_>>();
     files.insert(binary_path.to_path_buf());
+    metadata_paths.extend(binary_path.ancestors().map(Path::to_path_buf));
     for offer in config.extra["offers"]
         .as_array()
         .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?
@@ -1940,8 +1960,15 @@ impl ProviderBridge {
         // Seatbelt resolves /var to /private/var before comparing literal paths.
         let ipc_path = std::fs::canonicalize(ipc_dir.path()).map_err(BridgeError::Spawn)?;
         let journal = model_journal_for_sandbox(&config)?;
-        let mut policy =
-            model_file_policy(binary_path.path(), &config, &journal, pinned_engine_bundle)?;
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
+        let mut policy = model_file_policy(
+            prepared.exec_path(),
+            &config,
+            &journal,
+            pinned_engine_bundle,
+        )?;
         let local_ids = offers
             .iter()
             .filter(|offer| {
@@ -2027,9 +2054,9 @@ impl ProviderBridge {
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
         config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
         let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.arg("-p").arg(policy).arg(binary_path.path());
+        command.arg("-p").arg(policy).arg(prepared.exec_path());
         let mut bridge = Self::spawn_command(
-            binary_path,
+            prepared,
             command,
             config.clone(),
             INIT_TIMEOUT,
@@ -2133,10 +2160,13 @@ impl ProviderBridge {
             );
         }
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
-        let mut command = Command::new(binary_path.path());
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
+        let mut command = Command::new(prepared.exec_path());
         super::linux_model_seccomp::install_on_command(&mut command).map_err(BridgeError::Spawn)?;
         let mut bridge = Self::spawn_command(
-            binary_path,
+            prepared,
             command,
             config.clone(),
             INIT_TIMEOUT,
@@ -2469,9 +2499,13 @@ impl ProviderBridge {
         init_timeout: std::time::Duration,
         shutdown_timeout: std::time::Duration,
     ) -> Result<Self, BridgeError> {
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
+        let command = Command::new(prepared.exec_path());
         Self::spawn_command(
-            binary_path,
-            Command::new(binary_path.path()),
+            prepared,
+            command,
             config,
             init_timeout,
             shutdown_timeout,
@@ -2486,9 +2520,13 @@ impl ProviderBridge {
         binary_path: &CheckedExecutable,
         config: ProviderConfig,
     ) -> Result<Self, BridgeError> {
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
+        let command = Command::new(prepared.exec_path());
         Self::spawn_command(
-            binary_path,
-            Command::new(binary_path.path()),
+            prepared,
+            command,
             config,
             INIT_TIMEOUT,
             SHUTDOWN_TIMEOUT,
@@ -2499,7 +2537,7 @@ impl ProviderBridge {
     }
 
     async fn spawn_command(
-        binary_path: &CheckedExecutable,
+        prepared: PreparedExecutable,
         mut command: Command,
         config: ProviderConfig,
         init_timeout: std::time::Duration,
@@ -2520,9 +2558,11 @@ impl ProviderBridge {
         };
         #[cfg(not(unix))]
         let _ = own_helpers;
-        binary_path
-            .verify_at_spawn()
-            .map_err(BridgeError::Refused)?;
+        #[cfg(target_os = "linux")]
+        prepared.configure_command(&mut command);
+        #[cfg(target_os = "macos")]
+        let _ = &prepared; // Keep the private executable through Init.
+        swap_after_verify();
         let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -3975,6 +4015,59 @@ mod tests {
             matches!(error, BridgeError::Refused(reason) if reason == "provider executable symlink is refused")
         );
         assert!(!marker.exists(), "symlink target did not exec");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    async fn checked_provider_survives_after_verify_swap(symlink: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let (binary, pid_file) = write_mock_provider_script(
+            temp.path(),
+            r#"{"status":"ok"}"#,
+            Some(r#"{"status":"ok"}"#),
+            0,
+        );
+        let checked = CheckedExecutable::for_test(&binary);
+        let marker = temp.path().join("substituted-ran");
+        let replacement = temp.path().join("substitute");
+        std::fs::write(
+            &replacement,
+            format!("#!/bin/sh\nprintf bad > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let original = temp.path().join("verified-original");
+        AFTER_VERIFY_SWAP.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new({
+                let binary = binary.clone();
+                let replacement = replacement.clone();
+                move || {
+                    std::fs::rename(&binary, &original).unwrap();
+                    if symlink {
+                        std::os::unix::fs::symlink(&replacement, &binary).unwrap();
+                    } else {
+                        std::fs::rename(&replacement, &binary).unwrap();
+                    }
+                }
+            }));
+        });
+        let bridge = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .expect("the verified bytes still start after a path swap");
+        assert!(pid_file.exists(), "the verified provider ran");
+        assert!(!marker.exists(), "the substituted provider did not run");
+        bridge.shutdown().await.unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn checked_provider_runs_verified_bytes_after_file_swap() {
+        checked_provider_survives_after_verify_swap(false).await;
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn checked_provider_runs_verified_bytes_after_symlink_swap() {
+        checked_provider_survives_after_verify_swap(true).await;
     }
 
     #[cfg(target_os = "linux")]

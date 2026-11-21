@@ -71,7 +71,7 @@ fn rows() -> Vec<Row> {
         row(
             "elastos-runtime/src/provider/failure_record.rs",
             "launch",
-            "libc::execve",
+            "libc::fexecve",
             "confined provider",
             "admitted rights+checked directory+bound executable",
             "B3 S10",
@@ -1006,7 +1006,17 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         (
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_command",
+            "prepared.configure_command(&mut command)",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_linux",
             "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_linux",
+            "Command::new(prepared.exec_path())",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
@@ -1016,12 +1026,42 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         (
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_confined_model_with_engine_bundle",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_with_engine_bundle",
+            "command.arg(\"-p\").arg(policy).arg(prepared.exec_path())",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_with_engine_bundle",
             "Self::spawn_command(",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_with_owned_helpers",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_owned_helpers",
+            "Command::new(prepared.exec_path())",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_owned_helpers",
             "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_timeouts",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_timeouts",
+            "Command::new(prepared.exec_path())",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
@@ -1032,6 +1072,11 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
             "elastos-runtime/src/provider/failure_record.rs",
             "launch",
             "verify_at_spawn()\n        .map_err(LaunchError::BeforeFork)",
+        ),
+        (
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "libc::fexecve(executable_fd, argv.as_ptr(), envp.as_ptr())",
         ),
         (
             "elastos-server/src/binaries.rs",
