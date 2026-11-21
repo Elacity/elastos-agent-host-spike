@@ -174,9 +174,10 @@ fn launch(
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
 ) -> Result<libc::pid_t, LaunchError> {
-    executable
+    let verified = executable
         .verify_at_spawn()
         .map_err(LaunchError::BeforeFork)?;
+    let executable_fd = verified.fd();
     let path = CString::new(executable.path().as_os_str().as_bytes())
         .map_err(|_| LaunchError::BeforeFork("provider executable path contains NUL".into()))?;
     let mut argv = Vec::with_capacity(args.len() + 2);
@@ -187,7 +188,7 @@ fn launch(
     // A zero-byte pipe only proves that the writer closed. Compare the live
     // child's executable with the requested file before handing out its PID.
     // Self-exec is ambiguous before exec, so fail closed in that case.
-    let requested_exe = std::fs::metadata(Path::new(std::ffi::OsStr::from_bytes(path.to_bytes())))
+    let requested_exe = std::fs::metadata(verified.exec_path())
         .ok()
         .map(|meta| (meta.dev(), meta.ino()));
     let launcher_exe = std::fs::metadata("/proc/self/exe")
@@ -269,11 +270,15 @@ fn launch(
             );
         }
         child_test_hook(test_hook, pipe[1]);
-        if let Err(failure) = unsafe { preexec_installer::install(prepared, pipe[1]) } {
+        if let Err(failure) =
+            unsafe { preexec_installer::install(prepared, pipe[1], executable_fd) }
+        {
             write_record_and_exit(pipe[1], &failure.record());
         }
         unsafe {
-            libc::execve(path.as_ptr(), argv.as_ptr(), envp.as_ptr());
+            // Native providers are ELF files. CLOEXEC closes the verified fd
+            // after the kernel enters them, preserving the fd-only child contract.
+            libc::fexecve(executable_fd, argv.as_ptr(), envp.as_ptr());
         }
         let errno = unsafe { *libc::__errno_location() };
         write_record_and_exit(pipe[1], &error_record(EXEC_TAG, errno));

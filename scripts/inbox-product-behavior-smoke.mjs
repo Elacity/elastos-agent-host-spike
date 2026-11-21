@@ -693,7 +693,7 @@ async function runInboxHomeChromeSmoke() {
       fetchCalls.push(path);
       if (path === "/api/apps/inbox/actions") {
         approvals.push(JSON.parse(options.body));
-        return jsonResponse({ message: "Approved agent plan." });
+        return jsonResponse({ message: "Agent plan dispatch completed." });
       }
       return previousFetch(path, options);
     };
@@ -734,6 +734,7 @@ async function runInboxHomeChromeSmoke() {
       assert.deepEqual(plainJson(stepUpRequests[0].message.request), { request_id: "inspect-act-9-abc" });
       assert.equal(stepUpRequests[0].origin, "http://localhost:61180");
       assert.equal(approvals[0].step_up_token, "agent-plan-step-up");
+      assert.match(nodes.get("status-text").textContent, /completed/);
     } finally {
       context.fetch = previousFetch;
       context.window.top = previousTop;

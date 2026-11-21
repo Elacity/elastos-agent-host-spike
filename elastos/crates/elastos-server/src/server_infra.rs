@@ -1,4 +1,4 @@
-use elastos_server::binaries::checked_native_provider;
+use elastos_server::binaries::{checked_native_provider, checked_native_provider_with_data_dir};
 #[cfg(test)]
 use std::fs;
 #[cfg(all(unix, test))]
@@ -487,24 +487,32 @@ pub(crate) async fn register_content_plane(
 pub(crate) async fn register_ipfs_provider_plane(
     provider_registry: &Arc<provider::ProviderRegistry>,
     binary_path: &Path,
+    data_dir: &Path,
 ) -> anyhow::Result<()> {
     register_ipfs_provider_plane_with_role(
         provider_registry,
         binary_path,
         elastos_server::ipfs::IpfsHostRole::User,
+        data_dir,
     )
     .await
 }
 
+/// `data_dir` is the Home this plane serves; the provider executable is
+/// admitted against that Home's signed release.
 async fn register_ipfs_provider_plane_with_role(
     provider_registry: &Arc<provider::ProviderRegistry>,
     binary_path: &Path,
     role: elastos_server::ipfs::IpfsHostRole,
+    data_dir: &Path,
 ) -> anyhow::Result<()> {
     let config = elastos_server::ipfs::ipfs_provider_config(role);
-    let bridge = provider::ProviderBridge::spawn(&checked_native_provider(binary_path), config)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to spawn ipfs-provider: {err}"))?;
+    let bridge = provider::ProviderBridge::spawn(
+        &checked_native_provider_with_data_dir(data_dir, binary_path),
+        config,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed to spawn ipfs-provider: {err}"))?;
     let ipfs_provider: Arc<dyn provider::Provider> = Arc::new(
         provider::CapsuleProvider::with_scheme(Arc::new(bridge), "ipfs"),
     );
@@ -515,13 +523,16 @@ async fn register_ipfs_provider_plane_with_role(
 }
 
 /// Spawn the availability-provider capsule and register `elastos://availability`.
+/// `data_dir` is the Home this plane serves; the provider executable is
+/// admitted against that Home's signed release.
 pub(crate) async fn register_availability_provider_plane(
     provider_registry: &Arc<provider::ProviderRegistry>,
     binary_path: &Path,
     config: serde_json::Value,
+    data_dir: &Path,
 ) -> anyhow::Result<()> {
     let bridge = provider::ProviderBridge::spawn(
-        &checked_native_provider(binary_path),
+        &checked_native_provider_with_data_dir(data_dir, binary_path),
         provider::BridgeProviderConfig {
             extra: config,
             ..Default::default()
@@ -584,10 +595,13 @@ pub(crate) async fn register_chain_provider_plane(
         anyhow::bail!("protected-content chain configuration names no protected_content_network");
     }
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
-    let bridge =
-        provider::ProviderBridge::spawn(&checked_native_provider(binary_path), generic_config)
-            .await
-            .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
+    // Admit against the signed release of the Home this chain plane serves.
+    let bridge = provider::ProviderBridge::spawn(
+        &checked_native_provider_with_data_dir(data_dir, binary_path),
+        generic_config,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
     match bridge
         .request(provider::bridge::ProviderRequest::Init { config })
         .await
@@ -835,6 +849,7 @@ async fn setup_server_infrastructure_impl(
                         &provider_registry,
                         &path,
                         availability_config,
+                        &data_dir,
                     )
                     .await
                     {
@@ -998,7 +1013,13 @@ async fn setup_server_infrastructure_impl(
 
     match binaries::resolve_verified_native_provider_binary("ipfs-provider") {
         Ok(Some(path)) => {
-            match register_ipfs_provider_plane_with_role(&provider_registry, &path, ipfs_role).await
+            match register_ipfs_provider_plane_with_role(
+                &provider_registry,
+                &path,
+                ipfs_role,
+                &data_dir,
+            )
+            .await
             {
                 Ok(()) => tracing::info!("ipfs-provider capsule from {}", path.display()),
                 Err(e) => tracing::warn!("ipfs-provider unavailable: {}", e),
@@ -4026,6 +4047,125 @@ mod tests {
         data_dir
     }
 
+    /// Install `source` as this Home's `custody-provider` under a signed
+    /// release, as `elastos setup` would.
+    #[cfg(unix)]
+    fn install_signed_custody_provider(data_dir: &Path, source: &Path) -> PathBuf {
+        install_signed_providers(data_dir, &[("custody-provider", source)]).remove(0)
+    }
+
+    /// Install each `(name, source)` as this Home's native provider under one
+    /// signed release, as `elastos setup` would. Every native provider start
+    /// admits its executable against the served Home's signed release.
+    #[cfg(unix)]
+    fn install_signed_providers(data_dir: &Path, providers: &[(&str, &Path)]) -> Vec<PathBuf> {
+        use elastos_common::localhost::{
+            publisher_release_head_path, publisher_release_manifest_path,
+        };
+        use sha2::{Digest as _, Sha256};
+        let bin_dir = data_dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let mut external = serde_json::Map::new();
+        let mut installed = Vec::new();
+        for (name, source) in providers {
+            let binary = bin_dir.join(name);
+            let bytes = fs::read(source).unwrap();
+            crate::test_support::write_from_child(&binary, &bytes, 0o700);
+            let provider_runtime = match *name {
+                "custody-provider" => serde_json::json!({
+                    "role": "provider", "substrate": "native",
+                    "runtime_abi": "elastos.provider-stdio/v1", "execution": "native-provider",
+                    "provides": "custody", "runtime_only": true
+                }),
+                "ipfs-provider" => serde_json::json!({
+                    "role": "provider", "substrate": "native",
+                    "runtime_abi": "elastos.provider-stdio/v1", "execution": "native-provider",
+                    "provides": "elastos://ipfs/*"
+                }),
+                other => panic!("no fixture provider_runtime for {other}"),
+            };
+            external.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "install_path": format!("bin/{name}"),
+                    "provider_runtime": provider_runtime,
+                    "platforms": {(elastos_server::setup::detect_platform()): {
+                        "install_path": format!("bin/{name}"),
+                        "checksum": format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
+                    }}
+                }),
+            );
+            installed.push(binary);
+        }
+        let components = serde_json::to_vec(&serde_json::json!({
+            "external": external, "capsules": {}, "profiles": {}
+        }))
+        .unwrap();
+        fs::write(data_dir.join("components.json"), &components).unwrap();
+        let cid = |bytes: &[u8]| {
+            cid::Cid::new_v1(
+                0x55,
+                cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap(),
+            )
+            .to_string()
+        };
+        let descriptor = |bytes: &[u8]| {
+            serde_json::json!({
+                "cid": cid(bytes), "sha256": hex::encode(Sha256::digest(bytes)), "size": bytes.len()
+            })
+        };
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x71; 32]);
+        let signed = |payload: serde_json::Value, domain: &str| {
+            let (signature, signer_did) = elastos_server::crypto::domain_separated_sign(
+                &key,
+                domain,
+                &serde_json::to_vec(&payload).unwrap(),
+            );
+            serde_json::to_vec(&serde_json::json!({
+                "payload": payload, "signature": signature, "signer_did": signer_did
+            }))
+            .unwrap()
+        };
+        let runtime = data_dir.join("runtime");
+        let runtime_bytes = b"fixture runtime";
+        fs::write(&runtime, runtime_bytes).unwrap();
+        let release = signed(
+            serde_json::json!({
+                "schema": "elastos.release/v1", "version": "0.7.0", "channel": "stable",
+                "platforms": {(elastos_server::update::detect_release_platform()): {
+                    "binary": descriptor(runtime_bytes), "components": descriptor(&components)
+                }}
+            }),
+            "elastos.release.v1",
+        );
+        let head = signed(
+            serde_json::json!({
+                "schema": "elastos.release.head/v1", "version": "0.7.0", "channel": "stable",
+                "latest_release_cid": cid(&release),
+                "release_sha256": hex::encode(Sha256::digest(&release))
+            }),
+            "elastos.release.head.v1",
+        );
+        let head_path = publisher_release_head_path(data_dir);
+        fs::create_dir_all(head_path.parent().unwrap()).unwrap();
+        fs::write(head_path, &head).unwrap();
+        fs::write(publisher_release_manifest_path(data_dir), &release).unwrap();
+        fs::write(
+            data_dir.join("sources.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.trusted-sources/v1", "default_source": "fixture", "sources": [{
+                    "name": "fixture",
+                    "publisher_dids": [elastos_server::crypto::encode_signing_key_did(&key)],
+                    "channel": "stable", "installed_version": "0.7.0",
+                    "install_path": runtime, "head_cid": cid(&head)
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        installed
+    }
+
     /// A stdio provider that answers every request with the fixed import CID,
     /// standing in for a kubo-backed ipfs-provider install.
     #[cfg(unix)]
@@ -4098,6 +4238,7 @@ mod tests {
         let custody_binary = required_provider_host_test_binary(PROVIDER_HOST_TEST_CUSTODY_BIN_ENV);
         let temp = TempDir::new().unwrap();
         let data_dir = provisioned_provider_host_data_dir(&temp);
+        let custody_binary = install_signed_custody_provider(&data_dir, &custody_binary);
 
         let plan = crate::provider_host::ProviderHostPlan::resolve(
             data_dir.clone(),
@@ -4154,6 +4295,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let data_dir = provisioned_provider_host_data_dir(&temp);
         let ipfs_binary = write_mock_ipfs_provider(&temp);
+        let installed = install_signed_providers(
+            &data_dir,
+            &[
+                ("custody-provider", custody_binary.as_path()),
+                ("ipfs-provider", ipfs_binary.as_path()),
+            ],
+        );
+        let (custody_binary, ipfs_binary) = (installed[0].clone(), installed[1].clone());
 
         let plan = crate::provider_host::ProviderHostPlan::resolve(
             data_dir.clone(),

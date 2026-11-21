@@ -624,21 +624,26 @@ mod tests {
         let bin = root.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let path = bin.join("ipfs-provider");
+        // The fixture names its Home root outright: on macOS the provider runs
+        // from a private verified copy, so its own path is not inside the Home.
         crate::test_support::write_from_child(
             &path,
-            br#"#!/usr/bin/env python3
+            format!(
+                r#"#!/usr/bin/env python3
 import json, pathlib, sys
-root = pathlib.Path(__file__).resolve().parent.parent
+root = pathlib.Path({root})
 for line in sys.stdin:
     request = json.loads(line)
     if request['op'] == 'init':
         assert not (root / 'needs-retirement').exists() or (root / 'old-retired').exists()
         with (root / 'new-init.jsonl').open('a') as receipt:
             receipt.write(json.dumps(request) + '\n')
-    print(json.dumps({'status': 'ok'}), flush=True)
+    print(json.dumps({{'status': 'ok'}}), flush=True)
     if request['op'] == 'shutdown':
         break
 "#,
+                root = serde_json::to_string(root.path().to_str().unwrap()).unwrap()
+            ),
             0o700,
         );
         let checksum = format!(
@@ -658,6 +663,9 @@ for line in sys.stdin:
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+        // The gateway start admits ipfs-provider against this Home's signed
+        // release, so the fixture Home carries one over its components.json.
+        crate::protected_content_config::tests::sign_test_install(root.path());
         root
     }
 

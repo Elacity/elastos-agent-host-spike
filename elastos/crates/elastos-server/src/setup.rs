@@ -20,6 +20,7 @@ pub(crate) use browser_config::linux_host_setup_message;
 pub(crate) use browser_config::repair_browser_host_components_for_open;
 mod browser_linux;
 mod browser_vm_image;
+pub mod verified_executable;
 pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
 pub(crate) use browser_vm_image::verified_seed_identity as verified_browser_vm_seed_identity;
 #[cfg(unix)]
@@ -1157,16 +1158,29 @@ pub fn verify_installed_component_start(
     data_dir: &Path,
     name: &str,
     path: &Path,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<verified_executable::VerifiedExecutable> {
     let source = installed_release_source(data_dir)?.ok_or_else(missing_trusted_source_error)?;
     let runtime = fs::canonicalize(&source.install_path)?;
     let (_, manifest) =
         crate::installed_release::read_signed_release(data_dir, &runtime, &source, false)?;
     let entry = installed_component_entry(data_dir, name, path, Some(&manifest))
         .context("Installed component manifest verification failed")?;
-    verify_installed_component_with_entry(name, path, &entry)
-        .context("Installed component binary verification failed")?;
-    Ok(entry.checksum)
+    let checksum = if entry.platform_info.extract_path.is_some() {
+        // The archive receipt is separate from the executable's bytes. The
+        // held descriptor below makes the only executable byte check at start.
+        if name == "home-cli" && path == entry.install_root.join("capsules/home-cli/bin/home-cli") {
+            verify_home_cli_receipts(&entry)
+                .context("Installed component binary verification failed")?;
+        } else {
+            anyhow::bail!("Installed component binary verification failed: installed archive executable has no signed digest");
+        }
+        signed_executable_checksum(&entry.platform_info)
+            .ok_or_else(|| anyhow::anyhow!("installed archive executable has no signed digest"))?
+    } else {
+        &entry.checksum
+    };
+    verified_executable::VerifiedExecutable::prepare(path, checksum)
+        .context("Installed component binary verification failed")
 }
 
 fn verify_installed_component_with_entry(
@@ -1178,17 +1192,15 @@ fn verify_installed_component_with_entry(
         return verify_installed_component_bytes(name, path, entry);
     }
     if name == "home-cli" && path == entry.install_root.join("capsules/home-cli/bin/home-cli") {
-        let bundle = entry.install_root.join("capsules/home-cli");
         let file = fs::symlink_metadata(path)?;
         anyhow::ensure!(
             file.file_type().is_file(),
             "Home CLI executable is not a regular file"
         );
+        let executable_checksum = verify_home_cli_receipts(entry)?;
         anyhow::ensure!(
-            read_artifact_sha256_receipt(&bundle)? == bare_sha256(&entry.checksum)
-                && bare_sha256(&compute_sha256_checksum(path)?)
-                    == fs::read_to_string(bundle.join(CACHED_EXECUTABLE_SHA_FILE))?.trim(),
-            "Home CLI executable differs from its signed archive receipt"
+            bare_sha256(&compute_sha256_checksum(path)?) == bare_sha256(executable_checksum),
+            "Home CLI executable differs from its signed release digest"
         );
         return Ok(());
     }
@@ -1232,6 +1244,23 @@ fn verify_installed_component_with_entry(
         path.display()
     );
     Ok(())
+}
+
+fn signed_executable_checksum(info: &PlatformInfo) -> Option<&str> {
+    info.extra.get("executable_checksum")?.as_str()
+}
+
+fn verify_home_cli_receipts(entry: &InstalledComponentEntry) -> anyhow::Result<&str> {
+    let bundle = entry.install_root.join("capsules/home-cli");
+    let executable_checksum = signed_executable_checksum(&entry.platform_info)
+        .ok_or_else(|| anyhow::anyhow!("Home CLI signed executable digest is missing"))?;
+    anyhow::ensure!(
+        read_artifact_sha256_receipt(&bundle)? == bare_sha256(&entry.checksum)
+            && fs::read_to_string(bundle.join(CACHED_EXECUTABLE_SHA_FILE))?.trim()
+                == bare_sha256(executable_checksum),
+        "Home CLI executable receipt differs from its signed release digest"
+    );
+    Ok(executable_checksum)
 }
 
 /// Where a single-file archive component's executable lies inside its capsule
@@ -1435,7 +1464,8 @@ pub(crate) fn admit_installed_components(
     };
     let binary = fs::canonicalize(&source.install_path)?;
     let (release, bytes) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)
+            .context(crate::installed_release::REPAIR)?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
         &source.publisher_dids,
@@ -9766,10 +9796,12 @@ pub(crate) mod tests {
         let error = ensure_browser_vm_image_in_context(&data, FirstPartyCarrierContext::Runtime)
             .await
             .unwrap_err();
-        // The stale manifest is refused at the signed components descriptor.
+        // The stale manifest is refused at the signed components descriptor,
+        // under the operator repair guidance.
         let error = format!("{error:#}");
         assert!(
-            error.contains("Installed component manifest verification failed")
+            error.contains("Installed release inputs require repair")
+                && error.contains("Installed component manifest verification failed")
                 && error.contains("Installed artifact differs from its signed checksum"),
             "{error}"
         );
