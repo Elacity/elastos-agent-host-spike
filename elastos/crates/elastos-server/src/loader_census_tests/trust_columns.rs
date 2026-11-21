@@ -397,20 +397,20 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/publish.rs",
             function: "start",
             call: "command",
-            class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(provider)"].concat(),
+            class: "release-component",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
             file: "elastos-server/src/publish.rs",
             function: "start",
             call: "spawn()",
-            class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(provider)"].concat(),
+            class: "release-component",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["prepared.attach_tokio", "(&mut command, false)?"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1576,20 +1576,20 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(columns.len(), 100);
     assert_eq!(classes.get("n/a"), Some(&51));
     assert_eq!(classes.get("os-tool"), Some(&2));
-    assert_eq!(classes.get("other"), Some(&37));
+    assert_eq!(classes.get("other"), Some(&35));
     assert_eq!(classes.get("own-binary"), Some(&5));
-    assert_eq!(classes.get("release-component"), Some(&5));
+    assert_eq!(classes.get("release-component"), Some(&7));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&53));
+    assert_eq!(roots.get("none"), Some(&51));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&24));
+    assert_eq!(roots.get("release-signature"), Some(&26));
     assert_eq!(roots.get("staged-cid"), Some(&7));
-    assert_eq!(times.get("at-every-start"), Some(&31));
+    assert_eq!(times.get("at-every-start"), Some(&33));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&8));
-    assert_eq!(times.get("never"), Some(&53));
-    assert_eq!(to_gate, 30);
+    assert_eq!(times.get("never"), Some(&51));
+    assert_eq!(to_gate, 28);
 }
 
 #[test]
