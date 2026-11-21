@@ -350,18 +350,22 @@ and that answer is unchanged. A local-only fetch stays on this machine. With
 `min_distinct_holders` set, it returns an error on a local hit and on a local
 miss, and it does not call availability.
 The requester signs the set with its node key under the domain label
-`elastos.content.fetch.receipt-set.v1` and marks it
-`requester-signed-not-holder-countersigned`: its own statement after its CID
-check, not a holder countersignature. `sign_fetch_receipt_set` refuses a
+`elastos.content.fetch.receipt-set.v2` and marks it
+`requester-signed-holder-countersigned`. Each counted holder row carries the
+requester's nonce for that attempt and the holder's signed statement for the
+same nonce, CID, requester DID, and byte count. Content checks these facts at
+the byte-release boundary. A row without the collector's nonce does not count.
+`sign_fetch_receipt_set` refuses a
 receipt that names a CID other than the set's, and it writes
 `observed_distinct_holders` from the distinct verified holder DIDs in the
 receipts. `verify_signed_fetch_receipt_set` checks the signature against the
 requester DID, then refuses a schema other than
-`elastos.content.fetch.receipt-set/v1`, a requested CID that is not a
+`elastos.content.fetch.receipt-set/v2`, a requested CID that is not a
 canonical SHA2-256 CID, a required holder count outside 1 to 8, an empty
 receipt list, a set with no time, a receipt that names another CID, or an
 observed count that differs from the distinct verified holder DIDs in the
-list. Readers use that verified nested payload for the CID, the counts and
+list. It also checks each verified row's holder signature against the
+collector-issued nonce. Readers use that verified nested payload for the CID, the counts and
 the receipts. The signed-mode answer does not repeat those values beside the
 signature.
 
