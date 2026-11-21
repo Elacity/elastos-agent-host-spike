@@ -3299,6 +3299,7 @@ mod tests {
             "abababababababababababababababab",
             "image-viewer",
             "photo-set",
+            "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
             &context,
         )
         .unwrap();
