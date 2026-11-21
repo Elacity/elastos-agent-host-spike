@@ -236,7 +236,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "release-component",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::ne", "w(&renderer)"].concat(),
+            evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -316,7 +316,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "release-component",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::n", "ew(binary)"].concat(),
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -326,7 +326,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "release-component",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::n", "ew(binary)"].concat(),
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -806,7 +806,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::n", "ew(program)"].concat(),
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -816,7 +816,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::n", "ew(program)"].concat(),
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1567,4 +1567,13 @@ fn installed_component_start_callers_keep_the_signed_gate() {
             "installed component start lost signed gate: {file}::{function}"
         );
     }
+    let custody = &sources["elastos-server/src/protected_content_config.rs"];
+    let selected = "verify_installed_component_start(data_dir, \"custody-provider\", &binary)";
+    assert!(
+        custody.match_indices(selected).any(|(at, _)| {
+            source::enclosing_fn(&source::code_only(custody), at)
+                == "provision_custody_node_with_installed_provider"
+        }),
+        "custody start must admit the resolver's selected binary"
+    );
 }
