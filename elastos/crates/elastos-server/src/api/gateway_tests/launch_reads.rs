@@ -85,7 +85,7 @@ async fn another_viewers_page_token_cannot_read_launch_content_or_nonplain_paths
     let app = gateway_router(library_test_state(dir.path()).await);
     let token = page_token(
         dir.path(),
-        &format!("elastos://launch/{}", launch_id()),
+        &format!("elastos://launch/{}/photo-set", launch_id()),
         "other-viewer",
     );
     let before = launch_reads_audited(dir.path()).len();
@@ -115,7 +115,11 @@ async fn another_launch_token_cannot_read_the_kept_launch() {
     *runtime.readable_launch_id.lock().await = Some(launch_id());
     let app = gateway_router(state);
     let other_id = "cd".repeat(16);
-    let token = page_token(dir.path(), &format!("elastos://launch/{other_id}"), PAGE);
+    let token = page_token(
+        dir.path(),
+        &format!("elastos://launch/{other_id}/photo-set"),
+        PAGE,
+    );
     for (uri, rest) in [
         (
             format!("/api/viewers/{PAGE}/launch/output/playlist.json"),
@@ -160,7 +164,11 @@ async fn another_launch_token_keeps_its_bound_id_without_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(library_test_state(dir.path()).await);
     let other_id = "cd".repeat(16);
-    let token = page_token(dir.path(), &format!("elastos://launch/{other_id}"), PAGE);
+    let token = page_token(
+        dir.path(),
+        &format!("elastos://launch/{other_id}/photo-set"),
+        PAGE,
+    );
     for (uri, rest) in [
         (
             format!("/api/viewers/{PAGE}/launch/output/playlist.json"),
@@ -226,7 +234,11 @@ async fn a_pages_token_reads_its_kept_launch_through_the_runtime_as_the_shell() 
     let runtime = start_fake_runtime(dir.path(), bus, "launch-reads").await;
     let app = gateway_router(state);
     let id = launch_id();
-    let token = page_token(dir.path(), &format!("elastos://launch/{id}"), PAGE);
+    let token = page_token(
+        dir.path(),
+        &format!("elastos://launch/{id}/photo-set"),
+        PAGE,
+    );
     let base = format!("/api/viewers/{PAGE}/launch");
 
     let (status, store, body) =
@@ -268,7 +280,7 @@ async fn a_launch_bound_token_opens_no_other_home_check() {
     let dir = tempfile::tempdir().unwrap();
     let state = library_test_state(dir.path()).await;
     let app = gateway_router(state);
-    let bound = format!("elastos://launch/{}", launch_id());
+    let bound = format!("elastos://launch/{}/photo-set", launch_id());
     let token = page_token(dir.path(), &bound, GBA_EMULATOR_CAPSULE_ID);
 
     let (status, _, body) = read(&app, "/api/viewers/gba-emulator/library", Some(&token)).await;
@@ -338,7 +350,7 @@ async fn anything_else_is_not_found_and_the_runtime_is_not_asked() {
     let runtime = start_fake_runtime(dir.path(), bus, "launch-reads-else").await;
     let app = gateway_router(state);
     let id = launch_id();
-    let bound = format!("elastos://launch/{id}");
+    let bound = format!("elastos://launch/{id}/photo-set");
     let own = page_token(dir.path(), &bound, PAGE);
     let base = format!("/api/viewers/{PAGE}/launch");
     let home = issue_home_launch_token(dir.path(), "home").unwrap();
