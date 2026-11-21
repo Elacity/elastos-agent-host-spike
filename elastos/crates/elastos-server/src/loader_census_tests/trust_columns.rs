@@ -463,11 +463,21 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-server/src/runtime.rs",
-            function: "run_signer",
+            function: "load_dev_unsigned_component",
             call: "component.load_admitted",
             class: "n/a",
             trust_root: "none",
             verified_when: "never",
+            evidence: ["component.l", "oad_admitted"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/runtime.rs",
+            function: "run_signer",
+            call: "component.load_admitted",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
             evidence: ["component.l", "oad_admitted"].concat(),
             os_path: "",
         },
@@ -1541,8 +1551,8 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 97);
-    assert_eq!(classes.get("n/a"), Some(&48));
+    assert_eq!(columns.len(), 98);
+    assert_eq!(classes.get("n/a"), Some(&49));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1552,12 +1562,32 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("none"), Some(&53));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&24));
-    assert_eq!(roots.get("staged-cid"), Some(&4));
+    assert_eq!(roots.get("staged-cid"), Some(&5));
     assert_eq!(times.get("at-every-start"), Some(&31));
     assert_eq!(times.get("at-install-only"), Some(&8));
-    assert_eq!(times.get("at-stage-and-start"), Some(&5));
+    assert_eq!(times.get("at-stage-and-start"), Some(&6));
     assert_eq!(times.get("never"), Some(&53));
     assert_eq!(to_gate, 30);
+}
+
+#[test]
+fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
+    let vm_rows: Vec<_> = rows()
+        .into_iter()
+        .filter(|row| row.kind == "VM capsule; image check pending 4b")
+        .collect();
+    assert_eq!(vm_rows.len(), 4);
+    let columns = columns();
+    for row in vm_rows {
+        let column = columns
+            .iter()
+            .find(|column| {
+                (column.file, column.function, column.call) == (row.file, row.function, row.call)
+            })
+            .unwrap();
+        assert_eq!(column.trust_root, "none");
+        assert_eq!(column.verified_when, "never");
+    }
 }
 
 #[test]
