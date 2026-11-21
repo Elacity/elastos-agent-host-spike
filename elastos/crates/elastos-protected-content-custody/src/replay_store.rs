@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
 use hpke::rand_core::{CryptoRng as HpkeCryptoRng, RngCore as HpkeRngCore};
+#[cfg(unix)]
 use nix::fcntl::{Flock, FlockArg};
+#[cfg(unix)]
 use nix::unistd::geteuid;
 use rand09::SeedableRng as _;
 use sha2::{Digest as _, Sha256};
@@ -474,6 +476,9 @@ impl DurableReplayClaimStoreV1 {
     }
 
     fn ensure_state_dir(&self) -> Result<(), ReplayClaimError> {
+        #[cfg(windows)]
+        require_supported_store()?;
+
         let parent = self
             .state_dir
             .parent()
@@ -548,10 +553,12 @@ impl DurableReplayClaimStoreV1 {
 }
 
 #[derive(Debug)]
+#[cfg(unix)]
 struct ExclusiveFileLock {
     file: Option<Flock<File>>,
 }
 
+#[cfg(unix)]
 impl ExclusiveFileLock {
     fn acquire(path: &Path) -> Result<Self, ReplayClaimError> {
         let file = open_or_create_owner_only_lock_file(path)?;
@@ -565,6 +572,7 @@ impl ExclusiveFileLock {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ExclusiveFileLock {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
@@ -573,6 +581,17 @@ impl Drop for ExclusiveFileLock {
     }
 }
 
+#[cfg(windows)]
+struct ExclusiveFileLock;
+
+#[cfg(windows)]
+impl ExclusiveFileLock {
+    fn acquire(_path: &Path) -> Result<Self, ReplayClaimError> {
+        Err(ReplayClaimError::UnsupportedOnWindows)
+    }
+}
+
+#[cfg(unix)]
 fn create_owner_only_directory(path: &Path) -> Result<(), ReplayClaimError> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -587,7 +606,20 @@ fn create_owner_only_directory(path: &Path) -> Result<(), ReplayClaimError> {
     }
 }
 
+#[cfg(windows)]
+fn create_owner_only_directory(_path: &Path) -> Result<(), ReplayClaimError> {
+    Err(ReplayClaimError::UnsupportedOnWindows)
+}
+
+#[cfg(windows)]
+fn require_supported_store() -> Result<(), ReplayClaimError> {
+    Err(ReplayClaimError::UnsupportedOnWindows)
+}
+
 fn open_owner_only_file(path: &Path, write: bool) -> Result<File, ReplayClaimError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let mut options = OpenOptions::new();
     options.read(true).write(write);
     #[cfg(unix)]
@@ -606,6 +638,9 @@ fn open_owner_only_file(path: &Path, write: bool) -> Result<File, ReplayClaimErr
 }
 
 fn open_or_create_owner_only_lock_file(path: &Path) -> Result<File, ReplayClaimError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let parent = path.parent().ok_or(ReplayClaimError::Unavailable)?;
     validate_owner_only_directory(parent)?;
 
@@ -633,6 +668,9 @@ fn open_or_create_owner_only_lock_file(path: &Path) -> Result<File, ReplayClaimE
 }
 
 fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, ReplayClaimError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let parent = path.parent().ok_or(ReplayClaimError::Unavailable)?;
     validate_owner_only_directory(parent)?;
 
@@ -655,6 +693,9 @@ fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, ReplayClaimE
 }
 
 fn sync_directory(path: &Path) -> Result<(), ReplayClaimError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|_| ReplayClaimError::Unavailable)
@@ -694,6 +735,7 @@ fn validate_owner_only_regular_file_metadata(
     Ok(())
 }
 
+#[cfg(unix)]
 fn validate_owner_and_mode(
     metadata: &fs::Metadata,
     exact_mode: u32,
@@ -707,6 +749,14 @@ fn validate_owner_and_mode(
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn validate_owner_and_mode(
+    _metadata: &fs::Metadata,
+    _exact_mode: u32,
+) -> Result<(), ReplayClaimError> {
+    Err(ReplayClaimError::UnsupportedOnWindows)
 }
 
 #[cfg(test)]
@@ -1074,6 +1124,22 @@ fn maybe_inject_test_fault(state_dir: &Path) -> Result<(), ReplayClaimError> {
         }
         None => Ok(()),
     }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_secure_store_before_creating_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("store");
+    assert_eq!(
+        create_owner_only_directory(&path),
+        Err(ReplayClaimError::UnsupportedOnWindows)
+    );
+    assert!(matches!(
+        ExclusiveFileLock::acquire(&path),
+        Err(ReplayClaimError::UnsupportedOnWindows)
+    ));
+    assert!(!path.exists());
 }
 
 #[cfg(test)]
@@ -1556,6 +1622,8 @@ mod tests {
                 Ok(()) => 10,
                 Err(ReplayClaimError::AlreadyClaimed) => 11,
                 Err(ReplayClaimError::Unavailable) => 12,
+                #[cfg(windows)]
+                Err(ReplayClaimError::UnsupportedOnWindows) => 13,
             };
             std::process::exit(code);
         }
