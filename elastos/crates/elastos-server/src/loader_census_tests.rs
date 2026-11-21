@@ -1028,3 +1028,4 @@ fn every_executable_loader_has_an_authority_row() {
         .collect();
     assert!(missing.is_empty(), "unlisted loaders: {missing:#?}");
 }
+mod trust_columns;

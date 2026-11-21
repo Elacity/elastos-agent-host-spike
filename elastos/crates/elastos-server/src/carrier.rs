@@ -5348,7 +5348,7 @@ async fn fetch_content_via_carrier_provider_invocation(
     }
     if path.is_empty()
         && bound.is_none()
-        && !crate::content::verify_exact_content_cid(registry, cid, &bytes).await?
+        && !crate::content::verify_carrier_content_cid(cid, &bytes)?
     {
         return Err(anyhow::Error::new(CarrierHolderCorruptBytes {
             bytes_received: bytes.len() as u64,
@@ -6573,10 +6573,9 @@ fn content_availability_replicas_with_reputation(
 ) -> Vec<CarrierAvailabilityReplica> {
     let mut replicas = Vec::new();
     for message in messages {
-        let Ok((envelope, signer_did)) = crate::crypto::verify_signed_json_envelope_against_dids(
+        let Ok((envelope, signer_did)) = crate::crypto::verify_self_signed_json_envelope(
             message.content.as_bytes(),
             CONTENT_AVAILABILITY_ANNOUNCEMENT_DOMAIN,
-            &[],
         ) else {
             continue;
         };
@@ -15671,6 +15670,25 @@ pub(crate) mod tests {
             requests[0]["request"]["_runtime_invocation"]["transfer"],
             "stream"
         );
+    }
+
+    #[tokio::test]
+    async fn carrier_only_consumer_verifies_holder_without_local_ipfs() {
+        let registry = ProviderRegistry::new();
+        registry
+            .set_carrier_invoker(Arc::new(MockCarrierProviderPlaneInvoker::default()))
+            .await;
+        let (bytes, _) = fetch_content_via_carrier_provider_invocation(
+            &registry,
+            "did:key:z6MkholderFixture",
+            "ticket:internal-secret",
+            "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp",
+            "",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bytes, b"carrier provider bytes");
     }
 
     #[tokio::test]
