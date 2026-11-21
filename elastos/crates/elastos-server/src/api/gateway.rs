@@ -96,8 +96,6 @@ pub(crate) use gateway_inbox::inbox_request_entries_for_test;
 mod gateway_inspect_actions;
 pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
 pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
-#[path = "gateway_marketplace.rs"]
-mod gateway_marketplace;
 #[path = "gateway_model_remote.rs"]
 mod gateway_model_remote;
 #[path = "gateway_model_service.rs"]
@@ -202,7 +200,6 @@ pub(in crate::api) use gateway_home_token::{
 use gateway_home_wallet_connector::*;
 use gateway_inbox::*;
 use gateway_inspect_actions::*;
-use gateway_marketplace::*;
 use gateway_origin::*;
 use gateway_passkey_step_up::*;
 #[cfg(test)]
@@ -1149,7 +1146,6 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
                 gateway_capsule_catalog::ModelPreparationOwner::default(),
             )),
         )
-        .route("/api/apps/marketplace/catalog", get(marketplace_catalog))
         // Reachable only with a Services token, which Home stops issuing while
         // Services is hidden (0.8.0; see capsule_is_offered). The share and
         // request backend stays: Inbox approval, grant use and revocation run on
