@@ -1672,12 +1672,16 @@ fn run_home_cli_renderer(
     session: &HomeSession,
 ) -> anyhow::Result<()> {
     let renderer = resolve_home_cli_renderer_program(data_dir)?;
-    crate::setup::verify_installed_component_start(data_dir, HOME_CLI_CAPSULE_NAME, &renderer)?;
-    let status = Command::new(&renderer)
+    let prepared =
+        crate::setup::verify_installed_component_start(data_dir, HOME_CLI_CAPSULE_NAME, &renderer)?;
+    let mut command = Command::new(prepared.exec_path());
+    command
         .arg(&session.uri_root)
         .env("ELASTOS_API", api_url)
         .env("ELASTOS_TOKEN", client_token)
-        .env_remove("ELASTOS_CARRIER_PATH")
+        .env_remove("ELASTOS_CARRIER_PATH");
+    prepared.attach_std(&mut command, false)?;
+    let status = command
         .status()
         .with_context(|| format!("failed to start Home CLI renderer {}", renderer.display()))?;
     if !status.success() {

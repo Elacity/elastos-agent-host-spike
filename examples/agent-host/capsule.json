@@ -20,6 +20,10 @@
     {
       "resource": "elastos://inspect/submit_agent_plan",
       "actions": ["write"]
+    },
+    {
+      "resource": "localhost://UsersAI/self/Documents/*",
+      "actions": ["write"]
     }
   ],
   "resources": {

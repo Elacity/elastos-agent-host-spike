@@ -9,20 +9,28 @@ use crate::{setup, sources::default_data_dir};
 /// Bind a native provider start to the current publisher-signed release.
 /// A failed admission stays a refused executable until the bridge reports it.
 pub fn checked_native_provider(path: &Path) -> CheckedExecutable {
-    #[cfg(test)]
-    if path.is_file() && !path.starts_with(default_data_dir()) {
-        return crate::test_support::fixture_executable(path);
-    }
     checked_native_provider_with_data_dir(&default_data_dir(), path)
 }
 
+/// Admit a native provider against the signed release of the Home at
+/// `data_dir`, the Home whose state the provider will serve.
 pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> CheckedExecutable {
+    // Library tests start isolated fixture executables that live outside the
+    // Home they run against; an executable inside the Home is always admitted.
+    #[cfg(test)]
+    if path.is_file() && !path.starts_with(data_dir) {
+        return crate::test_support::fixture_executable(path);
+    }
     let admitted = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow::anyhow!("native provider name is invalid"))
         .and_then(|name| setup::verify_installed_component_start(data_dir, name, path))
-        .and_then(|hash| CheckedExecutable::pinned(path, &hash).map_err(anyhow::Error::msg));
+        // Admission holds the signed bytes; the bridge re-checks the same
+        // digest at spawn and runs the bytes it checked (CheckedExecutable).
+        .and_then(|verified| {
+            CheckedExecutable::pinned(path, verified.checksum()).map_err(anyhow::Error::msg)
+        });
     admitted.unwrap_or_else(|error| {
         CheckedExecutable::refused(
             path,
