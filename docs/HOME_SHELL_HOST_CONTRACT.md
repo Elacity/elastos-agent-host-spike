@@ -100,6 +100,11 @@ these two operations selects `home-launch`; that grant can ask the gateway to
 launch or open content without browser provenance. For content
 open, the gateway gives the Runtime a `home-shell` projection grant bound to
 `home`; the Runtime accepts that grant only on its internal content-open hop.
+The local owner can run `elastos home --cli-launch-token` inside the authenticated
+Home terminal to print this session-bound grant. The CLI verifies the active admin
+passkey session before it asks the existing projection issuer to sign the grant.
+Headless checks pass it as `ELASTOS_CLI_LAUNCH_TOKEN`; the public journey smoke
+obtains it from that CLI command when the variable is absent.
 
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers

@@ -8,13 +8,13 @@ CLI_LAUNCH_TOKEN="${ELASTOS_CLI_LAUNCH_TOKEN:-}"
 
 usage() {
     cat <<EOF
-Usage: ELASTOS_CLI_LAUNCH_TOKEN=<home-cli-grant> $(basename "$0")
+Usage: ELASTOS_CLI_LAUNCH_TOKEN=<home-cli-grant> $(basename "$0") [--public-assets-only]
 
 Live Library proof for a signed CLI launch grant. The script asks Runtime to launch
 Library, extracts the Library-scoped launch token, then verifies the app-facing
 provider path: roots, write, publish, status, share, trash, and cleanup.
-The CLI grant is required for this proof. The script checks public Library
-shell/modules for stale static deployment before the signed provider path.
+The CLI grant is required for the provider path. --public-assets-only checks
+the public Library shell/modules without a grant.
 
 Environment:
   ELASTOS_GATEWAY_URL       Default: https://elastos.elacitylabs.com
@@ -194,15 +194,25 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
-if [[ -z "$CLI_LAUNCH_TOKEN" ]]; then
-    echo "[library-live-smoke] signed provider path needs ELASTOS_CLI_LAUNCH_TOKEN with a home-cli grant" >&2
-    exit 1
-fi
-
 need_cmd curl
 need_cmd grep
 
 verify_public_library_assets
+
+if [[ "${1:-}" == "--public-assets-only" ]]; then
+    echo "[library-live-smoke] public Library assets passed"
+    exit 0
+fi
+
+if [[ -n "${1:-}" ]]; then
+    usage >&2
+    exit 2
+fi
+
+if [[ -z "$CLI_LAUNCH_TOKEN" ]]; then
+    echo "[library-live-smoke] signed provider path needs ELASTOS_CLI_LAUNCH_TOKEN from 'elastos home --cli-launch-token' in the owner Home terminal" >&2
+    exit 1
+fi
 
 need_cmd base64
 need_cmd jq

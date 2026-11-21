@@ -7437,7 +7437,8 @@ async fn home_launch_gate_accepts_page_and_cli_then_checks_target() {
     )
     .contains("home_page_only"));
 
-    let cli = cli_home_launch_grant(dir.path());
+    let owner = passkey_authority(dir.path());
+    let cli = owner_cli_home_launch_grant(dir.path(), &owner);
     let cli_launch = app
         .oneshot(
             Request::builder()
@@ -7641,7 +7642,8 @@ async fn test_home_launch_validates_shell_targets() {
         .unwrap();
     assert_eq!(other_body.as_ref(), b"home_page_only");
 
-    let cli = cli_home_launch_grant(dir.path());
+    let owner = passkey_authority(dir.path());
+    let cli = owner_cli_home_launch_grant(dir.path(), &owner);
     let cli_launch = app
         .clone()
         .oneshot(

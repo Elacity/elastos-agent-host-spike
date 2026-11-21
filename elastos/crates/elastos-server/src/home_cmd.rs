@@ -618,7 +618,14 @@ impl Drop for LoggingSuppressionGuard {
     }
 }
 
-pub(crate) async fn run(status: bool, json: bool) -> anyhow::Result<()> {
+pub(crate) async fn run(status: bool, json: bool, cli_launch_token: bool) -> anyhow::Result<()> {
+    if cli_launch_token {
+        let token = elastos_server::api::gateway::issue_gateway_owned_home_cli_launch_grant(
+            &default_data_dir(),
+        )?;
+        writeln!(std::io::stdout().lock(), "{token}")?;
+        return Ok(());
+    }
     let snapshot = gather_snapshot().await?;
 
     if json {

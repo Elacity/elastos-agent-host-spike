@@ -400,6 +400,36 @@ pub fn issue_gateway_owned_home_cli_launch_token(
     ))
 }
 
+/// Give an authenticated Home owner a grant for the two headless Home launch
+/// operations. The gateway-owned terminal supplies the session context; the
+/// existing projection issuer supplies the signer, session check and expiry.
+pub fn issue_gateway_owned_home_cli_launch_grant(
+    data_dir: &std::path::Path,
+) -> anyhow::Result<String> {
+    let context = gateway_owned_home_cli_launch_context_from_env(data_dir)?
+        .ok_or_else(|| anyhow::anyhow!("an authenticated Home CLI session is required"))?;
+    issue_home_cli_launch_grant_for_context(data_dir, &context)
+}
+
+fn issue_home_cli_launch_grant_for_context(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<String> {
+    if context.root().kind() != Some(crate::auth::PrincipalKind::Human) {
+        anyhow::bail!("a human Home owner is required");
+    }
+    gateway_home_system::require_admin_principal(
+        &gateway_home_token::home_launch_auth_data_dir(data_dir),
+        context,
+    )?;
+    gateway_home_token::issue_home_projection_launch_token_with_context(
+        data_dir,
+        "home-launch",
+        HOME_CLI_SHELL_ID,
+        context,
+    )
+}
+
 pub fn gateway_owned_home_cli_active_shell_snapshot(
     data_dir: &std::path::Path,
 ) -> anyhow::Result<Option<serde_json::Value>> {

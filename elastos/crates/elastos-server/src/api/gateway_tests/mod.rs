@@ -73,10 +73,16 @@ fn test_browser_request(host: &'static str, origin: &'static str) -> axum::http:
     }
 }
 
-fn cli_home_launch_grant(data_dir: &std::path::Path) -> String {
-    let context = local_home_launch_token_context(data_dir).unwrap();
-    issue_home_projection_launch_token_with_context(data_dir, "home-launch", "home-cli", &context)
-        .unwrap()
+fn owner_cli_home_launch_grant(data_dir: &std::path::Path, owner: &TestPasskeyAuthority) -> String {
+    let context = home_launch_token_context_from_parts(
+        data_dir,
+        &owner.principal_id,
+        &owner.session_id,
+        Some(&owner.proof_binding_id),
+        &owner.grant_id,
+    )
+    .unwrap();
+    issue_home_cli_launch_grant_for_context(data_dir, &context).unwrap()
 }
 
 fn agent_home_token(data_dir: &std::path::Path) -> String {

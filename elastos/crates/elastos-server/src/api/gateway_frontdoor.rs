@@ -243,6 +243,7 @@ pub(super) async fn gateway_admission(
     }
     let read = method == Method::GET || method == Method::HEAD;
     if path.starts_with("/api/apps/home/")
+        && path != "/api/apps/home/launch"
         && gateway_home_system::require_home_active_shell_wallet_authority(&state.data_dir, headers)
             .is_err()
     {

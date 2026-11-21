@@ -790,6 +790,22 @@ pub(crate) fn require_home_page_or_cli_launch_context(
     Ok(context)
 }
 
+/// Identify the verified projection before Home's general wallet authority
+/// can consider it. Only the exact launch routes consume this grant.
+pub(crate) fn verified_home_cli_launch_grant(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+) -> bool {
+    require_home_launch_token_for_any_from_with_origin(
+        data_dir,
+        headers,
+        &["home-cli"],
+        None,
+        HomeLaunchOriginPolicy::InternalShell,
+    )
+    .is_ok_and(|required| required.launch_context.selected_resource == "home-launch")
+}
+
 fn require_home_page_launch_request(headers: &HeaderMap) -> anyhow::Result<()> {
     let page = (|| {
         let origin = home_browser_origin(headers)?;
