@@ -3,6 +3,7 @@
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Rendered only by the macOS start arm.
 const HEAD: &[&str] = &["(version 1)", "(deny default)", "(deny network*)"];
 
 /// Runtime-owned model launch inputs. Each numbered socket is a bound literal;
@@ -44,7 +45,7 @@ fn model_inputs() -> Vec<String> {
 }
 
 /// Render `rows` and the macOS process-start baseline in profile order.
-#[allow(dead_code)] // The macOS arm renders this profile and then refuses.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only the macOS start arm calls this outside tests.
 pub(super) fn render_macos_profile(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
