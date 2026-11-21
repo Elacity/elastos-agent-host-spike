@@ -1313,6 +1313,19 @@ impl Runtime {
         let signer = self
             .verify_capsule_signature(&manifest, path, admitted_bytes.as_deref())
             .await?;
+        // A folder manifest has no dependency CID field. Only the by-CID
+        // entry can verify a signed dependency closure; refuse loose members
+        // before the component provider receives any bytes.
+        if let Some(requirement) = manifest
+            .requires
+            .first()
+            .filter(|_| manifest.is_component_capsule())
+        {
+            return Err(ElastosError::InvalidManifest(format!(
+                "bundle_requirement_unpinned: {}",
+                requirement.name
+            )));
+        }
         if let Some(bytes) = &admitted_bytes {
             crate::component::validate_component_imports_for_manifest(bytes, &manifest)
                 .map_err(ElastosError::InvalidManifest)?;
@@ -3682,6 +3695,43 @@ pub(crate) mod tests {
         .unwrap();
         std::fs::write(dir.join("app.component.wasm"), &component).unwrap();
         component
+    }
+
+    #[tokio::test]
+    async fn local_component_refuses_unpinned_requirement_before_load() {
+        let (runtime, temp) = component_runtime().await;
+        let key = elastos_runtime::signature::SigningKey::from_bytes(&[92; 32]);
+        runtime
+            .configure_capsule_admission(
+                temp.path(),
+                &[hex::encode(key.verifying_key().to_bytes())],
+                true,
+            )
+            .await
+            .unwrap();
+        let folder = temp.path().join("local-requires");
+        let bytes = signed_component_folder(&folder, "local-requires", &key);
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(folder.join("capsule.json")).unwrap()).unwrap();
+        manifest.requires.push(elastos_common::CapsuleRequirement {
+            name: "needed".to_string(),
+            kind: elastos_common::RequirementKind::Capsule,
+        });
+        elastos_runtime::signature::sign_capsule(&key, &mut manifest, &hash_content(&bytes))
+            .unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let error = runtime.run_local(&folder, Vec::new()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("bundle_requirement_unpinned: needed"),
+            "{error}"
+        );
+        assert!(runtime.list_capsules().await.is_empty());
     }
 
     /// A component folder outside dev mode is walked once by the folder gate,

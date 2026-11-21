@@ -1853,6 +1853,79 @@ async fn a_pinned_bundle_that_is_not_in_the_store_refuses_the_start() {
 /// that pins one staged bundle signed by another publisher and starts (the
 /// control), then changes one thing about the pinned bundle.
 #[tokio::test]
+async fn slice_4a_valid_signed_component_closure_launches() {
+    let signer = key(93);
+    let home = Home::trusting(&[&signer]).await;
+    let member = home
+        .staged("needed", &manifest("needed"), &quiet_component(), &signer)
+        .await;
+    let root = home
+        .staged(
+            "root",
+            &manifest_pinning("root", &[("needed", &member)]),
+            &quiet_component(),
+            &signer,
+        )
+        .await;
+    assert_eq!(home.run(&root, None).await.unwrap().0, "root");
+}
+
+#[tokio::test]
+async fn slice_4a_unsigned_dependency_refuses_before_load() {
+    let signer = key(94);
+    let home = Home::trusting(&[&signer]).await;
+    let member = home
+        .staged("needed", &manifest("needed"), &quiet_component(), &signer)
+        .await;
+    let root = home
+        .staged(
+            "root",
+            &manifest_pinning("root", &[("needed", &member)]),
+            &quiet_component(),
+            &signer,
+        )
+        .await;
+    std::fs::remove_file(bundle_signature_path(
+        &home.data(),
+        &member.parse().unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        home.run(&root, None).await.unwrap_err(),
+        under("needed", BundleRefusal::Unsigned)
+    );
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
+#[tokio::test]
+async fn slice_4a_changed_dependency_refuses_before_load() {
+    let signer = key(95);
+    let home = Home::trusting(&[&signer]).await;
+    let bytes = quiet_component();
+    let member = home
+        .staged("needed", &manifest("needed"), &bytes, &signer)
+        .await;
+    let root = home
+        .staged(
+            "root",
+            &manifest_pinning("root", &[("needed", &member)]),
+            &bytes,
+            &signer,
+        )
+        .await;
+    let mut changed = bytes;
+    *changed.last_mut().unwrap() ^= 1;
+    home.overwrite(&member, ENTRYPOINT, &changed);
+    let refusal = home.run(&root, None).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_cid_mismatch");
+    assert!(
+        refusal.to_string().contains("requirement needed"),
+        "{refusal}"
+    );
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
+#[tokio::test]
 async fn a_pinned_bundle_is_held_to_every_check_the_asked_one_is() {
     let (publisher, other) = (key(63), key(64));
     let home = Home::trusting(&[&publisher, &other]).await;

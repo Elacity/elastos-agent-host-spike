@@ -1549,6 +1549,26 @@ fn trust_column_counts_and_chokepoint_queue() {
 }
 
 #[test]
+fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
+    let vm_rows: Vec<_> = rows()
+        .into_iter()
+        .filter(|row| row.kind == "VM capsule; image check pending 4b")
+        .collect();
+    assert_eq!(vm_rows.len(), 4);
+    let columns = columns();
+    for row in vm_rows {
+        let column = columns
+            .iter()
+            .find(|column| {
+                (column.file, column.function, column.call) == (row.file, row.function, row.call)
+            })
+            .unwrap();
+        assert_eq!(column.trust_root, "none");
+        assert_eq!(column.verified_when, "never");
+    }
+}
+
+#[test]
 fn installed_component_start_callers_keep_the_signed_gate() {
     let sources = source::production_sources();
     for (file, function) in [

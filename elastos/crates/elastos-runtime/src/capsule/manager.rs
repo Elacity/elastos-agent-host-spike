@@ -166,6 +166,14 @@ impl CapsuleManager {
 
         check_entrypoint_file(path, &manifest.entrypoint).await?;
 
+        // Component bundles need the server's checked signed closure. This
+        // legacy manager has only a path and cannot verify pinned members.
+        if manifest.is_component_capsule() {
+            return Err(ElastosError::Compute(
+                "component_closure_required: launch a signed bundle by CID".to_string(),
+            ));
+        }
+
         // Generate unique ID
         let capsule_id = CapsuleId::new();
 
@@ -493,6 +501,28 @@ mod tests {
         );
         assert_eq!(loads.load(Ordering::SeqCst), 0);
         assert!(manager.list_running().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn component_manifest_requires_checked_closure_before_compute_load() {
+        let (manager, loads) = create_test_manager_with_loads();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.wasm"), b"component").unwrap();
+        let mut manifest = create_test_manifest();
+        manifest.runtime_abi = Some(elastos_common::CapsuleRuntimeAbi::ElastosComponentV1);
+        manifest.execution = Some(elastos_common::CapsuleExecution::Component);
+        manifest.bus_contract = Some(elastos_common::ELASTOS_BUS_V1_CONTRACT.to_string());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v1_wit_sha256());
+        manifest.validate().unwrap();
+        let error = manager
+            .launch_local(dir.path(), manifest, TrustLevel::Untrusted)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("component_closure_required"),
+            "{error}"
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
