@@ -684,6 +684,7 @@ fn status_from_offers(offers: &[serde_json::Value]) -> AiProviderStatus {
     }
 }
 
+#[cfg(unix)]
 fn write_model_provider_config_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -719,6 +720,15 @@ fn write_model_provider_config_atomic(path: &Path, bytes: &[u8]) -> anyhow::Resu
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(windows)]
+fn write_model_provider_config_atomic(_path: &Path, _bytes: &[u8]) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "owner-only model provider configuration writes are unsupported on Windows",
+    )
+    .into())
 }
 
 fn strip_runtime_share_fields(mut offer: serde_json::Value) -> serde_json::Value {
@@ -1716,6 +1726,7 @@ pub(crate) fn seed_model_provider_operator_offers_for_test(
     persist_model_provider_operator_offers(data_dir, offers)
 }
 
+#[cfg(unix)]
 fn validate_model_provider_private_directory(path: &Path, label: &str) -> anyhow::Result<()> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {label} {}", path.display()))?;
@@ -1732,6 +1743,16 @@ fn validate_model_provider_private_directory(path: &Path, label: &str) -> anyhow
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_model_provider_private_directory(_path: &Path, _label: &str) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "owner-only model provider directories are unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn validate_model_provider_private_file(
     path: &Path,
     metadata: &fs::Metadata,
@@ -1749,6 +1770,19 @@ fn validate_model_provider_private_file(
     }
     let _ = path;
     Ok(())
+}
+
+#[cfg(windows)]
+fn validate_model_provider_private_file(
+    _path: &Path,
+    _metadata: &fs::Metadata,
+    _label: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "owner-only model provider files are unsupported on Windows",
+    )
+    .into())
 }
 
 fn read_model_provider_private_file(
@@ -1787,8 +1821,9 @@ fn read_model_provider_private_file(
     Ok(bytes)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod hosted_decision_write_fault_tests {
+    #![cfg(unix)]
     #[tokio::test]
     async fn decision_writer_reports_post_rename_durability_failure() {
         const CHILD: &str = "ELASTOS_TEST_HOSTED_POST_RENAME_FAULT";

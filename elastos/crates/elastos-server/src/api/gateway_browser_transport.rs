@@ -10,7 +10,9 @@ use hmac::{Hmac, Mac};
 use rand::RngCore as _;
 use serde::Deserialize;
 use sha1::Sha1;
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Read as _;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
@@ -734,6 +736,7 @@ fn browser_vz_value_contains_secret(value: &serde_json::Value) -> bool {
     }
 }
 
+#[cfg(unix)]
 fn read_browser_vz_transport_config(
     data_dir: &Path,
 ) -> Result<Option<BrowserVzTransportConfig>, String> {
@@ -775,6 +778,13 @@ fn read_browser_vz_transport_config(
     let config = serde_json::from_slice(&bytes)
         .map_err(|err| format!("Browser VZ transport config is invalid JSON: {err}"))?;
     Ok(Some(config))
+}
+
+#[cfg(windows)]
+fn read_browser_vz_transport_config(
+    _data_dir: &Path,
+) -> Result<Option<BrowserVzTransportConfig>, String> {
+    Err("Browser VZ transport file custody is unsupported on Windows".to_string())
 }
 
 fn validate_browser_vz_transport_config(config: &BrowserVzTransportConfig) -> Result<(), String> {

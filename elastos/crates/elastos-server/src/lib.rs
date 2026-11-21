@@ -78,6 +78,10 @@ pub(crate) mod page_launch;
 pub mod protected_content_config;
 pub mod protected_content_runtime;
 pub mod provider_resource;
+#[cfg(unix)]
+pub mod release_publication;
+#[cfg(windows)]
+#[path = "release_publication_windows.rs"]
 pub mod release_publication;
 pub mod resource_bridge;
 pub mod room_service;

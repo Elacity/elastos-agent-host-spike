@@ -1,20 +1,33 @@
 //! Signed installed Home controller. The controller survives replacement of Runtime.
 //! Its private receipt binds the signed controller and the retained launch settings.
 
+#[cfg(unix)]
+pub(crate) mod child;
+#[cfg(windows)]
+#[path = "update_controller/child_windows.rs"]
 pub(crate) mod child;
 
 pub fn watch_parent() -> anyhow::Result<()> {
     child::watch_parent()
 }
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +49,7 @@ const ACTIVE_REQUEST: &str = "active-request.json";
 const REFUSED: &str = "refused-releases.json";
 const REFUSED_SCHEMA: &str = "elastos.update-controller.refused-releases/v1";
 const MAX_REFUSED: usize = 8;
+#[cfg(unix)]
 const LEASE_ENV: &str = "ELASTOS_UPDATE_CONTROLLER_LEASE";
 const HOST_ENV: &str = "ELASTOS_UPDATE_CONTROLLER_HOST";
 const MAX_PRIVATE_JSON: u64 = 256 * 1024;
@@ -53,6 +67,7 @@ const MAX_RUNTIME_LOG: u64 = 16 * 1024 * 1024;
 // Home reads provider and Browser settings from its installed private config files.
 // Persist the paths, desktop session, locale, and Runtime bindings needed to restart this Home.
 // Wallet's existing API key binding remains in the same owner-only receipt.
+#[cfg(unix)]
 const LAUNCH_ENVIRONMENT: &[&str] = &[
     "HOME",
     "XDG_DATA_HOME",
@@ -95,6 +110,7 @@ const LAUNCH_ENVIRONMENT: &[&str] = &[
     "ELASTOS_QUIET_RUNTIME_NOTICES",
 ];
 
+#[cfg(unix)]
 fn allowed_launch_key(key: &std::ffi::OsStr) -> bool {
     LAUNCH_ENVIRONMENT
         .iter()
@@ -158,6 +174,7 @@ fn restart_recovery_handoff(data: &Path, binary: &Path) -> Result<Option<Recover
 
 /// Exec keeps the terminal's foreground process and the same lease description.
 /// Returns only on failure.
+#[cfg(unix)]
 fn exec_controller(controller: &Path, receipt: &Path, lease: &FileLock) -> anyhow::Error {
     let inherited = unsafe { libc::fcntl(lease.as_raw_fd(), libc::F_DUPFD, 3) };
     if inherited < 0 {
@@ -177,6 +194,11 @@ fn exec_controller(controller: &Path, receipt: &Path, lease: &FileLock) -> anyho
     error.into()
 }
 
+#[cfg(windows)]
+fn exec_controller(_controller: &Path, _receipt: &Path, _lease: &FileLock) -> anyhow::Error {
+    unsupported_windows("update controller descriptor handoff")
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LaunchPlan {
@@ -186,6 +208,7 @@ struct LaunchPlan {
 }
 
 impl LaunchPlan {
+    #[cfg(unix)]
     fn capture() -> Result<Self> {
         Ok(Self::capture_environment(
             std::env::vars_os(),
@@ -193,6 +216,12 @@ impl LaunchPlan {
         ))
     }
 
+    #[cfg(windows)]
+    fn capture() -> Result<Self> {
+        Err(unsupported_windows("update controller launch plan capture"))
+    }
+
+    #[cfg(unix)]
     fn capture_environment(
         environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
         cwd: PathBuf,
@@ -212,6 +241,7 @@ impl LaunchPlan {
         }
     }
 
+    #[cfg(unix)]
     fn command(
         &self,
         binary: &Path,
@@ -240,6 +270,16 @@ impl LaunchPlan {
             .env("ELASTOS_UPDATE_GENERATION", generation)
             .env("ELASTOS_UPDATE_RESTART", if restart { "1" } else { "0" });
         Ok(command)
+    }
+
+    #[cfg(windows)]
+    fn command(
+        &self,
+        _binary: &Path,
+        _generation: &str,
+        _restart: bool,
+    ) -> Result<tokio::process::Command> {
+        Err(unsupported_windows("update controller child launch"))
     }
 
     fn sha256(&self) -> Result<String> {
@@ -405,6 +445,7 @@ fn refuse_other_owner_action(directory: &Path) -> Result<()> {
     Err(ApprovalReplaced.into())
 }
 
+#[cfg(unix)]
 fn owner_action_guard(data_dir: &Path) -> Result<(PathBuf, FileLock)> {
     let data_dir = fs::canonicalize(data_dir)?;
     let directory = controller_directory(&data_dir)?;
@@ -427,6 +468,11 @@ fn owner_action_guard(data_dir: &Path) -> Result<(PathBuf, FileLock)> {
         }
     })?;
     Ok((directory, lock))
+}
+
+#[cfg(windows)]
+fn owner_action_guard(_data_dir: &Path) -> Result<(PathBuf, FileLock)> {
+    Err(unsupported_windows("update owner action lock"))
 }
 
 fn check_owner_effect(
@@ -646,7 +692,7 @@ fn reuse_home_inputs_after_space_refusal(
         Err(error) if controller_space_error(&error) => {
             let installed = crate::installed_release::read_without_migration(data, binary, source)?;
             if prepare_controller(directory, binary, &installed.binary_sha256, |_, _| {
-                Err(std::io::Error::from_raw_os_error(libc::ENOSPC).into())
+                Err(storage_full_error().into())
             })? {
                 Ok(installed)
             } else {
@@ -818,8 +864,11 @@ pub async fn run(receipt_path: PathBuf) -> Result<()> {
         #[cfg(test)]
         test_readiness: None,
     };
+    #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    #[cfg(unix)]
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(unix)]
     let result = tokio::select! {
         result = async {
             controller.reconcile_pending().await?;
@@ -829,6 +878,13 @@ pub async fn run(receipt_path: PathBuf) -> Result<()> {
         _ = interrupt.recv() => Ok(()),
         _ = term.recv() => Ok(()),
     };
+    #[cfg(windows)]
+    let result = async {
+        controller.reconcile_pending().await?;
+        controller.complete_reconciliation().await?;
+        controller.serve().await
+    }
+    .await;
     let closed = controller.close_carrier().await;
     let stopped = controller.stop_child().await;
     result.and(closed).and(stopped)
@@ -1631,7 +1687,7 @@ fn installed_source(data_dir: &Path) -> Result<TrustedSource> {
         .context("Installed trusted source is unavailable.")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn admit_installed_release(signed: &[u8], source: &TrustedSource, binary: &Path) -> Result<String> {
     let expected = admit_release_digest(signed, source)?;
     anyhow::ensure!(
@@ -1701,6 +1757,7 @@ fn validate_retained_receipt_record(receipt: &Receipt) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn controller_file_digest(path: &Path) -> Result<Option<String>> {
     if !path_present(path)? {
         return Ok(None);
@@ -1727,6 +1784,13 @@ fn controller_file_digest(path: &Path) -> Result<Option<String>> {
         digest.update(&buffer[..length]);
     }
     Ok(Some(hex::encode(digest.finalize())))
+}
+
+#[cfg(windows)]
+fn controller_file_digest(_path: &Path) -> Result<Option<String>> {
+    Err(unsupported_windows(
+        "retained update controller file custody",
+    ))
 }
 
 pub(crate) const REFUSED_MESSAGE: &str = "This update was refused because the publisher's signed release is not valid for this Home. Your current version is unchanged.";
@@ -1787,7 +1851,27 @@ fn controller_space_error(error: &anyhow::Error) -> bool {
         .is_some()
         || error
             .downcast_ref::<std::io::Error>()
-            .is_some_and(|error| error.raw_os_error() == Some(libc::ENOSPC))
+            .is_some_and(storage_full)
+}
+
+#[cfg(unix)]
+fn storage_full(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ENOSPC)
+}
+
+#[cfg(windows)]
+fn storage_full(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::StorageFull
+}
+
+#[cfg(unix)]
+fn storage_full_error() -> std::io::Error {
+    std::io::Error::from_raw_os_error(libc::ENOSPC)
+}
+
+#[cfg(windows)]
+fn storage_full_error() -> std::io::Error {
+    std::io::Error::from(std::io::ErrorKind::StorageFull)
 }
 
 // Caller holds the controller lease and installation lock through receipt publication.
@@ -1883,6 +1967,7 @@ pub(crate) fn installed_host_binary(data_dir: &Path) -> Result<Option<PathBuf>> 
     Ok(Some(receipt.binary))
 }
 
+#[cfg(unix)]
 fn controller_directory(data_dir: &Path) -> Result<PathBuf> {
     anyhow::ensure!(
         data_dir.is_absolute() && fs::canonicalize(data_dir)? == data_dir,
@@ -1901,6 +1986,12 @@ fn controller_directory(data_dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(windows)]
+fn controller_directory(_data_dir: &Path) -> Result<PathBuf> {
+    Err(unsupported_windows("update controller directory custody"))
+}
+
+#[cfg(unix)]
 fn check_controller_directory(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     anyhow::ensure!(
@@ -1913,6 +2004,12 @@ fn check_controller_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn check_controller_directory(_path: &Path) -> Result<()> {
+    Err(unsupported_windows("update controller directory ownership"))
+}
+
+#[cfg(unix)]
 fn acquire_lease(directory: &Path) -> Result<FileLock> {
     let path = directory.join("controller.lock");
     let file = OpenOptions::new()
@@ -1932,6 +2029,12 @@ fn acquire_lease(directory: &Path) -> Result<FileLock> {
         .context("Home already has an update controller. Keep its terminal open.")
 }
 
+#[cfg(windows)]
+fn acquire_lease(_directory: &Path) -> Result<FileLock> {
+    Err(unsupported_windows("update controller lease"))
+}
+
+#[cfg(unix)]
 fn inherited_or_new_lease(directory: &Path) -> Result<FileLock> {
     let Ok(value) = std::env::var(LEASE_ENV) else {
         return acquire_lease(directory);
@@ -1957,6 +2060,12 @@ fn inherited_or_new_lease(directory: &Path) -> Result<FileLock> {
     FileLock::try_exclusive(file).context("controller lease is busy")
 }
 
+#[cfg(windows)]
+fn inherited_or_new_lease(_directory: &Path) -> Result<FileLock> {
+    Err(unsupported_windows("update controller inherited lease"))
+}
+
+#[cfg(unix)]
 fn copy_controller(binary: &Path, controller: &Path, expected: &str) -> Result<()> {
     let temporary = controller.with_extension("partial");
     if fs::symlink_metadata(&temporary).is_ok() {
@@ -2027,6 +2136,12 @@ fn copy_controller(binary: &Path, controller: &Path, expected: &str) -> Result<(
     result
 }
 
+#[cfg(windows)]
+fn copy_controller(_binary: &Path, _controller: &Path, _expected: &str) -> Result<()> {
+    Err(unsupported_windows("retained update controller copy"))
+}
+
+#[cfg(unix)]
 fn check_private_file(file: &File) -> Result<()> {
     let metadata = file.metadata()?;
     anyhow::ensure!(
@@ -2039,6 +2154,7 @@ fn check_private_file(file: &File) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_regular_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
@@ -2058,6 +2174,12 @@ fn read_regular_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(windows)]
+fn read_regular_bounded(_path: &Path, _limit: u64) -> Result<Vec<u8>> {
+    Err(unsupported_windows("update controller bounded file reads"))
+}
+
+#[cfg(unix)]
 fn read_private_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let file = OpenOptions::new()
         .read(true)
@@ -2077,6 +2199,14 @@ fn read_private_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+#[cfg(windows)]
+fn read_private_json<T: serde::de::DeserializeOwned>(_path: &Path) -> Result<T> {
+    Err(unsupported_windows(
+        "update controller private record reads",
+    ))
+}
+
+#[cfg(unix)]
 fn write_new_private(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     anyhow::ensure!(
         bytes.len() as u64 <= MAX_PRIVATE_JSON,
@@ -2093,6 +2223,14 @@ fn write_new_private(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn write_new_private(_path: &Path, _bytes: &[u8], _mode: u32) -> Result<()> {
+    Err(unsupported_windows(
+        "update controller private record creation",
+    ))
+}
+
+#[cfg(unix)]
 fn write_private(path: &Path, value: &impl Serialize) -> Result<()> {
     if fs::symlink_metadata(path).is_ok() {
         let file = OpenOptions::new()
@@ -2114,6 +2252,14 @@ fn write_private(path: &Path, value: &impl Serialize) -> Result<()> {
     result
 }
 
+#[cfg(windows)]
+fn write_private(_path: &Path, _value: &impl Serialize) -> Result<()> {
+    Err(unsupported_windows(
+        "update controller private record publication",
+    ))
+}
+
+#[cfg(unix)]
 fn open_private_log(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .append(true)
@@ -2123,6 +2269,20 @@ fn open_private_log(path: &Path) -> Result<File> {
         .open(path)?;
     check_private_file(&file)?;
     Ok(file)
+}
+
+#[cfg(windows)]
+fn open_private_log(_path: &Path) -> Result<File> {
+    Err(unsupported_windows("update controller private log"))
+}
+
+#[cfg(windows)]
+fn unsupported_windows(operation: &'static str) -> anyhow::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{operation} is unsupported on Windows"),
+    )
+    .into()
 }
 
 /// Opens runtime.log for one Home start and writes that start's header. A log past
@@ -2440,5 +2600,19 @@ fn valid_hash(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests;
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_controller_before_creating_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let error = controller_directory(temp.path()).unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::Unsupported)
+    );
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}

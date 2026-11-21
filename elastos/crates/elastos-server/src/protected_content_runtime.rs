@@ -3539,6 +3539,11 @@ fn stage_runtime_media_provider_input(
     destination_path: &Path,
     expected_digest: Digest32,
 ) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Runtime media input custody is unsupported on Windows",
+    ))?;
     if source_bytes.is_empty()
         || source_bytes.len() as u64 > MEDIA_PROVIDER_MAX_INPUT_BYTES
         || runtime_media_source_digest(source_bytes) != expected_digest
@@ -3580,15 +3585,12 @@ fn open_runtime_media_source_file(path: &Path) -> anyhow::Result<fs::File> {
 
 #[cfg(not(unix))]
 fn open_runtime_media_source_file(path: &Path) -> anyhow::Result<fs::File> {
-    let file = fs::File::open(path)
-        .map_err(|_| anyhow::anyhow!("Runtime custody media preparation input is invalid"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| anyhow::anyhow!("Runtime custody media preparation input is invalid"))?;
-    if !metadata.is_file() {
-        anyhow::bail!("Runtime custody media preparation input is invalid");
-    }
-    Ok(file)
+    let _ = path;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Runtime media source no-follow admission is unsupported on Windows",
+    )
+    .into())
 }
 
 fn load_validated_runtime_prepared_media(
@@ -3741,6 +3743,11 @@ fn read_runtime_media_prepared_part(
     require_non_empty: bool,
     max_output_part_bytes: u64,
 ) -> anyhow::Result<Vec<u8>> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Runtime media output no-follow admission is unsupported on Windows",
+    ))?;
     #[cfg(unix)]
     let file = {
         let mut options = fs::OpenOptions::new();
@@ -8091,6 +8098,11 @@ fn runtime_storage_temp_path(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn write_owner_only_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Runtime owner-only storage is unsupported on Windows",
+    ))?;
     if let Some(parent) = path.parent() {
         #[cfg(unix)]
         ensure_owner_only_runtime_storage_parent(parent)?;

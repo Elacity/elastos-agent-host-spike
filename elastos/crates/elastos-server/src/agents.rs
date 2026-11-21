@@ -198,6 +198,8 @@ fn load(data_dir: &Path, owner_file: &[PrincipalRecord]) -> anyhow::Result<Agent
 /// file. Refuses a path that is not a regular file under regular
 /// directories, and a file anyone but its owner can read or write.
 fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
+    #[cfg(windows)]
+    Err::<(), _>("agent file custody is unsupported on Windows")?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(NOT_REGULAR),

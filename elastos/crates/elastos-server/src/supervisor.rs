@@ -2043,6 +2043,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn on_demand_chat_home_launch_uses_carrier_and_refuses_checksum_mismatch() {
         let capsule = include_bytes!("../../../../capsules/chat-room/capsule.json");
@@ -2175,6 +2176,7 @@ mod tests {
     }
 
     /// What a test puts at the install CID record path before an install.
+    #[cfg(unix)]
     #[derive(Clone, Copy)]
     enum RecordPlant {
         /// A link to a sentinel file outside `capsules/`.
@@ -2183,6 +2185,7 @@ mod tests {
         Folder,
     }
 
+    #[cfg(unix)]
     fn plant_at_record(data: &Path, dir: &Path, plant: RecordPlant) {
         let record = crate::setup::install_cid_record(dir).unwrap();
         std::fs::create_dir_all(record.parent().unwrap()).unwrap();
@@ -2199,6 +2202,7 @@ mod tests {
     /// After an install over `plant`, only one entry with the record's name is
     /// beside `dir`. A link kept its sentinel's bytes and is now a regular
     /// record of the walk; a folder is unchanged, so the install has no record.
+    #[cfg(unix)]
     fn assert_install_over(data: &Path, dir: &Path, plant: RecordPlant, files: &[&str]) {
         let record = crate::setup::install_cid_record(dir).unwrap();
         let name = record.file_name().unwrap().to_str().unwrap();
@@ -2227,6 +2231,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn capsule_install_records_its_walk_cid_and_a_reinstall_updates_it() {
         let capsule = include_bytes!("../../../../capsules/chat-room/capsule.json");

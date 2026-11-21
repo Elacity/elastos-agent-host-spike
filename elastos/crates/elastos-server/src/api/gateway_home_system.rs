@@ -1420,6 +1420,7 @@ fn unconfigured_people_discovery_summary() -> HomePeopleDiscoverySummary {
 
 #[cfg(test)]
 mod discovery_summary_tests {
+    #![cfg(unix)]
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
@@ -9619,6 +9620,7 @@ mod home_events_pacing_tests {
 /// principal-id rule.
 #[cfg(test)]
 mod stored_root_tests {
+    #![cfg(unix)]
     use super::*;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

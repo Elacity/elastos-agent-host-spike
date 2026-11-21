@@ -200,6 +200,11 @@ pub(crate) fn load_existing_device_did(data_dir: &Path) -> anyhow::Result<Option
 pub(crate) fn load_existing_device_signing_key(
     data_dir: &Path,
 ) -> anyhow::Result<Option<(SigningKey, String)>> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "device key custody is unsupported on Windows",
+    ))?;
     let device_key = data_dir.join("identity").join("device.key");
     let mut options = std::fs::OpenOptions::new();
     options.read(true);

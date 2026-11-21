@@ -440,6 +440,7 @@ pub(crate) fn create_owner_only_file(path: &Path, bytes: &[u8], label: &str) -> 
     result
 }
 
+#[cfg(unix)]
 fn validate_owner_only_parent(path: &Path) -> anyhow::Result<PathBuf> {
     let parent = path
         .parent()
@@ -453,6 +454,16 @@ fn validate_owner_only_parent(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(parent.to_path_buf())
 }
 
+#[cfg(windows)]
+fn validate_owner_only_parent(_path: &Path) -> anyhow::Result<PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration owner-only parent admission is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn validate_private_output_target(path: &Path) -> anyhow::Result<()> {
     let parent = validate_owner_only_parent(path)?;
     #[cfg(unix)]
@@ -469,6 +480,16 @@ fn validate_private_output_target(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_private_output_target(_path: &Path) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration private output admission is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn validate_owner_only_regular_file(
     path: &Path,
     metadata: &fs::Metadata,
@@ -485,6 +506,19 @@ fn validate_owner_only_regular_file(
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn validate_owner_only_regular_file(
+    _path: &Path,
+    _metadata: &fs::Metadata,
+    _label: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration owner-only file admission is unsupported on Windows",
+    )
+    .into())
 }
 
 fn random_hex_128() -> anyhow::Result<String> {

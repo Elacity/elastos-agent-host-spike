@@ -103,6 +103,11 @@ async fn start_gateway_server_with_shutdown(
     on_ready: Option<fn(&str)>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "gateway child ownership and private local control are unsupported on Windows",
+    ))?;
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
     let listener = TcpListener::bind(addr).await?;
     let local_control_registry = provider_registry.clone();
@@ -542,6 +547,7 @@ mod trusted_gateway_tests {
         drop(helper);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn browser_home_ready_serves_router_and_shutdown_releases_resources() {
         let temp = tempfile::tempdir().unwrap();

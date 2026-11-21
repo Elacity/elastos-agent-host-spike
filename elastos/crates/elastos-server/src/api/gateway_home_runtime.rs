@@ -2076,6 +2076,7 @@ mod tests {
 
     /// A legacy Services peer-contacts object the migration cannot read is not
     /// the typed refusal, so the wrapper keeps the error and the launch fails.
+    #[cfg(unix)]
     #[test]
     fn a_legacy_contacts_migration_error_other_than_the_refusal_fails_launch() {
         use super::super::gateway_tests::r8d_passkey_rows::passkey_person;

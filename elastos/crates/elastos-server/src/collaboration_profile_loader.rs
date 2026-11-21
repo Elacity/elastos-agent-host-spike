@@ -498,6 +498,11 @@ fn random_hex_128() -> anyhow::Result<String> {
 }
 
 fn ensure_owner_only_directory(path: &Path) -> anyhow::Result<bool> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration profile directory custody is unsupported on Windows",
+    ))?;
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             validate_owner_only_directory(path, &metadata)?;
@@ -547,22 +552,34 @@ fn validate_owner_only_regular_file(path: &Path, metadata: &fs::Metadata) -> any
     validate_owner_and_mode(path, metadata)
 }
 
+#[cfg(unix)]
 fn validate_owner_and_mode(path: &Path, metadata: &fs::Metadata) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-            anyhow::bail!(
-                "collaboration config path is not owner-only: {}",
-                path.display()
-            );
-        }
+    use std::os::unix::fs::MetadataExt;
+    if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+        anyhow::bail!(
+            "collaboration config path is not owner-only: {}",
+            path.display()
+        );
     }
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_owner_and_mode(_path: &Path, _metadata: &fs::Metadata) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration profile owner-only admission is unsupported on Windows",
+    )
+    .into())
+}
+
 /// Opens or creates the owner-only head lock and waits for its exclusive lock.
 fn lock_owner_only_file(path: &Path) -> anyhow::Result<FileLock> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration profile lock custody is unsupported on Windows",
+    ))?;
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
     #[cfg(unix)]

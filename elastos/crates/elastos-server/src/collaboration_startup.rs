@@ -1021,6 +1021,7 @@ fn decode_canonical_base64(
     Ok(decoded)
 }
 
+#[cfg(unix)]
 fn validate_owner_only_regular_file(path: &Path, metadata: &fs::Metadata) -> anyhow::Result<()> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         anyhow::bail!(
@@ -1039,6 +1040,15 @@ fn validate_owner_only_regular_file(path: &Path, metadata: &fs::Metadata) -> any
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn validate_owner_only_regular_file(_path: &Path, _metadata: &fs::Metadata) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration startup file custody is unsupported on Windows",
+    )
+    .into())
 }
 
 fn now_secs() -> u64 {

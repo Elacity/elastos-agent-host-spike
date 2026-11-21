@@ -3070,6 +3070,7 @@ async fn an_admin_with_two_passkeys_serves_a_shared_exit_grant() {
     assert_eq!(grant.grant_id, grant_id);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_carrier_exit_admission_requires_current_issued_contact_grant() {
     use crate::api::gateway::gateway_browser::{

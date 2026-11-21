@@ -10594,6 +10594,7 @@ mod publish_tests {
         assert!(home.stat("Documents/stale.txt").await["publication"].is_null());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn publish_refuses_traversal_other_roots_and_links() {
         let home = home("did:key:z6MkPublishPaths").await;

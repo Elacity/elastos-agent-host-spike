@@ -1150,6 +1150,11 @@ fn consumed_path(data_dir: &Path, step_up_id: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn read_strict_json<T: serde::de::DeserializeOwned>(path: &Path, label: &str) -> anyhow::Result<T> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "passkey step-up record custody is unsupported on Windows",
+    ))?;
     let metadata =
         std::fs::symlink_metadata(path).map_err(|_| anyhow::anyhow!("{label} is unavailable"))?;
     if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 {
@@ -1224,6 +1229,11 @@ where
 }
 
 fn create_staging_file(parent: &Path, record_digest: &str) -> anyhow::Result<(PathBuf, File)> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "passkey step-up private staging is unsupported on Windows",
+    ))?;
     for _ in 0..8 {
         let nonce = gateway_home_token::uuid_like_token();
         let path = parent.join(format!(
@@ -1249,6 +1259,11 @@ fn create_staging_file(parent: &Path, record_digest: &str) -> anyhow::Result<(Pa
 }
 
 fn remove_staging_and_sync(path: &Path, parent: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "passkey step-up private staging cleanup is unsupported on Windows",
+    ))?;
     std::fs::remove_file(path)?;
     sync_directory(parent)
 }
@@ -1322,6 +1337,11 @@ fn ensure_private_record_root(root: &Path) -> anyhow::Result<()> {
 }
 
 fn ensure_private_directory(path: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "passkey step-up record custody is unsupported on Windows",
+    ))?;
     let (metadata, created) = match std::fs::symlink_metadata(path) {
         Ok(metadata) => (metadata, false),
         Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -1360,7 +1380,7 @@ fn set_private_directory_permissions(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn set_private_directory_permissions(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    anyhow::bail!("passkey step-up directory custody is unsupported on Windows")
 }
 
 #[cfg(unix)]
@@ -1371,7 +1391,7 @@ fn set_private_file_permissions(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn set_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    anyhow::bail!("passkey step-up file custody is unsupported on Windows")
 }
 
 #[cfg(unix)]
@@ -1382,7 +1402,7 @@ fn set_private_open_file_permissions(file: &File) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn set_private_open_file_permissions(_file: &File) -> anyhow::Result<()> {
-    Ok(())
+    anyhow::bail!("passkey step-up file custody is unsupported on Windows")
 }
 
 #[cfg(unix)]
@@ -1393,7 +1413,7 @@ fn sync_directory(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    anyhow::bail!("passkey step-up directory sync is unsupported on Windows")
 }
 
 fn passkey_step_up_error_response(err: anyhow::Error) -> Response {

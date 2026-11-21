@@ -11,7 +11,10 @@
 //! capability manager. A provider host serves peers over Carrier and nothing
 //! else.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::OpenOptions;
+#[cfg(unix)]
 use std::io::Write as _;
 use std::net::SocketAddr;
 #[cfg(unix)]
@@ -22,6 +25,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use elastos_runtime::provider::ProviderRegistry;
 
+#[cfg(unix)]
 use crate::server_infra;
 
 /// Where a running provider host publishes its readiness receipt.
@@ -337,6 +341,7 @@ impl ProviderHost {
 /// Order matters: prerequisites are checked before anything is spawned, the
 /// providers are registered before the Carrier node starts serving them, and
 /// the readiness receipt is published only once every registration succeeded.
+#[cfg(unix)]
 pub(crate) async fn compose(plan: &ProviderHostPlan) -> anyhow::Result<ProviderHost> {
     for hosted in &plan.providers {
         hosted.plane.check_prerequisites(&plan.data_dir)?;
@@ -413,6 +418,15 @@ pub(crate) async fn compose(plan: &ProviderHostPlan) -> anyhow::Result<ProviderH
     })
 }
 
+#[cfg(windows)]
+pub(crate) async fn compose(_plan: &ProviderHostPlan) -> anyhow::Result<ProviderHost> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native provider hosting requires an owner-only readiness receipt on Windows",
+    )
+    .into())
+}
+
 /// Host the planned providers until SIGTERM or SIGINT, then retract readiness.
 pub(crate) async fn run(plan: ProviderHostPlan) -> anyhow::Result<()> {
     let host = compose(&plan).await?;
@@ -446,6 +460,7 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 }
 
 /// Publish the owner-only readiness receipt peers' operators poll for.
+#[cfg(unix)]
 fn write_ready_receipt(
     path: &Path,
     did: &str,
@@ -491,6 +506,25 @@ fn write_ready_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_refuses_provider_host_before_side_effects() {
+        let temp = tempfile::tempdir().unwrap();
+        let plan = ProviderHostPlan {
+            data_dir: temp.path().to_path_buf(),
+            providers: Vec::new(),
+            carrier_addr: None,
+        };
+        let error = compose(&plan).await.err().unwrap();
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Unsupported)
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn provider_names_resolve_to_planes_and_registry_targets() {

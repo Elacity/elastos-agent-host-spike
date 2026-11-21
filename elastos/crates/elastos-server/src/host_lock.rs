@@ -410,6 +410,7 @@ impl BinarySnapshotReader for RealBinarySnapshotReader {
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    #![cfg(unix)]
     use std::os::fd::{FromRawFd as _, RawFd};
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::process::CommandExt as _;
@@ -571,6 +572,7 @@ mod tests {
         drop(first);
     }
 
+    #[cfg(unix)]
     #[test]
     fn ended_host_lock_is_free_while_a_command_spawned_under_it_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -582,6 +584,7 @@ mod tests {
             .expect("the next host must not wait for a command spawned under the last");
     }
 
+    #[cfg(unix)]
     #[test]
     fn released_lock_reports_ok_and_is_free_while_a_command_spawned_under_it_runs() {
         let temp = tempfile::tempdir().expect("tempdir");

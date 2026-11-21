@@ -284,6 +284,11 @@ fn run_index_lock() -> &'static std::sync::Mutex<()> {
 }
 
 fn read_run_index(data_dir: &Path) -> anyhow::Result<RemoteModelRunIndex> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "model run index custody is unsupported on Windows",
+    ))?;
     let path = run_index_path(data_dir);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -306,6 +311,11 @@ fn read_run_index(data_dir: &Path) -> anyhow::Result<RemoteModelRunIndex> {
 }
 
 fn write_run_index(data_dir: &Path, index: &RemoteModelRunIndex) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "model run index custody is unsupported on Windows",
+    ))?;
     let path = run_index_path(data_dir);
     let temp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(index)?;

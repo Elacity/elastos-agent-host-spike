@@ -3429,6 +3429,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_snapshot_names_the_nickname_file_when_it_is_unreadable() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -5148,6 +5149,7 @@ pub(crate) mod tests {
         server.abort();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_status_reports_a_serving_browser_home() {
         use std::os::unix::fs::PermissionsExt;

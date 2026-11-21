@@ -425,7 +425,7 @@ impl DurableReplayClaimStoreV1 {
         Ok(contribution)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn claim_pair_inner(
         &self,
         mut claims: [ReplayClaimEntryV1; 2],
@@ -446,7 +446,7 @@ impl DurableReplayClaimStoreV1 {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn claim_claim_only_record(
         &self,
         record: StoredNodeReleaseRecordV1,
@@ -757,7 +757,7 @@ fn validate_owner_and_mode(
     Err(ReplayClaimError::UnsupportedOnWindows)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn sort_claims(claims: &mut [ReplayClaimEntryV1; 2]) {
     if replay_claim_sort_key(claims[1].key()) < replay_claim_sort_key(claims[0].key()) {
         claims.swap(0, 1);
@@ -1048,7 +1048,7 @@ fn replay_exact_contribution(
     Ok(contribution)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn synthetic_runtime_release_audit_id(claims: &[ReplayClaimEntryV1; 2]) -> RuntimeReleaseAuditIdV1 {
     let mut hasher = Sha256::new();
     hasher.update(b"elastos/protected-content/node-replay-claims/test-audit-id/v1");
@@ -1060,7 +1060,7 @@ fn synthetic_runtime_release_audit_id(claims: &[ReplayClaimEntryV1; 2]) -> Runti
     RuntimeReleaseAuditIdV1::new(Digest32::new(hasher.finalize().into())).unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn synthetic_operation_hash(claims: &[ReplayClaimEntryV1; 2]) -> Digest32 {
     let mut hasher = Sha256::new();
     hasher.update(b"elastos/protected-content/node-replay-claims/test-operation-hash/v1");
@@ -1079,21 +1079,21 @@ fn state_integrity_digest(payload: &[u8]) -> [u8; STATE_DIGEST_BYTES] {
     hasher.finalize().into()
 }
 
-#[cfg(not(test))]
+#[cfg(any(not(test), windows))]
 fn maybe_inject_test_fault(_state_dir: &Path) -> Result<(), ReplayClaimError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestFault {
     RenameStateDirBeforeRename,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static TEST_FAULT: std::sync::Mutex<Option<(TestFault, PathBuf)>> = std::sync::Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn maybe_inject_test_fault(state_dir: &Path) -> Result<(), ReplayClaimError> {
     let fault = {
         let mut guard = TEST_FAULT
@@ -1140,8 +1140,9 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Barrier};

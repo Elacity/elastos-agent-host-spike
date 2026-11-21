@@ -10,7 +10,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use base64::Engine as _;
 use elastos_common::localhost::{parse_localhost_path, parse_localhost_uri};

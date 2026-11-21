@@ -161,6 +161,7 @@ fn store(error: std::io::Error) -> BundleRefusal {
 
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use super::*;
     use crate::bundle_admission::tests::{did, file_for, key, sign_by_hand, signed, CID_A};
     use crate::bundle_admission::BUNDLE_SIGNATURE_DOMAIN;

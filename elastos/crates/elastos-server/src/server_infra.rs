@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs;
 #[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt as _;
@@ -58,31 +58,31 @@ const BROWSER_ENGINE_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const MODEL_PROVIDER_ID: &str = "model-provider";
 const MODEL_PROVIDER_PROTOCOL_VERSION: &str = "elastos.model-provider/v1";
 const MODEL_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MODEL_PROVIDER_CONFIG_FILE_NAME: &str = "config.json";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MODEL_PROVIDER_CONFIG_MAX_BYTES: usize = 256 * 1024;
 const MEDIA_PROVIDER_ID: &str = "media-provider";
 const MEDIA_PROVIDER_ROUTE: &str = "media";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MEDIA_PROVIDER_PROTOCOL_VERSION: &str = "elastos.media-provider/v1";
 const MEDIA_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const WALLET_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use api::model_provider_bridge_config;
 use api::model_provider_config as model_provider_startup_config;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_root_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("providers").join(MODEL_PROVIDER_ID)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_config_path(data_dir: &Path) -> PathBuf {
     model_provider_root_dir(data_dir).join(MODEL_PROVIDER_CONFIG_FILE_NAME)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_journal_dir(data_dir: &Path) -> PathBuf {
     model_provider_root_dir(data_dir).join("journal")
 }
@@ -136,12 +136,12 @@ fn chain_provider_protected_startup_config(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn media_provider_root_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("protected-content").join(MEDIA_PROVIDER_ID)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn media_provider_config_path(data_dir: &Path) -> PathBuf {
     media_provider_root_dir(data_dir).join("config.json")
 }
@@ -2148,6 +2148,7 @@ fn provider_config_from_env_or_file(
 
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     #[test]
     fn configured_carrier_listener_is_optional_and_strict() {
         let dir = tempfile::tempdir().unwrap();

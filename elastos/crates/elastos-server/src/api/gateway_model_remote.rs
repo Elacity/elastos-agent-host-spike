@@ -125,6 +125,11 @@ fn index_lock() -> &'static std::sync::Mutex<()> {
 }
 
 fn read_index(data_dir: &Path) -> anyhow::Result<RemoteRunIndex> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "remote run index custody is unsupported on Windows",
+    ))?;
     match std::fs::read(index_path(data_dir)) {
         Ok(bytes) => {
             let index: RemoteRunIndex =
@@ -149,6 +154,11 @@ fn update_index<T>(
     now: u64,
     update: impl FnOnce(&mut RemoteRunIndex) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "remote run index custody is unsupported on Windows",
+    ))?;
     let _guard = index_lock()
         .lock()
         .map_err(|_| anyhow::anyhow!("remote run index unavailable"))?;

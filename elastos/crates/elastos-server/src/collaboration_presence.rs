@@ -1340,6 +1340,7 @@ fn canonical_state_bytes(state: &PresenceState) -> anyhow::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use super::*;
 
     use std::os::unix::fs::{symlink, PermissionsExt};

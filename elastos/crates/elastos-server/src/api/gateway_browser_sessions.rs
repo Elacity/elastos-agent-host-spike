@@ -2772,8 +2772,11 @@ fn open_browser_dir_nofollow(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(not(unix))]
-fn open_browser_dir_nofollow(path: &Path) -> std::io::Result<File> {
-    File::open(path)
+fn open_browser_dir_nofollow(_path: &Path) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser lifecycle no-follow directory opens are unsupported on Windows",
+    ))
 }
 
 #[cfg(unix)]
@@ -2786,20 +2789,39 @@ fn open_browser_file_nofollow(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(not(unix))]
-fn open_browser_file_nofollow(path: &Path) -> std::io::Result<File> {
-    File::open(path)
+fn open_browser_file_nofollow(_path: &Path) -> std::io::Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser lifecycle no-follow file opens are unsupported on Windows",
+    ))
 }
 
+#[cfg(unix)]
 fn set_private_browser_dir(handle: &File) -> std::io::Result<()> {
-    #[cfg(unix)]
     handle.set_permissions(std::fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn set_private_browser_dir(_handle: &File) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser lifecycle private directories are unsupported on Windows",
+    ))
+}
+
+#[cfg(unix)]
 fn set_private_browser_file(handle: &File) -> std::io::Result<()> {
-    #[cfg(unix)]
     handle.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_private_browser_file(_handle: &File) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser lifecycle private files are unsupported on Windows",
+    ))
 }
 
 fn secure_browser_lifecycle_dir(
@@ -2869,6 +2891,7 @@ fn secure_browser_lifecycle_dir(
     Ok(Some(parent))
 }
 
+#[cfg(unix)]
 fn create_browser_temp_file(parent: &Path, target: &Path) -> Result<(PathBuf, File), String> {
     let target_name = target
         .file_name()
@@ -2898,6 +2921,11 @@ fn create_browser_temp_file(parent: &Path, target: &Path) -> Result<(PathBuf, Fi
         }
     }
     Err("Browser lifecycle temporary state name could not be allocated".to_string())
+}
+
+#[cfg(not(unix))]
+fn create_browser_temp_file(_parent: &Path, _target: &Path) -> Result<(PathBuf, File), String> {
+    Err("Browser lifecycle private file creation is unsupported on Windows".to_string())
 }
 
 pub(super) fn write_browser_json_atomic<T: Serialize>(

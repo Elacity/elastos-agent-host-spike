@@ -397,12 +397,12 @@ impl NodeLocalShareStoreV1 {
             .join(format!(".{}.tmp", lower_hex_digest(slot_hash)))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn test_record_path(&self, slot_hash: Digest32) -> PathBuf {
         self.record_path(slot_hash)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn test_temp_path(&self, slot_hash: Digest32) -> PathBuf {
         self.temp_path(slot_hash)
     }
@@ -1035,8 +1035,9 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    #![cfg(unix)]
     use std::io::Write as _;
 
     use ed25519_dalek::{Signer as _, SigningKey};

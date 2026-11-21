@@ -15664,6 +15664,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_carrier_browser_exit_rejects_unissued_request_on_authenticated_connection()
     {

@@ -1572,9 +1572,12 @@ fn ensure_private_stream_dir(path: &FsPath) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn ensure_private_stream_dir(path: &FsPath) -> anyhow::Result<()> {
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("failed to create Browser stream root {path:?}"))
+fn ensure_private_stream_dir(_path: &FsPath) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Browser Unix control sockets are unsupported on Windows",
+    )
+    .into())
 }
 
 pub(in crate::api::gateway) fn validate_browser_stream_receipt(
