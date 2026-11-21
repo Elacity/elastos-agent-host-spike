@@ -955,12 +955,24 @@ fn missing_manifest_message() -> String {
         .to_string()
 }
 
-/// The owner's explicit opt-in in `{data_dir}/config.toml`; reading never creates the file.
+/// The owner's explicit opt-in: `dev_mode = true` (a TOML bool) in a regular,
+/// non-symlink `{data_dir}/config.toml`. Read-only; anything else is no opt-in.
 fn source_home_dev_mode(data_dir: &Path) -> bool {
-    data_dir.join("config.toml").is_file()
-        && elastos_runtime::bootstrap::RuntimeConfig::load(data_dir)
-            .0
-            .dev_mode
+    const MAX_CONFIG: u64 = 64 * 1024;
+    let read = || -> anyhow::Result<bool> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(data_dir.join("config.toml"))?;
+        anyhow::ensure!(file.metadata()?.is_file() && file.metadata()?.len() <= MAX_CONFIG);
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(file, MAX_CONFIG + 1), &mut text)?;
+        anyhow::ensure!(text.len() as u64 <= MAX_CONFIG);
+        let config: toml::Table = toml::from_str(&text)?;
+        Ok(config.get("dev_mode").and_then(toml::Value::as_bool) == Some(true))
+    };
+    read().unwrap_or(false)
 }
 
 fn missing_trusted_source_error() -> anyhow::Error {

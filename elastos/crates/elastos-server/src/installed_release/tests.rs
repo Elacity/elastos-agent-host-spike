@@ -87,6 +87,65 @@ fn source_home_without_dev_mode_refuses_before_exec() {
 }
 
 #[test]
+fn source_home_dev_mode_symlink_is_no_opt_in() {
+    let (root, data, path) = source_home(None);
+    let elsewhere = root.path().join("elsewhere.toml");
+    fs::write(&elsewhere, "dev_mode = true\n").unwrap();
+    symlink(&elsewhere, data.join("config.toml")).unwrap();
+    let marker = data.join("ran");
+    let error = start_in(&data, &path, &marker).unwrap_err().to_string();
+    assert!(error.contains("No trusted source configured"), "{error}");
+    assert!(!marker.exists());
+}
+
+#[test]
+fn source_home_opt_in_read_never_creates_a_config() {
+    // The config can vanish between any two steps of a check; a gone file,
+    // or even a gone data directory, must stay gone.
+    let (root, data, path) = source_home(None);
+    let missing = root.path().join("removed-data-dir");
+    for data in [data, missing] {
+        let error = crate::setup::verify_installed_component_start(&data, "shell", &path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("No trusted source configured"), "{error}");
+        assert!(!data.join("config.toml").exists(), "{}", data.display());
+    }
+    assert!(!root.path().join("removed-data-dir").exists());
+}
+
+#[test]
+fn source_home_opt_in_must_be_a_small_regular_file_with_a_toml_bool() {
+    for (case, config) in [
+        ("string", "dev_mode = \"true\"\n".to_string()),
+        ("integer", "dev_mode = 1\n".to_string()),
+        ("parse error", "dev_mode = true\nbroken = [\n".to_string()),
+        (
+            "oversize",
+            format!("dev_mode = true\n#{}\n", "x".repeat(70 * 1024)),
+        ),
+    ] {
+        let (_root, data, path) = source_home(Some(&config));
+        let error = start_in(&data, &path, &data.join("ran"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("No trusted source configured"),
+            "{case}: {error}"
+        );
+    }
+    let (_root, data, path) = source_home(None);
+    fs::create_dir(data.join("config.toml")).unwrap();
+    let error = start_in(&data, &path, &data.join("ran"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("No trusted source configured"),
+        "directory: {error}"
+    );
+}
+
+#[test]
 fn installed_home_with_dev_mode_is_still_checked() {
     let (fixture, path, marker) = start_fixture();
     fs::write(fixture.data.join("config.toml"), "dev_mode = true\n").unwrap();
