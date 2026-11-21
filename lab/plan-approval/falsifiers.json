@@ -1,0 +1,13 @@
+{
+  "about": "Plan approval stand-in binding plant. Run from lab/plan-approval with python3 -I falsify.py after the normal cargo test gate.",
+  "falsifiers": [
+    {
+      "id": "F-plan-binding",
+      "title": "let a bound grant execute a different plan",
+      "file": "../agent-conformance/standin-runtime/mod.rs",
+      "old": "        Some(binding) => plan_sha256 == Some(binding.plan_sha256.as_str()),",
+      "new": "        Some(binding) => plan_sha256 == Some(binding.plan_sha256.as_str()) || plan_sha256.is_some(),",
+      "test": "a_grant_bound_to_one_plan_is_refused_for_another_plan"
+    }
+  ]
+}

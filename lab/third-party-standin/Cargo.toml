@@ -1,0 +1,20 @@
+[package]
+name = "third-party-standin"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Lab stand-in for a third-party provider and app. Mechanism proof only."
+
+# Own workspace. The ElastOS workspace stays unchanged.
+[workspace]
+
+[dependencies]
+elastos-common = { path = "../../elastos/crates/elastos-common" }
+elastos-runtime = { path = "../../elastos/crates/elastos-runtime" }
+serde_json = "1.0"
+
+[dev-dependencies]
+# Already in the elastos-runtime tree. Tests need them to call the async registry.
+async-trait = "0.1"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }

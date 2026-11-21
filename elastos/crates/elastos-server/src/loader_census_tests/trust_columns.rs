@@ -40,6 +40,16 @@ fn columns() -> Vec<TrustColumn> {
             os_path: "",
         },
         TrustColumn {
+            file: "elastos-runtime/src/provider/failure_record.rs",
+            function: "launch",
+            call: "libc::execve",
+            class: "n/a",
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["libc::execve", "(path.as_ptr()"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
             file: "elastos-runtime/src/provider/bridge.rs",
             function: "spawn_command",
             call: "spawn()",
@@ -1513,22 +1523,22 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 95);
-    assert_eq!(classes.get("n/a"), Some(&46));
+    assert_eq!(columns.len(), 96);
+    assert_eq!(classes.get("n/a"), Some(&47));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&58));
+    assert_eq!(roots.get("none"), Some(&59));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&17));
     assert_eq!(roots.get("staged-cid"), Some(&4));
     assert_eq!(times.get("at-every-start"), Some(&24));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&58));
+    assert_eq!(times.get("never"), Some(&59));
     assert_eq!(to_gate, 34);
 }
 
