@@ -87,11 +87,17 @@ pub mod setup;
 pub mod shares;
 pub mod sources;
 pub mod stage_cmd;
+#[cfg(unix)]
 pub mod supervisor;
+#[cfg(windows)]
+#[path = "supervisor_windows.rs"]
+pub mod supervisor;
+mod supervisor_protocol;
 #[cfg(test)]
 mod test_clock;
 #[cfg(all(test, unix))]
 mod test_support;
 pub mod update;
 pub mod update_controller;
+#[cfg(unix)]
 pub mod vm_provider;

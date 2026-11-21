@@ -51,6 +51,7 @@ use elastos_compute::providers::ComponentProvider;
 use elastos_compute::ComputeProvider;
 use elastos_storage::providers::LocalFSProvider;
 
+#[cfg(unix)]
 use elastos_crosvm::{CrosvmConfig, CrosvmProvider};
 
 const ELASTOS_VERSION: &str = env!("ELASTOS_VERSION");
@@ -2387,6 +2388,7 @@ pub(crate) async fn create_runtime(
     let mut compute_providers: Vec<Arc<dyn ComputeProvider>> = Vec::new();
 
     // Add crosvm provider if KVM is available
+    #[cfg(unix)]
     if elastos_crosvm::is_supported() {
         match CrosvmProvider::new(CrosvmConfig::default()) {
             Ok(provider) => {

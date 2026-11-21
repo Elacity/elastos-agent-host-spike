@@ -4419,7 +4419,7 @@ pub(crate) mod tests {
 
     /// G1-r4 (r4 §3, kept by r6 §0): the production `SupervisorRequest`
     /// variant set and `LaunchCapsule`'s field set are exact literals read
-    /// from supervisor.rs's production text, and every production site that
+    /// from the shared supervisor protocol's production text, and every production site that
     /// builds a bridge principal or hands one to a bridge is pinned as a
     /// `(file, count)` list with the same walker as the row above. A new
     /// variant, a new field or a new caller turns this row red and forces a
@@ -4428,7 +4428,7 @@ pub(crate) mod tests {
     /// `elastos/crates` only.
     #[test]
     fn r6_g1_supervisor_variants_and_principal_sites_hold_tree_wide() {
-        let supervisor = production_text(include_str!("supervisor.rs"));
+        let supervisor = production_text(include_str!("supervisor_protocol.rs"));
         let body = {
             let rest = &supervisor[supervisor.find("pub enum SupervisorRequest {").unwrap()..];
             &rest[..rest.find("\n}\n").expect("the enum closes at column 0")]
@@ -4567,7 +4567,8 @@ pub(crate) mod tests {
             expected_counts(&[
                 ("elastos-server/src/api/handlers/supervisor_api.rs", 7),
                 ("elastos-server/src/gateway_cmd.rs", 1),
-                ("elastos-server/src/supervisor.rs", 7),
+                ("elastos-server/src/supervisor.rs", 6),
+                ("elastos-server/src/supervisor_protocol.rs", 1),
             ]),
             "guest_payload uses"
         );

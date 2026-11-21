@@ -6,7 +6,12 @@
 //!
 //! Providers are registered at startup and can be dynamically added/removed.
 
+#[cfg(unix)]
 pub mod bridge;
+#[cfg(windows)]
+#[path = "bridge_windows.rs"]
+pub mod bridge;
+mod bridge_protocol;
 pub mod dispatch;
 mod landlock_plan;
 #[cfg(target_os = "linux")]
@@ -14,6 +19,7 @@ mod linux_model_seccomp;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod local_model_broker;
 mod macos_profile;
+#[cfg(unix)]
 mod os_entry;
 mod registry;
 mod rights;

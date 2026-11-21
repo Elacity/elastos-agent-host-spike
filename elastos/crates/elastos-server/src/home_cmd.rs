@@ -2149,7 +2149,18 @@ fn catalog_capsule_has_cli_projection(capsule: &serde_json::Value) -> bool {
 }
 
 fn action_launch(action: ActionSpec, snapshot: &HomeSnapshot) -> ActionLaunch {
-    action_launch_with_kvm(action, snapshot, elastos_crosvm::is_supported())
+    action_launch_with_kvm(action, snapshot, kvm_supported())
+}
+
+fn kvm_supported() -> bool {
+    #[cfg(unix)]
+    {
+        elastos_crosvm::is_supported()
+    }
+    #[cfg(windows)]
+    {
+        false
+    }
 }
 
 fn action_launch_with_kvm(
@@ -2183,7 +2194,7 @@ fn action_args_with_kvm(
 }
 
 fn action_command(action: ActionSpec, snapshot: &HomeSnapshot) -> String {
-    action_command_with_kvm(action, snapshot, elastos_crosvm::is_supported())
+    action_command_with_kvm(action, snapshot, kvm_supported())
 }
 
 fn action_command_with_kvm(
