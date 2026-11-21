@@ -2113,9 +2113,6 @@ fn model_inert_bindings(name: &str) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-#[path = "../../../lab/agent-conformance/standin-runtime/provider_launcher.rs"]
-mod provider_launcher;
-
 fn standin_spawn_confined_provider(
     host: StandinHost,
     policy: StandinPolicy<'_>,
@@ -2125,7 +2122,7 @@ fn standin_spawn_confined_provider(
     declared: &Value,
     profile_dir: &Path,
 ) -> Result<ConfinedProvider, String> {
-    provider_launcher::standin_spawn_confined_provider(
+    agent_conformance::standin_runtime::provider_launcher::standin_spawn_confined_provider(
         host,
         policy,
         name,
@@ -2133,6 +2130,7 @@ fn standin_spawn_confined_provider(
         base_path,
         declared,
         profile_dir,
+        standin_spawn_confined_provider_body,
     )
 }
 
@@ -7556,16 +7554,12 @@ fn standin_journeys_keep_the_shared_launcher_path() {
             "{caller} must call the shared launcher"
         );
     }
+    let adapter = function("standin_spawn_confined_provider");
     assert!(
-        function("standin_spawn_confined_provider")
-            .contains("provider_launcher::standin_spawn_confined_provider("),
-        "the test adapter must call the lab-owned launcher"
-    );
-    let launcher =
-        include_str!("../../../lab/agent-conformance/standin-runtime/provider_launcher.rs");
-    assert!(
-        launcher.contains("super::standin_spawn_confined_provider_body("),
-        "the lab launcher must call the registered plant path in confine.rs"
+        adapter.contains(
+            "agent_conformance::standin_runtime::provider_launcher::standin_spawn_confined_provider("
+        ) && adapter.contains("standin_spawn_confined_provider_body,"),
+        "the test adapter must call the lab-owned launcher with the registered plant path"
     );
     for journey in [
         "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite",

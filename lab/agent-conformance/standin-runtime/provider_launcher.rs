@@ -1,8 +1,9 @@
 //! Shared lab provider launcher used by the did, wallet and model journeys.
-//! This module is included by the wallet confinement test. Its launch body is
-//! owned by that test so its registered behavioral plants remain on the path.
+//! The wallet confinement test calls this module through the lab crate's
+//! public API. Its launch body stays in that test so its registered behavioral
+//! plants remain on the path.
 
-use super::*;
+use std::path::Path;
 
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
 ///
@@ -60,16 +61,20 @@ use super::*;
 /// the provider config from `provider_init_config`. `name` and `binary_path`
 /// are inputs rather than this provider's constants, so another provider's
 /// binary can start through this same function.
-pub(super) fn standin_spawn_confined_provider(
-    host: StandinHost,
-    policy: StandinPolicy<'_>,
+pub fn standin_spawn_confined_provider<H, P, D, R, E, F>(
+    host: H,
+    policy: P,
     name: &str,
     binary_path: &Path,
     base_path: &Path,
-    declared: &Value,
+    declared: &D,
     profile_dir: &Path,
-) -> Result<ConfinedProvider, String> {
-    super::standin_spawn_confined_provider_body(
+    launch: F,
+) -> Result<R, E>
+where
+    F: FnOnce(H, P, &str, &Path, &Path, &D, &Path) -> Result<R, E>,
+{
+    launch(
         host,
         policy,
         name,

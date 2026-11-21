@@ -142,8 +142,9 @@ no reason is refused.
 
 `standin_spawn_confined_provider` in
 `lab/agent-conformance/standin-runtime/provider_launcher.rs` is a lab
-stand-in included by `tests/confine.rs`. It copies the inputs of the Runtime's
-provider launch entry, `ProviderBridge::spawn(binary_path, config)` with
+stand-in called by `tests/confine.rs` through the lab crate's dev dependency.
+It copies the inputs of the Runtime's provider launch entry,
+`ProviderBridge::spawn(binary_path, config)` with
 `ProviderConfig.base_path`. The stand-in owns the start decision for the
 lab proofs: a start it cannot confine is refused with a reason and returns no
 provider.
