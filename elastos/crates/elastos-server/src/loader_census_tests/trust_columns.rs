@@ -348,7 +348,11 @@ fn columns() -> Vec<TrustColumn> {
             class: "n/a",
             trust_root: "components-json-in-data-dir",
             verified_when: "at-every-start",
-            evidence: ["checked_native_provider_with_data_dir", "(data_dir, binary_path)"].concat(),
+            evidence: [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat(),
             os_path: "",
         },
         TrustColumn {
@@ -636,9 +640,13 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_availability_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat(),
             os_path: "",
         },
         TrustColumn {
@@ -646,9 +654,13 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_chain_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; separate verified spawn via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat(),
             os_path: "",
         },
         TrustColumn {
@@ -656,9 +668,13 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_ipfs_provider_plane_with_role",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via register_ipfs_provider_plane through ProviderPlane::register"].concat(),
+            trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1253,23 +1269,34 @@ fn assert_caller_paths(sources: &BTreeMap<String, String>) {
             .iter()
             .filter(|path| (path.row_file, path.row_function) == row)
             .all(|path| path.check.is_some());
-        // Custody checks the executable in its own entry, including the
-        // direct ProviderPlane caller that has no separate caller check.
-        let entry_checked =
-            row == (
+        // Hosted planes check the executable in their own entry, including
+        // direct callers that have no separate caller check.
+        let entry_checked = matches!(
+            row,
+            (
                 "elastos-server/src/protected_content_runtime.rs",
-                "register_inactive_custody_provider",
-            ) && {
-                let text = &sources[row.0];
-                let code = source::code_only(text);
-                let check = [
-                    "checked_native_provider_with_data_dir",
-                    "(data_dir, binary_path)",
-                ]
-                .concat();
-                text.match_indices(&check)
-                    .any(|(at, _)| source::enclosing_fn(&code, at) == row.1)
-            };
+                "register_inactive_custody_provider"
+            ) | (
+                "elastos-server/src/server_infra.rs",
+                "register_availability_provider_plane"
+            ) | (
+                "elastos-server/src/server_infra.rs",
+                "register_chain_provider_plane"
+            ) | (
+                "elastos-server/src/server_infra.rs",
+                "register_ipfs_provider_plane_with_role"
+            )
+        ) && {
+            let text = &sources[row.0];
+            let code = source::code_only(text);
+            let check = [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat();
+            text.match_indices(&check)
+                .any(|(at, _)| source::enclosing_fn(&code, at) == row.1)
+        };
         assert_eq!(
             column.trust_root == "components-json-in-data-dir",
             all_callers_checked || entry_checked,
@@ -1564,16 +1591,16 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("other"), Some(&36));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&15));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&52));
+    assert_eq!(roots.get("none"), Some(&49));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&24));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&32));
+    assert_eq!(times.get("at-every-start"), Some(&35));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&52));
+    assert_eq!(times.get("never"), Some(&49));
     assert_eq!(to_gate, 29);
 }
 
