@@ -420,6 +420,26 @@ fn columns() -> Vec<TrustColumn> {
             os_path: "",
         },
         TrustColumn {
+            file: "elastos-server/src/run_cmd.rs",
+            function: "run_bundle",
+            call: "bundle start",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
+            evidence: [".run_b", "y_bundle(&data_dir"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/run_cmd.rs",
+            function: "run_staged_component",
+            call: "staged folder start",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
+            evidence: ["::run_staged", "_folder("].concat(),
+            os_path: "",
+        },
+        TrustColumn {
             file: "elastos-server/src/runtime.rs",
             function: "run_by_bundle_observed",
             call: "bundle start",
@@ -877,6 +897,16 @@ fn columns() -> Vec<TrustColumn> {
             trust_root: "components-json-in-data-dir",
             verified_when: "at-every-start",
             evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/stage_cmd.rs",
+            function: "run_staged_folder",
+            call: "bundle start",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
+            evidence: ["runtime.run_b", "y_bundle(data_dir, &cid"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1523,8 +1553,8 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 96);
-    assert_eq!(classes.get("n/a"), Some(&47));
+    assert_eq!(columns.len(), 99);
+    assert_eq!(classes.get("n/a"), Some(&50));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1534,10 +1564,10 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("none"), Some(&59));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&17));
-    assert_eq!(roots.get("staged-cid"), Some(&4));
+    assert_eq!(roots.get("staged-cid"), Some(&7));
     assert_eq!(times.get("at-every-start"), Some(&24));
     assert_eq!(times.get("at-install-only"), Some(&8));
-    assert_eq!(times.get("at-stage-and-start"), Some(&5));
+    assert_eq!(times.get("at-stage-and-start"), Some(&8));
     assert_eq!(times.get("never"), Some(&59));
     assert_eq!(to_gate, 34);
 }

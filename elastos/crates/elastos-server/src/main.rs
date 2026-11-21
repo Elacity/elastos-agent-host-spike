@@ -127,6 +127,11 @@ enum Commands {
         #[arg(long, value_name = "ADDR")]
         carrier_addr: Option<String>,
 
+        /// Run an unsigned local Component in a source or CI Home with
+        /// dev_mode=true. Installed signed releases refuse this path.
+        #[arg(long, hide = true, conflicts_with_all = ["cid", "bundle", "with", "carrier_addr"])]
+        dev_unsigned_component: bool,
+
         /// Arguments to pass to the capsule (after --)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         capsule_args: Vec<String>,
@@ -1411,12 +1416,21 @@ async fn run() -> anyhow::Result<()> {
             bundle,
             with,
             carrier_addr,
+            dev_unsigned_component,
             capsule_args,
         } => {
             if let Some(bundle) = bundle {
                 return run_cmd::run_bundle(&bundle).await;
             }
-            return run_cmd::run_capsule(path, cid, with, carrier_addr, capsule_args).await;
+            return run_cmd::run_capsule(
+                path,
+                cid,
+                with,
+                carrier_addr,
+                dev_unsigned_component,
+                capsule_args,
+            )
+            .await;
         }
 
         Commands::Serve {

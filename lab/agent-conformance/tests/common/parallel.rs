@@ -69,7 +69,11 @@ fn exercise(runaway: bool, require_reason: bool) -> Vec<Completion> {
         .map(|(home, capsule)| Launch {
             home,
             program: &runtime.binary,
-            args: vec!["run", capsule.path.to_str().unwrap()],
+            args: vec![
+                "run",
+                "--dev-unsigned-component",
+                capsule.path.to_str().unwrap(),
+            ],
         })
         .collect();
     let running = RunningInstances::start(&launches, Some(&operator_home))

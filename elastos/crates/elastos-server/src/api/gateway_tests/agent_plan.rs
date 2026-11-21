@@ -1305,8 +1305,52 @@ async fn a15r_current_gate_recheck_refuses_rebound_preview() {
     assert!(calls.lock().await.is_empty());
 }
 
-// The June planner's A15R_PREVIEW_STEP_PATH output is byte-compared in the build.
+// The literal stays with the slice 7 refusal rows. The joined row runs the
+// Agent Host planner and reads its preview and submitted bytes instead.
 const REAL_STEP: &str = "{\"operation\":\"write\",\"request\":{\"content\":[116,104,114,101,101,32,108,105,110,101,115],\"path\":\"localhost://UsersAI/self/Documents/note.txt\"},\"scheme\":\"localhost\"}";
+
+fn real_planner_output() -> (serde_json::Value, Vec<u8>, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let preview = temp.path().join("preview.json");
+    let submitted = temp.path().join("submitted.json");
+    let journal = temp.path().join("journal.txt");
+    let host_manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../examples/agent-host/Cargo.toml");
+    let host_target = host_manifest.parent().unwrap().join("target");
+    let output = std::process::Command::new("cargo")
+        .arg("test")
+        .arg("--locked")
+        .arg("--manifest-path")
+        .arg(host_manifest)
+        .arg("--target-dir")
+        .arg(host_target)
+        .arg("--lib")
+        .arg("tests::a15r_june_plan_preview_and_submit_keep_the_document_step")
+        .arg("--")
+        .arg("--exact")
+        .env("A15R_PREVIEW_STEP_PATH", &preview)
+        .env("A15R_SUBMIT_PLAN_PATH", &submitted)
+        .env("A15R_JOURNAL_PATH", &journal)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("run the Agent Host planner");
+    assert!(
+        output.status.success(),
+        "Agent Host planner failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let preview_bytes = std::fs::read(preview).expect("planner preview bytes");
+    let submitted_bytes = std::fs::read(submitted).expect("planner submit bytes");
+    let plan: serde_json::Value = serde_json::from_slice(&submitted_bytes).unwrap();
+    assert_eq!(
+        serde_json::to_vec(&plan["steps"][0]).unwrap(),
+        preview_bytes,
+        "the submitted step is the previewed step"
+    );
+    let journal_uri = std::fs::read_to_string(journal).expect("guest journal URI");
+    (plan, preview_bytes, journal_uri)
+}
 
 fn real_submit(dir: &Path, owner: &str, agent: &str, now: u64) -> serde_json::Value {
     let manifest: elastos_common::CapsuleManifest = serde_json::from_str(include_str!(
@@ -1343,7 +1387,7 @@ struct RealCase {
 }
 
 impl RealCase {
-    async fn new(now: u64) -> Self {
+    async fn empty() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
         let app = gateway_router(state.clone());
@@ -1354,7 +1398,6 @@ impl RealCase {
             &owner.principal_id,
         );
         let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
-        let created = real_submit(dir.path(), &owner.principal_id, &agent, now);
         Self {
             dir,
             state,
@@ -1363,8 +1406,34 @@ impl RealCase {
             owner: owner.principal_id,
             agent,
             token,
-            id: created["request_id"].as_str().unwrap().to_string(),
+            id: String::new(),
         }
+    }
+
+    async fn new(now: u64) -> Self {
+        let mut case = Self::empty().await;
+        case.next(now);
+        case
+    }
+
+    async fn from_guest(
+        plan: &serde_json::Value,
+        journal_uri: &str,
+    ) -> (Self, String, String, String) {
+        let mut case = Self::empty().await;
+        let (response, journal, capsule, session) =
+            crate::resource_bridge::tests::a15r_guest_journal_and_submit(
+                case.dir.path(),
+                &case.agent,
+                journal_uri,
+                plan,
+            )
+            .await;
+        case.id = response["response"]["result"]["data"]["request_id"]
+            .as_str()
+            .expect("bridge pending record id")
+            .to_string();
+        (case, journal, capsule, session)
     }
 
     fn record(&self) -> serde_json::Value {
@@ -1426,7 +1495,15 @@ impl RealCase {
 
 #[tokio::test]
 async fn a15r_real_journey_one_step_one_result() {
-    let mut case = RealCase::new(301).await;
+    if !crate::agents::build_allows() {
+        assert_eq!(
+            crate::agents::require_build().unwrap_err().to_string(),
+            crate::agents::FEATURE_OFF
+        );
+        return;
+    }
+    let (plan, proposed, journal_alias) = real_planner_output();
+    let (case, journal_uri, capsule, session) = RealCase::from_guest(&plan, &journal_alias).await;
     let person_root =
         crate::auth::principal_stored_localhost_root(Some(case.dir.path()), &case.owner).unwrap();
     let person_target = format!("{person_root}/Documents/note.txt");
@@ -1442,24 +1519,26 @@ async fn a15r_real_journey_one_step_one_result() {
         b"person's note",
     )
     .unwrap();
-    let card = case.card().await;
-    let mut wrong = card["request_binding"].clone();
-    wrong["sha256"] = json!("0".repeat(64));
-    assert_eq!(case.click(&wrong, true).await.0, StatusCode::BAD_REQUEST);
-    assert_eq!(case.record()["status"], "stale");
-    case.next(302);
     let record = case.record();
     assert_eq!(record["status"], "pending");
     assert_eq!(
-        serde_json::to_string(&record["request"]).unwrap(),
-        REAL_STEP
+        std::fs::read_dir(case.dir.path().join("inspect-actions"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(serde_json::to_vec(&record["request"]).unwrap(), proposed);
+    assert_eq!(record["request"], plan["steps"][0]);
+    assert_eq!(
+        real_object(case.dir.path(), &case.agent, &journal_uri).unwrap(),
+        b"agent journal v1"
     );
     let card = case.card().await;
     assert_eq!(card["request_binding"], record["request_binding"]);
     assert!(card["body"]
         .as_str()
         .unwrap()
-        .contains(&format!("Step 1: {REAL_STEP}")));
+        .contains(&format!("Step 1: {}", String::from_utf8_lossy(&proposed))));
     let hash = card["request_binding"]["sha256"].as_str().unwrap();
     assert_eq!(hash.len(), 64);
     assert!(card["body"]
@@ -1478,6 +1557,12 @@ async fn a15r_real_journey_one_step_one_result() {
     let record = case.record();
     assert_eq!(record["status"], "completed");
     assert_eq!(record["result"]["status"], "ok");
+    assert_eq!(
+        std::fs::read_dir(case.dir.path().join("inspect-actions"))
+            .unwrap()
+            .count(),
+        1
+    );
     assert_eq!(case.object().unwrap(), b"three lines");
     assert_eq!(
         real_object(case.dir.path(), &case.owner, &person_target).unwrap(),
@@ -1486,16 +1571,21 @@ async fn a15r_real_journey_one_step_one_result() {
     assert!(case.calls.lock().await.is_empty());
     assert_eq!(case.audit("agent_plan.dispatch.started"), 1);
     assert_eq!(case.audit("agent_plan.dispatch.completed"), 1);
+    assert_eq!(record["principal_id"], case.owner, "{record}");
+    assert_eq!(record["requester_id"], case.agent, "{record}");
+    assert_eq!(record["id"], capsule, "{record}");
+    assert_eq!(record["session_id"], session, "{record}");
     let receipt = super::gateway_inspect_actions::agent_plan_result_for_requester(
         case.dir.path(),
         &case.id,
         &case.owner,
         &case.agent,
-        "capsule:agent-host",
-        "session:agent-1",
+        &capsule,
+        &session,
     )
     .unwrap();
     assert_eq!(receipt["schema"], "elastos.agent-plan.result/v1");
+    assert_eq!(receipt["request_binding"], record["request_binding"]);
     assert_eq!(receipt["dispatch_result"], record["result"]);
     assert!(agent_plan_cards(&case.app, &case.token).await.is_empty());
 }
