@@ -172,16 +172,52 @@ fn documented_stage_then_run_and_explicit_development_commands() {
     let dev_folder = folder(dev_home.path(), MANIFEST);
     let configured = command(dev_home.path(), &["config", "set", "dev_mode", "true"]);
     assert!(configured.status.success(), "{}", text(&configured));
-    let run = command(
-        dev_home.path(),
-        &[
-            "run",
-            "--dev-unsigned-component",
-            dev_folder.to_str().unwrap(),
-        ],
+    let dev_run = [
+        "run",
+        "--dev-unsigned-component",
+        dev_folder.to_str().unwrap(),
+    ];
+    // Without a live operator Runtime the run is refused before anything starts.
+    let refused = command(dev_home.path(), &dev_run);
+    assert!(!refused.status.success(), "{}", text(&refused));
+    assert!(
+        text(&refused).contains("This command requires a running runtime."),
+        "{}",
+        text(&refused)
     );
+    assert!(
+        !text(&refused).contains("Development Component capsule"),
+        "{}",
+        text(&refused)
+    );
+
+    // With live operator coordinates for this Home, the same run starts.
+    let configured = String::from_utf8(configured.stdout).unwrap();
+    let config_path = configured.trim().strip_prefix("Set dev_mode in ").unwrap();
+    let data_dir = Path::new(config_path).parent().unwrap();
+    live_operator_coords(data_dir);
+    let run = command(dev_home.path(), &dev_run);
     assert!(run.status.success(), "{}", text(&run));
     assert!(text(&run).contains("Development Component capsule 'cli-component' exited"));
+}
+
+/// Operator coordinates the CLI accepts as live: a loopback health answer and
+/// this test's own pid, as home_storage_default's Component row writes them.
+fn live_operator_coords(data_dir: &Path) {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let ok = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+            let _ = stream.write_all(ok);
+        }
+    });
+    let coords = serde_json::json!({"api_url": api_url, "attach_secret": "",
+        "pid": std::process::id(), "runtime_kind": "operator"});
+    fs::write(data_dir.join("runtime-coords.json"), coords.to_string()).unwrap();
 }
 
 #[test]

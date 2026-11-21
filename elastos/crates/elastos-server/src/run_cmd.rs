@@ -289,6 +289,9 @@ async fn run_unsigned_development_component(
     capsule_dir: &Path,
     capsule_args: Vec<String>,
 ) -> anyhow::Result<()> {
+    // A Component run needs a live operator Runtime, refused before the
+    // dev_mode check as before. The bridge still attaches on its first call.
+    operator_runtime_coords().await?;
     let data_dir = crate::default_data_dir();
     let runtime = Arc::new(crate::create_runtime(data_dir.join("storage")).await?);
     configure_component_bridge(&runtime, &data_dir);
@@ -296,7 +299,8 @@ async fn run_unsigned_development_component(
     let _saved_termios = crate::runtime_control::enable_host_raw_mode_pub();
     let handle = runtime
         .run_unsigned_development_component(capsule_dir, capsule_args)
-        .await?;
+        .await
+        .map_err(|error| anyhow::anyhow!("Component capsule failed: {error}"))?;
     eprintln!(
         "[run] Development Component capsule '{}' exited",
         handle.manifest.name

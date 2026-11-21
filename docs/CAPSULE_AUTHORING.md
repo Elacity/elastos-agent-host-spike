@@ -263,9 +263,10 @@ mode. From the repository root, after building `my-app`:
 ```
 
 An installed signed release refuses this development command, even if its
-config says `dev_mode = true`. The command runs a local Component without an
-operator connection until the guest makes a Bus call. The Bus handler then
-attaches to this Home's operator Runtime and uses the active manifest ceiling.
+config says `dev_mode = true`. The command requires a live operator Runtime
+(`elastos serve`) and refuses first without one. The Component then runs
+locally; on its first Bus call the Bus handler attaches to this Home's operator
+Runtime and uses the active manifest ceiling.
 Use a Runtime integration test for a Component that needs grants and a person
 principal, as [agent-host](../examples/agent-host/README.md) does.
 
