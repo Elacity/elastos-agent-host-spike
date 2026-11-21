@@ -1079,6 +1079,43 @@ class CliFixtureTests(unittest.TestCase):
         self.assertEqual(cleanup["remaining_pids"], [])
         self.assertFalse(cleanup["errors"])
 
+    def test_cleanup_rechecks_fd_exec_provider_hash_before_signalling(self):
+        class Exited:
+            pid, returncode = 33000, 0
+            def poll(self):
+                return 0
+            def wait(self, timeout=None):
+                return 0
+
+        executable = self.root / "payload/kubo"
+        expected_hash = observer.digest(executable)
+        manager = observer.CliProcesses(self.root)
+        manager.processes = [Exited()]
+        manager.roots[str(executable)] = {expected_hash}
+        row = {"pid": 33001, "parent": 1, "group": 33000, "command": "/proc/self/fd/9"}
+        rows = [row]
+        def kill(pid, sig):
+            rows.clear()
+        with patch.object(observer, "cli_census", side_effect=lambda: list(rows)), \
+             patch.object(observer.os, "readlink", return_value=str(executable)) as readlink, \
+             patch.object(observer.os, "kill", side_effect=kill) as pids, patch.object(observer.time, "sleep"):
+            cleanup = manager.cleanup()
+        self.assertFalse(cleanup["errors"])
+        self.assertEqual(cleanup["remaining_pids"], [])
+        self.assertEqual({call.args[0] for call in pids.call_args_list}, {row["pid"]})
+        readlink.assert_called()
+
+        executable.write_bytes(b"changed installed provider")
+        manager = observer.CliProcesses(self.root)
+        manager.processes = [Exited()]
+        manager.roots[str(executable)] = {expected_hash}
+        with patch.object(observer, "cli_census", return_value=[row]), \
+             patch.object(observer.os, "readlink", return_value=str(executable)), \
+             patch.object(observer.os, "kill") as pids, patch.object(observer.time, "sleep"):
+            cleanup = manager.cleanup()
+        pids.assert_not_called()
+        self.assertTrue(any("cleanup executable hash differs" in error for error in cleanup["errors"]))
+
     def test_paths_private_json_and_phase_mapping_are_refused(self):
         with self.assertRaisesRegex(ValueError, "noncanonical"):
             observer.cli_path(self.root, "payload/../outside")

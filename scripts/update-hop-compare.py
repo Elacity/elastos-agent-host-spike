@@ -2458,6 +2458,17 @@ class CliProcesses:
             verified_pids = set()
             for row in rows:
                 root = next((path for path in self.roots if row["command"] == path or row["command"].startswith(path + " ")), None)
+                if root is None and row["group"] in historical:
+                    # Native providers exec the checked descriptor through
+                    # /proc/self/fd/N, so argv[0] does not name the installed file.
+                    try:
+                        executable = os.readlink(Path("/proc") / str(row["pid"]) / "exe")
+                    except OSError as error:
+                        if error.errno not in (errno.ENOENT, errno.ESRCH):
+                            raise
+                    else:
+                        root = next((path for path in self.roots
+                                     if os.path.realpath(executable) == os.path.realpath(path)), None)
                 if root:
                     need(digest(root) in self.roots[root], "cleanup executable hash differs")
                     verified_groups.add(row["group"])
