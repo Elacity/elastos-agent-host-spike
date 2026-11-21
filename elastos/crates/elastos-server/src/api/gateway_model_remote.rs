@@ -349,6 +349,10 @@ async fn call_grant(
     request: Value,
 ) -> Result<Value, RemoteRouteError> {
     let expected_refusal = super::gateway_model_service::invocation_refusal_binding(&request);
+    registry
+        .remember_carrier_peer_ticket(&grant.peer_did, &grant.connect_ticket)
+        .await
+        .map_err(|err| classify_carrier_error(&err.to_string()))?;
     let response = registry
         .invoke_provider(ProviderInvocation {
             source: "model-consumer".to_string(),
@@ -358,10 +362,10 @@ async fn call_grant(
             transfer: ProviderTransfer::Json,
             range: None,
             progress: None,
-            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::ConnectTicket {
-                connect_ticket: grant.connect_ticket.clone(),
-                peer_did: Some(grant.peer_did.clone()),
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did: grant.peer_did.clone(),
                 timeout_ms: Some(CARRIER_TIMEOUT_MS),
+                reply_wait_ms: None,
             }),
         })
         .await
