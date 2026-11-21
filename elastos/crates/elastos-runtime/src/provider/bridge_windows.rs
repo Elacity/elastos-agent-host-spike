@@ -9,6 +9,9 @@ use std::sync::Arc;
 const WINDOWS_PROVIDER_REFUSAL: &str =
     "provider start is refused: no confined provider launcher on Windows";
 
+/// Keep registry request deadlines available when the Windows bridge refuses a start.
+pub(super) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub use super::bridge_protocol::{BridgeError, ProviderConfig, ProviderRequest, ProviderResponse};
 
 /// A confined provider handle. Windows cannot construct one through a start.

@@ -1220,6 +1220,8 @@ fn validate_owner_only_regular_file_metadata_with_link_count(
     metadata: &fs::Metadata,
     expected_link_count: u64,
 ) -> Result<(), RuntimeReleaseJournalError> {
+    #[cfg(windows)]
+    let _ = expected_link_count;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(RuntimeReleaseJournalError::Unavailable);
     }
@@ -1434,7 +1436,7 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

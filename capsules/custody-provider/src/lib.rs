@@ -1,4 +1,6 @@
+#[cfg(unix)]
 use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
 use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 
@@ -15,14 +17,21 @@ use serde::Deserialize;
 use zeroize::Zeroizing;
 
 const MAX_CONFIG_PATH_BYTES: usize = 4096;
+#[cfg(unix)]
 const MAX_SECRET_FILE_BYTES: usize = 128;
+#[cfg(unix)]
 const STAGING_ROOT_PREFIX: &str = ".custody-provider-stage-";
+#[cfg(unix)]
 const TRUSTED_RUNTIME_ISSUER_FILE: &str = "trusted-runtime-issuer";
+#[cfg(unix)]
 const NODE_CUSTODY_SECRET_FILE: &str = "node-custody-secret";
+#[cfg(unix)]
 const NODE_SIGNING_KEY_FILE: &str = "node-signing-key";
+#[cfg(unix)]
 const DATA_ROOT_DIR: &str = "data";
 // The Runtime keeps custody state at DATA/protected-content/custody-provider/<root>
 // (elastos-server INACTIVE_CUSTODY_ROOT); that layout names the data root.
+#[cfg(unix)]
 const STATE_PARENT_IN_DATA: &str = "protected-content/custody-provider";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +40,8 @@ pub enum CustodyProviderStateRootError {
     MissingOrUnsafe,
     Conflict,
     ProvisioningFailed,
+    #[cfg(windows)]
+    UnsupportedOnWindows,
 }
 
 impl std::fmt::Display for CustodyProviderStateRootError {
@@ -40,6 +51,8 @@ impl std::fmt::Display for CustodyProviderStateRootError {
             Self::MissingOrUnsafe => "custody provider state root is missing or unsafe",
             Self::Conflict => "custody provider state root conflicts with the requested identity",
             Self::ProvisioningFailed => "custody provider provisioning failed",
+            #[cfg(windows)]
+            Self::UnsupportedOnWindows => "custody provider state is unsupported on Windows",
         })
     }
 }
@@ -69,6 +82,7 @@ struct ProviderInitConfigV1 {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(unix)]
 struct CustodyProviderStatePaths {
     root: PathBuf,
     trusted_runtime_issuer: PathBuf,
@@ -77,6 +91,7 @@ struct CustodyProviderStatePaths {
     data_root: PathBuf,
 }
 
+#[cfg(unix)]
 impl CustodyProviderStatePaths {
     fn derive(root: PathBuf) -> Self {
         Self {
@@ -113,12 +128,19 @@ pub fn parse_runtime_issuer_hex(
         .map_err(|_| CustodyProviderStateRootError::InvalidConfig)
 }
 
+#[cfg(unix)]
 pub fn validate_state_root_path(root: &Path) -> Result<(), CustodyProviderStateRootError> {
     validate_absolute_path_syntax(root)?;
     validate_existing_path_components(root)?;
     validate_owner_only_directory(root)
 }
 
+#[cfg(windows)]
+pub fn validate_state_root_path(_root: &Path) -> Result<(), CustodyProviderStateRootError> {
+    Err(CustodyProviderStateRootError::UnsupportedOnWindows)
+}
+
+#[cfg(unix)]
 pub fn load_state_from_root(
     root: &Path,
 ) -> Result<LoadedCustodyProviderState, CustodyProviderStateRootError> {
@@ -146,10 +168,18 @@ pub fn load_state_from_root(
     })
 }
 
+#[cfg(windows)]
+pub fn load_state_from_root(
+    _root: &Path,
+) -> Result<LoadedCustodyProviderState, CustodyProviderStateRootError> {
+    Err(CustodyProviderStateRootError::UnsupportedOnWindows)
+}
+
 /// Reads only the trusted Runtime issuer a provisioned state root was bound
 /// to, without touching the node's secrets. A custody host uses it to point
 /// every plane that verifies signed Runtime operations (the chain
 /// rights-evidence plane) at the same issuer the custody plane trusts.
+#[cfg(unix)]
 pub fn load_trusted_runtime_issuer(
     root: &Path,
 ) -> Result<RuntimeOperationIssuerKeyV1, CustodyProviderStateRootError> {
@@ -162,6 +192,14 @@ pub fn load_trusted_runtime_issuer(
         .map_err(|_| CustodyProviderStateRootError::MissingOrUnsafe)
 }
 
+#[cfg(windows)]
+pub fn load_trusted_runtime_issuer(
+    _root: &Path,
+) -> Result<RuntimeOperationIssuerKeyV1, CustodyProviderStateRootError> {
+    Err(CustodyProviderStateRootError::UnsupportedOnWindows)
+}
+
+#[cfg(unix)]
 pub fn provision_state_root(
     root: &Path,
     expected_runtime_issuer: RuntimeOperationIssuerKeyV1,
@@ -196,6 +234,15 @@ pub fn provision_state_root(
     result
 }
 
+#[cfg(windows)]
+pub fn provision_state_root(
+    _root: &Path,
+    _expected_runtime_issuer: RuntimeOperationIssuerKeyV1,
+) -> Result<ProvisionedCustodyProviderPublicKeys, CustodyProviderStateRootError> {
+    Err(CustodyProviderStateRootError::UnsupportedOnWindows)
+}
+
+#[cfg(unix)]
 fn provision_state_root_in_stage(
     final_paths: &CustodyProviderStatePaths,
     stage_paths: &CustodyProviderStatePaths,
@@ -244,6 +291,7 @@ fn provision_state_root_in_stage(
     })
 }
 
+#[cfg(unix)]
 fn create_stage_root(parent: &Path) -> Result<PathBuf, CustodyProviderStateRootError> {
     for _ in 0..8 {
         let mut nonce = [0u8; 8];
@@ -268,6 +316,7 @@ fn create_stage_root(parent: &Path) -> Result<PathBuf, CustodyProviderStateRootE
     Err(CustodyProviderStateRootError::ProvisioningFailed)
 }
 
+#[cfg(unix)]
 fn remove_created_stage_root(path: &Path) -> Result<(), CustodyProviderStateRootError> {
     let file_name = path
         .file_name()
@@ -331,7 +380,10 @@ fn rename_without_replacement(from: &Path, to: &Path) -> Result<(), CustodyProvi
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "macos", target_os = "ios"))
+))]
 fn rename_without_replacement(
     _from: &Path,
     _to: &Path,
@@ -339,6 +391,7 @@ fn rename_without_replacement(
     Err(CustodyProviderStateRootError::ProvisioningFailed)
 }
 
+#[cfg(unix)]
 fn generate_nonzero_secret() -> Result<Zeroizing<[u8; 32]>, CustodyProviderStateRootError> {
     let mut bytes = Zeroizing::new([0u8; 32]);
     getrandom::getrandom(&mut *bytes)
@@ -349,6 +402,7 @@ fn generate_nonzero_secret() -> Result<Zeroizing<[u8; 32]>, CustodyProviderState
     Ok(bytes)
 }
 
+#[cfg(unix)]
 fn create_owner_only_directory(path: &Path) -> Result<(), CustodyProviderStateRootError> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -362,6 +416,7 @@ fn create_owner_only_directory(path: &Path) -> Result<(), CustodyProviderStateRo
     validate_owner_only_directory(path)
 }
 
+#[cfg(unix)]
 fn write_owner_only_hex32_file(
     path: &Path,
     bytes: &[u8; 32],
@@ -388,6 +443,7 @@ fn write_owner_only_hex32_file(
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), CustodyProviderStateRootError> {
     let file =
         open_directory(path).map_err(|_| CustodyProviderStateRootError::ProvisioningFailed)?;
@@ -395,6 +451,7 @@ fn sync_directory(path: &Path) -> Result<(), CustodyProviderStateRootError> {
         .map_err(|_| CustodyProviderStateRootError::ProvisioningFailed)
 }
 
+#[cfg(unix)]
 fn open_directory(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -420,6 +477,7 @@ fn path_from_config_value(value: &str) -> Result<PathBuf, CustodyProviderStateRo
     Ok(path)
 }
 
+#[cfg(unix)]
 fn normalize_root_path(path: &Path) -> Result<PathBuf, CustodyProviderStateRootError> {
     validate_absolute_path_syntax(path)?;
     Ok(path.to_path_buf())
@@ -442,12 +500,14 @@ fn validate_absolute_path_syntax(path: &Path) -> Result<(), CustodyProviderState
 
 /// The Runtime data directory holding `path`, when `path` follows the custody
 /// state layout; otherwise none, and every component keeps the strict rule.
+#[cfg(unix)]
 fn data_root_of(path: &Path) -> Option<&Path> {
     path.ancestors()
         .find(|ancestor| ancestor.ends_with(STATE_PARENT_IN_DATA))
         .and_then(|parent| parent.parent()?.parent())
 }
 
+#[cfg(unix)]
 fn validate_existing_path_components(path: &Path) -> Result<(), CustodyProviderStateRootError> {
     let data_root = data_root_of(path);
     let mut current = PathBuf::new();
@@ -473,6 +533,7 @@ fn validate_existing_path_components(path: &Path) -> Result<(), CustodyProviderS
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_hex32_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, CustodyProviderStateRootError> {
     let metadata =
         fs::symlink_metadata(path).map_err(|_| CustodyProviderStateRootError::MissingOrUnsafe)?;
@@ -524,6 +585,7 @@ fn hex_nibble(byte: u8) -> Result<u8, ()> {
     }
 }
 
+#[cfg(unix)]
 fn hex_bytes(bytes: &[u8; 32]) -> String {
     bytes
         .iter()
@@ -531,6 +593,7 @@ fn hex_bytes(bytes: &[u8; 32]) -> String {
         .collect::<String>()
 }
 
+#[cfg(unix)]
 fn validate_owner_only_directory(path: &Path) -> Result<(), CustodyProviderStateRootError> {
     let metadata =
         fs::symlink_metadata(path).map_err(|_| CustodyProviderStateRootError::MissingOrUnsafe)?;
@@ -540,6 +603,7 @@ fn validate_owner_only_directory(path: &Path) -> Result<(), CustodyProviderState
     validate_owner_mode_and_links(&metadata, 0o700, None)
 }
 
+#[cfg(unix)]
 fn validate_owner_only_file_metadata(
     metadata: &fs::Metadata,
 ) -> Result<(), CustodyProviderStateRootError> {
@@ -549,6 +613,7 @@ fn validate_owner_only_file_metadata(
     validate_owner_mode_and_links(metadata, 0o600, Some(1))
 }
 
+#[cfg(unix)]
 fn validate_owner_mode_and_links(
     metadata: &fs::Metadata,
     exact_mode: u32,
@@ -576,6 +641,7 @@ fn validate_owner_mode_and_links(
 /// Directories below the data directory (`below_data`) are ElastOS's own and
 /// stay closed to group writes, sticky or not. Outside the custody layout no
 /// data directory is known and the original rule applies to every folder.
+#[cfg(unix)]
 fn validate_component_owner_and_mode(
     metadata: &fs::Metadata,
     shared: bool,
@@ -603,6 +669,7 @@ fn validate_component_owner_and_mode(
     Ok(())
 }
 
+#[cfg(unix)]
 fn require_same_file(
     pre: &fs::Metadata,
     opened: &fs::Metadata,
@@ -624,6 +691,7 @@ fn require_same_file(
     Ok(())
 }
 
+#[cfg(unix)]
 fn open_owner_only_file(path: &Path) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -635,7 +703,42 @@ fn open_owner_only_file(path: &Path) -> std::io::Result<File> {
     options.open(path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn state_entry_points_refuse_before_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("state");
+        let root = root.as_path();
+        let issuer = RuntimeOperationIssuerKeyV1::new(
+            SigningKey::from_bytes(&[0x42; 32])
+                .verifying_key()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_state_root_path(root),
+            Err(CustodyProviderStateRootError::UnsupportedOnWindows)
+        );
+        assert!(matches!(
+            load_state_from_root(root),
+            Err(CustodyProviderStateRootError::UnsupportedOnWindows)
+        ));
+        assert_eq!(
+            load_trusted_runtime_issuer(root),
+            Err(CustodyProviderStateRootError::UnsupportedOnWindows)
+        );
+        assert_eq!(
+            provision_state_root(root, issuer),
+            Err(CustodyProviderStateRootError::UnsupportedOnWindows)
+        );
+        assert!(!root.exists());
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     #[cfg(unix)]

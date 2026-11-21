@@ -3391,7 +3391,7 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::path::PathBuf;

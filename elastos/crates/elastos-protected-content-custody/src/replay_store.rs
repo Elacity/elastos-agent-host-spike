@@ -637,10 +637,8 @@ fn open_owner_only_file(path: &Path, write: bool) -> Result<File, ReplayClaimErr
     Ok(file)
 }
 
+#[cfg(unix)]
 fn open_or_create_owner_only_lock_file(path: &Path) -> Result<File, ReplayClaimError> {
-    #[cfg(windows)]
-    require_supported_store()?;
-
     let parent = path.parent().ok_or(ReplayClaimError::Unavailable)?;
     validate_owner_only_directory(parent)?;
 
@@ -1142,7 +1140,7 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::process::{Command, Stdio};

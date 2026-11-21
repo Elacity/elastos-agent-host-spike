@@ -735,6 +735,8 @@ fn validate_owner_only_regular_file_metadata_with_link_count(
     metadata: &fs::Metadata,
     expected_link_count: u64,
 ) -> Result<(), NodeLocalShareStoreErrorV1> {
+    #[cfg(windows)]
+    let _ = expected_link_count;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(NodeLocalShareStoreErrorV1::Unavailable);
     }
@@ -910,10 +912,8 @@ impl ExclusiveFileLock {
     }
 }
 
+#[cfg(unix)]
 fn open_or_create_owner_only_lock_file(path: &Path) -> Result<File, NodeLocalShareStoreErrorV1> {
-    #[cfg(windows)]
-    require_supported_store()?;
-
     let parent = path
         .parent()
         .ok_or(NodeLocalShareStoreErrorV1::Unavailable)?;
@@ -1035,7 +1035,7 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::io::Write as _;
 

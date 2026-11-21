@@ -8,9 +8,11 @@ use std::env;
 use std::io::{self, BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use custody_provider::load_state_from_root;
 use custody_provider::{
-    load_state_from_root, parse_runtime_issuer_hex, parse_state_root_from_provider_init,
-    provision_state_root, provisioning_receipt, PROVISIONING_SCHEMA_V1,
+    parse_runtime_issuer_hex, parse_state_root_from_provider_init, provision_state_root,
+    provisioning_receipt, PROVISIONING_SCHEMA_V1,
 };
 use ed25519_dalek::SigningKey;
 use elastos_protected_content_contracts::{
@@ -35,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const PROVIDER_VERSION: &str = env!("CARGO_PKG_VERSION");
+#[cfg(unix)]
 const INIT_ERROR_CODE: &str = "invalid_config";
 const REQUEST_ERROR_CODE: &str = "invalid_request";
 const BACKEND_ERROR_CODE: &str = "backend_unavailable";
@@ -46,6 +49,25 @@ enum ControlRequest {
     Init { config: Value },
     Status,
     Shutdown,
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn init_refuses_custody_state_and_status_omits_custody_ops() {
+        let mut provider = CustodyProvider::new();
+        let response = serde_json::to_value(provider.init(json!({}))).unwrap();
+        assert_eq!(response["status"], "error");
+        assert_eq!(response["code"], BACKEND_ERROR_CODE);
+        let status = serde_json::to_value(provider.status()).unwrap();
+        assert_eq!(status["data"]["configured"], false);
+        assert_eq!(
+            status["data"]["supported_operations"],
+            json!(["status", "shutdown"])
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -132,6 +154,7 @@ impl CustodyProvider {
         self.handle_frame(line.as_bytes()).0
     }
 
+    #[cfg(unix)]
     fn init(&mut self, config: Value) -> ProviderResponse {
         self.state = None;
         match load_provider_state(config) {
@@ -146,12 +169,34 @@ impl CustodyProvider {
         }
     }
 
+    #[cfg(unix)]
     fn status(&self) -> ProviderResponse {
         ProviderResponse::ok(json!({
             "provider": "custody",
             "version": PROVIDER_VERSION,
             "configured": self.state.is_some(),
             "supported_operations": ["status", "provision_node_share", "release_contribution", "shutdown"],
+            "request_schema": CUSTODY_PROVIDER_REQUEST_SCHEMA_V1,
+            "response_schema": CUSTODY_PROVIDER_RESPONSE_SCHEMA_V1,
+        }))
+    }
+
+    #[cfg(windows)]
+    fn init(&mut self, _config: Value) -> ProviderResponse {
+        self.state = None;
+        ProviderResponse::error(
+            BACKEND_ERROR_CODE,
+            "custody provider state is unsupported on Windows",
+        )
+    }
+
+    #[cfg(windows)]
+    fn status(&self) -> ProviderResponse {
+        ProviderResponse::ok(json!({
+            "provider": "custody",
+            "version": PROVIDER_VERSION,
+            "configured": false,
+            "supported_operations": ["status", "shutdown"],
             "request_schema": CUSTODY_PROVIDER_REQUEST_SCHEMA_V1,
             "response_schema": CUSTODY_PROVIDER_RESPONSE_SCHEMA_V1,
         }))
@@ -410,6 +455,7 @@ fn chain_rights_evidence_request_from_validated_request(request: &Value) -> Resu
     chain_rights_evidence_request(&signed_runtime_release_operation).map_err(|_| ())
 }
 
+#[cfg(unix)]
 fn load_provider_state(config: Value) -> Result<ConfiguredCustodyProvider, ()> {
     let root = parse_state_root_from_provider_init(&config).map_err(|_| ())?;
     let loaded = load_state_from_root(&root).map_err(|_| ())?;
@@ -569,7 +615,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .collect::<String>()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs::{self};
