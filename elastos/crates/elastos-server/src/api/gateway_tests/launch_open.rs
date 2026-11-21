@@ -65,6 +65,33 @@ fn token_life(token: &str) -> (u64, u64) {
     )
 }
 
+#[test]
+fn cli_launch_grant_is_refused_by_wallet_authority_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let grant = owner_cli_home_launch_grant(dir.path(), &owner);
+    let mut headers = HeaderMap::new();
+    headers.insert("x-elastos-home-token", grant.parse().unwrap());
+    let error =
+        gateway_home_system::require_home_active_shell_wallet_authority(dir.path(), &headers)
+            .err()
+            .expect("wallet authority must refuse the CLI launch grant");
+    assert_eq!(error.to_string(), "home_cli_launch_grant_scope_mismatch");
+}
+
+#[test]
+fn cli_launch_grant_is_refused_by_front_door_without_wallet_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let grant = owner_cli_home_launch_grant(dir.path(), &owner);
+    let mut headers = HeaderMap::new();
+    headers.insert("x-elastos-home-token", grant.parse().unwrap());
+    let error = gateway_home_token::require_gateway_launch(dir.path(), &headers)
+        .err()
+        .expect("front-door admission must refuse the CLI launch grant");
+    assert_eq!(error.to_string(), "home_launch_grant_scope_mismatch");
+}
+
 #[tokio::test]
 async fn owner_cli_issuer_limits_headless_launch_and_open_gates() {
     let dir = tempfile::tempdir().unwrap();
@@ -178,6 +205,28 @@ fn cli_issuer_refuses_guest_and_unbound_context() {
     assert!(issue_home_cli_launch_grant_for_context(dir.path(), &context).is_err());
     let device = local_home_launch_token_context(dir.path()).unwrap();
     assert!(issue_home_cli_launch_grant_for_context(dir.path(), &device).is_err());
+}
+
+#[test]
+fn cli_issuer_refuses_agent_principal() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = crate::auth::valid_agent::plant(dir.path());
+    let context = home_launch_token_context_from_parts(
+        dir.path(),
+        &agent.principal_id,
+        "session:agent-cli-issuer",
+        None,
+        "grant:agent-cli-issuer",
+    )
+    .unwrap();
+    assert_eq!(
+        context.root().kind(),
+        Some(crate::auth::PrincipalKind::Agent)
+    );
+    let error = issue_home_cli_launch_grant_for_context(dir.path(), &context)
+        .err()
+        .expect("agent principal must be refused");
+    assert_eq!(error.to_string(), "a human Home owner is required");
 }
 
 /// D2a-open. The signed-in person's Home session opens a set by its CID: the
