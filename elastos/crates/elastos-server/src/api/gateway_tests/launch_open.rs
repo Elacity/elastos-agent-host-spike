@@ -212,6 +212,32 @@ async fn content_open_names_non_home_page_and_accepts_cli_grant() {
     assert_eq!(runtime.kept_launch_reads.lock().await.len(), 1);
 }
 
+#[tokio::test]
+async fn content_open_refuses_agent_home_page_before_minting() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .method("POST")
+                .uri("/api/home/launch/content")
+                .header("x-elastos-home-token", agent_home_token(dir.path()))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"cid":"bafy-good"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        body.as_ref(),
+        gateway_home_token::GATEWAY_AGENT_REFUSAL.as_bytes()
+    );
+}
+
 /// D2a-address. The page's address takes each part of the entrypoint
 /// percent-encoded, so a file name with a space or a `#` (a manifest allows
 /// both) names that file and no other. A 200 from the Runtime in any other

@@ -9128,6 +9128,14 @@ pub async fn production_after() {
             ]),
             "Home token context callers"
         );
+        // Gateway admission had two refusal calls. Home page/CLI launch,
+        // internal shell content open, and launch-bound reads now fence the
+        // same resolved agent principal before they use its context.
+        assert_eq!(
+            production_counts_ignoring_cfg_test("refuse_agent_principal("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 5)]),
+            "agent-principal refusal callers"
+        );
         // Blast radius of the one helper: the direct callers and the front
         // door's path through `require_gateway_launch_for`, which runs only
         // when the request is not public, not sign-in, not a terminal ticket
@@ -9156,6 +9164,8 @@ pub async fn production_after() {
         let open = body.find('{').expect("the match block opens");
         let end = cfg_test_item_end(&body[open..]);
         let arms = body[open..open + end].matches("=>").count();
-        assert_eq!(arms, 5, "gateway admission match arms");
+        // Five admission arms plus three error-response arms for Home launch
+        // and content open. The latter preserve the agent-refusal reason.
+        assert_eq!(arms, 8, "gateway admission match arms");
     }
 }

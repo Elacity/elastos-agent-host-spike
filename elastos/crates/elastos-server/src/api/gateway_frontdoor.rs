@@ -276,8 +276,19 @@ pub(super) async fn gateway_admission(
     if !public && !sign_in && !ticket && !runtime_session {
         match gateway_home_token::require_gateway_launch_for(&state.data_dir, headers, path) {
             Ok(()) => {}
-            Err(_) if matches!(path, "/api/apps/home/launch" | "/api/home/launch/content") => {
-                return refused()
+            Err(err) if matches!(path, "/api/apps/home/launch" | "/api/home/launch/content") => {
+                let reason = err.to_string();
+                return match reason.as_str() {
+                    "home_cli_launch_grant_mismatch" => {
+                        (StatusCode::FORBIDDEN, "home_cli_launch_grant_mismatch").into_response()
+                    }
+                    gateway_home_token::GATEWAY_AGENT_REFUSAL => (
+                        StatusCode::FORBIDDEN,
+                        gateway_home_token::GATEWAY_AGENT_REFUSAL,
+                    )
+                        .into_response(),
+                    _ => refused(),
+                };
             }
             Err(_) if browser_api_path(path) => {
                 if let Some(err) =

@@ -79,6 +79,23 @@ fn cli_home_launch_grant(data_dir: &std::path::Path) -> String {
         .unwrap()
 }
 
+fn agent_home_token(data_dir: &std::path::Path) -> String {
+    let agent = crate::auth::valid_agent::plant(data_dir);
+    let now = crate::auth::now_ts();
+    let grant = AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: "grant:home-launch-agent".to_string(),
+        session_id: "session:home-launch-agent".to_string(),
+        principal_id: agent.principal_id,
+        proof_binding_id: agent.proof_binding_id,
+        issued_at: now,
+        expires_at: now + 600,
+        apps: vec![HOME_CAPSULE_ID.to_string()],
+    };
+    crate::auth::plant_session_grant(data_dir, grant.clone());
+    issue_home_launch_token_for_auth_grant(data_dir, HOME_CAPSULE_ID, &grant).unwrap()
+}
+
 /// Reads Home events once from `cursor` and reports whether Inbox changed.
 async fn home_inbox_changed(app: &Router, home_token: &str, cursor: &mut String) -> bool {
     let request = test_browser_request("localhost:61180", "http://localhost:61180")
