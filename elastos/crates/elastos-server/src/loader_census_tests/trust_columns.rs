@@ -136,9 +136,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "start_home_terminal_session",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new(&com", "mand_spec.program)"].concat(),
+            trust_root: "release-signature-or-source-dev-mode",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -146,9 +146,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "start_home_terminal_session",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new(&com", "mand_spec.program)"].concat(),
+            trust_root: "release-signature-or-source-dev-mode",
+            verified_when: "at-every-start",
+            evidence: ["prepared.attach_", "tokio(&mut command, false)?"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -176,8 +176,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "send_raw_blocking",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature-or-source-dev-mode",
+            verified_when: "at-every-start",
             evidence: ["self.s", "pawn()?"].concat(),
             os_path: "",
         },
@@ -186,9 +186,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new(&s", "elf.binary_path)"].concat(),
+            trust_root: "release-signature-or-source-dev-mode",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -196,9 +196,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new(&s", "elf.binary_path)"].concat(),
+            trust_root: "release-signature-or-source-dev-mode",
+            verified_when: "at-every-start",
+            evidence: ["prepared.attach_", "std(&mut cmd, false)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1586,15 +1586,16 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&47));
+    assert_eq!(roots.get("none"), Some(&42));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&31));
+    assert_eq!(roots.get("release-signature-or-source-dev-mode"), Some(&5));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&39));
+    assert_eq!(times.get("at-every-start"), Some(&44));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&47));
-    assert_eq!(to_gate, 29);
+    assert_eq!(times.get("never"), Some(&42));
+    assert_eq!(to_gate, 24);
 }
 
 #[test]

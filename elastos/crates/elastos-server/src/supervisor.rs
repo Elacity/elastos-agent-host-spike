@@ -8,6 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::Digest as _;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -413,6 +414,31 @@ impl Supervisor {
         Ok(())
     }
 
+    fn carrier_service_start_pin(
+        &self,
+        name: &str,
+        binary_path: PathBuf,
+    ) -> Result<(PathBuf, String)> {
+        if crate::setup::installed_release_source(&self.data_dir)?.is_some() {
+            let installed = self.data_dir.join("bin").join(name);
+            let prepared =
+                crate::setup::verify_installed_component_start(&self.data_dir, name, &installed)?;
+            return Ok((installed, prepared.checksum().to_owned()));
+        }
+        anyhow::ensure!(
+            elastos_runtime::bootstrap::RuntimeConfig::load(&self.data_dir)
+                .0
+                .dev_mode,
+            "unsigned carrier service '{}' requires source Home dev_mode=true",
+            name
+        );
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(std::fs::read(&binary_path)?))
+        );
+        Ok((binary_path, checksum))
+    }
+
     pub fn new(data_dir: PathBuf, registry: ComponentsManifest) -> Self {
         let capsules_dir = data_dir.join("capsules");
         let crosvm_bin =
@@ -676,6 +702,7 @@ impl Supervisor {
         capsule_name: &str,
         provides: Option<&str>,
         binary_path: &Path,
+        checksum: String,
         env_vars: Vec<(String, String)>,
         init_config: serde_json::Value,
     ) -> Option<ProviderRoute> {
@@ -694,6 +721,7 @@ impl Supervisor {
             Arc::new(CarrierServiceProvider::new(
                 provider_scheme,
                 binary_path.display().to_string(),
+                checksum,
                 env_vars,
                 init_config,
             ));
@@ -1301,6 +1329,7 @@ impl Supervisor {
             )
         })?;
         self.verify_carrier_service_binary(name, capsule_dir, &binary_path)?;
+        let (binary_path, checksum) = self.carrier_service_start_pin(name, binary_path)?;
 
         // Use CID 0 for carrier services — no VM, no vsock
         let cid = 0u32;
@@ -1324,6 +1353,7 @@ impl Supervisor {
                 name,
                 provides.as_deref(),
                 &binary_path,
+                checksum,
                 env_vars,
                 config,
             )
@@ -3097,6 +3127,46 @@ mod tests {
             )
             .unwrap_err();
         assert!(err.to_string().contains("cached CID mismatch"));
+    }
+
+    #[test]
+    fn carrier_service_start_uses_signed_name_and_refuses_changed_binary() {
+        let mut fixture = crate::installed_release::tests::Fixture::new();
+        let name = "carrier-service";
+        let installed = fixture.data.join("bin").join(name);
+        std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        let script = b"#!/bin/sh\nexit 0\n";
+        std::fs::write(&installed, script).unwrap();
+        std::fs::write(fixture.data.join("components.json"), serde_json::to_vec(&serde_json::json!({
+            "schema":"elastos.components/v1", "external":{"carrier-service":{
+                "install_path":format!("bin/{name}"), "platforms":{(crate::setup::detect_platform()):{
+                    "install_path":format!("bin/{name}"), "checksum":format!("sha256:{}", hex::encode(sha2::Sha256::digest(script)))
+                }}
+            }}, "capsules":{}, "profiles":{}
+        })).unwrap()).unwrap();
+        fixture.bind_components();
+        std::fs::write(fixture.data.join("config.toml"), "dev_mode = true\n").unwrap();
+        let supervisor = Supervisor::new(
+            fixture.data.clone(),
+            ComponentsManifest {
+                extra: Default::default(),
+                model_catalog: None,
+                collaboration_network: None,
+                external: Default::default(),
+                capsules: Default::default(),
+                profiles: Default::default(),
+            },
+        );
+        let (path, pin) = supervisor
+            .carrier_service_start_pin(name, installed.clone())
+            .unwrap();
+        assert_eq!(path, installed);
+        assert!(pin.starts_with("sha256:"));
+        assert!(supervisor
+            .carrier_service_start_pin("substitute", path.clone())
+            .is_err());
+        std::fs::write(&installed, b"#!/bin/sh\nexit 1\n").unwrap();
+        assert!(supervisor.carrier_service_start_pin(name, path).is_err());
     }
 
     #[tokio::test]

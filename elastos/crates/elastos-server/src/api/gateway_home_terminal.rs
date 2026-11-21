@@ -236,6 +236,7 @@ struct HomeTerminalSession {
     input: Mutex<Option<HomeTerminalInput>>,
     input_closed: watch::Sender<bool>,
     child: Mutex<Child>,
+    _prepared: Option<crate::setup::verified_executable::VerifiedExecutable>,
     events: broadcast::Sender<HomeTerminalBroadcastEvent>,
     replay: StdMutex<HomeTerminalReplayLog>,
     event_stream_generation: AtomicU64,
@@ -789,8 +790,9 @@ async fn start_home_terminal_session(
     close_home_terminal_cleanup_targets(cleanup).await;
 
     let command_spec = home_terminal_command()?;
+    let prepared = prepare_home_terminal_executable(data_dir, &command_spec)?;
     let pty = open_home_terminal_pty(size)?;
-    let mut command = Command::new(&command_spec.program);
+    let mut command = Command::new(prepared.exec_path());
     command
         .args(&command_spec.args)
         .stdin(Stdio::from(pty.slave_stdin))
@@ -831,6 +833,7 @@ async fn start_home_terminal_session(
     if !acts_for_host(data_dir, context.proof_binding_id()) {
         return Err(HomeTerminalStartError::GuestRefused);
     }
+    prepared.attach_tokio(&mut command, false)?;
     let child = command
         .spawn()
         .with_context(|| format!("failed to start terminal process {}", command_spec.label))?;
@@ -849,6 +852,7 @@ async fn start_home_terminal_session(
         input: Mutex::new(Some(pty.input)),
         input_closed: watch::channel(false).0,
         child: Mutex::new(child),
+        _prepared: Some(prepared),
         events,
         replay: StdMutex::new(HomeTerminalReplayLog::default()),
         event_stream_generation: AtomicU64::new(0),
@@ -1052,6 +1056,36 @@ fn home_terminal_command() -> anyhow::Result<HomeTerminalCommand> {
         args: vec!["home".to_string()],
         label: "elastos home".to_string(),
     })
+}
+
+#[cfg(unix)]
+fn prepare_home_terminal_executable(
+    data_dir: &FsPath,
+    spec: &HomeTerminalCommand,
+) -> anyhow::Result<crate::setup::verified_executable::VerifiedExecutable> {
+    let program = FsPath::new(&spec.program);
+    let own = std::env::current_exe()?;
+    if crate::setup::installed_release_source(data_dir)?.is_some() {
+        if program == own {
+            return crate::setup::verify_own_runtime_start(data_dir, program);
+        }
+        if program == data_dir.join("capsules/home-cli/bin/home-cli") {
+            return crate::setup::verify_installed_component_start(data_dir, "home-cli", program);
+        }
+        anyhow::bail!("terminal executable is outside the signed Home release")
+    }
+    anyhow::ensure!(
+        elastos_runtime::bootstrap::RuntimeConfig::load(data_dir)
+            .0
+            .dev_mode,
+        "unsigned terminal executable requires source Home dev_mode=true"
+    );
+    use sha2::Digest as _;
+    let checksum = format!(
+        "sha256:{}",
+        hex::encode(sha2::Sha256::digest(std::fs::read(program)?))
+    );
+    crate::setup::verified_executable::VerifiedExecutable::prepare(program, &checksum)
 }
 
 #[cfg(unix)]
@@ -1964,6 +1998,37 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn terminal_helper_uses_source_dev_mode_and_signed_home_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper = dir.path().join("terminal-helper");
+        let marker = dir.path().join("started");
+        std::fs::write(&helper, b"#!/bin/sh\nprintf started > \"$1\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let spec = HomeTerminalCommand {
+            program: helper.display().to_string(),
+            args: vec![],
+            label: "fixture".into(),
+        };
+        assert!(prepare_home_terminal_executable(dir.path(), &spec).is_err());
+        std::fs::write(dir.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        let prepared = prepare_home_terminal_executable(dir.path(), &spec).unwrap();
+        let mut command = std::process::Command::new(prepared.exec_path());
+        command.arg(&marker);
+        prepared.attach_std(&mut command, false).unwrap();
+        assert!(command.status().unwrap().success());
+        assert_eq!(std::fs::read(&marker).unwrap(), b"started");
+
+        let installed = crate::installed_release::tests::Fixture::new();
+        std::fs::write(installed.data.join("config.toml"), "dev_mode = true\n").unwrap();
+        assert!(prepare_home_terminal_executable(&installed.data, &spec)
+            .unwrap_err()
+            .to_string()
+            .contains("outside the signed Home release"));
+    }
 
     #[tokio::test]
     #[cfg(unix)]
@@ -2921,6 +2986,7 @@ mod tests {
             input: Mutex::new(input),
             input_closed: watch::channel(false).0,
             child: Mutex::new(child),
+            _prepared: None,
             events,
             replay: StdMutex::new(HomeTerminalReplayLog::default()),
             event_stream_generation: AtomicU64::new(0),

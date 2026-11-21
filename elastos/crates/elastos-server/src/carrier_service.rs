@@ -12,6 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::setup::verified_executable::VerifiedExecutable;
 use elastos_runtime::provider::{
     EntryType, Provider, ProviderError, ResourceAction, ResourceEntry, ResourceRequest,
     ResourceResponse,
@@ -29,13 +30,15 @@ struct CarrierServiceBridge {
     io: Mutex<Option<ChildIo>>,
     /// Binary path and env vars for spawning.
     binary_path: String,
+    checksum: String,
     env_vars: Vec<(String, String)>,
-    child: Mutex<Option<Child>>,
+    child: Mutex<Option<(Child, VerifiedExecutable)>>,
 }
 
 impl CarrierServiceBridge {
     fn new(
         binary_path: String,
+        checksum: String,
         env_vars: Vec<(String, String)>,
         init_config: serde_json::Value,
     ) -> Self {
@@ -43,19 +46,28 @@ impl CarrierServiceBridge {
             init_config,
             io: Mutex::new(None),
             binary_path,
+            checksum,
             env_vars,
             child: Mutex::new(None),
         }
     }
 
     fn spawn(&self) -> Result<ChildIo, ProviderError> {
-        let mut cmd = Command::new(&self.binary_path);
+        let prepared =
+            VerifiedExecutable::prepare(std::path::Path::new(&self.binary_path), &self.checksum)
+                .map_err(|e| {
+                    ProviderError::Provider(format!("carrier service executable refused: {e:#}"))
+                })?;
+        let mut cmd = Command::new(prepared.exec_path());
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         for (k, v) in &self.env_vars {
             cmd.env(k, v);
         }
+        prepared.attach_std(&mut cmd, false).map_err(|e| {
+            ProviderError::Provider(format!("carrier service executable refused: {e:#}"))
+        })?;
         let mut child = cmd.spawn().map_err(|e| {
             ProviderError::Provider(format!(
                 "failed to spawn carrier service '{}': {}",
@@ -73,7 +85,7 @@ impl CarrierServiceBridge {
             .ok_or_else(|| ProviderError::Provider("carrier service stdout unavailable".into()))?;
 
         if let Ok(mut guard) = self.child.lock() {
-            *guard = Some(child);
+            *guard = Some((child, prepared));
         }
 
         Ok(ChildIo {
@@ -188,7 +200,7 @@ impl CarrierServiceBridge {
 impl Drop for CarrierServiceBridge {
     fn drop(&mut self) {
         if let Ok(mut child_guard) = self.child.lock() {
-            if let Some(ref mut child) = *child_guard {
+            if let Some((child, _prepared)) = child_guard.as_mut() {
                 let _ = child.kill();
                 let _ = child.wait();
             }
@@ -203,9 +215,10 @@ pub struct CarrierServiceProvider {
 }
 
 impl CarrierServiceProvider {
-    pub fn new(
+    pub(crate) fn new(
         scheme: impl Into<String>,
         binary_path: String,
+        checksum: String,
         env_vars: Vec<(String, String)>,
         init_config: serde_json::Value,
     ) -> Self {
@@ -215,6 +228,7 @@ impl CarrierServiceProvider {
             scheme,
             bridge: Arc::new(CarrierServiceBridge::new(
                 binary_path,
+                checksum,
                 env_vars,
                 init_config,
             )),
@@ -376,5 +390,56 @@ impl Provider for CarrierServiceProvider {
             .map_err(|e| {
                 ProviderError::Provider(format!("carrier service bridge task join failed: {e}"))
             })?
+    }
+}
+
+#[cfg(test)]
+mod checked_start_tests {
+    use super::*;
+    use sha2::Digest as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn valid_carrier_helper_starts_but_substitution_refuses_before_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("carrier-helper");
+        let marker = dir.path().join("started");
+        let script = b"#!/bin/sh\nprintf started > \"$MARKER\"\nwhile IFS= read -r line; do printf '{\"status\":\"ok\"}\\n'; done\n";
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let checksum = format!("sha256:{}", hex::encode(sha2::Sha256::digest(script)));
+        let bridge = CarrierServiceBridge::new(
+            path.display().to_string(),
+            checksum.clone(),
+            vec![("MARKER".into(), marker.display().to_string())],
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            bridge
+                .send_raw_blocking(&serde_json::json!({"op":"ping"}))
+                .unwrap()["status"],
+            "ok"
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), b"started");
+        drop(bridge);
+        std::fs::remove_file(&marker).unwrap();
+        let substitute = dir.path().join("substitute");
+        std::fs::write(&substitute, b"#!/bin/sh\nprintf replaced > \"$MARKER\"\n").unwrap();
+        std::fs::set_permissions(&substitute, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&substitute, &path).unwrap();
+        let bridge = CarrierServiceBridge::new(
+            path.display().to_string(),
+            checksum,
+            vec![("MARKER".into(), marker.display().to_string())],
+            serde_json::json!({}),
+        );
+        assert!(format!(
+            "{}",
+            bridge
+                .send_raw_blocking(&serde_json::json!({"op":"ping"}))
+                .unwrap_err()
+        )
+        .contains("differs"));
+        assert!(!marker.exists());
     }
 }

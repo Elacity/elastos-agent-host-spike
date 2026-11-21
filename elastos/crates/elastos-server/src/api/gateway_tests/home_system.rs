@@ -4,6 +4,15 @@ use elastos_runtime::signature::{generate_keypair, SigningKey};
 const HOME_CLI_CAPSULE_ID_FOR_TEST: &str = "home-cli";
 static HOME_GATEWAY_TEST_ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
+#[cfg(unix)]
+fn terminal_shell_fixture(dir: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join("terminal-shell");
+    std::fs::write(&path, b"#!/bin/sh\nexec /bin/sh \"$@\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path.display().to_string()
+}
+
 struct EnvRestore {
     key: &'static str,
     previous: Option<String>,
@@ -660,7 +669,10 @@ async fn test_home_cli_terminal_delayed_body_policy_switch_refuses_spawn() {
     let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
     let fixture = tempfile::tempdir().unwrap();
     let marker = fixture.path().join("terminal-started");
-    let _program = EnvRestore::set("ELASTOS_HOME_CLI_TERMINAL_PROGRAM", "/bin/sh".to_string());
+    let _program = EnvRestore::set(
+        "ELASTOS_HOME_CLI_TERMINAL_PROGRAM",
+        terminal_shell_fixture(fixture.path()),
+    );
     let _args = EnvRestore::set(
         "ELASTOS_HOME_CLI_TERMINAL_ARGS_JSON",
         serde_json::json!([
@@ -679,7 +691,11 @@ async fn test_home_cli_terminal_delayed_body_policy_switch_refuses_spawn() {
         ] {
             let dir = tempfile::tempdir().unwrap();
             let owner = passkey_authority(dir.path());
-            std::fs::write(dir.path().join("config.toml"), "developer_mode = true\n").unwrap();
+            std::fs::write(
+                dir.path().join("config.toml"),
+                "dev_mode = true\ndeveloper_mode = true\n",
+            )
+            .unwrap();
             let app = gateway_router(test_state(dir.path()));
             let token = app_token_for_authority(dir.path(), HOME_CLI_CAPSULE_ID_FOR_TEST, &owner);
             let (reading_tx, reading_rx) = tokio::sync::oneshot::channel();
@@ -734,7 +750,10 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
     let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
     let fixture = tempfile::tempdir().unwrap();
     let marker = fixture.path().join("terminal-started");
-    let _program = EnvRestore::set("ELASTOS_HOME_CLI_TERMINAL_PROGRAM", "/bin/sh".to_string());
+    let _program = EnvRestore::set(
+        "ELASTOS_HOME_CLI_TERMINAL_PROGRAM",
+        terminal_shell_fixture(fixture.path()),
+    );
     let _args = EnvRestore::set(
         "ELASTOS_HOME_CLI_TERMINAL_ARGS_JSON",
         serde_json::json!([
@@ -757,7 +776,7 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
             );
             std::fs::write(
                 dir.path().join("config.toml"),
-                format!("developer_mode = {developer_mode}\n"),
+                format!("dev_mode = true\ndeveloper_mode = {developer_mode}\n"),
             )
             .unwrap();
             crate::auth::set_guest_registration_enabled(
@@ -823,7 +842,11 @@ async fn test_home_cli_terminal_developer_mode_policy_matrix() {
     for switch in ["developer mode off", "registration on", "owner demoted"] {
         let dir = tempfile::tempdir().unwrap();
         let owner = passkey_authority(dir.path());
-        std::fs::write(dir.path().join("config.toml"), "developer_mode = true\n").unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "dev_mode = true\ndeveloper_mode = true\n",
+        )
+        .unwrap();
         let app = gateway_router(test_state(dir.path()));
         let token = app_token_for_authority(dir.path(), HOME_CLI_CAPSULE_ID_FOR_TEST, &owner);
         let started = app
@@ -963,8 +986,15 @@ async fn test_home_cli_terminal_defaults_off_and_malformed_settings_fail_closed(
 async fn test_home_cli_terminal_stream_requires_cli_launch_token() {
     let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("config.toml"), "developer_mode = true\n").unwrap();
-    let _program = EnvRestore::set("ELASTOS_HOME_CLI_TERMINAL_PROGRAM", "/bin/sh".to_string());
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "dev_mode = true\ndeveloper_mode = true\n",
+    )
+    .unwrap();
+    let _program = EnvRestore::set(
+        "ELASTOS_HOME_CLI_TERMINAL_PROGRAM",
+        terminal_shell_fixture(dir.path()),
+    );
     let _args = EnvRestore::set(
         "ELASTOS_HOME_CLI_TERMINAL_ARGS_JSON",
         serde_json::json!([
