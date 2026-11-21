@@ -44,8 +44,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "launch",
             call: "libc::execve",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: ["libc::execve", "(path.as_ptr()"].concat(),
             os_path: "",
         },
@@ -54,8 +54,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_command",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: ["mut comman", "d: Command"].concat(),
             os_path: "",
         },
@@ -64,9 +64,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_confined_model_linux",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(binary_path.path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -74,8 +74,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_confined_model_with_engine_bundle",
             call: "command",
             class: "os-tool",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: ["Command::new(\"/usr", "/bin/sandbox-exec\")"].concat(),
             os_path: "/usr/bin/sandbox-exec",
         },
@@ -84,9 +84,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_with_owned_helpers",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(binary_path.path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -94,9 +94,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_with_timeouts",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(binary_path.path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1464,7 +1464,13 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             ["ProviderBridge::", "spawn(&path, Default::default())"].concat(),
-            5,
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["&checked_native_provider", "(&path)"].concat(),
+            4,
         ),
         (
             "elastos-server/src/server_infra.rs",
@@ -1531,15 +1537,15 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&59));
+    assert_eq!(roots.get("none"), Some(&53));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&17));
+    assert_eq!(roots.get("release-signature"), Some(&23));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&24));
+    assert_eq!(times.get("at-every-start"), Some(&30));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&59));
-    assert_eq!(to_gate, 34);
+    assert_eq!(times.get("never"), Some(&53));
+    assert_eq!(to_gate, 30);
 }
 
 #[test]

@@ -1,3 +1,4 @@
+use crate::binaries::checked_native_provider_with_data_dir;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -392,9 +393,12 @@ async fn register_installed_ipfs_provider(
         .await
         .map_err(|error| anyhow::anyhow!("Failed to retire existing IPFS provider: {error}"))?;
     let config = crate::ipfs::ipfs_provider_config(crate::ipfs::IpfsHostRole::Gateway);
-    let bridge = provider::ProviderBridge::spawn(&ipfs_binary, config)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to spawn ipfs-provider: {}", e))?;
+    let bridge = provider::ProviderBridge::spawn(
+        &checked_native_provider_with_data_dir(data_dir, &ipfs_binary),
+        config,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to spawn ipfs-provider: {}", e))?;
     let ipfs_provider: Arc<dyn provider::Provider> = Arc::new(
         provider::CapsuleProvider::with_scheme(Arc::new(bridge), "ipfs"),
     );

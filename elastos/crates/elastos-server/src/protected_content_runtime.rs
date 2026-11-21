@@ -5,6 +5,7 @@
 //! the existing `chain` registry route. Library mint and buy use these seams.
 //! It does not replace the provisional `key`/`rights`/`drm`/`decrypt`
 //! open/share path or expose provider topology to capsules.
+use crate::binaries::checked_native_provider;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -1181,11 +1182,12 @@ pub async fn register_inactive_custody_provider(
         ..Default::default()
     };
     let bridge = Arc::new(
-        elastos_runtime::provider::ProviderBridge::spawn(binary_path, bridge_config)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("failed to spawn inactive custody provider: {error}")
-            })?,
+        elastos_runtime::provider::ProviderBridge::spawn(
+            &checked_native_provider(binary_path),
+            bridge_config,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to spawn inactive custody provider: {error}"))?,
     );
     let startup = async {
         let status =
@@ -1209,7 +1211,7 @@ pub async fn register_protect_provider(
 ) -> anyhow::Result<()> {
     let bridge = Arc::new(
         elastos_runtime::provider::ProviderBridge::spawn(
-            binary_path,
+            &checked_native_provider(binary_path),
             ProviderConfig {
                 extra: json!({}),
                 ..Default::default()
@@ -1242,7 +1244,7 @@ pub async fn register_protected_content_decrypt_provider(
 ) -> anyhow::Result<()> {
     let bridge = Arc::new(
         ProviderBridge::spawn(
-            binary_path,
+            &checked_native_provider(binary_path),
             ProviderConfig {
                 extra: json!({
                     "trusted_runtime_issuer": format!(

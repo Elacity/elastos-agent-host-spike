@@ -64,7 +64,7 @@ fn rows() -> Vec<Row> {
             "spawn_command",
             "spawn()",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -82,7 +82,7 @@ fn rows() -> Vec<Row> {
             "spawn_confined_model_linux",
             "command",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -91,7 +91,7 @@ fn rows() -> Vec<Row> {
             "spawn_confined_model_with_engine_bundle",
             "command",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -100,7 +100,7 @@ fn rows() -> Vec<Row> {
             "spawn_with_owned_helpers",
             "command",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -109,7 +109,7 @@ fn rows() -> Vec<Row> {
             "spawn_with_timeouts",
             "command",
             "host process",
-            "none",
+            "CID+DID",
             "P2-8",
             1,
         ),
@@ -998,3 +998,53 @@ fn every_executable_loader_has_an_authority_row() {
     assert!(missing.is_empty(), "unlisted loaders: {missing:#?}");
 }
 mod trust_columns;
+
+#[test]
+fn native_provider_spawn_routes_keep_the_checked_executable() {
+    let sources = source::production_sources();
+    for (file, function, needle) in [
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_command",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_linux",
+            "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_with_engine_bundle",
+            "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_owned_helpers",
+            "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_timeouts",
+            "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "verify_at_spawn()\n        .map_err(LaunchError::BeforeFork)",
+        ),
+        (
+            "elastos-server/src/binaries.rs",
+            "checked_native_provider_with_data_dir",
+            "verify_installed_component_start(",
+        ),
+    ] {
+        let text = &sources[file];
+        let code = source::code_only(text);
+        assert!(
+            text.match_indices(needle)
+                .any(|(at, _)| source::enclosing_fn(&code, at) == function),
+            "checked executable route missing: {file}::{function} -> {needle}"
+        );
+    }
+}

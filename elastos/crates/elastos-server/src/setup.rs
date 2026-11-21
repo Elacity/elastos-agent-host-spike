@@ -1157,7 +1157,7 @@ pub fn verify_installed_component_start(
     data_dir: &Path,
     name: &str,
     path: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     let source = installed_release_source(data_dir)?.ok_or_else(missing_trusted_source_error)?;
     let runtime = fs::canonicalize(&source.install_path)?;
     let (_, manifest) =
@@ -1165,7 +1165,8 @@ pub fn verify_installed_component_start(
     let entry = installed_component_entry(data_dir, name, path, Some(&manifest))
         .context("Installed component manifest verification failed")?;
     verify_installed_component_with_entry(name, path, &entry)
-        .context("Installed component binary verification failed")
+        .context("Installed component binary verification failed")?;
+    Ok(entry.checksum)
 }
 
 fn verify_installed_component_with_entry(

@@ -1,3 +1,4 @@
+use elastos_server::binaries::checked_native_provider;
 #[cfg(test)]
 use std::fs;
 #[cfg(all(unix, test))]
@@ -501,7 +502,7 @@ async fn register_ipfs_provider_plane_with_role(
     role: elastos_server::ipfs::IpfsHostRole,
 ) -> anyhow::Result<()> {
     let config = elastos_server::ipfs::ipfs_provider_config(role);
-    let bridge = provider::ProviderBridge::spawn(binary_path, config)
+    let bridge = provider::ProviderBridge::spawn(&checked_native_provider(binary_path), config)
         .await
         .map_err(|err| anyhow::anyhow!("failed to spawn ipfs-provider: {err}"))?;
     let ipfs_provider: Arc<dyn provider::Provider> = Arc::new(
@@ -520,7 +521,7 @@ pub(crate) async fn register_availability_provider_plane(
     config: serde_json::Value,
 ) -> anyhow::Result<()> {
     let bridge = provider::ProviderBridge::spawn(
-        binary_path,
+        &checked_native_provider(binary_path),
         provider::BridgeProviderConfig {
             extra: config,
             ..Default::default()
@@ -583,9 +584,10 @@ pub(crate) async fn register_chain_provider_plane(
         anyhow::bail!("protected-content chain configuration names no protected_content_network");
     }
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
-    let bridge = provider::ProviderBridge::spawn(binary_path, generic_config)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
+    let bridge =
+        provider::ProviderBridge::spawn(&checked_native_provider(binary_path), generic_config)
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
     match bridge
         .request(provider::bridge::ProviderRequest::Init { config })
         .await
@@ -789,7 +791,7 @@ async fn setup_server_infrastructure_impl(
                 )
             })?;
 
-        let provider_bytes = std::fs::read(&binary_path)?;
+        let provider_bytes = std::fs::read(binary_path.path())?;
         provider_cid = format!(
             "sha256:{}",
             hex::encode(elastos_runtime::signature::hash_content(&provider_bytes))
@@ -1367,7 +1369,12 @@ async fn setup_server_infrastructure_impl(
         if let Err(e) = verify_provider_binary("drm-provider", &path) {
             tracing::warn!("Skipping drm-provider due to verification failure: {}", e);
         } else {
-            match provider::ProviderBridge::spawn(&path, Default::default()).await {
+            match provider::ProviderBridge::spawn(
+                &checked_native_provider(&path),
+                Default::default(),
+            )
+            .await
+            {
                 Ok(bridge) => {
                     let drm_provider: Arc<dyn provider::Provider> = Arc::new(
                         provider::CapsuleProvider::with_scheme(Arc::new(bridge), "drm"),
@@ -1392,7 +1399,12 @@ async fn setup_server_infrastructure_impl(
                 e
             );
         } else {
-            match provider::ProviderBridge::spawn(&path, Default::default()).await {
+            match provider::ProviderBridge::spawn(
+                &checked_native_provider(&path),
+                Default::default(),
+            )
+            .await
+            {
                 Ok(bridge) => {
                     let rights_provider: Arc<dyn provider::Provider> = Arc::new(
                         provider::CapsuleProvider::with_scheme(Arc::new(bridge), "rights"),
@@ -1414,7 +1426,12 @@ async fn setup_server_infrastructure_impl(
         if let Err(e) = verify_provider_binary("key-provider", &path) {
             tracing::warn!("Skipping key-provider due to verification failure: {}", e);
         } else {
-            match provider::ProviderBridge::spawn(&path, Default::default()).await {
+            match provider::ProviderBridge::spawn(
+                &checked_native_provider(&path),
+                Default::default(),
+            )
+            .await
+            {
                 Ok(bridge) => {
                     let key_provider: Arc<dyn provider::Provider> = Arc::new(
                         provider::CapsuleProvider::with_scheme(Arc::new(bridge), "key"),
@@ -1439,7 +1456,12 @@ async fn setup_server_infrastructure_impl(
                 e
             );
         } else {
-            match provider::ProviderBridge::spawn(&path, Default::default()).await {
+            match provider::ProviderBridge::spawn(
+                &checked_native_provider(&path),
+                Default::default(),
+            )
+            .await
+            {
                 Ok(bridge) => {
                     let decrypt_provider: Arc<dyn provider::Provider> = Arc::new(
                         provider::CapsuleProvider::with_scheme(Arc::new(bridge), "decrypt"),
@@ -2466,10 +2488,12 @@ mod tests {
             ),
             0o700,
         );
-        let bridge =
-            provider::ProviderBridge::spawn_with_owned_helpers(&binary, Default::default())
-                .await
-                .unwrap();
+        let bridge = provider::ProviderBridge::spawn_with_owned_helpers(
+            &crate::test_support::fixture_executable(&binary),
+            Default::default(),
+        )
+        .await
+        .unwrap();
         let ready: serde_json::Value =
             serde_json::from_slice(&fs::read(temp.path().join("ready.json")).unwrap()).unwrap();
         let pid = ready["helper"].as_u64().unwrap() as libc::pid_t;
@@ -3017,9 +3041,12 @@ mod tests {
             &status,
         );
         let bridge = Arc::new(
-            provider::ProviderBridge::spawn(&script_path, Default::default())
-                .await
-                .unwrap(),
+            provider::ProviderBridge::spawn(
+                &crate::test_support::fixture_executable(&script_path),
+                Default::default(),
+            )
+            .await
+            .unwrap(),
         );
 
         let error = start_media_provider(&registry, bridge, Duration::from_secs(1))
@@ -3059,9 +3086,12 @@ mod tests {
             &media_provider_status(),
         );
         let first_bridge = Arc::new(
-            provider::ProviderBridge::spawn(&first_binary, Default::default())
-                .await
-                .unwrap(),
+            provider::ProviderBridge::spawn(
+                &crate::test_support::fixture_executable(&first_binary),
+                Default::default(),
+            )
+            .await
+            .unwrap(),
         );
         start_media_provider(&registry, first_bridge, Duration::from_secs(1))
             .await
@@ -3069,9 +3099,12 @@ mod tests {
         let first_pid = read_pid(&first_pid_path);
 
         let second_bridge = Arc::new(
-            provider::ProviderBridge::spawn(&second_binary, Default::default())
-                .await
-                .unwrap(),
+            provider::ProviderBridge::spawn(
+                &crate::test_support::fixture_executable(&second_binary),
+                Default::default(),
+            )
+            .await
+            .unwrap(),
         );
         let error = start_media_provider(&registry, second_bridge, Duration::from_secs(1))
             .await
@@ -3097,9 +3130,12 @@ mod tests {
         let (binary, pid_path, request_log, status_signal, status_release) =
             write_blocking_media_status_script(tempdir.path());
         let bridge = Arc::new(
-            provider::ProviderBridge::spawn(&binary, Default::default())
-                .await
-                .unwrap(),
+            provider::ProviderBridge::spawn(
+                &crate::test_support::fixture_executable(&binary),
+                Default::default(),
+            )
+            .await
+            .unwrap(),
         );
         let task_registry = registry.clone();
         let registration = tokio::spawn(async move {
@@ -3593,7 +3629,7 @@ mod tests {
         );
 
         let error = match provider::ProviderBridge::spawn(
-            &script_path,
+            &crate::test_support::fixture_executable(&script_path),
             model_provider_bridge_config(tempdir.path()).unwrap(),
         )
         .await

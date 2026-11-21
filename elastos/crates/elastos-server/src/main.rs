@@ -1,5 +1,7 @@
 //! ElastOS Runtime CLI
 
+use elastos_server::binaries::checked_native_provider;
+
 mod capsule_cmd;
 mod capsule_publish_cmd;
 mod chat_cmd;
@@ -1878,7 +1880,7 @@ async fn get_content_registry_with_local_ipfs_backend(
     Ok((registry, ipfs_bridge))
 }
 
-fn verified_ipfs_provider_binary() -> anyhow::Result<PathBuf> {
+fn verified_ipfs_provider_binary() -> anyhow::Result<elastos_runtime::provider::CheckedExecutable> {
     let binary = resolve_verified_native_provider_binary("ipfs-provider")?.ok_or_else(|| {
         anyhow::anyhow!(
             "ipfs-provider not found. Run: elastos setup --with kubo --with ipfs-provider"
@@ -1894,9 +1896,10 @@ async fn get_tunnel_bridge() -> anyhow::Result<TunnelBridge> {
         )
     })?;
     verify_component_binary("tunnel-provider", &binary)?;
-    let bridge = provider::ProviderBridge::spawn(&binary, Default::default())
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to spawn tunnel-provider: {}", e))?;
+    let bridge =
+        provider::ProviderBridge::spawn(&checked_native_provider(&binary), Default::default())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to spawn tunnel-provider: {}", e))?;
     Ok(TunnelBridge::new(Arc::new(bridge)))
 }
 

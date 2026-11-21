@@ -1,6 +1,7 @@
 //! Fixed child install report. All allocation and path preparation finish before fork.
 #![allow(dead_code)] // The server does not call this launcher yet.
 
+use super::super::CheckedExecutable;
 use super::super::{landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId};
 use super::preexec_installer;
 use std::{
@@ -74,12 +75,12 @@ pub(super) fn start(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
     checked: super::CheckedDirectory<'_>,
-    executable: &Path,
+    executable: &CheckedExecutable,
     args: &[&CStr],
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
 ) -> Result<libc::pid_t, LaunchError> {
-    let path = CString::new(executable.as_os_str().as_bytes()).map_err(|_| {
+    let _path = CString::new(executable.path().as_os_str().as_bytes()).map_err(|_| {
         LaunchError::BeforeFork(
             "landlock probe refused: PROVIDER_EXECUTABLE path contains NUL".into(),
         )
@@ -101,7 +102,7 @@ pub(super) fn start(
         admitted,
         &landlock_plan::Bindings {
             storage_root: storage.path.to_path_buf(),
-            provider_executable: executable.to_path_buf(),
+            provider_executable: executable.path().to_path_buf(),
             storage_dev: storage.dev,
             storage_ino: storage.ino,
         },
@@ -111,7 +112,7 @@ pub(super) fn start(
     apply_pre_fork_storage_swap(storage.path);
     launch(
         &prepared,
-        &path,
+        executable,
         args,
         NORMAL_TEST_HOOK,
         stdin_read,
@@ -167,12 +168,17 @@ fn open_dev_null() -> Result<OwnedFd, String> {
 
 fn launch(
     prepared: &preexec_installer::Prepared,
-    path: &CStr,
+    executable: &CheckedExecutable,
     args: &[&CStr],
     test_hook: TestHook,
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
 ) -> Result<libc::pid_t, LaunchError> {
+    executable
+        .verify_at_spawn()
+        .map_err(LaunchError::BeforeFork)?;
+    let path = CString::new(executable.path().as_os_str().as_bytes())
+        .map_err(|_| LaunchError::BeforeFork("provider executable path contains NUL".into()))?;
     let mut argv = Vec::with_capacity(args.len() + 2);
     argv.push(path.as_ptr());
     argv.extend(args.iter().map(|arg| arg.as_ptr()));
@@ -476,7 +482,7 @@ mod tests {
             RuntimeProviderId::Did,
             &rows,
             opened_directory(Path::new("/")),
-            bad,
+            &CheckedExecutable::for_test(bad),
             &[],
             None,
             None,
@@ -507,7 +513,6 @@ mod tests {
     #[test]
     fn installer_failure_crosses_pipe_and_child_is_reaped() {
         let root = tempfile::tempdir().unwrap();
-        let path = CString::new("/bin/true").unwrap();
         let bindings = bindings_for(root.path(), Path::new("/bin/true"));
         let rows = did_rows();
         let expected_rule = landlock_plan::build(
@@ -524,7 +529,14 @@ mod tests {
         let prepared =
             preexec_installer::prepare(RuntimeProviderId::Did, &rows, &bindings).unwrap();
         std::fs::remove_dir(root.path()).unwrap();
-        let (pid, reason) = match launch(&prepared, &path, &[], TestReport::Normal, None, None) {
+        let (pid, reason) = match launch(
+            &prepared,
+            &CheckedExecutable::for_test(Path::new("/bin/true")),
+            &[],
+            TestReport::Normal,
+            None,
+            None,
+        ) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
             Ok(pid) => {
                 let mut status = 0;
@@ -560,7 +572,7 @@ mod tests {
             RuntimeProviderId::Did,
             &rows,
             opened_directory(root.path()),
-            &executable,
+            &CheckedExecutable::for_test(&executable),
             &[],
             None,
             None,
@@ -589,10 +601,30 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn changed_provider_pin_refuses_before_fork() {
+        let root = tempfile::tempdir().unwrap();
+        let rows = did_rows();
+        let prepared = preexec_installer::prepare(
+            RuntimeProviderId::Did,
+            &rows,
+            &bindings_for(root.path(), Path::new("/bin/true")),
+        )
+        .unwrap();
+        let checked = CheckedExecutable::pinned(
+            Path::new("/bin/true"),
+            &format!("sha256:{}", "0".repeat(64)),
+        )
+        .unwrap();
+        let result = launch(&prepared, &checked, &[], TestReport::Normal, None, None);
+        assert!(matches!(result, Err(LaunchError::BeforeFork(reason))
+            if reason == "provider executable differs from verified release checksum"));
+    }
+
     #[test]
     fn child_exits_without_record_is_refused_and_reaped() {
         let root = tempfile::tempdir().unwrap();
-        let path = CString::new("/bin/true").unwrap();
         let rows = did_rows();
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
@@ -602,7 +634,7 @@ mod tests {
         .unwrap();
         let (pid, reason) = match launch(
             &prepared,
-            &path,
+            &CheckedExecutable::for_test(Path::new("/bin/true")),
             &[],
             TestReport::NoRecordAfterDelay,
             None,
@@ -635,7 +667,6 @@ mod tests {
     #[test]
     fn short_child_record_is_refused_and_reaped() {
         let root = tempfile::tempdir().unwrap();
-        let path = CString::new("/bin/true").unwrap();
         let rows = did_rows();
         let prepared = preexec_installer::prepare(
             RuntimeProviderId::Did,
@@ -643,8 +674,14 @@ mod tests {
             &bindings_for(root.path(), Path::new("/bin/true")),
         )
         .unwrap();
-        let (pid, reason) = match launch(&prepared, &path, &[], TestReport::ShortRecord, None, None)
-        {
+        let (pid, reason) = match launch(
+            &prepared,
+            &CheckedExecutable::for_test(Path::new("/bin/true")),
+            &[],
+            TestReport::ShortRecord,
+            None,
+            None,
+        ) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
             other => panic!("a short child record must refuse the launch: {other:?}"),
         };
@@ -666,7 +703,6 @@ mod tests {
     #[test]
     fn exec_closes_report_and_all_other_descriptors() {
         let root = tempfile::tempdir().unwrap();
-        let path = CString::new("/bin/cat").unwrap();
         let marker = std::fs::File::open("/dev/null").unwrap();
         assert_eq!(
             unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&marker), libc::F_SETFD, 0) },
@@ -691,7 +727,7 @@ mod tests {
         );
         let pid = launch(
             &prepared,
-            &path,
+            &CheckedExecutable::for_test(Path::new("/bin/cat")),
             &[],
             TestReport::Normal,
             Some(input[0]),
@@ -776,7 +812,7 @@ mod tests {
             RuntimeProviderId::Did,
             &rows,
             opened_directory(&root),
-            Path::new("/bin/true"),
+            &CheckedExecutable::for_test(Path::new("/bin/true")),
             &[],
             None,
             None,

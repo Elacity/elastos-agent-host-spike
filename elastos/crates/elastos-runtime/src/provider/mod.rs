@@ -7,6 +7,7 @@
 //! Providers are registered at startup and can be dynamically added/removed.
 
 pub mod bridge;
+mod checked_executable;
 pub mod dispatch;
 mod landlock_plan;
 #[cfg(target_os = "linux")]
@@ -24,6 +25,7 @@ mod seccomp_program;
 pub use bridge::{
     CapsuleProvider, Confined, ProviderBridge, ProviderConfig as BridgeProviderConfig,
 };
+pub use checked_executable::CheckedExecutable;
 pub use registry::{
     decode_provider_stream_payload, EntryType, LocalIpfsCapacityObservation, Provider,
     ProviderByteRange, ProviderCarrierInvoker, ProviderCarrierRoute, ProviderError,

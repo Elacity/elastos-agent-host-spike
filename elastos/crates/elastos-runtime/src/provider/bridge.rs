@@ -27,6 +27,7 @@ use super::registry::{
     EntryType, Provider, ProviderError, ResourceAction, ResourceEntry, ResourceRequest,
     ResourceResponse,
 };
+use super::CheckedExecutable;
 
 /// Timeout for provider requests (30 seconds)
 pub(super) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1772,7 +1773,10 @@ impl ProviderBridge {
     ///
     /// Starts the binary, sends Init with the given config, and waits
     /// for the init response.
-    pub async fn spawn(binary_path: &Path, config: ProviderConfig) -> Result<Self, BridgeError> {
+    pub async fn spawn(
+        binary_path: &CheckedExecutable,
+        config: ProviderConfig,
+    ) -> Result<Self, BridgeError> {
         Self::spawn_with_timeouts(binary_path, config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT).await
     }
 
@@ -1790,7 +1794,7 @@ impl ProviderBridge {
     pub async fn spawn_confined(
         component_key: &str,
         authority: &ProviderAuthority,
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         storage_root: &Path,
         config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
@@ -1887,7 +1891,7 @@ impl ProviderBridge {
     /// Admit only Runtime-selected private engine sockets for the native model provider.
     #[cfg(target_os = "macos")]
     pub async fn spawn_confined_model(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         config: ProviderConfig,
     ) -> Result<
         (
@@ -1906,7 +1910,7 @@ impl ProviderBridge {
     /// Runtime retains verification and offer authority through every Init.
     #[cfg(target_os = "macos")]
     pub async fn spawn_confined_model_with_engine_bundle(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         mut config: ProviderConfig,
         pinned_engine_bundle: Option<&Path>,
     ) -> Result<
@@ -1936,7 +1940,8 @@ impl ProviderBridge {
         // Seatbelt resolves /var to /private/var before comparing literal paths.
         let ipc_path = std::fs::canonicalize(ipc_dir.path()).map_err(BridgeError::Spawn)?;
         let journal = model_journal_for_sandbox(&config)?;
-        let mut policy = model_file_policy(binary_path, &config, &journal, pinned_engine_bundle)?;
+        let mut policy =
+            model_file_policy(binary_path.path(), &config, &journal, pinned_engine_bundle)?;
         let local_ids = offers
             .iter()
             .filter(|offer| {
@@ -2022,8 +2027,9 @@ impl ProviderBridge {
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
         config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
         let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.arg("-p").arg(policy).arg(binary_path);
+        command.arg("-p").arg(policy).arg(binary_path.path());
         let mut bridge = Self::spawn_command(
+            binary_path,
             command,
             config.clone(),
             INIT_TIMEOUT,
@@ -2061,7 +2067,7 @@ impl ProviderBridge {
     /// kernel socket filter inherited by its guard and llama.cpp descendants.
     #[cfg(target_os = "linux")]
     pub async fn spawn_confined_model_linux(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         mut config: ProviderConfig,
     ) -> Result<(Self, BTreeMap<String, String>, Vec<String>, ProviderConfig), BridgeError> {
         let offers = config
@@ -2127,9 +2133,10 @@ impl ProviderBridge {
             );
         }
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
-        let mut command = Command::new(binary_path);
+        let mut command = Command::new(binary_path.path());
         super::linux_model_seccomp::install_on_command(&mut command).map_err(BridgeError::Spawn)?;
         let mut bridge = Self::spawn_command(
+            binary_path,
             command,
             config.clone(),
             INIT_TIMEOUT,
@@ -2457,13 +2464,14 @@ impl ProviderBridge {
     }
 
     async fn spawn_with_timeouts(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         config: ProviderConfig,
         init_timeout: std::time::Duration,
         shutdown_timeout: std::time::Duration,
     ) -> Result<Self, BridgeError> {
         Self::spawn_command(
-            Command::new(binary_path),
+            binary_path,
+            Command::new(binary_path.path()),
             config,
             init_timeout,
             shutdown_timeout,
@@ -2475,11 +2483,12 @@ impl ProviderBridge {
 
     /// Runtime owns helper lifetime even while the provider is busy launching.
     pub async fn spawn_with_owned_helpers(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         config: ProviderConfig,
     ) -> Result<Self, BridgeError> {
         Self::spawn_command(
-            Command::new(binary_path),
+            binary_path,
+            Command::new(binary_path.path()),
             config,
             INIT_TIMEOUT,
             SHUTDOWN_TIMEOUT,
@@ -2490,6 +2499,7 @@ impl ProviderBridge {
     }
 
     async fn spawn_command(
+        binary_path: &CheckedExecutable,
         mut command: Command,
         config: ProviderConfig,
         init_timeout: std::time::Duration,
@@ -2510,6 +2520,9 @@ impl ProviderBridge {
         };
         #[cfg(not(unix))]
         let _ = own_helpers;
+        binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
         let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -3894,7 +3907,7 @@ mod tests {
         let mut attempts = 0u32;
         loop {
             match ProviderBridge::spawn_with_timeouts(
-                binary,
+                &CheckedExecutable::for_test(binary),
                 config.clone(),
                 init_timeout,
                 shutdown_timeout,
@@ -3919,6 +3932,74 @@ mod tests {
                 result => return result,
             }
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn checked_provider_starts_and_refuses_changed_bytes_and_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let (binary, pid_file) = write_mock_provider_script(
+            temp.path(),
+            r#"{"status":"ok"}"#,
+            Some(r#"{"status":"ok"}"#),
+            0,
+        );
+        let checked = CheckedExecutable::for_test(&binary);
+        let bridge = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .unwrap();
+        assert!(pid_file.exists(), "the checked provider starts");
+        bridge.shutdown().await.unwrap();
+
+        let marker = temp.path().join("refused.marker");
+        let replacement = format!("#!/bin/sh\nprintf bad > '{}'\n", marker.display());
+        std::fs::write(&binary, &replacement).unwrap();
+        let error = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, BridgeError::Refused(reason) if reason == "provider executable differs from verified release checksum")
+        );
+        assert!(!marker.exists(), "changed bytes did not exec");
+
+        std::fs::remove_file(&binary).unwrap();
+        let alternate = temp.path().join("alternate-provider");
+        std::fs::write(&alternate, replacement).unwrap();
+        std::os::unix::fs::symlink(&alternate, &binary).unwrap();
+        let error = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, BridgeError::Refused(reason) if reason == "provider executable symlink is refused")
+        );
+        assert!(!marker.exists(), "symlink target did not exec");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_model_spawn_refuses_substituted_provider_before_exec() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("model-provider");
+        let marker = temp.path().join("ran");
+        std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let checked = CheckedExecutable::for_test(&binary);
+        std::fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        let config = ProviderConfig {
+            extra: serde_json::json!({"offers":[]}),
+            ..Default::default()
+        };
+        let result = ProviderBridge::spawn_confined_model_linux(&checked, config).await;
+        assert!(matches!(result, Err(BridgeError::Refused(reason))
+            if reason == "provider executable differs from verified release checksum"));
+        assert!(!marker.exists(), "the changed model provider did not exec");
     }
 
     #[cfg(unix)]
@@ -4348,7 +4429,7 @@ mod tests {
             .unwrap();
         assert!(canonicalized.success());
         let (bridge, sockets, vacant, confined_config, _hosted_listener) =
-            ProviderBridge::spawn_confined_model(&script, config)
+            ProviderBridge::spawn_confined_model(&CheckedExecutable::for_test(&script), config)
                 .await
                 .unwrap();
         assert_eq!(
@@ -4421,7 +4502,7 @@ mod tests {
         };
         let (empty_bridge, _, vacant, _, _hosted_listener) =
             ProviderBridge::spawn_confined_model_with_engine_bundle(
-                &script,
+                &CheckedExecutable::for_test(&script),
                 empty_config,
                 Some(&engine_dir),
             )
@@ -4514,13 +4595,16 @@ mod tests {
         let offer_id = fixture["offer_id"].as_str().unwrap();
         #[cfg(target_os = "macos")]
         let (bridge, sockets, _, _, _hosted_listener) =
-            ProviderBridge::spawn_confined_model(binary, config)
+            ProviderBridge::spawn_confined_model(&CheckedExecutable::for_test(binary), config)
                 .await
                 .unwrap();
         #[cfg(target_os = "linux")]
-        let (bridge, sockets, _, _) = ProviderBridge::spawn_confined_model_linux(binary, config)
-            .await
-            .unwrap();
+        let (bridge, sockets, _, _) = ProviderBridge::spawn_confined_model_linux(
+            &CheckedExecutable::for_test(binary),
+            config,
+        )
+        .await
+        .unwrap();
         let socket = sockets[offer_id].clone();
         let input = serde_json::json!({
             "schema": "elastos.model.input.text/v1",
@@ -4709,7 +4793,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        let spawned = ProviderBridge::spawn_confined_model_linux(&probe, config).await;
+        let spawned = ProviderBridge::spawn_confined_model_linux(
+            &CheckedExecutable::for_test(&probe),
+            config,
+        )
+        .await;
         let (bridge, sockets, vacant, _) = spawned.unwrap();
         let pid = bridge
             .child
@@ -4822,7 +4910,7 @@ mod tests {
         let confined = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -4888,7 +4976,7 @@ mod tests {
         let error = match ProviderBridge::spawn_confined(
             "did-provider",
             &authority,
-            &temp.path().join("never-runs"),
+            &CheckedExecutable::for_test(&temp.path().join("never-runs")),
             &widened,
             ProviderConfig::default(),
         )
@@ -4908,7 +4996,7 @@ mod tests {
         let confined = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -4942,7 +5030,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &authority,
-            &program,
+            &CheckedExecutable::for_test(&program),
             &temp.path().join("root"),
             ProviderConfig::default(),
         )
@@ -4988,7 +5076,7 @@ mod tests {
         let error = match ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &program,
+            &CheckedExecutable::for_test(&program),
             &root,
             ProviderConfig::default(),
         )
@@ -5044,7 +5132,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -5077,7 +5165,7 @@ mod tests {
             let confined = ProviderBridge::spawn_confined(
                 "did-provider",
                 &committed_authority("did"),
-                &binary,
+                &CheckedExecutable::for_test(&binary),
                 root,
                 ProviderConfig::default(),
             )
@@ -5136,7 +5224,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -5171,7 +5259,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -5677,7 +5765,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "ipfs-provider",
             &committed_authority("did"),
-            &temp.path().join("never-runs"),
+            &CheckedExecutable::for_test(&temp.path().join("never-runs")),
             &root,
             ProviderConfig::default(),
         )
@@ -5759,7 +5847,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &program,
+            &CheckedExecutable::for_test(&program),
             &root,
             ProviderConfig::default(),
         )
@@ -5789,7 +5877,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &program,
+            &CheckedExecutable::for_test(&program),
             &root,
             ProviderConfig::default(),
         )
