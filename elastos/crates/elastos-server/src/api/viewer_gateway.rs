@@ -959,7 +959,8 @@ async fn viewer_launch_read(
     plain: bool,
 ) -> Response {
     let not_found = || (StatusCode::NOT_FOUND, "not_found").into_response();
-    let Ok((id, token, context)) = require_launch_bound_token(data_dir, headers, viewer, false)
+    let Ok((id, _content_name, token, context)) =
+        require_launch_bound_token(data_dir, headers, viewer, false)
     else {
         return not_found();
     };
@@ -1045,6 +1046,7 @@ struct RuntimeOpened {
     id: String,
     page: String,
     entrypoint: String,
+    content_name: String,
 }
 
 /// `POST /api/home/launch/content`: Home opens a content capsule by its CID
@@ -1066,7 +1068,13 @@ pub async fn home_launch_content(
         Ok(opened) => opened,
         Err((status, refusal)) => return (status, refusal).into_response(),
     };
-    let token = match issue_launch_page_token(&state.data_dir, &opened.id, &opened.page, &context) {
+    let token = match issue_launch_page_token(
+        &state.data_dir,
+        &opened.id,
+        &opened.page,
+        &opened.content_name,
+        &context,
+    ) {
         Ok(token) => token,
         Err(err) => return viewer_error_response(err),
     };
@@ -1127,8 +1135,11 @@ async fn open_at_runtime(
     let page = !opened.page.is_empty()
         && !opened.page.contains('/')
         && crate::page_launch::plain_content_path(&opened.page);
+    let content_name = !opened.content_name.is_empty()
+        && !opened.content_name.contains('/')
+        && crate::page_launch::plain_content_path(&opened.content_name);
     let entrypoint = crate::page_launch::plain_content_path(&opened.entrypoint);
-    match launch_id && page && entrypoint {
+    match launch_id && page && content_name && entrypoint {
         true => Ok(opened),
         false => Err(odd()),
     }
