@@ -9796,9 +9796,14 @@ pub(crate) mod tests {
         let error = ensure_browser_vm_image_in_context(&data, FirstPartyCarrierContext::Runtime)
             .await
             .unwrap_err();
+        // The stale manifest is refused at the signed components descriptor,
+        // under the operator repair guidance.
+        let error = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("Installed release inputs require repair"),
-            "{error:#}"
+            error.contains("Installed release inputs require repair")
+                && error.contains("Installed component manifest verification failed")
+                && error.contains("Installed artifact differs from its signed checksum"),
+            "{error}"
         );
         assert!(!data.join(browser_vm_image::INSTALL_PATH).exists());
         server.close().await;

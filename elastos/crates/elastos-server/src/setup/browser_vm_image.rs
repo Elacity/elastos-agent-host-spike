@@ -2,7 +2,9 @@
 //! This prepares image bytes; Engine host admission still owns launch readiness.
 
 use super::{replace_directory, ComponentsManifest, PlatformInfo};
+use crate::installed_release::release_cid;
 use anyhow::{bail, ensure, Context};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -17,6 +19,7 @@ pub(super) const NAME: &str = "browser-vm-image";
 pub(super) const INSTALL_PATH: &str = "browser-vm/image-set";
 const RECEIPT: &str = "browser-vm-rootfs-manifest.json";
 const RECEIPT_HASH: &str = ".elastos-image-manifest-sha256";
+const SIGNED_IMAGE: &str = ".elastos-signed-image.json";
 const FILES: [&str; 4] = [RECEIPT, "rootfs.ext4", "vmlinux", "initrd"];
 // An exact stamped size bounds each disk-backed transfer independently of RAM.
 const MAX_ARCHIVE_SIZE: u64 = 64 * 1024 * 1024 * 1024;
@@ -31,6 +34,52 @@ const VERIFIED_SET_TOTAL_CACHE_LIMIT: usize = 32;
 const UNPACKED_SET_BYTES: u64 = 4352 * 1024 * 1024;
 // Unit tests unpack small fixtures, so they do not ask for the full set's room.
 const UNPACK_ESTIMATE: u64 = if cfg!(test) { 0 } else { UNPACKED_SET_BYTES };
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VmImageEntry {
+    path: String,
+    size: u64,
+    sha256: String,
+    cid: String,
+}
+
+fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
+    let entry = info.extra.get("vm_image");
+    ensure!(
+        entry.is_some() || info.cid.is_none(),
+        "Browser image has no signed VM image entry"
+    );
+    let Some(entry) = entry else { return Ok(None) };
+    let entry: VmImageEntry = serde_json::from_value(entry.clone())?;
+    let cid = cid::Cid::try_from(entry.cid.as_str())?;
+    ensure!(
+        entry.path == "rootfs.ext4"
+            && entry.size > 0
+            && entry.size <= MAX_ARCHIVE_SIZE
+            && entry.sha256.len() == 64
+            && entry
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && cid.codec() == 0x55
+            && cid.hash().code() == 0x12
+            && cid.hash().digest() == hex::decode(&entry.sha256)?.as_slice()
+            && cid.to_string() == entry.cid,
+        "Browser signed VM image entry is invalid"
+    );
+    Ok(Some(entry))
+}
+
+fn verify_signed_image(bundle: &Path, info: &PlatformInfo, digest: &str) -> anyhow::Result<()> {
+    if let Some(entry) = signed_image(info)? {
+        ensure!(
+            fs::metadata(bundle.join(&entry.path))?.len() == entry.size && digest == entry.sha256,
+            "Browser extracted image differs from signed VM image entry"
+        );
+    }
+    Ok(())
+}
 
 // Like AuthState's verified-file cache, use inode plus nanosecond change time:
 // a same-size rewrite with restored mtime still requires verification.
@@ -412,6 +461,7 @@ pub(super) fn component_info<'a>(
 }
 
 fn validate_info(info: &PlatformInfo) -> anyhow::Result<()> {
+    signed_image(info)?;
     ensure!(
         info.install_path.as_deref() == Some(INSTALL_PATH)
             && info.extract_path.as_deref() == Some(NAME)
@@ -695,14 +745,32 @@ fn verify_installed_with_cancel(
         "Browser image receipt identity is stale"
     );
     let paths = FILES.map(|name| dest.join(name));
-    verify_cached_payload(
+    let digests = verify_cached_payload(
         &paths,
         platform,
         &serde_json::to_string(info)?,
         cancelled,
         || verify_payload_with_cancel(&dest, platform, cancelled),
-    )
-    .map(|_| ())
+    )?;
+    verify_signed_image(&dest, info, &digests[0])?;
+    if let Some(entry) = signed_image(info)? {
+        let recorded: Value = serde_json::from_slice(&fs::read(dest.join(SIGNED_IMAGE))?)?;
+        let release_cid = signed_release_cid(data)?;
+        ensure!(
+            recorded["image_cid"] == entry.cid
+                && recorded["release_cid"].as_str() == release_cid.as_deref(),
+            "Browser signed image installation receipt differs from release"
+        );
+    }
+    Ok(())
+}
+
+fn signed_release_cid(data: &Path) -> anyhow::Result<Option<String>> {
+    let Some(source) = super::installed_release_source(data)? else {
+        return Ok(None);
+    };
+    let binary = fs::canonicalize(&source.install_path)?;
+    Ok(Some(release_cid(data, &binary, &source)?))
 }
 
 fn check_cancelled(cancelled: Option<&AtomicBool>) -> anyhow::Result<()> {
@@ -943,7 +1011,16 @@ fn install_archive_reader(
         found.len() == FILES.len(),
         "Browser image archive is missing a required image-set file"
     );
-    verify_payload_with_cancel(&bundle, platform, Some(cancelled))?;
+    let digests = verify_payload_with_cancel(&bundle, platform, Some(cancelled))?;
+    verify_signed_image(&bundle, info, &digests[0])?;
+    if let Some(entry) = signed_image(info)? {
+        fs::write(
+            bundle.join(SIGNED_IMAGE),
+            serde_json::to_vec(&json!({
+                "release_cid": signed_release_cid(data)?, "image_cid": entry.cid
+            }))?,
+        )?;
+    }
     super::write_platform_cache_metadata(info, &bundle)?;
     fs::write(
         bundle.join(RECEIPT_HASH),
@@ -1154,6 +1231,37 @@ mod tests {
 
     fn manifest(info: &PlatformInfo) -> ComponentsManifest {
         serde_json::from_value(json!({"external":{NAME:{"install_path":INSTALL_PATH,"platforms":{"darwin-arm64":info}}},"profiles":{}})).unwrap()
+    }
+
+    #[test]
+    fn signed_image_install_refuses_changed_bytes_and_missing_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let (original, mut info) = archive(&fixture(b"signed-image"));
+        info.cid = Some(super::super::catalog_head_cid(&original).unwrap());
+        assert!(
+            install_archive(temp.path(), &original, &info, "darwin-arm64")
+                .unwrap_err()
+                .to_string()
+                .contains("no signed VM image entry")
+        );
+        info.extra.insert(
+            "vm_image".into(),
+            json!({"path":"rootfs.ext4", "size":12,
+            "sha256":sha(b"signed-image"),
+            "cid":super::super::catalog_head_cid(b"signed-image").unwrap()}),
+        );
+        install_archive(temp.path(), &original, &info, "darwin-arm64").unwrap();
+        verify_installed(temp.path(), &info, "darwin-arm64").unwrap();
+        let (changed, mut changed_info) = archive(&fixture(b"changed-image"));
+        changed_info.cid = info.cid.clone();
+        changed_info.extra = info.extra.clone();
+        assert!(
+            install_archive(temp.path(), &changed, &changed_info, "darwin-arm64")
+                .unwrap_err()
+                .to_string()
+                .contains("differs from signed VM image entry")
+        );
+        verify_installed(temp.path(), &info, "darwin-arm64").unwrap();
     }
 
     #[test]

@@ -1052,7 +1052,28 @@ class SignerTests(unittest.TestCase):
         self.current_shape()
         prepared = self.prepare()
         self.assertEqual(len(prepared.files), 6)
+        row = S.parse_json((self.root / "components-x86_64-linux.json").read_bytes())["external"]["localhost-provider"]["platforms"]["linux-amd64"]
+        self.assertNotIn("vm_image", row)
         self.assertFalse(self.marker.exists())
+
+    def test_signed_vm_image_entry_round_trips_and_refuses_invalid_raw_cid(self):
+        components = self.current_shape()
+        row = components["external"]["localhost-provider"]["platforms"]["linux-amd64"]
+        image = b"final raw VM image bytes"
+        row.update(strategy="browser-vm-image", vm_image={"path": "rootfs.ext4", "size": len(image),
+                   "sha256": S.sha256(image), "cid": S.raw_cid(image)})
+        self.reapprove_components(components)
+        publication = dict(S.sign_publication(self.prepare(), FakeBackend()))
+        signed = S.parse_json(publication["components-x86_64-linux.json"].read_bytes())
+        self.assertEqual(signed["external"]["localhost-provider"]["platforms"]["linux-amd64"]["vm_image"], row["vm_image"])
+        for change in (lambda r: r.pop("vm_image"), lambda r: r["vm_image"].update(cid=S.raw_cid(b"changed"))):
+            invalid = copy.deepcopy(components)
+            change(invalid["external"]["localhost-provider"]["platforms"]["linux-amd64"])
+            for path in self.snapshot.iterdir():
+                path.unlink()
+            self.reapprove_components(invalid)
+            with self.assertRaisesRegex(ValueError, "signed VM image"):
+                self.prepare()
 
     def test_release_size_mismatch_and_null_are_refused(self):
         for size in (0, None, True):

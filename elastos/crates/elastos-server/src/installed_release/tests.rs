@@ -38,6 +38,23 @@ fn installed_component_start_accepts_signed_release() {
     assert_eq!(fs::read(marker).unwrap(), b"ran");
 }
 
+#[test]
+fn installed_release_cid_comes_from_verified_signed_head() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        release_cid(&fixture.data, &fixture.binary, &fixture.source).unwrap(),
+        raw_cid(&fixture.release)
+    );
+    let mut head: Value = serde_json::from_slice(&fixture.head).unwrap();
+    head["signature"] = json!("changed");
+    fs::write(
+        publisher_release_head_path(&fixture.data),
+        serde_json::to_vec(&head).unwrap(),
+    )
+    .unwrap();
+    assert!(release_cid(&fixture.data, &fixture.binary, &fixture.source).is_err());
+}
+
 #[tokio::test]
 async fn signed_checked_provider_starts() {
     let (fixture, path, _) = start_fixture();

@@ -1574,7 +1574,7 @@ fn trust_column_counts_and_chokepoint_queue() {
 fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
     let vm_rows: Vec<_> = rows()
         .into_iter()
-        .filter(|row| row.kind == "VM capsule; image check pending 4b")
+        .filter(|row| row.kind == "VM capsule; image check pending 4b-2")
         .collect();
     assert_eq!(vm_rows.len(), 4);
     let columns = columns();
