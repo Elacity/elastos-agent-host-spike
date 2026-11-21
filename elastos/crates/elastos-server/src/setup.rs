@@ -1434,7 +1434,8 @@ pub(crate) fn admit_installed_components(
     };
     let binary = fs::canonicalize(&source.install_path)?;
     let (release, bytes) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)
+            .context(crate::installed_release::REPAIR)?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
         &source.publisher_dids,
