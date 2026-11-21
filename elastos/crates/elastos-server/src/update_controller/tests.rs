@@ -4526,20 +4526,22 @@ fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
     let source = fixture.publish_installed_release();
     // A normal signed start has no journal. That absence never admits a
     // different executable under the host-start reader.
-    crate::installed_release::read_signed_release_for_host_start(
+    crate::installed_release::read_signed_release(
         &fixture.data,
         &fixture.binary,
         &source,
         false,
+        true,
     )
     .unwrap();
     let other_binary = fixture.data.join("other-runtime");
     fixture.file(&other_binary, b"other Runtime", 0o755);
-    let error = crate::installed_release::read_signed_release_for_host_start(
+    let error = crate::installed_release::read_signed_release(
         &fixture.data,
         &other_binary,
         &source,
         false,
+        true,
     )
     .unwrap_err();
     assert!(
@@ -4548,11 +4550,12 @@ fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
     );
 
     let writer = prepare_host_fence_release(&fixture, &fixture.binary, false);
-    let error = crate::installed_release::read_signed_release_for_host_start(
+    let error = crate::installed_release::read_signed_release(
         &fixture.data,
         &fixture.binary,
         &source,
         false,
+        true,
     )
     .unwrap_err();
     assert!(
@@ -4599,11 +4602,12 @@ fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
         Some(claim.generation.as_str()),
         "this test needs an unclaimed process"
     );
-    let error = crate::installed_release::read_signed_release_for_host_start(
+    let error = crate::installed_release::read_signed_release(
         &fixture.data,
         &fixture.binary,
         &source,
         false,
+        true,
     )
     .unwrap_err();
     assert!(
@@ -4615,11 +4619,12 @@ fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
         error.to_string().contains("claimed generation"),
         "{error:#}"
     );
-    let error = crate::installed_release::read_signed_release_for_host_start(
+    let error = crate::installed_release::read_signed_release(
         &fixture.data,
         &other_binary,
         &source,
         false,
+        true,
     )
     .unwrap_err();
     assert!(

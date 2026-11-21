@@ -94,6 +94,12 @@ The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers
 appropriate to their document or asset role.
 
+Home reads its own facts from `GET /api/apps/home/summary`. Chat summary at
+`GET /api/apps/chat-room/summary` requires a signed Chat launch token; a Home
+session cookie does not give access to that route. Marketplace reads the shared
+`/api/capsules/catalog` and `/api/capsules/interfaces` routes with its scoped
+launch token. The old `/api/apps/marketplace/catalog` alias is absent.
+
 ## Host Responsibilities
 
 The Home host may:

@@ -288,7 +288,10 @@ class RepositoryTest(unittest.TestCase):
                 tables = set(tables_naming_lab((REPO / name).read_text(), os.path.dirname(name)))
                 if tables:
                     named[name] = tables
-        self.assertEqual(named, {"capsules/model-provider/Cargo.toml": {"[dev-dependencies]"}})
+        self.assertEqual(named, {
+            "capsules/model-provider/Cargo.toml": {"[dev-dependencies]"},
+            "capsules/wallet-provider/Cargo.toml": {"[dev-dependencies]"},
+        })
         self.assertEqual(set(tables_naming_lab('[dependencies]\nlab-x = { path = "../../lab/x" }\n', "capsules/a")),
                          {"[dependencies]"})
         self.assertEqual(set(tables_naming_lab("[build-dependencies.lab-x]\npath = '../../lab/x'\n", "capsules/a")),

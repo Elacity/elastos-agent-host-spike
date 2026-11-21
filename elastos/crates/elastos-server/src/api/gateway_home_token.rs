@@ -675,10 +675,10 @@ pub(crate) fn require_internal_shell_projection_context(
     selected_resource: &str,
     executable_actor: &str,
 ) -> anyhow::Result<HomeLaunchTokenContext> {
-    let (id, _token, context) =
+    let (id, content_name, _token, context) =
         require_launch_bound_token(data_dir, headers, executable_actor, true)?;
-    if format!("{LAUNCH_BOUND}{id}") != selected_resource {
-        anyhow::bail!("home launch token projection authority mismatch");
+    if format!("{LAUNCH_BOUND}{id}/{content_name}") != selected_resource {
+        anyhow::bail!("kept_launch_grant_mismatch");
     }
     Ok(context)
 }
@@ -693,7 +693,7 @@ pub(crate) fn require_launch_bound_token(
     headers: &HeaderMap,
     page: &str,
     internal_shell: bool,
-) -> anyhow::Result<(String, String, HomeLaunchTokenContext)> {
+) -> anyhow::Result<(String, String, String, HomeLaunchTokenContext)> {
     let token = single_home_launch_token_header(headers)?
         .ok_or_else(|| anyhow::anyhow!("missing home launch token"))?;
     let expected_did = load_existing_gateway_runtime_did(data_dir)
@@ -712,11 +712,20 @@ pub(crate) fn require_launch_bound_token(
         false => require_capsule_browser_origin(headers)?,
     }
     let bound = &required.launch_context.selected_resource;
-    let id = bound
+    let (id, content_name) = bound
         .strip_prefix(LAUNCH_BOUND)
-        .filter(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .and_then(|value| value.split_once('/'))
+        .filter(|(_, name)| !name.is_empty() && !name.contains('/'))
         .ok_or_else(|| anyhow::anyhow!("home launch token is not bound to a content launch"))?;
-    Ok((id.to_string(), token.trim().to_string(), required.context))
+    if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("home launch token is not bound to a content launch");
+    }
+    Ok((
+        id.to_string(),
+        content_name.to_string(),
+        token.trim().to_string(),
+        required.context,
+    ))
 }
 
 pub(crate) fn require_home_token(
@@ -1153,12 +1162,13 @@ pub(in crate::api) fn issue_launch_page_token(
     data_dir: &std::path::Path,
     id: &str,
     page: &str,
+    content_name: &str,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<String> {
     let issued_at = now_ts();
     let ttl = LAUNCH_PAGE_TOKEN_TTL_SECS;
     let expires_at = grant_bound_token_expiry(data_dir, context, issued_at, ttl)?;
-    let bound = format!("{LAUNCH_BOUND}{id}");
+    let bound = format!("{LAUNCH_BOUND}{id}/{content_name}");
     let launch_context = HomeLaunchContext::projection(&bound, page);
     issue_home_launch_token_at(
         data_dir,

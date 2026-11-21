@@ -1189,7 +1189,7 @@ pub fn verify_installed_component_start(
     };
     let runtime = fs::canonicalize(&source.install_path)?;
     let (_, manifest) =
-        crate::installed_release::read_signed_release(data_dir, &runtime, &source, false)?;
+        crate::installed_release::read_signed_release(data_dir, &runtime, &source, false, true)?;
     let entry = installed_component_entry(data_dir, name, path, Some(&manifest))
         .context("Installed component manifest verification failed")?;
     let checksum = if entry.platform_info.extract_path.is_some() {
@@ -1491,7 +1491,7 @@ pub(crate) fn admit_installed_components(
     };
     let binary = fs::canonicalize(&source.install_path)?;
     let (release, bytes) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false, false)
             .context(crate::installed_release::REPAIR)?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
@@ -1518,9 +1518,10 @@ pub(crate) fn installed_release_signers(
         return Ok(Default::default());
     };
     let binary = fs::canonicalize(&source.install_path)?;
-    let (release, components) = crate::installed_release::read_signed_release_for_host_start(
-        data_dir, &binary, &source, false,
-    )?;
+    // The confined DID start reads the signers during a claimed update restart
+    // too (#1750), through #1816's host-start reader.
+    let (release, components) =
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false, true)?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
         &source.publisher_dids,
@@ -3535,8 +3536,13 @@ pub(crate) async fn repair_installed_support(
     catalogue: CatalogueRepair<'_>,
     carrier_context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
-    let (release, components) =
-        crate::installed_release::read_signed_release(data_dir, binary, source, repair_version)?;
+    let (release, components) = crate::installed_release::read_signed_release(
+        data_dir,
+        binary,
+        source,
+        repair_version,
+        false,
+    )?;
     // Repair restores rows of the installed release, checked against its own records.
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,

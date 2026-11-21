@@ -21,8 +21,6 @@ const MAX_COMPONENTS: u64 = 4 * 1024 * 1024;
 const MIGRATION: &str = ".elastos.installation-migrate";
 const HEAD: &str = "release-head.json";
 const RELEASE: &str = "release.json";
-const UPDATE_STAGE: &str = ".elastos.update-stage";
-const UPDATE_ROLLBACK: &str = ".elastos.update-rollback";
 pub(crate) const REPAIR: &str = "Installed release inputs require repair. Preserve the installation files and ask the operator to restore the verified signed pair.";
 
 pub(crate) struct InstalledRelease {
@@ -171,42 +169,30 @@ pub(crate) fn read_signed_components(
     source: &TrustedSource,
     repair_version: bool,
 ) -> Result<Vec<u8>> {
-    read_signed_release(data, binary, source, repair_version).map(|(_, components)| components)
+    read_signed_release(data, binary, source, repair_version, false)
+        .map(|(_, components)| components)
 }
 
 /// The installed signed release envelope bytes and the components it binds.
+/// Host starts admit only the update controller's claimed generation while a journal is pending.
 pub(crate) fn read_signed_release(
     data: &Path,
     binary: &Path,
     source: &TrustedSource,
     repair_version: bool,
+    for_host_start: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    require_no_pending(binary)?;
-    read_signed_release_checked(data, binary, source, repair_version, false)
+    if for_host_start {
+        crate::install_transaction::authorize_host_start(data, binary)?;
+    } else {
+        require_no_pending(binary)?;
+    }
+    read_signed_release_after_gate(data, binary, source, repair_version, for_host_start)
 }
 
-/// A controller-claimed Home may read its signed inputs during the update hop.
-/// With no journal, a normal Home still passes every signed-input check. Only
-/// the claimed restart may read while a journal is pending; the ordinary
-/// migration reader keeps its pending-recovery fence.
-pub(crate) fn read_signed_release_for_host_start(
-    data: &Path,
-    binary: &Path,
-    source: &TrustedSource,
-    repair_version: bool,
-) -> Result<(Vec<u8>, Vec<u8>)> {
-    read_signed_release_for_host_start_with_generation(
-        data,
-        binary,
-        source,
-        repair_version,
-        std::env::var("ELASTOS_UPDATE_GENERATION").ok().as_deref(),
-        std::process::id(),
-    )
-}
-
-/// Only a claimed update restart may find that update's own private scratch
-/// folders beside the pair; the reader still opens only the two release files.
+/// Tests drive the host-start gate with an explicit update generation and
+/// process id; production reads both from the environment and this process.
+#[cfg(test)]
 pub(crate) fn read_signed_release_for_host_start_with_generation(
     data: &Path,
     binary: &Path,
@@ -215,21 +201,24 @@ pub(crate) fn read_signed_release_for_host_start_with_generation(
     generation: Option<&str>,
     process_id: u32,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let update_in_progress = crate::install_transaction::claimed_host_start_with_generation(
+    crate::install_transaction::authorize_host_start_with_generation(
         data, binary, generation, process_id,
     )?;
-    read_signed_release_checked(data, binary, source, repair_version, update_in_progress)
+    read_signed_release_after_gate(data, binary, source, repair_version, true)
 }
 
-fn read_signed_release_checked(
+fn read_signed_release_after_gate(
     data: &Path,
     binary: &Path,
     source: &TrustedSource,
     repair_version: bool,
-    update_in_progress: bool,
+    for_host_start: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     require_current_source(data, source)?;
-    let private = consumed_present(data, update_in_progress)?;
+    let private = consumed_present(
+        data,
+        for_host_start && InstallTransaction::has_pending_recovery(binary),
+    )?;
     let (head, release) = if private {
         (
             installation_release_head_path(data),
@@ -577,12 +566,7 @@ fn present(path: &Path) -> Result<bool> {
     }
 }
 
-/// Only the signed pair belongs in `installation/`. During a claimed update
-/// restart, that update's own scratch folders may also sit there until
-/// finalize; each must pass the strict private check (`check_directory`: a real
-/// directory, owned by this user, mode 0700). They are never opened; the pair is
-/// still read, so scratch folders alone select the private pair and are refused.
-fn consumed_present(data: &Path, update_in_progress: bool) -> Result<bool> {
+fn consumed_present(data: &Path, allow_update_scratch: bool) -> Result<bool> {
     let root = data.join("installation");
     if !present(&root)? {
         return Ok(false);
@@ -592,11 +576,13 @@ fn consumed_present(data: &Path, update_in_progress: bool) -> Result<bool> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let name = entry.file_name();
-        if update_in_progress && (name == UPDATE_STAGE || name == UPDATE_ROLLBACK) {
+        if allow_update_scratch
+            && (name == ".elastos.update-stage" || name == ".elastos.update-rollback")
+        {
             check_directory(&entry.path(), true)?;
-        } else {
-            anyhow::ensure!(name == HEAD || name == RELEASE, "{REPAIR}");
+            continue;
         }
+        anyhow::ensure!(name == HEAD || name == RELEASE, "{REPAIR}");
         count += 1;
     }
     Ok(count > 0)
