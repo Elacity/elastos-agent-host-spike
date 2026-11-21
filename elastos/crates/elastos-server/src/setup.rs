@@ -955,6 +955,14 @@ fn missing_manifest_message() -> String {
         .to_string()
 }
 
+/// The owner's explicit opt-in in `{data_dir}/config.toml`; reading never creates the file.
+fn source_home_dev_mode(data_dir: &Path) -> bool {
+    data_dir.join("config.toml").is_file()
+        && elastos_runtime::bootstrap::RuntimeConfig::load(data_dir)
+            .0
+            .dev_mode
+}
+
 fn missing_trusted_source_error() -> anyhow::Error {
     anyhow::anyhow!(
         "No trusted source configured.\n\
@@ -1153,13 +1161,20 @@ pub fn verify_installed_component(data_dir: &Path, name: &str, path: &Path) -> a
 }
 
 /// Admit executable bytes from the current publisher-signed installed release.
-/// Call immediately before an installed component starts.
+/// Call immediately before an installed component starts. A source Home has no
+/// release; it starts the file unchecked only when its owner set `dev_mode = true`.
 pub fn verify_installed_component_start(
     data_dir: &Path,
     name: &str,
     path: &Path,
 ) -> anyhow::Result<verified_executable::VerifiedExecutable> {
-    let source = installed_release_source(data_dir)?.ok_or_else(missing_trusted_source_error)?;
+    let Some(source) = installed_release_source(data_dir)? else {
+        if !source_home_dev_mode(data_dir) {
+            return Err(missing_trusted_source_error());
+        }
+        tracing::warn!("dev_mode = true: starting source Home component '{name}' unchecked");
+        return verified_executable::VerifiedExecutable::unchecked(path);
+    };
     let runtime = fs::canonicalize(&source.install_path)?;
     let (_, manifest) =
         crate::installed_release::read_signed_release(data_dir, &runtime, &source, false)?;

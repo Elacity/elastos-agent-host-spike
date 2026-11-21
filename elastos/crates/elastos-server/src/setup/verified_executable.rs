@@ -22,6 +22,15 @@ pub struct VerifiedExecutable {
 
 impl VerifiedExecutable {
     pub fn prepare(path: &Path, checksum: &str) -> Result<Self> {
+        Self::hold(path, Some(checksum))
+    }
+
+    /// A source Home's `dev_mode = true` start: the same held bytes, no digest.
+    pub(crate) fn unchecked(path: &Path) -> Result<Self> {
+        Self::hold(path, None)
+    }
+
+    fn hold(path: &Path, checksum: Option<&str>) -> Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -32,7 +41,7 @@ impl VerifiedExecutable {
             "installed executable is not a regular file"
         );
         anyhow::ensure!(
-            matches_checksum(&mut file, checksum)?,
+            checksum.map_or(Ok(true), |checksum| matches_checksum(&mut file, checksum))?,
             "installed executable differs from signed release digest"
         );
 
@@ -70,7 +79,7 @@ impl VerifiedExecutable {
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
                 .open(&exec_path)?;
             anyhow::ensure!(
-                matches_checksum(&mut copy, checksum)?,
+                checksum.map_or(Ok(true), |checksum| matches_checksum(&mut copy, checksum))?,
                 "private executable copy differs from signed release digest"
             );
             Ok(Self {

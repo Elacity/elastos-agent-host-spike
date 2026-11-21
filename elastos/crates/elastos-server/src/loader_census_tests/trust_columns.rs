@@ -1577,3 +1577,70 @@ fn installed_component_start_callers_keep_the_signed_gate() {
         "custody start must admit the resolver's selected binary"
     );
 }
+
+/// A start path that runs a component with no check, only on an owner's opt-in.
+struct DevOptIn {
+    file: &'static str,
+    function: &'static str,
+    evidence: &'static str,
+    trust_root: &'static str,
+    verified_when: &'static str,
+    note: &'static str,
+}
+
+fn dev_opt_ins() -> Vec<DevOptIn> {
+    vec![DevOptIn {
+        file: "elastos-server/src/setup.rs",
+        function: "verify_installed_component_start",
+        evidence: "VerifiedExecutable::unchecked(path)",
+        trust_root: "none",
+        verified_when: "never",
+        note: "dev-only explicit opt-in: source Home with config.toml dev_mode = true",
+    }]
+}
+
+#[test]
+fn dev_opt_in_start_is_one_honest_row_behind_the_installed_release() {
+    let sources = source::production_sources();
+    let rows = dev_opt_ins();
+    assert_eq!(rows.len(), 1);
+    for row in &rows {
+        assert_eq!((row.trust_root, row.verified_when), ("none", "never"));
+        assert!(row.note.starts_with("dev-only explicit opt-in"));
+        let text = &sources[row.file];
+        let code = source::code_only(text);
+        let at = |needle: &str| {
+            let found: Vec<usize> = text
+                .match_indices(needle)
+                .map(|(at, _)| at)
+                .filter(|at| source::enclosing_fn(&code, *at) == row.function)
+                .collect();
+            assert_eq!(found.len(), 1, "{needle} in {}::{}", row.file, row.function);
+            found[0]
+        };
+        // A Home with a release never reaches the opt-in; the opt-in is
+        // asked before the unchecked start.
+        let release = at("let Some(source) = installed_release_source(data_dir)? else {");
+        let opt_in = at("if !source_home_dev_mode(data_dir) {");
+        let unchecked = at(row.evidence);
+        let signed = at("read_signed_release(data_dir, &runtime, &source, false)");
+        assert!(release < opt_in && opt_in < unchecked && unchecked < signed);
+    }
+    // No other production code starts a component unchecked.
+    let callers: Vec<_> = sources
+        .iter()
+        .flat_map(|(file, text)| {
+            let code = source::code_only(text);
+            text.match_indices("VerifiedExecutable::unchecked(")
+                .map(|(at, _)| (file.clone(), source::enclosing_fn(&code, at)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        callers,
+        [(
+            "elastos-server/src/setup.rs".to_string(),
+            "verify_installed_component_start".to_string()
+        )]
+    );
+}

@@ -23,7 +23,11 @@ fn start_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
 }
 
 fn start_shell(fixture: &Fixture, path: &Path, marker: &Path) -> Result<()> {
-    let prepared = crate::setup::verify_installed_component_start(&fixture.data, "shell", path)?;
+    start_in(&fixture.data, path, marker)
+}
+
+fn start_in(data: &Path, path: &Path, marker: &Path) -> Result<()> {
+    let prepared = crate::setup::verify_installed_component_start(data, "shell", path)?;
     let mut command = std::process::Command::new(prepared.exec_path());
     command.arg(marker);
     prepared.attach_std(&mut command, false)?;
@@ -36,6 +40,65 @@ fn installed_component_start_accepts_signed_release() {
     let (fixture, path, marker) = start_fixture();
     start_shell(&fixture, &path, &marker).unwrap();
     assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
+/// A source Home: no installation/, no trusted source, a local shell script.
+fn source_home(
+    config: Option<&str>,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let data = fs::canonicalize(root.path()).unwrap();
+    let path = data.join("bin/shell");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"#!/bin/sh\nprintf ran > \"$1\"\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    if let Some(config) = config {
+        fs::write(data.join("config.toml"), config).unwrap();
+    }
+    (root, data, path)
+}
+
+#[test]
+fn source_home_with_dev_mode_starts_its_component() {
+    let (_root, data, path) = source_home(Some("dev_mode = true\n"));
+    let marker = data.join("ran");
+    start_in(&data, &path, &marker).unwrap();
+    assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
+#[test]
+fn source_home_without_dev_mode_refuses_before_exec() {
+    for config in [
+        None,
+        Some("dev_mode = false\n"),
+        Some("trusted_keys = []\n"),
+    ] {
+        let (_root, data, path) = source_home(config);
+        let marker = data.join("ran");
+        let error = start_in(&data, &path, &marker).unwrap_err().to_string();
+        assert!(
+            error.contains("No trusted source configured"),
+            "{config:?}: {error}"
+        );
+        assert!(!marker.exists(), "{config:?}");
+        // Reading the opt-in never writes a default config.
+        assert_eq!(data.join("config.toml").exists(), config.is_some());
+    }
+}
+
+#[test]
+fn installed_home_with_dev_mode_is_still_checked() {
+    let (fixture, path, marker) = start_fixture();
+    fs::write(fixture.data.join("config.toml"), "dev_mode = true\n").unwrap();
+    fs::write(&path, b"#!/bin/sh\nprintf replaced > \"$1\"\n").unwrap();
+    let error = start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Installed component binary verification failed"),
+        "{error}"
+    );
+    assert!(!marker.exists());
 }
 
 #[test]
