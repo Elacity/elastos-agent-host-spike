@@ -2133,8 +2133,124 @@ fn standin_spawn_confined_provider(
         base_path,
         declared,
         profile_dir,
-        write_generated_profile,
     )
+}
+
+/// The confinement decisions exercised by every lab stand-in journey.
+/// The lab launcher calls this body so registered plants in this file change
+/// the path that starts each provider.
+fn standin_spawn_confined_provider_body(
+    host: StandinHost,
+    policy: StandinPolicy<'_>,
+    name: &str,
+    binary_path: &Path,
+    base_path: &Path,
+    declared: &Value,
+    profile_dir: &Path,
+) -> Result<ConfinedProvider, String> {
+    standin_host_refusal(name, host, policy)?;
+    let os = host.os;
+    if let StandinPolicy::Seatbelt(sandbox_exec) = policy {
+        if !sandbox_exec.is_file() {
+            return Err(format!(
+                "{name} start on {os} is refused: the confinement tool {} is absent",
+                sandbox_exec.display()
+            ));
+        }
+        if sandbox_exec != Path::new(SANDBOX_EXEC) {
+            return Err(format!(
+                "{name} start on {os} is refused: the confinement tool {} is not {SANDBOX_EXEC}, \
+                 which is the one the stand-in runs",
+                sandbox_exec.display()
+            ));
+        }
+    }
+    if let StandinPolicy::Seccomp(allow) = policy {
+        if allow.provider != name {
+            return Err(format!(
+                "{name} start is refused: the seccomp allow list was generated for {}",
+                allow.provider
+            ));
+        }
+    }
+    if let StandinPolicy::Landlock { allow, ruleset } = policy {
+        // The same list check as the Seccomp arm, then the ruleset's provider.
+        if allow.provider != name {
+            return Err(format!(
+                "{name} start is refused: the seccomp allow list was generated for {}",
+                allow.provider
+            ));
+        }
+        if ruleset.provider != name {
+            return Err(format!(
+                "{name} start is refused: the landlock ruleset was generated for {}",
+                ruleset.provider
+            ));
+        }
+    }
+    if !binary_path.is_file() {
+        return Err(format!(
+            "{name} start is refused: the provider binary {} is not a file",
+            binary_path.display()
+        ));
+    }
+    let canonical = canonical_bindings(name, base_path, binary_path);
+    let mut provider = match policy {
+        StandinPolicy::Seatbelt(_) => {
+            let profile = profile_dir.join(format!("{name}-standin.sb"));
+            write_generated_profile(name, declared, &profile)?;
+            create_shared_ancestors(&canonical);
+            let inert = model_inert_bindings(name);
+            let mut bindings: Vec<(&str, &Path)> = canonical
+                .iter()
+                .map(|(binding, path)| (*binding, path.as_path()))
+                .collect();
+            bindings.extend(
+                inert
+                    .iter()
+                    .map(|(binding, path)| (binding.as_str(), path.as_path())),
+            );
+            ConfinedProvider::start_under(&profile, &bindings, binary_path)
+        }
+        StandinPolicy::Seccomp(allow) => {
+            create_shared_ancestors(&canonical);
+            ConfinedProvider::start_under_seccomp(allow, binary_path)?
+        }
+        StandinPolicy::Landlock { allow, ruleset } => {
+            create_shared_ancestors(&canonical);
+            // A Landlock path rule needs a descriptor on `STORAGE_ROOT`, so the
+            // root must exist before any rule is installed. The launcher creates
+            // and syncs it here, in the parent, before the fork. This is the
+            // half the provider no longer does: the provider stops publishing a
+            // directory another actor created, and the actor that creates the
+            // root publishes its entry. No profile form and no right is added.
+            let storage_root = provider_storage_root(name, base_path);
+            let parent = storage_root
+                .parent()
+                .expect("a bound storage root has a parent");
+            fs::create_dir_all(&storage_root)
+                .and_then(|()| {
+                    fs::File::open(&storage_root)?.sync_all()?;
+                    fs::File::open(parent)?.sync_all()
+                })
+                .map_err(|err| {
+                    format!(
+                        "{name} start is refused: the storage root {} must be creatable: {err}",
+                        storage_root.display()
+                    )
+                })?;
+            ConfinedProvider::start_under_landlock(allow, ruleset, binary_path)?
+        }
+    };
+    let init = json!({
+        "op": "init",
+        "config": provider_init_config(name, base_path),
+    });
+    match provider.try_send(&init) {
+        Ok(answer) if answer["status"] == "ok" => Ok(provider),
+        Ok(answer) => Err(format!("{name} start is refused: init answered {answer}")),
+        Err(failure) => Err(format!("{name} start is refused: {failure}")),
+    }
 }
 
 fn assert_storage_error(response: &Value) {
@@ -7444,6 +7560,12 @@ fn standin_journeys_keep_the_shared_launcher_path() {
         function("standin_spawn_confined_provider")
             .contains("provider_launcher::standin_spawn_confined_provider("),
         "the test adapter must call the lab-owned launcher"
+    );
+    let launcher =
+        include_str!("../../../lab/agent-conformance/standin-runtime/provider_launcher.rs");
+    assert!(
+        launcher.contains("super::standin_spawn_confined_provider_body("),
+        "the lab launcher must call the registered plant path in confine.rs"
     );
     for journey in [
         "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite",

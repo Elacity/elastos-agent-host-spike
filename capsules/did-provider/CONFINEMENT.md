@@ -48,9 +48,10 @@ are separate B3-R checks.
 
 One generator covers `did-provider`, `wallet-provider` and `model-provider`,
 parameterized by the provider's approved declared rights and its storage root,
-so the Runtime has one path for a provider's profile (P10). Runtime source has profile rendering and confined launch paths in
-`elastos/crates/elastos-runtime/src/provider/`; installed acceptance remains
-a B3-R gate. The tests launch this provider
+so the Runtime has one path for a provider's profile (P10). Runtime source
+renders the profile, then its macOS provider entry refuses start because the
+Seatbelt profile has no spawn path yet. Installed acceptance remains a B3-R
+gate. The tests launch this provider
 under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
 `startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is
 refused when the profile cannot be applied.
@@ -89,8 +90,9 @@ One rule, `profile_parameter_section_problems`, under the test
 holds these three names and the two storage layouts to the one derivation the
 launch uses, and it does not check a path for `PROVIDER_EXECUTABLE`.
 
-The tests pass a temporary base and bind all three parameters before launch;
-the Runtime source has a confined binding path. Installed behavior is B3-R.
+The tests pass a temporary base and bind all three parameters before launch.
+The Runtime macOS entry renders a profile, then refuses start because its
+Seatbelt profile has no spawn path yet. Installed behavior is B3-R.
 
 ## The model provider's inline profile
 
@@ -494,24 +496,28 @@ The shared lab launcher is `lab/agent-conformance/standin-runtime/provider_launc
 
 ### C0 part
 
-Written sentence: One C0 journey starts `did-provider` and `wallet-provider`
-confined through the lab stand-in on macOS, or the stand-in refuses each host
+Written sentence: One C0 journey starts `did-provider`, `wallet-provider` and
+`model-provider` confined through the lab stand-in on macOS, or the stand-in refuses each host
 and process it cannot confine with its own reason and starts no provider.
 
 Counting rule, as `lab/redteam/acceptance/C8.md` words it: a complete journey, a
 refusal with a reason, a CAUGHT falsifier, and reviews that pass.
 
 Journey test: `standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host`
-in `capsules/wallet-provider/tests/confine.rs` at
-`16c4997d20b332d5e5f82999a10a035fcee6a3ab` (line 4165). It runs did first and
-then wallet. Its macOS leg is `standin_confined_journey` (line 3999): it starts
-the provider under the stand-in's generated profile, refuses one outside write
+in the current `capsules/wallet-provider/tests/confine.rs` (line 5677). It runs
+did, wallet and model in that order. Its macOS leg is
+`standin_confined_journey` (line 5486): it starts the provider under the
+stand-in's generated profile, refuses one outside write
 with nothing created, keeps the root answering, and exits 0 on `shutdown`. Its
-refusal rows call `standin_refusals_for` (line 3657), which reads one host
-report through `standin_host_refusal` (line 904) and the launch through
-`standin_spawn_confined_provider` in `lab/agent-conformance/standin-runtime/provider_launcher.rs`.
+refusal rows call `standin_refusals_for` (line 5143), which reads one host
+report through `standin_host_refusal` (line 2043). The test adapter at line
+2119 calls `lab/agent-conformance/standin-runtime/provider_launcher.rs`,
+which calls the planted launch body in `confine.rs` at line 2142.
 
 Files at their commits:
+
+These pins describe the earlier C0 record. The current journey and line
+locations are named above.
 
 - `capsules/wallet-provider/tests/confine.rs` at
   `16c4997d20b332d5e5f82999a10a035fcee6a3ab`, the journey test and the stand-in.
@@ -529,7 +535,7 @@ Refusals, with the reason the code produces and what the journey row checks for
 `did-provider`. The wallet leg checks the same strings with `wallet-provider` in
 place of `did-provider`. The first eight rows, `standin_refusals_for`'s cases
 (a) to (c2), check the `{name} start on {os} is refused: ` prefix and the named
-parts, and require the forbidden parts absent (lines 3776-3790); cases (c3),
+parts, and require the forbidden parts absent; cases (c3),
 (e) and (f) check no prefix.
 
 - plan9 row: the code produces `did-provider start on plan9 is refused: plan9 has no confinement design, and the lab stand-in applies confinement only on macos`; the row checks the prefix and the parts `plan9`, `has no confinement design` and `macos`, and requires none of `linux is designed, not enforced`, `linux confinement refused: the kernel has no Landlock`, `linux confinement refused: user namespaces are turned off` or `linux confinement refused: the seccomp filter cannot be installed`.
@@ -540,10 +546,10 @@ parts, and require the forbidden parts absent (lines 3776-3790); cases (c3),
 - macOS whose report leaves Landlock unavailable: the code produces `did-provider start on macos is refused: linux confinement refused: the kernel has no Landlock`; the row checks the prefix and the parts `linux confinement refused: the kernel has no Landlock` and `on macos`, and requires none of `linux confinement refused: user namespaces are turned off`, `linux confinement refused: the seccomp filter cannot be installed`, `linux is designed, not enforced` or `has no confinement design`.
 - macOS without the tool: the code produces `did-provider start on macos is refused: the confinement tool <capsules/wallet-provider/tests/absent-sandbox-exec> is absent`; the row checks the prefix and the parts `on macos`, `is absent` and that path, and requires that the reason holds no `/usr/bin/sandbox-exec`.
 - macOS with another tool: the code produces `did-provider start on macos is refused: the confinement tool <the test executable path> is not /usr/bin/sandbox-exec, which is the one the stand-in runs`; the row checks the prefix and the parts `on macos`, that path and `/usr/bin/sandbox-exec`.
-- A binary path that is not a file: the code produces `did-provider start is refused: the provider binary <capsules/wallet-provider/tests/absent-provider-binary> is not a file`; the row checks the provider name and that path in the reason and requires no `must resolve` (lines 3835-3841), and it checks no prefix.
-- An unnamed right: the code produces `did-provider declares unnamed-right, which the shared contract does not name`; the row compares the whole string exactly (lines 3882-3886).
-- A profile the launch cannot apply: the code produces `did-provider start is refused: <failure>`; the row checks that the failure carries `exit status:` and `invalid data type of path filter` and requires no `execvp` (lines 3932-3942), and it checks no prefix.
-- An `init` answer that is not ok: the code produces `did-provider start is refused: init answered <answer>`; the row checks that the reason carries `init answered` and `"status":"error"` (lines 3970-3976), and it checks no prefix.
+- A binary path that is not a file: the code produces `did-provider start is refused: the provider binary <capsules/wallet-provider/tests/absent-provider-binary> is not a file`; the row checks the provider name and that path in the reason and requires no `must resolve`, and it checks no prefix.
+- An unnamed right: the code produces `did-provider declares unnamed-right, which the shared contract does not name`; the row compares the whole string exactly.
+- A profile the launch cannot apply: the code produces `did-provider start is refused: <failure>`; the row checks that the failure carries `exit status:` and `invalid data type of path filter` and requires no `execvp`, and it checks no prefix.
+- An `init` answer that is not ok: the code produces `did-provider start is refused: init answered <answer>`; the row checks that the reason carries `init answered` and `"status":"error"`, and it checks no prefix.
 
 CAUGHT falsifiers. Each entry is in `capsules/wallet-provider/falsifiers.json`
 at `16c4997d20b332d5e5f82999a10a035fcee6a3ab`; wallet's crate holds the stand-in
@@ -632,8 +638,9 @@ Journey test: `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the
 in `capsules/wallet-provider/tests/confine.rs`. The three provider entries use
 `standin_b3_journey`; the model entry has 17 cases. The launched file passes
 `check_profile_contract`, `check_declared_rights` and
-`compare_profile_to_its_oracle` before the case records are compared. The
-launcher body lives in `lab/agent-conformance/standin-runtime/provider_launcher.rs`.
+`compare_profile_to_its_oracle` before the case records are compared. The lab
+launcher in `lab/agent-conformance/standin-runtime/provider_launcher.rs`
+calls the planted launch body in `tests/confine.rs`.
 `standin_journeys_keep_the_shared_launcher_path` checks the B3 and C0 call
 paths even when sandbox execution is unavailable. The model startup refusal
 also has `standin_refuses_a_start_it_cannot_apply` in the model test crate.
@@ -646,15 +653,16 @@ rights fixture, and the shared lab launcher above.
 
 CAUGHT falsifiers. The existing wallet registry lists earlier B3 journey
 plants; this close-out reruns a separate one-line launcher bypass plant. The
-older registry entries have no new CAUGHT run in this checkout.
+failure points below apply when Seatbelt can start the provider. The older
+registry entries have no new CAUGHT run in this checkout.
 
-- `WP116`: a broader did storage binding reaches a sibling.
-- `WP121`: a missing wallet case shortens its record.
-- `WP124`: wallet's root layout makes did init fail.
-- `WP127`: an added did parent write has no declared right.
-- `WP133`: an added read has no declared right.
-- `WP134`: a missing network denial fails the profile contract.
-- `WP138`: an extra deny form differs from the oracle.
+- `WP116`: a broader did storage binding would reach a sibling.
+- `WP121`: a missing wallet case would shorten its record.
+- `WP124`: wallet's root layout would make did init fail.
+- `WP127`: an added did parent write would have no declared right.
+- `WP133`: an added read would have no declared right.
+- `WP134`: a missing network denial would fail the profile contract.
+- `WP138`: an extra deny form would differ from the oracle.
 
 Reviews. This close-out needs current-head review. Earlier PR review statements
 are historical and do not review these edits.

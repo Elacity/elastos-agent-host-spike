@@ -2,8 +2,9 @@
 
 `confine.sb` is the one oracle for the model provider's confinement profile
 (one file, P10): the profile the Runtime generates for this provider must match
-it. Runtime source now renders the model profile and has confined model launch
-entries; installed Mac engine acceptance is tracked under B3-R. The file starts
+it. Runtime source renders the model profile, then the macOS provider entry
+refuses start because the Seatbelt profile has no spawn path yet. Installed Mac
+engine acceptance is tracked under B3-R. The file starts
 with `(version 1)`, then
 `(deny default)`, then `(deny network*)`. The provider reads line-delimited
 JSON on stdin and writes one JSON answer per line on stdout. The profile
@@ -14,8 +15,8 @@ refused (P3, P11).
 
 This file uses only the three parameter tokens every file profile binds. The
 generated profile binds the same three, and the tests pass them with
-`sandbox-exec -D`. The Runtime source has a confined launch path for them;
-installed behavior is a separate gate.
+`sandbox-exec -D`. The Runtime macOS entry renders the profile and refuses
+provider start because the Seatbelt profile has no spawn path yet.
 
 - `PROVIDER_EXECUTABLE`: the canonical path of the provider binary.
 - `STORAGE_ROOT`: the model journal root. That is
@@ -23,8 +24,8 @@ installed behavior is a separate gate.
   `journal_dir`.
 - `STORAGE_PARENT`: the parent of `STORAGE_ROOT`. The tests create it before
   launch. `model_provider_ops_under_profile` shows the provider then creates
-  `STORAGE_ROOT` itself at its first `init`. The Runtime source also has a
-  confined model launch path. This lab test does not prove that installed path.
+  `STORAGE_ROOT` itself at its first `init`. The Runtime macOS entry still
+  refuses provider start; this lab test does not prove an installed start.
 
 All three are resolved paths. The sandbox matches the resolved path, so a
 path through a link (macOS `/var` is `/private/var`) would match nothing.
@@ -68,8 +69,9 @@ generated text, `Launch::Profile` applies that file, and `init` answers
 `model_declared_rights_read_on_the_did_and_wallet_template` reads this oracle
 and this declared-rights file. Runtime profile rendering and comparison source
 live in `elastos/crates/elastos-runtime/src/provider/macos_profile.rs`; the
-confined launch path is in `provider/os_entry.rs` and `provider/bridge.rs`.
-Their installed Mac engine behavior is assessed under B3-R.
+macOS entry in `provider/os_entry.rs` refuses provider start because the
+Seatbelt profile has no spawn path yet. The bridge also has model launch code
+in `provider/bridge.rs`; installed Mac engine behavior is assessed under B3-R.
 The `sandbox-exec -f confine.sb` launch is the tests' launch (see "Tests"),
 not the Runtime's.
 
@@ -97,7 +99,8 @@ widens in path or operation, including an added file write, or if
 `standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
 in `../wallet-provider/tests/confine.rs` starts did, wallet and model through
 the shared lab launcher at
-`lab/agent-conformance/standin-runtime/provider_launcher.rs`. Each leg reads
+`lab/agent-conformance/standin-runtime/provider_launcher.rs`, which calls the
+planted launch body in `../wallet-provider/tests/confine.rs`. Each leg reads
 its declared rights and compares the launched generated profile with its own
 committed `confine.sb`. The model leg compares 17 named permitted and denied
 cases, including startup refusal for an unbound executable, with a second run
@@ -334,8 +337,9 @@ The launcher starts the provider no other way, as F-cc19a shows. The reason
 reaches the test through the launcher's stderr channel, as F-cc19b shows.
 For the Runtime's refusal of such a start, see "The Runtime bridge change"
 in `../did-provider/CONFINEMENT.md`. The lab writer in that did section is
-test code. Runtime source for profile rendering and launch lives in
-`elastos/crates/elastos-runtime/src/provider/`; installed acceptance is B3-R.
+test code. Runtime source for profile rendering and the macOS start refusal
+lives in `elastos/crates/elastos-runtime/src/provider/`; installed acceptance
+is B3-R.
 
 `standin_refuses_a_start_it_cannot_apply` refuses a declared value with no
 rights list and starts nothing, and a generated profile whose last `)` is
