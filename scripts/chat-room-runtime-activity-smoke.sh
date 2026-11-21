@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_URL="${ELASTOS_BASE_URL:-http://127.0.0.1:8090}"
 COOKIE_JAR="$(mktemp /tmp/elastos-home-smoke-cookies.XXXXXX)"
 trap 'rm -f "$COOKIE_JAR"' EXIT
@@ -27,17 +28,19 @@ system_launch_json=$(
     "${BASE_URL}/api/apps/home/launch" \
     -d '{"target":"system"}'
 )
-system_token=$(node -e 'const launch = JSON.parse(process.argv[1]); const url = new URL(launch.route, "https://example.invalid"); process.stdout.write(url.searchParams.get("home_token") || "");' "$system_launch_json")
+system_token=$(node --input-type=module -e 'const { readLaunchToken } = await import(process.argv[1]); const launch = JSON.parse(process.argv[2]); process.stdout.write(readLaunchToken(launch.route, new URL(process.argv[3]).origin, "system"));' "$SCRIPT_DIR/chat-summary-smoke-client.mjs" "$system_launch_json" "$BASE_URL")
 summary_json=$(curl -fsS -H "x-elastos-home-token: ${system_token}" "${BASE_URL}/api/apps/system/summary")
 
-node - <<'NODE' "$launch_json" "$summary_json"
-const launch = JSON.parse(process.argv[2]);
-const summary = JSON.parse(process.argv[3]);
+node --input-type=module - "$SCRIPT_DIR/chat-summary-smoke-client.mjs" "$BASE_URL" "$launch_json" "$summary_json" <<'NODE'
+const { readLaunchToken, redactLaunchTokens } = await import(process.argv[2]);
+const homeOrigin = new URL(process.argv[3]).origin;
+const launch = JSON.parse(process.argv[4]);
+const summary = JSON.parse(process.argv[5]);
 
 function fail(message, details) {
   console.error(`FAIL chat-room-runtime-activity-smoke: ${message}`);
   if (details) {
-    console.error(JSON.stringify(details, null, 2));
+    console.error(redactLaunchTokens(JSON.stringify(details, null, 2)));
   }
   process.exit(1);
 }
@@ -51,7 +54,9 @@ if (launch.launch_status !== "launched") {
 if (typeof launch.capsule_id !== "string" || launch.capsule_id.trim() === "") {
   fail("chat-room launch did not return a capsule id", launch);
 }
-if (!String(launch.route || "").startsWith("/apps/chat-room/?home_token=")) {
+try {
+  readLaunchToken(launch.route, homeOrigin, "chat-room");
+} catch {
   fail("chat-room launch route is not Home-scoped", launch);
 }
 
