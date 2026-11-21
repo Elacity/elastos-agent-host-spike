@@ -9063,10 +9063,7 @@ pub async fn production_after() {
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("issue_home_launch_token_with_context("),
-            expected_counts(&[
-                ("elastos-server/src/api/gateway_home_token.rs", 1),
-                ("elastos-server/src/api/viewer_gateway.rs", 1),
-            ]),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
             "context issuer callers"
         );
         assert_eq!(
@@ -9075,6 +9072,7 @@ pub async fn production_after() {
                 ("elastos-server/src/api/auth_gateway.rs", 2),
                 ("elastos-server/src/api/gateway.rs", 1),
                 ("elastos-server/src/api/gateway_home_runtime.rs", 3),
+                ("elastos-server/src/api/viewer_gateway.rs", 1),
             ]),
             "projection issuer callers"
         );
@@ -9125,9 +9123,8 @@ pub async fn production_after() {
                 ("elastos-server/src/api/gateway_home_external_link.rs", 1),
                 ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
                 ("elastos-server/src/api/gateway_home_system.rs", 2),
-                ("elastos-server/src/api/gateway_home_token.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 3),
                 ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
-                ("elastos-server/src/api/viewer_gateway.rs", 1),
             ]),
             "Home token context callers"
         );
@@ -9159,6 +9156,6 @@ pub async fn production_after() {
         let open = body.find('{').expect("the match block opens");
         let end = cfg_test_item_end(&body[open..]);
         let arms = body[open..open + end].matches("=>").count();
-        assert_eq!(arms, 4, "gateway admission match arms");
+        assert_eq!(arms, 5, "gateway admission match arms");
     }
 }

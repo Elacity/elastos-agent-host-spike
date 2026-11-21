@@ -69,7 +69,7 @@ fn test_browser_request(host: &'static str, origin: &'static str) -> axum::http:
     } else {
         request
             .header("sec-fetch-site", "same-origin")
-            .header("referer", "http://localhost:61180/home/")
+            .header("referer", format!("{origin}/home/"))
     }
 }
 
