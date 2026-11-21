@@ -4026,6 +4026,101 @@ mod tests {
         data_dir
     }
 
+    /// Install `source` as this Home's `custody-provider` under a signed
+    /// release, as `elastos setup` would. Every native provider start admits
+    /// its executable against the Home's publisher-signed release.
+    #[cfg(unix)]
+    fn install_signed_custody_provider(data_dir: &Path, source: &Path) -> PathBuf {
+        use elastos_common::localhost::{
+            publisher_release_head_path, publisher_release_manifest_path,
+        };
+        use sha2::{Digest as _, Sha256};
+        let bin_dir = data_dir.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let binary = bin_dir.join("custody-provider");
+        let bytes = fs::read(source).unwrap();
+        crate::test_support::write_from_child(&binary, &bytes, 0o700);
+        let components = serde_json::to_vec(&serde_json::json!({
+            "external": {"custody-provider": {
+                "install_path": "bin/custody-provider",
+                "provider_runtime": {
+                    "role": "provider", "substrate": "native",
+                    "runtime_abi": "elastos.provider-stdio/v1", "execution": "native-provider",
+                    "provides": "custody", "runtime_only": true
+                },
+                "platforms": {(elastos_server::setup::detect_platform()): {
+                    "install_path": "bin/custody-provider",
+                    "checksum": format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
+                }}
+            }},
+            "capsules": {}, "profiles": {}
+        }))
+        .unwrap();
+        fs::write(data_dir.join("components.json"), &components).unwrap();
+        let cid = |bytes: &[u8]| {
+            cid::Cid::new_v1(
+                0x55,
+                cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap(),
+            )
+            .to_string()
+        };
+        let descriptor = |bytes: &[u8]| {
+            serde_json::json!({
+                "cid": cid(bytes), "sha256": hex::encode(Sha256::digest(bytes)), "size": bytes.len()
+            })
+        };
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0x71; 32]);
+        let signed = |payload: serde_json::Value, domain: &str| {
+            let (signature, signer_did) = elastos_server::crypto::domain_separated_sign(
+                &key,
+                domain,
+                &serde_json::to_vec(&payload).unwrap(),
+            );
+            serde_json::to_vec(&serde_json::json!({
+                "payload": payload, "signature": signature, "signer_did": signer_did
+            }))
+            .unwrap()
+        };
+        let runtime = data_dir.join("runtime");
+        let runtime_bytes = b"fixture runtime";
+        fs::write(&runtime, runtime_bytes).unwrap();
+        let release = signed(
+            serde_json::json!({
+                "schema": "elastos.release/v1", "version": "0.7.0", "channel": "stable",
+                "platforms": {(elastos_server::update::detect_release_platform()): {
+                    "binary": descriptor(runtime_bytes), "components": descriptor(&components)
+                }}
+            }),
+            "elastos.release.v1",
+        );
+        let head = signed(
+            serde_json::json!({
+                "schema": "elastos.release.head/v1", "version": "0.7.0", "channel": "stable",
+                "latest_release_cid": cid(&release),
+                "release_sha256": hex::encode(Sha256::digest(&release))
+            }),
+            "elastos.release.head.v1",
+        );
+        let head_path = publisher_release_head_path(data_dir);
+        fs::create_dir_all(head_path.parent().unwrap()).unwrap();
+        fs::write(head_path, &head).unwrap();
+        fs::write(publisher_release_manifest_path(data_dir), &release).unwrap();
+        fs::write(
+            data_dir.join("sources.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.trusted-sources/v1", "default_source": "fixture", "sources": [{
+                    "name": "fixture",
+                    "publisher_dids": [elastos_server::crypto::encode_signing_key_did(&key)],
+                    "channel": "stable", "installed_version": "0.7.0",
+                    "install_path": runtime, "head_cid": cid(&head)
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        binary
+    }
+
     /// A stdio provider that answers every request with the fixed import CID,
     /// standing in for a kubo-backed ipfs-provider install.
     #[cfg(unix)]
@@ -4098,6 +4193,7 @@ mod tests {
         let custody_binary = required_provider_host_test_binary(PROVIDER_HOST_TEST_CUSTODY_BIN_ENV);
         let temp = TempDir::new().unwrap();
         let data_dir = provisioned_provider_host_data_dir(&temp);
+        let custody_binary = install_signed_custody_provider(&data_dir, &custody_binary);
 
         let plan = crate::provider_host::ProviderHostPlan::resolve(
             data_dir.clone(),

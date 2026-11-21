@@ -78,6 +78,15 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-server/src/setup/verified_executable.rs",
+            "attach_std",
+            "libc::fexecve",
+            "installed component",
+            "checksum",
+            "P2-8",
+            1,
+        ),
+        row(
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_confined_model_linux",
             "command",

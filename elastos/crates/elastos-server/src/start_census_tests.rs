@@ -173,6 +173,13 @@ fn places() -> Vec<Place> {
             "B3 S10: admitted rights, checked root identity, bound executable",
         ),
         place(
+            "elastos-server/src/setup/verified_executable.rs",
+            "attach_std",
+            "libc::fexecve".to_string(),
+            1,
+            "P2-8 slice 2: held descriptor matched the signed release digest at start",
+        ),
+        place(
             "elastos-server/src/carrier.rs",
             "start_carrier_node_with_network",
             "spawn()".to_string(),

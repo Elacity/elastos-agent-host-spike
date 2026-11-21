@@ -23,11 +23,11 @@ fn start_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
 }
 
 fn start_shell(fixture: &Fixture, path: &Path, marker: &Path) -> Result<()> {
-    crate::setup::verify_installed_component_start(&fixture.data, "shell", path)?;
-    anyhow::ensure!(std::process::Command::new(path)
-        .arg(marker)
-        .status()?
-        .success());
+    let prepared = crate::setup::verify_installed_component_start(&fixture.data, "shell", path)?;
+    let mut command = std::process::Command::new(prepared.exec_path());
+    command.arg(marker);
+    prepared.attach_std(&mut command, false)?;
+    anyhow::ensure!(command.status()?.success());
     Ok(())
 }
 
@@ -182,7 +182,8 @@ fn installed_home_cli_executable_uses_signed_archive_receipt() {
     fs::write(fixture.data.join("components.json"), serde_json::to_vec(&json!({
         "schema":"elastos.components/v1", "external":{"home-cli":{
             "install_path":"capsules/home-cli", "platforms":{(crate::setup::detect_platform()):{
-                "install_path":"capsules/home-cli", "extract_path":"home-cli", "checksum":checksum
+                "install_path":"capsules/home-cli", "extract_path":"home-cli", "checksum":checksum,
+                "executable_checksum":format!("sha256:{}", hex::encode(Sha256::digest(b"signed renderer")))
             }}
         }}, "capsules":{}, "profiles":{}
     })).unwrap()).unwrap();
@@ -201,6 +202,109 @@ fn installed_home_cli_executable_uses_signed_archive_receipt() {
             .to_string()
             .contains("binary verification failed")
     );
+}
+
+#[test]
+fn installed_home_cli_refuses_replaced_executable_and_receipt_before_exec() {
+    let mut fixture = Fixture::new();
+    let bundle = fixture.data.join("capsules/home-cli");
+    let binary = bundle.join("bin/home-cli");
+    let marker = fixture.data.join("replaced-ran");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    let original = b"#!/bin/sh\nexit 0\n";
+    let replaced = format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display());
+    fs::write(&binary, original).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let archive_checksum = format!("sha256:{}", hex::encode(Sha256::digest(b"signed archive")));
+    fs::write(fixture.data.join("components.json"), serde_json::to_vec(&json!({
+        "schema":"elastos.components/v1", "external":{"home-cli":{
+            "install_path":"capsules/home-cli", "platforms":{(crate::setup::detect_platform()):{
+                "install_path":"capsules/home-cli", "extract_path":"home-cli", "checksum":archive_checksum,
+                "executable_checksum":format!("sha256:{}", hex::encode(Sha256::digest(original)))
+            }}
+        }}, "capsules":{}, "profiles":{}
+    })).unwrap()).unwrap();
+    crate::setup::write_artifact_sha256_receipt(&bundle, &archive_checksum).unwrap();
+    fs::write(
+        bundle.join(".elastos-executable-sha256"),
+        hex::encode(Sha256::digest(original)),
+    )
+    .unwrap();
+    fixture.bind_components();
+    fs::write(&binary, replaced.as_bytes()).unwrap();
+    fs::write(
+        bundle.join(".elastos-executable-sha256"),
+        hex::encode(Sha256::digest(replaced.as_bytes())),
+    )
+    .unwrap();
+    let error = crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary)
+        .expect_err("replaced renderer and receipt must be refused");
+    assert!(format!("{error:#}").contains("signed release digest"));
+    assert!(!marker.exists());
+}
+
+#[test]
+fn installed_shell_runs_verified_bytes_after_path_swap() {
+    let (fixture, path, marker) = start_fixture();
+    let prepared =
+        crate::setup::verify_installed_component_start(&fixture.data, "shell", &path).unwrap();
+    let replacement = path.with_extension("replacement");
+    fs::write(
+        &replacement,
+        format!("#!/bin/sh\nprintf replaced > '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&replacement, &path).unwrap();
+    let mut command = std::process::Command::new(prepared.exec_path());
+    command.arg(&marker);
+    prepared.attach_std(&mut command, false).unwrap();
+    assert!(command.status().unwrap().success());
+    assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
+#[test]
+fn installed_shell_runs_verified_bytes_after_symlink_swap() {
+    let (fixture, path, marker) = start_fixture();
+    let prepared =
+        crate::setup::verify_installed_component_start(&fixture.data, "shell", &path).unwrap();
+    let replacement = path.with_extension("replacement");
+    fs::write(
+        &replacement,
+        format!("#!/bin/sh\nprintf replaced > '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_file(&path).unwrap();
+    symlink(&replacement, &path).unwrap();
+    let mut command = std::process::Command::new(prepared.exec_path());
+    command.arg(&marker);
+    prepared.attach_std(&mut command, false).unwrap();
+    assert!(command.status().unwrap().success());
+    assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
+#[test]
+fn installed_start_refuses_resolved_override_with_its_own_manifest() {
+    let (fixture, _installed, marker) = start_fixture();
+    let override_root = fixture.data.join("override");
+    let override_binary = override_root.join("bin/shell");
+    fs::create_dir_all(override_binary.parent().unwrap()).unwrap();
+    let replacement = format!("#!/bin/sh\nprintf replaced > '{}'\n", marker.display());
+    fs::write(&override_binary, replacement.as_bytes()).unwrap();
+    fs::set_permissions(&override_binary, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(override_root.join("components.json"), serde_json::to_vec(&json!({
+        "schema":"elastos.components/v1", "external":{"shell":{
+            "install_path":"bin/shell", "platforms":{(crate::setup::detect_platform()):{
+                "install_path":"bin/shell", "checksum":format!("sha256:{}", hex::encode(Sha256::digest(replacement.as_bytes())))
+            }}
+        }}, "capsules":{}, "profiles":{}
+    })).unwrap()).unwrap();
+    let error =
+        crate::setup::verify_installed_component_start(&fixture.data, "shell", &override_binary)
+            .expect_err("override manifest cannot authorize an installed start");
+    assert!(format!("{error:#}").contains("Installed component binary verification failed"));
+    assert!(!marker.exists());
 }
 
 pub(crate) struct Fixture {
