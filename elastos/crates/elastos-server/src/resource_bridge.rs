@@ -2751,7 +2751,7 @@ fn random_hex(bytes_len: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A ceiling of resource patterns alone: any action on each, as a
@@ -4486,7 +4486,10 @@ mod tests {
         );
 
         // The production sites that build a bridge principal or hand one to a
-        // bridge. `BridgeContext` and the two constructors are pinned above.
+        // bridge. Staged and explicit development Component CLI starts install
+        // their attached hostcall in run_cmd::configure_component_bridge;
+        // Runtime holds each admitted manifest ceiling before that call runs.
+        // `BridgeContext` and the two constructors are pinned above.
         for (needle, expected) in [
             (
                 "set_bridge_principal",
@@ -4529,6 +4532,19 @@ mod tests {
                 "{needle} callers"
             );
         }
+        let run = production_text(include_str!("run_cmd.rs"));
+        assert_eq!(
+            run.matches("configure_component_bridge(&runtime, &data_dir);")
+                .count(),
+            2,
+            "both staged and explicit development Component starts install the hostcall"
+        );
+        assert_eq!(
+            run.matches(".bridge_bounds_for_capsule(capsule_id)")
+                .count(),
+            1,
+            "the CLI hostcall reads the admitted instance's ceiling"
+        );
     }
 
     /// G3b (r6 §3 M-c, r5 §4; A3): the guest payload is moved whole and read
@@ -4569,13 +4585,14 @@ mod tests {
     /// or storage permissions itself. So a rule placed in that function (such
     /// as: a manifest with asks is bounded by them and by nothing else) holds
     /// wherever a capsule is started. This test counts callers; what the
-    /// function returns is held by its own tests. And those four are the
-    /// only production callers of that
-    /// function under `elastos/crates`: a fifth has to be added here.
+    /// function returns is held by its own tests. The three production callers
+    /// under `elastos/crates` are pinned here: a fourth has to be added here.
+    /// A staged Component reaches runtime::hold_launch_context through
+    /// start_by_bundle and start_loaded, so run_cmd fills no ceiling itself.
     ///
     /// What this cannot show: a workspace member outside `elastos/crates`
     /// (two live under `capsules/`; neither calls the function today), a call
-    /// split across lines, and a fifth file that fills a ceiling straight
+    /// split across lines, and a fourth file that fills a ceiling straight
     /// from a manifest's capability list without calling the function at all.
     #[test]
     fn every_place_that_fills_a_ceiling_asks_the_one_bounds_function() {
@@ -4591,11 +4608,6 @@ mod tests {
                 "manifest_capabilities: manifest.resource_authority_bounds(),",
             ),
             (
-                "run_cmd.rs",
-                include_str!("run_cmd.rs"),
-                "let manifest_capabilities = manifest.resource_authority_bounds();",
-            ),
-            (
                 "capsule_cmd.rs",
                 include_str!("capsule_cmd.rs"),
                 "let manifest_capabilities = manifest.resource_authority_bounds();",
@@ -4606,6 +4618,10 @@ mod tests {
             for direct in ["manifest.capabilities", "permissions.storage"] {
                 assert!(!production.contains(direct), "{file} reads {direct}");
             }
+        }
+        let run = production_text(include_str!("run_cmd.rs"));
+        for direct in ["manifest.capabilities", "permissions.storage"] {
+            assert!(!run.contains(direct), "run_cmd.rs reads {direct}");
         }
 
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -4623,7 +4639,6 @@ mod tests {
         callers.sort();
         let expected = [
             "elastos-server/src/capsule_cmd.rs",
-            "elastos-server/src/run_cmd.rs",
             "elastos-server/src/runtime.rs",
             "elastos-server/src/supervisor.rs",
         ]
@@ -7438,7 +7453,7 @@ mod tests {
             manifest.resource_authority_bounds(),
             vec![
                 elastos_common::AuthorityBound {
-                    resource: "localhost://Users/self/.AppData/Agents/agent-host/*".to_string(),
+                    resource: "localhost://UsersAI/self/.AppData/Agents/agent-host/*".to_string(),
                     actions: Some(vec![
                         elastos_common::AskAction::Write,
                         elastos_common::AskAction::Read,
@@ -7454,13 +7469,16 @@ mod tests {
                 },
             ]
         );
-        let (temp, mut ctx, _) = journal_context("person:local:journal-owner");
-        ctx.manifest_capabilities = manifest.resource_authority_bounds();
+        let temp = tempfile::tempdir().unwrap();
+        let owner = "person:local:journal-owner";
+        crate::auth::store_test_human_principal(temp.path(), owner);
+        let agent = crate::agents::tests::plant_for_dispatch(temp.path(), owner, owner);
+        let (ctx, _) = submit_plan_bridge(temp.path(), &agent).await;
         let provider = Arc::new(CapturingProvider::default());
         ctx.provider_registry.register(provider.clone()).await;
-        let root = crate::auth::principal_localhost_root("person:local:journal-owner");
+        let root = crate::auth::principal_stored_localhost_root(Some(temp.path()), &agent).unwrap();
         let journal = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
-        let journal_self = "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal";
+        let journal_self = "localhost://UsersAI/self/.AppData/Agents/agent-host/tasks/demo/journal";
         let first = journal_write(
             &ctx,
             &journal,
@@ -7476,12 +7494,12 @@ mod tests {
         ];
         for (uri, refused) in [
             (
-                "localhost://Users/self/.AppData",
+                "localhost://UsersAI/self/.AppData",
                 "manifest_capability_denied",
             ),
-            ("localhost://Users/self", "manifest_capability_denied"),
+            ("localhost://UsersAI/self", "manifest_capability_denied"),
             (
-                "localhost://Users/self/.AppData/Agents",
+                "localhost://UsersAI/self/.AppData/Agents",
                 "manifest_capability_denied",
             ),
             (journal_self, "manifest_capability_denied"),
@@ -7501,8 +7519,8 @@ mod tests {
                 let response = handle_request(&line, &Some(ctx.clone())).await.unwrap();
                 assert_eq!(response["response"]["code"], refused, "delete {uri}");
             }
-            // Asking for a delete grant is refused at once, with no approval:
-            // by the Agents rule inside the area, by the manifest bound outside it.
+            // The signed ask lists write and read only, so delete is refused
+            // before any grant can be approved.
             let ask = serde_json::json!({
                 "id": 69,
                 "request": {
@@ -7514,12 +7532,10 @@ mod tests {
             })
             .to_string();
             let asked = handle_request(&ask, &Some(ctx.clone())).await.unwrap();
-            let expected = if uri.contains("/.AppData/Agents") {
-                "operation_not_allowed"
-            } else {
-                "manifest_capability_denied"
-            };
-            assert_eq!(asked["response"]["code"], expected, "{uri}");
+            assert_eq!(
+                asked["response"]["code"], "manifest_capability_denied",
+                "{uri}"
+            );
         }
         // Delete is outside the ask's actions, so the manifest refuses the
         // invoke. The provider sees no request.
@@ -7539,7 +7555,7 @@ mod tests {
         assert_eq!(response["response"]["code"], "manifest_capability_denied");
         assert!(provider.requests().await.is_empty());
         assert!(journal_path(&temp, &journal).is_file());
-        assert!(temp.path().join("Users").is_dir());
+        assert!(temp.path().join("UsersAI").is_dir());
     }
 
     #[tokio::test]
@@ -8279,6 +8295,52 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// The stored Agent guest writes and reads its own task journal before it
+    /// submits the planner's exact one-step plan through the same bridge.
+    pub(crate) async fn a15r_guest_journal_and_submit(
+        data_dir: &Path,
+        agent: &str,
+        alias: &str,
+        plan: &serde_json::Value,
+    ) -> (serde_json::Value, String, String, String) {
+        let (ctx, provider) = submit_plan_bridge(data_dir, agent).await;
+        let scoped = scope_current_user_alias(alias, Some(agent), Some(data_dir)).unwrap();
+        assert!(scoped.starts_with("localhost://UsersAI/"));
+        assert!(scope_current_user_alias(
+            "localhost://Users/self/.AppData/Agents/agent-host/tasks/demo/journal",
+            Some(agent),
+            Some(data_dir),
+        )
+        .is_err());
+        let written = journal_write(
+            &ctx,
+            &scoped,
+            alias,
+            b"agent journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(written["response"]["result"]["status"], "ok", "{written}");
+        let read = handle_request(
+            &journal_read_line(61, alias, bridge_token(&ctx, &scoped, Action::Read)),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["response"]["result"]["status"], "ok", "{read}");
+        assert_eq!(
+            read["response"]["result"]["data"]["content"],
+            serde_json::json!(b"agent journal v1"),
+        );
+        let response = submit_with_write(&ctx, 81, plan).await;
+        assert_eq!(
+            response["response"]["type"], "resource_result",
+            "{response}"
+        );
+        assert!(provider.requests().await.is_empty());
+        (response, scoped, ctx.capsule_id, ctx.session_id)
     }
 
     /// The submission is refused for `reason`; no record is written and no

@@ -65,7 +65,11 @@ fn assert_refusal_as(
     let output = home
         .launch(
             &runtime.binary,
-            &["run", capsule.path.to_str().unwrap()],
+            &[
+                "run",
+                "--dev-unsigned-component",
+                capsule.path.to_str().unwrap(),
+            ],
             // A refusal returns at once. The bound passes the probe's own
             // 30-second pending wait, so a declared request still reports its
             // refusal reason instead of the harness bound.
@@ -337,7 +341,11 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
         .map(|(capsule, home)| Launch {
             home,
             program: &runtime.binary,
-            args: vec!["run", capsule.path.to_str().unwrap()],
+            args: vec![
+                "run",
+                "--dev-unsigned-component",
+                capsule.path.to_str().unwrap(),
+            ],
         })
         .collect();
     let running = RunningInstances::start(&launches, Some(&home))

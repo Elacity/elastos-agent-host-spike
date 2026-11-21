@@ -107,7 +107,11 @@ fn real_agent_host_gets_no_ungranted_authority() {
     let launches = [Launch {
         home: &home,
         program: &runtime.binary,
-        args: vec!["run", capsule.path.to_str().unwrap()],
+        args: vec![
+            "run",
+            "--dev-unsigned-component",
+            capsule.path.to_str().unwrap(),
+        ],
     }];
     let running = RunningInstances::start(&launches, Some(&home)).expect("launch the real capsule");
     let observation = Observation::Launched {

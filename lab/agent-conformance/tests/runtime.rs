@@ -27,7 +27,7 @@ fn run_probe(home: &ThrowawayHome) -> String {
     let output = home
         .launch(
             &runtime.binary,
-            &["run", probe.to_str().unwrap()],
+            &["run", "--dev-unsigned-component", probe.to_str().unwrap()],
             Duration::from_secs(10),
         )
         .expect("launch through the throwaway Home primitive");

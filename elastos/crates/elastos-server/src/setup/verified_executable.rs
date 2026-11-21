@@ -18,13 +18,23 @@ pub struct VerifiedExecutable {
     #[cfg(target_os = "macos")]
     _private_dir: tempfile::TempDir,
     exec_path: PathBuf,
-    /// The signed release digest these held bytes matched. A native provider
-    /// start pins its spawn-time check to this same digest.
-    checksum: String,
+    /// The signed release digest these held bytes matched (none for a source
+    /// Home's `dev_mode = true` start). A native provider start pins its
+    /// spawn-time check to this same digest.
+    checksum: Option<String>,
 }
 
 impl VerifiedExecutable {
     pub fn prepare(path: &Path, checksum: &str) -> Result<Self> {
+        Self::hold(path, Some(checksum))
+    }
+
+    /// A source Home's `dev_mode = true` start: the same held bytes, no digest.
+    pub(crate) fn unchecked(path: &Path) -> Result<Self> {
+        Self::hold(path, None)
+    }
+
+    fn hold(path: &Path, checksum: Option<&str>) -> Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -35,7 +45,7 @@ impl VerifiedExecutable {
             "installed executable is not a regular file"
         );
         anyhow::ensure!(
-            matches_checksum(&mut file, checksum)?,
+            checksum.map_or(Ok(true), |checksum| matches_checksum(&mut file, checksum))?,
             "installed executable differs from signed release digest"
         );
 
@@ -51,7 +61,7 @@ impl VerifiedExecutable {
             Ok(Self {
                 file: unsafe { File::from_raw_fd(fd) },
                 exec_path: format!("/proc/self/fd/{fd}").into(),
-                checksum: checksum.to_owned(),
+                checksum: checksum.map(str::to_owned),
             })
         }
         #[cfg(target_os = "macos")]
@@ -74,13 +84,13 @@ impl VerifiedExecutable {
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
                 .open(&exec_path)?;
             anyhow::ensure!(
-                matches_checksum(&mut copy, checksum)?,
+                checksum.map_or(Ok(true), |checksum| matches_checksum(&mut copy, checksum))?,
                 "private executable copy differs from signed release digest"
             );
             Ok(Self {
                 _private_dir: private_dir,
                 exec_path,
-                checksum: checksum.to_owned(),
+                checksum: checksum.map(str::to_owned),
             })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -91,9 +101,10 @@ impl VerifiedExecutable {
         &self.exec_path
     }
 
-    /// The signed release digest the held bytes matched.
-    pub fn checksum(&self) -> &str {
-        &self.checksum
+    /// The signed release digest the held bytes matched; `None` for an
+    /// unchecked dev-mode start.
+    pub fn checksum(&self) -> Option<&str> {
+        self.checksum.as_deref()
     }
 
     /// Attach after the caller has set all arguments and environment changes.

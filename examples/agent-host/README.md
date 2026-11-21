@@ -227,24 +227,19 @@ and CI.
 The guest runs two turns, compacts the tail, and exits. This does not start `elastos serve`, does
 not open the Home data directory, and does not publish anything.
 
-## Run beside a local Runtime
+## Exercise the granted Runtime journey
 
-The Component ABI has no stdout. A successful run prints only the host exit
-line. Start the operator Runtime in one terminal, then run the guest from
-another:
-
-```bash
-./elastos/target/release/elastos serve
-```
+From the repository root, run the end-to-end Runtime test. It builds the guest,
+starts an isolated test Runtime, supplies the two journal grants, runs the two
+turns, and checks the journal through the real Bus bridge:
 
 ```bash
-./elastos/target/release/elastos run "$PWD/examples/agent-host"
+./examples/agent-host/run-e2e.sh
 ```
 
-Success ends with:
-
-```text
-[run] Component capsule 'agent-host' exited
-```
-
-That command is an operator action. Home's window does not list this guest.
+The general `elastos run <folder>` command selects a staged, signed CID and
+starts the checked slot in a self-contained Runtime. Its Bus calls attach to
+the operator Runtime when one is available, but this command supplies no person
+principal or journal grants for the guest's full journey. The explicit unsigned
+development command has the same principal limit. The Runtime test above
+supplies that context. Home's window does not list this guest.
