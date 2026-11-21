@@ -29,11 +29,7 @@ pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> Ch
         // Admission holds the signed bytes; the bridge re-checks the same
         // digest at spawn and runs the bytes it checked (CheckedExecutable).
         .and_then(|verified| {
-            // A dev-mode unchecked start has no signed digest to pin; a native
-            // provider still needs one.
-            let checksum = verified.checksum().ok_or_else(|| {
-                anyhow::anyhow!("no signed release digest (dev_mode start is unchecked)")
-            })?;
+            let checksum = verified.signed_checksum()?;
             CheckedExecutable::pinned(path, checksum).map_err(anyhow::Error::msg)
         });
     admitted.unwrap_or_else(|error| {

@@ -971,6 +971,7 @@ async fn provision_custody_node_with_installed_provider(
     // against the signed release, which refuses an unrelated override root.
     let prepared =
         crate::setup::verify_installed_component_start(data_dir, "custody-provider", &binary)?;
+    prepared.signed_checksum()?;
     let issuer_hex = format!("0x{}", hex::encode(issuer.as_bytes()));
     let mut command = tokio::process::Command::new(prepared.exec_path());
     command
@@ -1581,6 +1582,37 @@ pub(crate) mod tests {
         assert!(!unverified_error
             .to_string()
             .contains(&data_dir.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_home_dev_mode_refuses_unchecked_custody_provider_before_spawn() {
+        let dir = safe_ancestor_tempdir();
+        let data_dir = dir.path().join("data");
+        owner_only_dir(&data_dir);
+        let marker = dir.path().join("provider-started");
+        let script = format!("#!/bin/sh\nprintf started > '{}'\n", marker.display());
+        install_verified_custody_provider(&data_dir, script.as_bytes());
+        std::fs::remove_file(data_dir.join("sources.json")).unwrap();
+        std::fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
+        assert!(crate::setup::installed_release_source(&data_dir)
+            .unwrap()
+            .is_none());
+
+        let descriptor = dir.path().join("node.descriptor.json");
+        let error = run_provision_custody_node_for_test(
+            data_dir,
+            descriptor.clone(),
+            test_runtime_issuer_hex(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!marker.exists(), "unchecked provider was started");
+        assert!(
+            error.to_string().contains("no signed release digest"),
+            "{error}"
+        );
+        assert!(!descriptor.exists());
     }
 
     #[cfg(unix)]

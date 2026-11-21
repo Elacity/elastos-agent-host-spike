@@ -321,6 +321,8 @@ fn columns() -> Vec<TrustColumn> {
             evidence: [".start_b", "y_bundle("].concat(),
             os_path: "",
         },
+        // Custody provisioning requires a signed digest before command
+        // creation; the source-Home dev_mode path is refused before spawn.
         TrustColumn {
             file: "elastos-server/src/protected_content_config.rs",
             function: "provision_custody_node_with_installed_provider",
@@ -1623,6 +1625,22 @@ fn installed_component_start_callers_keep_the_signed_gate() {
                 == "provision_custody_node_with_installed_provider"
         }),
         "custody start must admit the resolver's selected binary"
+    );
+    let custody_code = source::code_only(custody);
+    let guard = "prepared.signed_checksum()?;";
+    let guard_at = custody_code
+        .find(guard)
+        .expect("custody start lost signed-digest guard");
+    assert_eq!(
+        source::enclosing_fn(&custody_code, guard_at),
+        "provision_custody_node_with_installed_provider"
+    );
+    let spawn_at = custody_code
+        .find("let mut child = command")
+        .expect("custody spawn moved");
+    assert!(
+        guard_at < spawn_at,
+        "custody digest guard moved after spawn"
     );
 }
 

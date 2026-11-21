@@ -101,10 +101,12 @@ impl VerifiedExecutable {
         &self.exec_path
     }
 
-    /// The signed release digest the held bytes matched; `None` for an
-    /// unchecked dev-mode start.
-    pub fn checksum(&self) -> Option<&str> {
-        self.checksum.as_deref()
+    /// Native providers require a signed digest even in a source Home's
+    /// `dev_mode`; refuse an unchecked executable before process creation.
+    pub fn signed_checksum(&self) -> Result<&str> {
+        self.checksum.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("no signed release digest (dev_mode start is unchecked)")
+        })
     }
 
     /// Attach after the caller has set all arguments and environment changes.
