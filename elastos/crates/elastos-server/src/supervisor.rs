@@ -23,6 +23,7 @@ use crate::setup::{
 use crate::vm_provider::VmCapsuleProvider;
 
 use elastos_crosvm::{CrosvmConfig, NetworkConfig, RunningVm, VmConfig};
+use elastos_runtime::capsule::check_entrypoint_file;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::session::{SessionRegistry, SessionType};
 
@@ -31,6 +32,17 @@ use elastos_runtime::session::{SessionRegistry, SessionType};
 const VM_PROVIDER_PORT: u16 = 7000;
 const CACHED_CID_FILE: &str = ".elastos-cid";
 const CHAT_RETURN_HOME_EXIT_CODE: i32 = 73;
+
+async fn checked_vm_rootfs_base(
+    capsule_dir: &Path,
+    manifest: &elastos_common::CapsuleManifest,
+) -> Result<PathBuf> {
+    check_entrypoint_file(capsule_dir, &manifest.entrypoint).await?;
+    if manifest.entrypoint != "rootfs.ext4" {
+        check_entrypoint_file(capsule_dir, "rootfs.ext4").await?;
+    }
+    Ok(capsule_dir.join("rootfs.ext4"))
+}
 
 fn vm_provider_bridge_enabled() -> bool {
     std::env::var("ELASTOS_VM_PROVIDER_BRIDGE")
@@ -793,10 +805,13 @@ impl Supervisor {
     ) -> Result<(PathBuf, elastos_common::CapsuleManifest)> {
         let capsule_dir = self.ensure_capsule(name).await?;
         let manifest_path = capsule_dir.join("capsule.json");
-        let manifest_data = tokio::fs::read_to_string(&manifest_path)
-            .await
-            .with_context(|| format!("reading capsule.json for '{name}'"))?;
-        let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&manifest_data)
+        let manifest_data = tokio::task::spawn_blocking(move || {
+            elastos_common::capsule_manifest_file::read(&manifest_path)
+        })
+        .await
+        .context("reading capsule.json task")?
+        .with_context(|| format!("reading capsule.json for '{name}'"))?;
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&manifest_data)
             .with_context(|| format!("parsing capsule.json for '{name}'"))?;
         Ok((capsule_dir, manifest))
     }
@@ -1034,6 +1049,7 @@ impl Supervisor {
         }
 
         // VM path — the release must publish crosvm and a guest kernel for this platform
+        let rootfs_base = checked_vm_rootfs_base(&capsule_dir, &manifest).await?;
         let platform = crate::setup::detect_platform();
         if let Some(reason) = Self::microvm_unavailable(&self.registry, &platform) {
             bail!("{reason}. Cannot launch capsule '{name}'.");
@@ -1177,7 +1193,6 @@ impl Supervisor {
         vm_config.boot_args = format!("{} elastos.carrier_path=/dev/hvc0", vm_config.boot_args);
 
         // Create rootfs overlay (writable copy)
-        let rootfs_base = capsule_dir.join("rootfs.ext4");
         if rootfs_base.is_file() {
             let overlay_dir = self.crosvm_config.rootfs_cache_dir.join("overlays");
             tokio::fs::create_dir_all(&overlay_dir).await?;
@@ -1202,6 +1217,7 @@ impl Supervisor {
                     capability_manager: cap_mgr.clone(),
                     pending_store: pending.clone(),
                     capsule_id: format!("vm-{}", name),
+                    session_id: format!("vm-{}", name),
                     principal_id: principal_id
                         .map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
                     manifest_capabilities: manifest.resource_authority_bounds(),
@@ -1657,6 +1673,34 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_vm_refuses_pipe_entrypoint_before_rootfs_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = dir.path().join("rootfs.ext4");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap()
+            .success());
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(include_str!("../../../capsules/shell/capsule.json")).unwrap();
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            checked_vm_rootfs_base(dir.path(), &manifest),
+        )
+        .await
+        .expect("the entrypoint check does not open a pipe")
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Entrypoint rootfs.ext4 is not a regular file"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn test_supervisor_request_serialization() {

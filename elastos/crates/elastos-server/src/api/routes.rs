@@ -11,6 +11,7 @@ use axum::{
 use elastos_runtime::primitives::audit::{AuditLog, TrustLevel};
 use serde::{Deserialize, Serialize};
 
+use crate::resource_bridge::BridgePrincipal;
 use crate::runtime::Runtime;
 
 const SERVER_VERSION: &str = env!("ELASTOS_VERSION");
@@ -104,16 +105,16 @@ pub async fn launch_capsule(
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     let path = std::path::Path::new(&req.path);
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
-    let (launcher, admission) = match req.agent_id.as_deref() {
-        None => (
-            principal_from_launch_request(
+    let (launcher, admission, grant_name) = match req.agent_id.as_deref() {
+        None => {
+            let (launcher, grant_name) = principal_from_launch_request(
                 data_dir.as_deref(),
                 path,
                 req.principal_id,
                 req.launch_grant,
-            )?,
-            None,
-        ),
+            )?;
+            (launcher, None, grant_name)
+        }
         Some(agent_id) => {
             let data_dir = data_dir.as_deref().ok_or((
                 StatusCode::BAD_REQUEST,
@@ -142,7 +143,7 @@ pub async fn launch_capsule(
                     .map(crate::resource_bridge::BridgePrincipal::principal_str),
                 agent_id,
             )?;
-            (launcher, Some(admission))
+            (launcher, Some(admission), None)
         }
     };
     // An admitted agent launch starts through the one entry that may hand the
@@ -156,7 +157,7 @@ pub async fn launch_capsule(
         Some(admission) => runtime.start_local_admitted(path, vec![], admission).await,
         None => {
             runtime
-                .start_local_with_signer(path, vec![], launcher)
+                .start_local_with_signer(path, vec![], launcher, grant_name.as_deref())
                 .await
         }
     };
@@ -261,18 +262,20 @@ fn principal_from_capsule_name(
     Ok(Some(principal))
 }
 
+type LaunchGrantBinding = (Option<BridgePrincipal>, Option<String>);
+
 fn principal_from_launch_request(
     data_dir: Option<&std::path::Path>,
     capsule_dir: &std::path::Path,
     principal_id: Option<String>,
     launch_grant: Option<String>,
-) -> Result<Option<crate::resource_bridge::BridgePrincipal>, (StatusCode, String)> {
+) -> Result<LaunchGrantBinding, (StatusCode, String)> {
     reject_raw_launch_principal_id(principal_id.as_deref())?;
     let launch_grant = launch_grant
         .map(|grant| grant.trim().to_string())
         .filter(|grant| !grant.is_empty());
     if launch_grant.is_none() {
-        return Ok(None);
+        return Ok((None, None));
     }
     if data_dir.is_none() {
         return Err((
@@ -281,12 +284,13 @@ fn principal_from_launch_request(
         ));
     }
     let capsule_name = launch_capsule_name(capsule_dir)?;
-    principal_from_capsule_name(data_dir, &capsule_name, launch_grant)
+    let principal = principal_from_capsule_name(data_dir, &capsule_name, launch_grant)?;
+    Ok((principal, Some(capsule_name)))
 }
 
 fn launch_capsule_name(capsule_dir: &std::path::Path) -> Result<String, (StatusCode, String)> {
     let manifest_path = capsule_dir.join("capsule.json");
-    let bytes = std::fs::read(&manifest_path).map_err(|err| {
+    let bytes = elastos_common::capsule_manifest_file::read(&manifest_path).map_err(|err| {
         (
             StatusCode::BAD_REQUEST,
             format!("read capsule manifest for launch grant: {err}"),
@@ -426,7 +430,7 @@ pub(crate) mod tests {
         let principal =
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, None).unwrap();
 
-        assert_eq!(principal, None);
+        assert_eq!(principal, (None, None));
     }
 
     #[test]
@@ -482,9 +486,10 @@ pub(crate) mod tests {
             gateway::issue_home_launch_token_with_context(dir.path(), "chat-wasm", &context)
                 .unwrap();
 
-        let principal =
+        let (principal, name) =
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, Some(grant))
                 .unwrap();
+        assert_eq!(name.as_deref(), Some("chat-wasm"));
 
         assert_eq!(
             principal
@@ -941,7 +946,7 @@ pub(crate) mod tests {
         pub(crate) data_dir: std::path::PathBuf,
         runtime: Arc<Runtime>,
         audit_log: Arc<AuditLog>,
-        pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
+        pub(crate) pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
         /// The same token store the manager holds: the live view's own input.
         capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
@@ -1477,6 +1482,14 @@ pub(crate) mod tests {
             launched
         }
 
+        pub(crate) async fn launched_instance_id(&self, agent_id: &str) -> String {
+            let launched = self.launch_with_grants(agent_id).await.unwrap().0;
+            assert_eq!(launched.status, crate::runtime::CAPSULE_STARTING);
+            let ended = self.wait_ended(&launched.id).await;
+            assert_eq!(ended.cause.as_deref(), Some("completed"));
+            launched.id
+        }
+
         /// Waits until the registry records this activation's end, and returns
         /// the entry: its status and cause are where a launch's outcome is
         /// now observable (`runtime.rs:start_loaded`).
@@ -1763,24 +1776,41 @@ pub(crate) mod tests {
 
     /// Every file under `dir` as (relative path, SHA-256 of its bytes), sorted.
     /// Two calls that return the same vector mean the tree's names and bytes
-    /// did not change.
+    /// did not change. Any part of the tree the walk cannot read fails the
+    /// caller by name: a census that skips a subtree cannot prove a claim
+    /// about the whole tree. A root that does not exist yet is an empty tree
+    /// (callers snapshot a root before anything is written there); every
+    /// error inside an existing tree still fails.
     pub(crate) fn tree_hashes(dir: &std::path::Path) -> Vec<(String, String)> {
         use sha2::{Digest, Sha256};
+        match std::fs::symlink_metadata(dir) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+            Err(err) => panic!("cannot stat {}: {err}", dir.display()),
+            Ok(_) => {}
+        }
         fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                return;
-            };
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|err| panic!("cannot list {}: {err}", dir.display()));
             for entry in entries {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
+                let entry = entry.unwrap_or_else(|err| {
+                    panic!("cannot read an entry of {}: {err}", dir.display())
+                });
+                let path = entry.path();
+                let is_dir = std::fs::metadata(&path)
+                    .unwrap_or_else(|err| panic!("cannot stat {}: {err}", path.display()))
+                    .is_dir();
+                if is_dir {
                     walk(root, &path, out);
                 } else {
                     let relative = path
                         .strip_prefix(root)
-                        .unwrap()
+                        .unwrap_or_else(|err| {
+                            panic!("{} is outside {}: {err}", path.display(), root.display())
+                        })
                         .to_string_lossy()
                         .into_owned();
-                    let bytes = std::fs::read(&path).unwrap();
+                    let bytes = std::fs::read(&path)
+                        .unwrap_or_else(|err| panic!("cannot read {}: {err}", path.display()));
                     let digest = format!("{:x}", Sha256::digest(&bytes));
                     out.push((relative, digest));
                 }
@@ -2026,6 +2056,91 @@ pub(crate) mod tests {
             "the other agent's calls are untouched"
         );
         grants.abort();
+    }
+
+    /// A5 row 2, on disk. The same launch as row 1, then the Home's whole
+    /// `UsersAI` area is walked: each of two stored agents' format-2 journal
+    /// entry and `memory/notes.md` sits under the writing agent's own root,
+    /// and the area holds nothing else. No copy sits under the other agent's
+    /// root, and no stray file sits at the area root. Each file is the sealed
+    /// object its own agent wrote: its envelope names that agent, that root
+    /// and that URI, so the bytes under one root cannot be the other agent's
+    /// object.
+    #[tokio::test]
+    async fn an_agents_journal_and_memory_sit_only_under_its_own_root_on_disk() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let agents = home.agents.clone();
+        assert_eq!(agents.len(), 2, "two agents");
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        for agent in &agents {
+            let launched = home.launch(agent).await.unwrap().0;
+            assert_eq!(launched.status, "starting");
+            let end = home.wait_ended(&launched.id).await;
+            assert_eq!(
+                (end.status.as_str(), end.cause.as_deref()),
+                ("stopped", Some("completed"))
+            );
+        }
+        grants.abort();
+
+        // What the guest wrote through the bridge, as the row above reads it.
+        let suffixes = [
+            "/.AppData/Agents/agent-host/tasks/t1/journal",
+            "/memory/notes.md",
+        ];
+        let mut expected: Vec<(String, String, String, String)> = Vec::new();
+        for agent in &agents {
+            let root = home.root(agent);
+            for suffix in suffixes {
+                let uri = format!("{root}{suffix}");
+                let path =
+                    elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &uri)
+                        .expect("the guest's URI maps to a file path");
+                let name = path
+                    .strip_prefix(&home.data_dir)
+                    .expect("the object is inside the data directory")
+                    .to_string_lossy()
+                    .into_owned();
+                expected.push((name, agent.to_string(), root.clone(), uri));
+            }
+        }
+
+        // Every object is the sealed envelope of the agent that wrote it, and
+        // every name in the area is one of those objects.
+        let area = home.data_dir.join("UsersAI");
+        for (name, agent, root, uri) in &expected {
+            let path = home.data_dir.join(name);
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|err| panic!("{name} is not on disk under its own root: {err}"));
+            let envelope: serde_json::Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|err| panic!("{name} is not a sealed object: {err}"));
+            for (field, want) in [
+                ("principal_id", agent.as_str()),
+                ("localhost_root", root.as_str()),
+                ("object_uri", uri.as_str()),
+            ] {
+                assert_eq!(
+                    envelope.get(field).and_then(serde_json::Value::as_str),
+                    Some(want),
+                    "{name} is the object of another agent or another path"
+                );
+            }
+        }
+        let mut names: Vec<String> = tree_hashes(&area)
+            .into_iter()
+            .map(|(name, _)| format!("UsersAI/{name}"))
+            .collect();
+        let mut wanted: Vec<String> = expected.into_iter().map(|row| row.0).collect();
+        names.sort();
+        wanted.sort();
+        assert_eq!(
+            names, wanted,
+            "the UsersAI area holds each agent's own journal and notes, and nothing else"
+        );
     }
 
     /// A3-R proof row. Two agents of one Home are resident at once through the
@@ -3930,6 +4045,7 @@ pub(crate) mod tests {
             capability_manager: home.capability_manager.clone(),
             pending_store: home.pending_store.clone(),
             capsule_id: instance.to_string(),
+            session_id: instance.to_string(),
             principal_id: Some(principal.to_string()),
             manifest_capabilities: tables.manifest_capabilities,
             data_dir: Some(home.data_dir.clone()),
@@ -5076,6 +5192,7 @@ pub(crate) mod tests {
             capability_manager: home.capability_manager.clone(),
             pending_store: home.pending_store.clone(),
             capsule_id: "a5-s5-protected-path-companion".to_string(),
+            session_id: "a5-s5-protected-path-companion".to_string(),
             principal_id: Some(x.clone()),
             manifest_capabilities: Vec::new(),
             data_dir: Some(home.data_dir.clone()),
@@ -6480,11 +6597,20 @@ pub(crate) mod tests {
         home.results(agent).join("\n")
     }
 
-    fn model_create_line(request_id: &str, extra: &str) -> String {
-        model_create_line_for(request_id, "offer:fixture", "text.generate", extra)
+    fn model_create_line(home: &ProbeLaunch, agent: &str, request_id: &str, extra: &str) -> String {
+        model_create_line_for(
+            home,
+            agent,
+            request_id,
+            "offer:fixture",
+            "text.generate",
+            extra,
+        )
     }
 
     fn model_create_line_for(
+        home: &ProbeLaunch,
+        agent: &str,
         request_id: &str,
         offer_id: &str,
         operation: &str,
@@ -6497,9 +6623,23 @@ pub(crate) mod tests {
         )
         .unwrap();
         let body = format!(
-            "\",\"offer_id\":\"{offer_id}\",\"operation\":\"{operation}\",\"request_id\":\"{request_id}\",\"input\":{{\"schema\":\"elastos.model.input.text/v1\",\"prompt\":\"hi\"}}{extra},\"pad\":\""
+            "{{\"offer_id\":\"{offer_id}\",\"operation\":\"{operation}\",\"input\":{{\"schema\":\"elastos.model.input.text/v1\",\"prompt\":\"hi with fixture padding\"}},\"request_id\":\"{request_id}\"{extra}}}"
         );
-        format!("invoke\t{resource}\t{resource}\truns_create\texecute\t{body}")
+        let root = home.root(agent);
+        let hash = hex::encode(elastos_runtime::signature::hash_content(body.as_bytes()));
+        let body_uri = format!("{root}/memory/model-create-{hash}.json");
+        let body_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &body_uri).unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            agent,
+            &root,
+            &body_uri,
+            &body_path,
+            body.as_bytes(),
+        )
+        .unwrap();
+        format!("send\t{resource}\t{resource}\truns_create\texecute\t{body_uri}")
     }
 
     async fn run_model_plan(
@@ -6515,7 +6655,7 @@ pub(crate) mod tests {
         lines.extend(
             creates
                 .iter()
-                .map(|(id, extra)| model_create_line(id, extra)),
+                .map(|(id, extra)| model_create_line(home, agent, id, extra)),
         );
         run_model_lines(home, dir, agent, &lines).await
     }
@@ -6577,8 +6717,8 @@ pub(crate) mod tests {
             &[
                 "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t"
                     .into(),
-                model_create_line("request:resident-first", ""),
-                model_create_line("request:resident-second", ""),
+                model_create_line(&home, &agent, "request:resident-first", ""),
+                model_create_line(&home, &agent, "request:resident-second", ""),
             ],
         );
         let launched = home.launch_from(&dir, &agent).await.unwrap().0;
@@ -6627,8 +6767,22 @@ pub(crate) mod tests {
         let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
         let lines = vec![
             "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
-            model_create_line_for("request:swap", "offer:fixture", "wrong.operation", ""),
-            model_create_line_for("request:swap", "offer:large", "text.generate", ""),
+            model_create_line_for(
+                &home,
+                &agent,
+                "request:swap",
+                "offer:fixture",
+                "wrong.operation",
+                "",
+            ),
+            model_create_line_for(
+                &home,
+                &agent,
+                "request:swap",
+                "offer:large",
+                "text.generate",
+                "",
+            ),
         ];
         let outcome = run_model_lines(&home, &dir, &agent, &lines).await;
         assert!(
@@ -6655,7 +6809,7 @@ pub(crate) mod tests {
         }
         let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
         model.raise_revision_after_rejection();
-        let create = model_create_line("request:revision", "");
+        let create = model_create_line(&home, &agent, "request:revision", "");
         let lines = vec![
             "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t".into(),
             create.clone(),
@@ -6697,7 +6851,10 @@ pub(crate) mod tests {
         }
         let (home, dir, agent, model) = admitted_model_agent(Some(1_140)).await;
         let _ = ask_model(&home, &dir, &agent, None).await;
-        home.plan(&agent, &[model_create_line("request:concurrent", "")]);
+        home.plan(
+            &agent,
+            &[model_create_line(&home, &agent, "request:concurrent", "")],
+        );
         let grants =
             grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
         let (first, second) = tokio::join!(
@@ -6788,10 +6945,15 @@ pub(crate) mod tests {
             &[("request:guest1", forged), ("request:guest2", forged)],
         )
         .await;
-        assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
+        assert!(
+            outcome.contains("unknown field `model_tokens`"),
+            "{outcome}"
+        );
         let calls = create_calls(&model);
-        assert_eq!(calls.len(), 1);
-        assert!(calls[0].get("model_tokens").is_none());
+        assert!(
+            calls.is_empty(),
+            "the unknown field is refused before dispatch"
+        );
     }
 
     /// An admitted agent whose signed manifest asks for no model tokens cannot

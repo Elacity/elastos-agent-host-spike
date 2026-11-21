@@ -124,6 +124,42 @@ pub(super) async fn append_inbox_requests(
     }
 }
 
+/// Test-only: the entries `append_inbox_requests` gives `principal_id` on a
+/// Home with no ports, as (id, kind, body).
+#[cfg(test)]
+pub(crate) async fn inbox_request_entries_for_test(
+    data_dir: &std::path::Path,
+    principal_id: &str,
+    proof_binding_id: Option<&str>,
+    kind: crate::auth::PrincipalKind,
+) -> Vec<(String, String, String)> {
+    let state = GatewayState {
+        provider_registry: None,
+        collaboration_chat_product_port: None,
+        collaboration_presence_product_port: None,
+        carrier_endpoint: None,
+        collaboration_discovery_service: None,
+        browser_internet: Default::default(),
+        identity_manager: Arc::new(std::sync::OnceLock::new()),
+        cache_dir: data_dir.to_path_buf(),
+        data_dir: data_dir.to_path_buf(),
+    };
+    let context = HomeLaunchTokenContext::for_test(
+        principal_id,
+        "session:inbox-test",
+        proof_binding_id.map(str::to_string),
+        "grant:inbox-test",
+        kind,
+    );
+    let mut notifications = HomeNotificationsSummary::default();
+    append_inbox_requests(&state, &context, Vec::new(), &mut notifications).await;
+    notifications
+        .entries
+        .into_iter()
+        .map(|entry| (entry.id, entry.kind, entry.body))
+        .collect()
+}
+
 /// Hosted access decisions and their history. They are the owner's alone, so
 /// anyone else gets none.
 #[cfg(unix)]
@@ -172,6 +208,7 @@ pub(super) fn append_hosted_route_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at: route.requested_at,
+            ..Default::default()
         });
     }
 }
@@ -212,6 +249,7 @@ pub(super) fn append_wallet_approval_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at: request.created_at,
+            ..Default::default()
         });
     }
 }
@@ -260,6 +298,7 @@ pub(super) fn append_runtime_capability_notifications(
             severity: "attention".to_string(),
             read: false,
             created_at: request.requested_at,
+            ..Default::default()
         });
     }
 }
@@ -332,7 +371,7 @@ pub(super) async fn inbox_action(
     match dispatch_inbox_action(&state, &launch, &context, &authority, &action).await {
         Ok(message) => {
             let result = inspect_action_request_id_from_action(&action.action_id)
-                .map(|request_id| inspect_action_result_receipt(&state.data_dir, request_id))
+                .map(|id| inspect_action_result_receipt(&state.data_dir, id))
                 .transpose();
             match result {
                 Ok(result) => Json(InboxActionResponse { message, result }).into_response(),
@@ -367,6 +406,7 @@ fn parse_inbox_action_request(
         Ok(InboxActionRequest {
             action_id,
             step_up_token: None,
+            request_binding: None,
         })
     } else {
         Err("unsupported inbox action content type".to_string())
@@ -550,6 +590,27 @@ async fn dispatch_inbox_action(
             context,
             state.collaboration_discovery_service.as_ref(),
             request_id,
+        )
+        .await;
+    }
+    if let Some(request_id) = action_id.strip_prefix("agent-plan-approve-request:") {
+        if state.provider_registry.is_none() {
+            anyhow::bail!("agent plan provider registry unavailable");
+        }
+        let card = action
+            .request_binding
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("agent plan approval requires the card binding"))?;
+        super::gateway_inspect_actions::approve_agent_plan_request(
+            state,
+            launch,
+            context,
+            request_id,
+            card,
+            action.step_up_token.as_deref(),
+        )?;
+        return super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            state, context, request_id,
         )
         .await;
     }

@@ -9,8 +9,9 @@
 mod signed_bundle;
 
 use agent_conformance::standin_runtime::{Caller, Life, StandIn, Start};
+use capsule_identity::NameSignature;
 use serde_json::{json, Value};
-use signed_bundle::{SignedBundle, SHARED_NAME};
+use signed_bundle::{write_typed_manifest_asks, SignedBundle, SHARED_NAME};
 use std::collections::BTreeSet;
 
 const LIVE_SCOPE: &str = "all_sessions_live";
@@ -36,10 +37,14 @@ fn assert_keys(value: &Value, expected: &[&str], message: &str) {
 /// Changes one payload byte of the signed bundle, so its bytes name another
 /// lab CID and the admitted signature no longer covers it.
 fn change_one_byte(bundle: &SignedBundle) {
-    let asks = bundle.path().join("asks.json");
-    let mut bytes = std::fs::read(&asks).expect("read asks.json");
-    bytes[0] ^= 0x01;
-    std::fs::write(&asks, &bytes).expect("flip one byte of asks.json");
+    let path = bundle.path().join("capsule.json");
+    let mut bytes = std::fs::read(&path).expect("read capsule.json");
+    let at = bytes
+        .windows(b"Journal".len())
+        .position(|window| window == b"Journal")
+        .expect("the manifest description names the journal");
+    bytes[at] ^= 0x20;
+    std::fs::write(&path, &bytes).expect("flip one byte of the manifest description");
 }
 
 fn request_ids(body: &Value) -> BTreeSet<String> {
@@ -1041,6 +1046,59 @@ fn standin_cancelled_resident_leaves_the_second_resident_to_complete() {
     );
 }
 
+/// The fixture writer puts the requested read on the manifest ask.
+#[test]
+fn fixture_writer_declares_the_requested_read() {
+    let shared = SignedBundle::new();
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(shared.path().join("capsule.json")).expect("read capsule.json"),
+    )
+    .expect("parse capsule.json");
+    assert!(
+        manifest.get("capabilities").is_none(),
+        "the fixture writer leaves capabilities out so asks are the one ceiling"
+    );
+    let asks: Vec<elastos_common::ManifestAsk> =
+        serde_json::from_value(manifest["asks"].clone()).expect("asks are typed manifest asks");
+    let declared = asks.iter().any(|ask| {
+        ask.resource == SHARED_RESOURCE && ask.actions.contains(&elastos_common::AskAction::Read)
+    });
+    assert!(
+        declared,
+        "the fixture writer declares read on {SHARED_RESOURCE}: {asks:?}"
+    );
+}
+
+/// The admitted manifest ask keeps its resource after that manifest changes.
+#[test]
+fn admitted_ask_keeps_its_resource_after_the_manifest_changes() {
+    let mut standin = StandIn::new();
+    let shared = SignedBundle::new();
+    declare_asks(&shared, &[(ASK_RESOURCE, "read")]);
+    let session = launched_guest(&mut standin, &shared);
+    let manifest = shared.path().join("capsule.json");
+    let text = std::fs::read_to_string(&manifest).expect("read capsule.json");
+    let later = format!("{ASK_RESOURCE}-later");
+    let changed = text.replacen(ASK_RESOURCE, &later, 1);
+    assert_ne!(changed, text, "the admitted manifest names the resource");
+    std::fs::write(&manifest, changed).expect("change the resource after admission");
+    let owner = Caller::Client {
+        session_id: &session,
+    };
+    let ask =
+        |resource: &str| json!({ "resource": resource, "action": "read", "reason": "journey" });
+    assert_eq!(
+        standin.post_capability_request(owner, &ask(ASK_RESOURCE)),
+        Ok(json!({ "status": "pending", "request_id": "request-1" })),
+        "the admitted ask keeps the resource from admission"
+    );
+    let refused = standin.post_capability_request(owner, &ask(&later));
+    assert!(
+        matches!(&refused, Err((403, reason)) if reason.ends_with(&format!("{later} read"))),
+        "a later resource is not the admitted ask: {refused:?}"
+    );
+}
+
 /// M1 check B2. The signed bundle declares one ask: a read of `ASK_RESOURCE`.
 const ASK_RESOURCE: &str = "localhost://Users/self/.AppData/Agents/agent-host/tasks";
 /// A path under `ASK_RESOURCE`. No ask names it.
@@ -1048,18 +1106,10 @@ const ASK_PATH: &str = "localhost://Users/self/.AppData/Agents/agent-host/tasks/
 /// A path outside `ASK_RESOURCE`. No ask names it.
 const OTHER_PATH: &str = "localhost://Users/self/.AppData/Agents/agent-host/other/journal";
 
-/// Replaces the fixture's `asks.json` with exactly `asks`, before signing.
+/// Replaces the fixture's asks with exactly `asks`, before signing. The
+/// manifest gets the typed rows.
 fn declare_asks(shared: &SignedBundle, asks: &[(&str, &str)]) {
-    let listed = asks
-        .iter()
-        .map(|(resource, kind)| json!({ "kind": kind, "resource": resource }))
-        .collect::<Vec<_>>();
-    let file = json!({ "schema": "elastos.agent-host.asks/v1", "asks": listed });
-    std::fs::write(
-        shared.path().join("asks.json"),
-        serde_json::to_vec_pretty(&file).expect("encode the fixture asks"),
-    )
-    .expect("write the fixture asks");
+    write_typed_manifest_asks(shared.path(), asks);
 }
 
 /// One admitted, launched and started guest, driven only through the routes.
@@ -1168,22 +1218,38 @@ fn standin_refuses_to_launch_a_bundle_whose_signed_asks_changed() {
         Ok(()),
         "the stand-in admits the bundle whose signed asks declare the read"
     );
-    let asks = shared.path().join("asks.json");
-    let mut bytes = std::fs::read(&asks).expect("read asks.json");
-    let at = bytes
-        .windows(ASK_RESOURCE.len())
-        .position(|window| window == ASK_RESOURCE.as_bytes())
-        .expect("the signed asks name the declared resource");
-    bytes[at] ^= 0x01;
-    std::fs::write(&asks, &bytes).expect("change the declared resource in asks.json");
+    let manifest_path = shared.path().join("capsule.json");
+    let text = std::fs::read_to_string(&manifest_path).expect("read capsule.json");
+    assert_eq!(
+        text.matches(ASK_RESOURCE).count(),
+        1,
+        "the typed manifest ask names the declared resource once"
+    );
+    let changed_resource = format!("{ASK_RESOURCE}/later");
+    let changed = text.replacen(ASK_RESOURCE, &changed_resource, 1);
+    let manifest: elastos_common::CapsuleManifest =
+        serde_json::from_str(&changed).expect("the changed manifest parses");
+    manifest
+        .validate()
+        .expect("a changed typed ask still validates");
+    assert!(
+        manifest.asks.iter().any(|ask| {
+            ask.resource == changed_resource
+                && ask.actions.contains(&elastos_common::AskAction::Read)
+        }),
+        "the mutation changes the typed ask resource and keeps its read: {:?}",
+        manifest.asks
+    );
+    std::fs::write(&manifest_path, &changed).expect("change the declared resource in capsule.json");
     let body = json!({ "cid": claimed });
     let launch = standin.post_capsules(Caller::Shell, &body);
     let expected = capsule_identity::Refusal::NameMismatch {
         actual: capsule_identity::lab_cid(shared.path())
-            .expect("the walk names the bundle with the changed asks"),
+            .expect("the walk names the bundle with the changed manifest ask"),
         claimed: claimed.clone(),
     }
     .to_string();
+    // The changed bytes are the typed ask's resource in capsule.json.
     // Every changed byte leaves the bundle under a new lab CID, so the
     // signature's name check refuses the launch here (B1's reason). No
     // instance starts carrying the admitted asks, which is what the request
@@ -1479,38 +1545,59 @@ fn standin_refuses_a_content_bundle_at_the_admission_seam() {
     assert_eq!(listed[0]["id"], json!(session_id), "the app instance stays");
 }
 
-/// M1 check B2. Writes exactly `file` as the fixture's `asks.json`, before
-/// signing, so the one walk reads the bytes the test meant.
-fn declare_asks_file(shared: &SignedBundle, file: &Value) {
+/// Writes `asks` onto the fixture manifest before signing.
+fn declare_manifest_asks(shared: &SignedBundle, asks: &Value) {
+    let path = shared.path().join("capsule.json");
+    let mut document: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read capsule.json"))
+            .expect("parse capsule.json");
+    document["asks"] = asks.clone();
     std::fs::write(
-        shared.path().join("asks.json"),
-        serde_json::to_vec_pretty(file).expect("encode the fixture asks"),
+        &path,
+        serde_json::to_vec_pretty(&document).expect("encode capsule.json"),
     )
-    .expect("write the fixture asks");
+    .expect("write capsule.json");
+}
+
+/// The walk's own refusal for the bytes now on disk.
+fn walk_reason(shared: &SignedBundle) -> String {
+    let bytes = std::fs::read(shared.path().join("capsule.json")).expect("read capsule.json");
+    match serde_json::from_slice::<elastos_common::CapsuleManifest>(&bytes) {
+        Err(error) => {
+            format!("the Runtime's CapsuleManifest refused to parse capsule.json: {error}")
+        }
+        Ok(manifest) => format!(
+            "the Runtime's CapsuleManifest::validate() refused capsule.json: {}",
+            manifest
+                .validate()
+                .expect_err("this manifest does not validate")
+        ),
+    }
 }
 
 /// Refuses `shared` at `admit_resident` with status 400 and `reason`, and
 /// proves the refusal stored no row: the capsule list and the capability
 /// list are the same before and after, and the refused CID never launches.
-fn assert_admission_refused(standin: &mut StandIn, shared: &SignedBundle, reason: &str) {
+fn assert_admission_refused(
+    standin: &mut StandIn,
+    shared: &SignedBundle,
+    signature: &NameSignature,
+    cid: &str,
+    reason: &str,
+) {
     let capsules_before = standin
         .get_capsules(Caller::Shell)
         .expect("the stand-in lists the capsules before");
     let grants_before = standin
         .get_capability_list(Caller::Shell, Some(LIVE_SCOPE))
         .expect("the stand-in lists the grants before");
-    let refused = standin.admit_resident(
-        shared.path(),
-        &shared.signature(),
-        shared.accepted(),
-        Start::Ok,
-    );
+    let refused = standin.admit_resident(shared.path(), signature, shared.accepted(), Start::Ok);
     match &refused {
         Err((status, said)) => {
             assert_eq!(*status, 400, "the refusal is a bad ask schema: {said}");
             assert_eq!(said, reason, "the stand-in gives the one reason");
         }
-        Ok(()) => panic!("an invalid asks.json must not be admitted"),
+        Ok(()) => panic!("an invalid manifest ask must not be admitted"),
     }
     assert_eq!(
         standin
@@ -1527,13 +1614,10 @@ fn assert_admission_refused(standin: &mut StandIn, shared: &SignedBundle, reason
         "the refused admission minted no grant"
     );
     assert_eq!(
-        standin.post_capsules(Caller::Shell, &shared.launch_body()),
+        standin.post_capsules(Caller::Shell, &json!({ "cid": cid })),
         Err((
             404,
-            format!(
-                "no bundle is admitted under {} in world resident-capsule",
-                shared.cid()
-            )
+            format!("no bundle is admitted under {cid} in world resident-capsule")
         )),
         "the refused bundle has no admitted row to launch"
     );
@@ -1541,72 +1625,60 @@ fn assert_admission_refused(standin: &mut StandIn, shared: &SignedBundle, reason
 
 #[test]
 fn standin_refuses_to_admit_a_bundle_whose_asks_do_not_follow_the_schema() {
-    const BAD_ASKS: &str = "asks.json does not follow the provisional ask schema";
-    let ask = json!({ "kind": "read", "resource": ASK_RESOURCE });
-
-    let missing = SignedBundle::new();
-    std::fs::remove_file(missing.path().join("asks.json")).expect("remove the asks file");
-    assert_admission_refused(
-        &mut StandIn::new(),
-        &missing,
-        "bundle declares no asks.json",
-    );
-
-    let schema = SignedBundle::new();
-    declare_asks_file(
-        &schema,
-        &json!({ "schema": "elastos.agent-host.asks/v2", "asks": [ask] }),
-    );
-    assert_admission_refused(&mut StandIn::new(), &schema, BAD_ASKS);
-
-    let resource = SignedBundle::new();
-    declare_asks_file(
-        &resource,
-        &json!({
-            "schema": "elastos.agent-host.asks/v1",
-            "asks": [{ "kind": "read" }]
-        }),
-    );
-    assert_admission_refused(&mut StandIn::new(), &resource, BAD_ASKS);
-
     let empty = SignedBundle::new();
-    declare_asks_file(
+    declare_manifest_asks(&empty, &json!([]));
+    let signature = empty.signature();
+    let cid = empty.cid();
+    assert_admission_refused(
+        &mut StandIn::new(),
         &empty,
-        &json!({ "schema": "elastos.agent-host.asks/v1", "asks": [] }),
-    );
-    assert_admission_refused(&mut StandIn::new(), &empty, BAD_ASKS);
-}
-
-#[test]
-fn standin_refuses_to_admit_a_bundle_whose_asks_carry_an_unknown_key() {
-    let top = SignedBundle::new();
-    declare_asks_file(
-        &top,
-        &json!({
-            "schema": "elastos.agent-host.asks/v1",
-            "asks": [{ "kind": "read", "resource": ASK_RESOURCE }],
-            "extra": true
-        }),
-    );
-    assert_admission_refused(
-        &mut StandIn::new(),
-        &top,
-        "asks.json carries an unknown key: extra",
+        &signature,
+        &cid,
+        "the signed manifest declares no asks",
     );
 
-    let inner = SignedBundle::new();
-    declare_asks_file(
-        &inner,
-        &json!({
-            "schema": "elastos.agent-host.asks/v1",
-            "asks": [{ "note": "x", "kind": "read", "resource": ASK_RESOURCE }]
-        }),
-    );
-    assert_admission_refused(
-        &mut StandIn::new(),
-        &inner,
-        "asks.json carries an unknown key: note",
-    );
+    let cases = [
+        (
+            json!([{ "resource": ASK_RESOURCE, "actions": ["edit"] }]),
+            "not a Runtime action",
+            false,
+        ),
+        (
+            json!([{ "resource": ASK_RESOURCE, "actions": [] }]),
+            "lists no action",
+            false,
+        ),
+        (
+            json!([{ "resource": ASK_RESOURCE, "actions": ["read"], "note": "x" }]),
+            "unknown field",
+            false,
+        ),
+        (
+            json!([{ "resource": ASK_RESOURCE, "actions": ["read"] }]),
+            "asks_conflict",
+            true,
+        ),
+    ];
+    for (asks, needle, conflict) in cases {
+        let shared = SignedBundle::new();
+        let signature = shared.signature();
+        let cid = shared.cid();
+        declare_manifest_asks(&shared, &asks);
+        if conflict {
+            let path = shared.path().join("capsule.json");
+            let text = std::fs::read_to_string(&path).expect("read capsule.json");
+            let changed = text.replacen(
+                "\"role\": \"app\"",
+                "\"role\": \"app\", \"capabilities\": [\"localhost://Public/shared.txt\"]",
+                1,
+            );
+            assert_ne!(changed, text, "the manifest names its role");
+            std::fs::write(&path, changed).expect("write capsule.json");
+        }
+        let reason = walk_reason(&shared);
+        assert!(reason.contains(needle), "{reason}");
+        assert_admission_refused(&mut StandIn::new(), &shared, &signature, &cid, &reason);
+    }
 }
 
 /// M1 check A7: the one budget cap on the stand-in's admission path.

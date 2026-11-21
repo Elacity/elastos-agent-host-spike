@@ -38,7 +38,7 @@ fn agent_host_copy_takes_only_listed_files() {
     ];
     for name in listed
         .into_iter()
-        .chain(["README.md", "agent-host.component.wasm", "asks.json"])
+        .chain(["README.md", "agent-host.component.wasm", "NOTES.md"])
     {
         fs::write(source.join(name), name).unwrap();
     }

@@ -70,6 +70,15 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "libc::execve",
+            "confined provider",
+            "admitted rights+checked directory+bound executable",
+            "B3 S10",
+            1,
+        ),
+        row(
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_confined_model_linux",
             "command",
@@ -394,6 +403,24 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-server/src/run_cmd.rs",
+            "run_bundle",
+            "bundle start",
+            "WASM bundle",
+            "CID+DID+closure",
+            "P2-2",
+            1,
+        ),
+        row(
+            "elastos-server/src/run_cmd.rs",
+            "run_staged_component",
+            "staged folder start",
+            "WASM bundle",
+            "CID+DID+closure",
+            "P2-8",
+            1,
+        ),
+        row(
             "elastos-server/src/runtime.rs",
             "run_by_bundle_observed",
             "bundle start",
@@ -548,8 +575,8 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/serve_cmd.rs",
-            "run_serve",
-            "vm_provider.load",
+            "load_microvm_capsule",
+            "provider.load",
             "VM capsule",
             "none",
             "P2-8",
@@ -818,6 +845,15 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/stage_cmd.rs",
+            "run_staged_folder",
+            "bundle start",
+            "WASM bundle",
+            "CID+DID+closure",
+            "P2-2",
+            1,
+        ),
+        row(
+            "elastos-server/src/stage_cmd.rs",
             "stage_bundle",
             "signed stage",
             "bundle stage",
@@ -926,10 +962,14 @@ fn found(sources: &BTreeMap<String, String>) -> BTreeMap<(String, String, String
         // Joined at run time, so this file never holds the literal call that
         // bundle_start_tests counts across the server sources.
         let bundle_start = [".start_by", "_bundle("].concat();
+        let bundle_run = [".run_by", "_bundle("].concat();
+        let staged_folder = ["::run_staged", "_folder("].concat();
         for (label, needle) in [
             ("command", "Command::new("),
             ("content import", "prepare_capsule_from_content_provider("),
             ("bundle start", bundle_start.as_str()),
+            ("bundle start", bundle_run.as_str()),
+            ("staged folder start", staged_folder.as_str()),
             ("folder start", ".run_signer("),
             ("Home install", "ensure_capsule_component_for_home_launch("),
             ("release capsule", "verify_installed_release_capsule("),
@@ -968,7 +1008,7 @@ fn every_executable_loader_has_an_authority_row() {
     let found = found(&sources);
     let mut listed = BTreeSet::new();
     for row in rows() {
-        assert!(matches!(row.check_id, "P2-2" | "P2-8"));
+        assert!(matches!(row.check_id, "P2-2" | "P2-8" | "B3 S10"));
         assert!(matches!(
             row.checks,
             "CID+DID+closure"
@@ -978,6 +1018,7 @@ fn every_executable_loader_has_an_authority_row() {
                 | "checksum"
                 | "admitted binary+OS gate+confined storage"
                 | "none"
+                | "admitted rights+checked directory+bound executable"
         ));
         assert!(!row.kind.is_empty());
         let key = (row.file.to_string(), row.function.to_string(), row.call);
@@ -994,3 +1035,4 @@ fn every_executable_loader_has_an_authority_row() {
         .collect();
     assert!(missing.is_empty(), "unlisted loaders: {missing:#?}");
 }
+mod trust_columns;

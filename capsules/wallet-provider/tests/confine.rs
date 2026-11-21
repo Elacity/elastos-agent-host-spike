@@ -40,6 +40,7 @@ use sha3::Keccak256;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -691,12 +692,10 @@ fn provider_init_request(name: &str, base: &Path) -> Value {
 }
 
 /// The protocol version every model status answer names.
-#[cfg(target_os = "linux")]
 const MODEL_PROTOCOL_VERSION: &str = "elastos.model-provider/v1";
 
 /// `init` and `status` report the model provider with its one offer ready, and
 /// both name the provider protocol version.
-#[cfg(target_os = "linux")]
 fn assert_serving(data: &Value) {
     assert_eq!(data["provider"], MODEL_PROVIDER, "{data}");
     assert_eq!(data["protocol_version"], MODEL_PROTOCOL_VERSION, "{data}");
@@ -704,17 +703,14 @@ fn assert_serving(data: &Value) {
 }
 
 /// The id of the one hosted text offer the journey's `init` config names.
-#[cfg(target_os = "linux")]
 const MODEL_HOSTED_OFFER_ID: &str = "confine-hosted-text";
 
 /// The wire schema of a model run view and of one run-events page.
-#[cfg(target_os = "linux")]
 const MODEL_RUN_SCHEMA: &str = "elastos.model.run/v1";
-#[cfg(target_os = "linux")]
 const MODEL_RUN_EVENTS_SCHEMA: &str = "elastos.model.run-events/v1";
 
-/// The seven model operations the Linux journey drives after `init` and
-/// `status`, in the order it drives them.
+/// The model operations shared by the Linux filter journey and the macOS B3
+/// oracle journey after `init` and `status`, in the order they run.
 ///
 /// `offers_list`, `runs_create`, `runs_get`, `runs_events`, `runs_cancel` and
 /// `shutdown` answer `ok`, so their class is `Permitted`. The unsupported
@@ -737,13 +733,12 @@ const MODEL_LINUX_ONLY_CASES: [(&str, SuiteClass); 7] = [
 ///
 /// The binding carries a fresh `model-v1:` request id and the input hash the
 /// contract derives from the exact input, so the provider's own binding checks
-/// pass. The config names no `runtime_hosted_socket`, and hosted containment is
-/// granted on macOS only, so the provider refuses the hosted dispatch before
-/// any socket on Linux: the run is stored and answers `terminal.error`
+/// pass. The config names no `runtime_hosted_socket`, so the provider refuses
+/// hosted dispatch before any socket on both journeys: the run is stored and
+/// answers `terminal.error`
 /// `context_rejected` with `Hosted external HTTPS is paused.`, and no request
 /// needs a network.
-#[cfg(target_os = "linux")]
-fn model_linux_run_create_request() -> Value {
+fn model_run_create_request() -> Value {
     let input = json!({
         "schema": "elastos.model.input.text/v1",
         "prompt": "confined read",
@@ -776,8 +771,7 @@ fn model_linux_run_create_request() -> Value {
 /// The access binding one model read of `run_id` sends. It keeps the create
 /// binding's owner fields, which the provider compares with the stored run, and
 /// names the run the create answered.
-#[cfg(target_os = "linux")]
-fn model_linux_access_binding(create: &Value, run_id: &str) -> Value {
+fn model_access_binding(create: &Value, run_id: &str) -> Value {
     let binding = &create["runtime_binding"];
     json!({
         "schema": "elastos.model.runtime-access-binding/v1",
@@ -790,8 +784,8 @@ fn model_linux_access_binding(create: &Value, run_id: &str) -> Value {
     })
 }
 
-/// The seven model operations the Linux journey drives after `init` and
-/// `status`, using the record type and judgement of the did and wallet suites.
+/// The six model operations shared by the Linux and B3 journeys after
+/// `init` and `status`, using the record type and judgement of the other suites.
 ///
 /// It starts no provider. `offers_list` answers with the configured hosted
 /// offer. `runs_create` stores one run and asserts its typed answer: the run is
@@ -801,13 +795,9 @@ fn model_linux_access_binding(create: &Value, run_id: &str) -> Value {
 /// run back equal to the create data, `runs_events` shows the terminal page
 /// with a last `failed` event and no more pages, and `runs_cancel` on a
 /// terminal run returns the same run data. The unsupported operation asserts
-/// `unsupported_operation`, and `shutdown` is last: it answers `ok` and the
-/// child exits with status 0, which `ConfinedProvider::shutdown` asserts.
-#[cfg(target_os = "linux")]
-fn model_standin_linux_only_operations(
-    provider: &mut ConfinedProvider,
-    label: &str,
-) -> Vec<SuiteEntry> {
+/// `unsupported_operation`. The caller records `shutdown` after every suite
+/// case, so the B3 journey and the Linux journey each stop the child once.
+fn model_standin_operations(provider: &mut ConfinedProvider, label: &str) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let offers = provider.send(&json!({ "op": "offers_list" }));
@@ -833,7 +823,7 @@ fn model_standin_linux_only_operations(
     );
     record.push(suite_entry("offers_list", SuiteClass::Permitted, &offers));
 
-    let create_request = model_linux_run_create_request();
+    let create_request = model_run_create_request();
     let created = provider.send(&create_request);
     assert_eq!(
         created["status"], "ok",
@@ -875,7 +865,7 @@ fn model_standin_linux_only_operations(
     );
     record.push(suite_entry("runs_create", SuiteClass::Permitted, &created));
 
-    let access = model_linux_access_binding(&create_request, &run_id);
+    let access = model_access_binding(&create_request, &run_id);
     let got = provider.send(&json!({
         "op": "runs_get", "run_id": run_id.clone(), "runtime_binding": access.clone()
     }));
@@ -950,15 +940,499 @@ fn model_standin_linux_only_operations(
     );
     record.push(suite_entry("unsupported", SuiteClass::Denied, &unsupported));
 
-    let shutdown = provider.shutdown();
-    assert_eq!(
-        shutdown["data"],
-        json!({ "shutdown": true }),
-        "{label}: shutdown must answer its one field: {shutdown}"
-    );
-    record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
-
     record
+}
+
+/// The complete model cases driven on each exact B3 profile. The separate
+/// model crate also has fixture-profile tests that add metadata rules; those
+/// modified profiles are not the committed oracle used by this journey.
+const MODEL_B3_SUITE_CASES: [(&str, SuiteClass); 17] = [
+    ("init at the model root", SuiteClass::Permitted),
+    ("status", SuiteClass::Permitted),
+    (
+        "redirected journal outside STORAGE_ROOT",
+        SuiteClass::Denied,
+    ),
+    ("local offer outside STORAGE_ROOT", SuiteClass::Denied),
+    ("init after the denied cases", SuiteClass::Permitted),
+    ("runs_create for outside read", SuiteClass::Permitted),
+    ("run record outside STORAGE_ROOT", SuiteClass::Denied),
+    ("runs_get after restoring the record", SuiteClass::Permitted),
+    ("offers_list", SuiteClass::Permitted),
+    ("runs_create", SuiteClass::Permitted),
+    ("runs_get", SuiteClass::Permitted),
+    ("runs_events", SuiteClass::Permitted),
+    ("runs_cancel", SuiteClass::Permitted),
+    ("unsupported", SuiteClass::Denied),
+    ("hosted connect refused", SuiteClass::Denied),
+    ("unbound executable refused", SuiteClass::Denied),
+    ("shutdown", SuiteClass::Permitted),
+];
+
+/// The same redirected-journal denial is used by the C0 applicable-host leg
+/// and by both B3 starts. The outside directory exists before the request, so
+/// a refusal cannot be attributed to an absent parent. Like the model crate's
+/// own redirected-journal row, this starts a fresh child under the same exact
+/// profile and makes the redirected request its first `init`. No accepted
+/// model configuration can stop the request before its journal metadata
+/// inspect. The link is removed before the fresh child receives its normal
+/// recovery `init`.
+fn model_suite_start(profile: &Path, binary: &Path, base: &Path) -> ConfinedProvider {
+    let bindings = canonical_bindings(MODEL_PROVIDER, base, binary);
+    create_shared_ancestors(&bindings);
+    let inert = model_inert_bindings(MODEL_PROVIDER);
+    let mut paths: Vec<(&str, &Path)> = bindings
+        .iter()
+        .map(|(binding, path)| (*binding, path.as_path()))
+        .collect();
+    paths.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
+    ConfinedProvider::start_under(profile, &paths, binary)
+}
+
+fn model_redirected_journal_denial(
+    profile: &Path,
+    binary: &Path,
+    base: &Path,
+    label: &str,
+) -> Value {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = provider_storage_root(MODEL_PROVIDER, base);
+    let outside = storage_parent(MODEL_PROVIDER, base).join("outside");
+    fs::create_dir_all(outside.join("inner"))
+        .unwrap_or_else(|err| panic!("{label}: prepare the outside journal: {err}"));
+    fs::set_permissions(outside.join("inner"), fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|err| panic!("{label}: make the outside journal owner-only: {err}"));
+    let escape = root.join("escape");
+    std::os::unix::fs::symlink(&outside, &escape)
+        .unwrap_or_else(|err| panic!("{label}: link the journal outside: {err}"));
+    let mut config = provider_init_config(MODEL_PROVIDER, base);
+    config["extra"]["journal_dir"] = json!(escape.join("inner"));
+    let mut provider = model_suite_start(profile, binary, base);
+    let denied = provider.send(&json!({
+        "op": "init", "config": config
+    }));
+    assert_eq!(
+        denied["code"], "journal_corrupt",
+        "{label}: the redirected journal must be refused at its metadata inspect: {denied}"
+    );
+    assert!(
+        !outside.join("inner").join("runs").exists(),
+        "{label}: the outside journal must stay empty"
+    );
+    fs::remove_file(&escape)
+        .unwrap_or_else(|err| panic!("{label}: remove the journal link: {err}"));
+    let recovered = provider.send(&json!({
+        "op": "init", "config": provider_init_config(MODEL_PROVIDER, base)
+    }));
+    assert_eq!(
+        recovered["status"], "ok",
+        "{label}: the restarted model must recover after the journal denial: {recovered}"
+    );
+    provider.shutdown();
+    denied
+}
+
+/// One model leg of the shared B3 record. It drives the model's normal
+/// operations and its exact-profile denials on the already started provider.
+/// The same function receives the generated-profile and oracle launches, so
+/// the common B3 comparator judges every named case and its answer.
+fn model_standin_suite(
+    provider: &mut ConfinedProvider,
+    base: &Path,
+    label: &str,
+    profile: &Path,
+    binary: &Path,
+) -> Vec<SuiteEntry> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut record = Vec::new();
+    let init = provider.send(&json!({
+        "op": "init", "config": provider_init_config(MODEL_PROVIDER, base)
+    }));
+    assert_eq!(
+        init["status"], "ok",
+        "{label}: model init must answer: {init}"
+    );
+    assert_serving(&init["data"]);
+    assert!(
+        provider_storage_root(MODEL_PROVIDER, base)
+            .join("runs")
+            .is_dir(),
+        "{label}: init must create the model run directory"
+    );
+    record.push(suite_entry(
+        "init at the model root",
+        SuiteClass::Permitted,
+        &init,
+    ));
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["data"], init["data"],
+        "{label}: status must report init"
+    );
+    record.push(suite_entry("status", SuiteClass::Permitted, &status));
+
+    let denied = model_redirected_journal_denial(profile, binary, base, label);
+    record.push(suite_entry(
+        "redirected journal outside STORAGE_ROOT",
+        SuiteClass::Denied,
+        &denied,
+    ));
+
+    // These files are valid local-offer inputs under the base, outside the
+    // model storage root. The profile refuses the base-path read first.
+    let engine = base.join("bin").join("fake-llama-server");
+    let model = base.join("models").join("fake.gguf");
+    fs::create_dir_all(engine.parent().expect("engine parent")).expect("engine directory");
+    fs::create_dir_all(model.parent().expect("model parent")).expect("model directory");
+    let engine_bytes = b"#!/bin/sh\nexit 0\n";
+    let model_bytes = b"model fixture\n";
+    fs::write(&engine, engine_bytes).expect("engine fixture");
+    fs::write(&model, model_bytes).expect("model fixture");
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o700))
+        .expect("the engine fixture must be owner-executable");
+    fs::set_permissions(&model, fs::Permissions::from_mode(0o600))
+        .expect("the model fixture must be owner-readable");
+    let mut config = provider_init_config(MODEL_PROVIDER, base);
+    config["extra"]["offers"] = json!([{
+        "id": "confine-local-text",
+        "title": "Confined Local Text",
+        "operation": "text.generate",
+        "input_modalities": ["text/plain"],
+        "output_modalities": ["text/plain"],
+        "policy": {
+            "concurrency_limit": 1, "input_bytes_limit": 8192,
+            "inline_output_bytes_limit": 8192, "event_bytes_limit": 8192,
+            "runtime_ms_limit": 30000, "retention_secs": 60,
+            "cancel_settlement_timeout_ms": 20
+        },
+        "adapter": {
+            "kind": "local_llama_cpp_text",
+            "engine": {
+                "path": engine,
+                "sha256": format!("sha256:{}", hex::encode(Sha256::digest(engine_bytes)))
+            },
+            "model": {
+                "path": model,
+                "sha256": format!("sha256:{}", hex::encode(Sha256::digest(model_bytes)))
+            },
+            "settings": {
+                "context_size": 256, "parallel": 1, "threads": 1,
+                "batch_threads": 1, "gpu_layers": 0,
+                "health_timeout_ms": 10000, "shutdown_timeout_ms": 250,
+                "enable_thinking": false
+            }
+        },
+        "enabled": true
+    }]);
+    let mut unconfined = ConfinedProvider::spawn(Command::new(binary));
+    let accepted = unconfined.send(&json!({ "op": "init", "config": config.clone() }));
+    assert_eq!(
+        accepted["status"], "ok",
+        "{label}: the valid local offer must pass without confinement: {accepted}"
+    );
+    assert_serving(&accepted["data"]);
+    unconfined.shutdown();
+
+    let mut local_provider = model_suite_start(profile, binary, base);
+    let denied = local_provider.send(&json!({ "op": "init", "config": config }));
+    assert_eq!(
+        denied["code"], "internal_error",
+        "{label}: the local offer outside the storage root must fail closed: {denied}"
+    );
+    record.push(suite_entry(
+        "local offer outside STORAGE_ROOT",
+        SuiteClass::Denied,
+        &denied,
+    ));
+
+    let recovered = local_provider.send(&json!({
+        "op": "init", "config": provider_init_config(MODEL_PROVIDER, base)
+    }));
+    assert_eq!(
+        recovered["status"], "ok",
+        "{label}: model init must recover: {recovered}"
+    );
+    record.push(suite_entry(
+        "init after the denied cases",
+        SuiteClass::Permitted,
+        &recovered,
+    ));
+    local_provider.shutdown();
+    assert!(
+        local_provider
+            .stderr()
+            .contains("invalid model provider init config: base_path is unavailable"),
+        "{label}: the confined local offer must stop where Seatbelt refuses base_path: {}",
+        local_provider.stderr()
+    );
+
+    record.extend(model_outside_run_read_entries(provider, base, label));
+    record.extend(model_standin_operations(provider, label));
+    record.push(model_hosted_connect_denial(profile, binary, base, label));
+    record
+}
+
+/// Store one real run, move its record outside the bound root, and keep its
+/// in-root pathname through a link. The exact profile must refuse that read;
+/// restoring the record must let the same request succeed. Both the B3 suite
+/// and the C0 journey send this action to the child their launcher returned.
+fn model_outside_run_read_entries(
+    provider: &mut ConfinedProvider,
+    base: &Path,
+    label: &str,
+) -> [SuiteEntry; 3] {
+    let mut create_request = model_run_create_request();
+    let request_id = create_request["runtime_binding"]["request_id"]
+        .as_str()
+        .expect("model request id")
+        .to_string();
+    create_request["runtime_binding"]["request_id"] = json!(format!("{request_id}-outside"));
+    let created = provider.send(&create_request);
+    assert_eq!(
+        created["status"], "ok",
+        "{label}: store the outside-read run: {created}"
+    );
+    let create_entry = suite_entry(
+        "runs_create for outside read",
+        SuiteClass::Permitted,
+        &created,
+    );
+    let run_id = created["data"]["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: the created run must name its id: {created}"));
+    let access = model_access_binding(&create_request, run_id);
+    let get = json!({ "op": "runs_get", "run_id": run_id, "runtime_binding": access });
+    let root_runs = provider_storage_root(MODEL_PROVIDER, base).join("runs");
+    assert_eq!(
+        fs::read_dir(&root_runs)
+            .expect("model runs directory")
+            .count(),
+        1,
+        "{label}: one stored run must leave one record"
+    );
+    let outside = storage_parent(MODEL_PROVIDER, base).join("outside");
+    fs::create_dir_all(&outside)
+        .unwrap_or_else(|err| panic!("{label}: prepare the outside run directory: {err}"));
+    let outside_runs = outside.join("runs");
+    fs::rename(&root_runs, &outside_runs)
+        .unwrap_or_else(|err| panic!("{label}: move the run outside: {err}"));
+    std::os::unix::fs::symlink(&outside_runs, &root_runs)
+        .unwrap_or_else(|err| panic!("{label}: link the run directory: {err}"));
+    let denied = provider.send(&get);
+    assert_eq!(
+        denied["code"], "journal_corrupt",
+        "{label}: the outside run record must be refused: {denied}"
+    );
+    let denied_entry = suite_entry(
+        "run record outside STORAGE_ROOT",
+        SuiteClass::Denied,
+        &denied,
+    );
+    fs::remove_file(&root_runs)
+        .unwrap_or_else(|err| panic!("{label}: remove the run directory link: {err}"));
+    fs::rename(&outside_runs, &root_runs)
+        .unwrap_or_else(|err| panic!("{label}: restore the run record: {err}"));
+    let restored = provider.send(&get);
+    assert_eq!(
+        restored["data"], created["data"],
+        "{label}: the restored record must read back: {restored}"
+    );
+    let restored_entry = suite_entry(
+        "runs_get after restoring the record",
+        SuiteClass::Permitted,
+        &restored,
+    );
+    [create_entry, denied_entry, restored_entry]
+}
+
+/// With a Runtime socket named in the real init config, Seatbelt must refuse
+/// the hosted connect. This is the exact-profile case in the model crate's
+/// `generated_profile_denies_the_hosted_connect`: the run settles with its
+/// transport refusal and the listening socket receives no connection.
+fn model_hosted_connect_denial(
+    profile: &Path,
+    binary: &Path,
+    base: &Path,
+    label: &str,
+) -> SuiteEntry {
+    let socket_dir = tempfile::tempdir_in(resolved(Path::new("/tmp")))
+        .expect("temporary hosted socket directory");
+    let socket_path = socket_dir.path().join("hosted.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind the Runtime socket stand-in");
+    listener
+        .set_nonblocking(true)
+        .expect("observe the Runtime socket without waiting");
+    let mut config = provider_init_config(MODEL_PROVIDER, base);
+    config["extra"]["runtime_hosted_socket"] = json!(socket_path);
+    let mut provider = model_suite_start(profile, binary, base);
+    let init = provider.send(&json!({ "op": "init", "config": config }));
+    assert_eq!(
+        init["status"], "ok",
+        "{label}: hosted init must answer: {init}"
+    );
+
+    let mut create = model_run_create_request();
+    let request_id = create["runtime_binding"]["request_id"]
+        .as_str()
+        .expect("model request id")
+        .to_string();
+    create["runtime_binding"]["request_id"] = json!(format!("{request_id}-hosted-connect"));
+    let created = provider.send(&create);
+    assert_eq!(
+        created["status"], "ok",
+        "{label}: the hosted run must be stored: {created}"
+    );
+    let run_id = created["data"]["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: the hosted run must have an id: {created}"));
+    let get = json!({
+        "op": "runs_get",
+        "run_id": run_id,
+        "runtime_binding": model_access_binding(&create, run_id),
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let settled = loop {
+        let answer = provider.send(&get);
+        assert_eq!(answer["status"], "ok", "{label}: hosted read: {answer}");
+        let run = &answer["data"];
+        if run["terminal"].is_object() {
+            break run.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label}: the refused hosted run must settle: {run}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        settled["status"], "failed",
+        "{label}: the hosted connect must fail: {settled}"
+    );
+    assert_eq!(
+        settled["terminal"]["error"],
+        json!({
+            "class": "transport_interrupted",
+            "code": "transport_interrupted",
+            "message": "model backend transport was interrupted",
+        }),
+        "{label}: the profile must refuse the hosted connect: {settled}"
+    );
+    match listener.accept() {
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("{label}: the Runtime socket must receive no connection: {other:?}"),
+    }
+    let offers = provider.send(&json!({ "op": "offers_list" }));
+    assert_eq!(
+        offers["status"], "ok",
+        "{label}: the provider must serve after the denied connect: {offers}"
+    );
+    let entry = suite_entry(
+        "hosted connect refused",
+        SuiteClass::Denied,
+        &json!({
+            "status": "error",
+            "code": settled["terminal"]["error"]["code"],
+            "message": settled["terminal"]["error"]["message"],
+        }),
+    );
+    provider.shutdown();
+    entry
+}
+
+/// Start a byte-identical copy from STORAGE_ROOT while the exact profile binds
+/// the original executable. Seatbelt must refuse that exec with exit 71 and
+/// the EPERM execvp line, as in the model crate's exact-oracle copy case.
+fn model_unbound_exec_denial(profile: &Path, binary: &Path, label: &str) -> SuiteEntry {
+    let fixture = tempfile::tempdir().expect("temporary model copy root");
+    let base = resolved(fixture.path());
+    let canonical = canonical_bindings(MODEL_PROVIDER, &base, binary);
+    create_shared_ancestors(&canonical);
+    let root = provider_storage_root(MODEL_PROVIDER, &base);
+    fs::create_dir_all(&root).expect("prepare the model storage root");
+    let copy = root.join(binary.file_name().expect("the provider executable name"));
+    fs::copy(binary, &copy).expect("copy the model executable under STORAGE_ROOT");
+    assert_eq!(
+        fs::read(&copy).expect("read the copied executable"),
+        fs::read(binary).expect("read the bound executable"),
+        "{label}: the unbound executable must be byte-identical"
+    );
+    let before = fs::read(&copy).expect("snapshot the copied executable");
+    let inert = model_inert_bindings(MODEL_PROVIDER);
+    let mut bindings: Vec<(&str, &Path)> = canonical
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    bindings.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
+    let mut refused = ConfinedProvider::start_under(profile, &bindings, &copy);
+    let exit = refused.wait_for_exit();
+    assert_eq!(
+        exit.code(),
+        Some(71),
+        "{label}: Seatbelt must refuse the unbound exec: {exit}"
+    );
+    let init = json!({
+        "op": "init", "config": provider_init_config(MODEL_PROVIDER, &base)
+    });
+    refused
+        .try_send(&init)
+        .expect_err("the unbound copy must not answer init");
+    let copy_text = copy.display().to_string();
+    let execs: Vec<&str> = refused
+        .stderr()
+        .lines()
+        .filter(|line| line.contains("execvp()"))
+        .collect();
+    let refused_exec = execs
+        .iter()
+        .find(|line| line.contains(&copy_text) && line.contains("Operation not permitted"))
+        .unwrap_or_else(|| panic!("{label}: sandbox-exec must log the copy's EPERM: {execs:?}"));
+    let entries: Vec<PathBuf> = fs::read_dir(&root)
+        .expect("list the model storage root")
+        .map(|entry| entry.expect("model storage entry").path())
+        .collect();
+    assert_eq!(
+        entries,
+        std::slice::from_ref(&copy),
+        "{label}: the copy must stay alone"
+    );
+    assert_eq!(
+        fs::read(&copy).expect("read the refused copy"),
+        before,
+        "{label}: the refused launch must keep the copy's bytes"
+    );
+    suite_entry(
+        "unbound executable refused",
+        SuiteClass::Denied,
+        &json!({
+            "status": "error",
+            "code": format!("sandbox_exec_exit_{}", exit.code().expect("exit 71")),
+            "message": refused_exec,
+        }),
+    )
+}
+
+/// The one shutdown record every B3 provider receives after its suite cases.
+fn b3_shutdown_entry(provider: &mut ConfinedProvider, name: &str, label: &str) -> SuiteEntry {
+    let shutdown = provider.shutdown();
+    if name == MODEL_PROVIDER {
+        assert_eq!(
+            shutdown["data"],
+            json!({ "shutdown": true }),
+            "{label}: shutdown must answer its one field: {shutdown}"
+        );
+    }
+    suite_entry("shutdown", SuiteClass::Permitted, &shutdown)
 }
 
 /// The test creates the directory `STORAGE_PARENT` names before the launch,
@@ -1608,6 +2082,37 @@ fn standin_host_refusal(
     }
 }
 
+/// M1a: the model profile also names measured inputs beyond the three
+/// canonical parameters (`measured_model_form`). An unbound `(param ...)` is
+/// `#f` and sandbox-exec exits 65, so the stand-in binds each to a path under
+/// the empty, root-owned /private/var/empty that nothing here can create. The
+/// grants stay inert, at least as strict as the Runtime's own inputs. Other
+/// providers get no extra binding.
+fn model_inert_bindings(name: &str) -> Vec<(String, PathBuf)> {
+    if name != MODEL_PROVIDER {
+        return Vec::new();
+    }
+    let mut names = vec![
+        "MODEL".to_owned(),
+        "ENGINE".to_owned(),
+        "ENGINE_BUNDLE".to_owned(),
+    ];
+    names.extend((0..19).map(|index| format!("MODEL_ANCESTOR_{index}")));
+    for slot in 0..64 {
+        names.push(format!("BROKER_SOCKET_{slot}"));
+        names.push(format!("ENGINE_SOCKET_{slot}"));
+    }
+    names
+        .into_iter()
+        .map(|binding| {
+            let path = PathBuf::from(format!(
+                "/private/var/empty/elastos-redteam-unbound/{binding}"
+            ));
+            (binding, path)
+        })
+        .collect()
+}
+
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
 ///
 /// This function is a lane copy that is to move under the one shared stand-in,
@@ -1728,10 +2233,16 @@ fn standin_spawn_confined_provider(
             let profile = profile_dir.join(format!("{name}-standin.sb"));
             write_generated_profile(name, declared, &profile)?;
             create_shared_ancestors(&canonical);
-            let bindings: Vec<(&str, &Path)> = canonical
+            let inert = model_inert_bindings(name);
+            let mut bindings: Vec<(&str, &Path)> = canonical
                 .iter()
                 .map(|(binding, path)| (*binding, path.as_path()))
                 .collect();
+            bindings.extend(
+                inert
+                    .iter()
+                    .map(|(binding, path)| (binding.as_str(), path.as_path())),
+            );
             ConfinedProvider::start_under(&profile, &bindings, binary_path)
         }
         StandinPolicy::Seccomp(allow) => {
@@ -5117,6 +5628,30 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
                 "the provider must stay in service: {after}"
             );
         }
+        MODEL_PROVIDER => {
+            let model_root = provider_storage_root(MODEL_PROVIDER, &base);
+            assert!(
+                model_root.join("runs").is_dir(),
+                "init must have created the model run directory: {}",
+                model_root.display()
+            );
+            let status = started.send(&json!({ "op": "status" }));
+            assert_eq!(
+                status["status"], "ok",
+                "the model must answer status: {status}"
+            );
+            assert_serving(&status["data"]);
+            let record = model_outside_run_read_entries(&mut started, &base, "model C0 journey");
+            assert_suite_outcomes(
+                "model C0 journey started child",
+                &record,
+                &[
+                    ("runs_create for outside read", SuiteClass::Permitted),
+                    ("run record outside STORAGE_ROOT", SuiteClass::Denied),
+                    ("runs_get after restoring the record", SuiteClass::Permitted),
+                ],
+            );
+        }
         other => panic!("the journey names no provider whose leg it knows: {other}"),
     }
 
@@ -5131,7 +5666,7 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
     started.shutdown();
 }
 
-/// M1 check C0, one end-to-end journey: did first, then wallet, each starts
+/// M1 check C0, one end-to-end journey: did, wallet and model each start
 /// confined through the lab stand-in on macOS, or the stand-in refuses the
 /// host with its own reason and starts no provider.
 ///
@@ -5145,7 +5680,8 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
 /// refused whatever its OS. Every refused case returns no provider, writes no
 /// profile and creates no storage root. The did
 /// binary comes from `provider_binary(DID_PROVIDER)`; the wallet binary comes from
-/// `CARGO_BIN_EXE_wallet-provider`. Linux stays a design plus a simulated
+/// `CARGO_BIN_EXE_wallet-provider`; model's comes from
+/// `provider_binary(MODEL_PROVIDER)`. Linux stays a design plus a simulated
 /// refusal: nothing here probes a real kernel or claims Linux enforcement. The
 /// stand-in is test code and not the Runtime.
 ///
@@ -5172,7 +5708,18 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
 /// prefix from the final `Err`, so did's first host row, plan9, lacks it.
 #[test]
 fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
-    let providers: [(&str, &Path, Value); 2] = [
+    // Keep a model host refusal visible even when this runner cannot apply
+    // sandbox-exec for the applicable-host legs below.
+    let model_host_refusal = standin_host_refusal(
+        MODEL_PROVIDER,
+        StandinHost::reporting("plan9"),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
+    );
+    assert!(
+        model_host_refusal.is_err(),
+        "model-provider C0 journey: a host without a confinement design must refuse startup"
+    );
+    let providers: [(&str, &Path, Value); 3] = [
         (
             DID_PROVIDER,
             provider_binary(DID_PROVIDER),
@@ -5183,6 +5730,12 @@ fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
             WALLET_PROVIDER,
             Path::new(PROVIDER_BINARY),
             read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+                .unwrap_or_else(|err| panic!("{err}")),
+        ),
+        (
+            MODEL_PROVIDER,
+            provider_binary(MODEL_PROVIDER),
+            read_declared_rights(MODEL_PROVIDER, &declared_rights_path(MODEL_PROVIDER))
                 .unwrap_or_else(|err| panic!("{err}")),
         ),
     ];
@@ -5228,8 +5781,9 @@ struct SuiteEntry {
 /// names and classes to equal this list, so a case that drops out or changes
 /// class fails with the case named. `outside_write_cases` holds the four
 /// outside bases and their names, and this list repeats those names as the
-/// expectation each record is checked against.
-const SUITE_CASES: [(&str, SuiteClass); 9] = [
+/// expectation each record is checked against. The shared B3 journey records
+/// the final shutdown after the wallet suite.
+const SUITE_CASES: [(&str, SuiteClass); 10] = [
     ("init at the wallet root", SuiteClass::Permitted),
     ("status", SuiteClass::Permitted),
     ("create_managed_account", SuiteClass::Permitted),
@@ -5239,6 +5793,7 @@ const SUITE_CASES: [(&str, SuiteClass); 9] = [
     (FRESH_OUTSIDE_CASE, SuiteClass::Denied),
     ("planted key beneath STORAGE_PARENT", SuiteClass::Denied),
     ("status after the denied cases", SuiteClass::Permitted),
+    ("shutdown", SuiteClass::Permitted),
 ];
 
 /// The did suite's cases in the order the suite runs them, with the class each
@@ -5248,12 +5803,12 @@ const SUITE_CASES: [(&str, SuiteClass); 9] = [
 /// and the sibling of `did/` under the same base; the planted read is the read
 /// half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`;
 /// and the final `get_did` is the service check both tests make after a
-/// refusal.
+/// refusal. The shared B3 journey records one shutdown after this suite.
 ///
 /// The permitted cases come first, as `DID_PERMITTED_CASES` says, so a caller
 /// that runs only them judges its record against the same leading entries
 /// instead of a second case list.
-const DID_SUITE_CASES: [(&str, SuiteClass); 10] = [
+const DID_SUITE_CASES: [(&str, SuiteClass); 11] = [
     // `confined_provider_serves_did_operations_under_its_root` (did's
     // tests/confine.rs:407) runs these six operations.
     ("init at the did root", SuiteClass::Permitted),
@@ -5284,6 +5839,7 @@ const DID_SUITE_CASES: [(&str, SuiteClass); 10] = [
     ),
     // The service check that both tests make after a refusal.
     ("get_did after the denied cases", SuiteClass::Permitted),
+    ("shutdown", SuiteClass::Permitted),
 ];
 
 /// How many leading entries of `DID_SUITE_CASES` are the permitted operations,
@@ -6709,10 +7265,30 @@ fn assert_standin_matches_oracle(
 /// One provider's place in the B3 journey: the name the stand-in serves, the
 /// binary it starts, the one suite that drives that provider, and the cases
 /// that suite must record.
+fn wallet_b3_suite(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+    _: &Path,
+    _: &Path,
+) -> Vec<SuiteEntry> {
+    wallet_standin_suite(provider, root, label)
+}
+
+fn did_b3_suite(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+    _: &Path,
+    _: &Path,
+) -> Vec<SuiteEntry> {
+    did_standin_suite(provider, root, label)
+}
+
 struct B3Provider {
     name: &'static str,
     binary: &'static Path,
-    suite: fn(&mut ConfinedProvider, &Path, &str) -> Vec<SuiteEntry>,
+    suite: fn(&mut ConfinedProvider, &Path, &str, &Path, &Path) -> Vec<SuiteEntry>,
     cases: &'static [(&'static str, SuiteClass)],
 }
 
@@ -6723,10 +7299,16 @@ struct B3Provider {
 fn standin_oracle_start(name: &str, binary: &Path, root: &Path) -> ConfinedProvider {
     let bindings = canonical_bindings(name, root, binary);
     create_shared_ancestors(&bindings);
-    let paths: Vec<(&str, &Path)> = bindings
+    let inert = model_inert_bindings(name);
+    let mut paths: Vec<(&str, &Path)> = bindings
         .iter()
         .map(|(binding, path)| (*binding, path.as_path()))
         .collect();
+    paths.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
     ConfinedProvider::start_under(&confine_oracle_path(name), &paths, binary)
 }
 
@@ -6782,16 +7364,45 @@ fn standin_b3_journey(provider: &B3Provider) {
     });
 
     let standin_label = format!("{name} B3 journey (the stand-in start)");
-    let standin_record = (provider.suite)(&mut standin, &standin_root, &standin_label);
+    let standin_profile = profile_dir.join(format!("{name}-standin.sb"));
+    let mut standin_record = (provider.suite)(
+        &mut standin,
+        &standin_root,
+        &standin_label,
+        &standin_profile,
+        provider.binary,
+    );
 
     let oracle_fixture = tempfile::tempdir().expect("temporary provider root");
     let oracle_root = resolved(oracle_fixture.path());
     let mut oracle = standin_oracle_start(name, provider.binary, &oracle_root);
     let oracle_label = format!("{name} B3 journey (the start under the committed confine.sb)");
-    let oracle_record = (provider.suite)(&mut oracle, &oracle_root, &oracle_label);
+    let oracle_profile = confine_oracle_path(name);
+    let mut oracle_record = (provider.suite)(
+        &mut oracle,
+        &oracle_root,
+        &oracle_label,
+        &oracle_profile,
+        provider.binary,
+    );
 
-    standin.shutdown();
-    oracle.shutdown();
+    if name == MODEL_PROVIDER {
+        // This startup denial needs a separate child for each exact profile:
+        // the copy never starts, so it cannot run inside the service suite.
+        standin_record.push(model_unbound_exec_denial(
+            &standin_profile,
+            provider.binary,
+            &standin_label,
+        ));
+        oracle_record.push(model_unbound_exec_denial(
+            &confine_oracle_path(name),
+            provider.binary,
+            &oracle_label,
+        ));
+    }
+
+    standin_record.push(b3_shutdown_entry(&mut standin, name, &standin_label));
+    oracle_record.push(b3_shutdown_entry(&mut oracle, name, &oracle_label));
 
     assert_suite_outcomes(
         &format!("{name}'s committed confine.sb"),
@@ -6806,8 +7417,8 @@ fn standin_b3_journey(provider: &B3Provider) {
     assert_standin_matches_oracle(name, &oracle_record, &standin_record);
 }
 
-/// M1 check B3, one end-to-end journey for each file profile: did first, then
-/// wallet. Each provider starts from its committed declared-rights file
+/// M1 check B3, one end-to-end journey for each file profile: did, wallet and
+/// model. Each provider starts from its committed declared-rights file
 /// through the lab stand-in into a fresh profile directory, and the one file
 /// the stand-in wrote there is the file the launch used. That file must pass
 /// the two contract checks and equal the provider's committed `confine.sb`
@@ -6824,7 +7435,7 @@ fn standin_b3_journey(provider: &B3Provider) {
 /// the provider's storage root; the widened grant permits did's sibling write
 /// beneath the base, so did's suite step fails at the sibling write where the
 /// record must refuse it. WP121 removes the planted-key push, so wallet's
-/// stand-in record holds eight entries where `SUITE_CASES` holds nine and the
+/// stand-in record holds nine entries where `SUITE_CASES` holds ten and the
 /// journey fails naming the missing case. WP124 makes the stand-in use wallet's
 /// root layout for did, so did's start is refused at its first `init`. WP127
 /// appends a write grant on `STORAGE_PARENT` to did's launched profile, so the
@@ -6843,6 +7454,18 @@ fn standin_b3_journey(provider: &B3Provider) {
 /// its oracle disagree panic, which names the planted form.
 #[test]
 fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
+    // The profile comparison is useful on hosts that cannot run Seatbelt too.
+    // The launched-file and suite checks below still require sandbox-exec.
+    let model_declared =
+        read_declared_rights(MODEL_PROVIDER, &declared_rights_path(MODEL_PROVIDER))
+            .unwrap_or_else(|err| panic!("model-provider B3 journey: {err}"));
+    let model_generated = generate_profile(MODEL_PROVIDER, &model_declared)
+        .unwrap_or_else(|err| panic!("model-provider B3 journey: {err}"));
+    let model_committed =
+        read_allow_rule_profile(MODEL_PROVIDER, &confine_oracle_path(MODEL_PROVIDER))
+            .unwrap_or_else(|err| panic!("model-provider B3 journey: {err}"));
+    compare_profile_to_its_oracle(MODEL_PROVIDER, &model_generated, &model_committed)
+        .unwrap_or_else(|err| panic!("model-provider B3 journey: {err}"));
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
@@ -6850,14 +7473,20 @@ fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
         B3Provider {
             name: DID_PROVIDER,
             binary: provider_binary(DID_PROVIDER),
-            suite: did_standin_suite,
+            suite: did_b3_suite,
             cases: &DID_SUITE_CASES,
         },
         B3Provider {
             name: WALLET_PROVIDER,
             binary: Path::new(PROVIDER_BINARY),
-            suite: wallet_standin_suite,
+            suite: wallet_b3_suite,
             cases: &SUITE_CASES,
+        },
+        B3Provider {
+            name: MODEL_PROVIDER,
+            binary: provider_binary(MODEL_PROVIDER),
+            suite: model_standin_suite,
+            cases: &MODEL_B3_SUITE_CASES,
         },
     ];
     for provider in &providers {
@@ -7513,6 +8142,44 @@ const STARTUP_RULES: [&str; 2] = [
 ];
 /// The model profile reads the root directory with this narrower form.
 const MODEL_ROOT_READ_RULE: &str = r#"(allow file-read-data (literal "/"))"#;
+/// Exact macOS probe X1-X6 and proposal rows 2, 4-7 for Model only.
+/// The numbered sets stop at the measured lab bounds; all other forms fail.
+fn measured_model_form(form: &str) -> bool {
+    if [
+        MODEL_ROOT_READ_RULE,
+        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#,
+        r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
+        r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
+        "(allow process-fork)",
+        r#"(allow file-read* (literal (param "MODEL")))"#,
+        r#"(allow file-read* (literal "/dev/urandom"))"#,
+        r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
+        r#"(allow process-exec (literal (param "ENGINE")))"#,
+        r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
+        r#"(allow file-read* (subpath "/usr/lib"))"#,
+        "(allow signal (target children))",
+    ].contains(&form) { return true; }
+    for index in 0..19 {
+        if form
+            == format!("(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_{index}\")))")
+        {
+            return true;
+        }
+    }
+    for slot in 0..64 {
+        for (op, param) in [
+            ("network-outbound", "BROKER_SOCKET"),
+            ("file-read-metadata", "ENGINE_SOCKET"),
+            ("file-write*", "ENGINE_SOCKET"),
+            ("network-bind", "ENGINE_SOCKET"),
+        ] {
+            if form == format!("(allow {op} (literal (param \"{param}_{slot}\")))") {
+                return true;
+            }
+        }
+    }
+    false
+}
 /// The calls a process makes reading the root directory at startup.
 const ROOT_READ_SYSCALLS: &[&str] = &[
     "faccessat",
@@ -7539,6 +8206,18 @@ const PINNED_RULES: &[(&str, &str)] = &[
     (SHARED_RULES[2], "storage"),
     (STARTUP_RULES[0], "startup-root-directory"),
     (STARTUP_RULES[1], "startup-sysctl"),
+    (
+        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#,
+        "model-gpu",
+    ),
+    (
+        r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
+        "model-gpu",
+    ),
+    (
+        r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
+        "model-gpu",
+    ),
 ];
 /// The file profiles the one contract check requires. Every one of them must
 /// present the contract, in this order.
@@ -7588,12 +8267,23 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
         if is_default_allow(form) {
             return Err(format!("{name} must reject (allow default): {form}"));
         }
-        if is_network_allow(form) {
+        if name == MODEL_PROVIDER
+            && is_allow_form(form)
+            && !SHARED_RULES.contains(&form.as_str())
+            && form != STARTUP_RULES[1]
+            && !measured_model_form(form)
+        {
+            return Err(format!("{name} has no measured model row for {form}"));
+        }
+        if is_network_allow(form) && !(name == MODEL_PROVIDER && measured_model_form(form)) {
             return Err(format!(
                 "{name} must not grant network access; a network allow is refused: {form}"
             ));
         }
-        if is_exec_allow(form) {
+        if is_exec_allow(form)
+            && !(name == MODEL_PROVIDER
+                && form == r#"(allow process-exec (literal (param "ENGINE")))"#)
+        {
             exec_allows.push(form.as_str());
         }
         let tokens = match parameter_tokens(form) {
@@ -7601,7 +8291,9 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
             Err(()) => return Err(format!("{name} parameter token must close: {form}")),
         };
         for token in tokens {
-            if !CANONICAL_PARAMS.contains(&token) {
+            if !(CANONICAL_PARAMS.contains(&token)
+                || (name == MODEL_PROVIDER && measured_model_form(form)))
+            {
                 return Err(format!(
                     "{name} declares the non-canonical parameter token {token}; \
                      every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE"
@@ -7871,14 +8563,18 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
 /// so each keeps the default decision, and the journey's sweep proves the
 /// refusal on the Linux host.
 const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
+    // M1a Linux probe: model-only unconditional calls, with kill excluded.
+    ("accept4", Some(288), Some(242)),
     // x86-64 only: aarch64 sets its thread pointer without a call.
     ("arch_prctl", Some(158), None),
     ("bpf", Some(321), Some(280)),
+    ("bind", Some(49), Some(200)),
     ("brk", Some(12), Some(214)),
     ("clone", Some(56), Some(220)),
     ("clone3", Some(435), Some(435)),
     ("close", Some(3), Some(57)),
     ("connect", Some(42), Some(203)),
+    ("dup2", Some(33), None),
     ("epoll_create1", Some(291), Some(20)),
     ("epoll_ctl", Some(233), Some(21)),
     ("epoll_pwait", Some(281), Some(22)),
@@ -7900,9 +8596,13 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("futex", Some(202), Some(98)),
     ("getdents64", Some(217), Some(61)),
     ("geteuid", Some(107), Some(175)),
+    ("getpgrp", Some(111), None),
+    ("getpid", Some(39), Some(172)),
     ("getrandom", Some(318), Some(278)),
+    ("getsockopt", Some(55), Some(209)),
     ("keyctl", Some(250), Some(219)),
     ("linkat", Some(265), Some(37)),
+    ("listen", Some(50), Some(201)),
     ("lseek", Some(8), Some(62)),
     ("madvise", Some(28), Some(233)),
     // x86-64 only, the older form of mkdirat that glibc calls there.
@@ -7916,6 +8616,7 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("openat", Some(257), Some(56)),
     ("openat2", Some(437), Some(437)),
     ("pidfd_getfd", Some(438), Some(438)),
+    ("pipe2", Some(293), Some(59)),
     // x86-64 only: aarch64 has ppoll alone.
     ("poll", Some(7), None),
     ("ppoll", Some(271), Some(73)),
@@ -7926,9 +8627,11 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("ptrace", Some(101), Some(117)),
     ("pwrite64", Some(18), Some(68)),
     ("read", Some(0), Some(63)),
+    ("readlink", Some(89), None),
     ("readlinkat", Some(267), Some(78)),
     ("readv", Some(19), Some(65)),
     ("recvmsg", Some(47), Some(212)),
+    ("recvfrom", Some(45), Some(207)),
     // x86-64 only: aarch64 has no rename call, so glibc's rename calls
     // renameat there.
     ("rename", Some(82), None),
@@ -7941,6 +8644,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("rt_sigprocmask", Some(14), Some(135)),
     ("sched_getaffinity", Some(204), Some(123)),
     ("sendmsg", Some(46), Some(211)),
+    ("sendto", Some(44), Some(206)),
+    ("setpgid", Some(109), Some(154)),
     ("set_robust_list", Some(273), Some(99)),
     ("set_tid_address", Some(218), Some(96)),
     ("sigaltstack", Some(131), Some(132)),
@@ -7954,6 +8659,7 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("unlinkat", Some(263), Some(35)),
     ("write", Some(1), Some(64)),
     ("writev", Some(20), Some(66)),
+    ("waitid", Some(247), Some(95)),
 ];
 
 /// The audit architecture this target's kernel reports in `seccomp_data.arch`.
@@ -7970,9 +8676,12 @@ const SECCOMP_AUDIT_ARCH: u32 = 0;
 /// calls, or calls aarch64 does not have.
 const X86_64_ONLY_SYSCALLS: &[&str] = &[
     "arch_prctl",
+    "dup2",
     "epoll_wait",
+    "getpgrp",
     "mkdir",
     "poll",
+    "readlink",
     "rename",
     "unlink",
 ];
@@ -8057,6 +8766,22 @@ impl SeccompInstruction {
 /// `PermissionDenied`, and the provider answers `journal_access_denied`. Each
 /// architecture admits only the form it has.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
+    // M1a Linux probe rows, excluding unscoped kill.
+    "accept4",
+    "bind",
+    "connect",
+    "dup2",
+    "getpgrp",
+    "getpid",
+    "getsockopt",
+    "listen",
+    "pipe2",
+    "readlink",
+    "recvfrom",
+    "rt_sigprocmask",
+    "sendto",
+    "setpgid",
+    "waitid",
     "epoll_create1",
     "epoll_ctl",
     "epoll_pwait",
@@ -8091,22 +8816,26 @@ const SECCOMP_ARG2_LOW: u32 = 32;
 const SECCOMP_ARG2_HIGH: u32 = 36;
 const SECCOMP_BPF_JSET_K: u16 = 0x45;
 /// The calls `seccomp_program_with_thread_rules` admits only with checked arguments.
-const THREAD_RULE_CALLS: [&str; 6] = [
+const THREAD_RULE_CALLS: [&str; 7] = [
     "clone3",
     "clone",
     "socketpair",
     "fcntl",
     "prlimit64",
     "futex",
+    "socket",
 ];
 const SECCOMP_BPF_AND_K: u16 = 0x54;
 /// Linux ABI values, written out because this builder compiles on macOS too, where
 /// libc has different numbers or none. `linux_abi_constants_match_libc` checks them.
 const LINUX_ENOSYS: u32 = 38;
 const LINUX_CLONE_THREAD: u32 = 0x1_0000;
+const LINUX_MEASURED_VFORK: u32 = 0x4111;
 const LINUX_AF_UNIX: u32 = 1;
 const LINUX_F_GETFD: u32 = 1;
 const LINUX_F_DUPFD_CLOEXEC: u32 = 1030;
+const LINUX_F_GETFL: u32 = 3;
+const LINUX_F_SETFL: u32 = 4;
 /// The kernel's `FUTEX_CMD_MASK`: every bit except `FUTEX_PRIVATE_FLAG` (0x80) and
 /// `FUTEX_CLOCK_REALTIME` (0x100).
 const LINUX_FUTEX_CMD_MASK: u32 = 0xffff_fe7f;
@@ -8258,16 +8987,16 @@ fn seccomp_allow_list_for_arch(
             // nothing, so no syscall answers to them.
             continue;
         }
-        let Some(row) = SECCOMP_RULE_SYSCALLS
+        let row = SECCOMP_RULE_SYSCALLS
             .iter()
-            .find(|(allowed, _)| *allowed == form.as_str())
-        else {
+            .find(|(allowed, _)| *allowed == form.as_str());
+        if row.is_none() && !(name == MODEL_PROVIDER && measured_model_form(&form)) {
             return Err(format!(
                 "{name} seccomp allow list refuses the allow form {form}: \
                  the mapping table has no syscall row for it, so no filter is built"
             ));
-        };
-        for syscall in row.1 {
+        }
+        for syscall in row.map(|row| row.1).unwrap_or(&[]) {
             // A row may name an older call one architecture alone has; a
             // target without it admits nothing for that name.
             if seccomp_syscall_number(syscall, audit_arch).is_none() {
@@ -8334,9 +9063,9 @@ fn seccomp_program(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompIns
 /// using:
 /// - `clone3` answers `ENOSYS`, because a filter cannot read its argument struct,
 ///   so glibc falls back to `clone`;
-/// - `clone` only with `CLONE_THREAD`, so threads start and new processes don't;
-/// - `socketpair` only for `AF_UNIX`, so `socket` and the network stay refused;
-/// - `fcntl` only for `F_GETFD` and `F_DUPFD_CLOEXEC`, so no `F_SETOWN` can aim a
+/// - `clone` with `CLONE_THREAD` or exactly measured `0x4111`;
+/// - `socketpair` and `socket` only for `AF_UNIX`;
+/// - `fcntl` for `F_GETFD`, `F_DUPFD_CLOEXEC`, `F_GETFL`, and `F_SETFL`, so no `F_SETOWN` can aim a
 ///   signal at another process;
 /// - `prlimit64` only for pid 0 with no new limit, so it reads its own limits and
 ///   changes nobody's;
@@ -8369,9 +9098,11 @@ fn seccomp_program_with_thread_rules(
     program.extend([
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone3"), 0, 1),
         SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ENOSYS),
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone"), 0, 4),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone"), 0, 6),
         SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
         SeccompInstruction::jump(SECCOMP_BPF_JSET_K, LINUX_CLONE_THREAD, 0, 1),
+        allow,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_MEASURED_VFORK, 0, 1),
         allow,
         deny,
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("socketpair"), 0, 4),
@@ -8379,10 +9110,12 @@ fn seccomp_program_with_thread_rules(
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_AF_UNIX, 0, 1),
         allow,
         deny,
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("fcntl"), 0, 5),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("fcntl"), 0, 7),
         SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFD, 1, 0),
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_DUPFD_CLOEXEC, 0, 1),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFD, 3, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_DUPFD_CLOEXEC, 2, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFL, 1, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_SETFL, 0, 1),
         allow,
         deny,
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("prlimit64"), 0, 10),
@@ -8403,6 +9136,11 @@ fn seccomp_program_with_thread_rules(
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAKE, 2, 0),
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAIT_BITSET, 1, 0),
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAKE_BITSET, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("socket"), 0, 4),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_AF_UNIX, 0, 1),
         allow,
         deny,
         deny,
@@ -8878,20 +9616,21 @@ fn landlock_path_rules(
             // nothing, so they take no row and add no path.
             continue;
         }
-        let Some((_, rights)) = LANDLOCK_RULE_RIGHTS
+        let row = LANDLOCK_RULE_RIGHTS
             .iter()
-            .find(|(allowed, _)| *allowed == form.as_str())
-        else {
+            .find(|(allowed, _)| *allowed == form.as_str());
+        if row.is_none() && !(name == MODEL_PROVIDER && measured_model_form(&form)) {
             return Err(format!(
                 "{name} landlock ruleset refuses the allow form {form}: \
                  the rights table has no row for it, so no ruleset is built"
             ));
-        };
-        if *rights == 0 {
+        }
+        let rights = row.map(|row| row.1).unwrap_or(0);
+        if rights == 0 {
             // A row that grants no right is a decision, not an omission.
             continue;
         }
-        if let Some(refusal) = landlock_row_abi_refusal(&format!("the {form} row"), *rights, abi) {
+        if let Some(refusal) = landlock_row_abi_refusal(&format!("the {form} row"), rights, abi) {
             return Err(refusal);
         }
         let Some((parameter, path)) = parameter_path_for_form(&form, bindings) else {
@@ -8906,7 +9645,7 @@ fn landlock_path_rules(
         rules.push(LandlockPathRule {
             parameter,
             path,
-            rights: *rights,
+            rights,
         });
     }
     for (path, _) in loader {
@@ -12072,6 +12811,7 @@ fn seccomp_allow_list_names_the_provider_it_was_built_for() {
 /// namespace, a keyring or a kernel-instrumentation interface. On a Linux host
 /// `model_syscall_lists_match_libc` compares that host's column with libc.
 const MODEL_FORBIDDEN_CALLS: &[(&str, u32, u32)] = &[
+    ("kill", 62, 129),
     ("ptrace", 101, 117),
     ("process_vm_readv", 310, 270),
     ("process_vm_writev", 311, 271),
@@ -12155,6 +12895,11 @@ macro_rules! model_allowed_x86_64 {
             SYS_faccessat = 269, SYS_ppoll = 271, SYS_epoll_pwait = 281, SYS_eventfd2 = 290,
             SYS_epoll_create1 = 291, SYS_prlimit64 = 302, SYS_renameat2 = 316, SYS_getrandom = 318,
             SYS_execveat = 322, SYS_statx = 332, SYS_rseq = 334, SYS_openat2 = 437,
+            SYS_accept4 = 288, SYS_bind = 49, SYS_connect = 42, SYS_dup2 = 33,
+            SYS_getpgrp = 111, SYS_getpid = 39, SYS_getsockopt = 55, SYS_listen = 50,
+            SYS_pipe2 = 293, SYS_readlink = 89, SYS_recvfrom = 45,
+            SYS_rt_sigprocmask = 14, SYS_sendto = 44, SYS_setpgid = 109,
+            SYS_socket = 41, SYS_waitid = 247,
         }
     };
 }
@@ -12174,6 +12919,10 @@ macro_rules! model_allowed_aarch64 {
             SYS_mmap = 222, SYS_mprotect = 226, SYS_prlimit64 = 261, SYS_renameat2 = 276,
             SYS_getrandom = 278, SYS_execveat = 281, SYS_statx = 291, SYS_rseq = 293,
             SYS_openat2 = 437,
+            SYS_accept4 = 242, SYS_bind = 200, SYS_connect = 203,
+            SYS_getpid = 172, SYS_getsockopt = 209, SYS_listen = 201,
+            SYS_pipe2 = 59, SYS_recvfrom = 207, SYS_rt_sigprocmask = 135,
+            SYS_sendto = 206, SYS_setpgid = 154, SYS_socket = 198, SYS_waitid = 95,
         }
     };
 }
@@ -12248,7 +12997,7 @@ fn model_syscall_lists_match_libc() {
         };
     }
     let libc_forbidden = libc_numbers! {
-        SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_kexec_load,
+        SYS_kill, SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_kexec_load,
         SYS_kexec_file_load, SYS_init_module, SYS_finit_module, SYS_bpf, SYS_mount, SYS_umount2,
         SYS_pivot_root, SYS_unshare, SYS_setns, SYS_keyctl, SYS_add_key, SYS_request_key,
         SYS_perf_event_open, SYS_userfaultfd,
@@ -15347,9 +16096,10 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
                 status["data"], init["data"],
                 "status must answer exactly what init did: {status} against {init}"
             );
-            // The seven remaining model operations, `shutdown` last, so this
-            // caller answers all nine under the filter.
-            let linux_only = model_standin_linux_only_operations(&mut provider, &label);
+            // The model operations and one shutdown answer all nine calls
+            // under the filter, with the child stopped exactly once.
+            let mut linux_only = model_standin_operations(&mut provider, &label);
+            linux_only.push(b3_shutdown_entry(&mut provider, MODEL_PROVIDER, &label));
             assert_suite_outcomes(&label, &linux_only, &MODEL_LINUX_ONLY_CASES);
             None
         }
@@ -15659,9 +16409,16 @@ fn linux_model_filter_admits_threads_and_refuses_new_processes() {
 fn linux_abi_constants_match_libc() {
     assert_eq!(LINUX_ENOSYS, libc::ENOSYS as u32);
     assert_eq!(LINUX_CLONE_THREAD, libc::CLONE_THREAD as u32);
+    // glibc exposes these values as the clone signal and the two fcntl commands.
+    assert_eq!(
+        LINUX_MEASURED_VFORK,
+        libc::SIGCHLD as u32 | libc::CLONE_VFORK as u32 | libc::CLONE_VM as u32
+    );
     assert_eq!(LINUX_AF_UNIX, libc::AF_UNIX as u32);
     assert_eq!(LINUX_F_GETFD, libc::F_GETFD as u32);
     assert_eq!(LINUX_F_DUPFD_CLOEXEC, libc::F_DUPFD_CLOEXEC as u32);
+    assert_eq!(LINUX_F_GETFL, libc::F_GETFL as u32);
+    assert_eq!(LINUX_F_SETFL, libc::F_SETFL as u32);
     assert_eq!(
         LINUX_FUTEX_CMD_MASK,
         !(libc::FUTEX_PRIVATE_FLAG | libc::FUTEX_CLOCK_REALTIME) as u32
@@ -17025,14 +17782,13 @@ fn read_bridge_source() -> Result<String, String> {
 }
 
 /// The production region of a Rust source: the text before its top-level
-/// `#[cfg(test)]` / `mod tests {` pair, or a refusal that names `source_name`
-/// when that pair is absent.
+/// `#[cfg(test)]` / `mod tests {` pair, with earlier test-only items removed.
 ///
 /// An attribute on a test-only helper or in a nested module does not cut the
 /// region. A source with no top-level test module is a refusal, never a silent
 /// read of the whole file, because a whole-file read would let a test's own
 /// launch answer for the shipped policy.
-fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a str, String> {
+fn rust_production_region(source_name: &str, source: &str) -> Result<String, String> {
     let mut cut = 0;
     let mut lines = source.split_inclusive('\n').peekable();
     while let Some(line) = lines.next() {
@@ -17041,7 +17797,7 @@ fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a 
                 .peek()
                 .is_some_and(|next| next.trim_end_matches(['\n', '\r']) == TEST_MODULE_DECLARATION)
         {
-            return Ok(&source[..cut]);
+            return Ok(rust_without_test_items(&source[..cut]));
         }
         cut += line.len();
     }
@@ -17050,6 +17806,185 @@ fn rust_production_region<'a>(source_name: &str, source: &'a str) -> Result<&'a 
          {TEST_MODULE_DECLARATION} pair that starts its test module; found none, so its \
          production region cannot be cut"
     ))
+}
+
+/// Remove items compiled only for tests. A source claim cannot be
+/// satisfied by an earlier test hook merely because it precedes `mod tests`.
+fn rust_without_test_items(source: &str) -> String {
+    let code = rust_code_mask(source);
+    let mut result = String::new();
+    let mut cursor = 0;
+    for (start, line) in code.split_inclusive('\n').scan(0, |offset, line| {
+        let start = *offset;
+        *offset += line.len();
+        Some((start, line))
+    }) {
+        if start < cursor || !rust_test_only_cfg(line.trim()) {
+            continue;
+        }
+        result.push_str(&source[cursor..start]);
+        cursor = rust_item_end(code.as_bytes(), start + line.len());
+    }
+    result.push_str(&source[cursor..]);
+    result
+}
+
+fn rust_test_only_cfg(line: &str) -> bool {
+    if line == TEST_MODULE_ATTRIBUTE {
+        return true;
+    }
+    let Some(inner) = line
+        .strip_prefix("#[cfg(all(")
+        .and_then(|value| value.strip_suffix("))]"))
+    else {
+        return false;
+    };
+    let mut depth = 0i32;
+    let mut begin = 0;
+    for (index, byte) in inner.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b',' if depth == 0 => {
+                if inner[begin..index].trim() == "test" {
+                    return true;
+                }
+                begin = index + 1;
+            }
+            _ => {}
+        }
+    }
+    inner[begin..].trim() == "test"
+}
+
+/// Mask comments and literals while preserving byte positions and newlines.
+fn rust_code_mask(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut code = bytes.to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        let start = index;
+        if bytes[index..].starts_with(b"//") {
+            index = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |offset| index + offset + 1);
+        } else if bytes[index..].starts_with(b"/*") {
+            index += 2;
+            let mut depth = 1;
+            while index + 1 < bytes.len() && depth > 0 {
+                if bytes[index..].starts_with(b"/*") {
+                    depth += 1;
+                    index += 2;
+                } else if bytes[index..].starts_with(b"*/") {
+                    depth -= 1;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+        } else {
+            let raw = if bytes[index] == b'r' {
+                Some(index)
+            } else if bytes[index..].starts_with(b"br") {
+                Some(index + 1)
+            } else {
+                None
+            };
+            let mut hashes = 0;
+            if let Some(raw) = raw {
+                while bytes.get(raw + 1 + hashes) == Some(&b'#') {
+                    hashes += 1;
+                }
+                if bytes.get(raw + 1 + hashes) == Some(&b'"') {
+                    index = raw + 2 + hashes;
+                    while index < bytes.len() {
+                        if bytes[index] == b'"'
+                            && (0..hashes).all(|count| bytes.get(index + 1 + count) == Some(&b'#'))
+                        {
+                            index += 1 + hashes;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+            }
+            if index == start && (bytes[index] == b'"' || bytes[index..].starts_with(b"b\"")) {
+                index += if bytes[index] == b'b' { 2 } else { 1 };
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                    } else if bytes[index] == b'"' {
+                        index += 1;
+                        break;
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            if index == start && bytes[index] == b'\'' {
+                let close = if bytes.get(index + 1) == Some(&b'\\') {
+                    index + 3
+                } else {
+                    index + 2
+                };
+                if bytes.get(close) == Some(&b'\'') {
+                    index = close + 1;
+                }
+            }
+        }
+        if index == start {
+            index += 1;
+        } else {
+            for byte in &mut code[start..index.min(bytes.len())] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+        }
+    }
+    String::from_utf8(code).expect("mask preserves UTF-8")
+}
+
+fn rust_item_end(code: &[u8], from: usize) -> usize {
+    let mut index = from;
+    loop {
+        while index < code.len() && code[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if code.get(index..index + 2) == Some(b"#[") {
+            index = rust_skip_pair(code, index + 1, b'[', b']');
+        } else {
+            break;
+        }
+    }
+    let mut parens = 0i32;
+    while index < code.len() {
+        match code[index] {
+            b'(' | b'[' => parens += 1,
+            b')' | b']' => parens -= 1,
+            b'{' if parens <= 0 => return rust_skip_pair(code, index, b'{', b'}'),
+            b';' | b',' if parens <= 0 => return index + 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    code.len()
+}
+
+fn rust_skip_pair(code: &[u8], open: usize, left: u8, right: u8) -> usize {
+    let mut depth = 0i32;
+    for (index, byte) in code.iter().enumerate().skip(open) {
+        if *byte == left {
+            depth += 1;
+        } else if *byte == right {
+            depth -= 1;
+            if depth == 0 {
+                return index + 1;
+            }
+        }
+    }
+    code.len()
 }
 
 /// Every backtick-delimited span in `text`, in order.
@@ -24199,8 +25134,7 @@ impl ModelInlineProfile {
             .unwrap_or_else(|err| panic!("{err}"));
         let source = read_bridge_source().unwrap_or_else(|err| panic!("{err}"));
         let region = rust_production_region(BRIDGE_SOURCE_PATH, &source)
-            .unwrap_or_else(|err| panic!("{err}"))
-            .to_string();
+            .unwrap_or_else(|err| panic!("{err}"));
         let did_section =
             section_under_one_heading(DID_PROVIDER, &did_document, MODEL_INLINE_HEADING)
                 .unwrap_or_else(|refusals| panic!("{}", refusals.join("\n")));
@@ -24512,12 +25446,38 @@ fn model_inline_profile_check_refuses_each_bad_section() {
         ),
         "a source with no test module is a refusal that names the file"
     );
+    let production_code = rust_code_mask(&inline.region);
     assert!(
-        !inline.region.contains(&format!(
-            "\n{TEST_MODULE_ATTRIBUTE}\n{TEST_MODULE_DECLARATION}"
-        )),
-        "the production region must stop before the test module"
+        !inline
+            .region
+            .contains(&format!("\n{TEST_MODULE_ATTRIBUTE}"))
+            && !production_code.contains(TEST_MODULE_ATTRIBUTE)
+            && !production_code.contains("#[cfg(all(test,"),
+        "the production region must exclude every test-only item"
     );
+    let planted = r#"fn live_before() {}
+#[cfg(test)]
+fn test_hook() { let answer = "arg(\"-p\")"; }
+#[cfg(all(test, target_os = "linux"))]
+fn linux_test_hook() { let answer = "(deny default)"; }
+struct Example;
+impl Example {
+    #[cfg(test)]
+    fn nested_test_hook() { let answer = "(param \""; }
+    fn live_method() {}
+}
+fn live_after() {}
+#[cfg(test)]
+mod tests {
+}
+"#;
+    let filtered = rust_production_region(BRIDGE_SOURCE_PATH, planted).unwrap();
+    assert!(
+        filtered.contains("fn live_before()")
+            && filtered.contains("fn live_after()")
+            && filtered.contains("fn live_method()")
+    );
+    assert!(!filtered.contains("test_hook") && !filtered.contains("(deny default)"));
 
     for (label, document, region, expected) in inline.bad_cases() {
         assert_eq!(

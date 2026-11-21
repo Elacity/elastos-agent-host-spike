@@ -504,9 +504,11 @@ PTY_CRITICAL_IDS = tuple(name[:-3] for name in PTY_FINDING_NAMES)
 def assert_pty_critical_preserved(start, end):
     """Keep a 061 ``CRITICAL.md`` that was already present.
 
-    ``unchanged_findings`` owns byte preservation for the whole snapshot.
-    Present content must name ``CRITICAL-confine-061`` or
-    ``CRITICAL-cc-model-confine-061`` and must be free of signal findings.
+    ``unchanged_findings`` owns byte preservation for the whole snapshot and
+    always runs. Present content must be free of signal findings, always.
+    Each 061 pty finding file present in ``start`` must be named in it. A
+    ``CRITICAL.md`` that another module's finding created, with no 061 file,
+    needs no 061 name.
     """
     unchanged_findings(start, end)
     end_critical = end.get("/CRITICAL.md")
@@ -515,11 +517,9 @@ def assert_pty_critical_preserved(start, end):
     text = end_critical.decode("utf-8")
     if "CRITICAL-confine-044" in text or "CRITICAL-cc-model-confine-044" in text:
         raise AssertionError("lab/redteam/CRITICAL.md contains a signal finding while signals are denied")
-    if all(finding_id not in text for finding_id in PTY_CRITICAL_IDS):
-        raise AssertionError(
-            "lab/redteam/CRITICAL.md lacks CRITICAL-confine-061 or "
-            "CRITICAL-cc-model-confine-061"
-        )
+    required = [name[:-3] for name in PTY_FINDING_NAMES if start.get(name) is not None]
+    if required and all(finding_id not in text for finding_id in required):
+        raise AssertionError("lab/redteam/CRITICAL.md lacks " + " or ".join(required))
 
 
 def _git(repo, *args):

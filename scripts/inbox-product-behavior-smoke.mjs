@@ -326,10 +326,29 @@ async function runInboxHomeChromeSmoke() {
     ]);
     assert(!actions.children.some(node => String(node.dataset.actionId || "").startsWith("notification-dismiss:")));
   }
-  // An agent plan card carries every stored step and the full binding hash. It
-  // has no approve action yet and no Dismiss control.
+  // An agent plan card carries every stored step, the full binding hash and the
+  // exact binding its approve click sends back. It offers that one action and
+  // no Dismiss control.
   {
     const hash = "b".repeat(64);
+    const binding = {
+      schema: "elastos.esp.request-binding/v1",
+      request_id: "inspect-act-9-abc",
+      principal: "person:local:owner",
+      capsule: "capsule:agent-host",
+      interface: null,
+      method: "status",
+      resources: ["elastos://availability/status"],
+      sha256: hash,
+      bytes: 128,
+      truncated: false,
+      preview: {
+        owner: "person:local:owner",
+        requester: "agent:v2:requester",
+        session: "session:agent-1",
+        step: { scheme: "availability", operation: "status", request: { principal: "person:other" } },
+      },
+    };
     const entry = {
       id: "agent-plan-request:inspect-act-9-abc",
       kind: "agent_plan",
@@ -340,6 +359,8 @@ async function runInboxHomeChromeSmoke() {
         "Gate preview: Capability elastos://availability/status: read.",
         `Binding sha256: ${hash}`,
       ].join("\n"),
+      action_ref: { app: "inbox", action_id: "agent-plan-approve-request:inspect-act-9-abc" },
+      request_binding: binding,
       severity: "attention",
       read: false,
       created_at: Math.floor(Date.now() / 1000),
@@ -354,7 +375,10 @@ async function runInboxHomeChromeSmoke() {
     assert(detailText.includes(hash), "Agent plan card lost the binding hash");
     const facts = descendants(detail).find(node => String(node.className || "").split(/\s+/).includes("entry-facts"));
     assert(Boolean(facts), "Agent plan card is not rendered as facts");
-    assert(!descendants(detail).some(node => node.tagName === "BUTTON"), "Agent plan card offers an action");
+    const buttons = descendants(detail).filter(node => node.tagName === "BUTTON");
+    assert.deepEqual(buttons.map(button => button.textContent), ["Approve"], "Agent plan card offers exactly the approve action");
+    assert.equal(buttons[0].dataset.actionId, entry.action_ref.action_id);
+    assert(!buttons.some(button => String(button.dataset.actionId || "").startsWith("notification-dismiss:")));
   }
   context.setStatus("unauthorized provider");
   assert.equal(nodes.get("status-text").textContent, "Inbox action could not be completed.");
@@ -622,6 +646,102 @@ async function runInboxHomeChromeSmoke() {
   assert.equal(nodes.get("pending-count").textContent, "1");
   assert.equal(filterAll.getAttribute("aria-label"), "All, 1 pending request");
   assert.equal(nodes.get("review-count").textContent, "1");
+
+  // The approve click asks for one fresh passkey bound to this request and
+  // sends the exact binding the card showed with its token.
+  {
+    const hash = "c".repeat(64);
+    const binding = {
+      schema: "elastos.esp.request-binding/v1",
+      request_id: "inspect-act-9-abc",
+      principal: "person:local:owner",
+      capsule: "capsule:agent-host",
+      interface: null,
+      method: "status",
+      resources: ["elastos://availability/status"],
+      sha256: hash,
+      bytes: 128,
+      truncated: false,
+      preview: {
+        owner: "person:local:owner",
+        requester: "agent:v2:requester",
+        session: "session:agent-1",
+        step: { scheme: "availability", operation: "status", request: { principal: "person:other" } },
+      },
+    };
+    const entry = {
+      id: "agent-plan-request:inspect-act-9-abc",
+      kind: "agent_plan",
+      source_app: "inbox",
+      title: "Agent plan for capsule:agent-host",
+      body: "Binding sha256: " + hash,
+      action_ref: { app: "inbox", action_id: "agent-plan-approve-request:inspect-act-9-abc" },
+      request_binding: binding,
+    };
+    const approvals = [];
+    const stepUpRequests = [];
+    const previousFetch = context.fetch;
+    const previousTop = context.window.top;
+    const previousSetTimeout = context.window.setTimeout;
+    const previousClearTimeout = context.window.clearTimeout;
+    // The fake clock fires timers immediately; a real Home answers the
+    // passkey request a round trip later, so keep the timeout pending until
+    // the click has registered its result listener.
+    context.window.setTimeout = () => 1;
+    context.window.clearTimeout = () => {};
+    context.fetch = async (path, options = {}) => {
+      fetchCalls.push(path);
+      if (path === "/api/apps/inbox/actions") {
+        approvals.push(JSON.parse(options.body));
+        return jsonResponse({ message: "Agent plan dispatch completed." });
+      }
+      return previousFetch(path, options);
+    };
+    const stepUpTop = {
+      postMessage(message, origin) {
+        if (message.type !== "elastos.home.passkey-step-up.request/v1") {
+          return;
+        }
+        stepUpRequests.push({ message, origin });
+        for (const callback of windowListeners.get("message") || []) {
+          callback({
+            source: stepUpTop,
+            origin: "http://localhost:61180",
+            data: {
+              type: "elastos.home.passkey-step-up.result/v1",
+              requestId: message.requestId,
+              stepUpToken: "agent-plan-step-up",
+            },
+          });
+        }
+      },
+    };
+    context.window.top = stepUpTop;
+    try {
+      const actions = new FakeElement("div");
+      context.fillEntryActions(actions, entry);
+      const approve = actions.children.find(node => node.tagName === "BUTTON" && node.textContent === "Approve");
+      assert(Boolean(approve), "Agent plan card has no approve action");
+      assert(!actions.children.some(node => String(node.dataset.actionId || "").startsWith("notification-dismiss:")));
+      for (const callback of approve.listeners.get("click") || []) callback();
+      await settle();
+      assert.equal(approvals.length, 1, "Agent plan approval was not sent");
+      assert.equal(approvals[0].action_id, "agent-plan-approve-request:inspect-act-9-abc");
+      assert.deepEqual(plainJson(approvals[0].request_binding), plainJson(binding));
+      assert.equal(stepUpRequests.length, 1, "Agent plan approval must ask for a fresh passkey");
+      assert.equal(stepUpRequests[0].message.type, "elastos.home.passkey-step-up.request/v1");
+      assert.equal(stepUpRequests[0].message.operation, "agent_plan.approve");
+      assert.deepEqual(plainJson(stepUpRequests[0].message.request), { request_id: "inspect-act-9-abc" });
+      assert.equal(stepUpRequests[0].origin, "http://localhost:61180");
+      assert.equal(approvals[0].step_up_token, "agent-plan-step-up");
+      assert.match(nodes.get("status-text").textContent, /completed/);
+    } finally {
+      context.fetch = previousFetch;
+      context.window.top = previousTop;
+      context.window.setTimeout = previousSetTimeout;
+      context.window.clearTimeout = previousClearTimeout;
+    }
+  }
 }
 
 async function runInboxLaunchSelectionSmoke() {

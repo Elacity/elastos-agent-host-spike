@@ -25,6 +25,15 @@ commit, and the sha256 of the bytes this run read. The helper line is
 ``result.command``. The same paragraph is appended to ``CRITICAL.md``.
 With no allow, this module writes neither file.
 
+One model allow is not an escape: ``named_rights`` names it
+(``CRITICAL-cc-model-confine-069``, the model helper's /dev/null write,
+approved 21 Nov 2026 and measured as the provider startup baseline). On the
+live model profile only, an allow that opens ``nullw`` and ``nullrw`` alone,
+under the one named /dev/null line, writes no finding; the model deny test
+becomes the named-right check, and ``test_model_allows_only_named_rights``
+fails the gate on any model allow beyond it, including any /dev write other
+than /dev/null. Wallet and did keep the deny.
+
 A recorded allow keeps the gate green. The deny test is an expected failure
 and its docstring names that finding file. A later harness error still
 fails. A recorded allow is not a skip. This module skips only when
@@ -46,6 +55,7 @@ from itertools import combinations
 from pathlib import Path
 from unittest.mock import patch
 
+import named_rights
 import sbx
 from test_confine_mach import (
     HarnessError as MachHarnessError,
@@ -869,10 +879,25 @@ def observe(case_cls):
     written and marked. A refusal before any allow writes nothing.
     """
     case_cls.recorded_allows = {}
+    case_cls.named_rights = {}
+    # The accepted rights belong to this run of the class only.
+    case_cls.addClassCleanup(setattr, case_cls, "named_rights", {})
     confirmed = []
     for profile in PROFILES:
         result = write_under(profile["path"])
         if classify(result) != "allow":
+            continue
+        right = named_rights.accepted(IDS[profile["name"]], profile["path"], result)
+        if right is not None:
+            case_cls.named_rights[profile["name"]] = right
+            named_rights.mark_named(
+                case_cls,
+                f"test_{profile['name']}_dev_write_is_denied",
+                right,
+                profile["path"],
+                write_under,
+                classify,
+            )
             continue
         confirmed.append((profile, result))
         write_findings(ROOT, list(confirmed))
@@ -924,6 +949,15 @@ def _require_stdout_contract():
         raise HarnessError("zero write line is a substring of the read-write plant")
 
 
+def skip_when_tools_missing(case):
+    """The one skip: a missing ``/usr/bin/sandbox-exec`` or ``/usr/bin/cc``."""
+    if type(case).skip_reason:
+        case.skipTest(type(case).skip_reason)
+    case.binary = type(case).binary
+    case.root = type(case).root
+    case.parent = type(case).parent
+
+
 class DevWriteProbe(unittest.TestCase):
     """The helper under the live profiles, and the five allow plants."""
 
@@ -933,6 +967,7 @@ class DevWriteProbe(unittest.TestCase):
     root = None
     parent = None
     recorded_allows = {}
+    named_rights = {}
 
     @classmethod
     def setUpClass(cls):
@@ -942,6 +977,7 @@ class DevWriteProbe(unittest.TestCase):
         cls.root = None
         cls.parent = None
         cls.recorded_allows = {}
+        cls.named_rights = {}
         if cls.skip_reason:
             return
         cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-devwr-parent-"))
@@ -952,11 +988,7 @@ class DevWriteProbe(unittest.TestCase):
         observe(cls)
 
     def setUp(self):
-        if type(self).skip_reason:
-            self.skipTest(type(self).skip_reason)
-        self.binary = type(self).binary
-        self.root = type(self).root
-        self.parent = type(self).parent
+        skip_when_tools_missing(self)
 
     def test_cc_and_sandbox_present_or_skip(self):
         """This class runs only when both binaries exist.
@@ -1068,7 +1100,10 @@ class DevWriteProbe(unittest.TestCase):
         its newline.
         """
         baseline = self._source_for_plant(profile["name"], text)
-        if profile["name"] not in type(self).recorded_allows:
+        if (
+            profile["name"] not in type(self).recorded_allows
+            and profile["name"] not in type(self).named_rights
+        ):
             for line in PLANT_LINE.values():
                 self.assertEqual(text.count(line), 0)
             self.assertEqual(text.count(DENY_DEFAULT), 1)
@@ -1268,6 +1303,9 @@ class DevWriteProbe(unittest.TestCase):
         is not a substring of the read-write line, so that strip leaves the
         read-write plant in place until its own exact line is removed.
         """
+        right = type(self).named_rights.get(name)
+        if right is not None:
+            return named_rights.strip_named_forms(right, text)
         finding = type(self).recorded_allows.get(name)
         if finding is None:
             for rule, _line in PLANT_LINES:
@@ -1291,6 +1329,103 @@ class DevWriteProbe(unittest.TestCase):
             if rule in text:
                 raise HarnessError(f"{name} plant line has no trailing newline")
         return text
+
+
+class DevWriteNamedRight(unittest.TestCase):
+    """The model's accepted /dev/null write, checked against the live files.
+
+    It compiles the helper and launches it under the live profiles on its
+    own, so the injected-suite checks of ``DevWriteProbe`` do not run it. It
+    skips only when ``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing.
+    """
+
+    maxDiff = None
+    skip_reason = None
+    binary = None
+    root = None
+    parent = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skip_reason = skip_reason()
+        if cls.skip_reason:
+            return
+        cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-devwr-named-parent-"))
+        cls.root = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-devwr-named-root-"))
+        cls.addClassCleanup(shutil.rmtree, cls.parent, ignore_errors=True)
+        cls.addClassCleanup(shutil.rmtree, cls.root, ignore_errors=True)
+        cls.binary = compile_devwr(cls.parent, cls.root, HELPER_C)
+
+    def setUp(self):
+        skip_when_tools_missing(self)
+
+    def _launch(self, profile):
+        return run_sandboxed(self.binary, self.root, self.parent, profile)
+
+    def test_model_allows_only_named_rights(self):
+        """A model device write must be the accepted /dev/null write, nothing wider.
+
+        A deny is stricter and passes. Any write that opens ``/dev/zero`` or
+        ``/dev/random``, or any further ``/dev`` write line, fails the gate
+        here, although ``observe`` records it as an ordinary finding. Wallet
+        and did still deny all five writes.
+        """
+        model = sbx.REPO_ROOT / "capsules/model-provider/confine.sb"
+        result = self._launch(model)
+        for name in ("wallet", "did"):
+            path = next(item["path"] for item in PROFILES if item["name"] == name)
+            denied = self._launch(path)
+            self.assertEqual(denied.stdout, DENY_STDOUT, name)
+            self.assertEqual(classify(denied), "deny", name)
+        if classify(result) == "deny":
+            return
+        right = named_rights.accepted(IDS["model"], model, result)
+        self.assertIsNotNone(right, f"model device write beyond its named right: {result.stdout!r}")
+        self.assertEqual(right.finding, IDS["model"])
+        self.assertEqual(opened_names(result.stdout), ("nullw", "nullrw"))
+
+    def test_falsifier_model_dev_write_beyond_null_is_caught(self):
+        """Any /dev write other than /dev/null on a model copy fails the check.
+
+        The zero, random and zero read-write plants, the write-data zero and
+        random forms, a ``/dev`` subpath write, and the bare write forms each
+        fail ``require``. The zero write plant launched for real opens
+        ``zerow`` and is refused on its line. A copy is never accepted as the
+        live profile. The named line twice or dropped fails too.
+        """
+        model = sbx.REPO_ROOT / "capsules/model-provider/confine.sb"
+        right = named_rights.RIGHTS[IDS["model"]]
+        text = model.read_text(encoding="utf-8")
+        self.assertIs(named_rights.require(right, text, NULL_RDWR_STDOUT), right)
+        directory = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-devwr-named-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        for label, line in (
+            ("zero-write", ZERO_WRITE_LINE),
+            ("random-write", RANDOM_WRITE_LINE),
+            ("zero-rdwr", ZERO_RDWR_LINE),
+            ("write-data-zero", WRITE_DATA_ZERO),
+            ("write-data-random", WRITE_DATA_RANDOM),
+            ("rw-data-zero", RDWR_DATA_ZERO),
+            ("dev-subpath", '(allow file-write-data (subpath "/dev"))\n'),
+            ("bare-write", BARE_WRITE),
+            ("bare-write-data", BARE_WRITE_DATA),
+            ("null-write-twice", right.forms[0] + "\n"),
+        ):
+            with self.subTest(plant=label):
+                with self.assertRaises(named_rights.NamedRightExceeded):
+                    named_rights.require(right, text + line, NULL_RDWR_STDOUT)
+        with self.assertRaises(named_rights.NamedRightExceeded):
+            named_rights.require(
+                right, named_rights.strip_named_forms(right, text), NULL_RDWR_STDOUT
+            )
+        planted = write_copy(directory, "model-zero-write", text + ZERO_WRITE_LINE)
+        widened = self._launch(planted)
+        self.assertEqual(opened_names(widened.stdout), ("nullw", "zerow", "nullrw"))
+        with self.assertRaises(named_rights.NamedRightExceeded):
+            named_rights.require(right, text, widened.stdout)
+        self.assertIsNone(named_rights.accepted(IDS["model"], planted, widened))
+        copy = write_copy(directory, "model-copy", text)
+        self.assertIsNone(named_rights.accepted(IDS["model"], copy, self._launch(copy)))
 
 
 class DevWriteRules(unittest.TestCase):
@@ -2545,6 +2680,8 @@ class DevWriteRules(unittest.TestCase):
         result is successful. The finding names every open that returned the
         success triple. The clean run writes no finding.
         """
+        # Python 3.15 Path.is_file calls os.path.isfile; keep data paths real.
+        real_isfile = os.path.isfile
         method_names = unittest.defaultTestLoader.getTestCaseNames(DevWriteProbe)
         scenarios = [((), None), ((), b"CRITICAL fixture from another probe\n")]
         for profile_name in ("wallet", "did", "model"):
@@ -2630,7 +2767,11 @@ class DevWriteRules(unittest.TestCase):
                     START_SHA, {}, clear=True
                 ), patch.object(sbx, "REPO_ROOT", repo), patch.object(
                     sbx, "WALLET_CONFINE_SB", profiles[0]["path"]
-                ), patch.object(os.path, "isfile", return_value=True), patch(
+                ), patch.object(
+                    os.path, "isfile",
+                    side_effect=lambda path: os.fspath(path) in (CC, sbx.SANDBOX_EXEC)
+                    or real_isfile(path),
+                ), patch(
                     __name__ + ".compile_devwr", side_effect=injected_compile
                 ), patch(__name__ + ".run_unsandboxed", side_effect=injected_control), patch.object(
                     sbx, "run", side_effect=injected_sandbox

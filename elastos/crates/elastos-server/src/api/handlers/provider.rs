@@ -16,6 +16,7 @@ use crate::provider_resource::{
     agents_area_refusal, build_capability_resource, ensure_generic_wallet_capability,
     in_agents_area, provider_operation_action,
 };
+use crate::resource_bridge::reject_localhost_user_area_path;
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::session::Session;
@@ -26,6 +27,10 @@ pub struct ProviderProxyState {
     pub registry: Arc<ProviderRegistry>,
     pub capability_manager: Option<Arc<CapabilityManager>>,
 }
+
+/// Error code for a session API call to the Runtime-owned IPFS provider.
+pub const IPFS_SESSION_PROXY_DENIED: &str = "ipfs_session_proxy_denied";
+pub const OBJECT_SESSION_PROXY_DENIED: &str = "object_session_proxy_denied";
 
 /// POST /api/provider/:scheme/:op
 ///
@@ -38,6 +43,22 @@ pub async fn provider_proxy(
     headers: HeaderMap,
     body: String,
 ) -> Result<Json<Value>, (StatusCode, String)> {
+    // The Runtime owns IPFS and reaches the provider through its own registry
+    // calls. A session body must not select host paths for that provider. The
+    // registry lowercases schemes, so this gate ignores case too.
+    if scheme.eq_ignore_ascii_case("ipfs") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("{IPFS_SESSION_PROXY_DENIED}: Runtime owns IPFS access"),
+        ));
+    }
+    if scheme.eq_ignore_ascii_case("object") {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("{OBJECT_SESSION_PROXY_DENIED}: Runtime owns object storage access"),
+        ));
+    }
+
     // Build request JSON first (need body for AI resource construction)
     let mut request: Value = if body.is_empty() {
         serde_json::json!({})
@@ -46,6 +67,15 @@ pub async fn provider_proxy(
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON body: {}", e)))?
     };
     request["op"] = Value::String(op.clone());
+    // This route has no principal to stamp a model run binding from; runs go
+    // through the gateway or the in-Runtime Bus, which stamp one.
+    if scheme == "model" && op != "offers_list" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "principal_context_required: model runs require a principal-scoped launch context"
+                .to_string(),
+        ));
+    }
 
     // A launch name is the Runtime's own to answer, in its bridge, for the
     // program of a content launch. No provider serves it, from anyone.
@@ -80,6 +110,14 @@ pub async fn provider_proxy(
                 StatusCode::FORBIDDEN,
                 "principal_context_required: Agent journals are reachable only through the in-Runtime protected storage bridge".to_string(),
             ));
+        }
+        // A shell can still use ordinary localhost documents. Capsule and
+        // attached-bridge sessions have no principal-bound provider route.
+        if !session.is_shell() || headers.contains_key("X-Elastos-Capsule-Id") {
+            if let Some(path) = request.get("path").and_then(Value::as_str) {
+                reject_localhost_user_area_path(path)
+                    .map_err(|message| (StatusCode::FORBIDDEN, message))?;
+            }
         }
         // Forward the path the rule checked, not the raw text.
         request["path"] = Value::String(resource.clone());
@@ -224,10 +262,13 @@ fn shell_write_requires_token(resource: &str, required_action: Action) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
     use axum::extract::State;
-    use axum::http::HeaderMap;
     use axum::http::HeaderValue;
+    use axum::http::{HeaderMap, Request};
+    use axum::routing::post;
     use axum::Extension;
+    use axum::Router;
     use elastos_runtime::capability::{CapabilityManager, CapabilityStore, TokenConstraints};
     use elastos_runtime::primitives::{audit::AuditLog, metrics::MetricsManager};
     use elastos_runtime::provider::{
@@ -235,6 +276,361 @@ mod tests {
     };
     use elastos_runtime::session::SessionType;
     use tokio::sync::Mutex;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn session_proxy_http_refuses_object_before_body_parse_for_all_sessions() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("object"));
+        registry
+            .register_sub_provider("object", provider.clone())
+            .await
+            .unwrap();
+        for kind in [SessionType::Shell, SessionType::Capsule] {
+            let app = Router::new()
+                .route("/api/provider/:scheme/:op", post(provider_proxy))
+                .layer(Extension(Session::new(kind, None)))
+                .with_state(ProviderProxyState {
+                    registry: registry.clone(),
+                    capability_manager: None,
+                });
+            for op in ["read", "write", "list", "delete"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("/api/provider/object/{op}"))
+                            .body(Body::from("{invalid"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{op}");
+                let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                assert!(
+                    String::from_utf8_lossy(&body).contains(OBJECT_SESSION_PROXY_DENIED),
+                    "{op}"
+                );
+            }
+        }
+        assert!(provider.requests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_proxy_http_refuses_ipfs_destination_operations() {
+        let app = Router::new()
+            .route("/api/provider/:scheme/:op", post(provider_proxy))
+            .layer(Extension(Session::new(SessionType::Shell, None)))
+            .with_state(ProviderProxyState {
+                registry: Arc::new(ProviderRegistry::new()),
+                capability_manager: None,
+            });
+        for op in ["cat_to_path", "download_directory"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/api/provider/ipfs/{op}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"cid":"fixture-cid", "dest":"/tmp/link/../file"})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{op}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(IPFS_SESSION_PROXY_DENIED),
+                "{op}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_proxy_http_refuses_entire_localhost_user_areas() {
+        let shell_registry = Arc::new(ProviderRegistry::new());
+        let shell_provider = Arc::new(CapturingSchemeProvider::new("localhost"));
+        shell_registry.register(shell_provider.clone()).await;
+        let shell_app = Router::new()
+            .route("/api/provider/:scheme/:op", post(provider_proxy))
+            .layer(Extension(Session::new(SessionType::Shell, None)))
+            .with_state(ProviderProxyState {
+                registry: shell_registry,
+                capability_manager: None,
+            });
+        let own_path = "Users/self/Documents/a.md";
+        let response = shell_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/provider/localhost/read")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"path": own_path}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{own_path}");
+        assert_eq!(
+            shell_provider.requests.lock().await[0]["path"],
+            "localhost://Users/self/Documents/a.md"
+        );
+
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("localhost"));
+        registry.register(provider.clone()).await;
+        let app = Router::new()
+            .route("/api/provider/:scheme/:op", post(provider_proxy))
+            .layer(Extension(Session::new(SessionType::Capsule, None)))
+            .with_state(ProviderProxyState {
+                registry,
+                capability_manager: None,
+            });
+        for path in [
+            "Users/self/Documents/a.md",
+            "Users/other/Documents/a.md",
+            "Users",
+            "UsersAI",
+            "UsersAI/agent/Documents/a.md",
+            " Users/self/Documents/a.md",
+            "Users/link/../Documents/a.md",
+            "Users/dangling",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/provider/localhost/read")
+                        .header("content-type", "application/json")
+                        .body(Body::from(serde_json::json!({"path": path}).to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        }
+        assert!(provider.requests.lock().await.is_empty());
+    }
+
+    // These routes have no principal-bound provider entrance for a launched
+    // agent. The same-root checks therefore assert closure on this route.
+    async fn s5_launched_agent() -> (
+        crate::api::routes::tests::ProbeLaunch,
+        String,
+        String,
+        String,
+    ) {
+        let home = crate::api::routes::tests::ProbeLaunch::new(&["s5-x", "s5-y"]).await;
+        let x = home.agents[0].clone();
+        let y = home.agents[1].clone();
+        let vm_id = home.launched_instance_id(&x).await;
+        let x_root = home.root(&x);
+        let y_root = home.root(&y);
+        let y_file = home
+            .data_dir
+            .join(y_root.trim_start_matches("localhost://"))
+            .join("memory/notes.md");
+        std::fs::create_dir_all(y_file.parent().unwrap()).unwrap();
+        std::fs::write(y_file, b"Y private bytes").unwrap();
+        (home, vm_id, x_root, y_root)
+    }
+
+    fn s5_y_file_unchanged(home: &crate::api::routes::tests::ProbeLaunch, y_root: &str) {
+        let y_file = home
+            .data_dir
+            .join(y_root.trim_start_matches("localhost://"))
+            .join("memory/notes.md");
+        assert_eq!(std::fs::read(y_file).unwrap(), b"Y private bytes");
+    }
+
+    async fn s5_proxy_request(
+        scheme: &'static str,
+        op: &str,
+        body: Value,
+        vm_id: &str,
+        owner: &str,
+    ) -> (
+        Arc<CapturingSchemeProvider>,
+        Result<Json<Value>, (StatusCode, String)>,
+    ) {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new(scheme));
+        if scheme == "localhost" {
+            registry.register(provider.clone()).await;
+        } else {
+            registry
+                .register_sub_provider(scheme, provider.clone())
+                .await
+                .unwrap();
+        }
+        let manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            Arc::new(AuditLog::new()),
+            Arc::new(MetricsManager::new()),
+        ));
+        let session = Session::with_owner(
+            SessionType::Capsule,
+            Some(vm_id.to_owned()),
+            owner.to_owned(),
+        );
+        let resource = build_capability_resource(scheme, op, &body).unwrap();
+        let action = provider_operation_action(scheme, op).unwrap();
+        let token = manager.grant(
+            session.id.as_str(),
+            ResourceId::new(resource),
+            action,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Capability-Token",
+            HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
+        );
+        let result = provider_proxy(
+            State(ProviderProxyState {
+                registry,
+                capability_manager: Some(manager),
+            }),
+            Extension(session),
+            Path((scheme.to_owned(), op.to_owned())),
+            headers,
+            body.to_string(),
+        )
+        .await;
+        (provider, result)
+    }
+
+    #[tokio::test]
+    async fn s5_p5_object_proxy_refuses_x_and_y_objects() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, vm, x_root, y_root) = s5_launched_agent().await;
+        let x = home.agents[0].clone();
+        let y = home.agents[1].clone();
+        for (principal, root) in [(&y, &y_root), (&x, &x_root)] {
+            for op in [
+                "roots",
+                "list",
+                "stat",
+                "read",
+                "download",
+                "write",
+                "mkdir",
+                "rename",
+                "move",
+                "copy",
+                "trash",
+                "restore",
+                "delete_permanently",
+                "empty_trash",
+                "status",
+                "events",
+                "publish",
+                "unpublish",
+                "repair",
+                "share",
+                "list_runtime_custody",
+                "import_runtime_custody",
+                "buy",
+                "open_viewer",
+                "read_viewer",
+                "close_viewer",
+            ] {
+                let body = serde_json::json!({"principal_id": principal, "uri": format!("{root}/memory/notes.md"), "target_parent_uri": format!("{root}/memory"), "destination_uri": format!("{root}/memory")});
+                // The route must refuse before a provider interprets an object body.
+                let (provider, result) = s5_proxy_request("object", op, body, &vm, &x).await;
+                assert_eq!(
+                    result.expect_err(op).0,
+                    StatusCode::FORBIDDEN,
+                    "P5 {op} {principal}"
+                );
+                assert!(
+                    provider.requests.lock().await.is_empty(),
+                    "P5 {op} {principal}"
+                );
+            }
+        }
+        assert!(home.pending_store.list_pending().await.is_empty());
+        s5_y_file_unchanged(&home, &y_root);
+    }
+
+    #[tokio::test]
+    async fn s5_p6_localhost_proxy_refuses_x_and_y_roots() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, vm, x_root, y_root) = s5_launched_agent().await;
+        let x = home.agents[0].clone();
+        let y_segment = y_root.strip_prefix("localhost://UsersAI/").unwrap();
+        let spellings = [
+            y_root.clone(),
+            format!("{y_root}/memory/notes.md"),
+            "localhost://UsersAI".to_owned(),
+            "localhost://UsersAI/".to_owned(),
+            format!("localhost://UsersAI/./{y_segment}/memory/notes.md"),
+            format!("localhost://UsersAI//{y_segment}/memory/notes.md"),
+            format!("{x_root}/../{y_segment}/memory/notes.md"),
+        ];
+        let own_file = format!("{x_root}/memory/notes.md");
+        for path in spellings
+            .iter()
+            .map(String::as_str)
+            .chain([x_root.as_str(), own_file.as_str()])
+        {
+            for op in [
+                "read", "list", "write", "delete", "stat", "mkdir", "exists", "resolve",
+            ] {
+                let body = serde_json::json!({"path": path, "data": "changed"});
+                let (provider, result) = s5_proxy_request("localhost", op, body, &vm, &x).await;
+                assert_eq!(
+                    result.expect_err(op).0,
+                    StatusCode::FORBIDDEN,
+                    "P6 {op} {path}"
+                );
+                assert!(provider.requests.lock().await.is_empty(), "P6 {op} {path}");
+            }
+        }
+        assert!(home.pending_store.list_pending().await.is_empty());
+        s5_y_file_unchanged(&home, &y_root);
+    }
+
+    #[tokio::test]
+    async fn s5_p8_ipfs_proxy_refuses_x_and_y_files() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let (home, vm, x_root, y_root) = s5_launched_agent().await;
+        let x = home.agents[0].clone();
+        for root in [&y_root, &x_root] {
+            let path = home.data_dir.join(root.trim_start_matches("localhost://"));
+            for op in ["add_path", "cat_to_path", "download_directory"] {
+                let body = serde_json::json!({"path": path, "dest": path, "cid": "fixture"});
+                let (provider, result) = s5_proxy_request("ipfs", op, body, &vm, &x).await;
+                assert_eq!(
+                    result.expect_err(op).0,
+                    StatusCode::FORBIDDEN,
+                    "P8 {op} {root}"
+                );
+                assert!(provider.requests.lock().await.is_empty(), "P8 {op} {root}");
+            }
+        }
+        assert!(home.pending_store.list_pending().await.is_empty());
+        s5_y_file_unchanged(&home, &y_root);
+    }
 
     #[derive(Default)]
     struct CapturingWalletProvider {
@@ -514,6 +910,99 @@ mod tests {
                 assert_eq!(provider.requests.lock().await.len(), usize::from(allowed));
             }
         }
+    }
+
+    #[tokio::test]
+    async fn shell_bearer_cannot_reach_ipfs_provider() {
+        // The registry lowercases schemes, so every spelling of the scheme must
+        // reach the same refusal before dispatch.
+        for scheme in ["ipfs", "IPFS", "Ipfs"] {
+            for op in ["add_path", "cat_to_path"] {
+                let body = serde_json::json!({
+                    "path": "/UsersAI/agent-root/Documents/a.md",
+                    "dest": "/UsersAI/agent-root/Documents/a.md"
+                })
+                .to_string();
+                let (provider, result) = proxy_as_shell(scheme, op, HeaderMap::new(), &body).await;
+                let label = format!("{scheme}/{op}");
+                let err = result.expect_err(&label);
+                assert_eq!(err.0, StatusCode::FORBIDDEN, "{label}");
+                assert!(
+                    err.1.contains(IPFS_SESSION_PROXY_DENIED),
+                    "{label}: {}",
+                    err.1
+                );
+                assert!(provider.requests.lock().await.is_empty(), "{label}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn capsule_ipfs_token_cannot_reach_session_proxy() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("ipfs"));
+        registry
+            .register_sub_provider("ipfs", provider.clone())
+            .await
+            .unwrap();
+        let capability_manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            Arc::new(AuditLog::new()),
+            Arc::new(MetricsManager::new()),
+        ));
+        let session = Session::new(SessionType::Capsule, None);
+        let token = capability_manager.grant(
+            session.id.as_str(),
+            ResourceId::new("elastos://ipfs/add_path"),
+            Action::Write,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "X-Capability-Token",
+            HeaderValue::from_str(&token.to_base64().unwrap()).unwrap(),
+        );
+        let state = ProviderProxyState {
+            registry,
+            capability_manager: Some(capability_manager),
+        };
+
+        let err = provider_proxy(
+            State(state),
+            Extension(session),
+            Path(("ipfs".to_string(), "add_path".to_string())),
+            headers,
+            serde_json::json!({"path": "/UsersAI/agent-root/Documents/a.md"}).to_string(),
+        )
+        .await
+        .expect_err("capsule IPFS token must not reach the provider");
+
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.contains(IPFS_SESSION_PROXY_DENIED), "{}", err.1);
+        assert!(provider.requests.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_internal_ipfs_calls_still_work() {
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("ipfs"));
+        registry
+            .register_sub_provider("ipfs", provider.clone())
+            .await
+            .unwrap();
+        let request = serde_json::json!({
+            "op": "add_path",
+            "path": "/UsersAI/agent-root/Documents/a.md"
+        });
+
+        let response = registry
+            .send_raw("ipfs", &request)
+            .await
+            .expect("Runtime keeps its direct IPFS provider calls");
+
+        assert_eq!(response["status"], "ok");
+        assert_eq!(*provider.requests.lock().await, vec![request]);
     }
 
     #[test]
@@ -933,6 +1422,32 @@ mod tests {
 
         assert_eq!(err.0, StatusCode::FORBIDDEN);
         assert!(provider.requests.lock().await.is_empty());
+    }
+
+    /// This route has no principal, so it refuses every model run operation
+    /// before the provider, whatever binding the body names.
+    #[tokio::test]
+    async fn provider_proxy_refuses_model_runs_without_a_principal() {
+        let run = format!("run:sha256:{}", "a".repeat(64));
+        let body = serde_json::json!({"run_id": run, "request_id": "model-v1:1:n",
+            "offer_id": "m", "operation": "text.generate", "input": {},
+            "runtime_binding": {"principal_id": "person:local:alice"}})
+        .to_string();
+        for op in ["runs_create", "runs_get", "runs_events", "runs_cancel"] {
+            let (provider, result) = proxy_as_shell("model", op, HeaderMap::new(), &body).await;
+            let (status, message) = result.expect_err(op);
+            assert_eq!(status, StatusCode::FORBIDDEN, "{op}");
+            assert!(
+                message.starts_with("principal_context_required"),
+                "{message}"
+            );
+            assert!(provider.requests.lock().await.is_empty(), "{op}");
+        }
+        let (provider, result) =
+            proxy_as_shell("model", "offers_list", HeaderMap::new(), "{}").await;
+        let Json(reply) = result.expect("offers_list still dispatches");
+        assert_eq!(reply["status"], "ok", "{reply}");
+        assert_eq!(provider.requests.lock().await.len(), 1);
     }
 
     #[tokio::test]

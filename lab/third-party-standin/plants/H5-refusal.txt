@@ -1,0 +1,9 @@
+id: H5-refusal
+file: elastos/crates/elastos-server/src/provider_resource.rs
+test: hook5_provider_operation_actions_are_the_known_set_today
+note: the digest arm of the operation-to-action map
+--- old
+            "digest" => Some(Action::Read),
+--- new
+            "digest" => Some(Action::Write),
+--- end
