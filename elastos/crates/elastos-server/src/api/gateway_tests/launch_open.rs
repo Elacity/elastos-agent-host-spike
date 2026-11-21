@@ -74,8 +74,7 @@ fn cli_launch_grant_is_refused_by_wallet_authority_itself() {
     headers.insert("x-elastos-home-token", grant.parse().unwrap());
     let error =
         gateway_home_system::require_home_active_shell_wallet_authority(dir.path(), &headers)
-            .err()
-            .expect("wallet authority must refuse the CLI launch grant");
+            .expect_err("wallet authority must refuse the CLI launch grant");
     assert_eq!(error.to_string(), "home_cli_launch_grant_scope_mismatch");
 }
 
@@ -87,8 +86,7 @@ fn cli_launch_grant_is_refused_by_front_door_without_wallet_authority() {
     let mut headers = HeaderMap::new();
     headers.insert("x-elastos-home-token", grant.parse().unwrap());
     let error = gateway_home_token::require_gateway_launch(dir.path(), &headers)
-        .err()
-        .expect("front-door admission must refuse the CLI launch grant");
+        .expect_err("front-door admission must refuse the CLI launch grant");
     assert_eq!(error.to_string(), "home_launch_grant_scope_mismatch");
 }
 
@@ -224,8 +222,7 @@ fn cli_issuer_refuses_agent_principal() {
         Some(crate::auth::PrincipalKind::Agent)
     );
     let error = issue_home_cli_launch_grant_for_context(dir.path(), &context)
-        .err()
-        .expect("agent principal must be refused");
+        .expect_err("agent principal must be refused");
     assert_eq!(error.to_string(), "a human Home owner is required");
 }
 
