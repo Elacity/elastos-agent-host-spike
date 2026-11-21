@@ -30,6 +30,7 @@ pub(super) struct CheckedDirectory<'a> {
 /// The caller creates both pipes, passes the child ends to the launcher, and
 /// drops them after the call. The parent ends travel through this value so the
 /// launched handle carries the only remaining copies.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) struct ChildStdio {
     pub stdin: i32,
     pub stdout: i32,
