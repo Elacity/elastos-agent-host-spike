@@ -22,7 +22,7 @@ use crate::setup::{
 };
 use crate::vm_provider::VmCapsuleProvider;
 
-use elastos_crosvm::{CrosvmConfig, NetworkConfig, RunningVm, VmConfig};
+use elastos_crosvm::{CrosvmConfig, NetworkConfig, RootfsManager, RunningVm, VmConfig};
 use elastos_runtime::capsule::check_entrypoint_file;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::session::{SessionRegistry, SessionType};
@@ -1050,6 +1050,12 @@ impl Supervisor {
 
         // VM path — the release must publish crosvm and a guest kernel for this platform
         let rootfs_base = checked_vm_rootfs_base(&capsule_dir, &manifest).await?;
+        let (image, sha256) = crate::setup::checked_vm_image(
+            &self.data_dir,
+            &capsule_dir,
+            name,
+            &manifest.entrypoint,
+        )?;
         let platform = crate::setup::detect_platform();
         if let Some(reason) = Self::microvm_unavailable(&self.registry, &platform) {
             bail!("{reason}. Cannot launch capsule '{name}'.");
@@ -1192,15 +1198,11 @@ impl Supervisor {
         vm_config.carrier_socket_path = Some(carrier_socket.clone());
         vm_config.boot_args = format!("{} elastos.carrier_path=/dev/hvc0", vm_config.boot_args);
 
-        // Create rootfs overlay (writable copy)
-        if rootfs_base.is_file() {
-            let overlay_dir = self.crosvm_config.rootfs_cache_dir.join("overlays");
-            tokio::fs::create_dir_all(&overlay_dir).await?;
-            let overlay_path = overlay_dir.join(format!("{}.ext4", handle));
-            let _ = tokio::fs::remove_file(&overlay_path).await;
-            tokio::fs::copy(&rootfs_base, &overlay_path).await?;
-            vm_config.rootfs_path = overlay_path;
-        }
+        let overlays = RootfsManager::new(&self.crosvm_config.rootfs_cache_dir);
+        overlays.init().await?;
+        vm_config.rootfs_path = overlays
+            .create_verified_overlay(&handle, &image, &rootfs_base, &sha256)
+            .await?;
 
         let provides = manifest.provides.clone();
 

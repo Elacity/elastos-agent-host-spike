@@ -1,6 +1,8 @@
 //! Rootfs caching and overlay management
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::{fs, io, io::Seek, io::Write};
 
 use elastos_common::{ElastosError, Result};
 
@@ -38,37 +40,69 @@ impl RootfsManager {
         Ok(())
     }
 
-    /// Get or create an overlay for a VM
-    ///
-    /// For now, this just copies the base rootfs to create a writable copy.
-    /// In the future, this could use device-mapper snapshots or overlayfs.
-    pub async fn get_or_create_overlay(&self, vm_id: &str, base_rootfs: &Path) -> Result<PathBuf> {
+    /// Copy exactly the verified descriptor into a new writable overlay.
+    pub async fn create_verified_overlay(
+        &self,
+        vm_id: &str,
+        image: &fs::File,
+        source: &Path,
+        expected_sha256: &str,
+    ) -> Result<PathBuf> {
         let overlay_path = self.overlay_dir.join(format!("{}.ext4", vm_id));
-
-        if overlay_path.exists() {
-            tracing::debug!("Using existing overlay: {}", overlay_path.display());
-            return Ok(overlay_path);
-        }
-
-        tracing::info!(
-            "Creating rootfs overlay for VM '{}' from: {}",
-            vm_id,
-            base_rootfs.display()
-        );
-
-        // For simplicity, create a copy of the rootfs
-        // This is inefficient but works for development
-        tokio::fs::copy(base_rootfs, &overlay_path)
-            .await
-            .map_err(|e| {
-                ElastosError::Storage(format!(
-                    "Failed to create rootfs overlay: {} -> {}: {}",
-                    base_rootfs.display(),
-                    overlay_path.display(),
-                    e
-                ))
-            })?;
-
+        let mut input = image
+            .try_clone()
+            .map_err(|e| ElastosError::Storage(e.to_string()))?;
+        let source = source.to_path_buf();
+        let expected_sha256 = expected_sha256.to_owned();
+        let output = overlay_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            input
+                .rewind()
+                .map_err(|e| ElastosError::Storage(e.to_string()))?;
+            let mut target = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output)
+                .map_err(|e| ElastosError::Storage(format!("Stale VM overlay refused: {e}")))?;
+            let copied = (|| -> io::Result<()> {
+                let mut hash = Sha256::new();
+                let mut chunk = [0; 64 * 1024];
+                loop {
+                    let count = io::Read::read(&mut input, &mut chunk)?;
+                    if count == 0 {
+                        break;
+                    }
+                    hash.update(&chunk[..count]);
+                    target.write_all(&chunk[..count])?;
+                }
+                if format!("{:x}", hash.finalize()) != expected_sha256 {
+                    return Err(io::Error::other(
+                        "Changed VM image refused: SHA-256/CID differs from signed entry",
+                    ));
+                }
+                let opened = input.metadata()?;
+                let selected = fs::symlink_metadata(&source)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    if !selected.file_type().is_file()
+                        || opened.dev() != selected.dev()
+                        || opened.ino() != selected.ino()
+                    {
+                        return Err(io::Error::other(
+                            "VM image path replaced after verification",
+                        ));
+                    }
+                }
+                target.sync_all()
+            })();
+            if copied.is_err() {
+                let _ = fs::remove_file(&output);
+            }
+            copied.map_err(|e| ElastosError::Storage(e.to_string()))
+        })
+        .await
+        .map_err(|e| ElastosError::Storage(e.to_string()))??;
         Ok(overlay_path)
     }
 
@@ -175,6 +209,73 @@ mod tests {
 
         assert!(manager.cache_dir().exists());
         assert!(manager.overlay_dir().exists());
+    }
+
+    #[tokio::test]
+    async fn verified_overlay_matches_open_image_and_refuses_change() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("rootfs.ext4");
+        fs::write(&source, b"signed image").unwrap();
+        let image = fs::File::open(&source).unwrap();
+        let manager = RootfsManager::new(temp.path().join("cache"));
+        manager.init().await.unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"signed image"));
+        let overlay = manager
+            .create_verified_overlay("valid", &image, &source, &digest)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(overlay).unwrap(), b"signed image");
+        fs::write(&source, b"other  image").unwrap();
+        assert!(manager
+            .create_verified_overlay("changed", &image, &source, &digest)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Changed VM image refused"));
+        assert!(!manager.overlay_dir().join("changed.ext4").exists());
+    }
+
+    #[tokio::test]
+    async fn verified_overlay_refuses_stale_file() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("rootfs.ext4");
+        fs::write(&source, b"signed image").unwrap();
+        let image = fs::File::open(&source).unwrap();
+        let manager = RootfsManager::new(temp.path().join("cache"));
+        manager.init().await.unwrap();
+        fs::write(manager.overlay_dir().join("stale.ext4"), b"old").unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"signed image"));
+        assert!(manager
+            .create_verified_overlay("stale", &image, &source, &digest)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Stale VM overlay refused"));
+        assert_eq!(
+            fs::read(manager.overlay_dir().join("stale.ext4")).unwrap(),
+            b"old"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn verified_overlay_refuses_replaced_source() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("rootfs.ext4");
+        fs::write(&source, b"signed image").unwrap();
+        let image = fs::File::open(&source).unwrap();
+        fs::rename(&source, temp.path().join("old.ext4")).unwrap();
+        fs::write(&source, b"signed image").unwrap();
+        let manager = RootfsManager::new(temp.path().join("cache"));
+        manager.init().await.unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"signed image"));
+        assert!(manager
+            .create_verified_overlay("replaced", &image, &source, &digest)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("path replaced"));
+        assert!(!manager.overlay_dir().join("replaced.ext4").exists());
     }
 
     #[tokio::test]

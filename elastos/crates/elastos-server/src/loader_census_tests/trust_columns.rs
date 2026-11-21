@@ -592,11 +592,11 @@ fn columns() -> Vec<TrustColumn> {
         TrustColumn {
             file: "elastos-server/src/serve_cmd.rs",
             function: "load_microvm_capsule",
-            call: "provider.load",
+            call: "provider.load_verified",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: [".load(capsule_", "dir, manifest)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: [".load_verified(capsule_", "dir, manifest, &image, &sha256)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -604,8 +604,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_serve",
             call: "vm_provider.start",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: [".start(", "&handle)"].concat(),
             os_path: "",
         },
@@ -894,8 +894,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "handle_request",
             call: "launch_capsule",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: ["launch_", "capsule"].concat(),
             os_path: "",
         },
@@ -904,8 +904,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "launch_capsule",
             call: "vm.start",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: ["vm.s", "tart"].concat(),
             os_path: "",
         },
@@ -1537,22 +1537,22 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&53));
+    assert_eq!(roots.get("none"), Some(&49));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&23));
+    assert_eq!(roots.get("release-signature"), Some(&27));
     assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&30));
+    assert_eq!(times.get("at-every-start"), Some(&34));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&5));
-    assert_eq!(times.get("never"), Some(&53));
+    assert_eq!(times.get("never"), Some(&49));
     assert_eq!(to_gate, 30);
 }
 
 #[test]
-fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
+fn slice_4b2_vm_image_rows_check_signed_bytes_at_load() {
     let vm_rows: Vec<_> = rows()
         .into_iter()
-        .filter(|row| row.kind == "VM capsule; image check pending 4b-2")
+        .filter(|row| row.kind == "VM capsule; signed image checked at load")
         .collect();
     assert_eq!(vm_rows.len(), 4);
     let columns = columns();
@@ -1563,8 +1563,8 @@ fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
                 (column.file, column.function, column.call) == (row.file, row.function, row.call)
             })
             .unwrap();
-        assert_eq!(column.trust_root, "none");
-        assert_eq!(column.verified_when, "never");
+        assert_eq!(column.trust_root, "release-signature");
+        assert_eq!(column.verified_when, "at-every-start");
     }
 }
 

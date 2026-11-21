@@ -29,6 +29,66 @@ pub struct CrosvmProvider {
 }
 
 impl CrosvmProvider {
+    /// Admit only an image opened and verified against a signed release row.
+    pub async fn load_verified(
+        &self,
+        path: &Path,
+        manifest: CapsuleManifest,
+        image: &std::fs::File,
+        sha256: &str,
+    ) -> Result<CapsuleHandle> {
+        let id = CapsuleId::new(format!("microvm-{}", uuid::Uuid::new_v4()));
+        let mut config = VmConfig::from_manifest(&manifest, path, &self.config.kernel_path);
+        let overlay = self
+            .rootfs_manager
+            .create_verified_overlay(
+                &config.vm_id,
+                image,
+                &path.join(&manifest.entrypoint),
+                sha256,
+            )
+            .await?;
+        config.rootfs_path = overlay;
+        self.load_with_overlay(manifest, id, config).await
+    }
+
+    async fn load_with_overlay(
+        &self,
+        manifest: CapsuleManifest,
+        id: CapsuleId,
+        mut vm_config: VmConfig,
+    ) -> Result<CapsuleHandle> {
+        if manifest.capsule_type != CapsuleType::MicroVM {
+            return Err(ElastosError::Compute(
+                "VM image requires a MicroVM capsule".into(),
+            ));
+        }
+        if !vm_config.kernel_path.exists() {
+            return Err(ElastosError::Compute("Kernel not found".into()));
+        }
+        let socket_path = self.socket_path(&id);
+        if let Some(size_mb) = manifest
+            .microvm
+            .as_ref()
+            .and_then(|m| m.persistent_storage_mb)
+        {
+            if size_mb > 0 {
+                vm_config.data_disk_path = Some(
+                    self.rootfs_manager
+                        .get_or_create_data_disk(&manifest.name, size_mb)
+                        .await?,
+                );
+            }
+        }
+        let vm = RunningVm::new(vm_config, manifest.clone(), socket_path);
+        self.vms.write().await.insert(id.clone(), vm);
+        Ok(CapsuleHandle {
+            id,
+            manifest,
+            args: vec![],
+        })
+    }
+
     /// Create a new crosvm provider
     pub fn new(config: CrosvmConfig) -> Result<Self> {
         config
@@ -70,67 +130,8 @@ impl CrosvmProvider {
 
 #[async_trait]
 impl ComputeProvider for CrosvmProvider {
-    async fn load(&self, path: &Path, manifest: CapsuleManifest) -> Result<CapsuleHandle> {
-        if manifest.capsule_type != CapsuleType::MicroVM {
-            return Err(ElastosError::Compute(format!(
-                "CrosvmProvider only supports MicroVM capsules, got: {:?}",
-                manifest.capsule_type
-            )));
-        }
-
-        let rootfs_path = path.join(&manifest.entrypoint);
-        if !rootfs_path.exists() {
-            return Err(ElastosError::CapsuleNotFound(format!(
-                "Rootfs not found: {}",
-                rootfs_path.display()
-            )));
-        }
-
-        let vm_config = VmConfig::from_manifest(&manifest, path, &self.config.kernel_path);
-
-        if !vm_config.kernel_path.exists() {
-            return Err(ElastosError::Compute(format!(
-                "Kernel not found: {}",
-                vm_config.kernel_path.display()
-            )));
-        }
-
-        let id = CapsuleId::new(format!("microvm-{}", uuid::Uuid::new_v4()));
-        let socket_path = self.socket_path(&id);
-
-        let overlay_path = self
-            .rootfs_manager
-            .get_or_create_overlay(&vm_config.vm_id, &rootfs_path)
-            .await?;
-
-        let mut vm_config = vm_config;
-        vm_config.rootfs_path = overlay_path;
-
-        if let Some(size_mb) = manifest
-            .microvm
-            .as_ref()
-            .and_then(|m| m.persistent_storage_mb)
-        {
-            if size_mb > 0 {
-                let data_path = self
-                    .rootfs_manager
-                    .get_or_create_data_disk(&manifest.name, size_mb)
-                    .await?;
-                vm_config.data_disk_path = Some(data_path);
-            }
-        }
-
-        let vm = RunningVm::new(vm_config, manifest.clone(), socket_path);
-
-        self.vms.write().await.insert(id.clone(), vm);
-
-        tracing::info!("Loaded MicroVM capsule '{}' with ID {}", manifest.name, id);
-
-        Ok(CapsuleHandle {
-            id,
-            manifest,
-            args: vec![],
-        })
+    async fn load(&self, _path: &Path, _manifest: CapsuleManifest) -> Result<CapsuleHandle> {
+        Err(ElastosError::Compute("Unsigned VM image refused".into()))
     }
 
     async fn start(&self, handle: &CapsuleHandle) -> Result<()> {

@@ -1075,6 +1075,22 @@ class SignerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "signed VM image"):
                 self.prepare()
 
+    def test_prebuilt_vm_image_entry_is_signed_and_rejects_changed_cid(self):
+        components = self.current_shape()
+        row = components["external"]["localhost-provider"]["platforms"]["linux-amd64"]
+        image = b"prebuilt VM rootfs"
+        row.update(strategy="prebuilt", vm_image={"path":"rootfs.ext4", "size":len(image),
+                   "sha256":S.sha256(image), "cid":S.raw_cid(image)})
+        self.reapprove_components(components)
+        signed = S.parse_json(dict(S.sign_publication(self.prepare(), FakeBackend()))["components-x86_64-linux.json"].read_bytes())
+        self.assertEqual(signed["external"]["localhost-provider"]["platforms"]["linux-amd64"]["vm_image"], row["vm_image"])
+        for path in self.snapshot.iterdir():
+            path.unlink()
+        row["vm_image"]["cid"] = S.raw_cid(b"changed")
+        self.reapprove_components(components)
+        with self.assertRaisesRegex(ValueError, "signed VM image"):
+            self.prepare()
+
     def test_release_size_mismatch_and_null_are_refused(self):
         for size in (0, None, True):
             self.manifest["release"]["platforms"]["x86_64-linux"]["binary"]["size"] = size
