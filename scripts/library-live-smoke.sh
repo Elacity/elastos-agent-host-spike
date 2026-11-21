@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAY_URL="${ELASTOS_GATEWAY_URL:-https://elastos.elacitylabs.com}"
 GATEWAY_URL="${GATEWAY_URL%/}"
 CLI_LAUNCH_TOKEN="${ELASTOS_CLI_LAUNCH_TOKEN:-}"
@@ -212,7 +213,7 @@ echo "[library-live-smoke] launch Library from signed CLI grant"
 launch="$(post_home_json "/api/apps/home/launch" '{"target":"library","query":{}}')"
 route="$(jq -r '.route // empty' <<<"$launch")"
 LIBRARY_TOKEN="$(
-    node -e 'const route = process.argv[1] || ""; const url = new URL(route, "https://example.invalid"); process.stdout.write(new URLSearchParams(url.hash.slice(1)).get("home_token") || "");' "$route"
+    node --input-type=module -e 'const { readLaunchToken } = await import(process.argv[1]); process.stdout.write(readLaunchToken(process.argv[2], new URL(process.argv[3]).origin, "library"));' "$SCRIPT_DIR/chat-summary-smoke-client.mjs" "$route" "$GATEWAY_URL"
 )"
 if [[ -z "$LIBRARY_TOKEN" ]]; then
     echo "[library-live-smoke] Home launch did not return a Library token" >&2

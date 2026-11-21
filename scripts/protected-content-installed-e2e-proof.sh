@@ -127,8 +127,10 @@
 # `POST /api/apps/home/launch {"target": <capsule>}` with the CLI grant to
 # mint a capsule-scoped projection token, which the handler appends to the
 # response `route` as a URL FRAGMENT, not a query parameter --
-# `#home_token=<token>` (`api/gateway_home_runtime.rs`). This script extracts
-# that fragment before making the app-scoped requests.
+# `#home_token=<token>` (api/gateway_home_runtime.rs:154-177
+# `append_home_launch_token_to_route`). This script extracts it from the
+# fragment. The Library live smoke reads that fragment through the shared
+# launch-token helper.
 #
 # import-recovery-key finding: `POST /api/apps/wallet/wallet/accounts/
 # import-recovery-key` (gateway_wallet_app.rs:174) does accept raw key

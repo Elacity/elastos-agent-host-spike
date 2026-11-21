@@ -1,15 +1,24 @@
 import http from "node:http";
 import https from "node:https";
 
-export function chatSummaryRequest(launchRoute, homeOrigin) {
+export function readLaunchToken(launchRoute, homeOrigin, actor) {
   const launch = new URL(launchRoute, homeOrigin);
-  if (launch.origin !== homeOrigin || launch.pathname !== "/apps/chat-room/") {
-    throw new Error("Chat launch returned an unexpected route");
+  if (launch.origin !== homeOrigin || launch.pathname !== `/apps/${actor}/`) {
+    throw new Error(`${actor} launch returned an unexpected route`);
   }
   const token = new URLSearchParams(launch.hash.slice(1)).get("home_token");
   if (!token) {
-    throw new Error("Chat launch did not return a home token");
+    throw new Error(`${actor} launch did not return a home token`);
   }
+  return token;
+}
+
+export function redactLaunchTokens(value) {
+  return String(value).replace(/(#home_token=)[^&\s"'\\<>]*/g, "$1[REDACTED]");
+}
+
+export function chatSummaryRequest(launchRoute, homeOrigin) {
+  const token = readLaunchToken(launchRoute, homeOrigin, "chat-room");
   return {
     url: new URL("/api/apps/chat-room/summary", homeOrigin),
     options: {
