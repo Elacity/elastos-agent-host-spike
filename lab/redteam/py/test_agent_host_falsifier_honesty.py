@@ -349,13 +349,18 @@ def relative_resource_reason(resource):
 
 
 def manifest_resource_reason(resource):
-    """Restrict a manifest ask to a directory under Users/self."""
+    """Restrict a manifest ask to a directory under Users/self or the agent's own UsersAI/self."""
     if any(char.isspace() and char not in "\x1c\x1d\x1e\x1f" for char in resource):
         return "asks whitespace"
     path = resource[len("localhost://"):]
-    if not path.startswith("Users/self/"):
+    # A15-R slice 7: an agent's own documents live under its own root (UsersAI/self),
+    # never the person's Users/self; both roots get the same directory rules below.
+    for root in ("Users/self/", "UsersAI/self/"):
+        if path.startswith(root):
+            break
+    else:
         return "asks users path"
-    rest = path[len("Users/self/"):]
+    rest = path[len(root):]
     if rest in ("", "*"):
         return None
     if rest.endswith("/*"):
@@ -794,6 +799,8 @@ class ProbeControls(unittest.TestCase):
         invalid = [
             ("https://api.example.com/", "resource is not a localhost ask"),
             ("localhost://Users/other/private/*", "asks users path"),
+            ("localhost://UsersAI/other/private/*", "asks users path"),
+            ("localhost://UsersAI/self", "asks users path"),
             (prefix + "Models/https://api.example.com/", "asks url"),
             (prefix + "file:/tmp/", "asks url scheme"),
             (prefix + "data:text/plain,x/", "asks url scheme"),

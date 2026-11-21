@@ -21,7 +21,7 @@ const MAX_COMPONENTS: u64 = 4 * 1024 * 1024;
 const MIGRATION: &str = ".elastos.installation-migrate";
 const HEAD: &str = "release-head.json";
 const RELEASE: &str = "release.json";
-const REPAIR: &str = "Installed release inputs require repair. Preserve the installation files and ask the operator to restore the verified signed pair.";
+pub(crate) const REPAIR: &str = "Installed release inputs require repair. Preserve the installation files and ask the operator to restore the verified signed pair.";
 
 pub(crate) struct InstalledRelease {
     pub(crate) head: Vec<u8>,

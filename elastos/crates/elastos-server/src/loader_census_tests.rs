@@ -71,10 +71,19 @@ fn rows() -> Vec<Row> {
         row(
             "elastos-runtime/src/provider/failure_record.rs",
             "launch",
-            "libc::execve",
+            "libc::fexecve",
             "confined provider",
             "admitted rights+checked directory+bound executable",
             "B3 S10",
+            1,
+        ),
+        row(
+            "elastos-server/src/setup/verified_executable.rs",
+            "attach_std",
+            "libc::fexecve",
+            "installed component",
+            "checksum",
+            "P2-8",
             1,
         ),
         row(
@@ -430,10 +439,19 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/runtime.rs",
+            "load_dev_unsigned_component",
+            "component.load_admitted",
+            "WASM component; dev-only explicit opt-in (dev_mode = true)",
+            "none",
+            "P2-8",
+            1,
+        ),
+        row(
+            "elastos-server/src/runtime.rs",
             "run_signer",
             "component.load_admitted",
-            "WASM component",
-            "none",
+            "WASM component; folder closure is the root, requires refused",
+            "CID+DID+closure",
             "P2-8",
             1,
         ),
@@ -1006,7 +1024,17 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         (
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_command",
+            "prepared.configure_command(&mut command)",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_linux",
             "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_linux",
+            "Command::new(prepared.exec_path())",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
@@ -1016,12 +1044,42 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         (
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_confined_model_with_engine_bundle",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_with_engine_bundle",
+            "command.arg(\"-p\").arg(policy).arg(prepared.exec_path())",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_confined_model_with_engine_bundle",
             "Self::spawn_command(",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
             "spawn_with_owned_helpers",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_owned_helpers",
+            "Command::new(prepared.exec_path())",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_owned_helpers",
             "Self::spawn_command(",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_timeouts",
+            "verify_at_spawn()",
+        ),
+        (
+            "elastos-runtime/src/provider/bridge.rs",
+            "spawn_with_timeouts",
+            "Command::new(prepared.exec_path())",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
@@ -1034,9 +1092,36 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
             "verify_at_spawn()\n        .map_err(LaunchError::BeforeFork)",
         ),
         (
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "libc::fexecve(executable_fd, argv.as_ptr(), envp.as_ptr())",
+        ),
+        (
             "elastos-server/src/binaries.rs",
             "checked_native_provider_with_data_dir",
             "verify_installed_component_start(",
+        ),
+        // A hosted plane admits against the Home it serves, never the
+        // default Home.
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_ipfs_provider_plane_with_role",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_availability_provider_plane",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "register_chain_provider_plane",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
+        ),
+        (
+            "elastos-server/src/protected_content_runtime.rs",
+            "register_inactive_custody_provider",
+            "checked_native_provider_with_data_dir(data_dir, binary_path)",
         ),
     ] {
         let text = &sources[file];

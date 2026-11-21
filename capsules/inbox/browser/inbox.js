@@ -801,12 +801,12 @@
       setButtonsDisabled(true);
       try {
         const stepUpToken = await requestPasskeyStepUp("agent_plan.approve", { request_id: requestId });
-        await inboxAction("agent-plan-approve-request:" + requestId, {
+        const outcome = await inboxAction("agent-plan-approve-request:" + requestId, {
           request_binding: binding,
           step_up_token: stepUpToken,
         });
-        setStatus("Agent plan approved.");
         await loadInbox();
+        setStatus(outcome.message || "Agent plan approved.");
         notifyHome();
       } finally {
         setButtonsDisabled(false);

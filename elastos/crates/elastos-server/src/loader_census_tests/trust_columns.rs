@@ -42,11 +42,23 @@ fn columns() -> Vec<TrustColumn> {
         TrustColumn {
             file: "elastos-runtime/src/provider/failure_record.rs",
             function: "launch",
-            call: "libc::execve",
+            call: "libc::fexecve",
             class: "n/a",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["libc::execve", "(path.as_ptr()"].concat(),
+            evidence: ["libc::fexecve", "(executable_fd"].concat(),
+            os_path: "",
+        },
+        // Installed-component start (slice 2): the held descriptor matched the
+        // signed release digest in VerifiedExecutable::prepare.
+        TrustColumn {
+            file: "elastos-server/src/setup/verified_executable.rs",
+            function: "attach_std",
+            call: "libc::fexecve",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["libc::fexecve", "(fd, argv_ptrs"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -56,7 +68,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["mut comman", "d: Command"].concat(),
+            evidence: ["prepared.configure_", "command(&mut command)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -66,7 +78,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::new", "(binary_path.path())"].concat(),
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -86,7 +98,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::new", "(binary_path.path())"].concat(),
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -96,7 +108,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::new", "(binary_path.path())"].concat(),
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -236,7 +248,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "release-component",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::ne", "w(&renderer)"].concat(),
+            evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -316,7 +328,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "release-component",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::n", "ew(binary)"].concat(),
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -326,7 +338,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "release-component",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::n", "ew(binary)"].concat(),
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -451,11 +463,21 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-server/src/runtime.rs",
-            function: "run_signer",
+            function: "load_dev_unsigned_component",
             call: "component.load_admitted",
             class: "n/a",
             trust_root: "none",
             verified_when: "never",
+            evidence: ["component.l", "oad_admitted"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/runtime.rs",
+            function: "run_signer",
+            call: "component.load_admitted",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
             evidence: ["component.l", "oad_admitted"].concat(),
             os_path: "",
         },
@@ -806,7 +828,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::n", "ew(program)"].concat(),
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -816,7 +838,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::n", "ew(program)"].concat(),
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1529,8 +1551,8 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 96);
-    assert_eq!(classes.get("n/a"), Some(&47));
+    assert_eq!(columns.len(), 98);
+    assert_eq!(classes.get("n/a"), Some(&49));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1539,12 +1561,12 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("none"), Some(&49));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&27));
-    assert_eq!(roots.get("staged-cid"), Some(&4));
-    assert_eq!(times.get("at-every-start"), Some(&30));
+    assert_eq!(roots.get("release-signature"), Some(&28));
+    assert_eq!(roots.get("staged-cid"), Some(&5));
+    assert_eq!(times.get("at-every-start"), Some(&31));
     assert_eq!(times.get("at-overlay-creation"), Some(&4));
     assert_eq!(times.get("at-install-only"), Some(&8));
-    assert_eq!(times.get("at-stage-and-start"), Some(&5));
+    assert_eq!(times.get("at-stage-and-start"), Some(&6));
     assert_eq!(times.get("never"), Some(&49));
     assert_eq!(to_gate, 30);
 }
@@ -1596,4 +1618,13 @@ fn installed_component_start_callers_keep_the_signed_gate() {
             "installed component start lost signed gate: {file}::{function}"
         );
     }
+    let custody = &sources["elastos-server/src/protected_content_config.rs"];
+    let selected = "verify_installed_component_start(data_dir, \"custody-provider\", &binary)";
+    assert!(
+        custody.match_indices(selected).any(|(at, _)| {
+            source::enclosing_fn(&source::code_only(custody), at)
+                == "provision_custody_node_with_installed_provider"
+        }),
+        "custody start must admit the resolver's selected binary"
+    );
 }

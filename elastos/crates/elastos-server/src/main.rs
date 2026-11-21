@@ -1896,10 +1896,11 @@ async fn get_tunnel_bridge() -> anyhow::Result<TunnelBridge> {
         )
     })?;
     verify_component_binary("tunnel-provider", &binary)?;
-    let bridge =
-        provider::ProviderBridge::spawn(&checked_native_provider(&binary), Default::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to spawn tunnel-provider: {}", e))?;
+    // tunnel-provider finds the installed cloudflared beside its own path.
+    let checked = checked_native_provider(&binary).with_sibling("cloudflared");
+    let bridge = provider::ProviderBridge::spawn(&checked, Default::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to spawn tunnel-provider: {}", e))?;
     Ok(TunnelBridge::new(Arc::new(bridge)))
 }
 
@@ -1983,18 +1984,19 @@ async fn serve_web_capsule(
 
     // Spawn shell capsule (decision engine for capability requests)
     let _shell_child = if let Some(shell_path) = find_installed_provider_binary("shell") {
-        elastos_server::setup::verify_installed_component_start(
+        let prepared = elastos_server::setup::verify_installed_component_start(
             &elastos_server::sources::default_data_dir(),
             "shell",
             &shell_path,
         )?;
         let api_url = format!("http://{}", addr);
         let (mut command, shell_mode) = serve_cmd::shell_capsule_command(
-            &shell_path,
+            prepared.exec_path(),
             &api_url,
             &shell_session.token,
             std::env::var("ELASTOS_SHELL_MODE").ok(),
         );
+        prepared.attach_tokio(&mut command, false)?;
         match command.spawn() {
             Ok(child) => {
                 tracing::info!(
