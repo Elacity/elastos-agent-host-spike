@@ -1896,10 +1896,11 @@ async fn get_tunnel_bridge() -> anyhow::Result<TunnelBridge> {
         )
     })?;
     verify_component_binary("tunnel-provider", &binary)?;
-    let bridge =
-        provider::ProviderBridge::spawn(&checked_native_provider(&binary), Default::default())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to spawn tunnel-provider: {}", e))?;
+    // tunnel-provider finds the installed cloudflared beside its own path.
+    let checked = checked_native_provider(&binary).with_sibling("cloudflared");
+    let bridge = provider::ProviderBridge::spawn(&checked, Default::default())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to spawn tunnel-provider: {}", e))?;
     Ok(TunnelBridge::new(Arc::new(bridge)))
 }
 

@@ -578,6 +578,11 @@ pub struct ProviderBridge {
     /// A forked provider whose pid this process owns. At most one of `child`
     /// and `fork` is set. The blocking `waitpid` task is the only reaper.
     fork: Mutex<Option<ForkChild>>,
+    /// The private verified copy the provider was started from. It is taken
+    /// only after the child is reaped; a dropped bridge kills the child first,
+    /// because `child` is declared before this field.
+    #[cfg(target_os = "macos")]
+    executable_copy: Mutex<Option<PreparedExecutable>>,
     #[cfg(unix)]
     helper_owner: Mutex<Option<elastos_common::process_lifetime::ParentLifetime>>,
     /// True once a shutdown attempt has completed (child reaped, or the
@@ -1872,6 +1877,8 @@ impl ProviderBridge {
             })),
             child: Mutex::new(None),
             fork: Mutex::new(Some(fork)),
+            #[cfg(target_os = "macos")]
+            executable_copy: Mutex::new(None),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -2560,8 +2567,6 @@ impl ProviderBridge {
         let _ = own_helpers;
         #[cfg(target_os = "linux")]
         prepared.configure_command(&mut command);
-        #[cfg(target_os = "macos")]
-        let _ = &prepared; // Keep the private executable through Init.
         swap_after_verify();
         let mut child = command
             .stdin(std::process::Stdio::piped())
@@ -2570,6 +2575,10 @@ impl ProviderBridge {
             .kill_on_drop(true)
             .spawn()
             .map_err(BridgeError::Spawn)?;
+        // Linux has exec'd the held descriptor; the child keeps its own copy
+        // when a script needs one. macOS keeps the private copy in the bridge.
+        #[cfg(not(target_os = "macos"))]
+        drop(prepared);
 
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
@@ -2599,6 +2608,8 @@ impl ProviderBridge {
             })),
             child: Mutex::new(Some(child)),
             fork: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            executable_copy: Mutex::new(Some(prepared)),
             #[cfg(unix)]
             helper_owner: Mutex::new(helper_owner),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -2680,6 +2691,8 @@ impl ProviderBridge {
             })),
             child: Mutex::new(None),
             fork: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            executable_copy: Mutex::new(None),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -3009,6 +3022,9 @@ impl ProviderBridge {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if child_guard.is_none() {
             self.stop_local_brokers().await;
+            // The provider has exited and been reaped: its path may go.
+            #[cfg(target_os = "macos")]
+            self.executable_copy.lock().await.take();
         }
         result
     }
@@ -4068,6 +4084,49 @@ mod tests {
     #[tokio::test]
     async fn checked_provider_runs_verified_bytes_after_symlink_swap() {
         checked_provider_survives_after_verify_swap(true).await;
+    }
+
+    /// A provider that resolves its own path after Init (model-provider's
+    /// guard re-exec, tunnel-provider's cloudflared lookup) still finds the
+    /// verified copy and its named sibling; both go only after the exit.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_verified_copy_and_sibling_outlive_init_until_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("self-resolving-provider");
+        let report = temp.path().join("self-report");
+        std::fs::write(temp.path().join("cloudflared"), b"installed companion").unwrap();
+        let script = format!(
+            "#!/bin/sh\nIFS= read -r _init || exit 1\nprintf '%s\\n' '{{\"status\":\"ok\"}}'\nIFS= read -r _probe || exit 1\nself=missing\n[ -f \"$0\" ] && self=present\nsibling=missing\n[ -f \"$(dirname \"$0\")/cloudflared\" ] && sibling=present\nprintf '%s\\n%s\\n%s\\n' \"$0\" \"$self\" \"$sibling\" > '{}'\nprintf '%s\\n' '{{\"status\":\"ok\"}}'\nIFS= read -r _shutdown || exit 0\nprintf '%s\\n' '{{\"status\":\"ok\"}}'\nexit 0\n",
+            report.display()
+        );
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let checked = CheckedExecutable::for_test(&binary).with_sibling("cloudflared");
+        let bridge = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .unwrap();
+        let response = bridge
+            .request(ProviderRequest::Exists {
+                path: "self".into(),
+                token: String::new(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(response, ProviderResponse::Ok { .. }));
+        let seen = std::fs::read_to_string(&report).unwrap();
+        let lines = seen.lines().collect::<Vec<_>>();
+        let own_path = Path::new(lines[0]);
+        assert_ne!(own_path, binary, "the provider ran from the private copy");
+        assert_eq!(lines[1], "present", "own path exists after Init");
+        assert_eq!(lines[2], "present", "named sibling resolves beside it");
+        bridge.shutdown().await.unwrap();
+        assert!(!own_path.exists(), "the copy goes after the provider exits");
+        assert!(!own_path.parent().unwrap().exists());
+        assert!(
+            temp.path().join("cloudflared").exists(),
+            "only the link went"
+        );
     }
 
     #[cfg(target_os = "linux")]
