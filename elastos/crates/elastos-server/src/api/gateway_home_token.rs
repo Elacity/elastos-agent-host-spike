@@ -7,6 +7,8 @@ use super::*;
 
 const HOME_LAUNCH_TOKEN_SCHEMA: &str = "elastos.home.launch-token/v4";
 const HOME_LAUNCH_CONTEXT_SCHEMA: &str = "elastos.runtime.browser-launch/v1";
+pub(super) const GATEWAY_AGENT_REFUSAL: &str =
+    "gateway admission refuses a Home launch token whose principal is an agent";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::api) struct HomeLaunchTokenContext {
@@ -647,6 +649,7 @@ pub(crate) fn require_internal_shell_content_open_context(
     {
         anyhow::bail!("home_shell_content_open_grant_mismatch");
     }
+    refuse_agent_principal(&required.context)?;
     Ok(required.context)
 }
 
@@ -732,6 +735,7 @@ pub(crate) fn require_launch_bound_token(
     if binding.len() != 32 || !binding.bytes().all(|b| b.is_ascii_hexdigit()) {
         anyhow::bail!("home launch token is not bound to a content launch");
     }
+    refuse_agent_principal(&required.context)?;
     Ok((
         id.to_string(),
         content_name.to_string(),
@@ -762,33 +766,53 @@ pub(crate) fn require_home_token_context(
     .map(|required| required.context)
 }
 
-/// Launch and content open use the document at `/home/`, or a CLI grant
-/// naming `home-cli`. The Home session alone cannot act as an internal client.
+/// Launch and content open use the Home document at `/home/` or one of its
+/// exact `index.html` aliases, or a CLI grant naming `home-cli`. The Home
+/// session alone cannot act as an internal client.
 pub(crate) fn require_home_page_or_cli_launch_context(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
 ) -> anyhow::Result<HomeLaunchTokenContext> {
-    if headers.contains_key("origin")
+    let context = if headers.contains_key("origin")
         || headers.contains_key("referer")
         || headers.contains_key("sec-fetch-site")
     {
         require_home_page_launch_request(headers)?;
-        return require_home_token_context(data_dir, headers);
-    }
-    let required = require_home_launch_token_for_any_from_with_origin(
+        require_home_token_context(data_dir, headers)?
+    } else {
+        let required = require_home_launch_token_for_any_from_with_origin(
+            data_dir,
+            headers,
+            &["home-cli"],
+            None,
+            HomeLaunchOriginPolicy::InternalShell,
+        )
+        .map_err(|_| anyhow::anyhow!("home_page_only"))?;
+        if required.launch_context.selected_resource != "home-launch"
+            || required.launch_context.authority_actor != HOME_CAPSULE_ID
+        {
+            anyhow::bail!("home_cli_launch_grant_mismatch");
+        }
+        required.context
+    };
+    refuse_agent_principal(&context)?;
+    Ok(context)
+}
+
+/// Identify the verified projection before Home's general wallet authority
+/// can consider it. Only the exact launch routes consume this grant.
+pub(crate) fn verified_home_cli_launch_grant(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+) -> bool {
+    require_home_launch_token_for_any_from_with_origin(
         data_dir,
         headers,
         &["home-cli"],
         None,
         HomeLaunchOriginPolicy::InternalShell,
     )
-    .map_err(|_| anyhow::anyhow!("home_page_only"))?;
-    if required.launch_context.selected_resource != "home-launch"
-        || required.launch_context.authority_actor != HOME_CAPSULE_ID
-    {
-        anyhow::bail!("home_cli_launch_grant_mismatch");
-    }
-    Ok(required.context)
+    .is_ok_and(|required| required.launch_context.selected_resource == "home-launch")
 }
 
 fn require_home_page_launch_request(headers: &HeaderMap) -> anyhow::Result<()> {
@@ -805,7 +829,10 @@ fn require_home_page_launch_request(headers: &HeaderMap) -> anyhow::Result<()> {
             presented == origin
                 && site == "same-origin"
                 && page.origin().ascii_serialization() == origin
-                && page.path() == "/home/"
+                && matches!(
+                    page.path(),
+                    "/home/" | "/home/index.html" | "/apps/home/index.html"
+                )
                 && page.username().is_empty()
                 && page.password().is_none()
                 && page.fragment().is_none(),
@@ -931,13 +958,14 @@ pub(super) fn require_gateway_launch(
 }
 
 /// Refuse a token whose resolved principal is an Agent. Both success paths of
-/// [`require_gateway_launch`] run this before they admit, so no gateway route
-/// can hand an Agent principal an admission. `Some(Human)` and `None` (the
+/// [`require_gateway_launch`] run this before they admit. Home page, CLI,
+/// internal shell content open, and launch-bound reads use the same fence.
+/// `Some(Human)` and `None` (the
 /// device arm) pass. The kind is the one the root resolved, never a re-read of
 /// the auth store and never a guess from the root string.
 fn refuse_agent_principal(context: &HomeLaunchTokenContext) -> anyhow::Result<()> {
     if context.root().kind() == Some(crate::auth::PrincipalKind::Agent) {
-        anyhow::bail!("gateway admission refuses a Home launch token whose principal is an agent");
+        anyhow::bail!(GATEWAY_AGENT_REFUSAL);
     }
     Ok(())
 }
@@ -3014,8 +3042,7 @@ mod tests {
         );
     }
 
-    const FENCE_AGENT_REFUSAL: &str =
-        "gateway admission refuses a Home launch token whose principal is an agent";
+    const FENCE_AGENT_REFUSAL: &str = GATEWAY_AGENT_REFUSAL;
 
     /// The Home browser headers for one token. The cookie carrier carries a
     /// single well-formed Home session cookie; the header carrier carries the
@@ -3169,6 +3196,15 @@ mod tests {
         page.insert("referer", "http://localhost:61180/home/".parse().unwrap());
         page.insert("x-elastos-home-token", home.parse().unwrap());
         require_home_page_or_cli_launch_context(dir.path(), &page).unwrap();
+        for alias in ["/home/index.html", "/apps/home/index.html"] {
+            let mut alias_page = page.clone();
+            alias_page.insert(
+                "referer",
+                format!("http://localhost:61180{alias}").parse().unwrap(),
+            );
+            require_home_page_or_cli_launch_context(dir.path(), &alias_page)
+                .unwrap_or_else(|err| panic!("{alias}: {err}"));
+        }
 
         let mut other_page = page.clone();
         other_page.insert(
@@ -3210,6 +3246,71 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "home_cli_launch_grant_mismatch"
+        );
+    }
+
+    #[test]
+    fn home_and_shell_launch_gates_refuse_verified_agent_contexts() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_token = fence_agent_token(dir.path());
+        let mut page = HeaderMap::new();
+        page.insert("host", "localhost:61180".parse().unwrap());
+        page.insert("origin", "http://localhost:61180".parse().unwrap());
+        page.insert("x-elastos-home-token", agent_token.parse().unwrap());
+        page.insert("referer", "http://localhost:61180/home/".parse().unwrap());
+        page.insert("sec-fetch-site", "same-origin".parse().unwrap());
+        let context = require_home_token_context(dir.path(), &page)
+            .expect("the stored agent has a valid Home token");
+        assert_eq!(
+            context.root().kind(),
+            Some(crate::auth::PrincipalKind::Agent)
+        );
+        assert_eq!(
+            require_home_page_or_cli_launch_context(dir.path(), &page)
+                .unwrap_err()
+                .to_string(),
+            FENCE_AGENT_REFUSAL
+        );
+
+        for (resource, actor, shell_open) in [
+            ("home-launch", "home-cli", false),
+            ("home", "home-shell", true),
+        ] {
+            let token = issue_home_projection_launch_token_with_context(
+                dir.path(),
+                resource,
+                actor,
+                &context,
+            )
+            .unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("x-elastos-home-token", token.parse().unwrap());
+            let refusal = if shell_open {
+                require_internal_shell_content_open_context(dir.path(), &headers)
+            } else {
+                require_home_page_or_cli_launch_context(dir.path(), &headers)
+            }
+            .unwrap_err();
+            assert_eq!(refusal.to_string(), FENCE_AGENT_REFUSAL, "{actor}");
+        }
+
+        let bound = issue_launch_page_token(
+            dir.path(),
+            "abababababababababababababababab",
+            "image-viewer",
+            "photo-set",
+            &context,
+        )
+        .unwrap();
+        let mut read = HeaderMap::new();
+        read.insert("host", "localhost:61180".parse().unwrap());
+        read.insert("origin", "null".parse().unwrap());
+        read.insert("x-elastos-home-token", bound.parse().unwrap());
+        assert_eq!(
+            require_launch_bound_token(dir.path(), &read, "image-viewer", false)
+                .unwrap_err()
+                .to_string(),
+            FENCE_AGENT_REFUSAL
         );
     }
 

@@ -9070,7 +9070,7 @@ pub async fn production_after() {
             production_counts_ignoring_cfg_test("issue_home_projection_launch_token_with_context("),
             expected_counts(&[
                 ("elastos-server/src/api/auth_gateway.rs", 2),
-                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/api/gateway.rs", 2),
                 ("elastos-server/src/api/gateway_home_runtime.rs", 3),
                 ("elastos-server/src/api/viewer_gateway.rs", 1),
             ]),
@@ -9128,6 +9128,14 @@ pub async fn production_after() {
             ]),
             "Home token context callers"
         );
+        // Gateway admission had two refusal calls. Home page/CLI launch,
+        // internal shell content open, and launch-bound reads now fence the
+        // same resolved agent principal before they use its context.
+        assert_eq!(
+            production_counts_ignoring_cfg_test("refuse_agent_principal("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 5)]),
+            "agent-principal refusal callers"
+        );
         // Blast radius of the one helper: the direct callers and the front
         // door's path through `require_gateway_launch_for`, which runs only
         // when the request is not public, not sign-in, not a terminal ticket
@@ -9155,7 +9163,67 @@ pub async fn production_after() {
         let body = &source[start..];
         let open = body.find('{').expect("the match block opens");
         let end = cfg_test_item_end(&body[open..]);
-        let arms = body[open..open + end].matches("=>").count();
-        assert_eq!(arms, 5, "gateway admission match arms");
+        let match_block = &body[open..open + end];
+        let bytes = match_block.as_bytes();
+        let (mut braces, mut parens, mut brackets, mut outer_arms) = (0, 0, 0, 0);
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    index = match_block[index..]
+                        .find('\n')
+                        .map_or(bytes.len(), |at| index + at + 1);
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    index = match_block[index..]
+                        .find("*/")
+                        .map_or(bytes.len(), |at| index + at + 2);
+                }
+                b'"' => index = string_end(match_block, index),
+                b'\'' => index = char_or_lifetime_end(bytes, index),
+                b'r' => index = raw_string_end(match_block, index).unwrap_or(index + 1),
+                b'b' if matches!(bytes.get(index + 1), Some(b'"') | Some(b'\'')) => {
+                    index = if bytes[index + 1] == b'"' {
+                        string_end(match_block, index + 1)
+                    } else {
+                        char_or_lifetime_end(bytes, index + 1)
+                    };
+                }
+                b'{' => {
+                    braces += 1;
+                    index += 1;
+                }
+                b'}' => {
+                    braces -= 1;
+                    index += 1;
+                }
+                b'(' => {
+                    parens += 1;
+                    index += 1;
+                }
+                b')' => {
+                    parens -= 1;
+                    index += 1;
+                }
+                b'[' => {
+                    brackets += 1;
+                    index += 1;
+                }
+                b']' => {
+                    brackets -= 1;
+                    index += 1;
+                }
+                b'=' if bytes.get(index + 1) == Some(&b'>') => {
+                    if braces == 1 && parens == 0 && brackets == 0 {
+                        outer_arms += 1;
+                    }
+                    index += 2;
+                }
+                _ => index += 1,
+            }
+        }
+        // Only the five arms of this match count. Nested error-response arms
+        // cannot compensate for removing an outer admission decision.
+        assert_eq!(outer_arms, 5, "gateway outer admission match arms");
     }
 }

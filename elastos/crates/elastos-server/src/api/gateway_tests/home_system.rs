@@ -7437,7 +7437,8 @@ async fn home_launch_gate_accepts_page_and_cli_then_checks_target() {
     )
     .contains("home_page_only"));
 
-    let cli = cli_home_launch_grant(dir.path());
+    let owner = passkey_authority(dir.path());
+    let cli = owner_cli_home_launch_grant(dir.path(), &owner);
     let cli_launch = app
         .oneshot(
             Request::builder()
@@ -7452,6 +7453,71 @@ async fn home_launch_gate_accepts_page_and_cli_then_checks_target() {
         .await
         .unwrap();
     assert_eq!(cli_launch.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn home_launch_refuses_agent_home_page_before_minting() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header("x-elastos-home-token", agent_home_token(dir.path()))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target":"library"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        body.as_ref(),
+        gateway_home_token::GATEWAY_AGENT_REFUSAL.as_bytes(),
+        "the response contains only the refusal, with no minted launch token"
+    );
+}
+
+#[tokio::test]
+async fn home_launch_routes_keep_cli_scope_refusal_on_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let wrong_cli = issue_home_projection_launch_token_with_context(
+        dir.path(),
+        "other-resource",
+        "home-cli",
+        &context,
+    )
+    .unwrap();
+    for (path, body) in [
+        ("/api/apps/home/launch", r#"{"target":"library"}"#),
+        ("/api/home/launch/content", r#"{"cid":"bafy-good"}"#),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(HOST, "localhost:61180")
+                    .header("x-elastos-home-token", wrong_cli.as_str())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        let wire = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(wire.as_ref(), b"home_cli_launch_grant_mismatch", "{path}");
+    }
 }
 
 #[tokio::test]
@@ -7576,7 +7642,8 @@ async fn test_home_launch_validates_shell_targets() {
         .unwrap();
     assert_eq!(other_body.as_ref(), b"home_page_only");
 
-    let cli = cli_home_launch_grant(dir.path());
+    let owner = passkey_authority(dir.path());
+    let cli = owner_cli_home_launch_grant(dir.path(), &owner);
     let cli_launch = app
         .clone()
         .oneshot(
