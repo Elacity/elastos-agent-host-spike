@@ -4486,7 +4486,10 @@ pub(crate) mod tests {
         );
 
         // The production sites that build a bridge principal or hand one to a
-        // bridge. `BridgeContext` and the two constructors are pinned above.
+        // bridge. Staged and explicit development Component CLI starts install
+        // their attached hostcall in run_cmd::configure_component_bridge;
+        // Runtime holds each admitted manifest ceiling before that call runs.
+        // `BridgeContext` and the two constructors are pinned above.
         for (needle, expected) in [
             (
                 "set_bridge_principal",
@@ -4529,6 +4532,19 @@ pub(crate) mod tests {
                 "{needle} callers"
             );
         }
+        let run = production_text(include_str!("run_cmd.rs"));
+        assert_eq!(
+            run.matches("configure_component_bridge(&runtime, &data_dir);")
+                .count(),
+            2,
+            "both staged and explicit development Component starts install the hostcall"
+        );
+        assert_eq!(
+            run.matches(".bridge_bounds_for_capsule(capsule_id)")
+                .count(),
+            1,
+            "the CLI hostcall reads the admitted instance's ceiling"
+        );
     }
 
     /// G3b (r6 §3 M-c, r5 §4; A3): the guest payload is moved whole and read
@@ -4569,13 +4585,14 @@ pub(crate) mod tests {
     /// or storage permissions itself. So a rule placed in that function (such
     /// as: a manifest with asks is bounded by them and by nothing else) holds
     /// wherever a capsule is started. This test counts callers; what the
-    /// function returns is held by its own tests. And those four are the
-    /// only production callers of that
-    /// function under `elastos/crates`: a fifth has to be added here.
+    /// function returns is held by its own tests. The three production callers
+    /// under `elastos/crates` are pinned here: a fourth has to be added here.
+    /// A staged Component reaches runtime::hold_launch_context through
+    /// start_by_bundle and start_loaded, so run_cmd fills no ceiling itself.
     ///
     /// What this cannot show: a workspace member outside `elastos/crates`
     /// (two live under `capsules/`; neither calls the function today), a call
-    /// split across lines, and a fifth file that fills a ceiling straight
+    /// split across lines, and a fourth file that fills a ceiling straight
     /// from a manifest's capability list without calling the function at all.
     #[test]
     fn every_place_that_fills_a_ceiling_asks_the_one_bounds_function() {
@@ -4591,11 +4608,6 @@ pub(crate) mod tests {
                 "manifest_capabilities: manifest.resource_authority_bounds(),",
             ),
             (
-                "run_cmd.rs",
-                include_str!("run_cmd.rs"),
-                "let manifest_capabilities = manifest.resource_authority_bounds();",
-            ),
-            (
                 "capsule_cmd.rs",
                 include_str!("capsule_cmd.rs"),
                 "let manifest_capabilities = manifest.resource_authority_bounds();",
@@ -4606,6 +4618,10 @@ pub(crate) mod tests {
             for direct in ["manifest.capabilities", "permissions.storage"] {
                 assert!(!production.contains(direct), "{file} reads {direct}");
             }
+        }
+        let run = production_text(include_str!("run_cmd.rs"));
+        for direct in ["manifest.capabilities", "permissions.storage"] {
+            assert!(!run.contains(direct), "run_cmd.rs reads {direct}");
         }
 
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -4623,7 +4639,6 @@ pub(crate) mod tests {
         callers.sort();
         let expected = [
             "elastos-server/src/capsule_cmd.rs",
-            "elastos-server/src/run_cmd.rs",
             "elastos-server/src/runtime.rs",
             "elastos-server/src/supervisor.rs",
         ]

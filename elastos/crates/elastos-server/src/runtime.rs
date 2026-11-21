@@ -920,6 +920,15 @@ impl Runtime {
         }
     }
 
+    /// The admitted ceiling held for a running capsule. An attached bridge
+    /// uses this value so a folder selector cannot supply a different manifest.
+    pub fn bridge_bounds_for_capsule(&self, id: &str) -> Option<Vec<AuthorityBound>> {
+        self.bridge_manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|bounds| bounds.get(id).cloned())
+    }
+
     /// Find a compute provider that supports the given capsule type
     fn get_provider(&self, capsule_type: &CapsuleType) -> Option<Arc<dyn ComputeProvider>> {
         self.compute_providers
@@ -1013,6 +1022,41 @@ impl Runtime {
     /// Load and run a capsule from a local directory
     pub async fn run_local(&self, path: &Path, args: Vec<String>) -> Result<CapsuleHandle> {
         self.run_local_with_principal(path, args, None).await
+    }
+
+    /// Explicit unsigned Component start for a source or CI Home. An installed
+    /// signed release never enters this mode, even if config.toml enables it.
+    pub async fn run_unsigned_development_component(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+    ) -> Result<CapsuleHandle> {
+        if !matches!(
+            *self.unsigned_capsules.read().await,
+            UnsignedCapsules::Allowed
+        ) {
+            return Err(ElastosError::InvalidManifest(
+                "--dev-unsigned-component requires a source Home with dev_mode = true; installed releases refuse it".into(),
+            ));
+        }
+        let manifest_bytes = tokio::fs::read(path.join("capsule.json"))
+            .await
+            .map_err(|error| ElastosError::InvalidManifest(error.to_string()))?;
+        let manifest: CapsuleManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| ElastosError::InvalidManifest(error.to_string()))?;
+        manifest.validate().map_err(ElastosError::InvalidManifest)?;
+        if !manifest.is_component_capsule() {
+            return Err(ElastosError::InvalidManifest(
+                "--dev-unsigned-component requires a Component manifest".into(),
+            ));
+        }
+        if manifest.signature.is_some() {
+            return Err(ElastosError::InvalidManifest(
+                "--dev-unsigned-component accepts only unsigned Components; stage a signed bundle"
+                    .into(),
+            ));
+        }
+        self.run_local(path, args).await
     }
 
     /// Load and run a capsule from a local directory with an optional runtime
@@ -3035,6 +3079,12 @@ pub(crate) mod tests {
             },
         );
 
+        assert_eq!(
+            runtime.bridge_bounds_for_capsule(&id),
+            Some(handle.manifest.resource_authority_bounds()),
+            "the attached bridge reads the active manifest ceiling"
+        );
+
         let held = ActivationContextHeld::new(&runtime, &handle, component);
         let mut filled = runtime.context_left_for_test(&id).await;
         filled.sort_unstable();
@@ -3055,6 +3105,7 @@ pub(crate) mod tests {
             Vec::<&str>::new(),
             "the one end leaves nothing"
         );
+        assert_eq!(runtime.bridge_bounds_for_capsule(&id), None);
     }
 
     /// The retention the sweeper rows give their activation. The sweeper runs
@@ -3404,6 +3455,40 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn explicit_unsigned_development_component_runs_only_in_source_home() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let folder = temp_dir.path().join("development-component");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            component_manifest_json("development-component"),
+        )
+        .unwrap();
+        std::fs::write(folder.join("app.component.wasm"), quiet_component()).unwrap();
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], false)
+            .await
+            .unwrap();
+        let error = runtime
+            .run_unsigned_development_component(&folder, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("requires a source Home"),
+            "{error}"
+        );
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        let handle = runtime
+            .run_unsigned_development_component(&folder, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(handle.manifest.name, "development-component");
+    }
+
     /// An installed Home whose config.toml still says `dev_mode = true` (the
     /// earlier default) admits only its signed release's capsules and capsules
     /// signed by the release publisher.
@@ -3451,6 +3536,14 @@ pub(crate) mod tests {
             .configure_capsule_admission(&home.data, &[], true)
             .await
             .unwrap();
+        let error = runtime
+            .run_unsigned_development_component(&local_dir, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("installed releases refuse it"),
+            "{error}"
+        );
         // The installed signed release is named as such, not as a key or dev.
         assert_eq!(
             runtime
