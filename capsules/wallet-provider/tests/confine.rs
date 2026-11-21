@@ -40,6 +40,7 @@ use sha3::Keccak256;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -691,12 +692,10 @@ fn provider_init_request(name: &str, base: &Path) -> Value {
 }
 
 /// The protocol version every model status answer names.
-#[cfg(target_os = "linux")]
 const MODEL_PROTOCOL_VERSION: &str = "elastos.model-provider/v1";
 
 /// `init` and `status` report the model provider with its one offer ready, and
 /// both name the provider protocol version.
-#[cfg(target_os = "linux")]
 fn assert_serving(data: &Value) {
     assert_eq!(data["provider"], MODEL_PROVIDER, "{data}");
     assert_eq!(data["protocol_version"], MODEL_PROTOCOL_VERSION, "{data}");
@@ -704,17 +703,14 @@ fn assert_serving(data: &Value) {
 }
 
 /// The id of the one hosted text offer the journey's `init` config names.
-#[cfg(target_os = "linux")]
 const MODEL_HOSTED_OFFER_ID: &str = "confine-hosted-text";
 
 /// The wire schema of a model run view and of one run-events page.
-#[cfg(target_os = "linux")]
 const MODEL_RUN_SCHEMA: &str = "elastos.model.run/v1";
-#[cfg(target_os = "linux")]
 const MODEL_RUN_EVENTS_SCHEMA: &str = "elastos.model.run-events/v1";
 
-/// The seven model operations the Linux journey drives after `init` and
-/// `status`, in the order it drives them.
+/// The model operations shared by the Linux filter journey and the macOS B3
+/// oracle journey after `init` and `status`, in the order they run.
 ///
 /// `offers_list`, `runs_create`, `runs_get`, `runs_events`, `runs_cancel` and
 /// `shutdown` answer `ok`, so their class is `Permitted`. The unsupported
@@ -737,13 +733,12 @@ const MODEL_LINUX_ONLY_CASES: [(&str, SuiteClass); 7] = [
 ///
 /// The binding carries a fresh `model-v1:` request id and the input hash the
 /// contract derives from the exact input, so the provider's own binding checks
-/// pass. The config names no `runtime_hosted_socket`, and hosted containment is
-/// granted on macOS only, so the provider refuses the hosted dispatch before
-/// any socket on Linux: the run is stored and answers `terminal.error`
+/// pass. The config names no `runtime_hosted_socket`, so the provider refuses
+/// hosted dispatch before any socket on both journeys: the run is stored and
+/// answers `terminal.error`
 /// `context_rejected` with `Hosted external HTTPS is paused.`, and no request
 /// needs a network.
-#[cfg(target_os = "linux")]
-fn model_linux_run_create_request() -> Value {
+fn model_run_create_request() -> Value {
     let input = json!({
         "schema": "elastos.model.input.text/v1",
         "prompt": "confined read",
@@ -776,8 +771,7 @@ fn model_linux_run_create_request() -> Value {
 /// The access binding one model read of `run_id` sends. It keeps the create
 /// binding's owner fields, which the provider compares with the stored run, and
 /// names the run the create answered.
-#[cfg(target_os = "linux")]
-fn model_linux_access_binding(create: &Value, run_id: &str) -> Value {
+fn model_access_binding(create: &Value, run_id: &str) -> Value {
     let binding = &create["runtime_binding"];
     json!({
         "schema": "elastos.model.runtime-access-binding/v1",
@@ -790,8 +784,8 @@ fn model_linux_access_binding(create: &Value, run_id: &str) -> Value {
     })
 }
 
-/// The seven model operations the Linux journey drives after `init` and
-/// `status`, using the record type and judgement of the did and wallet suites.
+/// The six model operations shared by the Linux and B3 journeys after
+/// `init` and `status`, using the record type and judgement of the other suites.
 ///
 /// It starts no provider. `offers_list` answers with the configured hosted
 /// offer. `runs_create` stores one run and asserts its typed answer: the run is
@@ -801,13 +795,9 @@ fn model_linux_access_binding(create: &Value, run_id: &str) -> Value {
 /// run back equal to the create data, `runs_events` shows the terminal page
 /// with a last `failed` event and no more pages, and `runs_cancel` on a
 /// terminal run returns the same run data. The unsupported operation asserts
-/// `unsupported_operation`, and `shutdown` is last: it answers `ok` and the
-/// child exits with status 0, which `ConfinedProvider::shutdown` asserts.
-#[cfg(target_os = "linux")]
-fn model_standin_linux_only_operations(
-    provider: &mut ConfinedProvider,
-    label: &str,
-) -> Vec<SuiteEntry> {
+/// `unsupported_operation`. The caller records `shutdown` after every suite
+/// case, so the B3 journey and the Linux journey each stop the child once.
+fn model_standin_operations(provider: &mut ConfinedProvider, label: &str) -> Vec<SuiteEntry> {
     let mut record = Vec::new();
 
     let offers = provider.send(&json!({ "op": "offers_list" }));
@@ -833,7 +823,7 @@ fn model_standin_linux_only_operations(
     );
     record.push(suite_entry("offers_list", SuiteClass::Permitted, &offers));
 
-    let create_request = model_linux_run_create_request();
+    let create_request = model_run_create_request();
     let created = provider.send(&create_request);
     assert_eq!(
         created["status"], "ok",
@@ -875,7 +865,7 @@ fn model_standin_linux_only_operations(
     );
     record.push(suite_entry("runs_create", SuiteClass::Permitted, &created));
 
-    let access = model_linux_access_binding(&create_request, &run_id);
+    let access = model_access_binding(&create_request, &run_id);
     let got = provider.send(&json!({
         "op": "runs_get", "run_id": run_id.clone(), "runtime_binding": access.clone()
     }));
@@ -950,15 +940,487 @@ fn model_standin_linux_only_operations(
     );
     record.push(suite_entry("unsupported", SuiteClass::Denied, &unsupported));
 
-    let shutdown = provider.shutdown();
-    assert_eq!(
-        shutdown["data"],
-        json!({ "shutdown": true }),
-        "{label}: shutdown must answer its one field: {shutdown}"
-    );
-    record.push(suite_entry("shutdown", SuiteClass::Permitted, &shutdown));
-
     record
+}
+
+/// The complete model cases driven on each exact B3 profile. The separate
+/// model crate also has fixture-profile tests that add metadata rules; those
+/// modified profiles are not the committed oracle used by this journey.
+const MODEL_B3_SUITE_CASES: [(&str, SuiteClass); 17] = [
+    ("init at the model root", SuiteClass::Permitted),
+    ("status", SuiteClass::Permitted),
+    (
+        "redirected journal outside STORAGE_ROOT",
+        SuiteClass::Denied,
+    ),
+    ("local offer outside STORAGE_ROOT", SuiteClass::Denied),
+    ("init after the denied cases", SuiteClass::Permitted),
+    ("runs_create for outside read", SuiteClass::Permitted),
+    ("run record outside STORAGE_ROOT", SuiteClass::Denied),
+    ("runs_get after restoring the record", SuiteClass::Permitted),
+    ("offers_list", SuiteClass::Permitted),
+    ("runs_create", SuiteClass::Permitted),
+    ("runs_get", SuiteClass::Permitted),
+    ("runs_events", SuiteClass::Permitted),
+    ("runs_cancel", SuiteClass::Permitted),
+    ("unsupported", SuiteClass::Denied),
+    ("hosted connect refused", SuiteClass::Denied),
+    ("unbound executable refused", SuiteClass::Denied),
+    ("shutdown", SuiteClass::Permitted),
+];
+
+/// The same redirected-journal denial is used by the C0 applicable-host leg
+/// and by both B3 starts. The outside directory exists before the request, so
+/// a refusal cannot be attributed to an absent parent. Like the model crate's
+/// own redirected-journal row, this starts a fresh child under the same exact
+/// profile and makes the redirected request its first `init`. No accepted
+/// model configuration can stop the request before its journal metadata
+/// inspect. The link is removed before the fresh child receives its normal
+/// recovery `init`.
+fn model_suite_start(profile: &Path, binary: &Path, base: &Path) -> ConfinedProvider {
+    let bindings = canonical_bindings(MODEL_PROVIDER, base, binary);
+    create_shared_ancestors(&bindings);
+    let paths: Vec<(&str, &Path)> = bindings
+        .iter()
+        .map(|(binding, path)| (*binding, path.as_path()))
+        .collect();
+    ConfinedProvider::start_under(profile, &paths, binary)
+}
+
+fn model_redirected_journal_denial(
+    profile: &Path,
+    binary: &Path,
+    base: &Path,
+    label: &str,
+) -> Value {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = provider_storage_root(MODEL_PROVIDER, base);
+    let outside = storage_parent(MODEL_PROVIDER, base).join("outside");
+    fs::create_dir_all(outside.join("inner"))
+        .unwrap_or_else(|err| panic!("{label}: prepare the outside journal: {err}"));
+    fs::set_permissions(outside.join("inner"), fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|err| panic!("{label}: make the outside journal owner-only: {err}"));
+    let escape = root.join("escape");
+    std::os::unix::fs::symlink(&outside, &escape)
+        .unwrap_or_else(|err| panic!("{label}: link the journal outside: {err}"));
+    let mut config = provider_init_config(MODEL_PROVIDER, base);
+    config["extra"]["journal_dir"] = json!(escape.join("inner"));
+    let mut provider = model_suite_start(profile, binary, base);
+    let denied = provider.send(&json!({
+        "op": "init", "config": config
+    }));
+    assert_eq!(
+        denied["code"], "journal_corrupt",
+        "{label}: the redirected journal must be refused at its metadata inspect: {denied}"
+    );
+    assert!(
+        !outside.join("inner").join("runs").exists(),
+        "{label}: the outside journal must stay empty"
+    );
+    fs::remove_file(&escape)
+        .unwrap_or_else(|err| panic!("{label}: remove the journal link: {err}"));
+    let recovered = provider.send(&json!({
+        "op": "init", "config": provider_init_config(MODEL_PROVIDER, base)
+    }));
+    assert_eq!(
+        recovered["status"], "ok",
+        "{label}: the restarted model must recover after the journal denial: {recovered}"
+    );
+    provider.shutdown();
+    denied
+}
+
+/// One model leg of the shared B3 record. It drives the model's normal
+/// operations and its exact-profile denials on the already started provider.
+/// The same function receives the generated-profile and oracle launches, so
+/// the common B3 comparator judges every named case and its answer.
+fn model_standin_suite(
+    provider: &mut ConfinedProvider,
+    base: &Path,
+    label: &str,
+    profile: &Path,
+    binary: &Path,
+) -> Vec<SuiteEntry> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut record = Vec::new();
+    let init = provider.send(&json!({
+        "op": "init", "config": provider_init_config(MODEL_PROVIDER, base)
+    }));
+    assert_eq!(
+        init["status"], "ok",
+        "{label}: model init must answer: {init}"
+    );
+    assert_serving(&init["data"]);
+    assert!(
+        provider_storage_root(MODEL_PROVIDER, base)
+            .join("runs")
+            .is_dir(),
+        "{label}: init must create the model run directory"
+    );
+    record.push(suite_entry(
+        "init at the model root",
+        SuiteClass::Permitted,
+        &init,
+    ));
+
+    let status = provider.send(&json!({ "op": "status" }));
+    assert_eq!(
+        status["data"], init["data"],
+        "{label}: status must report init"
+    );
+    record.push(suite_entry("status", SuiteClass::Permitted, &status));
+
+    let denied = model_redirected_journal_denial(profile, binary, base, label);
+    record.push(suite_entry(
+        "redirected journal outside STORAGE_ROOT",
+        SuiteClass::Denied,
+        &denied,
+    ));
+
+    // These files are valid local-offer inputs under the base, outside the
+    // model storage root. The profile refuses the base-path read first.
+    let engine = base.join("bin").join("fake-llama-server");
+    let model = base.join("models").join("fake.gguf");
+    fs::create_dir_all(engine.parent().expect("engine parent")).expect("engine directory");
+    fs::create_dir_all(model.parent().expect("model parent")).expect("model directory");
+    let engine_bytes = b"#!/bin/sh\nexit 0\n";
+    let model_bytes = b"model fixture\n";
+    fs::write(&engine, engine_bytes).expect("engine fixture");
+    fs::write(&model, model_bytes).expect("model fixture");
+    fs::set_permissions(&engine, fs::Permissions::from_mode(0o700))
+        .expect("the engine fixture must be owner-executable");
+    fs::set_permissions(&model, fs::Permissions::from_mode(0o600))
+        .expect("the model fixture must be owner-readable");
+    let mut config = provider_init_config(MODEL_PROVIDER, base);
+    config["extra"]["offers"] = json!([{
+        "id": "confine-local-text",
+        "title": "Confined Local Text",
+        "operation": "text.generate",
+        "input_modalities": ["text/plain"],
+        "output_modalities": ["text/plain"],
+        "policy": {
+            "concurrency_limit": 1, "input_bytes_limit": 8192,
+            "inline_output_bytes_limit": 8192, "event_bytes_limit": 8192,
+            "runtime_ms_limit": 30000, "retention_secs": 60,
+            "cancel_settlement_timeout_ms": 20
+        },
+        "adapter": {
+            "kind": "local_llama_cpp_text",
+            "engine": {
+                "path": engine,
+                "sha256": format!("sha256:{}", hex::encode(Sha256::digest(engine_bytes)))
+            },
+            "model": {
+                "path": model,
+                "sha256": format!("sha256:{}", hex::encode(Sha256::digest(model_bytes)))
+            },
+            "settings": {
+                "context_size": 256, "parallel": 1, "threads": 1,
+                "batch_threads": 1, "gpu_layers": 0,
+                "health_timeout_ms": 10000, "shutdown_timeout_ms": 250,
+                "enable_thinking": false
+            }
+        },
+        "enabled": true
+    }]);
+    let mut unconfined = ConfinedProvider::spawn(Command::new(binary));
+    let accepted = unconfined.send(&json!({ "op": "init", "config": config.clone() }));
+    assert_eq!(
+        accepted["status"], "ok",
+        "{label}: the valid local offer must pass without confinement: {accepted}"
+    );
+    assert_serving(&accepted["data"]);
+    unconfined.shutdown();
+
+    let mut local_provider = model_suite_start(profile, binary, base);
+    let denied = local_provider.send(&json!({ "op": "init", "config": config }));
+    assert_eq!(
+        denied["code"], "internal_error",
+        "{label}: the local offer outside the storage root must fail closed: {denied}"
+    );
+    record.push(suite_entry(
+        "local offer outside STORAGE_ROOT",
+        SuiteClass::Denied,
+        &denied,
+    ));
+
+    let recovered = local_provider.send(&json!({
+        "op": "init", "config": provider_init_config(MODEL_PROVIDER, base)
+    }));
+    assert_eq!(
+        recovered["status"], "ok",
+        "{label}: model init must recover: {recovered}"
+    );
+    record.push(suite_entry(
+        "init after the denied cases",
+        SuiteClass::Permitted,
+        &recovered,
+    ));
+    local_provider.shutdown();
+    assert!(
+        local_provider
+            .stderr()
+            .contains("invalid model provider init config: base_path is unavailable"),
+        "{label}: the confined local offer must stop where Seatbelt refuses base_path: {}",
+        local_provider.stderr()
+    );
+
+    record.extend(model_outside_run_read_entries(provider, base, label));
+    record.extend(model_standin_operations(provider, label));
+    record.push(model_hosted_connect_denial(profile, binary, base, label));
+    record
+}
+
+/// Store one real run, move its record outside the bound root, and keep its
+/// in-root pathname through a link. The exact profile must refuse that read;
+/// restoring the record must let the same request succeed. Both the B3 suite
+/// and the C0 journey send this action to the child their launcher returned.
+fn model_outside_run_read_entries(
+    provider: &mut ConfinedProvider,
+    base: &Path,
+    label: &str,
+) -> [SuiteEntry; 3] {
+    let mut create_request = model_run_create_request();
+    let request_id = create_request["runtime_binding"]["request_id"]
+        .as_str()
+        .expect("model request id")
+        .to_string();
+    create_request["runtime_binding"]["request_id"] = json!(format!("{request_id}-outside"));
+    let created = provider.send(&create_request);
+    assert_eq!(
+        created["status"], "ok",
+        "{label}: store the outside-read run: {created}"
+    );
+    let create_entry = suite_entry(
+        "runs_create for outside read",
+        SuiteClass::Permitted,
+        &created,
+    );
+    let run_id = created["data"]["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: the created run must name its id: {created}"));
+    let access = model_access_binding(&create_request, run_id);
+    let get = json!({ "op": "runs_get", "run_id": run_id, "runtime_binding": access });
+    let root_runs = provider_storage_root(MODEL_PROVIDER, base).join("runs");
+    assert_eq!(
+        fs::read_dir(&root_runs)
+            .expect("model runs directory")
+            .count(),
+        1,
+        "{label}: one stored run must leave one record"
+    );
+    let outside = storage_parent(MODEL_PROVIDER, base).join("outside");
+    fs::create_dir_all(&outside)
+        .unwrap_or_else(|err| panic!("{label}: prepare the outside run directory: {err}"));
+    let outside_runs = outside.join("runs");
+    fs::rename(&root_runs, &outside_runs)
+        .unwrap_or_else(|err| panic!("{label}: move the run outside: {err}"));
+    std::os::unix::fs::symlink(&outside_runs, &root_runs)
+        .unwrap_or_else(|err| panic!("{label}: link the run directory: {err}"));
+    let denied = provider.send(&get);
+    assert_eq!(
+        denied["code"], "journal_corrupt",
+        "{label}: the outside run record must be refused: {denied}"
+    );
+    let denied_entry = suite_entry(
+        "run record outside STORAGE_ROOT",
+        SuiteClass::Denied,
+        &denied,
+    );
+    fs::remove_file(&root_runs)
+        .unwrap_or_else(|err| panic!("{label}: remove the run directory link: {err}"));
+    fs::rename(&outside_runs, &root_runs)
+        .unwrap_or_else(|err| panic!("{label}: restore the run record: {err}"));
+    let restored = provider.send(&get);
+    assert_eq!(
+        restored["data"], created["data"],
+        "{label}: the restored record must read back: {restored}"
+    );
+    let restored_entry = suite_entry(
+        "runs_get after restoring the record",
+        SuiteClass::Permitted,
+        &restored,
+    );
+    [create_entry, denied_entry, restored_entry]
+}
+
+/// With a Runtime socket named in the real init config, Seatbelt must refuse
+/// the hosted connect. This is the exact-profile case in the model crate's
+/// `generated_profile_denies_the_hosted_connect`: the run settles with its
+/// transport refusal and the listening socket receives no connection.
+fn model_hosted_connect_denial(
+    profile: &Path,
+    binary: &Path,
+    base: &Path,
+    label: &str,
+) -> SuiteEntry {
+    let socket_dir = tempfile::tempdir_in(resolved(Path::new("/tmp")))
+        .expect("temporary hosted socket directory");
+    let socket_path = socket_dir.path().join("hosted.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind the Runtime socket stand-in");
+    listener
+        .set_nonblocking(true)
+        .expect("observe the Runtime socket without waiting");
+    let mut config = provider_init_config(MODEL_PROVIDER, base);
+    config["extra"]["runtime_hosted_socket"] = json!(socket_path);
+    let mut provider = model_suite_start(profile, binary, base);
+    let init = provider.send(&json!({ "op": "init", "config": config }));
+    assert_eq!(
+        init["status"], "ok",
+        "{label}: hosted init must answer: {init}"
+    );
+
+    let mut create = model_run_create_request();
+    let request_id = create["runtime_binding"]["request_id"]
+        .as_str()
+        .expect("model request id")
+        .to_string();
+    create["runtime_binding"]["request_id"] = json!(format!("{request_id}-hosted-connect"));
+    let created = provider.send(&create);
+    assert_eq!(
+        created["status"], "ok",
+        "{label}: the hosted run must be stored: {created}"
+    );
+    let run_id = created["data"]["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{label}: the hosted run must have an id: {created}"));
+    let get = json!({
+        "op": "runs_get",
+        "run_id": run_id,
+        "runtime_binding": model_access_binding(&create, run_id),
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let settled = loop {
+        let answer = provider.send(&get);
+        assert_eq!(answer["status"], "ok", "{label}: hosted read: {answer}");
+        let run = &answer["data"];
+        if run["terminal"].is_object() {
+            break run.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{label}: the refused hosted run must settle: {run}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        settled["status"], "failed",
+        "{label}: the hosted connect must fail: {settled}"
+    );
+    assert_eq!(
+        settled["terminal"]["error"],
+        json!({
+            "class": "transport_interrupted",
+            "code": "transport_interrupted",
+            "message": "model backend transport was interrupted",
+        }),
+        "{label}: the profile must refuse the hosted connect: {settled}"
+    );
+    match listener.accept() {
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("{label}: the Runtime socket must receive no connection: {other:?}"),
+    }
+    let offers = provider.send(&json!({ "op": "offers_list" }));
+    assert_eq!(
+        offers["status"], "ok",
+        "{label}: the provider must serve after the denied connect: {offers}"
+    );
+    let entry = suite_entry(
+        "hosted connect refused",
+        SuiteClass::Denied,
+        &json!({
+            "status": "error",
+            "code": settled["terminal"]["error"]["code"],
+            "message": settled["terminal"]["error"]["message"],
+        }),
+    );
+    provider.shutdown();
+    entry
+}
+
+/// Start a byte-identical copy from STORAGE_ROOT while the exact profile binds
+/// the original executable. Seatbelt must refuse that exec with exit 71 and
+/// the EPERM execvp line, as in the model crate's exact-oracle copy case.
+fn model_unbound_exec_denial(profile: &Path, binary: &Path, label: &str) -> SuiteEntry {
+    let fixture = tempfile::tempdir().expect("temporary model copy root");
+    let base = resolved(fixture.path());
+    let canonical = canonical_bindings(MODEL_PROVIDER, &base, binary);
+    create_shared_ancestors(&canonical);
+    let root = provider_storage_root(MODEL_PROVIDER, &base);
+    fs::create_dir_all(&root).expect("prepare the model storage root");
+    let copy = root.join(binary.file_name().expect("the provider executable name"));
+    fs::copy(binary, &copy).expect("copy the model executable under STORAGE_ROOT");
+    assert_eq!(
+        fs::read(&copy).expect("read the copied executable"),
+        fs::read(binary).expect("read the bound executable"),
+        "{label}: the unbound executable must be byte-identical"
+    );
+    let before = fs::read(&copy).expect("snapshot the copied executable");
+    let bindings: Vec<(&str, &Path)> = canonical
+        .iter()
+        .map(|(name, path)| (*name, path.as_path()))
+        .collect();
+    let mut refused = ConfinedProvider::start_under(profile, &bindings, &copy);
+    let exit = refused.wait_for_exit();
+    assert_eq!(
+        exit.code(),
+        Some(71),
+        "{label}: Seatbelt must refuse the unbound exec: {exit}"
+    );
+    let init = json!({
+        "op": "init", "config": provider_init_config(MODEL_PROVIDER, &base)
+    });
+    refused
+        .try_send(&init)
+        .expect_err("the unbound copy must not answer init");
+    let copy_text = copy.display().to_string();
+    let execs: Vec<&str> = refused
+        .stderr()
+        .lines()
+        .filter(|line| line.contains("execvp()"))
+        .collect();
+    let refused_exec = execs
+        .iter()
+        .find(|line| line.contains(&copy_text) && line.contains("Operation not permitted"))
+        .unwrap_or_else(|| panic!("{label}: sandbox-exec must log the copy's EPERM: {execs:?}"));
+    let entries: Vec<PathBuf> = fs::read_dir(&root)
+        .expect("list the model storage root")
+        .map(|entry| entry.expect("model storage entry").path())
+        .collect();
+    assert_eq!(
+        entries,
+        std::slice::from_ref(&copy),
+        "{label}: the copy must stay alone"
+    );
+    assert_eq!(
+        fs::read(&copy).expect("read the refused copy"),
+        before,
+        "{label}: the refused launch must keep the copy's bytes"
+    );
+    suite_entry(
+        "unbound executable refused",
+        SuiteClass::Denied,
+        &json!({
+            "status": "error",
+            "code": format!("sandbox_exec_exit_{}", exit.code().expect("exit 71")),
+            "message": refused_exec,
+        }),
+    )
+}
+
+/// The one shutdown record every B3 provider receives after its suite cases.
+fn b3_shutdown_entry(provider: &mut ConfinedProvider, name: &str, label: &str) -> SuiteEntry {
+    let shutdown = provider.shutdown();
+    if name == MODEL_PROVIDER {
+        assert_eq!(
+            shutdown["data"],
+            json!({ "shutdown": true }),
+            "{label}: shutdown must answer its one field: {shutdown}"
+        );
+    }
+    suite_entry("shutdown", SuiteClass::Permitted, &shutdown)
 }
 
 /// The test creates the directory `STORAGE_PARENT` names before the launch,
@@ -5117,6 +5579,30 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
                 "the provider must stay in service: {after}"
             );
         }
+        MODEL_PROVIDER => {
+            let model_root = provider_storage_root(MODEL_PROVIDER, &base);
+            assert!(
+                model_root.join("runs").is_dir(),
+                "init must have created the model run directory: {}",
+                model_root.display()
+            );
+            let status = started.send(&json!({ "op": "status" }));
+            assert_eq!(
+                status["status"], "ok",
+                "the model must answer status: {status}"
+            );
+            assert_serving(&status["data"]);
+            let record = model_outside_run_read_entries(&mut started, &base, "model C0 journey");
+            assert_suite_outcomes(
+                "model C0 journey started child",
+                &record,
+                &[
+                    ("runs_create for outside read", SuiteClass::Permitted),
+                    ("run record outside STORAGE_ROOT", SuiteClass::Denied),
+                    ("runs_get after restoring the record", SuiteClass::Permitted),
+                ],
+            );
+        }
         other => panic!("the journey names no provider whose leg it knows: {other}"),
     }
 
@@ -5131,7 +5617,7 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
     started.shutdown();
 }
 
-/// M1 check C0, one end-to-end journey: did first, then wallet, each starts
+/// M1 check C0, one end-to-end journey: did, wallet and model each start
 /// confined through the lab stand-in on macOS, or the stand-in refuses the
 /// host with its own reason and starts no provider.
 ///
@@ -5145,7 +5631,8 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
 /// refused whatever its OS. Every refused case returns no provider, writes no
 /// profile and creates no storage root. The did
 /// binary comes from `provider_binary(DID_PROVIDER)`; the wallet binary comes from
-/// `CARGO_BIN_EXE_wallet-provider`. Linux stays a design plus a simulated
+/// `CARGO_BIN_EXE_wallet-provider`; model's comes from
+/// `provider_binary(MODEL_PROVIDER)`. Linux stays a design plus a simulated
 /// refusal: nothing here probes a real kernel or claims Linux enforcement. The
 /// stand-in is test code and not the Runtime.
 ///
@@ -5172,7 +5659,18 @@ fn standin_confined_journey(name: &str, provider: &Path, declared: &Value) {
 /// prefix from the final `Err`, so did's first host row, plan9, lacks it.
 #[test]
 fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
-    let providers: [(&str, &Path, Value); 2] = [
+    // Keep a model host refusal visible even when this runner cannot apply
+    // sandbox-exec for the applicable-host legs below.
+    let model_host_refusal = standin_host_refusal(
+        MODEL_PROVIDER,
+        StandinHost::reporting("plan9"),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
+    );
+    assert!(
+        model_host_refusal.is_err(),
+        "model-provider C0 journey: a host without a confinement design must refuse startup"
+    );
+    let providers: [(&str, &Path, Value); 3] = [
         (
             DID_PROVIDER,
             provider_binary(DID_PROVIDER),
@@ -5183,6 +5681,12 @@ fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
             WALLET_PROVIDER,
             Path::new(PROVIDER_BINARY),
             read_declared_rights(WALLET_PROVIDER, &declared_rights_path(WALLET_PROVIDER))
+                .unwrap_or_else(|err| panic!("{err}")),
+        ),
+        (
+            MODEL_PROVIDER,
+            provider_binary(MODEL_PROVIDER),
+            read_declared_rights(MODEL_PROVIDER, &declared_rights_path(MODEL_PROVIDER))
                 .unwrap_or_else(|err| panic!("{err}")),
         ),
     ];
@@ -5228,8 +5732,9 @@ struct SuiteEntry {
 /// names and classes to equal this list, so a case that drops out or changes
 /// class fails with the case named. `outside_write_cases` holds the four
 /// outside bases and their names, and this list repeats those names as the
-/// expectation each record is checked against.
-const SUITE_CASES: [(&str, SuiteClass); 9] = [
+/// expectation each record is checked against. The shared B3 journey records
+/// the final shutdown after the wallet suite.
+const SUITE_CASES: [(&str, SuiteClass); 10] = [
     ("init at the wallet root", SuiteClass::Permitted),
     ("status", SuiteClass::Permitted),
     ("create_managed_account", SuiteClass::Permitted),
@@ -5239,6 +5744,7 @@ const SUITE_CASES: [(&str, SuiteClass); 9] = [
     (FRESH_OUTSIDE_CASE, SuiteClass::Denied),
     ("planted key beneath STORAGE_PARENT", SuiteClass::Denied),
     ("status after the denied cases", SuiteClass::Permitted),
+    ("shutdown", SuiteClass::Permitted),
 ];
 
 /// The did suite's cases in the order the suite runs them, with the class each
@@ -5248,12 +5754,12 @@ const SUITE_CASES: [(&str, SuiteClass); 9] = [
 /// and the sibling of `did/` under the same base; the planted read is the read
 /// half of `planted_file_beneath_storage_parent_is_neither_read_nor_written`;
 /// and the final `get_did` is the service check both tests make after a
-/// refusal.
+/// refusal. The shared B3 journey records one shutdown after this suite.
 ///
 /// The permitted cases come first, as `DID_PERMITTED_CASES` says, so a caller
 /// that runs only them judges its record against the same leading entries
 /// instead of a second case list.
-const DID_SUITE_CASES: [(&str, SuiteClass); 10] = [
+const DID_SUITE_CASES: [(&str, SuiteClass); 11] = [
     // `confined_provider_serves_did_operations_under_its_root` (did's
     // tests/confine.rs:407) runs these six operations.
     ("init at the did root", SuiteClass::Permitted),
@@ -5284,6 +5790,7 @@ const DID_SUITE_CASES: [(&str, SuiteClass); 10] = [
     ),
     // The service check that both tests make after a refusal.
     ("get_did after the denied cases", SuiteClass::Permitted),
+    ("shutdown", SuiteClass::Permitted),
 ];
 
 /// How many leading entries of `DID_SUITE_CASES` are the permitted operations,
@@ -6709,10 +7216,30 @@ fn assert_standin_matches_oracle(
 /// One provider's place in the B3 journey: the name the stand-in serves, the
 /// binary it starts, the one suite that drives that provider, and the cases
 /// that suite must record.
+fn wallet_b3_suite(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+    _: &Path,
+    _: &Path,
+) -> Vec<SuiteEntry> {
+    wallet_standin_suite(provider, root, label)
+}
+
+fn did_b3_suite(
+    provider: &mut ConfinedProvider,
+    root: &Path,
+    label: &str,
+    _: &Path,
+    _: &Path,
+) -> Vec<SuiteEntry> {
+    did_standin_suite(provider, root, label)
+}
+
 struct B3Provider {
     name: &'static str,
     binary: &'static Path,
-    suite: fn(&mut ConfinedProvider, &Path, &str) -> Vec<SuiteEntry>,
+    suite: fn(&mut ConfinedProvider, &Path, &str, &Path, &Path) -> Vec<SuiteEntry>,
     cases: &'static [(&'static str, SuiteClass)],
 }
 
@@ -6782,16 +7309,45 @@ fn standin_b3_journey(provider: &B3Provider) {
     });
 
     let standin_label = format!("{name} B3 journey (the stand-in start)");
-    let standin_record = (provider.suite)(&mut standin, &standin_root, &standin_label);
+    let standin_profile = profile_dir.join(format!("{name}-standin.sb"));
+    let mut standin_record = (provider.suite)(
+        &mut standin,
+        &standin_root,
+        &standin_label,
+        &standin_profile,
+        provider.binary,
+    );
 
     let oracle_fixture = tempfile::tempdir().expect("temporary provider root");
     let oracle_root = resolved(oracle_fixture.path());
     let mut oracle = standin_oracle_start(name, provider.binary, &oracle_root);
     let oracle_label = format!("{name} B3 journey (the start under the committed confine.sb)");
-    let oracle_record = (provider.suite)(&mut oracle, &oracle_root, &oracle_label);
+    let oracle_profile = confine_oracle_path(name);
+    let mut oracle_record = (provider.suite)(
+        &mut oracle,
+        &oracle_root,
+        &oracle_label,
+        &oracle_profile,
+        provider.binary,
+    );
 
-    standin.shutdown();
-    oracle.shutdown();
+    if name == MODEL_PROVIDER {
+        // This startup denial needs a separate child for each exact profile:
+        // the copy never starts, so it cannot run inside the service suite.
+        standin_record.push(model_unbound_exec_denial(
+            &standin_profile,
+            provider.binary,
+            &standin_label,
+        ));
+        oracle_record.push(model_unbound_exec_denial(
+            &confine_oracle_path(name),
+            provider.binary,
+            &oracle_label,
+        ));
+    }
+
+    standin_record.push(b3_shutdown_entry(&mut standin, name, &standin_label));
+    oracle_record.push(b3_shutdown_entry(&mut oracle, name, &oracle_label));
 
     assert_suite_outcomes(
         &format!("{name}'s committed confine.sb"),
@@ -6806,8 +7362,8 @@ fn standin_b3_journey(provider: &B3Provider) {
     assert_standin_matches_oracle(name, &oracle_record, &standin_record);
 }
 
-/// M1 check B3, one end-to-end journey for each file profile: did first, then
-/// wallet. Each provider starts from its committed declared-rights file
+/// M1 check B3, one end-to-end journey for each file profile: did, wallet and
+/// model. Each provider starts from its committed declared-rights file
 /// through the lab stand-in into a fresh profile directory, and the one file
 /// the stand-in wrote there is the file the launch used. That file must pass
 /// the two contract checks and equal the provider's committed `confine.sb`
@@ -6824,7 +7380,7 @@ fn standin_b3_journey(provider: &B3Provider) {
 /// the provider's storage root; the widened grant permits did's sibling write
 /// beneath the base, so did's suite step fails at the sibling write where the
 /// record must refuse it. WP121 removes the planted-key push, so wallet's
-/// stand-in record holds eight entries where `SUITE_CASES` holds nine and the
+/// stand-in record holds nine entries where `SUITE_CASES` holds ten and the
 /// journey fails naming the missing case. WP124 makes the stand-in use wallet's
 /// root layout for did, so did's start is refused at its first `init`. WP127
 /// appends a write grant on `STORAGE_PARENT` to did's launched profile, so the
@@ -6843,6 +7399,18 @@ fn standin_b3_journey(provider: &B3Provider) {
 /// its oracle disagree panic, which names the planted form.
 #[test]
 fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
+    // The profile comparison is useful on hosts that cannot run Seatbelt too.
+    // The launched-file and suite checks below still require sandbox-exec.
+    let model_declared =
+        read_declared_rights(MODEL_PROVIDER, &declared_rights_path(MODEL_PROVIDER))
+            .unwrap_or_else(|err| panic!("model-provider B3 journey: {err}"));
+    let model_generated = generate_profile(MODEL_PROVIDER, &model_declared)
+        .unwrap_or_else(|err| panic!("model-provider B3 journey: {err}"));
+    let model_committed =
+        read_allow_rule_profile(MODEL_PROVIDER, &confine_oracle_path(MODEL_PROVIDER))
+            .unwrap_or_else(|err| panic!("model-provider B3 journey: {err}"));
+    compare_profile_to_its_oracle(MODEL_PROVIDER, &model_generated, &model_committed)
+        .unwrap_or_else(|err| panic!("model-provider B3 journey: {err}"));
     if !sandbox_available(std::env::consts::OS, Path::new(SANDBOX_EXEC)) {
         return;
     }
@@ -6850,14 +7418,20 @@ fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
         B3Provider {
             name: DID_PROVIDER,
             binary: provider_binary(DID_PROVIDER),
-            suite: did_standin_suite,
+            suite: did_b3_suite,
             cases: &DID_SUITE_CASES,
         },
         B3Provider {
             name: WALLET_PROVIDER,
             binary: Path::new(PROVIDER_BINARY),
-            suite: wallet_standin_suite,
+            suite: wallet_b3_suite,
             cases: &SUITE_CASES,
+        },
+        B3Provider {
+            name: MODEL_PROVIDER,
+            binary: provider_binary(MODEL_PROVIDER),
+            suite: model_standin_suite,
+            cases: &MODEL_B3_SUITE_CASES,
         },
     ];
     for provider in &providers {
@@ -15467,9 +16041,10 @@ fn seccomp_confined_journey(name: &str, binary: &Path, declared: &Value, test_na
                 status["data"], init["data"],
                 "status must answer exactly what init did: {status} against {init}"
             );
-            // The seven remaining model operations, `shutdown` last, so this
-            // caller answers all nine under the filter.
-            let linux_only = model_standin_linux_only_operations(&mut provider, &label);
+            // The model operations and one shutdown answer all nine calls
+            // under the filter, with the child stopped exactly once.
+            let mut linux_only = model_standin_operations(&mut provider, &label);
+            linux_only.push(b3_shutdown_entry(&mut provider, MODEL_PROVIDER, &label));
             assert_suite_outcomes(&label, &linux_only, &MODEL_LINUX_ONLY_CASES);
             None
         }

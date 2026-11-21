@@ -109,7 +109,7 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::fs;
 use std::path::{Path, PathBuf};
-use wasm_capsule_tools::verify::{verify_bundle, DeclaredImport};
+use wasm_capsule_tools::verify::verify_bundle;
 use wasm_capsule_tools::CAPSULE_MANIFEST;
 
 /// The eight bytes `00 61 73 6d 01 00 00 00`.
@@ -153,10 +153,6 @@ fn sign(dir: &Path) -> NameSignature {
     sign_bundle(&key, dir).unwrap_or_else(|refusal| panic!("sign_bundle refused: {refusal}"))
 }
 
-fn no_grants() -> &'static [DeclaredImport] {
-    &[]
-}
-
 fn assert_names_differ(text: &str) {
     assert!(
         text.contains("bundle bytes name "),
@@ -180,8 +176,7 @@ fn swapped_module_is_refused() {
     let bundle = prepare();
     let signature = sign(bundle.path());
     let accepted = [signature.signer_did.clone()];
-    let granted = no_grants();
-    let verified = verify_bundle(bundle.path(), Some(&signature), &accepted, granted)
+    let verified = verify_bundle(bundle.path(), Some(&signature), &accepted)
         .unwrap_or_else(|refusal| panic!("the signed bundle was refused: {refusal}"));
     assert_eq!(verified.entrypoint().content.as_slice(), MODULE);
 
@@ -190,7 +185,7 @@ fn swapped_module_is_refused() {
         fs::read(bundle.path().join("capsule.wasm")).expect("read capsule.wasm"),
         SWAPPED
     );
-    match verify_bundle(bundle.path(), Some(&signature), &accepted, granted) {
+    match verify_bundle(bundle.path(), Some(&signature), &accepted) {
         Ok(_) => panic!("accepted swap: verify_bundle returned Ok"),
         Err(refusal) => {
             let text = refusal.to_string();
@@ -282,6 +277,12 @@ def cargo_env(root):
     env["RUST_TEST_THREADS"] = "2"
     env["RUST_BACKTRACE"] = "0"
     env["REDTEAM_BUNDLE_DIR"] = str(root / "bundle")
+    # The temp copy is built to observe behaviour (is the swapped module refused?),
+    # not to lint it. CI exports RUSTFLAGS=-D warnings, and the planted copy has
+    # an unused import and variable by construction, so the build failed before the
+    # test could report "accepted swap:". Lints on the real crate run in CI clippy.
+    env.pop("RUSTFLAGS", None)
+    env.pop("CARGO_ENCODED_RUSTFLAGS", None)
     return env
 
 
@@ -400,12 +401,11 @@ def write_accept_finding():
                 "2. Sign that directory with SigningKey::generate and OsRng. "
                 "The key and the signature stay in memory.",
                 "3. verify_bundle of that directory, with that signature and a "
-                "one-element accepted list of the signer's did:key, and with "
-                "granted imports empty, returns Ok. entrypoint() bytes are those eight.",
+                "one-element accepted list of the signer's did:key, returns Ok. "
+                "entrypoint() bytes are those eight.",
                 "4. Replace capsule.wasm with "
                 "00 61 73 6d 01 00 00 00 00 04 01 6e 68 69.",
-                "5. verify_bundle with the original signature, the same accepted "
-                "list, and empty grants.",
+                "5. verify_bundle with the original signature and the same accepted list.",
                 "",
                 "observed: Ok",
                 "",
@@ -428,6 +428,7 @@ class WasmVerifySwapProbe(unittest.TestCase):
         cls.root = None
         cls.source = None
         cls._hold = None
+        cls._baseline_status = git("status", "--porcelain", "--", *REAL_TREES)
         if cls.skip_reason:
             report_skip(cls.skip_reason)
 
@@ -456,7 +457,7 @@ class WasmVerifySwapProbe(unittest.TestCase):
 
     def assert_trees_clean(self):
         status = git("status", "--porcelain", "--", *REAL_TREES)
-        self.assertEqual(status, "", status)
+        self.assertEqual(status, type(self)._baseline_status, status)
 
     def assert_copy_is_pinned(self, source):
         """The temp verify.rs bytes equal the live file."""
@@ -663,8 +664,8 @@ class WasmVerifySwapProbe(unittest.TestCase):
             self.assertEqual(
                 lines[5],
                 "3. verify_bundle of that directory, with that signature and a "
-                "one-element accepted list of the signer's did:key, and with "
-                "granted imports empty, returns Ok. entrypoint() bytes are those eight.",
+                "one-element accepted list of the signer's did:key, returns Ok. "
+                "entrypoint() bytes are those eight.",
             )
             self.assertEqual(
                 lines[6],
@@ -673,8 +674,7 @@ class WasmVerifySwapProbe(unittest.TestCase):
             )
             self.assertEqual(
                 lines[7],
-                "5. verify_bundle with the original signature, the same accepted "
-                "list, and empty grants.",
+                "5. verify_bundle with the original signature and the same accepted list.",
             )
             self.assertEqual(lines[8], "")
             self.assertEqual(lines[9], "observed: Ok")
