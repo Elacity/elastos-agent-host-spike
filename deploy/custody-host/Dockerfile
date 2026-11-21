@@ -40,8 +40,10 @@ ARG TARGETARCH
 # unreleased "" placeholders components.json ships with. It never reaches
 # the runtime stage. curl fetches the pinned kubo release tarball below
 # (also build-time only; the runtime stage gets just the extracted binary).
+# python3 + openssl sign this image's harness release (see the signing step
+# after the components.json stamp); neither reaches the runtime stage.
 RUN apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends jq curl \
+    && apt-get install -y -qq --no-install-recommends jq curl python3 openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Keep this verified input layer before source-dependent builds, so the
@@ -233,6 +235,22 @@ jq \
     ' /src/components.json > "${data_root}/components.json"
 chmod 0600 "${data_root}/components.json"
 chmod 0700 "${data_root}"
+
+# A real custody host installs from a publisher's signed release, and every
+# installed component start (custody provisioning included) verifies that
+# release first. This source-built image plays the publisher: a throwaway key,
+# made and deleted inside this step, signs one release binding the exact
+# stripped `elastos` binary and stamped components.json above, and is pinned
+# as the default trusted source. Must run last: it signs these final bytes.
+case "${TARGETARCH}" in
+    amd64) release_platform="x86_64-linux" ;;
+    arm64) release_platform="aarch64-linux" ;;
+    *) echo "FAIL: unsupported TARGETARCH=${TARGETARCH} for the harness release" >&2; exit 1 ;;
+esac
+runtime_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' /src/elastos/Cargo.toml | head -n 1)"
+[ -n "${runtime_version}" ] || { echo "FAIL: no workspace version in /src/elastos/Cargo.toml" >&2; exit 1; }
+python3 -I /src/deploy/custody-host/sign-harness-release.py \
+    --data-root "${data_root}" --platform "${release_platform}" --version "${runtime_version}"
 EOF
 
 # Runtime stage: no Rust toolchain, no source tree, no target dirs, and no
@@ -285,6 +303,10 @@ ENV HOME=/home/custody \
 # and then never reaches it again across an image upgrade.
 COPY --from=builder --chown=custody:custody /home/custody/.local/share/elastos/bin /opt/elastos-image/bin
 COPY --from=builder --chown=custody:custody /home/custody/.local/share/elastos/components.json /opt/elastos-image/components.json
+# The harness release's public signed inputs (no key): see the builder stage.
+COPY --from=builder --chown=custody:custody /home/custody/.local/share/elastos/sources.json /opt/elastos-image/sources.json
+COPY --from=builder --chown=custody:custody /home/custody/.local/share/elastos/ElastOS/SystemServices/Publisher/release-head.json /opt/elastos-image/release-head.json
+COPY --from=builder --chown=custody:custody /home/custody/.local/share/elastos/ElastOS/SystemServices/Publisher/release.json /opt/elastos-image/release.json
 # The data root itself ships empty (just the directory, owner-only, no
 # content) -- entrypoint.sh's sync step populates bin/+components.json into
 # it on first boot exactly as it does on every later mismatch. Created here
