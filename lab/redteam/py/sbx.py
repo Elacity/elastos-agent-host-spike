@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,6 +49,7 @@ WALLET_CONFINE_SB = REPO_ROOT / "capsules" / "wallet-provider" / "confine.sb"
 # (error "...") form. A blocked exec, and a sandbox_apply refused inside an
 # outer sandbox, exit 71 instead, so this code never stands for a deny.
 PROFILE_ERROR_EXIT = 65
+SANDBOX_APPLY_REFUSAL = "sandbox-exec: sandbox_apply: Operation not permitted"
 
 
 def sandbox_exec_available() -> bool:
@@ -100,6 +102,25 @@ def profile_error(result) -> str | None:
             f"program, so nothing was denied")
 
 
+def outer_sandbox_reason(result) -> str | None:
+    """Skip only when a separate permissive stock launch has the same refusal.
+
+    A profile-specific launch failure remains a harness error if the canary
+    runs. The canary uses no provider profile or test fixture.
+    """
+    if (result.exit_code != 71 or result.stdout or
+            result.stderr.strip() != SANDBOX_APPLY_REFUSAL):
+        return None
+    canary = subprocess.run(
+        [SANDBOX_EXEC, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if (canary.returncode == 71 and not canary.stdout and
+            canary.stderr.strip() == SANDBOX_APPLY_REFUSAL):
+        return "outer sandbox prevents sandbox-exec from applying even a permissive stock profile"
+    return None
+
+
 def run(
     *,
     pinned_exe,
@@ -141,9 +162,13 @@ def run(
         text=True,
         timeout=timeout,
     )
-    return Result(
+    result = Result(
         exit_code=completed.returncode,
         stdout=completed.stdout,
         stderr=completed.stderr,
         argv=argv,
     )
+    reason = outer_sandbox_reason(result)
+    if reason is not None:
+        raise unittest.SkipTest(reason)
+    return result
