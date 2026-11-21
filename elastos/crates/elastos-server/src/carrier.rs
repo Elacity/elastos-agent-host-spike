@@ -8589,6 +8589,9 @@ impl CarrierProviderInvoker {
             {
                 Ok(client) => {
                     connected = true;
+                    // A later stream failure is different from a ticket that
+                    // never connected. Only the latter needs plain-key lookup.
+                    transit_kind = transit_kind.map(|_| std::io::ErrorKind::ConnectionReset);
                     let invoke = client.invoke_provider(invocation, request.clone());
                     // A bounded Content read carries no effect, so its answer
                     // gets the same budget as the connect and a silent holder
@@ -8743,9 +8746,12 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
             routes.remove(&oldest);
             lookup.remove_endpoint_info(oldest);
         }
-        for addr in &endpoints {
-            lookup.add_endpoint_info(addr.clone());
-        }
+        // A replacement ticket owns the complete current address set. Merge
+        // its endpoints before replacing the lookup entry in one operation.
+        lookup.set_endpoint_info(iroh::EndpointAddr::from_parts(
+            peer,
+            endpoints.iter().flat_map(|addr| addr.addrs.iter().cloned()),
+        ));
         routes.insert(
             peer,
             RememberedPeerTicket {
@@ -8911,6 +8917,12 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
                         let cause = match err.downcast_ref::<CarrierProviderDecision>() {
                             Some(decision) => decision.code,
                             None if err.downcast_ref::<CarrierTransportFailure>().is_some() => {
+                                if bounded {
+                                    return Err(ProviderError::Io(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionReset,
+                                        "Carrier peer stream failed in transit",
+                                    )));
+                                }
                                 PEER_ROUTE_IN_TRANSIT
                             }
                             None => "failed",
@@ -14482,6 +14494,37 @@ pub(crate) mod tests {
             invoker.remembered_ticket_endpoints(&peer).await,
             Some(vec![fresh])
         );
+    }
+
+    #[tokio::test]
+    async fn replaced_peer_ticket_replaces_lookup_addresses() {
+        let invoker = CarrierProviderInvoker {
+            ticket_lookup: Some(MemoryLookup::new()),
+            ..CarrierProviderInvoker::new()
+        };
+        let peer = iroh::SecretKey::from_bytes(&[237; 32]).public();
+        let did = public_key_to_did(&peer).unwrap();
+        let old = iroh::EndpointAddr::from(peer)
+            .with_addrs([iroh::TransportAddr::Ip("127.0.0.1:1".parse().unwrap())]);
+        let fresh = iroh::EndpointAddr::from(peer)
+            .with_addrs([iroh::TransportAddr::Ip("127.0.0.1:2".parse().unwrap())]);
+        invoker
+            .remember_peer_ticket(&did, &encode_ticket_for(old))
+            .await
+            .unwrap();
+        invoker
+            .remember_peer_ticket(&did, &encode_ticket_for(fresh.clone()))
+            .await
+            .unwrap();
+
+        let lookup_addr: iroh::EndpointAddr = invoker
+            .ticket_lookup
+            .as_ref()
+            .unwrap()
+            .get_endpoint_info(peer)
+            .unwrap()
+            .into();
+        assert_eq!(lookup_addr, fresh);
     }
 
     #[tokio::test]
@@ -20678,6 +20721,78 @@ pub(crate) mod tests {
 
         endpoint.close().await;
         shutdown_test_carrier_node(holder.local_node).await;
+    }
+
+    #[tokio::test]
+    async fn bounded_availability_read_keeps_lost_holder_stream_in_transit() {
+        let cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+        let (holder_sk, holder_did) = elastos_identity::derive_did(&[238; 32]);
+        let holder = Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .secret_key(iroh::SecretKey::from_bytes(&holder_sk.to_bytes()))
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .alpns(vec![CARRIER_ALPN.to_vec()])
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let address = wait_for_direct_endpoint_addr(&holder).await;
+        let ticket = encode_ticket_for(address.clone());
+        let (announcement, signed_did) = signed_content_availability_message(
+            cid,
+            [238; 32],
+            &ticket,
+            &address.id.to_string(),
+            now_secs(),
+        );
+        assert_eq!(signed_did, holder_did);
+        let serving = holder.clone();
+        let served = tokio::spawn(async move {
+            let conn = serving.accept().await.unwrap().await.unwrap();
+            let (_send, recv) = conn.accept_bi().await.unwrap();
+            let mut request = String::new();
+            BufReader::new(recv).read_line(&mut request).await.unwrap();
+            conn.close(0u32.into(), b"lost after request");
+            request
+        });
+
+        let (provider, registry, endpoint) = distinct_holder_fetch_fixture(
+            239,
+            cid,
+            vec![announcement],
+            Arc::new(MockCarrierProviderPlaneInvoker::default()),
+        )
+        .await;
+        let invoker = Arc::new(CarrierProviderInvoker::with_carrier_endpoint_and_registry(
+            endpoint.clone(),
+            Arc::downgrade(&registry),
+        ));
+        registry.set_carrier_invoker(invoker).await;
+
+        let response = provider
+            .send_raw(&serde_json::json!({
+                "op": "fetch",
+                "cid": cid,
+                "path": "weights.gguf",
+                "bounded_read": true,
+                "range": {"start": 0, "end": 3},
+                "transfer": "stream"
+            }))
+            .await
+            .unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(10), served)
+            .await
+            .unwrap()
+            .unwrap()
+            .contains("fetch"));
+        assert_eq!(
+            response["code"], CARRIER_FETCH_IN_TRANSIT_CODE,
+            "{response}"
+        );
+
+        endpoint.close().await;
+        holder.close().await;
     }
 
     /// An answer that is not valid UTF-8 is the holder's bad answer, not a
