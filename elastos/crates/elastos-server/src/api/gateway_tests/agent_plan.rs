@@ -130,6 +130,17 @@ fn submit(
     plan: serde_json::Value,
     now: u64,
 ) -> serde_json::Value {
+    submit_with_bounds(dir, owner, requester, plan, now, None)
+}
+
+fn submit_with_bounds(
+    dir: &Path,
+    owner: &str,
+    requester: &str,
+    plan: serde_json::Value,
+    now: u64,
+    bounds: Option<Vec<elastos_common::AuthorityBound>>,
+) -> serde_json::Value {
     let record = submit_pending_agent_plan(
         dir,
         owner,
@@ -156,21 +167,23 @@ fn submit(
             capsule_id: "capsule:agent-host".to_string(),
             session_id: "session:agent-1".to_string(),
             principal_id: Some(requester.to_string()),
-            manifest_capabilities: (if requester == "agent:narrow" {
-                vec!["elastos://did/*"]
-            } else {
-                vec![
-                    "elastos://availability/*",
-                    "localhost://UsersAI/*",
-                    "localhost://Users/*",
-                ]
-            })
-            .into_iter()
-            .map(|resource| elastos_common::AuthorityBound {
-                resource: resource.to_string(),
-                actions: None,
-            })
-            .collect(),
+            manifest_capabilities: bounds.unwrap_or_else(|| {
+                (if requester == "agent:narrow" {
+                    vec!["elastos://did/*"]
+                } else {
+                    vec![
+                        "elastos://availability/*",
+                        "localhost://UsersAI/*",
+                        "localhost://Users/*",
+                    ]
+                })
+                .into_iter()
+                .map(|resource| elastos_common::AuthorityBound {
+                    resource: resource.to_string(),
+                    actions: None,
+                })
+                .collect()
+            }),
             data_dir: Some(dir.to_path_buf()),
             launch: None,
             model_token_ceiling: Some(16),
@@ -1290,4 +1303,313 @@ async fn a15r_current_gate_recheck_refuses_rebound_preview() {
     assert!(refused.is_err());
     assert_eq!(read_record(dir.path(), id)["status"], "stale");
     assert!(calls.lock().await.is_empty());
+}
+
+// The June planner's A15R_PREVIEW_STEP_PATH output is byte-compared in the build.
+const REAL_STEP: &str = "{\"operation\":\"write\",\"request\":{\"content\":[116,104,114,101,101,32,108,105,110,101,115],\"path\":\"localhost://UsersAI/self/Documents/note.txt\"},\"scheme\":\"localhost\"}";
+
+fn real_submit(dir: &Path, owner: &str, agent: &str, now: u64) -> serde_json::Value {
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(include_str!(
+        "../../../../../../examples/agent-host/capsule.json"
+    ))
+    .unwrap();
+    assert_eq!(manifest.asks.len(), 3);
+    let step = serde_json::from_str::<serde_json::Value>(REAL_STEP).unwrap();
+    submit_with_bounds(
+        dir,
+        owner,
+        agent,
+        json!({"steps": [step]}),
+        now,
+        Some(manifest.resource_authority_bounds()),
+    )
+}
+
+fn real_object(dir: &Path, principal: &str, uri: &str) -> anyhow::Result<Vec<u8>> {
+    let root = crate::auth::principal_stored_localhost_root(Some(dir), principal).unwrap();
+    let path = elastos_common::localhost::rooted_localhost_fs_path(dir, uri).unwrap();
+    crate::auth::read_principal_root_object(dir, principal, &root, uri, &path)
+}
+
+struct RealCase {
+    dir: tempfile::TempDir,
+    state: GatewayState,
+    app: Router,
+    calls: Arc<TokioMutex<Vec<serde_json::Value>>>,
+    owner: String,
+    agent: String,
+    token: String,
+    id: String,
+}
+
+impl RealCase {
+    async fn new(now: u64) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, calls) = agent_plan_dispatch_state(dir.path()).await;
+        let app = gateway_router(state.clone());
+        let owner = passkey_authority(dir.path());
+        let agent = crate::agents::tests::plant_for_dispatch(
+            dir.path(),
+            &owner.principal_id,
+            &owner.principal_id,
+        );
+        let token = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &owner);
+        let created = real_submit(dir.path(), &owner.principal_id, &agent, now);
+        Self {
+            dir,
+            state,
+            app,
+            calls,
+            owner: owner.principal_id,
+            agent,
+            token,
+            id: created["request_id"].as_str().unwrap().to_string(),
+        }
+    }
+
+    fn record(&self) -> serde_json::Value {
+        read_record(self.dir.path(), &self.id)
+    }
+    fn target(&self) -> String {
+        let root = crate::auth::principal_stored_localhost_root(Some(self.dir.path()), &self.agent)
+            .unwrap();
+        format!("{root}/Documents/note.txt")
+    }
+    fn object(&self) -> anyhow::Result<Vec<u8>> {
+        real_object(self.dir.path(), &self.agent, &self.target())
+    }
+    async fn card(&self) -> serde_json::Value {
+        owner_card(&self.app, &self.token, &self.id).await
+    }
+    async fn click(&self, binding: &serde_json::Value, fresh: bool) -> (StatusCode, String) {
+        let passkey = fresh.then(|| {
+            step_up_token_for_app_context(
+                self.dir.path(),
+                INBOX_CAPSULE_ID,
+                &self.token,
+                "agent_plan.approve",
+                &json!({"request_id": self.id}),
+            )
+        });
+        post_action(
+            &self.app,
+            &self.token,
+            approve_body(&self.id, binding, passkey.as_deref()),
+        )
+        .await
+    }
+    async fn dispatch(&self) -> anyhow::Result<String> {
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &self.state,
+            &dispatch_context(&self.owner),
+            &self.id,
+        )
+        .await
+    }
+    fn audit(&self, event_type: &str) -> usize {
+        crate::auth::load_auth_state(self.dir.path())
+            .unwrap()
+            .audit
+            .iter()
+            .filter(|event| {
+                event.event_type == event_type
+                    && event.challenge_id.as_deref() == Some(&self.id)
+                    && event.signature.is_some()
+            })
+            .count()
+    }
+    fn next(&mut self, now: u64) {
+        let created = real_submit(self.dir.path(), &self.owner, &self.agent, now);
+        self.id = created["request_id"].as_str().unwrap().to_string();
+    }
+}
+
+#[tokio::test]
+async fn a15r_real_journey_one_step_one_result() {
+    let mut case = RealCase::new(301).await;
+    let person_root =
+        crate::auth::principal_stored_localhost_root(Some(case.dir.path()), &case.owner).unwrap();
+    let person_target = format!("{person_root}/Documents/note.txt");
+    let person_path =
+        elastos_common::localhost::rooted_localhost_fs_path(case.dir.path(), &person_target)
+            .unwrap();
+    crate::auth::write_principal_root_object(
+        case.dir.path(),
+        &case.owner,
+        &person_root,
+        &person_target,
+        &person_path,
+        b"person's note",
+    )
+    .unwrap();
+    let card = case.card().await;
+    let mut wrong = card["request_binding"].clone();
+    wrong["sha256"] = json!("0".repeat(64));
+    assert_eq!(case.click(&wrong, true).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(case.record()["status"], "stale");
+    case.next(302);
+    let record = case.record();
+    assert_eq!(record["status"], "pending");
+    assert_eq!(
+        serde_json::to_string(&record["request"]).unwrap(),
+        REAL_STEP
+    );
+    let card = case.card().await;
+    assert_eq!(card["request_binding"], record["request_binding"]);
+    assert!(card["body"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("Step 1: {REAL_STEP}")));
+    let hash = card["request_binding"]["sha256"].as_str().unwrap();
+    assert_eq!(hash.len(), 64);
+    assert!(card["body"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("Binding sha256: {hash}")));
+    assert_eq!(
+        case.click(&card["request_binding"], false).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(case.record()["status"], "pending");
+    assert!(case.object().is_err());
+    let (status, body) = case.click(&card["request_binding"], true).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("Agent plan dispatch completed"), "{body}");
+    let record = case.record();
+    assert_eq!(record["status"], "completed");
+    assert_eq!(record["result"]["status"], "ok");
+    assert_eq!(case.object().unwrap(), b"three lines");
+    assert_eq!(
+        real_object(case.dir.path(), &case.owner, &person_target).unwrap(),
+        b"person's note"
+    );
+    assert!(case.calls.lock().await.is_empty());
+    assert_eq!(case.audit("agent_plan.dispatch.started"), 1);
+    assert_eq!(case.audit("agent_plan.dispatch.completed"), 1);
+    let receipt = super::gateway_inspect_actions::agent_plan_result_for_requester(
+        case.dir.path(),
+        &case.id,
+        &case.owner,
+        &case.agent,
+        "capsule:agent-host",
+        "session:agent-1",
+    )
+    .unwrap();
+    assert_eq!(receipt["schema"], "elastos.agent-plan.result/v1");
+    assert_eq!(receipt["dispatch_result"], record["result"]);
+    assert!(agent_plan_cards(&case.app, &case.token).await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_real_unapproved_zero() {
+    let case = RealCase::new(303).await;
+    assert!(case
+        .dispatch()
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not approved"));
+    assert_eq!(case.record()["status"], "pending");
+    assert!(case.object().is_err());
+    assert!(case.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_real_changed_plan_zero() {
+    let case = RealCase::new(304).await;
+    set_approved(case.dir.path(), &case.id);
+    let mut changed = case.record();
+    changed["request_binding"]["sha256"] = json!("0".repeat(64));
+    write_record(case.dir.path(), &case.id, &changed);
+    assert!(case.dispatch().await.is_err());
+    assert_eq!(case.record()["status"], "stale");
+    assert!(case.object().is_err());
+    assert!(case.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_real_self_approval_zero() {
+    let case = RealCase::new(305).await;
+    let context = HomeLaunchTokenContext::for_test(
+        case.agent.clone(),
+        "session:agent-test",
+        None,
+        "grant:agent-test",
+        crate::auth::PrincipalKind::Agent,
+    );
+    let launch = RequiredHomeLaunchToken {
+        expires_at: crate::auth::now_ts() + 60,
+        launch_id: "launch:agent-test".to_string(),
+        launch_context: HomeLaunchContext {
+            schema: "elastos.runtime.browser-launch/v1".to_string(),
+            selected_resource: INBOX_CAPSULE_ID.to_string(),
+            executable_actor: INBOX_CAPSULE_ID.to_string(),
+            authority_actor: INBOX_CAPSULE_ID.to_string(),
+        },
+        context: context.clone(),
+        grant: super::gateway_home_token::VerifiedLaunchGrant::for_test(&case.agent),
+    };
+    let refused = super::gateway_inspect_actions::approve_agent_plan_request(
+        &case.state,
+        &launch,
+        &context,
+        &case.id,
+        &case.record()["request_binding"],
+        None,
+    )
+    .unwrap_err();
+    assert!(refused.to_string().contains("its owner"), "{refused}");
+    assert_eq!(case.record()["status"], "pending");
+    assert!(case.object().is_err());
+    assert!(case.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_real_replay_zero() {
+    let case = RealCase::new(306).await;
+    let card = case.card().await;
+    let fresh = step_up_token_for_app_context(
+        case.dir.path(),
+        INBOX_CAPSULE_ID,
+        &case.token,
+        "agent_plan.approve",
+        &json!({"request_id": case.id}),
+    );
+    let body = approve_body(&case.id, &card["request_binding"], Some(&fresh));
+    assert_eq!(
+        post_action(&case.app, &case.token, body.clone()).await.0,
+        StatusCode::OK
+    );
+    assert_ne!(
+        post_action(&case.app, &case.token, body).await.0,
+        StatusCode::OK
+    );
+    assert!(case.dispatch().await.is_err());
+    assert_eq!(case.object().unwrap(), b"three lines");
+    assert_eq!(case.audit("agent_plan.dispatch.started"), 1);
+    assert!(case.calls.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn a15r_real_restart_zero() {
+    let case = RealCase::new(307).await;
+    let card = case.card().await;
+    assert_eq!(
+        case.click(&card["request_binding"], true).await.0,
+        StatusCode::OK
+    );
+    let before = case.record();
+    let (restarted, after_calls) = agent_plan_dispatch_state(case.dir.path()).await;
+    assert!(
+        super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &restarted,
+            &dispatch_context(&case.owner),
+            &case.id
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(case.record(), before);
+    assert_eq!(case.audit("agent_plan.dispatch.started"), 1);
+    assert!(case.calls.lock().await.is_empty() && after_calls.lock().await.is_empty());
 }

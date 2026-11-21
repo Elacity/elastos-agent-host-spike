@@ -3681,7 +3681,7 @@ impl ContentProvider {
             hop.progress = None;
         }
 
-        let response = match registry
+        let mut response = match registry
             .invoke_provider(ProviderInvocation {
                 source: source.to_string(),
                 target: "availability".to_string(),
@@ -3744,19 +3744,35 @@ impl ContentProvider {
         if transfer.bounded_read {
             check_bounded_availability_payload(&response, transfer)?;
         }
-        let payload = provider_response_payload(&response, "availability provider", transfer)?;
         let whole_object = path.is_empty() && !transfer.bounded_read && transfer.range.is_none();
         if whole_object {
-            let bytes = match &payload {
-                ContentFetchPayload::Bytes(data) => base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?,
-                ContentFetchPayload::Stream(stream) => provider_stream_payload_bytes(stream)?,
+            let verified = match transfer.transfer {
+                ProviderTransfer::Stream => verify_carrier_content_cid_stream(
+                    cid,
+                    response.pointer("/data/stream").ok_or_else(|| {
+                        ProviderError::Provider(
+                            "availability response missing stream payload".into(),
+                        )
+                    })?,
+                )?,
+                _ => verify_carrier_content_cid_base64(
+                    cid,
+                    response
+                        .pointer("/data/data")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            ProviderError::Provider(
+                                "availability response missing base64 data".into(),
+                            )
+                        })?,
+                )?,
             };
-            if !verify_exact_content_cid(registry, cid, &bytes).await? {
+            if !verified {
                 return Err(ProviderError::Provider("availability CID mismatch".into()));
             }
         }
+        let payload =
+            provider_response_payload_owned(&mut response, "availability provider", transfer)?;
         let mut availability = response
             .get("data")
             .and_then(|data| data.get("availability"))
@@ -9191,12 +9207,293 @@ fn provider_response_ok(response: &Value, operation: &str) -> Result<(), Provide
     Ok(())
 }
 
-pub(crate) async fn verify_exact_content_cid(
-    registry: &ProviderRegistry,
+// Carrier-only Homes have no local IPFS provider. Check Kubo's legacy file
+// import profiles used by Content from the received bytes, before returning
+// them to the caller. A CID with another codec or import recipe fails closed.
+pub(crate) fn verify_carrier_content_cid(cid: &str, bytes: &[u8]) -> Result<bool, ProviderError> {
+    verify_carrier_content_cid_reader(cid, bytes)
+}
+
+fn verify_carrier_content_cid_base64(cid: &str, data: &str) -> Result<bool, ProviderError> {
+    let reader = base64::read::DecoderReader::new(
+        data.as_bytes(),
+        &base64::engine::general_purpose::STANDARD,
+    );
+    verify_carrier_content_cid_reader(cid, reader)
+}
+
+fn verify_carrier_content_cid_reader(
     cid: &str,
-    bytes: &[u8],
+    mut reader: impl Read,
 ) -> Result<bool, ProviderError> {
-    verify_exact_content_cid_with_filename(registry, cid, bytes, "content.bin").await
+    let requested = cid::Cid::try_from(cid)
+        .map_err(|err| ProviderError::Provider(format!("invalid content CID: {err}")))?;
+    if requested.to_string() != cid {
+        return Ok(false);
+    }
+    if requested.hash().code() != 0x12 || requested.hash().digest().len() != 32 {
+        return Ok(false);
+    }
+    if !matches!(
+        (requested.version(), requested.codec()),
+        (cid::Version::V1, 0x55) | (cid::Version::V0 | cid::Version::V1, 0x70)
+    ) {
+        return Ok(false);
+    }
+    let mut reducer = FileCidReducer::new(&requested);
+    feed_file_cid_reader(&mut reducer, &mut reader)?;
+    Ok(reducer.matches(&requested))
+}
+
+fn feed_file_cid_reader(
+    reducer: &mut FileCidReducer,
+    reader: &mut impl Read,
+) -> Result<u64, ProviderError> {
+    let mut buffer = [0u8; 32 * 1024];
+    let mut length = 0u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?;
+        if count == 0 {
+            return Ok(length);
+        }
+        length = length
+            .checked_add(count as u64)
+            .ok_or_else(|| ProviderError::Provider("availability data length overflow".into()))?;
+        reducer.push(&buffer[..count]);
+    }
+}
+
+fn verify_carrier_content_cid_stream(cid: &str, stream: &Value) -> Result<bool, ProviderError> {
+    let requested = cid::Cid::try_from(cid)
+        .map_err(|err| ProviderError::Provider(format!("invalid content CID: {err}")))?;
+    let invalid = |detail: &str| ProviderError::Provider(format!("availability stream {detail}"));
+    if requested.to_string() != cid
+        || requested.hash().code() != 0x12
+        || requested.hash().digest().len() != 32
+        || !matches!(
+            (requested.version(), requested.codec()),
+            (cid::Version::V1, 0x55) | (cid::Version::V0 | cid::Version::V1, 0x70)
+        )
+    {
+        return Ok(false);
+    }
+    if stream.get("schema").and_then(Value::as_str) != Some("elastos.provider.stream/v1")
+        || stream.get("encoding").and_then(Value::as_str) != Some("base64-chunks")
+        || stream.get("completed").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(invalid("has invalid header"));
+    }
+    let chunks = stream
+        .get("chunks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("requires chunks"))?;
+    let mut reducer = FileCidReducer::new(&requested);
+    let mut offset = 0u64;
+    for (index, chunk) in chunks.iter().enumerate() {
+        if chunk.get("index").and_then(Value::as_u64) != Some(index as u64)
+            || chunk.get("offset").and_then(Value::as_u64) != Some(offset)
+        {
+            return Err(invalid("chunk index or offset mismatch"));
+        }
+        let data = chunk
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("chunk requires base64 data"))?;
+        let mut reader = base64::read::DecoderReader::new(
+            data.as_bytes(),
+            &base64::engine::general_purpose::STANDARD,
+        );
+        let length = feed_file_cid_reader(&mut reducer, &mut reader)?;
+        if chunk
+            .get("length")
+            .and_then(Value::as_u64)
+            .is_some_and(|v| v != length)
+        {
+            return Err(invalid("chunk length mismatch"));
+        }
+        offset = offset
+            .checked_add(length)
+            .ok_or_else(|| invalid("length overflow"))?;
+    }
+    if stream
+        .get("total_bytes")
+        .and_then(Value::as_u64)
+        .is_some_and(|v| v != offset)
+    {
+        return Err(invalid("total length mismatch"));
+    }
+    Ok(reducer.matches(&requested))
+}
+
+const UNIXFS_CHUNK_BYTES: usize = 262_144;
+const UNIXFS_FILE_LINKS: usize = 174;
+
+#[derive(Clone)]
+struct FileCidNode {
+    cid: cid::Cid,
+    file_size: u64,
+    dag_size: u64,
+}
+
+// Keep at most one partial UnixFS chunk plus compact leaf metadata. Base64
+// payloads are decoded through this reducer without a second whole-file copy.
+struct FileCidReducer {
+    version: cid::Version,
+    raw: Vec<FileCidNode>,
+    legacy: Vec<FileCidNode>,
+    partial: Vec<u8>,
+    raw_enabled: bool,
+    legacy_enabled: bool,
+}
+
+impl FileCidReducer {
+    fn new(requested: &cid::Cid) -> Self {
+        Self {
+            version: requested.version(),
+            raw: Vec::new(),
+            legacy: Vec::new(),
+            partial: Vec::with_capacity(UNIXFS_CHUNK_BYTES),
+            raw_enabled: requested.version() == cid::Version::V1,
+            legacy_enabled: requested.codec() == 0x70,
+        }
+    }
+
+    fn push(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let count = bytes.len().min(UNIXFS_CHUNK_BYTES - self.partial.len());
+            self.partial.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.partial.len() == UNIXFS_CHUNK_BYTES {
+                self.push_leaf();
+            }
+        }
+    }
+
+    fn push_leaf(&mut self) {
+        if self.raw_enabled {
+            self.raw
+                .push(file_leaf(&self.partial, cid::Version::V1, true));
+        }
+        if self.legacy_enabled {
+            self.legacy
+                .push(file_leaf(&self.partial, self.version, false));
+        }
+        self.partial.clear();
+    }
+
+    fn matches(mut self, requested: &cid::Cid) -> bool {
+        if !self.partial.is_empty() || (self.raw.is_empty() && self.legacy.is_empty()) {
+            self.push_leaf();
+        }
+        (self.raw_enabled && file_cid_from_leaves(self.raw, cid::Version::V1) == *requested)
+            || (self.legacy_enabled
+                && file_cid_from_leaves(self.legacy, self.version) == *requested)
+    }
+}
+
+fn pb_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 128 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn pb_number(out: &mut Vec<u8>, field: u64, value: u64) {
+    pb_varint(out, field << 3);
+    pb_varint(out, value);
+}
+
+fn pb_bytes(out: &mut Vec<u8>, field: u64, value: &[u8]) {
+    pb_varint(out, (field << 3) | 2);
+    pb_varint(out, value.len() as u64);
+    out.extend_from_slice(value);
+}
+
+fn hashed_cid(block: &[u8], version: cid::Version, codec: u64) -> cid::Cid {
+    let digest = sha2::Sha256::digest(block);
+    let hash = cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice())
+        .expect("SHA-256 fits a multihash");
+    match version {
+        cid::Version::V0 => cid::Cid::new_v0(hash).expect("CIDv0 uses dag-pb SHA-256"),
+        cid::Version::V1 => cid::Cid::new_v1(codec, hash),
+    }
+}
+
+fn file_leaf(chunk: &[u8], version: cid::Version, raw: bool) -> FileCidNode {
+    if raw {
+        return FileCidNode {
+            cid: hashed_cid(chunk, cid::Version::V1, 0x55),
+            file_size: chunk.len() as u64,
+            dag_size: chunk.len() as u64,
+        };
+    }
+    let mut unixfs = Vec::with_capacity(chunk.len() + 16);
+    pb_number(&mut unixfs, 1, 2); // UnixFS File
+    if !chunk.is_empty() {
+        pb_bytes(&mut unixfs, 2, chunk);
+    }
+    pb_number(&mut unixfs, 3, chunk.len() as u64);
+    let mut block = Vec::with_capacity(unixfs.len() + 8);
+    pb_bytes(&mut block, 1, &unixfs);
+    FileCidNode {
+        cid: hashed_cid(&block, version, 0x70),
+        file_size: chunk.len() as u64,
+        dag_size: block.len() as u64,
+    }
+}
+
+fn file_parent(children: &[FileCidNode], version: cid::Version) -> FileCidNode {
+    let file_size = children.iter().map(|node| node.file_size).sum();
+    let mut unixfs = Vec::with_capacity(children.len() * 5 + 16);
+    pb_number(&mut unixfs, 1, 2);
+    pb_number(&mut unixfs, 3, file_size);
+    for child in children {
+        pb_number(&mut unixfs, 4, child.file_size);
+    }
+    // Kubo's legacy PBNode field order is Links, then Data. An empty Name is
+    // serialized on each link, and Tsize is the child's cumulative DAG size.
+    let mut block = Vec::with_capacity(children.len() * 70 + unixfs.len());
+    for child in children {
+        let mut link = Vec::with_capacity(64);
+        pb_bytes(&mut link, 1, &child.cid.to_bytes());
+        pb_bytes(&mut link, 2, b"");
+        pb_number(&mut link, 3, child.dag_size);
+        pb_bytes(&mut block, 2, &link);
+    }
+    pb_bytes(&mut block, 1, &unixfs);
+    FileCidNode {
+        cid: hashed_cid(&block, version, 0x70),
+        file_size,
+        dag_size: block.len() as u64 + children.iter().map(|node| node.dag_size).sum::<u64>(),
+    }
+}
+
+fn file_cid_from_leaves(mut level: Vec<FileCidNode>, version: cid::Version) -> cid::Cid {
+    while level.len() > 1 {
+        // Kubo keeps one-link intermediate nodes when a balanced level opens;
+        // promoting a trailing singleton changes the file CID.
+        level = level
+            .chunks(UNIXFS_FILE_LINKS)
+            .map(|children| file_parent(children, version))
+            .collect();
+    }
+    level.pop().expect("file has one root").cid
+}
+
+#[cfg(test)]
+fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
+    let level: Vec<FileCidNode> = if bytes.is_empty() {
+        vec![file_leaf(bytes, version, raw)]
+    } else {
+        bytes
+            .chunks(UNIXFS_CHUNK_BYTES)
+            .map(|chunk| file_leaf(chunk, version, raw))
+            .collect()
+    };
+    file_cid_from_leaves(level, version)
 }
 
 async fn verify_exact_content_cid_with_filename(
@@ -9266,6 +9563,33 @@ fn provider_response_payload(
             response,
             provider_name,
         )?)),
+    }
+}
+
+fn provider_response_payload_owned(
+    response: &mut Value,
+    provider_name: &str,
+    transfer: &ContentFetchTransfer,
+) -> Result<ContentFetchPayload, ProviderError> {
+    let field = match transfer.transfer {
+        ProviderTransfer::Stream => "stream",
+        _ => "data",
+    };
+    let value = response
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+        .and_then(|data| data.remove(field))
+        .ok_or_else(|| {
+            ProviderError::Provider(format!("{provider_name} response missing {field} payload"))
+        })?;
+    match transfer.transfer {
+        ProviderTransfer::Stream => Ok(ContentFetchPayload::Stream(value)),
+        _ => match value {
+            Value::String(data) => Ok(ContentFetchPayload::Bytes(data)),
+            _ => Err(ProviderError::Provider(format!(
+                "{provider_name} response {field} is not a string"
+            ))),
+        },
     }
 }
 
@@ -9864,18 +10188,202 @@ mod tests {
 
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
-    fn fetch_receipt(result: FetchResult, verified: bool, attempt: u8) -> FetchReceipt {
-        let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
-        FetchReceipt::new(
-            TEST_CID,
-            &peer_did,
-            42,
-            verified,
-            result,
-            attempt,
-            1_700_000_000,
+    #[test]
+    fn carrier_cid_check_matches_isolated_kubo_file_imports() {
+        // Kubo 0.40.1 `add --only-hash`, using its legacy profile and the
+        // workflow's explicit CIDv1 option. These pins cover raw leaves,
+        // dag-pb parents, and the empty CIDv0 file special case.
+        let small = b"carrier provider bytes";
+        assert!(verify_carrier_content_cid(
+            "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp",
+            small,
         )
-        .unwrap()
+        .unwrap());
+        assert!(verify_carrier_content_cid(
+            "bafkreiermf3pekqicqpks77bbjoszjblcapl7vgvdaafl7qbn6enegjo5e",
+            small,
+        )
+        .unwrap());
+        assert!(
+            verify_carrier_content_cid("QmbFMke1KXqnYyBBWxB74N4c5SBnJMVAiMNRcGu6x1AwQH", b"",)
+                .unwrap()
+        );
+        let generic = [
+            sha2::Sha256::digest(b"issue89 generic file").repeat(65_536),
+            b"complete".to_vec(),
+        ]
+        .concat();
+        let generic_cid = "bafybeihkdt7gm3dap774urwmlqcnymhfvhtctkvnzb6vdcxmmad3cnbawy";
+        assert!(verify_carrier_content_cid(generic_cid, &generic).unwrap());
+        assert!(verify_carrier_content_cid(
+            "QmbBXPq7tPW63A7hTYFJXKVZaRxXd4u1TRtQRvr3mmd4LF",
+            &generic,
+        )
+        .unwrap());
+        let mut changed = generic;
+        changed[0] ^= 1;
+        assert!(!verify_carrier_content_cid(generic_cid, &changed).unwrap());
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_above_one_file_link_layer() {
+        let mut bytes = Vec::with_capacity(175 * UNIXFS_CHUNK_BYTES + 1);
+        for index in 0..175 {
+            bytes.extend(std::iter::repeat_n((index % 251) as u8, UNIXFS_CHUNK_BYTES));
+        }
+        bytes.push(b'X');
+        assert!(verify_carrier_content_cid(
+            "bafybeicxfrgbvn3264uulnvvg77cnxxobo3nggiylvggg66em3mvrdlmzu",
+            &bytes,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_zero_file_boundaries() {
+        // Generated with pinned Kubo 0.40.1 from an all-zero stream:
+        // `ipfs add --only-hash --quieter --pin=false --hash=sha2-256
+        // --chunker=size-262144 --max-file-links=174`, once with
+        // `--cid-version=0 --raw-leaves=false` and once with
+        // `--cid-version=1 --raw-leaves=true`.
+        let vectors = [
+            (
+                0,
+                "QmbFMke1KXqnYyBBWxB74N4c5SBnJMVAiMNRcGu6x1AwQH",
+                "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+            ),
+            (
+                1,
+                "QmS9JArPwa55ePgDnyg6TzX24mYTS1b1vLqWNebyVotKxQ",
+                "bafkreidogqfzz75tpkmjzjke425xqcrmpcib2p5tg44hnbirumdbpl5adu",
+            ),
+            (
+                UNIXFS_CHUNK_BYTES,
+                "QmRk1rduJvo5DfEYAaLobS2za9tDszk35hzaNSDCJ74DA7",
+                "bafkreiekhhjkxu4ztk3tyng3er3ijhg56mb44oe3gwbgquhzu4afrg2ksa",
+            ),
+            (
+                UNIXFS_CHUNK_BYTES + 1,
+                "QmbVuw4C4vcmVKqxoWtgDVobvcHrSn51qsmQmyxjk4sB2Q",
+                "bafybeigllfqgfpqydppr6cmv56g7ax4wyhruzswvcefv6j5kj77nzttfki",
+            ),
+            (
+                174 * UNIXFS_CHUNK_BYTES,
+                "QmY4HSz1oVGdUzb8poVYPLsoqBZjH6LZrtgnme9wWn2Qko",
+                "bafybeibxsa3ioclowpaq7b6gxl65gzqneopfr3fnhedak6sqr4bjz5lnyq",
+            ),
+            (
+                174 * UNIXFS_CHUNK_BYTES + 1,
+                "QmehMASWcBsX7VcEQqs6rpR5AHoBfKyBVEgmkJHjpPg8jq",
+                "bafybeihqwzd3o6q6v3pmwhzjy22vokhr767burokmqemg63hptx2nqd7ym",
+            ),
+            (
+                175 * UNIXFS_CHUNK_BYTES,
+                "QmaL1KiQRV8secNszpjjFPg722T53c77k2dz5UsNua59ZT",
+                "bafybeigfps5vzivfspwgm3uwsfyl5s6bn3ysh7uqidgauxgopw4yi66lse",
+            ),
+        ];
+        for (size, legacy_cid, raw_cid) in vectors {
+            let mut bytes = vec![0; size];
+            assert!(
+                verify_carrier_content_cid(legacy_cid, &bytes).unwrap(),
+                "legacy Kubo vector for {size} bytes"
+            );
+            assert!(
+                verify_carrier_content_cid(raw_cid, &bytes).unwrap(),
+                "raw-leaf Kubo vector for {size} bytes"
+            );
+            if size == 174 * UNIXFS_CHUNK_BYTES + 1 {
+                bytes[0] ^= 1;
+                assert!(!verify_carrier_content_cid(legacy_cid, &bytes).unwrap());
+                assert!(!verify_carrier_content_cid(raw_cid, &bytes).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn carrier_cid_check_streams_file_above_64_mib() {
+        use std::io::{Seek, SeekFrom};
+
+        // Kubo 0.42.0, with the same pinned recipe as the 0.40.1 vectors:
+        // `ipfs add --only-hash --quieter --pin=false --hash=sha2-256
+        //  --chunker=size-262144 --max-file-links=174 --cid-version=1
+        //  --raw-leaves=true` on a 67,108,865-byte all-zero file.
+        const SIZE: u64 = 64 * 1024 * 1024 + 1;
+        const CID: &str = "bafybeifky37h74hoftm3v3ecyfh5bg6ozwbplp7bavvbjf2ari2jbqtuyu";
+        let mut file = tempfile::tempfile().unwrap();
+        file.set_len(SIZE).unwrap();
+        assert!(verify_carrier_content_cid_reader(CID, &mut file).unwrap());
+
+        file.rewind().unwrap();
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = base64::write::EncoderWriter::new(
+                &mut encoded,
+                &base64::engine::general_purpose::STANDARD,
+            );
+            std::io::copy(&mut file, &mut encoder).unwrap();
+            encoder.finish().unwrap();
+        }
+        let encoded = String::from_utf8(encoded).unwrap();
+        assert!(verify_carrier_content_cid_base64(CID, &encoded).unwrap());
+        let mut stream = json!({
+            "schema": "elastos.provider.stream/v1",
+            "encoding": "base64-chunks",
+            "completed": true,
+            "total_bytes": SIZE,
+            "chunks": [{"index": 0, "offset": 0, "length": SIZE, "data": encoded}],
+        });
+        assert!(verify_carrier_content_cid_stream(CID, &stream).unwrap());
+        if let Value::String(data) = &mut stream["chunks"][0]["data"] {
+            data.replace_range(0..1, "B");
+        } else {
+            panic!("stream chunk data is a string");
+        }
+        assert!(!verify_carrier_content_cid_stream(CID, &stream).unwrap());
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[1]).unwrap();
+        file.rewind().unwrap();
+        assert!(!verify_carrier_content_cid_reader(CID, &mut file).unwrap());
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_three_file_link_layers() {
+        // This represents a 7,936,933,888-byte all-zero file without allocating
+        // it. Kubo 0.40.1 computed both CIDs from the complete streamed input.
+        const CHUNKS: usize = 174 * 174 + 1;
+        let chunk = vec![0; UNIXFS_CHUNK_BYTES];
+        for (version, raw, expected) in [
+            (
+                cid::Version::V0,
+                false,
+                "QmaTv4QL4SrnRDVUXJ9C6FgK2eDzXm2nYEgaAxdtZHoWMf",
+            ),
+            (
+                cid::Version::V1,
+                true,
+                "bafybeibqr5nnenx3ea57tdg3kla3rkb7hvbv7meogyxrubwrc5vmicaw5u",
+            ),
+        ] {
+            let leaf = file_leaf(&chunk, version, raw);
+            let cid = file_cid_from_leaves(vec![leaf; CHUNKS], version);
+            assert_eq!(cid.to_string(), expected);
+        }
+    }
+
+    fn fetch_receipt(result: FetchResult, verified: bool, attempt: u8) -> FetchReceipt {
+        fetch_receipt_for(TEST_CID, result, verified, attempt)
+    }
+
+    fn fetch_receipt_for(
+        cid: &str,
+        result: FetchResult,
+        verified: bool,
+        attempt: u8,
+    ) -> FetchReceipt {
+        let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
+        FetchReceipt::new(cid, &peer_did, 42, verified, result, attempt, 1_700_000_000).unwrap()
     }
 
     #[test]
@@ -10047,11 +10555,15 @@ mod tests {
     }
 
     fn two_verified_holder_receipts() -> Vec<FetchReceipt> {
+        two_verified_holder_receipts_for(TEST_CID)
+    }
+
+    fn two_verified_holder_receipts_for(cid: &str) -> Vec<FetchReceipt> {
         let (_, second_peer) = elastos_identity::derive_did(&[22; 32]);
         vec![
-            fetch_receipt(FetchResult::Ok, true, 1),
+            fetch_receipt_for(cid, FetchResult::Ok, true, 1),
             FetchReceipt::new(
-                TEST_CID,
+                cid,
                 &second_peer,
                 42,
                 true,
@@ -10303,6 +10815,7 @@ mod tests {
     #[tokio::test]
     async fn distinct_holder_answer_carries_a_requester_signed_set() {
         let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let cid = fixture_file_cid(b"carrier bytes");
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(provider_ok(json!({
@@ -10314,7 +10827,7 @@ mod tests {
                     "distinct_holders": 2,
                     "required_distinct_holders": 2,
                     "receipt_attestation": "self",
-                    "receipts": two_verified_holder_receipts(),
+                    "receipts": two_verified_holder_receipts_for(&cid),
                 }
             }))),
         });
@@ -10331,7 +10844,7 @@ mod tests {
             Some(data_dir.path()),
             &registry,
             "content-provider",
-            TEST_CID,
+            &cid,
             "",
             &transfer,
             Some(json!(2)),
@@ -10452,7 +10965,11 @@ mod tests {
         assert!(matches!(err, ProviderError::Io(_)));
     }
 
-    fn two_holder_availability_body(bytes: &[u8]) -> Value {
+    fn fixture_file_cid(bytes: &[u8]) -> String {
+        file_cid(bytes, cid::Version::V1, true).to_string()
+    }
+
+    fn two_holder_availability_body(bytes: &[u8], cid: &str) -> Value {
         provider_ok(json!({
             "data": base64::engine::general_purpose::STANDARD.encode(bytes),
             "availability": {
@@ -10462,7 +10979,7 @@ mod tests {
                 "distinct_holders": 2,
                 "required_distinct_holders": 2,
                 "receipt_attestation": "self",
-                "receipts": two_verified_holder_receipts(),
+                "receipts": two_verified_holder_receipts_for(cid),
             }
         }))
     }
@@ -10471,16 +10988,21 @@ mod tests {
     /// holders still produce their receipts and the signed set.
     #[tokio::test]
     async fn local_copy_with_distinct_holders_returns_holder_receipts() {
-        let (data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
+        let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let cid = fixture_file_cid(b"carrier bytes");
+        ipfs.cat_files
+            .lock()
+            .await
+            .insert(String::new(), b"carrier bytes".to_vec());
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
-            response: Mutex::new(two_holder_availability_body(b"carrier bytes")),
+            response: Mutex::new(two_holder_availability_body(b"carrier bytes", &cid)),
         });
         registry.register(availability.clone()).await;
         let response = content
             .send_raw(&json!({
                 "op": "fetch",
-                "cid": TEST_CID,
+                "cid": cid,
                 "min_distinct_holders": 2,
             }))
             .await
@@ -10542,7 +11064,7 @@ mod tests {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
-            response: Mutex::new(two_holder_availability_body(b"carrier bytes")),
+            response: Mutex::new(two_holder_availability_body(b"carrier bytes", TEST_CID)),
         });
         registry.register(availability.clone()).await;
         let response = content
@@ -10622,7 +11144,24 @@ mod tests {
         Arc<MockAvailabilityProvider>,
         Result<Value, ProviderError>,
     ) {
-        let (data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
+        content_fetch_against_bridge_for_cid(TEST_CID, body).await
+    }
+
+    async fn content_fetch_against_bridge_for_cid(
+        cid: &str,
+        body: Value,
+    ) -> (
+        tempfile::TempDir,
+        Arc<MockAvailabilityProvider>,
+        Result<Value, ProviderError>,
+    ) {
+        let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        if cid != TEST_CID {
+            ipfs.cat_files
+                .lock()
+                .await
+                .insert(String::new(), BRIDGE_BYTES.to_vec());
+        }
         let availability = Arc::new(MockAvailabilityProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(body),
@@ -10631,7 +11170,7 @@ mod tests {
         let response = content
             .send_raw(&json!({
                 "op": "fetch",
-                "cid": TEST_CID,
+                "cid": cid,
                 "min_distinct_holders": 2,
             }))
             .await;
@@ -10642,14 +11181,17 @@ mod tests {
     /// stay unreturned, including the local copy.
     #[tokio::test]
     async fn availability_success_without_receipts_returns_no_bytes() {
-        let (_data_dir, availability, response) =
-            content_fetch_against_bridge(bridge_success(json!({
+        let cid = fixture_file_cid(BRIDGE_BYTES);
+        let (_data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
                 "status": "network_available",
                 "provider": "bridge",
                 "distinct_holders": 9,
                 "required_distinct_holders": 2,
-            })))
-            .await;
+            })),
+        )
+        .await;
         assert_eq!(availability.requests.lock().await.len(), 1);
         let err = response.expect_err("a success with no receipts must not return bytes");
         let text = err.to_string();
@@ -10661,15 +11203,18 @@ mod tests {
     /// answer's own count fields say the requirement is met.
     #[tokio::test]
     async fn availability_success_with_one_holder_when_two_are_required_is_refused() {
-        let (data_dir, availability, response) =
-            content_fetch_against_bridge(bridge_success(json!({
+        let cid = fixture_file_cid(BRIDGE_BYTES);
+        let (data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
                 "status": "network_available",
                 "provider": "bridge",
                 "distinct_holders": 9,
                 "required_distinct_holders": 1,
-                "receipts": [fetch_receipt(FetchResult::Ok, true, 1)],
-            })))
-            .await;
+                "receipts": [fetch_receipt_for(&cid, FetchResult::Ok, true, 1)],
+            })),
+        )
+        .await;
         assert_eq!(availability.requests.lock().await.len(), 1);
         let response = response.expect("the refusal is an error answer, not a transport failure");
         assert_eq!(response["status"], "error", "{response}");
@@ -10687,7 +11232,7 @@ mod tests {
         let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
         let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
         assert_eq!(receipts.len(), 1);
-        assert_eq!(signed.payload.requested_cid, TEST_CID);
+        assert_eq!(signed.payload.requested_cid, cid);
         assert_eq!(signed.payload.required_distinct_holders, 2);
         assert_eq!(signed.payload.observed_distinct_holders, 1);
     }
@@ -10788,19 +11333,22 @@ mod tests {
     /// Two verified receipts for another CID do not prove this CID.
     #[tokio::test]
     async fn availability_success_for_another_cid_is_refused() {
+        let cid = fixture_file_cid(BRIDGE_BYTES);
         let receipts = vec![
             verified_receipt_for(OTHER_CID, [7; 32], 1, 1_700_000_000),
             verified_receipt_for(OTHER_CID, [22; 32], 2, 1_700_000_001),
         ];
-        let (data_dir, availability, response) =
-            content_fetch_against_bridge(bridge_success(json!({
+        let (data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
                 "status": "network_available",
                 "provider": "bridge",
                 "distinct_holders": 9,
                 "required_distinct_holders": 1,
                 "receipts": receipts,
-            })))
-            .await;
+            })),
+        )
+        .await;
         assert_eq!(availability.requests.lock().await.len(), 1);
         let response = response.expect("another CID is a refusal, not a transport failure");
         assert_eq!(response["status"], "error", "{response}");
@@ -10815,7 +11363,7 @@ mod tests {
         let verified = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
         assert_eq!(verified.len(), 2);
         assert_eq!(signed.payload.requested_cid, OTHER_CID);
-        assert_ne!(signed.payload.requested_cid, TEST_CID);
+        assert_ne!(signed.payload.requested_cid, cid);
         assert_eq!(signed.payload.required_distinct_holders, 2);
         assert_eq!(signed.payload.observed_distinct_holders, 2);
     }
@@ -13989,6 +14537,35 @@ mod tests {
         assert_eq!(requests[0]["uri"], format!("elastos://{cid}"));
         assert!(requests[0].get("path").is_none());
         assert_eq!(requests[1]["path"], "remote.md");
+    }
+
+    #[tokio::test]
+    async fn carrier_only_content_fetch_verifies_without_local_ipfs() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let content =
+            ContentProvider::new(data_dir.path().to_path_buf(), Arc::downgrade(&registry));
+        registry
+            .register(Arc::new(MockAvailabilityProvider {
+                requests: Mutex::new(Vec::new()),
+                response: Mutex::new(provider_ok(json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(b"remote content"),
+                }))),
+            }))
+            .await;
+        let response = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["data"]["availability"]["cid_verified"], true);
+        assert_eq!(
+            response["data"]["data"],
+            base64::engine::general_purpose::STANDARD.encode(b"remote content")
+        );
     }
 
     #[tokio::test]

@@ -8594,7 +8594,10 @@ fn manifest_resource_refusal(resource: &str) -> Option<&'static str> {
     let Some(path) = resource.strip_prefix("localhost://") else {
         return ask_resource_refusal(resource).or(Some("asks url"));
     };
-    let Some(rest) = path.strip_prefix("Users/self/") else {
+    let Some(rest) = path
+        .strip_prefix("Users/self/")
+        .or_else(|| path.strip_prefix("UsersAI/self/"))
+    else {
         return ask_resource_refusal(path).or(Some("asks users path"));
     };
     if rest.is_empty() || rest == "*" {
@@ -9739,7 +9742,7 @@ mod tests {
     #[test]
     fn a15r_june_plan_preview_and_submit_keep_the_document_step() {
         let mut journal = empty_journal();
-        let document = "localhost://Users/self/Documents/note.txt";
+        let document = "localhost://UsersAI/self/Documents/note.txt";
         assert!(observe(&mut journal, document, 2, "two lines"));
         let edit = propose_edit(&mut journal, document, "two", "three", Some(2)).unwrap();
         let mut bus = PlanBus::default();
@@ -9779,7 +9782,7 @@ mod tests {
     #[test]
     fn a15r_june_plan_refuses_two_steps_before_any_bus_call() {
         let mut journal = empty_journal();
-        let document = "localhost://Users/self/Documents/note.txt";
+        let document = "localhost://UsersAI/self/Documents/note.txt";
         assert!(observe(&mut journal, document, 1, "two lines"));
         let edit = propose_edit(&mut journal, document, "two", "three", Some(1)).unwrap();
         let mut bus = PlanBus::default();
@@ -20851,9 +20854,15 @@ mod tests {
         );
         let asks = parse_manifest_asks(MANIFEST_JSON)
             .unwrap_or_else(|reason| panic!("the manifest asks are refused: {reason}"));
-        assert_eq!(asks.len(), 2, "the manifest lists journal and submit asks");
+        assert_eq!(
+            asks.len(),
+            3,
+            "the manifest lists journal, submit and document asks"
+        );
         assert_eq!(asks[1].resource, "elastos://inspect/submit_agent_plan");
         assert_eq!(asks[1].actions, ["write"]);
+        assert_eq!(asks[2].resource, "localhost://UsersAI/self/Documents/*");
+        assert_eq!(asks[2].actions, ["write"]);
         let ask = &asks[0];
         (ask.resource.clone(), ask.actions.clone())
     }
