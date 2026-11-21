@@ -330,7 +330,7 @@ fn places() -> Vec<Place> {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             spawn.clone(),
-            17,
+            16,
             P2_2,
         ),
         place(
@@ -353,6 +353,13 @@ fn places() -> Vec<Place> {
             spawn.clone(),
             1,
             P2_2,
+        ),
+        place(
+            "elastos-server/src/server_infra.rs",
+            "start_wallet_provider",
+            [spawn.as_str(), "_confined"].concat(),
+            1,
+            "Wallet: admitted binary, OS gate, confined storage",
         ),
         place(
             "elastos-server/src/protected_content_runtime.rs",
@@ -557,11 +564,21 @@ pub(super) fn sites(file: &str, text: &str) -> Vec<Site> {
         }
     }
     let spawn = joined(SPAWN);
+    let confined_spawn = [spawn.as_str(), "_confined"].concat();
     for (at, _) in code.match_indices(&spawn) {
+        let suffix = &code[at + spawn.len()..];
+        let label = if suffix
+            .strip_prefix("_confined")
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+        {
+            confined_spawn.clone()
+        } else {
+            spawn.clone()
+        };
         sites.push(Site {
             file: file.to_string(),
             function: enclosing_fn(&code, at),
-            label: spawn.clone(),
+            label,
         });
     }
     for at in zero_argument_spawns(&code) {
