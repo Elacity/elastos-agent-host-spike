@@ -5,6 +5,7 @@
   "description": "Agent Host journal and document plan guest. It asks for write and read on its own task journal, and write on the exact Runtime plan submit resource. The document plan waits for owner approval. No Home icon.",
   "author": "local-development",
   "role": "app",
+  "agent": {"kind": "agent"},
   "type": "wasm",
   "runtime_abi": "elastos.component/v1",
   "bus_contract": "elastos:bus@v1",
@@ -14,7 +15,7 @@
   "entrypoint": "agent-host.component.wasm",
   "asks": [
     {
-      "resource": "localhost://Users/self/.AppData/Agents/agent-host/*",
+      "resource": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
       "actions": ["write", "read"]
     },
     {

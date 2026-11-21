@@ -27,6 +27,14 @@ contains CRITICAL and names the commit from ``git log -1 --format=%H HEAD
 service that opened. The same paragraph is appended to ``CRITICAL.md``.
 With no allow, this module writes neither file.
 
+One model allow is not an escape: ``named_rights`` names it
+(``CRITICAL-cc-model-confine-064``, the model helper's GPU right, approved
+20 Nov 2026 and measured as probe row X5). On the live model profile only,
+an allow that opens the IOSurfaceRoot client alone, under the one named
+``iokit-open-user-client`` form, writes no finding; the model deny test
+becomes the named-right check, and ``test_model_allows_only_named_rights``
+fails the gate on any model allow beyond it. Wallet and did keep the deny.
+
 A recorded allow keeps the gate green. The deny test is an expected
 failure and its docstring names that finding file (README guard b).
 Each confirmed allow is written before the next profile is classified.
@@ -53,6 +61,7 @@ from functools import wraps
 from pathlib import Path
 from unittest.mock import patch
 
+import named_rights
 import sbx
 from test_confine_mach import (
     HarnessError as MachHarnessError,
@@ -666,11 +675,26 @@ def observe(case_cls):
     written and marked. A refusal before any allow writes nothing.
     """
     case_cls.recorded_allows = {}
+    case_cls.named_rights = {}
+    # The accepted rights belong to this run of the class only.
+    case_cls.addClassCleanup(setattr, case_cls, "named_rights", {})
     confirmed = []
     for profile in PROFILES:
         result = iokit_under(profile["path"])
         outcome = classify(result)
         if outcome != "allow":
+            continue
+        right = named_rights.accepted(IDS[profile["name"]], profile["path"], result)
+        if right is not None:
+            case_cls.named_rights[profile["name"]] = right
+            named_rights.mark_named(
+                case_cls,
+                f"test_{profile['name']}_iokit_open_is_denied",
+                right,
+                profile["path"],
+                iokit_under,
+                classify,
+            )
             continue
         confirmed.append((profile, result))
         # Snapshot: a later append must not change the list this call recorded.
@@ -706,6 +730,15 @@ def tearDownModule():
     require_unchanged(START_SHA)
 
 
+def skip_when_unavailable(case):
+    """The one skip: a missing tool, or a named IOKit device absent here."""
+    if type(case).skip_reason:
+        case.skipTest(type(case).skip_reason)
+    case.binary = type(case).binary
+    case.root = type(case).root
+    case.parent = type(case).parent
+
+
 class IokitProbe(unittest.TestCase):
     """The helper under the live profiles, and the allow plant."""
 
@@ -714,6 +747,7 @@ class IokitProbe(unittest.TestCase):
     root = None
     parent = None
     recorded_allows = {}
+    named_rights = {}
 
     @classmethod
     def setUpClass(cls):
@@ -722,6 +756,7 @@ class IokitProbe(unittest.TestCase):
         cls.root = None
         cls.parent = None
         cls.recorded_allows = {}
+        cls.named_rights = {}
         if cls.skip_reason:
             return
         cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-iokit-parent-"))
@@ -735,11 +770,7 @@ class IokitProbe(unittest.TestCase):
         observe(cls)
 
     def setUp(self):
-        if type(self).skip_reason:
-            self.skipTest(type(self).skip_reason)
-        self.binary = type(self).binary
-        self.root = type(self).root
-        self.parent = type(self).parent
+        skip_when_unavailable(self)
 
     def test_cc_and_sandbox_present_or_skip(self):
         """This class runs only when both binaries exist.
@@ -993,6 +1024,101 @@ class IokitProbe(unittest.TestCase):
         if PLANT_PHRASE in text:
             raise HarnessError(f"{name} plant line has no trailing newline")
         return text
+
+
+class IokitNamedRight(unittest.TestCase):
+    """The model's accepted GPU right, checked against the live files.
+
+    It compiles the helper and launches it under the live profiles on its
+    own, so the injected-suite checks of ``IokitProbe`` do not run it. It
+    skips for the same reasons as ``IokitProbe``.
+    """
+
+    skip_reason = None
+    binary = None
+    root = None
+    parent = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skip_reason = skip_reason()
+        if cls.skip_reason:
+            return
+        cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-iokit-named-parent-"))
+        cls.root = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-iokit-named-root-"))
+        cls.addClassCleanup(shutil.rmtree, cls.parent, ignore_errors=True)
+        cls.addClassCleanup(shutil.rmtree, cls.root, ignore_errors=True)
+        cls.binary = compile_iokit(cls.parent, cls.root, HELPER_C)
+        cls.skip_reason = absent_device_reason(cls.binary)
+
+    def setUp(self):
+        skip_when_unavailable(self)
+
+    def _launch(self, profile):
+        return run_sandboxed(self.binary, self.root, self.parent, profile)
+
+    def test_model_allows_only_named_rights(self):
+        """A model IOKit allow must be the accepted GPU right, nothing wider.
+
+        A deny is stricter and passes. Any opened client other than
+        IOSurfaceRoot, or any further ``iokit-open`` form, fails the gate here,
+        although ``observe`` records it as an ordinary finding. Wallet and did
+        still deny every client.
+        """
+        model = sbx.REPO_ROOT / "capsules/model-provider/confine.sb"
+        result = self._launch(model)
+        for name in ("wallet", "did"):
+            path = next(item["path"] for item in PROFILES if item["name"] == name)
+            denied = self._launch(path)
+            self.assertEqual(denied.stdout, DENY_STDOUT, name)
+            self.assertEqual(classify(denied), "deny", name)
+        if classify(result) == "deny":
+            return
+        right = named_rights.accepted(IDS["model"], model, result)
+        self.assertIsNotNone(right, f"model IOKit allow beyond its named right: {result.stdout!r}")
+        self.assertEqual(right.finding, IDS["model"])
+        self.assertEqual(opened_names(result.stdout), ("surface",))
+
+    def test_falsifier_model_beyond_named_right_is_caught(self):
+        """A further IOKit grant on a model copy fails the named-right check.
+
+        Appending ``(allow iokit-open)`` opens every client on a real launch
+        and is refused. A second IOSurface client class in the named line, a
+        separate ``iokit-open-user-client`` line, and the named line dropped
+        each fail ``require``. A copy is never accepted as the live profile.
+        """
+        model = sbx.REPO_ROOT / "capsules/model-provider/confine.sb"
+        right = named_rights.RIGHTS[IDS["model"]]
+        text = model.read_text(encoding="utf-8")
+        measured = (
+            "smc match=1 kr=-536870174 surface match=1 kr=0 "
+            "display match=1 kr=-536870174 report match=1 kr=-536870174\n"
+        )
+        self.assertIs(named_rights.require(right, text, measured), right)
+        directory = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-iokit-named-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        second_class = text.replace(
+            right.forms[0],
+            right.forms[0][:-1] + ' (iokit-user-client-class "IOSurfaceSendRight"))',
+        )
+        self.assertNotEqual(second_class, text)
+        for label, planted in (
+            ("second-client-class", second_class),
+            ("separate-line", text + '(allow iokit-open-user-client (iokit-user-client-class "AppleSMCClient"))\n'),
+            ("open-all", text + ALLOW_IOKIT),
+            ("dropped", named_rights.strip_named_forms(right, text)),
+        ):
+            with self.subTest(plant=label):
+                with self.assertRaises(named_rights.NamedRightExceeded):
+                    named_rights.require(right, planted, measured)
+        planted = write_copy(directory, "model-open-all", text + ALLOW_IOKIT)
+        widened = self._launch(planted)
+        self.assertEqual(widened.stdout, ALLOW_STDOUT)
+        with self.assertRaises(named_rights.NamedRightExceeded):
+            named_rights.require(right, text, widened.stdout)
+        self.assertIsNone(named_rights.accepted(IDS["model"], planted, widened))
+        copy = write_copy(directory, "model-copy", text)
+        self.assertIsNone(named_rights.accepted(IDS["model"], copy, self._launch(copy)))
 
 
 class IokitRules(unittest.TestCase):

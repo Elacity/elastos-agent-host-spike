@@ -980,10 +980,16 @@ const MODEL_B3_SUITE_CASES: [(&str, SuiteClass); 17] = [
 fn model_suite_start(profile: &Path, binary: &Path, base: &Path) -> ConfinedProvider {
     let bindings = canonical_bindings(MODEL_PROVIDER, base, binary);
     create_shared_ancestors(&bindings);
-    let paths: Vec<(&str, &Path)> = bindings
+    let inert = model_inert_bindings(MODEL_PROVIDER);
+    let mut paths: Vec<(&str, &Path)> = bindings
         .iter()
         .map(|(binding, path)| (*binding, path.as_path()))
         .collect();
+    paths.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
     ConfinedProvider::start_under(profile, &paths, binary)
 }
 
@@ -1358,10 +1364,16 @@ fn model_unbound_exec_denial(profile: &Path, binary: &Path, label: &str) -> Suit
         "{label}: the unbound executable must be byte-identical"
     );
     let before = fs::read(&copy).expect("snapshot the copied executable");
-    let bindings: Vec<(&str, &Path)> = canonical
+    let inert = model_inert_bindings(MODEL_PROVIDER);
+    let mut bindings: Vec<(&str, &Path)> = canonical
         .iter()
         .map(|(name, path)| (*name, path.as_path()))
         .collect();
+    bindings.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
     let mut refused = ConfinedProvider::start_under(profile, &bindings, &copy);
     let exit = refused.wait_for_exit();
     assert_eq!(
@@ -2070,6 +2082,37 @@ fn standin_host_refusal(
     }
 }
 
+/// M1a: the model profile also names measured inputs beyond the three
+/// canonical parameters (`measured_model_form`). An unbound `(param ...)` is
+/// `#f` and sandbox-exec exits 65, so the stand-in binds each to a path under
+/// the empty, root-owned /private/var/empty that nothing here can create. The
+/// grants stay inert, at least as strict as the Runtime's own inputs. Other
+/// providers get no extra binding.
+fn model_inert_bindings(name: &str) -> Vec<(String, PathBuf)> {
+    if name != MODEL_PROVIDER {
+        return Vec::new();
+    }
+    let mut names = vec![
+        "MODEL".to_owned(),
+        "ENGINE".to_owned(),
+        "ENGINE_BUNDLE".to_owned(),
+    ];
+    names.extend((0..19).map(|index| format!("MODEL_ANCESTOR_{index}")));
+    for slot in 0..64 {
+        names.push(format!("BROKER_SOCKET_{slot}"));
+        names.push(format!("ENGINE_SOCKET_{slot}"));
+    }
+    names
+        .into_iter()
+        .map(|binding| {
+            let path = PathBuf::from(format!(
+                "/private/var/empty/elastos-redteam-unbound/{binding}"
+            ));
+            (binding, path)
+        })
+        .collect()
+}
+
 /// Lab stand-in for the Runtime's provider launch, not the Runtime.
 ///
 /// This function is a lane copy that is to move under the one shared stand-in,
@@ -2190,10 +2233,16 @@ fn standin_spawn_confined_provider(
             let profile = profile_dir.join(format!("{name}-standin.sb"));
             write_generated_profile(name, declared, &profile)?;
             create_shared_ancestors(&canonical);
-            let bindings: Vec<(&str, &Path)> = canonical
+            let inert = model_inert_bindings(name);
+            let mut bindings: Vec<(&str, &Path)> = canonical
                 .iter()
                 .map(|(binding, path)| (*binding, path.as_path()))
                 .collect();
+            bindings.extend(
+                inert
+                    .iter()
+                    .map(|(binding, path)| (binding.as_str(), path.as_path())),
+            );
             ConfinedProvider::start_under(&profile, &bindings, binary_path)
         }
         StandinPolicy::Seccomp(allow) => {
@@ -7250,10 +7299,16 @@ struct B3Provider {
 fn standin_oracle_start(name: &str, binary: &Path, root: &Path) -> ConfinedProvider {
     let bindings = canonical_bindings(name, root, binary);
     create_shared_ancestors(&bindings);
-    let paths: Vec<(&str, &Path)> = bindings
+    let inert = model_inert_bindings(name);
+    let mut paths: Vec<(&str, &Path)> = bindings
         .iter()
         .map(|(binding, path)| (*binding, path.as_path()))
         .collect();
+    paths.extend(
+        inert
+            .iter()
+            .map(|(binding, path)| (binding.as_str(), path.as_path())),
+    );
     ConfinedProvider::start_under(&confine_oracle_path(name), &paths, binary)
 }
 
@@ -8087,6 +8142,44 @@ const STARTUP_RULES: [&str; 2] = [
 ];
 /// The model profile reads the root directory with this narrower form.
 const MODEL_ROOT_READ_RULE: &str = r#"(allow file-read-data (literal "/"))"#;
+/// Exact macOS probe X1-X6 and proposal rows 2, 4-7 for Model only.
+/// The numbered sets stop at the measured lab bounds; all other forms fail.
+fn measured_model_form(form: &str) -> bool {
+    if [
+        MODEL_ROOT_READ_RULE,
+        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#,
+        r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
+        r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
+        "(allow process-fork)",
+        r#"(allow file-read* (literal (param "MODEL")))"#,
+        r#"(allow file-read* (literal "/dev/urandom"))"#,
+        r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
+        r#"(allow process-exec (literal (param "ENGINE")))"#,
+        r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
+        r#"(allow file-read* (subpath "/usr/lib"))"#,
+        "(allow signal (target children))",
+    ].contains(&form) { return true; }
+    for index in 0..19 {
+        if form
+            == format!("(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_{index}\")))")
+        {
+            return true;
+        }
+    }
+    for slot in 0..64 {
+        for (op, param) in [
+            ("network-outbound", "BROKER_SOCKET"),
+            ("file-read-metadata", "ENGINE_SOCKET"),
+            ("file-write*", "ENGINE_SOCKET"),
+            ("network-bind", "ENGINE_SOCKET"),
+        ] {
+            if form == format!("(allow {op} (literal (param \"{param}_{slot}\")))") {
+                return true;
+            }
+        }
+    }
+    false
+}
 /// The calls a process makes reading the root directory at startup.
 const ROOT_READ_SYSCALLS: &[&str] = &[
     "faccessat",
@@ -8113,6 +8206,18 @@ const PINNED_RULES: &[(&str, &str)] = &[
     (SHARED_RULES[2], "storage"),
     (STARTUP_RULES[0], "startup-root-directory"),
     (STARTUP_RULES[1], "startup-sysctl"),
+    (
+        r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#,
+        "model-gpu",
+    ),
+    (
+        r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#,
+        "model-gpu",
+    ),
+    (
+        r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
+        "model-gpu",
+    ),
 ];
 /// The file profiles the one contract check requires. Every one of them must
 /// present the contract, in this order.
@@ -8162,12 +8267,23 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
         if is_default_allow(form) {
             return Err(format!("{name} must reject (allow default): {form}"));
         }
-        if is_network_allow(form) {
+        if name == MODEL_PROVIDER
+            && is_allow_form(form)
+            && !SHARED_RULES.contains(&form.as_str())
+            && form != STARTUP_RULES[1]
+            && !measured_model_form(form)
+        {
+            return Err(format!("{name} has no measured model row for {form}"));
+        }
+        if is_network_allow(form) && !(name == MODEL_PROVIDER && measured_model_form(form)) {
             return Err(format!(
                 "{name} must not grant network access; a network allow is refused: {form}"
             ));
         }
-        if is_exec_allow(form) {
+        if is_exec_allow(form)
+            && !(name == MODEL_PROVIDER
+                && form == r#"(allow process-exec (literal (param "ENGINE")))"#)
+        {
             exec_allows.push(form.as_str());
         }
         let tokens = match parameter_tokens(form) {
@@ -8175,7 +8291,9 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
             Err(()) => return Err(format!("{name} parameter token must close: {form}")),
         };
         for token in tokens {
-            if !CANONICAL_PARAMS.contains(&token) {
+            if !(CANONICAL_PARAMS.contains(&token)
+                || (name == MODEL_PROVIDER && measured_model_form(form)))
+            {
                 return Err(format!(
                     "{name} declares the non-canonical parameter token {token}; \
                      every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE"
@@ -8445,14 +8563,18 @@ const SECCOMP_RULE_SYSCALLS: &[(&str, &[&str])] = &[
 /// so each keeps the default decision, and the journey's sweep proves the
 /// refusal on the Linux host.
 const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
+    // M1a Linux probe: model-only unconditional calls, with kill excluded.
+    ("accept4", Some(288), Some(242)),
     // x86-64 only: aarch64 sets its thread pointer without a call.
     ("arch_prctl", Some(158), None),
     ("bpf", Some(321), Some(280)),
+    ("bind", Some(49), Some(200)),
     ("brk", Some(12), Some(214)),
     ("clone", Some(56), Some(220)),
     ("clone3", Some(435), Some(435)),
     ("close", Some(3), Some(57)),
     ("connect", Some(42), Some(203)),
+    ("dup2", Some(33), None),
     ("epoll_create1", Some(291), Some(20)),
     ("epoll_ctl", Some(233), Some(21)),
     ("epoll_pwait", Some(281), Some(22)),
@@ -8474,9 +8596,13 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("futex", Some(202), Some(98)),
     ("getdents64", Some(217), Some(61)),
     ("geteuid", Some(107), Some(175)),
+    ("getpgrp", Some(111), None),
+    ("getpid", Some(39), Some(172)),
     ("getrandom", Some(318), Some(278)),
+    ("getsockopt", Some(55), Some(209)),
     ("keyctl", Some(250), Some(219)),
     ("linkat", Some(265), Some(37)),
+    ("listen", Some(50), Some(201)),
     ("lseek", Some(8), Some(62)),
     ("madvise", Some(28), Some(233)),
     // x86-64 only, the older form of mkdirat that glibc calls there.
@@ -8490,6 +8616,7 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("openat", Some(257), Some(56)),
     ("openat2", Some(437), Some(437)),
     ("pidfd_getfd", Some(438), Some(438)),
+    ("pipe2", Some(293), Some(59)),
     // x86-64 only: aarch64 has ppoll alone.
     ("poll", Some(7), None),
     ("ppoll", Some(271), Some(73)),
@@ -8500,9 +8627,11 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("ptrace", Some(101), Some(117)),
     ("pwrite64", Some(18), Some(68)),
     ("read", Some(0), Some(63)),
+    ("readlink", Some(89), None),
     ("readlinkat", Some(267), Some(78)),
     ("readv", Some(19), Some(65)),
     ("recvmsg", Some(47), Some(212)),
+    ("recvfrom", Some(45), Some(207)),
     // x86-64 only: aarch64 has no rename call, so glibc's rename calls
     // renameat there.
     ("rename", Some(82), None),
@@ -8515,6 +8644,8 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("rt_sigprocmask", Some(14), Some(135)),
     ("sched_getaffinity", Some(204), Some(123)),
     ("sendmsg", Some(46), Some(211)),
+    ("sendto", Some(44), Some(206)),
+    ("setpgid", Some(109), Some(154)),
     ("set_robust_list", Some(273), Some(99)),
     ("set_tid_address", Some(218), Some(96)),
     ("sigaltstack", Some(131), Some(132)),
@@ -8528,6 +8659,7 @@ const SECCOMP_SYSCALL_NUMBERS: &[(&str, Option<u32>, Option<u32>)] = &[
     ("unlinkat", Some(263), Some(35)),
     ("write", Some(1), Some(64)),
     ("writev", Some(20), Some(66)),
+    ("waitid", Some(247), Some(95)),
 ];
 
 /// The audit architecture this target's kernel reports in `seccomp_data.arch`.
@@ -8544,9 +8676,12 @@ const SECCOMP_AUDIT_ARCH: u32 = 0;
 /// calls, or calls aarch64 does not have.
 const X86_64_ONLY_SYSCALLS: &[&str] = &[
     "arch_prctl",
+    "dup2",
     "epoll_wait",
+    "getpgrp",
     "mkdir",
     "poll",
+    "readlink",
     "rename",
     "unlink",
 ];
@@ -8631,6 +8766,22 @@ impl SeccompInstruction {
 /// `PermissionDenied`, and the provider answers `journal_access_denied`. Each
 /// architecture admits only the form it has.
 const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[
+    // M1a Linux probe rows, excluding unscoped kill.
+    "accept4",
+    "bind",
+    "connect",
+    "dup2",
+    "getpgrp",
+    "getpid",
+    "getsockopt",
+    "listen",
+    "pipe2",
+    "readlink",
+    "recvfrom",
+    "rt_sigprocmask",
+    "sendto",
+    "setpgid",
+    "waitid",
     "epoll_create1",
     "epoll_ctl",
     "epoll_pwait",
@@ -8665,22 +8816,26 @@ const SECCOMP_ARG2_LOW: u32 = 32;
 const SECCOMP_ARG2_HIGH: u32 = 36;
 const SECCOMP_BPF_JSET_K: u16 = 0x45;
 /// The calls `seccomp_program_with_thread_rules` admits only with checked arguments.
-const THREAD_RULE_CALLS: [&str; 6] = [
+const THREAD_RULE_CALLS: [&str; 7] = [
     "clone3",
     "clone",
     "socketpair",
     "fcntl",
     "prlimit64",
     "futex",
+    "socket",
 ];
 const SECCOMP_BPF_AND_K: u16 = 0x54;
 /// Linux ABI values, written out because this builder compiles on macOS too, where
 /// libc has different numbers or none. `linux_abi_constants_match_libc` checks them.
 const LINUX_ENOSYS: u32 = 38;
 const LINUX_CLONE_THREAD: u32 = 0x1_0000;
+const LINUX_MEASURED_VFORK: u32 = 0x4111;
 const LINUX_AF_UNIX: u32 = 1;
 const LINUX_F_GETFD: u32 = 1;
 const LINUX_F_DUPFD_CLOEXEC: u32 = 1030;
+const LINUX_F_GETFL: u32 = 3;
+const LINUX_F_SETFL: u32 = 4;
 /// The kernel's `FUTEX_CMD_MASK`: every bit except `FUTEX_PRIVATE_FLAG` (0x80) and
 /// `FUTEX_CLOCK_REALTIME` (0x100).
 const LINUX_FUTEX_CMD_MASK: u32 = 0xffff_fe7f;
@@ -8832,16 +8987,16 @@ fn seccomp_allow_list_for_arch(
             // nothing, so no syscall answers to them.
             continue;
         }
-        let Some(row) = SECCOMP_RULE_SYSCALLS
+        let row = SECCOMP_RULE_SYSCALLS
             .iter()
-            .find(|(allowed, _)| *allowed == form.as_str())
-        else {
+            .find(|(allowed, _)| *allowed == form.as_str());
+        if row.is_none() && !(name == MODEL_PROVIDER && measured_model_form(&form)) {
             return Err(format!(
                 "{name} seccomp allow list refuses the allow form {form}: \
                  the mapping table has no syscall row for it, so no filter is built"
             ));
-        };
-        for syscall in row.1 {
+        }
+        for syscall in row.map(|row| row.1).unwrap_or(&[]) {
             // A row may name an older call one architecture alone has; a
             // target without it admits nothing for that name.
             if seccomp_syscall_number(syscall, audit_arch).is_none() {
@@ -8908,9 +9063,9 @@ fn seccomp_program(syscalls: &[&'static str], audit_arch: u32) -> Vec<SeccompIns
 /// using:
 /// - `clone3` answers `ENOSYS`, because a filter cannot read its argument struct,
 ///   so glibc falls back to `clone`;
-/// - `clone` only with `CLONE_THREAD`, so threads start and new processes don't;
-/// - `socketpair` only for `AF_UNIX`, so `socket` and the network stay refused;
-/// - `fcntl` only for `F_GETFD` and `F_DUPFD_CLOEXEC`, so no `F_SETOWN` can aim a
+/// - `clone` with `CLONE_THREAD` or exactly measured `0x4111`;
+/// - `socketpair` and `socket` only for `AF_UNIX`;
+/// - `fcntl` for `F_GETFD`, `F_DUPFD_CLOEXEC`, `F_GETFL`, and `F_SETFL`, so no `F_SETOWN` can aim a
 ///   signal at another process;
 /// - `prlimit64` only for pid 0 with no new limit, so it reads its own limits and
 ///   changes nobody's;
@@ -8943,9 +9098,11 @@ fn seccomp_program_with_thread_rules(
     program.extend([
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone3"), 0, 1),
         SeccompInstruction::stmt(SECCOMP_BPF_RET_K, SECCOMP_RET_ENOSYS),
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone"), 0, 4),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("clone"), 0, 6),
         SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
         SeccompInstruction::jump(SECCOMP_BPF_JSET_K, LINUX_CLONE_THREAD, 0, 1),
+        allow,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_MEASURED_VFORK, 0, 1),
         allow,
         deny,
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("socketpair"), 0, 4),
@@ -8953,10 +9110,12 @@ fn seccomp_program_with_thread_rules(
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_AF_UNIX, 0, 1),
         allow,
         deny,
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("fcntl"), 0, 5),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("fcntl"), 0, 7),
         SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFD, 1, 0),
-        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_DUPFD_CLOEXEC, 0, 1),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFD, 3, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_DUPFD_CLOEXEC, 2, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFL, 1, 0),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_SETFL, 0, 1),
         allow,
         deny,
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("prlimit64"), 0, 10),
@@ -8977,6 +9136,11 @@ fn seccomp_program_with_thread_rules(
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAKE, 2, 0),
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAIT_BITSET, 1, 0),
         SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_FUTEX_WAKE_BITSET, 0, 1),
+        allow,
+        deny,
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number("socket"), 0, 4),
+        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG0_LOW),
+        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_AF_UNIX, 0, 1),
         allow,
         deny,
         deny,
@@ -9452,20 +9616,21 @@ fn landlock_path_rules(
             // nothing, so they take no row and add no path.
             continue;
         }
-        let Some((_, rights)) = LANDLOCK_RULE_RIGHTS
+        let row = LANDLOCK_RULE_RIGHTS
             .iter()
-            .find(|(allowed, _)| *allowed == form.as_str())
-        else {
+            .find(|(allowed, _)| *allowed == form.as_str());
+        if row.is_none() && !(name == MODEL_PROVIDER && measured_model_form(&form)) {
             return Err(format!(
                 "{name} landlock ruleset refuses the allow form {form}: \
                  the rights table has no row for it, so no ruleset is built"
             ));
-        };
-        if *rights == 0 {
+        }
+        let rights = row.map(|row| row.1).unwrap_or(0);
+        if rights == 0 {
             // A row that grants no right is a decision, not an omission.
             continue;
         }
-        if let Some(refusal) = landlock_row_abi_refusal(&format!("the {form} row"), *rights, abi) {
+        if let Some(refusal) = landlock_row_abi_refusal(&format!("the {form} row"), rights, abi) {
             return Err(refusal);
         }
         let Some((parameter, path)) = parameter_path_for_form(&form, bindings) else {
@@ -9480,7 +9645,7 @@ fn landlock_path_rules(
         rules.push(LandlockPathRule {
             parameter,
             path,
-            rights: *rights,
+            rights,
         });
     }
     for (path, _) in loader {
@@ -12646,6 +12811,7 @@ fn seccomp_allow_list_names_the_provider_it_was_built_for() {
 /// namespace, a keyring or a kernel-instrumentation interface. On a Linux host
 /// `model_syscall_lists_match_libc` compares that host's column with libc.
 const MODEL_FORBIDDEN_CALLS: &[(&str, u32, u32)] = &[
+    ("kill", 62, 129),
     ("ptrace", 101, 117),
     ("process_vm_readv", 310, 270),
     ("process_vm_writev", 311, 271),
@@ -12729,6 +12895,11 @@ macro_rules! model_allowed_x86_64 {
             SYS_faccessat = 269, SYS_ppoll = 271, SYS_epoll_pwait = 281, SYS_eventfd2 = 290,
             SYS_epoll_create1 = 291, SYS_prlimit64 = 302, SYS_renameat2 = 316, SYS_getrandom = 318,
             SYS_execveat = 322, SYS_statx = 332, SYS_rseq = 334, SYS_openat2 = 437,
+            SYS_accept4 = 288, SYS_bind = 49, SYS_connect = 42, SYS_dup2 = 33,
+            SYS_getpgrp = 111, SYS_getpid = 39, SYS_getsockopt = 55, SYS_listen = 50,
+            SYS_pipe2 = 293, SYS_readlink = 89, SYS_recvfrom = 45,
+            SYS_rt_sigprocmask = 14, SYS_sendto = 44, SYS_setpgid = 109,
+            SYS_socket = 41, SYS_waitid = 247,
         }
     };
 }
@@ -12748,6 +12919,10 @@ macro_rules! model_allowed_aarch64 {
             SYS_mmap = 222, SYS_mprotect = 226, SYS_prlimit64 = 261, SYS_renameat2 = 276,
             SYS_getrandom = 278, SYS_execveat = 281, SYS_statx = 291, SYS_rseq = 293,
             SYS_openat2 = 437,
+            SYS_accept4 = 242, SYS_bind = 200, SYS_connect = 203,
+            SYS_getpid = 172, SYS_getsockopt = 209, SYS_listen = 201,
+            SYS_pipe2 = 59, SYS_recvfrom = 207, SYS_rt_sigprocmask = 135,
+            SYS_sendto = 206, SYS_setpgid = 154, SYS_socket = 198, SYS_waitid = 95,
         }
     };
 }
@@ -12822,7 +12997,7 @@ fn model_syscall_lists_match_libc() {
         };
     }
     let libc_forbidden = libc_numbers! {
-        SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_kexec_load,
+        SYS_kill, SYS_ptrace, SYS_process_vm_readv, SYS_process_vm_writev, SYS_kexec_load,
         SYS_kexec_file_load, SYS_init_module, SYS_finit_module, SYS_bpf, SYS_mount, SYS_umount2,
         SYS_pivot_root, SYS_unshare, SYS_setns, SYS_keyctl, SYS_add_key, SYS_request_key,
         SYS_perf_event_open, SYS_userfaultfd,
@@ -16234,9 +16409,16 @@ fn linux_model_filter_admits_threads_and_refuses_new_processes() {
 fn linux_abi_constants_match_libc() {
     assert_eq!(LINUX_ENOSYS, libc::ENOSYS as u32);
     assert_eq!(LINUX_CLONE_THREAD, libc::CLONE_THREAD as u32);
+    // glibc exposes these values as the clone signal and the two fcntl commands.
+    assert_eq!(
+        LINUX_MEASURED_VFORK,
+        libc::SIGCHLD as u32 | libc::CLONE_VFORK as u32 | libc::CLONE_VM as u32
+    );
     assert_eq!(LINUX_AF_UNIX, libc::AF_UNIX as u32);
     assert_eq!(LINUX_F_GETFD, libc::F_GETFD as u32);
     assert_eq!(LINUX_F_DUPFD_CLOEXEC, libc::F_DUPFD_CLOEXEC as u32);
+    assert_eq!(LINUX_F_GETFL, libc::F_GETFL as u32);
+    assert_eq!(LINUX_F_SETFL, libc::F_SETFL as u32);
     assert_eq!(
         LINUX_FUTEX_CMD_MASK,
         !(libc::FUTEX_PRIVATE_FLAG | libc::FUTEX_CLOCK_REALTIME) as u32

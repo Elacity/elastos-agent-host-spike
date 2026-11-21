@@ -28,6 +28,14 @@ contains CRITICAL and names the commit from ``git log -1 --format=%H HEAD
 device opened. The same paragraph is appended to ``CRITICAL.md``. With no
 allow, this module writes neither file.
 
+One model allow is not an escape: ``named_rights`` names it
+(``CRITICAL-cc-model-confine-059``, the model helper's /dev/urandom and
+/dev/null reads, approved 21 Nov 2026 and measured as the provider startup
+baseline). On the live model profile only, an allow that opens both devices
+under exactly the two named lines writes no finding; the model deny test
+becomes the named-right check, and ``test_model_allows_only_named_rights``
+fails the gate on any model allow beyond it. Wallet and did keep the deny.
+
 A recorded allow keeps the gate green. The deny test is an expected
 failure and its docstring names that finding file (README guard b).
 Each confirmed allow is written before the next profile is classified.
@@ -54,6 +62,7 @@ from functools import wraps
 from pathlib import Path
 from unittest.mock import patch
 
+import named_rights
 import sbx
 from test_confine_mach import (
     HarnessError as MachHarnessError,
@@ -601,11 +610,27 @@ def observe(case_cls):
     written and marked. A refusal before any allow writes nothing.
     """
     case_cls.recorded_allows = {}
+    case_cls.named_rights = {}
+    # The accepted rights belong to this run of the class only.
+    case_cls.addClassCleanup(setattr, case_cls, "named_rights", {})
     confirmed = []
     for profile in PROFILES:
         result = read_under(profile["path"])
         outcome = classify(result)
         if outcome == "deny":
+            continue
+        right = named_rights.accepted(IDS[profile["name"]], profile["path"], result)
+        if right is not None:
+            case_cls.named_rights[profile["name"]] = right
+            named_rights.mark_named(
+                case_cls,
+                f"test_{profile['name']}_dev_read_is_denied",
+                right,
+                profile["path"],
+                read_under,
+                classify,
+                allow="both",
+            )
             continue
         confirmed.append((profile, result))
         # Snapshot: a later append must not change the list this call recorded.
@@ -641,6 +666,15 @@ def tearDownModule():
     require_unchanged(START_SHA)
 
 
+def skip_when_tools_missing(case):
+    """The one skip: a missing ``/usr/bin/sandbox-exec`` or ``/usr/bin/cc``."""
+    if type(case).skip_reason:
+        case.skipTest(type(case).skip_reason)
+    case.binary = type(case).binary
+    case.root = type(case).root
+    case.parent = type(case).parent
+
+
 class DevReadProbe(unittest.TestCase):
     """The helper under the live profiles, and the two allow plants."""
 
@@ -649,6 +683,7 @@ class DevReadProbe(unittest.TestCase):
     root = None
     parent = None
     recorded_allows = {}
+    named_rights = {}
 
     @classmethod
     def setUpClass(cls):
@@ -657,6 +692,7 @@ class DevReadProbe(unittest.TestCase):
         cls.root = None
         cls.parent = None
         cls.recorded_allows = {}
+        cls.named_rights = {}
         if cls.skip_reason:
             return
         cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-dev-parent-"))
@@ -667,11 +703,7 @@ class DevReadProbe(unittest.TestCase):
         observe(cls)
 
     def setUp(self):
-        if type(self).skip_reason:
-            self.skipTest(type(self).skip_reason)
-        self.binary = type(self).binary
-        self.root = type(self).root
-        self.parent = type(self).parent
+        skip_when_tools_missing(self)
 
     def test_cc_and_sandbox_present_or_skip(self):
         """This class runs only when both binaries exist.
@@ -767,7 +799,10 @@ class DevReadProbe(unittest.TestCase):
         into an ordinary failure.
         """
         baseline = self._source_for_plant(profile["name"], text)
-        if profile["name"] not in type(self).recorded_allows:
+        if (
+            profile["name"] not in type(self).recorded_allows
+            and profile["name"] not in type(self).named_rights
+        ):
             self.assertEqual(text.count(URANDOM_RULE), 0)
             self.assertEqual(text.count(NULL_RULE), 0)
             self.assertEqual(text.count(DENY_DEFAULT), 1)
@@ -947,6 +982,9 @@ class DevReadProbe(unittest.TestCase):
         removed so the append is still that one line. The read-write null
         line is not a plant and stays.
         """
+        right = type(self).named_rights.get(name)
+        if right is not None:
+            return named_rights.strip_named_forms(right, text)
         finding = type(self).recorded_allows.get(name)
         if finding is None:
             if URANDOM_RULE in text:
@@ -966,6 +1004,88 @@ class DevReadProbe(unittest.TestCase):
             if occurrences == 1:
                 text = text.replace(line, "", 1)
         return text
+
+
+class DevReadNamedRight(unittest.TestCase):
+    """The model's accepted device-read right, checked against the live files.
+
+    It compiles the helper and launches it under the live profiles on its
+    own, so the injected-suite checks of ``DevReadProbe`` do not run it. It
+    skips only when ``/usr/bin/sandbox-exec`` or ``/usr/bin/cc`` is missing.
+    """
+
+    skip_reason = None
+    binary = None
+    root = None
+    parent = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.skip_reason = skip_reason()
+        if cls.skip_reason:
+            return
+        cls.parent = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-dev-named-parent-"))
+        cls.root = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-dev-named-root-"))
+        cls.addClassCleanup(shutil.rmtree, cls.parent, ignore_errors=True)
+        cls.addClassCleanup(shutil.rmtree, cls.root, ignore_errors=True)
+        cls.binary = compile_dev(cls.parent, cls.root, HELPER_C)
+
+    def setUp(self):
+        skip_when_tools_missing(self)
+
+    def _launch(self, profile):
+        return run_sandboxed(self.binary, self.root, self.parent, profile)
+
+    def test_model_allows_only_named_rights(self):
+        """A model device-read allow must be the accepted named right, nothing wider.
+
+        A deny is stricter and passes. Any further ``/dev`` read line, or a
+        probe line other than the measured one, fails the gate here, although
+        ``observe`` records it as an ordinary finding. Wallet and did still
+        deny both opens.
+        """
+        model = sbx.REPO_ROOT / "capsules/model-provider/confine.sb"
+        result = self._launch(model)
+        for name in ("wallet", "did"):
+            path = next(item["path"] for item in PROFILES if item["name"] == name)
+            denied = self._launch(path)
+            self.assertEqual(denied.stdout, DENY_STDOUT, name)
+            self.assertEqual(classify(denied), "deny", name)
+        if classify(result) == "deny":
+            return
+        right = named_rights.accepted(IDS["model"], model, result)
+        self.assertIsNotNone(right, f"model device read beyond its named right: {result.stdout!r}")
+        self.assertEqual(right.finding, IDS["model"])
+
+    def test_falsifier_model_beyond_named_right_is_caught(self):
+        """A further device read on a model copy fails the named-right check.
+
+        A ``/dev/zero`` read, a ``/dev`` subpath read, a bare ``file-read*``,
+        a named line twice, and a named line dropped each fail ``require``.
+        A copy launched for real is never accepted as the live profile.
+        """
+        model = sbx.REPO_ROOT / "capsules/model-provider/confine.sb"
+        right = named_rights.RIGHTS[IDS["model"]]
+        text = model.read_text(encoding="utf-8")
+        self.assertIs(named_rights.require(right, text, BOTH_STDOUT), right)
+        with self.assertRaises(named_rights.NamedRightExceeded):
+            named_rights.require(right, text, URANDOM_STDOUT)
+        directory = os.path.realpath(tempfile.mkdtemp(prefix="ccrt-dev-named-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        for label, planted in (
+            ("zero", text + '(allow file-read* (literal "/dev/zero"))\n'),
+            ("subpath", text + '(allow file-read-data (subpath "/dev"))\n'),
+            ("bare", text + "(allow file-read*)\n"),
+            ("twice", text + right.forms[0] + "\n"),
+            ("dropped", text.replace(right.forms[0] + "\n", "", 1)),
+        ):
+            with self.subTest(plant=label):
+                with self.assertRaises(named_rights.NamedRightExceeded):
+                    named_rights.require(right, planted, BOTH_STDOUT)
+        copy = write_copy(directory, "model-copy", text)
+        launched = self._launch(copy)
+        self.assertEqual(launched.stdout, BOTH_STDOUT)
+        self.assertIsNone(named_rights.accepted(IDS["model"], copy, launched))
 
 
 class DevReadRules(unittest.TestCase):

@@ -144,6 +144,11 @@ fn build_for_arch(
                         BINARY,
                     ))
                 }
+                // macOS probe X4's Metal bundle, X5 and X6 have no Linux path decision.
+                r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#
+                | r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#
+                | r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#
+                    if matches!(provider, RuntimeProviderId::Model) => {}
                 _ => return Err(format!("Landlock has no path decision for {form}")),
             }
         }
@@ -351,7 +356,10 @@ mod tests {
                 for claim in declared["rights"].as_array().unwrap() {
                     for form in claim["rules"].as_array().unwrap() {
                         let form = form.as_str().unwrap();
-                        let mask = masks[form];
+                        let Some(mask) = masks.get(form).copied() else {
+                            assert!(form.starts_with("(allow iokit-open") || form.starts_with("(allow mach-lookup") || form == r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#, "lab form has no mask: {form}");
+                            continue;
+                        };
                         if mask == 0 {
                             continue;
                         }
