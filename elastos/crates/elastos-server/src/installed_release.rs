@@ -21,6 +21,8 @@ const MAX_COMPONENTS: u64 = 4 * 1024 * 1024;
 const MIGRATION: &str = ".elastos.installation-migrate";
 const HEAD: &str = "release-head.json";
 const RELEASE: &str = "release.json";
+const UPDATE_STAGE: &str = ".elastos.update-stage";
+const UPDATE_ROLLBACK: &str = ".elastos.update-rollback";
 const REPAIR: &str = "Installed release inputs require repair. Preserve the installation files and ask the operator to restore the verified signed pair.";
 
 pub(crate) struct InstalledRelease {
@@ -52,7 +54,7 @@ pub(crate) fn load_or_migrate_for_update(
     require_current_source(data, source)?;
     let root = data.join("installation");
     let stage = data.join(MIGRATION);
-    if consumed_present(data)? {
+    if consumed_present(data, false)? {
         let admitted = read_pair(
             data,
             binary,
@@ -138,7 +140,7 @@ pub(crate) fn read_without_migration_for_update(
 ) -> Result<InstalledRelease> {
     require_no_pending(binary)?;
     require_current_source(data, source)?;
-    if consumed_present(data)? {
+    if consumed_present(data, false)? {
         read_pair(
             data,
             binary,
@@ -180,7 +182,7 @@ pub(crate) fn read_signed_release(
     repair_version: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     require_no_pending(binary)?;
-    read_signed_release_checked(data, binary, source, repair_version)
+    read_signed_release_checked(data, binary, source, repair_version, false)
 }
 
 /// A controller-claimed Home may read its signed inputs during the update hop.
@@ -193,8 +195,30 @@ pub(crate) fn read_signed_release_for_host_start(
     source: &TrustedSource,
     repair_version: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    crate::install_transaction::authorize_host_start(data, binary)?;
-    read_signed_release_checked(data, binary, source, repair_version)
+    read_signed_release_for_host_start_with_generation(
+        data,
+        binary,
+        source,
+        repair_version,
+        std::env::var("ELASTOS_UPDATE_GENERATION").ok().as_deref(),
+        std::process::id(),
+    )
+}
+
+/// Only a claimed update restart may find that update's own private scratch
+/// folders beside the pair; the reader still opens only the two release files.
+pub(crate) fn read_signed_release_for_host_start_with_generation(
+    data: &Path,
+    binary: &Path,
+    source: &TrustedSource,
+    repair_version: bool,
+    generation: Option<&str>,
+    process_id: u32,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let update_in_progress = crate::install_transaction::claimed_host_start_with_generation(
+        data, binary, generation, process_id,
+    )?;
+    read_signed_release_checked(data, binary, source, repair_version, update_in_progress)
 }
 
 fn read_signed_release_checked(
@@ -202,9 +226,10 @@ fn read_signed_release_checked(
     binary: &Path,
     source: &TrustedSource,
     repair_version: bool,
+    update_in_progress: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     require_current_source(data, source)?;
-    let private = consumed_present(data)?;
+    let private = consumed_present(data, update_in_progress)?;
     let (head, release) = if private {
         (
             installation_release_head_path(data),
@@ -246,7 +271,7 @@ pub(crate) fn read_for_setup(
     guard.require_binary(binary)?;
     require_no_pending(binary)?;
     require_current_source(data, source)?;
-    anyhow::ensure!(consumed_present(data)?, "{REPAIR}");
+    anyhow::ensure!(consumed_present(data, false)?, "{REPAIR}");
     read_pair_and_binary(
         data,
         binary,
@@ -550,7 +575,12 @@ fn present(path: &Path) -> Result<bool> {
     }
 }
 
-fn consumed_present(data: &Path) -> Result<bool> {
+/// Only the signed pair belongs in `installation/`. During a claimed update
+/// restart, that update's own scratch folders may also sit there until
+/// finalize; each must pass the strict private check (`check_directory`: a real
+/// directory, owned by this user, mode 0700). They are never opened; the pair is
+/// still read, so scratch folders alone select the private pair and are refused.
+fn consumed_present(data: &Path, update_in_progress: bool) -> Result<bool> {
     let root = data.join("installation");
     if !present(&root)? {
         return Ok(false);
@@ -558,8 +588,13 @@ fn consumed_present(data: &Path) -> Result<bool> {
     check_directory(&root, true)?;
     let mut count = 0;
     for entry in fs::read_dir(root)? {
-        let name = entry?.file_name();
-        anyhow::ensure!(name == HEAD || name == RELEASE, "{REPAIR}");
+        let entry = entry?;
+        let name = entry.file_name();
+        if update_in_progress && (name == UPDATE_STAGE || name == UPDATE_ROLLBACK) {
+            check_directory(&entry.path(), true)?;
+        } else {
+            anyhow::ensure!(name == HEAD || name == RELEASE, "{REPAIR}");
+        }
         count += 1;
     }
     Ok(count > 0)
@@ -702,7 +737,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 fn publish_stage(data: &Path, binary: &Path, stage: &Path, root: &Path) -> Result<()> {
     require_no_pending(binary)?;
-    anyhow::ensure!(!consumed_present(data)?, "{REPAIR}");
+    anyhow::ensure!(!consumed_present(data, false)?, "{REPAIR}");
     sync(stage)?;
     fs::rename(stage, root)?;
     sync(data)

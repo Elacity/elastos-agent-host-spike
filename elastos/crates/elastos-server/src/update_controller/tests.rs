@@ -4588,6 +4588,92 @@ fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
     );
 }
 
+/// A claimed update restart reads its signed pair while that update's own
+/// private scratch folders still sit beside it in `installation/`. Nothing
+/// else is admitted there, and without a claimed restart the folders refuse.
+#[tokio::test]
+async fn host_start_reader_admits_only_the_claimed_updates_private_scratch_folders() {
+    let installation = |fixture: &PrivateFixture| fixture.data.join("installation");
+    let read = |fixture: &PrivateFixture, generation: Option<&str>, pid: u32| {
+        let source = crate::setup::installed_release_source(&fixture.data)
+            .unwrap()
+            .unwrap();
+        crate::installed_release::read_signed_release_for_host_start_with_generation(
+            &fixture.data,
+            &fixture.binary,
+            &source,
+            false,
+            generation,
+            pid,
+        )
+    };
+    let refused = |result: Result<(Vec<u8>, Vec<u8>)>| {
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(
+            error.contains("Installed release inputs require repair"),
+            "{error}"
+        );
+    };
+
+    // (b) No journal: the update folders are not installed inputs.
+    let fixture = PrivateFixture::new();
+    fixture.publish_installed_release();
+    read(&fixture, None, std::process::id()).unwrap();
+    for name in [".elastos.update-stage", ".elastos.update-rollback"] {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(installation(&fixture).join(name))
+            .unwrap();
+        refused(read(&fixture, None, std::process::id()));
+    }
+
+    // (a) The real update's restart hop leaves both folders until finalize.
+    let (fixture, _) = dead_previous_start().await;
+    let record = InstallTransaction::acquire(&fixture.data, &fixture.binary)
+        .unwrap()
+        .restart_record()
+        .unwrap();
+    let stage = installation(&fixture).join(".elastos.update-stage");
+    let rollback = installation(&fixture).join(".elastos.update-rollback");
+    assert!(stage.is_dir() && rollback.is_dir());
+    let pid = record.pid.unwrap();
+    let claimed = || read(&fixture, Some(&record.generation), pid);
+    let (release, _) = claimed().unwrap();
+    assert_eq!(
+        release,
+        fs::read(installation_release_manifest_path(&fixture.data)).unwrap()
+    );
+    // An unclaimed start still meets the pending journal's fence.
+    assert!(read(&fixture, None, pid).is_err());
+
+    // (c) Each folder must pass the strict private directory check.
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o755)).unwrap();
+    refused(claimed());
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+    claimed().unwrap();
+    let held = fixture.data.join("held-stage");
+    fs::rename(&stage, &held).unwrap();
+    symlink(&held, &stage).unwrap();
+    refused(claimed());
+    fs::remove_file(&stage).unwrap();
+    fs::rename(&held, &stage).unwrap();
+    claimed().unwrap();
+
+    // (d) Any other entry is still refused, even a private folder.
+    for name in [
+        ".elastos.update-journal.json",
+        ".elastos.update-stage2",
+        "extra",
+    ] {
+        let extra = installation(&fixture).join(name);
+        fs::DirBuilder::new().mode(0o700).create(&extra).unwrap();
+        refused(claimed());
+        fs::remove_dir(&extra).unwrap();
+    }
+    fixture.file(&installation(&fixture).join("extra"), b"extra", 0o600);
+    refused(claimed());
+}
+
 #[test]
 fn installed_release_signers_name_only_rows_their_signed_record_matches() {
     let app = b"fixture app archive";
