@@ -7574,10 +7574,7 @@ async fn test_home_launch_validates_shell_targets() {
     let other_body = axum::body::to_bytes(other_page.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert_eq!(
-        serde_json::from_slice::<Value>(&other_body).unwrap()["error"],
-        "home_page_only"
-    );
+    assert_eq!(other_body.as_ref(), b"home_page_only");
 
     let cli = cli_home_launch_grant(dir.path());
     let cli_launch = app
