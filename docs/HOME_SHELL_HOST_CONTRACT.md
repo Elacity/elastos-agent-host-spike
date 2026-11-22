@@ -103,8 +103,11 @@ open, the gateway gives the Runtime a `home-shell` projection grant bound to
 `elastos home --cli-launch-token` does not mint a grant from the process
 environment. The command refuses. A terminal may register a bound request with
 `POST /api/home/cli-mint/request`. The signed-in human admin begins that request
-and approves it with a fresh passkey assertion. Approval records the decision
-and returns no launch grant. The gateway still gives its `elastos home` TUI
+and approves it with a fresh passkey assertion. The gateway keeps that decision
+in its own memory and returns no launch grant. A file in the data directory is
+not an approval. A restart drops a request that is still waiting. `Origin: null`
+cannot register a request, including when the caller presents a launch token.
+The gateway still gives its `elastos home` TUI
 child the terminal environment. That child uses the environment for an internal
 projection token. The TUI has no host shell and no export-mint action. The
 public journey smoke requires `ELASTOS_CLI_LAUNCH_TOKEN` from the operator.

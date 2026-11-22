@@ -4,14 +4,15 @@
 //! a fresh passkey assertion. The waiting terminal claims the grant once.
 //! The claim signs only after that approved record matches the request id,
 //! the secret hash, the bound owner, session, proof, grant, and operation.
+//!
+//! The request table lives only in this process. A same-user process can write
+//! the data directory, so a file there is not an approval and cannot deliver a
+//! grant. A gateway restart drops every waiting request. The table holds 32
+//! live requests for 120 seconds.
 
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-
-#[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use elastos_identity::{AuthenticationResponse, CredentialDescriptor, RequestOptions};
 use sha2::{Digest, Sha256};
@@ -30,7 +31,6 @@ const APPROVE_RESULT_SCHEMA: &str = "elastos.home.cli-mint.approve.result/v1";
 const CLAIM_RESULT_SCHEMA: &str = "elastos.home.cli-mint.claim.result/v1";
 const CANCEL_RESULT_SCHEMA: &str = "elastos.home.cli-mint.cancel.result/v1";
 const OPERATION: &str = "home-cli.export-grant";
-const DIRECTORY: &str = "home-cli-mint";
 const REQUEST_TTL_SECS: u64 = 120;
 /// Exported grant lifetime, measured from the signature.
 const EXPORT_TTL_SECS: u64 = 5 * 60;
@@ -54,11 +54,14 @@ const SECRET_MISMATCH: &str = "cli mint requester secret does not match";
 const EXPIRED: &str = "cli mint request expired";
 const MISMATCH: &str = "cli mint request mismatch";
 const ORIGIN_MISMATCH: &str = "cli mint passkey origin mismatch";
+const REQUEST_ORIGIN_REFUSED: &str = "cli mint request origin is refused";
 const CREDENTIAL_UNAVAILABLE: &str = "cli mint passkey credential is unavailable";
 const DIFFERENT_PASSKEY: &str = "cli mint used a different registered passkey";
 const CAPACITY_ERROR: &str = "cli mint request capacity";
 
-static MINT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+struct MintTable {
+    records: HashMap<String, MintRecord>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,7 +138,7 @@ struct CancelResult {
     status: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MintRecord {
     schema: String,
@@ -153,10 +156,13 @@ struct MintRecord {
 }
 
 pub(super) async fn home_cli_mint_request(
-    State(state): State<GatewayState>,
+    headers: HeaderMap,
     Json(input): Json<RequestBody>,
 ) -> Response {
-    match create_request(&state.data_dir, input) {
+    if !super::gateway_frontdoor::cli_mint_request_origin_allowed(&headers) {
+        return mint_error(anyhow::anyhow!(REQUEST_ORIGIN_REFUSED));
+    }
+    match create_request(input) {
         Ok(body) => Json(body).into_response(),
         Err(err) => mint_error(err),
     }
@@ -217,14 +223,17 @@ fn home_admin_context(
     Ok(context)
 }
 
-fn create_request(data_dir: &Path, input: RequestBody) -> anyhow::Result<RequestResult> {
+fn create_request(input: RequestBody) -> anyhow::Result<RequestResult> {
     if input.schema != REQUEST_SCHEMA {
         anyhow::bail!("unsupported cli mint request schema");
     }
     valid_secret(&input.requester_secret)?;
-    let _guard = mint_lock()?;
+    let mut table = mint_table()?;
     let now = now_ts();
-    prepare_capacity(data_dir, now)?;
+    table.records.retain(|_, record| now < record.expires_at);
+    if table.records.len() >= CAPACITY {
+        anyhow::bail!(CAPACITY_ERROR);
+    }
     let request_id = gateway_home_token::uuid_like_token();
     let record = MintRecord {
         schema: RECORD_SCHEMA.to_string(),
@@ -240,11 +249,12 @@ fn create_request(data_dir: &Path, input: RequestBody) -> anyhow::Result<Request
         ceremony_id: None,
         state: STATE_PENDING.to_string(),
     };
-    store_record(data_dir, &record)?;
+    let expires_at = record.expires_at;
+    table.records.insert(request_id.clone(), record);
     Ok(RequestResult {
         schema: REQUEST_RESULT_SCHEMA.to_string(),
         request_id,
-        expires_at: record.expires_at,
+        expires_at,
         status: STATE_PENDING.to_string(),
     })
 }
@@ -267,9 +277,9 @@ async fn begin_request(
     }
     let manager = state.identity_manager()?;
     let mut manager = manager.lock().await;
-    let _guard = mint_lock()?;
+    let mut table = mint_table()?;
     let now = now_ts();
-    let mut record = load_record(&state.data_dir, &input.request_id, now)?;
+    let mut record = load_record(&table, &input.request_id, now)?;
     if record.state != STATE_PENDING {
         anyhow::bail!(if record.state == STATE_BEGUN {
             ALREADY_WAITING
@@ -301,17 +311,16 @@ async fn begin_request(
     record.session_id = Some(context.session_id().to_string());
     record.proof_binding_id = context.proof_binding_id().map(str::to_string);
     record.grant_id = Some(context.grant_id().to_string());
-    record.ceremony_id = Some(ceremony_id.clone());
+    record.ceremony_id = Some(ceremony_id);
     record.state = STATE_BEGUN.to_string();
-    if let Err(err) = store_record(&state.data_dir, &record) {
-        manager.cancel_challenge(&ceremony_id);
-        return Err(err);
-    }
+    let request_id = record.request_id.clone();
+    let expires_at = record.expires_at;
+    table.records.insert(request_id.clone(), record);
     Ok(BeginResult {
         schema: BEGIN_RESULT_SCHEMA.to_string(),
-        request_id: record.request_id,
+        request_id,
         options,
-        expires_at: record.expires_at,
+        expires_at,
     })
 }
 
@@ -328,9 +337,9 @@ async fn approve_request(
     let rp = super::super::handlers::identity::derive_rp(headers)?;
     let manager = state.identity_manager()?;
     let mut manager = manager.lock().await;
-    let _guard = mint_lock()?;
+    let mut table = mint_table()?;
     let now = now_ts();
-    let mut record = load_record(&state.data_dir, &input.request_id, now)?;
+    let mut record = load_record(&table, &input.request_id, now)?;
     if record.state != STATE_BEGUN {
         anyhow::bail!(if record.state == STATE_PENDING {
             NOT_WAITING
@@ -356,8 +365,7 @@ async fn approve_request(
         .filter(|value| value.starts_with("cli-mint:"))
         .ok_or_else(|| anyhow::anyhow!(MISMATCH))?;
     if input.response.raw_id != passkey.credential_id {
-        record.state = STATE_REFUSED.to_string();
-        store_record(&state.data_dir, &record)?;
+        mark_refused(&mut table, &mut record);
         anyhow::bail!(DIFFERENT_PASSKEY);
     }
     let outcome = match manager.complete_authentication(
@@ -368,8 +376,7 @@ async fn approve_request(
     ) {
         Ok(outcome) => outcome,
         Err(err) => {
-            record.state = STATE_REFUSED.to_string();
-            store_record(&state.data_dir, &record)?;
+            mark_refused(&mut table, &mut record);
             return Err(err);
         }
     };
@@ -378,15 +385,15 @@ async fn approve_request(
         || outcome.credential.rp_id != passkey.rp_id
         || outcome.credential.public_key != passkey.public_key
     {
-        record.state = STATE_REFUSED.to_string();
-        store_record(&state.data_dir, &record)?;
+        mark_refused(&mut table, &mut record);
         anyhow::bail!(DIFFERENT_PASSKEY);
     }
     record.state = STATE_APPROVED.to_string();
-    store_record(&state.data_dir, &record)?;
+    let request_id = record.request_id.clone();
+    table.records.insert(request_id.clone(), record);
     Ok(ApproveResult {
         schema: APPROVE_RESULT_SCHEMA.to_string(),
-        request_id: record.request_id,
+        request_id,
         status: STATE_APPROVED.to_string(),
     })
 }
@@ -396,9 +403,9 @@ fn claim_request(data_dir: &Path, input: ClaimBody) -> anyhow::Result<ClaimResul
         anyhow::bail!("unsupported cli mint claim schema");
     }
     valid_secret(&input.requester_secret)?;
-    let _guard = mint_lock()?;
+    let mut table = mint_table()?;
     let now = now_ts();
-    let mut record = load_record(data_dir, &input.request_id, now)?;
+    let mut record = load_record(&table, &input.request_id, now)?;
     if record.state != STATE_APPROVED {
         anyhow::bail!(claim_state_error(&record.state));
     }
@@ -421,10 +428,11 @@ fn claim_request(data_dir: &Path, input: ClaimBody) -> anyhow::Result<ClaimResul
         Some(issued_at.saturating_add(EXPORT_TTL_SECS)),
     )?;
     record.state = STATE_DELIVERED.to_string();
-    store_record(data_dir, &record)?;
+    let request_id = record.request_id.clone();
+    table.records.insert(request_id.clone(), record);
     Ok(ClaimResult {
         schema: CLAIM_RESULT_SCHEMA.to_string(),
-        request_id: record.request_id,
+        request_id,
         status: STATE_DELIVERED.to_string(),
         grant,
     })
@@ -439,9 +447,9 @@ fn cancel_request(
         anyhow::bail!("unsupported cli mint cancel schema");
     }
     let context = home_admin_context(data_dir, headers)?;
-    let _guard = mint_lock()?;
+    let mut table = mint_table()?;
     let now = now_ts();
-    let mut record = load_record(data_dir, &input.request_id, now)?;
+    let mut record = load_record(&table, &input.request_id, now)?;
     if matches!(record.state.as_str(), STATE_BEGUN | STATE_APPROVED)
         && !binding_matches_context(&record, &context)
     {
@@ -454,10 +462,11 @@ fn cancel_request(
         anyhow::bail!(ALREADY_DECIDED);
     }
     record.state = STATE_CANCELLED.to_string();
-    store_record(data_dir, &record)?;
+    let request_id = record.request_id.clone();
+    table.records.insert(request_id.clone(), record);
     Ok(CancelResult {
         schema: CANCEL_RESULT_SCHEMA.to_string(),
-        request_id: record.request_id,
+        request_id,
         status: STATE_CANCELLED.to_string(),
     })
 }
@@ -475,6 +484,13 @@ fn binding_matches_context(record: &MintRecord, context: &HomeLaunchTokenContext
         && record.session_id.as_deref() == Some(context.session_id())
         && record.proof_binding_id.as_deref() == context.proof_binding_id()
         && record.grant_id.as_deref() == Some(context.grant_id())
+}
+
+fn mark_refused(table: &mut MintTable, record: &mut MintRecord) {
+    record.state = STATE_REFUSED.to_string();
+    table
+        .records
+        .insert(record.request_id.clone(), record.clone());
 }
 
 /// The bound owner, session, proof, grant, and operation still name one live
@@ -611,15 +627,13 @@ fn passkey_for_context(
         .ok_or_else(|| anyhow::anyhow!("admin passkey required"))
 }
 
-fn load_record(data_dir: &Path, request_id: &str, now: u64) -> anyhow::Result<MintRecord> {
+fn load_record(table: &MintTable, request_id: &str, now: u64) -> anyhow::Result<MintRecord> {
     valid_request_id(request_id)?;
-    let path = record_path(data_dir, request_id)?;
-    let meta = fs::symlink_metadata(&path).map_err(|_| anyhow::anyhow!(NOT_WAITING))?;
-    if !meta.file_type().is_file() {
-        anyhow::bail!(MISMATCH);
-    }
-    let record: MintRecord =
-        serde_json::from_slice(&fs::read(&path)?).map_err(|_| anyhow::anyhow!(MISMATCH))?;
+    let record = table
+        .records
+        .get(request_id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!(NOT_WAITING))?;
     if record.schema != RECORD_SCHEMA
         || record.request_id != request_id
         || record.operation != OPERATION
@@ -643,112 +657,16 @@ fn load_record(data_dir: &Path, request_id: &str, now: u64) -> anyhow::Result<Mi
     Ok(record)
 }
 
-fn prepare_capacity(data_dir: &Path, now: u64) -> anyhow::Result<()> {
-    let root = data_dir.join(DIRECTORY);
-    if !root.exists() {
-        return Ok(());
-    }
-    let mut kept = 0usize;
-    for entry in fs::read_dir(&root)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        let Some(id) = name.strip_suffix(".json") else {
-            continue;
-        };
-        if valid_request_id(id).is_err() {
-            continue;
-        }
-        let path = entry.path();
-        let expired = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<MintRecord>(&bytes).ok())
-            .is_some_and(|record| now >= record.expires_at);
-        if expired {
-            let _ = fs::remove_file(path);
-        } else {
-            kept += 1;
-        }
-    }
-    if kept >= CAPACITY {
-        anyhow::bail!(CAPACITY_ERROR);
-    }
-    Ok(())
-}
-
-fn store_record(data_dir: &Path, record: &MintRecord) -> anyhow::Result<()> {
-    let path = record_path(data_dir, &record.request_id)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("cli mint state root is unavailable"))?;
-    ensure_private_dir(parent)?;
-    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        anyhow::bail!(MISMATCH);
-    }
-    let bytes = serde_json::to_vec(record)?;
-    let temporary = parent.join(format!(".{}.tmp", record.request_id));
-    let _ = fs::remove_file(&temporary);
-    let write_result = (|| -> anyhow::Result<()> {
-        let mut file = {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600);
-            options.open(&temporary)?
-        };
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if let Err(err) = write_result {
-        let _ = fs::remove_file(&temporary);
-        return Err(err);
-    }
-    fs::rename(&temporary, &path)?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    sync_dir(parent)
-}
-
-fn record_path(data_dir: &Path, request_id: &str) -> anyhow::Result<PathBuf> {
-    valid_request_id(request_id)?;
-    Ok(data_dir.join(DIRECTORY).join(format!("{request_id}.json")))
-}
-
-fn ensure_private_dir(path: &Path) -> anyhow::Result<()> {
-    if path.symlink_metadata().is_ok() {
-        let meta = fs::symlink_metadata(path)?;
-        if meta.file_type().is_symlink() || !meta.is_dir() {
-            anyhow::bail!("cli mint state root is not a directory");
-        }
-        return Ok(());
-    }
-    #[cfg(unix)]
-    {
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(path)?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::create_dir_all(path)?;
-    }
-    Ok(())
-}
-
-fn sync_dir(path: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        File::open(path)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
+fn mint_table() -> anyhow::Result<std::sync::MutexGuard<'static, MintTable>> {
+    static TABLE: OnceLock<Mutex<MintTable>> = OnceLock::new();
+    TABLE
+        .get_or_init(|| {
+            Mutex::new(MintTable {
+                records: HashMap::new(),
+            })
+        })
+        .lock()
+        .map_err(|_| anyhow::anyhow!("cli mint state lock is poisoned"))
 }
 
 fn valid_request_id(value: &str) -> anyhow::Result<()> {
@@ -773,17 +691,11 @@ fn valid_secret(value: &str) -> anyhow::Result<()> {
     anyhow::bail!("cli mint requester secret is not a 43 to 128 character base64url value");
 }
 
-fn mint_lock() -> anyhow::Result<std::sync::MutexGuard<'static, ()>> {
-    MINT_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("cli mint state lock is poisoned"))
-}
-
 fn mint_error(err: anyhow::Error) -> Response {
     let text = err.to_string();
     let status = if text == HUMAN_REQUIRED
         || text == SESSION_MISMATCH
+        || text == REQUEST_ORIGIN_REFUSED
         || text.contains("admin passkey required")
         || text.contains("missing home launch token")
     {
@@ -797,6 +709,39 @@ fn mint_error(err: anyhow::Error) -> Response {
 }
 
 #[cfg(test)]
-pub(super) fn cli_mint_record_path_for_test(data_dir: &Path, request_id: &str) -> PathBuf {
-    data_dir.join(DIRECTORY).join(format!("{request_id}.json"))
+pub(super) fn clear_cli_mint_for_test() {
+    mint_table().expect("cli mint state lock").records.clear();
+}
+
+#[cfg(test)]
+pub(super) fn cli_mint_record_json_for_test(request_id: &str) -> Option<String> {
+    mint_table()
+        .expect("cli mint state lock")
+        .records
+        .get(request_id)
+        .map(|record| serde_json::to_string(record).expect("cli mint record json"))
+}
+
+#[cfg(test)]
+pub(super) fn cli_mint_expire_for_test(request_id: &str) {
+    let mut table = mint_table().expect("cli mint state lock");
+    let record = table.records.get_mut(request_id).expect("cli mint request");
+    record.created_at = 1;
+    record.expires_at = 2;
+}
+
+#[cfg(test)]
+pub(super) fn cli_mint_rewrite_for_test(request_id: &str, field: &str, value: &str) {
+    let mut table = mint_table().expect("cli mint state lock");
+    let record = table.records.get_mut(request_id).expect("cli mint request");
+    match field {
+        "state" => record.state = value.to_string(),
+        "operation" => record.operation = value.to_string(),
+        "session_id" => record.session_id = Some(value.to_string()),
+        "principal_id" => record.principal_id = Some(value.to_string()),
+        "proof_binding_id" => record.proof_binding_id = Some(value.to_string()),
+        "grant_id" => record.grant_id = Some(value.to_string()),
+        "secret_sha256" => record.secret_sha256 = value.to_string(),
+        other => panic!("cli mint test cannot rewrite {other}"),
+    }
 }
