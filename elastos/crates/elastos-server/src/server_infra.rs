@@ -372,6 +372,7 @@ fn wallet_confinement_refusal() -> Option<&'static str> {
 /// a missing level at 0700 and removes group and other write bits from an
 /// existing one. Inspect and tighten the same opened directory, after checking
 /// its owner. The confined entry checks the storage root again at launch.
+#[cfg(unix)]
 fn tighten_wallet_parent(directory: &std::fs::File, effective_uid: u32) -> anyhow::Result<()> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
@@ -386,6 +387,14 @@ fn tighten_wallet_parent(directory: &std::fs::File, effective_uid: u32) -> anyho
     Ok(())
 }
 
+/// Windows has no owner-checked, no-follow wallet storage parent yet; the wallet
+/// start refuses there before this point, and this refuses as well.
+#[cfg(windows)]
+fn prepare_wallet_storage_parent(_wallet_root: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("wallet storage is unsupported on Windows")
+}
+
+#[cfg(unix)]
 fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 

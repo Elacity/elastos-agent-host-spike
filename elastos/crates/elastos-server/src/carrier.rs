@@ -14335,6 +14335,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_registered_ticket_peer_did_reaches_only_matching_peer() {
         let fixture = peer_did_route_fixture_with_address(109, 110, false).await;
@@ -14393,6 +14394,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn expired_remembered_ticket_uses_plain_peer_resolution() {
         let fixture = peer_did_route_fixture(233, 234).await;
@@ -15487,6 +15489,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_times_out_at_its_reply_wait() {
         let fixture = peer_did_route_fixture(198, 199).await;
@@ -15581,6 +15584,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_ticket_route_stops_at_reply_wait() {
         let fixture = peer_did_route_fixture(216, 217).await;
@@ -15631,6 +15635,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_is_not_shared_once_the_sender_unpins() {
         let fixture = peer_did_route_fixture(201, 202).await;
@@ -20715,6 +20720,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bounded_availability_read_keeps_undialable_holder_in_transit() {
         let holder = peer_did_route_fixture(230, 231).await;
