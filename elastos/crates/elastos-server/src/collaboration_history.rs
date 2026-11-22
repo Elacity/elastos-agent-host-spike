@@ -1222,6 +1222,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ProviderCarrierInvoker for ChangeAfterFirstRequest {
+        async fn remember_peer_ticket(
+            &self,
+            peer_did: &str,
+            ticket: &str,
+        ) -> Result<(), ProviderError> {
+            self.plane.remember_peer_ticket(peer_did, ticket).await
+        }
+
         async fn invoke_carrier_provider(
             &self,
             route: &ProviderCarrierRoute,

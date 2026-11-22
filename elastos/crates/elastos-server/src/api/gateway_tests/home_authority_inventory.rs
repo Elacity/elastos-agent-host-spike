@@ -221,6 +221,7 @@ fn rows() -> Vec<AuthorityRow> {
     const SHARED: &str = "elastos-server/src/api/gateway_home_shared_content.rs";
     const HOME_SYSTEM: &str = "elastos-server/src/api/gateway_home_system.rs";
     const STEP_UP: &str = "elastos-server/src/api/gateway_passkey_step_up.rs";
+    const CLI_MINT: &str = "elastos-server/src/api/gateway_home_cli_mint.rs";
     const ROOM: &str = "elastos-server/src/api/gateway_room.rs";
     const ROUTES: &str = "elastos-server/src/api/routes.rs";
     const VIEWER: &str = "elastos-server/src/api/viewer_gateway.rs";
@@ -430,6 +431,13 @@ fn rows() -> Vec<AuthorityRow> {
             "require_home_token_context",
             1,
             "runtime-admin:claim_pending+complete_authentication",
+        ),
+        row(
+            CLI_MINT,
+            "home_admin_context",
+            "require_home_token_context",
+            1,
+            "runtime-admin:human admin passkey before cli mint begin or approve",
         ),
         row(
             ROUTES,
