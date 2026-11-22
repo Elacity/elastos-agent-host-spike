@@ -9070,7 +9070,7 @@ pub async fn production_after() {
             production_counts_ignoring_cfg_test("issue_home_projection_launch_token_with_context("),
             expected_counts(&[
                 ("elastos-server/src/api/auth_gateway.rs", 2),
-                ("elastos-server/src/api/gateway.rs", 2),
+                ("elastos-server/src/api/gateway.rs", 1),
                 ("elastos-server/src/api/gateway_home_runtime.rs", 3),
                 ("elastos-server/src/api/viewer_gateway.rs", 1),
             ]),
@@ -9124,6 +9124,7 @@ pub async fn production_after() {
                 ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
                 ("elastos-server/src/api/gateway_home_system.rs", 2),
                 ("elastos-server/src/api/gateway_home_token.rs", 3),
+                ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
                 ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
             ]),
             "Home token context callers"
@@ -9138,8 +9139,8 @@ pub async fn production_after() {
         );
         // Blast radius of the one helper: the direct callers and the front
         // door's path through `require_gateway_launch_for`, which runs only
-        // when the request is not public, not sign-in, not a terminal ticket
-        // and not a runtime session.
+        // when the request is not public, not sign-in, not a terminal ticket,
+        // not a runtime session, and not a bound CLI mint request.
         assert_eq!(
             production_counts_ignoring_cfg_test("require_gateway_launch("),
             expected_counts(&[
@@ -9154,8 +9155,10 @@ pub async fn production_after() {
         )
         .unwrap();
         assert!(
-            source.contains("if !public && !sign_in && !ticket && !runtime_session {"),
-            "the front-door match keeps its four exclusions"
+            source.contains(
+                "if !public && !sign_in && !ticket && !runtime_session && !cli_mint_request {"
+            ),
+            "the front-door match keeps its five exclusions"
         );
         let start = source
             .find("match gateway_home_token::require_gateway_launch_for(")
