@@ -48,9 +48,11 @@ pub enum AuditEvent {
         session_id: Option<String>,
     },
 
-    /// Capsule stopped. An owner's stop of an agent session also names the
-    /// agent, the owner, the host bundle CID, the launch id, and the session.
-    /// A stop that is not that action leaves those fields empty.
+    /// Capsule stopped. The one end of an agent session names the agent, the
+    /// owner, the host bundle CID, the launch id, and the session. The reason
+    /// is that end: requested when an owner stop ended it, completed when the
+    /// guest ended on its own. A stop that is not an agent session leaves
+    /// those fields empty.
     CapsuleStop {
         timestamp: SecureTimestamp,
         capsule_id: String,

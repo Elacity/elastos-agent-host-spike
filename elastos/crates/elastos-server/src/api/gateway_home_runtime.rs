@@ -703,9 +703,18 @@ pub(super) struct StoppedRuntimeAgent {
     pub(super) status: String,
 }
 
+/// What the Runtime's stop route answered. `already` is set when the route
+/// found the sessions already ending and stopped nothing further.
+pub(super) struct RuntimeAgentStop {
+    pub(super) stopped: Vec<StoppedRuntimeAgent>,
+    pub(super) already: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct RuntimeAgentStopResponse {
     stopped: Vec<RuntimeStoppedSession>,
+    #[serde(default)]
+    already: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -719,7 +728,7 @@ struct RuntimeStoppedSession {
 pub(super) async fn stop_runtime_agent(
     data_dir: &FsPath,
     agent_id: &str,
-) -> anyhow::Result<Vec<StoppedRuntimeAgent>> {
+) -> anyhow::Result<RuntimeAgentStop> {
     let coords = load_live_runtime_coords(data_dir)
         .await
         .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
@@ -738,17 +747,34 @@ pub(super) async fn stop_runtime_agent(
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        anyhow::bail!("runtime stop failed ({}): {}", status, text.trim());
+        let detail = text.trim();
+        if status == StatusCode::NOT_FOUND {
+            return Err(
+                crate::agents::Refused("this agent has no running session".to_string()).into(),
+            );
+        }
+        if status == StatusCode::CONFLICT || status == StatusCode::BAD_REQUEST {
+            let reason = if detail.is_empty() {
+                "runtime stop was refused".to_string()
+            } else {
+                detail.to_string()
+            };
+            return Err(crate::agents::Refused(reason).into());
+        }
+        anyhow::bail!("runtime stop failed ({}): {}", status, detail);
     }
     let payload = response.json::<RuntimeAgentStopResponse>().await?;
-    Ok(payload
-        .stopped
-        .into_iter()
-        .map(|session| StoppedRuntimeAgent {
-            session_id: session.session_id,
-            status: session.status,
-        })
-        .collect())
+    Ok(RuntimeAgentStop {
+        stopped: payload
+            .stopped
+            .into_iter()
+            .map(|session| StoppedRuntimeAgent {
+                session_id: session.session_id,
+                status: session.status,
+            })
+            .collect(),
+        already: payload.already,
+    })
 }
 
 async fn ensure_home_target_package(

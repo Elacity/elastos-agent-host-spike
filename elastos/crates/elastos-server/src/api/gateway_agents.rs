@@ -287,9 +287,10 @@ pub(super) async fn agents_stop(
 
 /// The owner gate. With no agent id this is the admin check, and it runs
 /// before the body is read. With an agent id it is that check plus "this
-/// owner owns this active agent". A guest fails the admin check. Another
-/// owner fails the stored-agent check. Either refusal happens before the
-/// Runtime is asked to stop anything.
+/// owner owns this agent". The agent may be off or retired, and the Home may
+/// have turned agents off. A guest fails the admin check. Another owner fails
+/// the ownership check. Either refusal happens before the Runtime is asked
+/// to stop anything.
 fn owner_may_stop(
     state: &GatewayState,
     headers: &HeaderMap,
@@ -297,7 +298,11 @@ fn owner_may_stop(
 ) -> anyhow::Result<()> {
     let owner = agents_owner(state, headers)?;
     if let Some(agent_id) = agent_id {
-        crate::agents::stored_agent(&state.data_dir, &owner.principal.principal_id, agent_id)?;
+        crate::agents::stored_agent_for_stop(
+            &state.data_dir,
+            &owner.principal.principal_id,
+            agent_id,
+        )?;
     }
     Ok(())
 }
@@ -312,13 +317,19 @@ async fn stop_agent(
     owner_may_stop(state, headers, None)?;
     let request: AgentStopRequest = agents_request(body)?;
     owner_may_stop(state, headers, Some(&request.agent_id))?;
-    let stopped = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
-    if stopped.is_empty() {
-        return Err(Refused("this agent has no running session".to_string()).into());
+    let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
+    if outcome.stopped.is_empty() {
+        let message = match outcome.already.as_deref() {
+            Some("stopping") => "this agent is already stopping",
+            Some("stopped") => "this agent is already stopped",
+            _ => "this agent has no running session",
+        };
+        return Err(Refused(message.to_string()).into());
     }
     Ok(AgentStopResponse {
         agent_id: request.agent_id,
-        stopped: stopped
+        stopped: outcome
+            .stopped
             .into_iter()
             .map(|session| AgentStoppedSession {
                 session_id: session.session_id,

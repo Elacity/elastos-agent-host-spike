@@ -498,15 +498,31 @@ test("stop posts the agent id and does not ask for the passkey", async () => {
   assert.equal(steps, 0);
 });
 
-test("an agent that is off has no Start or Stop button", async () => {
-  const ui = mount(() => Promise.resolve({
-    agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: false }],
-  }));
+test("an agent that is off has Stop and no Start", async () => {
+  const calls = [];
+  const ui = mount((path, init = {}) => {
+    calls.push(callOf(path, init));
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: false }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+    });
+  });
   await ui.load();
   assert.equal(ui.agentId(AGENT_ID), AGENT_ID);
   assert.equal(ui.button("Start"), null);
-  assert.equal(ui.button("Stop"), null);
   assert.equal(ui.button("Turn on") !== null, true);
+  assert.equal(ui.button("Stop") !== null, true);
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  const stopped = calls.filter((call) => call.path.endsWith("/stop"));
+  assert.equal(stopped.length, 1);
+  assert.deepEqual(stopped[0].body, { agent_id: AGENT_ID });
 });
 
 test("the page's two refusal sentences are the server's", () => {

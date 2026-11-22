@@ -477,11 +477,17 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         Router::new()
     };
 
-    // Capsule management routes (require shell session — launching/stopping is an orchestrator operation)
-    let capsule_mgmt_routes = Router::new()
+    // Capsule management routes (require shell session — launching/stopping is an orchestrator operation).
+    // The agent stop route belongs to a build that carries agents. A build
+    // without them does not mount it, so that build has no agent selector.
+    let mut capsule_mgmt_routes = Router::new()
         .route("/api/capsules", get(routes::list_capsules))
-        .route("/api/capsules", post(routes::launch_capsule))
-        .route("/api/capsules/stop-agent", post(routes::stop_agent_session))
+        .route("/api/capsules", post(routes::launch_capsule));
+    if crate::agents::build_allows() {
+        capsule_mgmt_routes =
+            capsule_mgmt_routes.route("/api/capsules/stop-agent", post(routes::stop_agent_session));
+    }
+    let capsule_mgmt_routes = capsule_mgmt_routes
         .route("/api/capsules/:id", delete(routes::stop_capsule))
         .route("/api/launch/open", post(routes::open_launch))
         .route(

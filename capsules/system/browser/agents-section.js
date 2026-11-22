@@ -70,12 +70,15 @@ export function bindAgents(doc, request, confirmStepUp) {
         start.type = "button";
         start.disabled = busy;
         start.addEventListener("click", () => run(startJob(agent)));
-        const stop = el(doc, "button", "pc2-btn pc2-btn-secondary", "Stop");
-        stop.type = "button";
-        stop.disabled = busy;
-        stop.addEventListener("click", () => run(stopJob(agent)));
-        actions.append(start, stop);
+        actions.append(start);
       }
+      // Stop stays while the agent is off, so a guest that is already running
+      // can be ended without turning the agent back on.
+      const stop = el(doc, "button", "pc2-btn pc2-btn-secondary", "Stop");
+      stop.type = "button";
+      stop.disabled = busy;
+      stop.addEventListener("click", () => run(stopJob(agent)));
+      actions.append(stop);
       const copy = el(doc, "div");
       copy.append(el(doc, "div", "pc2-card-label", text(agent.display_name) || "Unnamed agent"), agentId, state);
       const row = el(doc, "div", "pc2-card-row");

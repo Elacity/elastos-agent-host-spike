@@ -311,7 +311,27 @@ fn live_principal(rows: &[crate::runtime::RunningCapsuleInfo], principal: &str) 
         .count()
 }
 
-/// `(agent_id, owner, host cid, launch id, session)` from launch and stop audits.
+/// The stop reason of every `capsule_stop` for this session, including one
+/// whose agent fields are empty.
+fn stop_reasons(
+    world: &World,
+    session: &str,
+) -> Vec<elastos_runtime::primitives::audit::StopReason> {
+    use elastos_runtime::primitives::audit::AuditEvent;
+    world
+        .runtime
+        .audit
+        .recent_events(usize::MAX)
+        .into_iter()
+        .filter_map(|event| match event {
+            AuditEvent::CapsuleStop {
+                capsule_id, reason, ..
+            } if capsule_id == session => Some(reason),
+            _ => None,
+        })
+        .collect()
+}
+
 fn audit_tuples(world: &World, kind: &str) -> Vec<(String, String, String, String, String)> {
     use elastos_runtime::primitives::audit::AuditEvent;
     world
@@ -816,11 +836,43 @@ async fn system_agent_launch_other_owner_step_up_starts_zero_guests() {
     assert_ne!(status, StatusCode::OK, "{body}");
 }
 
-async fn started(world: &World, agent_id: &str) -> Value {
-    let token = step_up(&world.app, &world.admin, agent_id).await;
-    let (status, body) = start(world, &world.admin, agent_id, &token).await;
+async fn started_by(world: &World, person: &Person, agent_id: &str) -> Value {
+    let token = step_up(&world.app, person, agent_id).await;
+    let (status, body) = start(world, person, agent_id, &token).await;
     assert_eq!(status, StatusCode::OK, "start {agent_id}: {body}");
     serde_json::from_str(&body).unwrap()
+}
+
+async fn started(world: &World, agent_id: &str) -> Value {
+    started_by(world, &world.admin, agent_id).await
+}
+
+async fn runtime_stop(world: &World, body: Value) -> (StatusCode, String) {
+    let response = crate::api::routes::stop_agent_session(
+        axum::Extension(world.runtime.runtime.clone()),
+        axum::Extension(world.runtime.audit.clone()),
+        axum::body::Bytes::from(body.to_string()),
+    )
+    .await;
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+fn named_row(id: &str, principal: &str) -> crate::runtime::RunningCapsuleInfo {
+    crate::runtime::RunningCapsuleInfo {
+        id: id.to_string(),
+        name: HOST.to_string(),
+        status: "running".to_string(),
+        capsule_type: elastos_common::CapsuleType::Wasm,
+        handle: None,
+        session_id: id.to_string(),
+        principal: Some(principal.to_string()),
+        cause: None,
+        ended_at: None,
+    }
 }
 
 #[tokio::test]
@@ -843,6 +895,14 @@ async fn owner_stop_stops_that_agents_row_and_writes_the_audit() {
         "the stop audit does not record the start tuple"
     );
     assert_eq!(stops.len(), 1, "one stop record: {stops:?}");
+    let reasons = stop_reasons(&world, &session);
+    assert!(
+        matches!(
+            reasons.as_slice(),
+            [elastos_runtime::primitives::audit::StopReason::Requested]
+        ),
+        "one owner stop writes one capsule_stop, and it was requested: {reasons:?}"
+    );
     assert_eq!(stops[0].0, world.agent_a);
     assert_eq!(stops[0].1, world.admin.principal_id);
     assert!(!stops[0].2.is_empty(), "the host CID is empty");
@@ -943,5 +1003,273 @@ async fn two_starts_with_one_step_up_start_one_guest() {
         mints(&world),
         1,
         "two starts shared one step-up and both minted"
+    );
+}
+
+#[tokio::test]
+async fn a_live_row_without_a_matching_start_record_is_not_stopped() {
+    let world = world().await;
+    let started = started(&world, &world.agent_a).await;
+    let session = started["session_id"].as_str().unwrap();
+    world
+        .runtime
+        .runtime
+        .register_capsule(named_row("orphan-session", &world.agent_a))
+        .await;
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    let rows = live(&world).await;
+    assert!(
+        status == StatusCode::OK
+            && live_principal(&rows, &world.agent_a) == 1
+            && rows.iter().any(|row| row.id == "orphan-session"),
+        "a row with no start record was stopped: {status} {body} rows={rows:?}"
+    );
+    assert_eq!(stop_reasons(&world, session).len(), 1, "{body}");
+    world
+        .runtime
+        .runtime
+        .register_capsule(named_row("mismatch-session", &world.agent_a))
+        .await;
+    world
+        .runtime
+        .runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: world.agent_b.clone(),
+            owner: world.admin.principal_id.clone(),
+            host_cid: "cid".to_string(),
+            launch_id: "launch:mismatch".to_string(),
+            session_id: "mismatch-session".to_string(),
+        })
+        .await;
+    let (status, body) = runtime_stop(&world, json!({ "agent_id": world.agent_a })).await;
+    let rows = live(&world).await;
+    assert!(
+        status == StatusCode::CONFLICT
+            && rows.iter().any(|row| row.id == "orphan-session")
+            && rows.iter().any(|row| row.id == "mismatch-session")
+            && body.contains("record"),
+        "a row whose record names another agent was stopped: {status} {body} rows={rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    let (status, body) = call(
+        &world.app,
+        ACTIVATE,
+        &world.admin.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a, "active": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "turn off: {body}");
+    let (other_status, other_body) = stop(&world, &world.other, &world.agent_a).await;
+    assert_ne!(
+        other_status,
+        StatusCode::OK,
+        "another owner stopped an agent that is off: {other_body}"
+    );
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        1,
+        "the other owner's stop ended the guest"
+    );
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "stop while off: {body}");
+    assert_eq!(live_principal(&live(&world).await, &world.agent_a), 0);
+
+    started(&world, &world.agent_b).await;
+    let (status, body) = call(
+        &world.app,
+        "/api/apps/system/agents/retire",
+        &world.admin.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_b })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retire: {body}");
+    let (status, body) = stop(&world, &world.admin, &world.agent_b).await;
+    assert_eq!(status, StatusCode::OK, "stop while retired: {body}");
+    assert_eq!(live_principal(&live(&world).await, &world.agent_b), 0);
+
+    let (status, body) = call(
+        &world.app,
+        ACTIVATE,
+        &world.admin.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a, "active": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "turn on: {body}");
+    started(&world, &world.agent_a).await;
+    let (status, body) = call(
+        &world.app,
+        "/api/apps/system/agents/disable",
+        &world.admin.system_token,
+        "null",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "turn agents off: {body}");
+    let (other_status, other_body) = stop(&world, &world.other, &world.agent_a).await;
+    assert_ne!(
+        other_status,
+        StatusCode::OK,
+        "another owner stopped an agent while agents are off: {other_body}"
+    );
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "stop while the Home has agents off: {body}"
+    );
+    assert_eq!(live_principal(&live(&world).await, &world.agent_a), 0);
+}
+
+#[tokio::test]
+async fn a_second_stop_of_the_same_agent_is_not_a_server_error() {
+    let world = world().await;
+    let started = started(&world, &world.agent_a).await;
+    let session = started["session_id"].as_str().unwrap().to_string();
+    let first = stop(&world, &world.admin, &world.agent_a);
+    let second = stop(&world, &world.admin, &world.agent_a);
+    let ((left_status, left_body), (right_status, right_body)) = tokio::join!(first, second);
+    for (status, body) in [(&left_status, &left_body), (&right_status, &right_body)] {
+        assert_ne!(
+            *status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a second stop returned 500: {left_status} {left_body} / {right_status} {right_body}"
+        );
+        assert!(
+            *status == StatusCode::OK || *status == StatusCode::CONFLICT,
+            "{status} {body}"
+        );
+    }
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        0,
+        "the two stops left the guest running: {left_status} {left_body} / {right_status} {right_body}"
+    );
+    let reasons = stop_reasons(&world, &session);
+    assert!(
+        matches!(
+            reasons.as_slice(),
+            [elastos_runtime::primitives::audit::StopReason::Requested]
+        ),
+        "two stops wrote more than one record: {reasons:?}"
+    );
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        status == StatusCode::CONFLICT && body.contains("no running session"),
+        "a stop after the guest ended was not a clean refusal: {status} {body}"
+    );
+    assert_eq!(stop_reasons(&world, &session).len(), 1);
+}
+
+#[tokio::test]
+async fn a_capsule_name_in_a_stop_request_is_refused() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    let (status, body) = call(
+        &world.app,
+        STOP,
+        &world.admin.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a, "name": HOST })),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("invalid"), "{status} {body}");
+    assert_eq!(
+        world.runtime.stops.lock().expect("recorded stops").len(),
+        0,
+        "a named stop reached the Runtime"
+    );
+    let (runtime_status, runtime_body) = runtime_stop(
+        &world,
+        json!({ "agent_id": world.agent_a, "capsule": HOST }),
+    )
+    .await;
+    assert_eq!(
+        runtime_status,
+        StatusCode::BAD_REQUEST,
+        "the Runtime accepted a capsule field: {runtime_body}"
+    );
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        1,
+        "a stop that named a capsule ended the guest"
+    );
+}
+
+#[tokio::test]
+async fn the_runtime_refuses_a_stop_named_for_the_host() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    world
+        .runtime
+        .runtime
+        .register_capsule(plain_host_row(&world.admin.principal_id))
+        .await;
+    let (status, body) = runtime_stop(&world, json!({ "agent_id": HOST })).await;
+    let rows = live(&world).await;
+    assert!(
+        status == StatusCode::NOT_FOUND
+            && live_principal(&rows, &world.agent_a) == 1
+            && live_principal(&rows, &world.admin.principal_id) == 1,
+        "the Runtime stop named for the host selected a row: {status} {body} rows={rows:?}"
+    );
+    let (status, body) = runtime_stop(&world, json!({ "agent_id": world.agent_a })).await;
+    let rows = live(&world).await;
+    assert!(
+        status == StatusCode::OK
+            && live_principal(&rows, &world.agent_a) == 0
+            && live_principal(&rows, &world.admin.principal_id) == 1,
+        "stopping the agent by principal stopped the host-named row: {status} {body} rows={rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn one_owners_stop_leaves_the_other_owners_agent_running() {
+    let world = world().await;
+    let (status, body) = call(
+        &world.app,
+        CREATE,
+        &world.other.system_token,
+        "null",
+        Some(json!({
+            "display_name": "Helper C",
+            "agent_host": HOST,
+            "request_id": "request-c",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "other owner create: {body}");
+    let agent_c = serde_json::from_str::<Value>(&body).unwrap()["agent_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = call(
+        &world.app,
+        ACTIVATE,
+        &world.other.system_token,
+        "null",
+        Some(json!({ "agent_id": agent_c, "active": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "other owner activate: {body}");
+    started_by(&world, &world.other, &agent_c).await;
+    started(&world, &world.agent_a).await;
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    let rows = live(&world).await;
+    assert!(
+        status == StatusCode::OK
+            && live_principal(&rows, &world.agent_a) == 0
+            && live_principal(&rows, &agent_c) == 1
+            && rows.iter().any(|row| row.name == HOST),
+        "one owner's stop ended the other owner's agent: {status} {body} rows={rows:?}"
     );
 }
