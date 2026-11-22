@@ -243,6 +243,9 @@ pub struct Runtime {
     /// activation's ending watcher so the entry it wrote at admission can be
     /// ended without the Runtime handle.
     running_capsules: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
+    /// Agent starts share this gate so a replay or concurrent start cannot
+    /// pass between admission and registration of its running session.
+    agent_launches: tokio::sync::Mutex<AgentLaunchState>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
@@ -268,6 +271,12 @@ pub struct Runtime {
     /// Launches kept for their page after the program's start is over, by a
     /// launch id of their own (`page_launch.rs`). The bridge never reads them.
     pub(crate) page_launches: crate::page_launch::PageLaunches,
+}
+
+#[derive(Default)]
+struct AgentLaunchState {
+    used: HashMap<String, u64>,
+    live: HashMap<String, String>,
 }
 
 /// One launch's content in the Runtime's table, for as long as this value
@@ -771,6 +780,7 @@ impl Runtime {
             unsigned_capsules: RwLock::new(UnsignedCapsules::Refused(None)),
             provider_registry: RwLock::new(None),
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
+            agent_launches: tokio::sync::Mutex::new(AgentLaunchState::default()),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -795,6 +805,7 @@ impl Runtime {
             unsigned_capsules: RwLock::new(UnsignedCapsules::Refused(None)),
             provider_registry: RwLock::new(None),
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
+            agent_launches: tokio::sync::Mutex::new(AgentLaunchState::default()),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -1166,6 +1177,45 @@ impl Runtime {
     ) -> Result<(CapsuleHandle, Signer)> {
         self.run_local_admitted_mode(path, args, admission, LaunchMode::Detached)
             .await
+    }
+
+    /// Consume the short grant once and reserve the Agent until its session
+    /// ends. The gate covers the provider start and registry insertion.
+    pub(crate) async fn start_agent_once(
+        &self,
+        path: &Path,
+        admission: crate::agent_admission::AdmissionContext,
+        launch_id: &str,
+        expires_at: u64,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        let agent_id = admission.actor().to_string();
+        let mut state = self.agent_launches.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        state.used.retain(|_, expiry| *expiry > now);
+        if expires_at <= now || state.used.contains_key(launch_id) {
+            return Err(ElastosError::InvalidManifest(
+                "agent launch grant was already used or expired".into(),
+            ));
+        }
+        if let Some(session) = state.live.get(&agent_id) {
+            if self
+                .get_capsule(session)
+                .await
+                .is_some_and(|entry| entry.ended_at.is_none())
+            {
+                return Err(ElastosError::InvalidManifest(
+                    "agent already has a live session".into(),
+                ));
+            }
+        }
+        state.live.remove(&agent_id);
+        state.used.insert(launch_id.to_string(), expires_at);
+        let started = self.start_local_admitted(path, vec![], admission).await?;
+        state.live.insert(agent_id, started.0.id.0.clone());
+        Ok(started)
     }
 
     /// Both admitted entries derive the same actor and ceiling from the

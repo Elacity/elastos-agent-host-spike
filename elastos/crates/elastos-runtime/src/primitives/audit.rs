@@ -38,6 +38,14 @@ pub enum AuditEvent {
         /// `did:key` of the trusted key that verified this capsule, when one did.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signer_did: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
 
     /// Capsule stopped
@@ -250,6 +258,14 @@ pub enum FetchSource {
 /// Maximum events to keep in memory buffer
 const MAX_MEMORY_EVENTS: usize = 1000;
 
+/// Verified fields attached to an Agent's capsule_launch event.
+pub struct AgentLaunchAudit<'a> {
+    pub host_cid: &'a str,
+    pub agent_id: &'a str,
+    pub owner: &'a str,
+    pub launch_id: &'a str,
+}
+
 /// Audit log manager
 pub struct AuditLog {
     writer: Option<Mutex<BufWriter<File>>>,
@@ -367,6 +383,32 @@ impl AuditLog {
             cid: cid.map(String::from),
             trust_level,
             signer_did: signer_did.map(String::from),
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
+        });
+    }
+
+    /// Record an admitted Agent launch on the same capsule_launch event.
+    pub fn agent_capsule_launch(
+        &self,
+        capsule_id: &str,
+        capsule_name: &str,
+        signer_did: Option<&str>,
+        agent: AgentLaunchAudit<'_>,
+    ) {
+        self.emit(AuditEvent::CapsuleLaunch {
+            timestamp: SecureTimestamp::now(),
+            capsule_id: capsule_id.to_string(),
+            capsule_name: capsule_name.to_string(),
+            cid: Some(agent.host_cid.to_string()),
+            trust_level: TrustLevel::Untrusted,
+            signer_did: signer_did.map(String::from),
+            agent_id: Some(agent.agent_id.to_string()),
+            owner: Some(agent.owner.to_string()),
+            launch_id: Some(agent.launch_id.to_string()),
+            session_id: Some(capsule_id.to_string()),
         });
     }
 
@@ -716,6 +758,10 @@ mod tests {
             cid: Some("Qm123".to_string()),
             trust_level: TrustLevel::Trusted,
             signer_did: Some("did:key:zTest".to_string()),
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
         };
 
         let json = serde_json::to_string(&event).unwrap();

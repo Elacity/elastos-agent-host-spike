@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use elastos_runtime::primitives::audit::{AuditLog, TrustLevel};
+use elastos_runtime::primitives::audit::{AgentLaunchAudit, AuditLog, TrustLevel};
 use serde::{Deserialize, Serialize};
 
 use crate::resource_bridge::BridgePrincipal;
@@ -105,7 +105,7 @@ pub async fn launch_capsule(
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     let path = std::path::Path::new(&req.path);
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
-    let (launcher, admission, grant_name) = match req.agent_id.as_deref() {
+    let (launcher, admission, grant_name, agent_audit) = match req.agent_id.as_deref() {
         None => {
             let (launcher, grant_name) = principal_from_launch_request(
                 data_dir.as_deref(),
@@ -113,7 +113,7 @@ pub async fn launch_capsule(
                 req.principal_id,
                 req.launch_grant,
             )?;
-            (launcher, None, grant_name)
+            (launcher, None, grant_name, None)
         }
         Some(agent_id) => {
             let data_dir = data_dir.as_deref().ok_or((
@@ -130,20 +130,23 @@ pub async fn launch_capsule(
             // and the loader; nothing reads the folder between them.
             let walked = crate::agent_admission::walk_launch(path)
                 .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-            let launcher = principal_from_capsule_name(
-                Some(data_dir),
-                &walked.manifest.name,
-                req.launch_grant,
-            )?;
+            let host_cid = walked.bundle_cid.clone();
+            let (launcher, launch_id, expires_at) =
+                agent_launch_grant(data_dir, &walked.manifest.name, agent_id, req.launch_grant)?;
             let admission = admit_agent_launch(
                 Some(data_dir),
                 walked,
-                launcher
-                    .as_ref()
-                    .map(crate::resource_bridge::BridgePrincipal::principal_str),
+                Some(launcher.principal_str()),
                 agent_id,
             )?;
-            (launcher, Some(admission), None)
+            let audit = (
+                agent_id.to_string(),
+                launcher.principal_str().to_string(),
+                host_cid,
+                launch_id,
+                expires_at,
+            );
+            (Some(launcher), Some(admission), None, Some(audit))
         }
     };
     // An admitted agent launch starts through the one entry that may hand the
@@ -154,7 +157,13 @@ pub async fn launch_capsule(
     // session. The worker changes it to `running` on `started`, and records
     // the status and cause when the guest ends.
     let started = match admission {
-        Some(admission) => runtime.start_local_admitted(path, vec![], admission).await,
+        Some(admission) => {
+            let (_, _, _, launch_id, expires_at) =
+                agent_audit.as_ref().expect("agent admission has a grant");
+            runtime
+                .start_agent_once(path, admission, launch_id, *expires_at)
+                .await
+        }
         None => {
             runtime
                 .start_local_with_signer(path, vec![], launcher, grant_name.as_deref())
@@ -173,13 +182,27 @@ pub async fn launch_capsule(
                 crate::runtime::Signer::Key { did } => Some(did.as_str()),
                 _ => None,
             };
-            audit_log.capsule_launch(
-                &handle.id.0,
-                &handle.manifest.name,
-                None,
-                TrustLevel::Untrusted,
-                signer_did,
-            );
+            if let Some((agent_id, owner, host_cid, launch_id, _)) = agent_audit {
+                audit_log.agent_capsule_launch(
+                    &handle.id.0,
+                    &handle.manifest.name,
+                    signer_did,
+                    AgentLaunchAudit {
+                        host_cid: &host_cid,
+                        agent_id: &agent_id,
+                        owner: &owner,
+                        launch_id: &launch_id,
+                    },
+                );
+            } else {
+                audit_log.capsule_launch(
+                    &handle.id.0,
+                    &handle.manifest.name,
+                    None,
+                    TrustLevel::Untrusted,
+                    signer_did,
+                );
+            }
             Ok(Json(LaunchResponse {
                 id: handle.id.0.clone(),
                 name: handle.manifest.name,
@@ -189,6 +212,37 @@ pub async fn launch_capsule(
         }
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
+}
+
+fn agent_launch_grant(
+    data_dir: &std::path::Path,
+    capsule_name: &str,
+    agent_id: &str,
+    launch_grant: Option<String>,
+) -> Result<(BridgePrincipal, String, u64), (StatusCode, String)> {
+    let grant = launch_grant
+        .filter(|grant| !grant.trim().is_empty())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "an agent launch needs its owner's launch grant".to_string(),
+        ))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-elastos-home-token",
+        HeaderValue::from_str(&grant).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "invalid launch_grant header value".to_string(),
+            )
+        })?,
+    );
+    super::gateway::require_internal_shell_agent_launch_grant(
+        data_dir,
+        &headers,
+        agent_id,
+        capsule_name,
+    )
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
 }
 
 /// Admits a launch that names a stored agent. The capsule's manifest must
@@ -228,8 +282,7 @@ fn reject_raw_launch_principal_id(principal_id: Option<&str>) -> Result<(), (Sta
     Ok(())
 }
 
-/// A launch grant names the capsule it authorizes. For an agent launch that
-/// name comes from the one walk, never from a second read of the folder.
+/// A non-Agent launch grant names the capsule it authorizes.
 fn principal_from_capsule_name(
     data_dir: Option<&std::path::Path>,
     capsule_name: &str,
@@ -937,7 +990,7 @@ pub(crate) mod tests {
         registry: Arc<elastos_runtime::provider::ProviderRegistry>,
         provider: Arc<CapturingLocalhostProvider>,
         capsule_dir: std::path::PathBuf,
-        grant: String,
+        context: gateway::HomeLaunchTokenContext,
         pub(crate) agents: Vec<String>,
         /// The stored person every agent here belongs to. It is the person
         /// `agents::create` records in each agent's `owner`.
@@ -1276,19 +1329,6 @@ pub(crate) mod tests {
             for id in &agents {
                 agents::set_active(&data_dir, &caller, id, true, 1).unwrap();
             }
-            // A person's Home launch token is a projection under the Home
-            // capsule's authority (`gateway_home_runtime.rs:149`), which is
-            // the app the person's sign-in grant authorizes. The Runtime-local
-            // fixture has no sign-in grant apps, so its direct token stays.
-            let grant = match context.proof_binding_id() {
-                Some(_) => gateway::issue_home_projection_launch_token_with_context(
-                    &data_dir, PROBE_HOST, PROBE_HOST, context,
-                ),
-                None => {
-                    gateway::issue_home_launch_token_with_context(&data_dir, PROBE_HOST, context)
-                }
-            }
-            .unwrap();
             Self {
                 _temp: temp,
                 fixture_root,
@@ -1301,7 +1341,7 @@ pub(crate) mod tests {
                 registry,
                 provider,
                 capsule_dir,
-                grant,
+                context: context.clone(),
                 agents,
                 owner: owner.to_string(),
                 tokens: None,
@@ -1653,7 +1693,13 @@ pub(crate) mod tests {
             dir: &'a std::path::Path,
             agent_id: &'a str,
         ) -> impl Future<Output = Result<Json<LaunchResponse>, (StatusCode, String)>> + 'a {
-            let grant = self.grant.clone();
+            let grant = gateway::issue_home_agent_launch_token_with_context(
+                &self.data_dir,
+                agent_id,
+                PROBE_HOST,
+                &self.context,
+            )
+            .unwrap();
             let agent_id = agent_id.to_string();
             let data_dir = Some(self.data_dir.clone());
             let runtime = self.runtime.clone();
@@ -2509,13 +2555,6 @@ pub(crate) mod tests {
             assert_eq!(status, StatusCode::OK, "{body}");
         }
 
-        let launch_grant = gateway::issue_home_projection_launch_token_with_context(
-            &data_dir,
-            "agent-host",
-            "agent-host",
-            &context,
-        )
-        .unwrap();
         let home = Arc::new(
             ProbeLaunch::over_home(
                 data_dir.clone(),
@@ -2534,7 +2573,13 @@ pub(crate) mod tests {
 
         let a_home = home.clone();
         let a_dir = capsule_dir.clone();
-        let a_grant = launch_grant.clone();
+        let a_grant = gateway::issue_home_agent_launch_token_with_context(
+            &data_dir,
+            &a_id,
+            "agent-host",
+            &context,
+        )
+        .unwrap();
         let a_name = a_id.clone();
         let a_task =
             tokio::spawn(async move { launch_installed(a_home, a_dir, a_grant, a_name).await });
@@ -2551,7 +2596,13 @@ pub(crate) mod tests {
 
         let b_home = home.clone();
         let b_dir = capsule_dir.clone();
-        let b_grant = launch_grant.clone();
+        let b_grant = gateway::issue_home_agent_launch_token_with_context(
+            &data_dir,
+            &b_id,
+            "agent-host",
+            &context,
+        )
+        .unwrap();
         let b_name = b_id.clone();
         let b_task =
             tokio::spawn(async move { launch_installed(b_home, b_dir, b_grant, b_name).await });
@@ -5839,8 +5890,10 @@ pub(crate) mod tests {
             std::fs::read(fixtures.join("bus-v1/bus-v1-conformance.component.wasm")).unwrap();
         sign(&forged_dir, "forged.component.wasm", &other_wasm);
         std::fs::write(forged_dir.join(".elastos-cid"), format!("{stored_cid}\n")).unwrap();
-        let grant =
-            gateway::issue_home_launch_token_with_context(&data_dir, PROBE_HOST, &context).unwrap();
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &data_dir, &agent, PROBE_HOST, &context,
+        )
+        .unwrap();
 
         let response = launch_capsule(
             Extension(runtime),
@@ -7202,6 +7255,251 @@ pub(crate) mod tests {
             vec![Vec::<(String, u64)>::new()],
             "a non-agent has no ceiling entry while the model call runs"
         );
+    }
+
+    async fn post_agent_grant(
+        home: &ProbeLaunch,
+        agent_id: &str,
+        grant: &str,
+    ) -> (StatusCode, String) {
+        use axum::{body::Body, http::Request, routing::post};
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .route("/api/capsules", post(launch_capsule))
+            .layer(Extension(Some(home.data_dir.clone())))
+            .layer(Extension(home.audit_log.clone()))
+            .layer(Extension(home.runtime.clone()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capsules")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "path": home.capsule_dir,
+                            "agent_id": agent_id,
+                            "launch_grant": grant,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn agent_launch_selected_resource_and_short_lifetime_guard_the_router() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let a = &home.agents[0];
+        let b = &home.agents[1];
+        let bound = |id: &str| {
+            gateway::issue_home_agent_launch_token_with_context(
+                &home.data_dir,
+                id,
+                PROBE_HOST,
+                &home.context,
+            )
+            .unwrap()
+        };
+        let other_agent = bound(b);
+        let host_only = gateway::issue_home_launch_token_with_context(
+            &home.data_dir,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let hop_grant = gateway::issue_home_projection_launch_token_with_context(
+            &home.data_dir,
+            PROBE_HOST,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let now = crate::auth::now_ts();
+        let overlong = gateway::issue_home_agent_launch_token_at_for_test(
+            &home.data_dir,
+            a,
+            PROBE_HOST,
+            &home.context,
+            now,
+            now + 61,
+        )
+        .unwrap();
+        let expired = gateway::issue_home_agent_launch_token_at_for_test(
+            &home.data_dir,
+            a,
+            PROBE_HOST,
+            &home.context,
+            now - 61,
+            now - 1,
+        )
+        .unwrap();
+        for (case, grant) in [
+            ("other agent", other_agent),
+            ("host only", host_only),
+            ("12 hour hop", hop_grant),
+            ("over 60 seconds", overlong),
+            ("expired", expired),
+        ] {
+            let (status, body) = post_agent_grant(&home, a, &grant).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {body}");
+            assert!(
+                home.runtime.list_capsules().await.is_empty(),
+                "{case} started a guest"
+            );
+        }
+        let good = bound(a);
+        let (status, body) = post_agent_grant(&home, a, &good).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["status"], "starting");
+        assert_eq!(home.runtime.list_capsules().await.len(), 1);
+        let event = home.audit_log.recent_events(1).pop().unwrap();
+        let audit = serde_json::to_value(event).unwrap();
+        assert_eq!(audit["type"], "capsule_launch");
+        assert_eq!(audit["agent_id"], a.as_str());
+        assert_eq!(audit["owner"], home.owner);
+        assert_eq!(audit["session_id"], answer["session_id"]);
+        assert!(audit["cid"].as_str().is_some_and(|cid| !cid.is_empty()));
+        assert!(audit["launch_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("launch:")));
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let ended = home
+            .wait_ended(answer["session_id"].as_str().unwrap())
+            .await;
+        assert_eq!(ended.cause.as_deref(), Some("completed"), "the guest ran");
+        grants.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_launch_id_is_one_use_after_the_guest_ends() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = &home.agents[0];
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let (status, body) = post_agent_grant(&home, agent, &grant).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let ended = home
+            .wait_ended(answer["session_id"].as_str().unwrap())
+            .await;
+        assert_eq!(
+            ended.cause.as_deref(),
+            Some("completed"),
+            "the first guest ran"
+        );
+        grants.abort();
+        let (status, body) = post_agent_grant(&home, agent, &grant).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "replayed launch_id: {body}"
+        );
+        assert!(body.contains("already used"), "{body}");
+        assert_eq!(
+            home.runtime.list_capsules().await.len(),
+            1,
+            "replay started no guest"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_launch_refuses_a_second_live_session_with_a_fresh_grant() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = &home.agents[0];
+        let mint = || {
+            gateway::issue_home_agent_launch_token_with_context(
+                &home.data_dir,
+                agent,
+                PROBE_HOST,
+                &home.context,
+            )
+            .unwrap()
+        };
+        let (status, body) = post_agent_grant(&home, agent, &mint()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if !home.pending_store.list_pending().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first guest remains live in its bridge call");
+        let (status, body) = post_agent_grant(&home, agent, &mint()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "second live start: {body}");
+        assert!(body.contains("live session"), "{body}");
+        assert_eq!(
+            home.runtime.list_capsules().await.len(),
+            1,
+            "second start made no guest"
+        );
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        home.wait_ended(answer["session_id"].as_str().unwrap())
+            .await;
+        grants.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_launch_feature_off_refuses_before_start() {
+        use crate::runtime::tests::test_runtime;
+        if crate::agents::require_build().is_ok() {
+            return;
+        }
+        use axum::{body::Body, http::Request, routing::post};
+        use tower::ServiceExt;
+        let (runtime, temp) = test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let app = axum::Router::new()
+            .route("/api/capsules", post(launch_capsule))
+            .layer(Extension(Some(temp.path().to_path_buf())))
+            .layer(Extension(Arc::new(AuditLog::new())))
+            .layer(Extension(runtime.clone()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capsules")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"path":"unused", "agent_id":"agent:v2:test"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(runtime.list_capsules().await.is_empty());
     }
 }
 
