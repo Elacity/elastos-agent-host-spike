@@ -69,6 +69,25 @@ const MEDIA_PROVIDER_PROTOCOL_VERSION: &str = "elastos.media-provider/v1";
 const MEDIA_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const WALLET_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn report_missing_home_provider(data_dir: &Path, name: &str, consequence: &str) {
+    let required = match std::fs::read(data_dir.join("components.json")) {
+        Ok(bytes) => serde_json::from_slice::<elastos_server::setup::ComponentsManifest>(&bytes)
+            .map(|manifest| {
+                manifest.profiles.get("home").is_some_and(|profile| {
+                    profile.components.iter().any(|component| component == name)
+                })
+            })
+            .unwrap_or(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    };
+    if required {
+        tracing::warn!("{name} binary is not installed; {consequence}");
+    } else {
+        tracing::debug!("{name} binary is not installed; {consequence}");
+    }
+}
+
 #[cfg(test)]
 use api::model_provider_bridge_config;
 use api::model_provider_config as model_provider_startup_config;
@@ -964,8 +983,10 @@ async fn setup_server_infrastructure_impl(
             }
         }
         Ok(None) => {
-            tracing::warn!(
-                "object-provider binary is not installed; Library object operations will fail closed"
+            report_missing_home_provider(
+                &data_dir,
+                "object-provider",
+                "Library object operations will fail closed",
             );
         }
         Err(e) => tracing::warn!(
@@ -993,8 +1014,10 @@ async fn setup_server_infrastructure_impl(
             }
         }
         Ok(None) => {
-            tracing::warn!(
-                "webspace-provider binary is not installed; WebSpace roots will fail closed"
+            report_missing_home_provider(
+                &data_dir,
+                "webspace-provider",
+                "WebSpace roots will fail closed",
             );
         }
         Err(e) => tracing::warn!(
@@ -1585,8 +1608,10 @@ async fn setup_server_infrastructure_impl(
             );
         }
     } else {
-        tracing::warn!(
-            "custody-provider binary is not installed; the inactive Runtime custody route will be unavailable"
+        report_missing_home_provider(
+            &data_dir,
+            "custody-provider",
+            "the inactive Runtime custody route will be unavailable",
         );
     }
 
@@ -2232,6 +2257,71 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn absent_optional_home_providers_are_quiet_but_required_provider_warns() {
+        use std::io::Write;
+
+        #[derive(Clone)]
+        struct WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for WarningWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("components.json"),
+            serde_json::json!({"external": {}, "profiles": {"home": {
+                "components": ["ipfs-provider"]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let writer = WarningWriter(log.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        for name in ["custody-provider", "object-provider", "webspace-provider"] {
+            report_missing_home_provider(temp.path(), name, "unavailable");
+        }
+        assert!(log.lock().unwrap().is_empty(), "optional providers warned");
+
+        fs::write(
+            temp.path().join("components.json"),
+            serde_json::json!({"external": {}, "profiles": {"home": {
+                "components": ["object-provider"]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        report_missing_home_provider(temp.path(), "object-provider", "unavailable");
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("object-provider binary is not installed"),
+            "{output}"
+        );
+
+        fs::write(temp.path().join("components.json"), "{").unwrap();
+        report_missing_home_provider(temp.path(), "custody-provider", "unavailable");
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("custody-provider binary is not installed"),
+            "{output}"
+        );
+    }
 
     fn did_fixture() -> (TempDir, PathBuf, PathBuf) {
         let temp = TempDir::new().unwrap();
