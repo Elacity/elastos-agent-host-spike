@@ -332,7 +332,8 @@ pub(crate) fn verify_agent_host(
     }))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::installed_release::tests::Fixture;

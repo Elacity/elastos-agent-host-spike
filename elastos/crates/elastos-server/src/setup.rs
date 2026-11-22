@@ -5288,7 +5288,8 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};

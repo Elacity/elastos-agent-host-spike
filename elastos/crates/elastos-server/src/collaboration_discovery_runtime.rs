@@ -4461,7 +4461,8 @@ fn require_discovery_provider_success(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
 

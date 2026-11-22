@@ -742,7 +742,8 @@ fn generate_with_migration(
     ))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;

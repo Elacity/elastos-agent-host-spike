@@ -1973,7 +1973,8 @@ fn now_unix_ms() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use super::*;
 

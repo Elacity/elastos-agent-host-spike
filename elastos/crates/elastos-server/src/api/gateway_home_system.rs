@@ -1418,7 +1418,8 @@ fn unconfigured_people_discovery_summary() -> HomePeopleDiscoverySummary {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod discovery_summary_tests {
     use super::*;
     use std::fs;
@@ -9617,7 +9618,8 @@ mod home_events_pacing_tests {
 /// R2 rows: the Home state surfaces read the root the context resolved, and a
 /// principal with no stored record is refused instead of served from the
 /// principal-id rule.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod stored_root_tests {
     use super::*;
     use std::fs;

@@ -408,7 +408,8 @@ impl BinarySnapshotReader for RealBinarySnapshotReader {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) mod test_support {
     use std::os::fd::{FromRawFd as _, RawFd};
     use std::os::unix::fs::MetadataExt as _;

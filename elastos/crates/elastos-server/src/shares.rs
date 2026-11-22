@@ -1001,7 +1001,8 @@ pub fn parse_share_uri(uri: &str) -> anyhow::Result<String> {
     );
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use elastos_runtime::signature::generate_keypair;

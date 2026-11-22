@@ -1821,7 +1821,8 @@ fn read_model_provider_private_file(
     Ok(bytes)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod hosted_decision_write_fault_tests {
     #[tokio::test]
     async fn decision_writer_reports_post_rename_durability_failure() {
@@ -2286,7 +2287,8 @@ mod hosted_hint_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod validate_fixture_tests {
     use super::{load_hosted_validate_fixtures, parse_loopback_http_url};
 

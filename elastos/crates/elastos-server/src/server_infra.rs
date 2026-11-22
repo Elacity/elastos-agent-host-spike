@@ -2146,7 +2146,8 @@ fn provider_config_from_env_or_file(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     #[test]
     fn configured_carrier_listener_is_optional_and_strict() {

@@ -159,7 +159,8 @@ fn store(error: std::io::Error) -> BundleRefusal {
     BundleRefusal::Store(error.to_string())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::bundle_admission::tests::{did, file_for, key, sign_by_hand, signed, CID_A};

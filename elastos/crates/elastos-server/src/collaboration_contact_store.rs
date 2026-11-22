@@ -4318,7 +4318,8 @@ fn retain_removed_records_without(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use super::*;
 

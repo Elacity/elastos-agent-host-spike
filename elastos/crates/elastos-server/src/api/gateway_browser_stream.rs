@@ -1720,7 +1720,8 @@ fn scrub_browser_stream_authority_fields(value: &mut serde_json::Value) {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;

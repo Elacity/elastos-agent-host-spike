@@ -5836,7 +5836,8 @@ fn unlock_state_file(lock: FileLock) -> anyhow::Result<()> {
     lock.release().context("failed to unlock group chat state")
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
