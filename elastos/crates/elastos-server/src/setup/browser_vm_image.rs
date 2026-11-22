@@ -1439,13 +1439,16 @@ pub(super) mod tests {
         let data = temp.path().join("xdg/elastos");
         fs::create_dir_all(&data).unwrap();
         fs::write(data.join("config.toml"), "dev_mode = true\n").unwrap();
-        let (bytes, mut info) = archive(&arm64_fixture(b"source-image"));
+        let platform = guest_platform(&super::super::detect_platform())
+            .unwrap()
+            .to_owned();
+        let (bytes, mut info) = archive(&fixture_for_platform(b"source-image", &platform));
         info.cid = Some(super::super::catalog_head_cid(&bytes).unwrap());
-        install_archive(&data, &bytes, &info, "linux-arm64").unwrap();
+        install_archive(&data, &bytes, &info, &platform).unwrap();
         fs::write(
             data.join("components.json"),
             serde_json::to_vec(&json!({"external": {NAME: {
-                "install_path": INSTALL_PATH, "platforms": {"linux-arm64": info}
+                "install_path": INSTALL_PATH, "platforms": {(platform.clone()): info}
             }}, "profiles": {}}))
             .unwrap(),
         )
@@ -1464,24 +1467,25 @@ pub(super) mod tests {
         );
         let produced =
             super::super::load_manifest_from_path(&data.join("components.json")).unwrap();
-        let retained = component_info(&produced, "linux-arm64").unwrap();
+        let retained = component_info(&produced, &platform).unwrap();
         assert!(retained.cid.is_some() && !retained.extra.contains_key("vm_image"));
         super::super::ensure_browser_vm_image_in_context_for_platform(
             &data,
             super::super::FirstPartyCarrierContext::Runtime,
-            "linux-arm64".into(),
+            platform.clone(),
         )
         .await
         .unwrap();
         let manifest_path = data.join("components.json");
         let original_manifest = fs::read(&manifest_path).unwrap();
         let mut malformed: Value = serde_json::from_slice(&original_manifest).unwrap();
-        malformed["external"][NAME]["platforms"]["linux-arm64"]["vm_image"] = json!({"bad": true});
+        malformed["external"][NAME]["platforms"][platform.as_str()]["vm_image"] =
+            json!({"bad": true});
         fs::write(&manifest_path, serde_json::to_vec(&malformed).unwrap()).unwrap();
         let error = super::super::ensure_browser_vm_image_in_context_for_platform(
             &data,
             super::super::FirstPartyCarrierContext::Runtime,
-            "linux-arm64".into(),
+            platform.clone(),
         )
         .await
         .unwrap_err();
@@ -1495,7 +1499,7 @@ pub(super) mod tests {
             super::super::ensure_browser_vm_image_in_context_for_platform(
                 &data,
                 super::super::FirstPartyCarrierContext::Runtime,
-                "linux-arm64".into(),
+                platform,
             )
             .await
             .is_err()
