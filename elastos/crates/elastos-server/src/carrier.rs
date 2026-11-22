@@ -9753,7 +9753,7 @@ pub(crate) mod tests {
         let started = std::time::Instant::now();
         let err = relay_until_idle(&activity, async {
             let mut sink = tokio::io::sink();
-            io::copy(&mut reader, &mut sink).await
+            tokio::io::copy(&mut reader, &mut sink).await
         })
         .await
         .unwrap_err();
@@ -9775,7 +9775,7 @@ pub(crate) mod tests {
         });
         let copied = relay_until_idle(&activity, async {
             let mut sink = tokio::io::sink();
-            io::copy(&mut reader, &mut sink).await
+            tokio::io::copy(&mut reader, &mut sink).await
         })
         .await
         .unwrap();

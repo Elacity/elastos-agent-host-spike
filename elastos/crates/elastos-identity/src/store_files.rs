@@ -400,7 +400,9 @@ mod portable {
     #[test]
     fn windows_identity_files_refuse_without_writing() {
         let root = tempfile::tempdir().unwrap();
-        let opened = IdentityFiles::open(root.path()).unwrap_err();
+        let Err(opened) = IdentityFiles::open(root.path()) else {
+            panic!("identity files opened on a platform without owner checks");
+        };
         assert_eq!(
             opened
                 .downcast_ref::<std::io::Error>()
