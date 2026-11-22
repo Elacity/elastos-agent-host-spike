@@ -2,8 +2,9 @@
 
 `confine.sb` is the one oracle for the model provider's confinement profile
 (one file, P10): the profile the Runtime generates for this provider must match
-it. Runtime source renders the model profile, then the macOS provider entry
-starts the provider under that profile through `/usr/bin/sandbox-exec`. Installed Mac
+it. Runtime source renders the model profile. The production model start does
+not use that profile: `spawn_confined_model_with_engine_bundle` in
+`provider/bridge.rs` applies the bridge's own inline Seatbelt policy. Installed Mac
 engine acceptance is tracked under B3-R. The file starts
 with `(version 1)`, then
 `(deny default)`, then `(deny network*)`. The provider reads line-delimited
@@ -15,7 +16,8 @@ refused (P3, P11).
 
 This file uses only the three parameter tokens every file profile binds. The
 generated profile binds the same three, and the tests pass them with
-`sandbox-exec -D`. The Runtime macOS entry renders the profile and starts the provider under that profile through `/usr/bin/sandbox-exec`.
+`sandbox-exec -D`. The Runtime renders the profile; the production model start
+uses the bridge's inline policy instead (see "Runtime source" below).
 
 - `PROVIDER_EXECUTABLE`: the canonical path of the provider binary.
 - `STORAGE_ROOT`: the model journal root. That is
@@ -23,8 +25,8 @@ generated profile binds the same three, and the tests pass them with
   `journal_dir`.
 - `STORAGE_PARENT`: the parent of `STORAGE_ROOT`. The tests create it before
   launch. `model_provider_ops_under_profile` shows the provider then creates
-  `STORAGE_ROOT` itself at its first `init`. The Runtime macOS entry starts
-  the provider under the profile; this lab test does not prove an installed start.
+  `STORAGE_ROOT` itself at its first `init`. The production model start uses
+  the bridge's inline policy, and this lab test does not prove an installed start.
 
 All three are resolved paths. The sandbox matches the resolved path, so a
 path through a link (macOS `/var` is `/private/var`) would match nothing.
@@ -68,9 +70,12 @@ generated text, `Launch::Profile` applies that file, and `init` answers
 `model_declared_rights_read_on_the_did_and_wallet_template` reads this oracle
 and this declared-rights file. Runtime profile rendering and comparison source
 live in `elastos/crates/elastos-runtime/src/provider/macos_profile.rs`; the
-macOS entry in `provider/os_entry.rs` starts the provider under that profile
-through `/usr/bin/sandbox-exec`. The bridge also has model launch code
-in `provider/bridge.rs`; installed Mac engine behavior is assessed under B3-R.
+generic macOS entry in `provider/os_entry.rs` can start a provider under a
+rendered profile through `/usr/bin/sandbox-exec`, but no production caller
+starts the model through it. The model's production launch is
+`spawn_confined_model_with_engine_bundle` in `provider/bridge.rs`, which applies
+the bridge's own inline Seatbelt policy; installed Mac engine behavior is
+assessed under B3-R.
 The `sandbox-exec -f confine.sb` launch is the tests' launch (see "Tests"),
 not the Runtime's.
 
@@ -336,8 +341,8 @@ The launcher starts the provider no other way, as F-cc19a shows. The reason
 reaches the test through the launcher's stderr channel, as F-cc19b shows.
 For the Runtime's refusal of such a start, see "The Runtime bridge change"
 in `../did-provider/CONFINEMENT.md`. The lab writer in that did section is
-test code. Runtime source for profile rendering and the macOS confined start
-lives in `elastos/crates/elastos-runtime/src/provider/`; installed acceptance
+test code. Runtime source for profile rendering, the generic macOS entry and
+the model's inline launch policy lives in `elastos/crates/elastos-runtime/src/provider/`; installed acceptance
 is B3-R.
 
 `standin_refuses_a_start_it_cannot_apply` refuses a declared value with no
