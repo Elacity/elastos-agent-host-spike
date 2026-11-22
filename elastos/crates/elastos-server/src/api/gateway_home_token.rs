@@ -426,9 +426,10 @@ pub(in crate::api) fn issue_home_projection_launch_token_with_context(
     )
 }
 
-/// A fresh fixture grant for one Agent Host start. The System issuer follows
-/// in the next slice; these router tests exercise Runtime admission now.
-#[cfg(test)]
+/// The internal grant for one Agent Host start. The resource is that agent,
+/// the executable is the host `verify_agent_host` named, and the lifetime is
+/// at most 60 seconds. The System route calls this only after it has consumed
+/// the one-use passkey step-up for the same agent.
 pub(in crate::api) fn issue_home_agent_launch_token_with_context(
     data_dir: &std::path::Path,
     agent_id: &str,
@@ -437,13 +438,43 @@ pub(in crate::api) fn issue_home_agent_launch_token_with_context(
 ) -> anyhow::Result<String> {
     let issued_at = now_ts();
     let expiry = grant_bound_token_expiry(data_dir, context, issued_at, 60)?;
-    issue_home_launch_token_at(
+    let token = issue_home_launch_token_at(
         data_dir,
         &HomeLaunchContext::projection(&format!("elastos://agent/{agent_id}"), executable_actor),
         context,
         issued_at,
         Some(expiry),
-    )
+    )?;
+    #[cfg(test)]
+    note_agent_launch_grant_minted(data_dir);
+    Ok(token)
+}
+
+/// Counts grants this process minted for one Home. A refused Start stays at
+/// zero, including a refusal that happens before the guest is asked to run.
+#[cfg(test)]
+static AGENT_LAUNCH_GRANTS_MINTED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn note_agent_launch_grant_minted(data_dir: &std::path::Path) {
+    *AGENT_LAUNCH_GRANTS_MINTED
+        .lock()
+        .expect("agent launch mint counter")
+        .entry(data_dir.to_path_buf())
+        .or_insert(0) += 1;
+}
+
+#[cfg(test)]
+#[cfg_attr(not(feature = "prototype-agents"), allow(dead_code))]
+pub(in crate::api) fn agent_launch_grants_minted_for_test(data_dir: &std::path::Path) -> u64 {
+    AGENT_LAUNCH_GRANTS_MINTED
+        .lock()
+        .expect("agent launch mint counter")
+        .get(data_dir)
+        .copied()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

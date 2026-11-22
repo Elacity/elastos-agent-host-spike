@@ -640,6 +640,62 @@ async fn launch_runtime_capsule(
     })
 }
 
+/// One agent the Home Runtime accepted. The grant that authorized it stays
+/// on this hop and is not part of the response.
+pub(super) struct StartedRuntimeAgent {
+    pub(super) capsule_id: String,
+    pub(super) session_id: String,
+    pub(super) status: String,
+}
+
+#[derive(Deserialize)]
+struct RuntimeAgentLaunchResponse {
+    id: String,
+    session_id: String,
+    status: String,
+}
+
+/// Ask the live Home Runtime to start one agent. `capsule_dir` is the
+/// directory `verify_agent_host` already checked. The grant was minted by the
+/// caller after the passkey step-up was consumed.
+pub(super) async fn launch_runtime_agent(
+    data_dir: &FsPath,
+    capsule_dir: &FsPath,
+    agent_id: &str,
+    launch_grant: &str,
+) -> anyhow::Result<StartedRuntimeAgent> {
+    let coords = load_live_runtime_coords(data_dir)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let shell =
+        gateway_attach_runtime_token(&client, &coords.api_url, &coords.attach_secret, "shell")
+            .await?;
+    let response = client
+        .post(format!("{}/api/capsules", coords.api_url))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .json(&serde_json::json!({
+            "path": capsule_dir.display().to_string(),
+            "agent_id": agent_id,
+            "launch_grant": launch_grant,
+        }))
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("runtime launch failed ({}): {}", status, text.trim());
+    }
+    let payload = response.json::<RuntimeAgentLaunchResponse>().await?;
+    Ok(StartedRuntimeAgent {
+        capsule_id: payload.id,
+        session_id: payload.session_id,
+        status: payload.status,
+    })
+}
+
 async fn ensure_home_target_package(
     data_dir: &FsPath,
     target: &str,

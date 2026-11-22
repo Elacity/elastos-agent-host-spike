@@ -159,12 +159,14 @@ pub(crate) use gateway_home_system::{
     authorize_home_service_exit, carrier_source_is_contact_of, sync_runtime_services_mailboxes,
 };
 use gateway_home_terminal::*;
+#[cfg(test)]
+#[cfg_attr(not(feature = "prototype-agents"), allow(unused_imports))]
+pub(super) use gateway_home_token::agent_launch_grants_minted_for_test;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
 #[cfg(test)]
 pub(super) use gateway_home_token::issue_home_agent_launch_token_at_for_test;
-#[cfg(test)]
 pub(super) use gateway_home_token::issue_home_agent_launch_token_with_context;
 #[cfg(test)]
 pub(super) use gateway_home_token::issue_home_launch_token_with_context;
@@ -866,6 +868,7 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route("/api/apps/system/agents/retire", post(agents_retire))
         .route("/api/apps/system/agents/rename", post(agents_rename))
         .route("/api/apps/system/agents/activate", post(agents_activate))
+        .route("/api/apps/system/agents/launch", post(agents_launch))
         .route(
             "/api/apps/system/community",
             get(system_community_membership_get).post(system_community_membership_update),
