@@ -252,9 +252,7 @@ pub fn resolve_verified_native_provider_binary(
 
 /// A native provider whose executable, manifest and authority the resolver
 /// verified. The fields are private; only `admit_with_bin_dir` writes them.
-/// No production caller in this slice: S1 calls `admit`.
-#[allow(dead_code)]
-pub(crate) struct AdmittedProvider {
+pub struct AdmittedProvider {
     key: String,
     path: PathBuf,
     checksum: String,
@@ -262,11 +260,10 @@ pub(crate) struct AdmittedProvider {
     authority: ProviderAuthority,
 }
 
-#[allow(dead_code)]
 impl AdmittedProvider {
     /// `Ok(None)` when no row resolves for `key` here; `Err` when a resolved
     /// row or the manifest beside it does not verify.
-    pub(crate) fn admit(data_dir: &Path, key: &str) -> anyhow::Result<Option<Self>> {
+    pub fn admit(data_dir: &Path, key: &str) -> anyhow::Result<Option<Self>> {
         let bin_dir = std::env::var_os("ELASTOS_CAPSULE_BIN_DIR").map(PathBuf::from);
         let signers = setup::installed_release_signers(data_dir)?;
         Self::admit_with_bin_dir(data_dir, key, bin_dir.as_deref(), &signers)
@@ -314,23 +311,25 @@ impl AdmittedProvider {
         }))
     }
 
-    pub(crate) fn key(&self) -> &str {
+    pub fn key(&self) -> &str {
         &self.key
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
+    #[allow(dead_code)]
     pub(crate) fn checksum(&self) -> &str {
         &self.checksum
     }
 
+    #[allow(dead_code)]
     pub(crate) fn signer_did(&self) -> Option<&str> {
         self.signer_did.as_deref()
     }
 
-    pub(crate) fn authority(&self) -> &ProviderAuthority {
+    pub fn authority(&self) -> &ProviderAuthority {
         &self.authority
     }
 }
@@ -778,7 +777,7 @@ mod tests {
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with("//"))
             .collect();
-        assert_eq!(header_code, ["#[allow(dead_code)]", "pub(crate)"]);
+        assert_eq!(header_code, ["pub"]);
         let body = &source[at..][..source[at..].find("\n}\n").unwrap()];
         assert!(!body.contains("pub"), "{body}");
 
@@ -803,6 +802,12 @@ mod tests {
         let impl_at = code.find(&impl_head).unwrap();
         let impl_block = &code[impl_at..][..code[impl_at..].find("\n}\n").unwrap()];
         assert!(!impl_block.contains("mut"), "{impl_block}");
+        for accessor in ["admit", "key", "path", "authority"] {
+            assert!(impl_block.contains(&format!("pub fn {accessor}(")));
+        }
+        for accessor in ["checksum", "signer_did"] {
+            assert!(impl_block.contains(&format!("pub(crate) fn {accessor}(")));
+        }
 
         let self_open = ["Self", "{"].concat();
         let maker = source.find("fn admit_with_bin_dir(").unwrap();

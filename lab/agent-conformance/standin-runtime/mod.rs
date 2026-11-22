@@ -56,6 +56,8 @@
 //! `Request timed out` and `runtime` for each pending request at least 300
 //! seconds old. A granted or denied record and its instance stay.
 
+pub mod provider_launcher;
+
 use capsule_identity::{
     checked_bundle, verify_checked_signature, CheckedBundle, LabCid, NameSignature, Refusal,
 };

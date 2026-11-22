@@ -61,6 +61,7 @@ pub(crate) struct Kept {
     principal: String,
     page: String,
     content_name: String,
+    binding: String,
     /// The page's entrypoint and files, as the walk read them.
     entrypoint: String,
     page_files: BTreeMap<String, Vec<u8>>,
@@ -79,6 +80,7 @@ pub struct Opened {
     pub page: String,
     pub entrypoint: String,
     pub content_name: String,
+    pub binding: String,
 }
 
 /// Why a launch was not opened for a page.
@@ -184,6 +186,7 @@ pub(crate) fn take_place(table: &PageLaunches, principal: &str) -> Result<Place,
         principal: principal.to_string(),
         page: String::new(),
         content_name: String::new(),
+        binding: hex::encode(rand::random::<[u8; 16]>()),
         entrypoint: String::new(),
         page_files: BTreeMap::new(),
         launch: None,
@@ -273,6 +276,7 @@ impl Runtime {
             page: page.name,
             entrypoint: page.entrypoint,
             content_name,
+            binding: one.binding.clone(),
         })
     }
 
@@ -332,6 +336,12 @@ impl Runtime {
         one.launch.as_ref().map(|_| one.content_name.clone())
     }
 
+    pub(crate) fn kept_launch_binding(&self, id: &str) -> Option<String> {
+        let kept = kept_ones(&self.page_launches);
+        let one = kept.get(id)?;
+        one.launch.as_ref().map(|_| one.binding.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn kept_launch_count(&self) -> usize {
         kept_ones(&self.page_launches).len()
@@ -353,5 +363,19 @@ impl Runtime {
             .unwrap_or_else(|it| it.into_inner());
         let past = Instant::now() - Duration::from_secs(1);
         kept.values_mut().for_each(|one| one.until = past);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reuse_kept_id_for_test(&self, old: &str, new: &str, old_binding: &str) {
+        let mut kept = self.page_launches.lock().unwrap();
+        let mut new_launch = kept.remove(new).expect("a new kept launch");
+        assert!(!kept.contains_key(old), "the old launch expired");
+        new_launch.binding = if old_binding == "0".repeat(32) {
+            "1"
+        } else {
+            "0"
+        }
+        .repeat(32);
+        kept.insert(old.to_string(), new_launch);
     }
 }

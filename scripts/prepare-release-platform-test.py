@@ -892,6 +892,17 @@ class PrepareWorkerTest(unittest.TestCase):
                     with self.assertRaisesRegex(SystemExit, "missing built Home CLI renderer"):
                         scope["write_capsule_archive"]("home-cli", self.repo / "capsules/home-cli")
 
+    def test_source_frontdoor_opts_in_and_proves_shell_start(self):
+        source = (SOURCE / "scripts/home-frontdoor-smoke.sh").read_text()
+        stage = source.index('"$ROOT/elastos/target/release/shell" "$SOURCE_RUNTIME_DATA_DIR/bin/shell"')
+        opt_in = source.index('printf \'dev_mode = true\\n\' > "$SOURCE_RUNTIME_DATA_DIR/config.toml"')
+        start = source.index('"$ROOT/elastos/target/debug/elastos" serve --addr')
+        check = source.index("grep -Fq 'Spawned shell capsule' \"$SOURCE_RUNTIME_LOG\"")
+        self.assertLess(stage, start)
+        self.assertLess(opt_in, start)
+        self.assertGreater(check, start)
+        self.assertIn('source shell capsule did not start', source)
+
     def test_development_manifests_bind_the_managed_media_archive(self):
         archive = self.root / "media-tools.tar.gz"
         archive.write_bytes(b"already-validated native media archive")

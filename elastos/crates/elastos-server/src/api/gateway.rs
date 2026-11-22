@@ -163,6 +163,8 @@ pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
 #[cfg(test)]
+pub(super) use gateway_home_token::issue_home_launch_token_with_context;
+#[cfg(test)]
 pub(super) use gateway_home_token::launch_principal_root;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
 pub(crate) use gateway_home_token::RuntimeWalletAuthority;
@@ -170,14 +172,13 @@ pub(crate) use gateway_home_token::VerifiedLaunchGrant;
 pub(super) use gateway_home_token::{
     home_browser_origin, home_launch_token_header, home_session_clear_cookie_header,
     home_session_cookie_header_for_token, issue_home_launch_token_for_auth_grant,
-    issue_home_launch_token_for_verified_grant, issue_home_launch_token_with_context,
-    issue_home_projection_launch_token_with_context, issue_launch_page_token,
-    require_carried_home_launch_token, require_home_launch_token,
+    issue_home_launch_token_for_verified_grant, issue_home_projection_launch_token_with_context,
+    issue_launch_page_token, require_carried_home_launch_token, require_home_launch_token,
     require_home_launch_token_binding, require_home_launch_token_context,
     require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
-    require_home_projection_launch_token_context, require_home_runtime_wallet_authority,
-    require_home_token, require_home_token_context, require_home_viewer_launch_token_context,
-    require_internal_shell_launch_grant_for_any_context,
+    require_home_page_or_cli_launch_context, require_home_projection_launch_token_context,
+    require_home_runtime_wallet_authority, require_home_token, require_home_token_context,
+    require_home_viewer_launch_token_context, require_internal_shell_content_open_context,
     require_internal_shell_launch_grant_principal, require_internal_shell_projection_context,
     require_internal_shell_runtime_wallet_authority, require_launch_bound_token,
     require_runtime_wallet_authority, runtime_wallet_authority, HomeLaunchContext,
@@ -397,6 +398,36 @@ pub fn issue_gateway_owned_home_cli_launch_token(
             data_dir, app, app, &context,
         )?,
     ))
+}
+
+/// Give an authenticated Home owner a grant for the two headless Home launch
+/// operations. The gateway-owned terminal supplies the session context; the
+/// existing projection issuer supplies the signer, session check and expiry.
+pub fn issue_gateway_owned_home_cli_launch_grant(
+    data_dir: &std::path::Path,
+) -> anyhow::Result<String> {
+    let context = gateway_owned_home_cli_launch_context_from_env(data_dir)?
+        .ok_or_else(|| anyhow::anyhow!("an authenticated Home CLI session is required"))?;
+    issue_home_cli_launch_grant_for_context(data_dir, &context)
+}
+
+fn issue_home_cli_launch_grant_for_context(
+    data_dir: &std::path::Path,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<String> {
+    if context.root().kind() != Some(crate::auth::PrincipalKind::Human) {
+        anyhow::bail!("a human Home owner is required");
+    }
+    gateway_home_system::require_admin_principal(
+        &gateway_home_token::home_launch_auth_data_dir(data_dir),
+        context,
+    )?;
+    gateway_home_token::issue_home_projection_launch_token_with_context(
+        data_dir,
+        "home-launch",
+        HOME_CLI_SHELL_ID,
+        context,
+    )
 }
 
 pub fn gateway_owned_home_cli_active_shell_snapshot(

@@ -187,6 +187,33 @@ pub(crate) fn read_signed_release(
     } else {
         require_no_pending(binary)?;
     }
+    read_signed_release_after_gate(data, binary, source, repair_version, for_host_start)
+}
+
+/// Tests drive the host-start gate with an explicit update generation and
+/// process id; production reads both from the environment and this process.
+#[cfg(test)]
+pub(crate) fn read_signed_release_for_host_start_with_generation(
+    data: &Path,
+    binary: &Path,
+    source: &TrustedSource,
+    repair_version: bool,
+    generation: Option<&str>,
+    process_id: u32,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    crate::install_transaction::authorize_host_start_with_generation(
+        data, binary, generation, process_id,
+    )?;
+    read_signed_release_after_gate(data, binary, source, repair_version, true)
+}
+
+fn read_signed_release_after_gate(
+    data: &Path,
+    binary: &Path,
+    source: &TrustedSource,
+    repair_version: bool,
+    for_host_start: bool,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     require_current_source(data, source)?;
     let private = consumed_present(
         data,
@@ -220,6 +247,7 @@ pub(crate) fn read_signed_release(
         &hex::encode(Sha256::digest(&components)),
         components.len() as u64,
     )
+    .context(REPAIR)
     .context("Installed component manifest verification failed")?;
     Ok((installed.release, components))
 }

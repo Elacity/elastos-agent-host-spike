@@ -48,8 +48,6 @@ use k256::ecdsa::SigningKey as WalletSigningKey;
 use serde_json::{json, Value};
 use sha2::Digest as _;
 use sha3::Keccak256;
-#[cfg(unix)]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Notify};
 use x_wing::kem::{Decapsulator as _, KeyExport as _};
 use x_wing::TryKeyInit as _;
@@ -4841,6 +4839,9 @@ async fn protected_provider_startup_rejects_invalid_status_and_reaps_child() {
 #[cfg(unix)]
 #[tokio::test]
 async fn protected_provider_startup_timeout_sends_shutdown_and_reaps_child() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     for provider in ProtectedStartupProvider::ALL {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("data");
@@ -4856,28 +4857,52 @@ async fn protected_provider_startup_timeout_sends_shutdown_and_reaps_child() {
                 .await
         });
 
-        let mut signal = tokio::fs::OpenOptions::new()
+        let mut signal = fs::OpenOptions::new()
             .read(true)
+            .custom_flags(libc::O_NONBLOCK)
             .open(&status_signal)
-            .await
             .unwrap();
         let mut marker = [0u8; 1];
-        signal.read_exact(&mut marker).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match signal.read(&mut marker) {
+                    Ok(1) => break,
+                    Ok(0) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    result => panic!("{provider:?}: status signal read failed: {result:?}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{provider:?}: child did not signal its status request"));
         assert_eq!(marker, [b'x']);
+        let mut release = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&status_release)
+                {
+                    Ok(release) => break release,
+                    Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("{provider:?}: status release open failed: {error}"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{provider:?}: child did not open its status release pipe"));
         tokio::time::pause();
         let release_status = tokio::spawn(async move {
-            let release = tokio::time::timeout(
+            let elapsed = tokio::time::timeout(
                 PROTECTED_CONTENT_PROVIDER_STATUS_TIMEOUT + std::time::Duration::from_millis(1),
                 std::future::pending::<()>(),
             )
             .await;
-            assert!(release.is_err());
-            let mut release = tokio::fs::OpenOptions::new()
-                .write(true)
-                .open(&status_release)
-                .await
-                .unwrap();
-            release.write_all(b"x").await.unwrap();
+            assert!(elapsed.is_err());
+            release.write_all(b"x").unwrap();
         });
         tokio::task::yield_now().await;
         tokio::time::advance(
@@ -4885,9 +4910,16 @@ async fn protected_provider_startup_timeout_sends_shutdown_and_reaps_child() {
         )
         .await;
         tokio::time::resume();
-        release_status.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), release_status)
+            .await
+            .unwrap_or_else(|_| panic!("{provider:?}: status release task did not finish"))
+            .unwrap();
 
-        let error = registration.await.unwrap().unwrap_err();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(20), registration)
+            .await
+            .unwrap_or_else(|_| panic!("{provider:?}: startup shutdown/reap did not finish"))
+            .unwrap()
+            .unwrap_err();
         assert!(
             error.to_string().contains("status timed out"),
             "{provider:?}: {error}"
@@ -4899,11 +4931,12 @@ async fn protected_provider_startup_timeout_sends_shutdown_and_reaps_child() {
         );
         assert!(requests.contains(r#""op":"status""#), "{provider:?}");
         assert!(requests.contains(r#""op":"shutdown""#), "{provider:?}");
-        assert!(
-            !registry
-                .has_ready_runtime_provider_target(provider.target())
-                .await
-        );
+        assert!(!tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            registry.has_ready_runtime_provider_target(provider.target()),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{provider:?}: registry readiness check did not finish")));
     }
 }
 
