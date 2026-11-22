@@ -46,6 +46,10 @@ pub(super) struct Launched {
     pub pid: libc::pid_t,
     pub to_child: OwnedFd,
     pub from_child: OwnedFd,
+    /// The verified copy sandbox-exec runs. The bridge holds it while the
+    /// provider lives, so the checked bytes are the bytes that start.
+    #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+    pub prepared: super::checked_executable::PreparedExecutable,
 }
 
 #[cfg(all(
@@ -153,12 +157,15 @@ fn dispatch(
                 .to_string(),
         );
     }
-    macos_start(executable, checked, stdio, profile)
+    // Re-check the signed digest now and start the verified copy, never the
+    // caller's pathname.
+    let prepared = executable.verify_at_spawn()?;
+    macos_start(prepared, checked, stdio, profile)
 }
 
 #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
 fn macos_start(
-    executable: &Path,
+    prepared: super::checked_executable::PreparedExecutable,
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
     profile: String,
@@ -207,7 +214,7 @@ fn macos_start(
     let parent = storage
         .parent()
         .ok_or("provider start is refused: storage root has no parent")?;
-    let binary = std::fs::canonicalize(executable).map_err(|error| {
+    let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
         format!("provider start is refused: cannot resolve provider executable: {error}")
     })?;
     let duplicate = |fd| {
@@ -268,6 +275,7 @@ fn macos_start(
         pid,
         to_child: stdio.to_child,
         from_child: stdio.from_child,
+        prepared,
     })
 }
 

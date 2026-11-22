@@ -1858,6 +1858,17 @@ impl ProviderBridge {
         drop(stdin_read);
         drop(stdout_write);
 
+        #[cfg(target_os = "macos")]
+        let executable_copy = {
+            #[cfg(not(elastos_unsupported_os_check))]
+            {
+                Some(launched.prepared)
+            }
+            #[cfg(elastos_unsupported_os_check)]
+            {
+                None
+            }
+        };
         let fork = ForkChild::start(launched.pid)?;
         let mut to_child = std::fs::File::from(launched.to_child);
         if let Some(line) = launched_pid_line(launched.pid) {
@@ -1878,7 +1889,7 @@ impl ProviderBridge {
             child: Arc::new(Mutex::new(None)),
             fork: Mutex::new(Some(fork)),
             #[cfg(target_os = "macos")]
-            executable_copy: Arc::new(Mutex::new(None)),
+            executable_copy: Arc::new(Mutex::new(executable_copy)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),

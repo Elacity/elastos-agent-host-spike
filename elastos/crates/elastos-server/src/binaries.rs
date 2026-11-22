@@ -319,8 +319,7 @@ impl AdmittedProvider {
         &self.path
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn checksum(&self) -> &str {
+    pub fn checksum(&self) -> &str {
         &self.checksum
     }
 

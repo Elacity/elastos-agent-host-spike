@@ -716,10 +716,15 @@ async fn start_did_provider(
         encryption_key: device_key_hex.to_owned(),
         ..Default::default()
     };
+    // The bridge re-checks the admitted signed digest at spawn and starts the
+    // bytes it checked.
+    let checked = provider::CheckedExecutable::pinned(admitted.path(), admitted.checksum())
+        .map_err(anyhow::Error::msg)?
+        .with_home_data_dir(data_dir);
     let confined = provider::ProviderBridge::spawn_confined(
         admitted.key(),
         admitted.authority(),
-        admitted.path(),
+        &checked,
         &confined_data_dir.join("did"),
         did_config,
     )
