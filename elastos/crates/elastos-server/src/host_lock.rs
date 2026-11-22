@@ -207,10 +207,6 @@ struct BinaryFileStamp {
     device_id: u64,
     #[cfg(unix)]
     inode: u64,
-    /// Windows has no inode; a renamed-in replacement keeps its own, later
-    /// creation time, so a same-size, same-mtime swap still changes the stamp.
-    #[cfg(windows)]
-    created: std::time::SystemTime,
 }
 
 trait BinarySnapshotReader {
@@ -395,8 +391,6 @@ fn binary_file_stamp_from_metadata(metadata: &fs::Metadata) -> anyhow::Result<Bi
             use std::os::unix::fs::MetadataExt as _;
             metadata.ino()
         },
-        #[cfg(windows)]
-        created: metadata.created()?,
     })
 }
 
@@ -657,6 +651,19 @@ mod tests {
 
         let replacement = temp.path().join("replacement");
         write_file(&replacement, b"same bytes");
+        // Two writes microseconds apart can share one file-clock tick (Windows ticks
+        // are coarse), so give the replacement a clearly different mtime.
+        let later = fs::metadata(&exe)
+            .expect("original metadata")
+            .modified()
+            .expect("mtime")
+            + std::time::Duration::from_secs(2);
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("open replacement")
+            .set_modified(later)
+            .expect("set replacement mtime");
         fs::rename(&replacement, &exe).expect("replace file");
 
         assert_eq!(watch.superseded_reason_with(&reader), None);

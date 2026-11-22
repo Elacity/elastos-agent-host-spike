@@ -1834,6 +1834,9 @@ impl Runtime {
         left: &mut Budget,
         after_walk: &mut impl FnMut(&LabCid),
     ) -> std::result::Result<(VerifiedBundle, AcceptedSignature), BundleRefusal> {
+        // Windows only: Unix already reports ENOTDIR (store IO) for a file where a
+        // store directory must be, so its "missing" answer must not change.
+        #[cfg(windows)]
         fn bundle_store_ancestor_blocks_lookup(data_dir: &Path, slot: &Path) -> Option<String> {
             let mut cursor = slot.parent();
             while let Some(path) = cursor {
@@ -1871,6 +1874,7 @@ impl Runtime {
                 // A missing slot is "no such bundle" only when the store can be
                 // looked into. On Windows, a file where a store directory must
                 // be reports NotFound for the child path. That is still store IO.
+                #[cfg(windows)]
                 if let Some(why) = bundle_store_ancestor_blocks_lookup(data_dir, &slot) {
                     return Err(BundleRefusal::Store(why));
                 }
