@@ -1811,8 +1811,19 @@ pub(crate) fn authorize_host_start_with_generation(
     generation: Option<&str>,
     process_id: u32,
 ) -> anyhow::Result<()> {
+    claimed_host_start_with_generation(data_dir, binary, generation, process_id).map(drop)
+}
+
+/// As `authorize_host_start_with_generation`; true only when it admitted a
+/// controller-claimed update restart (a journal is pending), false with no journal.
+pub(crate) fn claimed_host_start_with_generation(
+    data_dir: &Path,
+    binary: &Path,
+    generation: Option<&str>,
+    process_id: u32,
+) -> anyhow::Result<bool> {
     let Some(journal) = read_host_start_journal(data_dir, binary)? else {
-        return Ok(());
+        return Ok(false);
     };
     if journal.restart.is_none() {
         bail!("{}", pending_home_recovery_hint(&journal));
@@ -1854,7 +1865,7 @@ pub(crate) fn authorize_host_start_with_generation(
     ) {
         bail!("claimed Runtime binary changed before startup");
     }
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn refuse_pending_home_start(data_dir: &Path, binary: &Path) -> anyhow::Result<()> {

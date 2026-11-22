@@ -38,6 +38,14 @@ pub enum AuditEvent {
         /// `did:key` of the trusted key that verified this capsule, when one did.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signer_did: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
 
     /// Capsule stopped
@@ -367,6 +375,10 @@ impl AuditLog {
             cid: cid.map(String::from),
             trust_level,
             signer_did: signer_did.map(String::from),
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
         });
     }
 
@@ -716,6 +728,10 @@ mod tests {
             cid: Some("Qm123".to_string()),
             trust_level: TrustLevel::Trusted,
             signer_did: Some("did:key:zTest".to_string()),
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
         };
 
         let json = serde_json::to_string(&event).unwrap();

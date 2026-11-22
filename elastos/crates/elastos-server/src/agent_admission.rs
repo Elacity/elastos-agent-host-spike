@@ -162,8 +162,8 @@ pub(crate) fn walk_launch(capsule_dir: &Path) -> anyhow::Result<WalkedLaunch> {
 /// that person's key. A launch that cannot meet any of that is refused here,
 /// before any provider starts and before any principal is bound.
 ///
-/// `walked` is the one value `walk_launch` produced; the grant check already
-/// read this manifest's name, and the loader compiles its entrypoint. Admission
+/// `walked` is the one value `walk_launch` produced; the grant check bound
+/// this manifest's name and Agent ID, and the loader compiles its entrypoint. Admission
 /// opens no file in the launching folder.
 pub(crate) fn admit_launch(
     data_dir: &Path,
@@ -266,7 +266,7 @@ pub(crate) fn verify_agent_host(
     // The release envelope and its components, read and verified against the
     // configured publisher keys. Its `signer_did` is the key that verified it.
     let (release, components) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false, false)?;
     let release: serde_json::Value = serde_json::from_slice(&release)?;
     let Some(release_signer) = release["signer_did"].as_str() else {
         return Err(refuse("is from a release with no signer"));

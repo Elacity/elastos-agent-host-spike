@@ -511,10 +511,29 @@ async fn test_chat_room_summary_requires_signed_launch_authority() {
 }
 #[cfg(unix)]
 #[tokio::test]
-async fn legacy_chat_room_summary_admits_only_chat_or_home() {
+async fn legacy_chat_room_summary_requires_chat_launch_even_with_home_cookie() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
+
+    // Handler proof: the front door admits this same-origin Home cookie.
+    let home = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/chat-room/summary")
+                .header(COOKIE, signed_home_cookie_for_room_test(&authority))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(home.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(home.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"chat_room_summary_requires_chat_launch");
+
     let capsule_summary = |token: String| {
         app.clone().oneshot(
             test_browser_request("localhost:61180", "null")
@@ -532,7 +551,7 @@ async fn legacy_chat_room_summary_admits_only_chat_or_home() {
     ))
     .await
     .unwrap();
-    assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(other.status(), StatusCode::FORBIDDEN);
     let body = axum::body::to_bytes(other.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -547,18 +566,31 @@ async fn legacy_chat_room_summary_admits_only_chat_or_home() {
     .unwrap();
     assert_eq!(chat.status(), StatusCode::OK);
 
-    let home = app
+    let home_page = app
         .clone()
         .oneshot(
             test_browser_request("localhost:61180", "http://localhost:61180")
-                .uri("/api/apps/chat-room/summary")
+                .uri("/api/apps/home/summary")
                 .header(COOKIE, signed_home_cookie_for_room_test(&authority))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(home.status(), StatusCode::OK);
+    assert_eq!(home_page.status(), StatusCode::OK);
+
+    // Front-door check: an opaque Home token is refused before the Chat handler.
+    let opaque_home = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .uri("/api/apps/chat-room/summary")
+                .header("x-elastos-home-token", authority.home_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opaque_home.status(), StatusCode::FORBIDDEN);
 }
 
 #[cfg(unix)]
@@ -1561,8 +1593,8 @@ async fn test_chat_room_shell_can_kick_guest_without_exposing_session_token() {
     let summary = app
         .clone()
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .method("GET")
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
@@ -1595,8 +1627,8 @@ async fn test_chat_room_shell_can_kick_guest_without_exposing_session_token() {
 
     let summary = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .method("GET")
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
@@ -1794,8 +1826,8 @@ async fn test_chat_room_shell_can_approve_browser_access_request() {
     let summary = app
         .clone()
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &home_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1843,12 +1875,12 @@ async fn test_room_service_summary_omits_display_name_suggestion() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1915,12 +1947,12 @@ async fn test_room_service_summary_includes_hosted_guest_urls() {
     .unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1959,12 +1991,12 @@ async fn test_room_service_summary_blocks_browser_access_when_seeded_room_has_no
     .unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),

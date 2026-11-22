@@ -545,6 +545,7 @@ async fn a15r_approve_is_the_owners_alone() {
         crate::auth::PrincipalKind::Agent,
     );
     let agent_launch = RequiredHomeLaunchToken {
+        issued_at: crate::auth::now_ts(),
         expires_at: crate::auth::now_ts() + 60,
         launch_id: "launch:agent-test".to_string(),
         launch_context: HomeLaunchContext {
@@ -1647,6 +1648,7 @@ async fn a15r_real_self_approval_zero() {
         crate::auth::PrincipalKind::Agent,
     );
     let launch = RequiredHomeLaunchToken {
+        issued_at: crate::auth::now_ts(),
         expires_at: crate::auth::now_ts() + 60,
         launch_id: "launch:agent-test".to_string(),
         launch_context: HomeLaunchContext {

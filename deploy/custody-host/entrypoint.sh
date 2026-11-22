@@ -25,6 +25,7 @@ image_root="/opt/elastos-image"
 elastos_bin="${data_root}/bin/elastos"
 shared="/shared"
 init_receipt="${data_root}/protected-content/custody-provider/container-init.json"
+publisher_rel="ElastOS/SystemServices/Publisher"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -32,7 +33,9 @@ fail() {
 }
 
 # The image (${image_root}, never volume-shadowed) is the source of truth
-# for bin/ + components.json; the volume only ever holds what an entrypoint
+# for bin/ + components.json + the signed release that binds them (the
+# publisher's release-head.json/release.json and the sources.json pinning
+# that publisher; see the Dockerfile's signing step); the volume only ever holds what an entrypoint
 # run has synced into it. Runs on every boot, first included: a bare
 # comparison naturally treats "nothing in the volume yet" as a mismatch, so
 # this is also the only seeding step first boot needs -- there is no
@@ -40,10 +43,13 @@ fail() {
 # state further down. Never touches protected-content/, identity/, or run/.
 sync_image_artifacts() {
     changed=0
-    if [ ! -f "${data_root}/components.json" ] \
-        || [ "$(sha256sum <"${image_root}/components.json")" != "$(sha256sum <"${data_root}/components.json")" ]; then
-        changed=1
-    fi
+    for pair in "components.json:components.json" "sources.json:sources.json" \
+        "release-head.json:${publisher_rel}/release-head.json" "release.json:${publisher_rel}/release.json"; do
+        if [ ! -f "${data_root}/${pair#*:}" ] \
+            || [ "$(sha256sum <"${image_root}/${pair%%:*}")" != "$(sha256sum <"${data_root}/${pair#*:}")" ]; then
+            changed=1
+        fi
+    done
     if [ "${changed}" -eq 0 ]; then
         for name in elastos custody-provider availability-provider ipfs-provider chain-provider; do
             if [ ! -f "${data_root}/bin/${name}" ] \
@@ -64,10 +70,21 @@ sync_image_artifacts() {
         chmod 0700 "${data_root}/bin/${name}.tmp"
         mv "${data_root}/bin/${name}.tmp" "${data_root}/bin/${name}"
     done
-    cp "${image_root}/components.json" "${data_root}/components.json.tmp"
-    chmod 0600 "${data_root}/components.json.tmp"
-    mv "${data_root}/components.json.tmp" "${data_root}/components.json"
-    echo "INFO: synced bin/ and components.json from the image into the data volume (new install or image upgrade)" >&2
+    # Owner-only at every level: the Runtime refuses group/world-writable or
+    # setgid parents of its signed release inputs.
+    dir="${data_root}"
+    for part in ElastOS SystemServices Publisher; do
+        dir="${dir}/${part}"
+        mkdir -p "${dir}"
+        chmod 0700 "${dir}"
+    done
+    for pair in "components.json:components.json" "sources.json:sources.json" \
+        "release-head.json:${publisher_rel}/release-head.json" "release.json:${publisher_rel}/release.json"; do
+        cp "${image_root}/${pair%%:*}" "${data_root}/${pair#*:}.tmp"
+        chmod 0600 "${data_root}/${pair#*:}.tmp"
+        mv "${data_root}/${pair#*:}.tmp" "${data_root}/${pair#*:}"
+    done
+    echo "INFO: synced bin/, components.json and the signed release from the image into the data volume (new install or image upgrade)" >&2
 }
 
 sync_image_artifacts

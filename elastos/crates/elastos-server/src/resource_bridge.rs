@@ -4395,10 +4395,10 @@ pub(crate) mod tests {
             expected_counts(&[("elastos-server/src/agent_admission.rs", 1)]),
             "AdmissionContext construction literal"
         );
-        // The one production caller of each constructor.
+        // The production callers of each constructor.
         assert_eq!(
             production_counts("BridgePrincipal::from_grant("),
-            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 2)]),
             "BridgePrincipal::from_grant callers"
         );
         assert_eq!(
@@ -4406,12 +4406,13 @@ pub(crate) mod tests {
             expected_counts(&[("elastos-server/src/runtime.rs", 1)]),
             "BridgePrincipal::from_admission callers"
         );
-        // The accessors: one read per agent refusal, one consuming conversion
-        // per route boundary. Definitions are excluded.
+        // The accessors: routes read the typed launcher for admission and
+        // audit; Runtime and supervisor each read it at their own boundary.
+        // Definitions are excluded.
         assert_eq!(
             production_counts("principal_str"),
             expected_counts(&[
-                ("elastos-server/src/api/routes.rs", 1),
+                ("elastos-server/src/api/routes.rs", 2),
                 ("elastos-server/src/runtime.rs", 1),
                 ("elastos-server/src/supervisor.rs", 1),
             ]),
@@ -4525,6 +4526,10 @@ pub(crate) mod tests {
             ("start_loaded", &[("elastos-server/src/runtime.rs", 2)][..]),
             (
                 "start_local_admitted",
+                &[("elastos-server/src/runtime.rs", 1)][..],
+            ),
+            (
+                "start_agent_once",
                 &[("elastos-server/src/api/routes.rs", 1)][..],
             ),
             ("run_local_admitted", &[][..]),
@@ -9140,18 +9145,16 @@ pub async fn production_after() {
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("issue_home_launch_token_with_context("),
-            expected_counts(&[
-                ("elastos-server/src/api/gateway_home_token.rs", 1),
-                ("elastos-server/src/api/viewer_gateway.rs", 1),
-            ]),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
             "context issuer callers"
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("issue_home_projection_launch_token_with_context("),
             expected_counts(&[
                 ("elastos-server/src/api/auth_gateway.rs", 2),
-                ("elastos-server/src/api/gateway.rs", 1),
+                ("elastos-server/src/api/gateway.rs", 2),
                 ("elastos-server/src/api/gateway_home_runtime.rs", 3),
+                ("elastos-server/src/api/viewer_gateway.rs", 1),
             ]),
             "projection issuer callers"
         );
@@ -9202,11 +9205,18 @@ pub async fn production_after() {
                 ("elastos-server/src/api/gateway_home_external_link.rs", 1),
                 ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
                 ("elastos-server/src/api/gateway_home_system.rs", 2),
-                ("elastos-server/src/api/gateway_home_token.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 3),
                 ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
-                ("elastos-server/src/api/viewer_gateway.rs", 1),
             ]),
             "Home token context callers"
+        );
+        // Gateway admission had two refusal calls. Home page/CLI launch,
+        // internal shell content open, and launch-bound reads now fence the
+        // same resolved agent principal before they use its context.
+        assert_eq!(
+            production_counts_ignoring_cfg_test("refuse_agent_principal("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 5)]),
+            "agent-principal refusal callers"
         );
         // Blast radius of the one helper: the direct callers and the front
         // door's path through `require_gateway_launch_for`, which runs only
@@ -9235,7 +9245,70 @@ pub async fn production_after() {
         let body = &source[start..];
         let open = body.find('{').expect("the match block opens");
         let end = cfg_test_item_end(&body[open..]);
-        let arms = body[open..open + end].matches("=>").count();
-        assert_eq!(arms, 4, "gateway admission match arms");
+        let match_block = &body[open..open + end];
+        let bytes = match_block.as_bytes();
+        let (mut braces, mut parens, mut brackets, mut outer_arms, mut total_arms) =
+            (0, 0, 0, 0, 0);
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    index = match_block[index..]
+                        .find('\n')
+                        .map_or(bytes.len(), |at| index + at + 1);
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    index = match_block[index..]
+                        .find("*/")
+                        .map_or(bytes.len(), |at| index + at + 2);
+                }
+                b'"' => index = string_end(match_block, index),
+                b'\'' => index = char_or_lifetime_end(bytes, index),
+                b'r' => index = raw_string_end(match_block, index).unwrap_or(index + 1),
+                b'b' if matches!(bytes.get(index + 1), Some(b'"') | Some(b'\'')) => {
+                    index = if bytes[index + 1] == b'"' {
+                        string_end(match_block, index + 1)
+                    } else {
+                        char_or_lifetime_end(bytes, index + 1)
+                    };
+                }
+                b'{' => {
+                    braces += 1;
+                    index += 1;
+                }
+                b'}' => {
+                    braces -= 1;
+                    index += 1;
+                }
+                b'(' => {
+                    parens += 1;
+                    index += 1;
+                }
+                b')' => {
+                    parens -= 1;
+                    index += 1;
+                }
+                b'[' => {
+                    brackets += 1;
+                    index += 1;
+                }
+                b']' => {
+                    brackets -= 1;
+                    index += 1;
+                }
+                b'=' if bytes.get(index + 1) == Some(&b'>') => {
+                    total_arms += 1;
+                    if braces == 1 && parens == 0 && brackets == 0 {
+                        outer_arms += 1;
+                    }
+                    index += 2;
+                }
+                _ => index += 1,
+            }
+        }
+        // Nested error-response arms cannot compensate for removing an outer
+        // admission decision; the total also pins those nested mappings.
+        assert_eq!(outer_arms, 5, "gateway outer admission match arms");
+        assert_eq!(total_arms, 8, "gateway total admission match arms");
     }
 }

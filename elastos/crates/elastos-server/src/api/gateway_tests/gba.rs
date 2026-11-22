@@ -157,6 +157,7 @@ async fn home_content_launch_uses_the_bound_gba_viewer_without_compute() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"gba-ucity"}"#))
@@ -288,6 +289,7 @@ async fn home_launches_gba_nonogram_through_the_bound_viewer() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"gba-nonogram"}"#))
@@ -438,6 +440,7 @@ async fn old_install_upgrade_encrypts_ucity_save_and_state_before_normal_round_t
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header(
                     "x-elastos-home-token",
                     issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context)

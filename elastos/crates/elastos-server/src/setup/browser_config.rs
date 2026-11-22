@@ -213,10 +213,14 @@ pub fn browser_available(platform: &str) -> bool {
     matches!(platform, "darwin-arm64" | "linux-arm64")
 }
 
-fn native_host_available(data: &Path) -> anyhow::Result<()> {
+fn native_host_available(data: &Path, catalogue: bool) -> anyhow::Result<()> {
     let program = data.join("bin/browser-vz-engine-supervisor");
-    super::verify_installed_component_binary(data, "browser-vz-engine-supervisor", &program)?;
-    probe_native_host(&program, data, std::time::Duration::from_secs(2))
+    let prepared = if catalogue {
+        super::verify_installed_component_catalogue(data, "browser-vz-engine-supervisor", &program)?
+    } else {
+        super::verify_installed_component_start(data, "browser-vz-engine-supervisor", &program)?
+    };
+    probe_native_host(&prepared, data, std::time::Duration::from_secs(2))
 }
 
 pub(crate) fn linux_host_setup_message(data: &Path, platform: &str) -> Option<&'static str> {
@@ -227,7 +231,7 @@ pub(crate) fn linux_host_setup_message(data: &Path, platform: &str) -> Option<&'
     )
 }
 
-fn linux_host_setup_message_with_kvm(
+pub(crate) fn linux_host_setup_message_with_kvm(
     data: &Path,
     platform: &str,
     kvm_present: bool,
@@ -238,7 +242,7 @@ fn linux_host_setup_message_with_kvm(
     if !kvm_present {
         return Some(super::browser_linux::KVM_MESSAGE);
     }
-    require_linux_host(data)
+    require_linux_host_for_catalogue(data)
         .is_err()
         .then_some(super::browser_linux::SETUP_MESSAGE)
 }
@@ -246,24 +250,32 @@ fn linux_host_setup_message_with_kvm(
 pub(super) fn require_linux_host(data: &Path) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     require_kvm(Path::new("/dev/kvm"))?;
-    native_host_available(data)
+    native_host_available(data, false)
+}
+
+fn require_linux_host_for_catalogue(data: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    require_kvm(Path::new("/dev/kvm"))?;
+    native_host_available(data, true)
 }
 
 fn probe_native_host(
-    program: &Path,
+    prepared: &super::verified_executable::VerifiedExecutable,
     data: &Path,
     timeout: std::time::Duration,
 ) -> anyhow::Result<()> {
     use std::time::{Duration, Instant};
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(prepared.exec_path());
+    command
         .arg("--host-capabilities")
         .env_clear()
         .env("ELASTOS_BROWSER_VM_DATA_DIR", data)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    prepared.attach_std(&mut command, true)?;
+    let mut child = command.spawn()?;
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -421,7 +433,7 @@ pub(super) async fn prepare_home(
                 #[cfg(target_os = "linux")]
                 if platform == "linux-arm64" {
                     require_kvm(Path::new("/dev/kvm"))?;
-                    native_host_available(data)?;
+                    native_host_available(data, false)?;
                 }
                 println!("Preparing Browser Engine image...");
                 super::ensure_browser_vm_image_in_context(
@@ -756,6 +768,14 @@ mod tests {
         use std::time::Duration;
         let temp = tempfile::tempdir().unwrap();
         let program = temp.path().join("probe");
+        let prepare = || {
+            let checksum = format!(
+                "sha256:{}",
+                hex::encode(sha2::Sha256::digest(fs::read(&program).unwrap()))
+            );
+            super::super::verified_executable::VerifiedExecutable::prepare(&program, &checksum)
+                .unwrap()
+        };
         for (output, accepted) in [
             (
                 r#"{"schema":"elastos.browser.vm-host-capabilities/v1","available":true}"#,
@@ -771,13 +791,13 @@ mod tests {
             fs::write(&program, format!("#!/bin/sh\n[ \"$1\" = --host-capabilities ] || exit 2\nprintf '%s\\n' '{output}'\n")).unwrap();
             fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
             assert_eq!(
-                probe_native_host(&program, temp.path(), Duration::from_secs(1)).is_ok(),
+                probe_native_host(&prepare(), temp.path(), Duration::from_secs(1)).is_ok(),
                 accepted
             );
         }
         fs::write(&program, "#!/bin/sh\nwhile :; do :; done\n").unwrap();
         assert!(
-            probe_native_host(&program, temp.path(), Duration::from_millis(20))
+            probe_native_host(&prepare(), temp.path(), Duration::from_millis(20))
                 .unwrap_err()
                 .to_string()
                 .contains("did not complete")
@@ -789,7 +809,7 @@ mod tests {
             temp.path().join("bin/browser-vz-engine-supervisor"),
         )
         .unwrap();
-        assert!(native_host_available(temp.path()).is_err());
+        assert!(native_host_available(temp.path(), false).is_err());
     }
 
     fn fixture_node() -> PathBuf {

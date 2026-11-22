@@ -6405,6 +6405,11 @@ pub(super) fn require_home_active_shell_wallet_authority(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
 ) -> anyhow::Result<RuntimeWalletAuthority> {
+    // This projection authorizes only Home launch and content open. The
+    // front door sends those exact routes to their own launch gate.
+    if gateway_home_token::verified_home_cli_launch_grant(data_dir, headers) {
+        anyhow::bail!("home_cli_launch_grant_scope_mismatch");
+    }
     if let Ok(authority) = require_home_runtime_wallet_authority(data_dir, headers) {
         return Ok(authority);
     }

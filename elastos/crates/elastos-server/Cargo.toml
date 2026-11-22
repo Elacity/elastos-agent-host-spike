@@ -143,3 +143,6 @@ default = []
 # Agents that belong to one person: an owner turns them on for a Home, then
 # creates, lists, renames and retires them. Off by default.
 prototype-agents = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(elastos_unsupported_os_check)"] }
