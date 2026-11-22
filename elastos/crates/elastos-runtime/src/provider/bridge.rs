@@ -574,15 +574,15 @@ struct ProviderIo {
 /// them one at a time).
 pub struct ProviderBridge {
     io: Arc<Mutex<ProviderIo>>,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     /// A forked provider whose pid this process owns. At most one of `child`
     /// and `fork` is set. The blocking `waitpid` task is the only reaper.
     fork: Mutex<Option<ForkChild>>,
-    /// The private verified copy the provider was started from. It is taken
-    /// only after the child is reaped; a dropped bridge kills the child first,
-    /// because `child` is declared before this field.
+    /// The private verified copy the provider was started from. The bridge's
+    /// exit watcher takes it as soon as the child is reaped, even if a Runtime
+    /// registry still holds the bridge.
     #[cfg(target_os = "macos")]
-    executable_copy: Mutex<Option<PreparedExecutable>>,
+    executable_copy: Arc<Mutex<Option<PreparedExecutable>>>,
     #[cfg(unix)]
     helper_owner: Mutex<Option<elastos_common::process_lifetime::ParentLifetime>>,
     /// True once a shutdown attempt has completed (child reaped, or the
@@ -1875,10 +1875,10 @@ impl ProviderBridge {
                     from_child,
                 ))),
             })),
-            child: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
             fork: Mutex::new(Some(fork)),
             #[cfg(target_os = "macos")]
-            executable_copy: Mutex::new(None),
+            executable_copy: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -2606,10 +2606,10 @@ impl ProviderBridge {
                 writer: Box::new(stdin),
                 reader: Box::new(tokio::io::BufReader::new(stdout)),
             })),
-            child: Mutex::new(Some(child)),
+            child: Arc::new(Mutex::new(Some(child))),
             fork: Mutex::new(None),
             #[cfg(target_os = "macos")]
-            executable_copy: Mutex::new(Some(prepared)),
+            executable_copy: Arc::new(Mutex::new(Some(prepared))),
             #[cfg(unix)]
             helper_owner: Mutex::new(helper_owner),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -2626,8 +2626,67 @@ impl ProviderBridge {
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         };
 
+        #[cfg(target_os = "macos")]
+        bridge.watch_executable_copy();
         bridge.init_provider(config, init_timeout).await?;
         Ok(bridge)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn watch_executable_copy(&self) {
+        let child = Arc::downgrade(&self.child);
+        let copy = Arc::downgrade(&self.executable_copy);
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        let mut sigint =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
+        tokio::spawn(async move {
+            loop {
+                let (Some(copy_ref), Some(child_ref)) = (copy.upgrade(), child.upgrade()) else {
+                    return;
+                };
+                if copy_ref.lock().await.is_none() {
+                    return;
+                }
+                let reaped = {
+                    let mut guard = child_ref.lock().await;
+                    match guard.as_mut() {
+                        Some(process) => matches!(process.try_wait(), Ok(Some(_))),
+                        None => true,
+                    }
+                };
+                if reaped {
+                    copy_ref.lock().await.take();
+                    return;
+                }
+                // A weak watcher never keeps a dropped bridge or child alive.
+                drop(child_ref);
+                drop(copy_ref);
+                let stopping = tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => false,
+                    _ = async { match &mut sigterm { Some(signal) => { signal.recv().await; }, None => std::future::pending().await } } => true,
+                    _ = async { match &mut sigint { Some(signal) => { signal.recv().await; }, None => std::future::pending().await } } => true,
+                };
+                if stopping {
+                    let (Some(copy_ref), Some(child_ref)) = (copy.upgrade(), child.upgrade())
+                    else {
+                        return;
+                    };
+                    let mut guard = child_ref.lock().await;
+                    if let Some(process) = guard.as_mut() {
+                        let _ = process.start_kill();
+                        if matches!(
+                            tokio::time::timeout(std::time::Duration::from_secs(1), process.wait())
+                                .await,
+                            Ok(Ok(_))
+                        ) {
+                            copy_ref.lock().await.take();
+                        }
+                    }
+                    return;
+                }
+            }
+        });
     }
 
     /// The one Init implementation: send `Init`, bound by `init_timeout`, and
@@ -2689,10 +2748,10 @@ impl ProviderBridge {
                 writer: Box::new(writer),
                 reader: Box::new(reader),
             })),
-            child: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
             fork: Mutex::new(None),
             #[cfg(target_os = "macos")]
-            executable_copy: Mutex::new(None),
+            executable_copy: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -4127,6 +4186,115 @@ mod tests {
             temp.path().join("cloudflared").exists(),
             "only the link went"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn checked_executable_copy_goes_when_provider_exits_without_bridge_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("short-provider");
+        std::fs::write(
+            &binary,
+            b"#!/bin/sh\nIFS= read -r _init || exit 1\nprintf '%s\\n' '{\"status\":\"ok\"}'\nIFS= read -r _request || exit 1\nprintf '%s\\n' '{\"status\":\"ok\"}'\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bridge = ProviderBridge::spawn(
+            &CheckedExecutable::for_test(&binary),
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap();
+        let copy_dir = bridge
+            .executable_copy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .exec_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(copy_dir.exists(), "the bridge initially owns its copy");
+        bridge
+            .request(ProviderRequest::Exists {
+                path: "exit".into(),
+                token: String::new(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while copy_dir.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the copy must go while the bridge remains live");
+        drop(bridge);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn checked_executable_copy_goes_after_provider_is_killed() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("waiting-provider");
+        std::fs::write(
+            &binary,
+            b"#!/bin/sh\nIFS= read -r _init || exit 1\nprintf '%s\\n' '{\"status\":\"ok\"}'\nwhile IFS= read -r _request; do :; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bridge = ProviderBridge::spawn(
+            &CheckedExecutable::for_test(&binary),
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap();
+        let copy_dir = bridge
+            .executable_copy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .exec_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let pid = bridge.child.lock().await.as_ref().unwrap().id().unwrap();
+        assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while copy_dir.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the killed provider's copy must go while the bridge remains live");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn checked_executable_spawn_failure_removes_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("unstartable-provider");
+        std::fs::write(&binary, b"#!/no/such/provider/interpreter\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let prepared = CheckedExecutable::for_test(&binary)
+            .verify_at_spawn()
+            .unwrap();
+        let copy_dir = prepared.exec_path().parent().unwrap().to_path_buf();
+        let command = Command::new(prepared.exec_path());
+        let result = ProviderBridge::spawn_command(
+            prepared,
+            command,
+            ProviderConfig::default(),
+            INIT_TIMEOUT,
+            SHUTDOWN_TIMEOUT,
+            std::process::Stdio::null(),
+            false,
+        )
+        .await;
+        assert!(matches!(result, Err(BridgeError::Spawn(_))));
+        assert!(!copy_dir.exists(), "a failed spawn drops its verified copy");
     }
 
     #[cfg(target_os = "linux")]

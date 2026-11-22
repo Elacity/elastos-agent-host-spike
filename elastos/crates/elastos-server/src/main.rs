@@ -1408,7 +1408,11 @@ async fn run() -> anyhow::Result<()> {
         &command,
         Commands::Serve { .. } | Commands::Gateway { .. } | Commands::Home { browser: true, .. }
     ) {
-        elastos_server::host_lock::authorize_host_process_start(&sources::default_data_dir())?;
+        let data_dir = sources::default_data_dir();
+        elastos_server::host_lock::authorize_host_process_start(&data_dir)?;
+        #[cfg(target_os = "macos")]
+        provider::recover_verified_copies(&data_dir)
+            .map_err(|reason| anyhow::anyhow!("provider copy recovery failed: {reason}"))?;
     }
 
     match command {
