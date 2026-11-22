@@ -26,7 +26,7 @@ grant, and a real stdin/stdout process test.
 The tests create the shared ancestors before launch, derive both storage
 parameters from the same canonical `Init.base_path` and pass the original base
 to `Init` (`start_with_profile`). The Runtime macOS entry renders a profile,
-then refuses start because its Seatbelt profile has no spawn path yet.
+then starts the provider under that profile through `/usr/bin/sandbox-exec`.
 Installed behavior is B3-R. The provider creates the final `Wallet` directory.
 Seatbelt grants recursive state access to that wallet
 directory alone. Literal read access to its existing parent lets the provider
@@ -110,8 +110,8 @@ are separate B3-R checks.
 One generator covers `did-provider`, `wallet-provider` and `model-provider`,
 parameterized by the provider's approved declared rights and its storage root,
 so the Runtime has one path for a provider's profile (P10). Runtime source
-renders the profile, then its macOS provider entry refuses start because the
-Seatbelt profile has no spawn path yet. Installed acceptance remains a B3-R
+renders the profile, then its macOS provider entry starts the provider under that profile
+through `/usr/bin/sandbox-exec`. Installed acceptance remains a B3-R
 gate. The tests launch this provider
 under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
 `startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is

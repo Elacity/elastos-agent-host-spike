@@ -402,6 +402,10 @@ pub(crate) async fn call(
     let ticket = grant["connect_ticket"]
         .as_str()
         .context("Engine ticket required")?;
+    let peer_did = super::public_key_to_did(&endpoint)?;
+    registry
+        .remember_carrier_peer_ticket(&peer_did, ticket)
+        .await?;
     request["op"] = json!(operation);
     request["grant_id"] = grant["grant_id"].clone();
     request["principal_id"] = grant["principal_id"].clone();
@@ -414,14 +418,14 @@ pub(crate) async fn call(
             transfer: ProviderTransfer::Json,
             range: None,
             progress: None,
-            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::ConnectTicket {
-                connect_ticket: ticket.into(),
-                peer_did: Some(super::public_key_to_did(&endpoint)?),
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did,
                 timeout_ms: Some(if matches!(operation, "prepare_launch" | "launch") {
                     60_000
                 } else {
                     5_000
                 }),
+                reply_wait_ms: None,
             }),
         })
         .await
@@ -460,16 +464,37 @@ mod tests {
     struct EngineCallInvoker {
         fail: bool,
         calls: std::sync::Mutex<Vec<ProviderInvocation>>,
+        tickets: std::sync::Mutex<Vec<(String, String)>>,
     }
 
     #[async_trait::async_trait]
     impl elastos_runtime::provider::ProviderCarrierInvoker for EngineCallInvoker {
+        async fn remember_peer_ticket(
+            &self,
+            peer_did: &str,
+            ticket: &str,
+        ) -> std::result::Result<(), elastos_runtime::provider::ProviderError> {
+            self.tickets
+                .lock()
+                .unwrap()
+                .push((peer_did.into(), ticket.into()));
+            Ok(())
+        }
+
         async fn invoke_carrier_provider(
             &self,
-            _: &ProviderCarrierRoute,
+            route: &ProviderCarrierRoute,
             invocation: &ProviderInvocation,
             _: Value,
         ) -> std::result::Result<Value, elastos_runtime::provider::ProviderError> {
+            if let ProviderCarrierRoute::PeerDid { peer_did, .. } = route {
+                assert!(self
+                    .tickets
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(remembered, _)| remembered == peer_did));
+            }
             self.calls.lock().unwrap().push(invocation.clone());
             if self.fail {
                 Err(elastos_runtime::provider::ProviderError::Provider(
@@ -487,6 +512,7 @@ mod tests {
         let invoker = Arc::new(EngineCallInvoker {
             fail: true,
             calls: Default::default(),
+            tickets: Default::default(),
         });
         registry.set_carrier_invoker(invoker.clone()).await;
         let grant = json!({"peer_did":iroh::SecretKey::from_bytes(&[19;32]).public().to_string(),
@@ -535,6 +561,7 @@ mod tests {
         let invoker = Arc::new(EngineCallInvoker {
             fail: false,
             calls: Default::default(),
+            tickets: Default::default(),
         });
         registry.set_carrier_invoker(invoker.clone()).await;
         let mut grant = json!({"peer_did":iroh::SecretKey::from_bytes(&[20;32]).public().to_string(),
