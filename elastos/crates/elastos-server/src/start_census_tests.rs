@@ -165,6 +165,13 @@ fn places() -> Vec<Place> {
             P2_2,
         ),
         place(
+            "elastos-runtime/src/provider/os_entry.rs",
+            "macos_start",
+            "spawn()".to_string(),
+            1,
+            "admitted grant, checked storage, Seatbelt profile",
+        ),
+        place(
             "elastos-runtime/src/provider/failure_record.rs",
             "launch",
             "libc::execve".to_string(),
@@ -332,6 +339,13 @@ fn places() -> Vec<Place> {
             spawn.clone(),
             16,
             P2_2,
+        ),
+        place(
+            "elastos-server/src/server_infra.rs",
+            "start_did_provider",
+            [spawn.as_str(), "_confined"].concat(),
+            1,
+            "DID: admitted binary and confined storage",
         ),
         place(
             "elastos-server/src/server_infra.rs",

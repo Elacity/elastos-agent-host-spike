@@ -115,6 +115,24 @@ fn rows() -> Vec<Row> {
             1,
         ),
         row(
+            "elastos-runtime/src/provider/os_entry.rs",
+            "macos_command",
+            "command",
+            "native provider",
+            "none",
+            "P2-8",
+            1,
+        ),
+        row(
+            "elastos-runtime/src/provider/os_entry.rs",
+            "macos_start",
+            "spawn()",
+            "native provider",
+            "checked storage+Seatbelt profile",
+            "P2-8",
+            1,
+        ),
+        row(
             "elastos-server/src/agent_admission.rs",
             "verify_agent_host",
             "release capsule",
@@ -634,7 +652,16 @@ fn rows() -> Vec<Row> {
             "native provider",
             "checksum",
             "P2-8",
-            16,
+            15,
+        ),
+        row(
+            "elastos-server/src/server_infra.rs",
+            "start_did_provider",
+            confined_spawn.clone(),
+            "native provider",
+            "admitted binary+OS gate+confined storage",
+            "P2-8",
+            1,
         ),
         row(
             "elastos-server/src/server_infra.rs",
@@ -1017,6 +1044,7 @@ fn every_executable_loader_has_an_authority_row() {
                 | "DID"
                 | "checksum"
                 | "admitted binary+OS gate+confined storage"
+                | "checked storage+Seatbelt profile"
                 | "none"
                 | "admitted rights+checked directory+bound executable"
         ));
