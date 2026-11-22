@@ -1834,10 +1834,46 @@ impl Runtime {
         left: &mut Budget,
         after_walk: &mut impl FnMut(&LabCid),
     ) -> std::result::Result<(VerifiedBundle, AcceptedSignature), BundleRefusal> {
+        fn bundle_store_ancestor_blocks_lookup(data_dir: &Path, slot: &Path) -> Option<String> {
+            let mut cursor = slot.parent();
+            while let Some(path) = cursor {
+                if !path.starts_with(data_dir) {
+                    break;
+                }
+                match std::fs::symlink_metadata(path) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => {
+                        return Some(format!(
+                            "could not look into the bundle store at {}: not a directory",
+                            path.display()
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Some(format!(
+                            "could not look into the bundle store at {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+                if path == data_dir {
+                    break;
+                }
+                cursor = path.parent();
+            }
+            None
+        }
+
         let slot = bundle_admission::bundle_slot(data_dir, asked);
         match std::fs::symlink_metadata(&slot) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A missing slot is "no such bundle" only when the store can be
+                // looked into. On Windows, a file where a store directory must
+                // be reports NotFound for the child path. That is still store IO.
+                if let Some(why) = bundle_store_ancestor_blocks_lookup(data_dir, &slot) {
+                    return Err(BundleRefusal::Store(why));
+                }
                 return Err(BundleRefusal::Missing(asked.to_string()));
             }
             Err(error) => {
@@ -3777,7 +3813,7 @@ pub(crate) mod tests {
         std::fs::write(dir.join("app.component.wasm"), &component).unwrap();
         component
     }
-
+    #[cfg(unix)]
     /// A component folder outside dev mode is walked once by the folder gate,
     /// and the bytes that walk read are the bytes that run. The test changes
     /// the entrypoint right after the walk: a second read would meet the new
@@ -3892,7 +3928,7 @@ pub(crate) mod tests {
         assert!(!error.contains("'probe-manifest'"), "{error}");
         assert!(runtime.list_capsules().await.is_empty(), "nothing started");
     }
-
+    #[cfg(unix)]
     /// An installed folder starts from both entrances: the CLI's bounded
     /// start and the launch route's detached start.
     #[tokio::test]
@@ -5691,7 +5727,7 @@ pub(crate) mod tests {
             own.to_string()
         )));
     }
-
+    #[cfg(unix)]
     /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
     /// task, and the runtime shuts down before it runs that task, as a
     /// runtime does with the tasks it has not run. The end still happens
