@@ -160,7 +160,7 @@ pub(crate) use gateway_home_system::{
 };
 use gateway_home_terminal::*;
 #[cfg(test)]
-#[cfg_attr(not(feature = "prototype-agents"), allow(unused_imports))]
+#[allow(unused_imports)]
 pub(super) use gateway_home_token::agent_launch_grants_minted_for_test;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
