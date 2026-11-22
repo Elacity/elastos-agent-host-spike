@@ -1035,9 +1035,8 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #![cfg(unix)]
     use std::io::Write as _;
 
     use ed25519_dalek::{Signer as _, SigningKey};

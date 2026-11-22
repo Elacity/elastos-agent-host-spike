@@ -1151,9 +1151,8 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #![cfg(unix)]
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Barrier};
