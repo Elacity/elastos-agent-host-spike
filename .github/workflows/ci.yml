@@ -464,7 +464,9 @@ jobs:
         working-directory: elastos
         run: |
           RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo check -p elastos-runtime --lib
-          RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo test -p elastos-server --lib --target-dir target-unsupported -- os_refusal
+          RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo test -p elastos-server --bin elastos --target-dir target-unsupported -- os_refusal 2>&1 | tee unsupported-os-refusal.log
+          # The refusal tests live in the elastos binary (server_infra); a filter that matches nothing must fail.
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed;' unsupported-os-refusal.log
       - name: Rust compile cache statistics
         if: always() && env.RUSTC_WRAPPER == 'sccache'
         run: sccache --show-stats
