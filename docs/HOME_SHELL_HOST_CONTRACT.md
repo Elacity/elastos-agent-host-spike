@@ -90,6 +90,30 @@ shell launch-grant transfer uses a separate non-browser validation path. Runtime
 rejects missing or conflicting provenance, v2, v3, mixed-shape, expired, and
 substituted tokens. A Home session cookie alone cannot mint an app token.
 
+The two Home launch operations, `POST /api/apps/home/launch` and
+`POST /api/home/launch/content`, accept the Home session only from the `/home/`
+document. These requests carry the exact destination `Origin`, a `/home/`
+`Referer`, and `Sec-Fetch-Site: same-origin`; another page receives
+`home_page_only`. The Home document sends its referrer only to its own origin.
+The native CLI uses its own app-scoped launch grants. Its `home-cli` grant for
+these two operations selects `home-launch`; that grant can ask the gateway to
+launch or open content without browser provenance. For content
+open, the gateway gives the Runtime a `home-shell` projection grant bound to
+`home`; the Runtime accepts that grant only on its internal content-open hop.
+Today, `home_cmd::run` calls the CLI grant issuer only when an
+`elastos home --cli-launch-token` process has the gateway-owned terminal
+auth environment.
+The gateway supplies that environment to its `elastos home` TUI child; the TUI
+does not offer a host shell or a grant-mint action. The owner therefore has no
+reachable product action to mint this grant. This is a known gap for the CTO.
+An isolated harness can run the command with that environment; the issuer then
+checks the live session grant and admin passkey binding before signing. The
+public journey smoke attempts this command when `ELASTOS_CLI_LAUNCH_TOKEN` is
+absent, so that auto-mint path needs such a harness. The issuer trusts the
+process environment and the local auth store as a same-user authority boundary:
+a same-user process with those values and auth-store access can mint the bearer
+grant, and its holder can replay it on the two headless launch operations.
+
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers
 appropriate to their document or asset role.

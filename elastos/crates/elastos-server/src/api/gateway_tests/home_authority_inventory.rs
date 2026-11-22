@@ -31,14 +31,19 @@ fn gate_decisions() -> BTreeMap<&'static str, (bool, &'static str)> {
     BTreeMap::from([
         ("require_home_launch_token", (true, "")),
         ("require_home_launch_token_context", (true, "")),
+        ("require_home_page_or_cli_launch_context", (true, "")),
+        (
+            "require_home_page_launch_request",
+            (false, "Page provenance only"),
+        ),
         ("require_home_launch_grant", (true, "")),
         ("require_home_launch_token_for_any_context", (true, "")),
         ("require_home_launch_token_for_any_app_context", (true, "")),
         ("require_home_projection_launch_token_context", (true, "")),
         ("require_home_viewer_launch_token_context", (true, "")),
         (
-            "require_internal_shell_launch_grant_for_any_context",
-            (true, ""),
+            "require_internal_shell_content_open_context",
+            (false, "home-shell actor only"),
         ),
         ("require_internal_shell_launch_grant_principal", (true, "")),
         ("require_internal_shell_projection_context", (true, "")),
@@ -309,9 +314,9 @@ fn rows() -> Vec<AuthorityRow> {
         row(
             HOME_RUNTIME,
             "home_launch",
-            "require_home_launch_token_context",
+            "require_home_page_or_cli_launch_context",
             1,
-            "app-grant:OPEN P2-4 follow-up; conditional model+peer via Inbox services sync",
+            "home-own:Home page or home-cli grant; conditional model+peer via Inbox services sync",
         ),
         row(
             FRONTDOOR,
@@ -440,13 +445,6 @@ fn rows() -> Vec<AuthorityRow> {
             "app-grant:launch-bound page token; Home actor only when the kept page resolves to home",
         ),
         row(
-            ROUTES,
-            "open_launch",
-            "require_internal_shell_launch_grant_for_any_context",
-            1,
-            "app-grant:verified CID opens one content launch; page grant binds its launch id and walked content name",
-        ),
-        row(
             VIEWER,
             "require_viewer_library_launch_context",
             "require_home_viewer_launch_token_context",
@@ -470,9 +468,9 @@ fn rows() -> Vec<AuthorityRow> {
         row(
             VIEWER,
             "home_launch_content",
-            "require_home_token_context",
+            "require_home_page_or_cli_launch_context",
             1,
-            "app-grant:OPEN P2-4 follow-up",
+            "home-own:Home page or home-cli grant; content page gets its own launch-bound token",
         ),
         row(
             FRONTDOOR,
@@ -1258,7 +1256,7 @@ fn viewer_launch_read_starts_with_its_bound_gate_and_existing_rows_remain() {
         .filter(|row| row.authority.contains("OPEN"))
         .map(|row| row.function)
         .collect();
-    assert_eq!(open_rows, ["home_launch", "home_launch_content"]);
+    assert!(open_rows.is_empty(), "Home launch/open rows are closed");
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_tests/launch_reads.rs");
     let text = fs::read_to_string(path).unwrap();

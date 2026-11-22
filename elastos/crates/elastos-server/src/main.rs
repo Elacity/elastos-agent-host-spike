@@ -333,7 +333,7 @@ enum Commands {
     /// Launch Home
     Home {
         /// Open local Home in the default web browser
-        #[arg(long, conflicts_with_all = &["status", "json"])]
+        #[arg(long, conflicts_with_all = &["status", "json", "cli_launch_token"])]
         browser: bool,
 
         /// Print a local Home-state probe without opening the home-cli surface
@@ -343,6 +343,10 @@ enum Commands {
         /// Emit the local Home-state probe as machine-readable JSON
         #[arg(long)]
         json: bool,
+
+        /// Print a session-bound Home launch grant from the authenticated owner CLI
+        #[arg(long, conflicts_with_all = &["status", "json"])]
+        cli_launch_token: bool,
     },
 
     #[command(name = "__update-controller", hide = true)]
@@ -1397,6 +1401,7 @@ async fn run() -> anyhow::Result<()> {
         browser: false,
         status: false,
         json: false,
+        cli_launch_token: false,
     });
     if matches!(&command, Commands::Home { browser: true, .. }) {
         // A pending Home restart belongs to the retained controller; this execs it.
@@ -1483,11 +1488,12 @@ async fn run() -> anyhow::Result<()> {
             browser,
             status,
             json,
+            cli_launch_token,
         } => {
             if browser {
                 return gateway_entry::run_browser_home().await;
             }
-            return home_cmd::run(status, json).await;
+            return home_cmd::run(status, json, cli_launch_token).await;
         }
 
         Commands::UpdateController { receipt } => {
@@ -2841,7 +2847,8 @@ mod tests {
             Some(super::Commands::Home {
                 browser: false,
                 status: false,
-                json: false
+                json: false,
+                cli_launch_token: false
             })
         ));
         let browser = super::Cli::try_parse_from(["elastos", "home", "--browser"]).unwrap();
@@ -2852,6 +2859,16 @@ mod tests {
         for probe in ["--status", "--json"] {
             assert!(super::Cli::try_parse_from(["elastos", "home", probe]).is_ok());
             assert!(super::Cli::try_parse_from(["elastos", "home", "--browser", probe]).is_err());
+        }
+        assert!(super::Cli::try_parse_from(["elastos", "home", "--cli-launch-token"]).is_ok());
+        for conflict in ["--browser", "--status", "--json"] {
+            assert!(super::Cli::try_parse_from([
+                "elastos",
+                "home",
+                "--cli-launch-token",
+                conflict,
+            ])
+            .is_err());
         }
     }
 

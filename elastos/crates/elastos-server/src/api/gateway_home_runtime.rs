@@ -1,5 +1,14 @@
 use super::*;
 
+const HOME_LAUNCH_ALIASES: &[(&str, &str)] = &[("home-agent", "assistant")];
+
+fn home_launch_manifest_name(target: &str) -> &str {
+    HOME_LAUNCH_ALIASES
+        .iter()
+        .find_map(|(alias, name)| (*alias == target).then_some(*name))
+        .unwrap_or(target)
+}
+
 /// Home launch migrates the legacy Services peer-contacts object before it
 /// serves the target. A person whose stored record is kept on another Runtime
 /// reaches that write with no protection here, so the migration refuses and
@@ -43,20 +52,17 @@ pub(super) async fn home_launch(
     Json(req): Json<HomeLaunchRequest>,
     platform: &str,
 ) -> Result<Json<HomeLaunchResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let context = require_home_launch_token_context(&state.data_dir, &headers, HOME_CAPSULE_ID)
-        .map_err(|err| {
-            (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": err.to_string() })),
-            )
-        })?;
+    let context =
+        gateway_home_token::require_home_page_or_cli_launch_context(&state.data_dir, &headers)
+            .map_err(|err| {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": err.to_string() })),
+                )
+            })?;
 
-    // Old Home bookmarks launch the canonical app. Normalize before package
-    // resolution and token creation; existing run actor bindings stay intact.
-    let target = match req.target.trim() {
-        "home-agent" => "assistant",
-        target => target,
-    };
+    // Old Home bookmarks resolve to an installed manifest name before lookup.
+    let target = home_launch_manifest_name(req.target.trim());
     if target.is_empty() || target == HOME_CAPSULE_ID {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -2113,6 +2119,27 @@ mod tests {
                     .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
             }),
             "{error:#}"
+        );
+    }
+
+    #[test]
+    fn legacy_home_bookmark_resolves_to_walked_assistant_manifest() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = home_launch_manifest_name("home-agent");
+        assert_eq!(target, "assistant");
+        assert_eq!(home_launch_manifest_name("wallet"), "wallet");
+        let installed = directory.path().join("capsules").join(target);
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(
+            installed.join("capsule.json"),
+            include_str!("../../../../../capsules/assistant/capsule.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::api::capsule_inventory::load_capsule_manifest(&installed, target)
+                .unwrap()
+                .name,
+            target
         );
     }
 

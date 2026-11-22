@@ -657,8 +657,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "shell_capsule_command",
             call: "command",
             class: "other",
-            trust_root: "release-signature",
-            verified_when: "at-every-start",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::new", "(shell_path)"].concat(),
             os_path: "",
         },
@@ -1603,20 +1603,29 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&61));
+    assert_eq!(roots.get("none"), Some(&62));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&17));
+    assert_eq!(roots.get("release-signature"), Some(&16));
     assert_eq!(roots.get("staged-cid"), Some(&7));
-    assert_eq!(times.get("at-every-start"), Some(&25));
+    assert_eq!(times.get("at-every-start"), Some(&24));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&8));
-    assert_eq!(times.get("never"), Some(&61));
-    assert_eq!(to_gate, 34);
+    assert_eq!(times.get("never"), Some(&62));
+    assert_eq!(to_gate, 35);
 }
 
 #[test]
 fn installed_component_start_callers_keep_the_signed_gate() {
     let sources = source::production_sources();
+    let browser = &sources["elastos-server/src/setup/browser_config.rs"];
+    let browser_code = source::code_only(browser);
+    let start_gate = ["verify_installed_", "component_start("].concat();
+    assert!(
+        browser
+            .match_indices(&start_gate)
+            .all(|(at, _)| { source::enclosing_fn(&browser_code, at) != "browser_available" }),
+        "browser_available remains pure; the catalogue host check owns release verification"
+    );
     for (file, function) in [
         ("elastos-server/src/home_cmd.rs", "run_home_cli_renderer"),
         ("elastos-server/src/main.rs", "serve_web_capsule"),
