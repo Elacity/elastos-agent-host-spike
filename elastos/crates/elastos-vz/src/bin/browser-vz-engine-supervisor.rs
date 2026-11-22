@@ -8794,7 +8794,15 @@ mod tests {
     #[test]
     fn foreign_owned_session_root_is_refused_when_one_exists() {
         let euid = unsafe { libc::geteuid() };
-        let candidates = ["/var/root", "/private/var/root", "/private/etc", "/bin", "/usr", "/etc", "/"];
+        let candidates = [
+            "/var/root",
+            "/private/var/root",
+            "/private/etc",
+            "/bin",
+            "/usr",
+            "/etc",
+            "/",
+        ];
         let found = candidates.iter().map(Path::new).find(|path| {
             fs::symlink_metadata(path).is_ok_and(|meta| {
                 meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() != euid
