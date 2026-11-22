@@ -60,6 +60,7 @@ def prepare_installed_components(data):
     platform_key = component_platform()
 
     def digest(value, name):
+        assert value, f"{name} has a blank catalogue checksum"
         assert isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value), \
             f"{name} requires a signed SHA-256 digest"
         return value[7:]

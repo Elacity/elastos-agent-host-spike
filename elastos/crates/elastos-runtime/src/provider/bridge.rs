@@ -2565,7 +2565,7 @@ impl ProviderBridge {
         };
         #[cfg(not(unix))]
         let _ = own_helpers;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         prepared.configure_command(&mut command);
         swap_after_verify();
         let mut child = command

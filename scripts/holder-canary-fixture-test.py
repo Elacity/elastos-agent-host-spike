@@ -18,6 +18,18 @@ spec.loader.exec_module(fixture)
 
 
 class HolderFixtureTests(unittest.TestCase):
+    def test_blank_installed_checksum_names_component(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            (data / "bin").mkdir()
+            (data / "bin/site-provider").write_bytes(b"provider")
+            (data / "components.json").write_text(json.dumps({"external": {
+                "site-provider": {"install_path": "bin/site-provider", "platforms": {
+                    "linux-amd64": {"checksum": ""}}}}}))
+            with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                with self.assertRaisesRegex(AssertionError, "site-provider has a blank catalogue checksum"):
+                    fixture.prepare_installed_components(data)
+
     def test_sign_install_binds_installed_files_and_removes_key(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

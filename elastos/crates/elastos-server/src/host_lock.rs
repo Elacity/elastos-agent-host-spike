@@ -555,14 +555,14 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn killed_runtime_copy_is_recovered_after_next_host_lock() {
+    fn live_provider_copy_survives_host_recovery_then_is_reaped() {
         use sha2::Digest as _;
+        use std::io::Read as _;
         use std::os::unix::process::ExitStatusExt as _;
 
-        const CHILD_HOME: &str = "ELASTOS_TEST_KILLED_COPY_HOME";
+        const CHILD_HOME: &str = "ELASTOS_TEST_LIVE_COPY_HOME";
         if let Some(home) = std::env::var_os(CHILD_HOME) {
             let home = PathBuf::from(home);
-            let _lock = acquire_host_process_lock(&home, "serve", "fixture").unwrap();
             let binary = home.join("provider");
             let checksum = format!(
                 "sha256:{:x}",
@@ -573,23 +573,49 @@ mod tests {
                 .with_home_data_dir(&home)
                 .verify_at_spawn()
                 .unwrap();
-            unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
-            unreachable!("SIGKILL did not stop the fixture Runtime");
+            let copy_dir = fs::read_dir(home.join("provider-copies"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            fs::write(home.join("copy-ready"), copy_dir.to_str().unwrap()).unwrap();
+            std::io::stdin().read_exact(&mut [0u8]).unwrap();
+            return;
         }
 
         let home = tempfile::tempdir().unwrap();
         fs::write(home.path().join("provider"), b"#!/bin/sh\nexit 0\n").unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "host_lock::tests::killed_runtime_copy_is_recovered_after_next_host_lock",
+                "host_lock::tests::live_provider_copy_survives_host_recovery_then_is_reaped",
             ])
             .env(CHILD_HOME, home.path())
-            .status()
+            .stdin(std::process::Stdio::piped())
+            .spawn()
             .unwrap();
-        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        let ready = home.path().join("copy-ready");
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "copy owner exited early"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "copy owner did not become ready");
         let root = home.path().join("provider-copies");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let copy = PathBuf::from(fs::read_to_string(&ready).unwrap());
+        let lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
+        assert!(copy.exists(), "the live provider owns this copy");
+        drop(lock);
+        child.kill().unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(copy.exists(), "SIGKILL leaves the copy for recovery");
         let _lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
         assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
     }
@@ -602,8 +628,23 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("provider-copies");
         fs::create_dir(&root).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(elastos_runtime::provider::recover_verified_copies(home.path()).is_err());
+        let lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
+        drop(lock);
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let stale = root.join("elastos-provider-ABC123");
+        fs::create_dir(&stale).unwrap();
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(stale.join(".copy-live.lock"), b"").unwrap();
+        fs::set_permissions(
+            stale.join(".copy-live.lock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
         let _lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
+        assert!(!stale.exists(), "host start also performs recovery");
     }
 
     #[test]
