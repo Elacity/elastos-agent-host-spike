@@ -1553,8 +1553,10 @@ pub(crate) fn installed_release_signers(
         return Ok(Default::default());
     };
     let binary = fs::canonicalize(&source.install_path)?;
+    // The confined DID start reads the signers during a claimed update restart
+    // too (#1750), through #1816's host-start reader.
     let (release, components) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false, false)?;
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false, true)?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
         &source.publisher_dids,

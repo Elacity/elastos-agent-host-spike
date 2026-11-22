@@ -99,6 +99,29 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(binary_path)"].concat(),
             os_path: "",
         },
+        // The macOS confined start checks the storage root's identity and
+        // wraps the provider in a Seatbelt profile. Neither checks the
+        // executable's bytes; the caller's admission does that.
+        TrustColumn {
+            file: "elastos-runtime/src/provider/os_entry.rs",
+            function: "macos_command",
+            call: "command",
+            class: "n/a",
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["Command::new", "(launcher)"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-runtime/src/provider/os_entry.rs",
+            function: "macos_start",
+            call: "spawn()",
+            class: "n/a",
+            trust_root: "none",
+            verified_when: "never",
+            evidence: [".spa", "wn()"].concat(),
+            os_path: "",
+        },
         TrustColumn {
             file: "elastos-server/src/agent_admission.rs",
             function: "verify_agent_host",
@@ -677,6 +700,19 @@ fn columns() -> Vec<TrustColumn> {
             trust_root: "components-json-in-data-dir",
             verified_when: "at-every-start",
             evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        // AdmittedProvider::admit checks the binary's checksum against the
+        // data-dir components.json at each start. It reads the release
+        // signer but does not check the binary against it.
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "start_did_provider",
+            call: concat!("ProviderBridge::spawn", "_confined"),
+            class: "n/a",
+            trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBridge::", "spawn_confined("].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1302,7 +1338,7 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
     let mut census = BTreeSet::new();
     for row in &listed {
         assert!(
-            census.insert((row.file, row.function, row.call)),
+            census.insert((row.file, row.function, row.call.as_str())),
             "duplicate census key"
         );
     }
@@ -1313,7 +1349,7 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         assert!(census.contains(&key), "overlay lacks census row: {key:?}");
         let row = listed
             .iter()
-            .find(|row| (row.file, row.function, row.call) == key)
+            .find(|row| (row.file, row.function, row.call.as_str()) == key)
             .unwrap();
         if row.kind == "host process" {
             assert!(
@@ -1458,6 +1494,12 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             ["ProviderBridge::", "spawn(&path, did_config)"].concat(),
+            0,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "start_did_provider",
+            ["ProviderBridge::", "spawn_confined("].concat(),
             1,
         ),
         (
@@ -1553,22 +1595,22 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 99);
-    assert_eq!(classes.get("n/a"), Some(&50));
+    assert_eq!(columns.len(), 102);
+    assert_eq!(classes.get("n/a"), Some(&53));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&60));
+    assert_eq!(roots.get("none"), Some(&62));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&16));
     assert_eq!(roots.get("staged-cid"), Some(&7));
-    assert_eq!(times.get("at-every-start"), Some(&23));
+    assert_eq!(times.get("at-every-start"), Some(&24));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&8));
-    assert_eq!(times.get("never"), Some(&60));
+    assert_eq!(times.get("never"), Some(&62));
     assert_eq!(to_gate, 35);
 }
 
