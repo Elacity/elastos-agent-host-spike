@@ -700,6 +700,20 @@ mod tests {
         let initial_reads = reader.digest_reads();
         let replacement = temp.path().join("replacement");
         write_file(&replacement, b"modified");
+        // Same size as the original and written within one Windows file-clock
+        // tick; Windows has no inode, so give the replacement a clearly later
+        // mtime, as a real replacement has.
+        let later = fs::metadata(&exe)
+            .expect("original metadata")
+            .modified()
+            .expect("mtime")
+            + std::time::Duration::from_secs(2);
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("open replacement")
+            .set_modified(later)
+            .expect("set replacement mtime");
         fs::rename(&replacement, &exe).expect("replace file");
 
         let reason = watch.superseded_reason_with(&reader).expect("superseded");
