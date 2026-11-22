@@ -452,6 +452,11 @@ async fn start_wallet_provider(
     if let Some(refusal) = wallet_confinement_refusal() {
         anyhow::bail!(refusal);
     }
+    // The bridge re-checks the admitted signed digest at spawn and starts the
+    // bytes it checked; check before the Home's storage is touched.
+    let checked = admitted
+        .checked_executable(data_dir)
+        .map_err(anyhow::Error::msg)?;
     let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
     prepare_wallet_storage_parent(&wallet_root)?;
     let wallet_config = provider::BridgeProviderConfig {
@@ -461,11 +466,6 @@ async fn start_wallet_provider(
         encryption_key: device_key_hex.to_owned(),
         ..Default::default()
     };
-    // The bridge re-checks the admitted signed digest at spawn and starts the
-    // bytes it checked.
-    let checked = admitted
-        .checked_executable(data_dir)
-        .map_err(anyhow::Error::msg)?;
     let confined = provider::ProviderBridge::spawn_confined(
         admitted.key(),
         admitted.authority(),
@@ -3011,6 +3011,8 @@ mod tests {
             manifest_dir.join("capsule.json"),
         )
         .unwrap();
+        #[cfg(unix)]
+        sign_test_home(&data_dir);
         (temp, data_dir, binary)
     }
 
@@ -3181,6 +3183,52 @@ mod tests {
         assert!(!temp.path().join("marker").exists());
     }
 
+    /// A Home with no signed release, and the same Home with `dev_mode`,
+    /// refuses the wallet start before its storage is touched. The route,
+    /// storage root and marker stay absent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wallet_unsigned_and_dev_mode_homes_refuse_before_anything_is_created() {
+        for dev_mode in [false, true] {
+            let (_temp, data_dir, _) = wallet_fixture();
+            fs::remove_file(data_dir.join("sources.json")).unwrap();
+            if dev_mode {
+                fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
+            }
+            let registry = provider::ProviderRegistry::new();
+            let error =
+                start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the wallet provider"));
+            let message = error.to_string();
+            if dev_mode {
+                assert!(
+                    message.contains("no signed release digest"),
+                    "dev_mode={dev_mode}: {message}"
+                );
+            } else {
+                assert!(
+                    message.contains("No trusted source configured"),
+                    "dev_mode={dev_mode}: {message}"
+                );
+            }
+            assert!(registry
+                .registration_for_uri("elastos://wallet/status")
+                .await
+                .is_none());
+            assert!(
+                !data_dir.join("ElastOS/SystemServices/Wallet").exists(),
+                "dev_mode={dev_mode}"
+            );
+            assert!(!data_dir.join("marker").exists(), "dev_mode={dev_mode}");
+            assert!(
+                !data_dir.join("provider-copies").exists(),
+                "dev_mode={dev_mode}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn wallet_unadmitted_bytes_leave_route_storage_and_marker_absent() {
         let (_temp, data_dir, binary) = wallet_fixture();
@@ -3264,8 +3312,9 @@ mod tests {
     async fn wallet_upgraded_home_with_group_writable_parent_still_starts() {
         let (_temp, data_dir, _) = wallet_fixture();
         let parent = data_dir.join("ElastOS/SystemServices");
-        // Another service creates the shared level with `create_dir_all` under umask 002.
-        fs::create_dir(&parent).unwrap();
+        // Another service creates the shared level with `create_dir_all` under umask 002
+        // (the signed test Home may already have created it).
+        fs::create_dir_all(&parent).unwrap();
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o775)).unwrap();
         let wallet_root = parent.join("Wallet");
         prepare_wallet_storage_parent(&wallet_root).unwrap();
