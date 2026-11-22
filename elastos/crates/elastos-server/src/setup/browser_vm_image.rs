@@ -1433,6 +1433,151 @@ pub(super) mod tests {
         assert_eq!(image_identities(&paths).unwrap(), old_image);
     }
 
+    const GUEST_ROOTFS_MANIFEST: &str = r#"{
+  "schema": "elastos.browser.vm-target/v1",
+  "engine": "chromium_microvm",
+  "network_mode": "runtime_net_only",
+  "direct_network": false,
+  "wallet_injection": false,
+  "media_transport": "runtime_relay",
+  "display_mode": "webrtc_remote_display",
+  "guarantee_level": "mechanism_microvm",
+  "runtime_exit_transport": "vsock_relay",
+  "display_backend": "vm_selkies_gstreamer_webrtc",
+  "control_transport": "vsock_relay",
+  "control_port": 19092
+}
+"#;
+
+    const GUEST_INIT: &str = r#"#!/bin/sh
+rootfs_checkpoint() { :; }
+ELASTOS_BROWSER_VM_SERIAL_LOG_DEV=""
+rootfs_checkpoint "rootfs diagnostics initialized"
+rootfs_checkpoint "runtime filesystems mounted"
+virtio_net
+/opt/elastos/bin/browser-vm-runtime-relay
+rootfs_checkpoint "starting browser stack"
+/opt/elastos/bin/browser-vm-selkies-start
+rootfs_checkpoint "browser control socket present"
+ELASTOS_BROWSER_SELKIES_CONTROL_CONFIG=
+/opt/elastos/bin/node /opt/elastos/bin/browser-selkies-control-service.mjs
+ELASTOS_BROWSER_VM_CONTROL_BRIDGE_CONFIG=
+/opt/elastos/bin/browser-vm-guest-control-bridge
+rootfs_checkpoint "guest control bridge started"
+"#;
+
+    const GUEST_SELKIES_START: &str = r#"#!/bin/sh
+selkies_checkpoint() { :; }
+selkies_checkpoint "dependencies checked"
+echo runtime_net_only
+echo '--proxy-server={proxy_url}'
+echo '--host-resolver-rules=MAP * ~NOTFOUND'
+echo '--web_root=/opt/gst-web'
+echo 'ELASTOS_BROWSER_VM_SELKIES_ENCODER'
+echo '--encoder="$ELASTOS_BROWSER_VM_SELKIES_ENCODER"'
+echo 'PipeWire is required for Browser audio'
+echo 'pipewire-pulse is required for Browser audio'
+echo 'WirePlumber is required for Browser audio'
+echo 'pw-cli is required for Browser audio'
+echo configure_browser_wireplumber_headless
+echo browser-vm-wireplumber-config.log
+echo 'alsa_monitor.properties["alsa.reserve"] = false'
+echo 'bluez_monitor.properties["with-logind"] = false'
+echo 'support.logind = disabled'
+echo 'pulsesrc.set_property("device", "auto_null.monitor")'
+echo 'gst-inspect-1.0 pulsesrc'
+/opt/elastos/bin/browser-native-proxy-engine
+selkies-gstreamer
+cat > /run/elastos/browser-selkies-control.json <<'JSON'
+{}
+JSON
+"#;
+
+    const GUEST_STUBS: &[&str] = &[
+        "opt/elastos/bin/browser-native-proxy-engine",
+        "opt/elastos/bin/browser-vm-runtime-relay",
+        "opt/elastos/bin/browser-vm-guest-control-bridge",
+        "opt/elastos/bin/browser-selkies-control-service.mjs",
+        "opt/elastos/bin/node",
+        "opt/elastos/bin/chromium",
+        "usr/bin/Xvfb",
+        "usr/bin/python3",
+        "usr/bin/gst-inspect-1.0",
+        "usr/bin/pipewire",
+        "usr/bin/pipewire-pulse",
+        "usr/bin/wireplumber",
+        "usr/bin/pw-cli",
+    ];
+
+    fn write_guest_file(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn mke2fs_program() -> PathBuf {
+        if let Some(paths) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&paths) {
+                let candidate = directory.join("mke2fs");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+        for candidate in [
+            "/opt/homebrew/bin/mke2fs",
+            "/usr/local/bin/mke2fs",
+            "/opt/homebrew/opt/e2fsprogs/sbin/mke2fs",
+            "/usr/local/opt/e2fsprogs/sbin/mke2fs",
+            "/usr/sbin/mke2fs",
+            "/sbin/mke2fs",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+        panic!("mke2fs from e2fsprogs is required to build the Browser image fixture");
+    }
+
+    /// Build an ext4 rootfs whose guest files satisfy `browser-vm-artifact-preflight.sh`.
+    /// `mke2fs -d` is the same pack the image preflight smoke uses, so debugfs on
+    /// Linux reads these paths and script snippets during `--verify-image-set`.
+    fn verified_guest_rootfs() -> Vec<u8> {
+        let scratch = tempfile::tempdir().unwrap();
+        let tree = scratch.path().join("guest");
+        write_guest_file(
+            &tree,
+            "etc/elastos/browser-vm-target.json",
+            GUEST_ROOTFS_MANIFEST,
+        );
+        write_guest_file(&tree, "opt/elastos/bin/browser-vm-init", GUEST_INIT);
+        write_guest_file(
+            &tree,
+            "opt/elastos/bin/browser-vm-selkies-start",
+            GUEST_SELKIES_START,
+        );
+        for relative in GUEST_STUBS {
+            write_guest_file(&tree, relative, "#!/bin/sh\nexit 0\n");
+        }
+        let image = scratch.path().join("rootfs.ext4");
+        let output = std::process::Command::new(mke2fs_program())
+            .args(["-q", "-t", "ext4", "-d"])
+            .arg(&tree)
+            .arg("-F")
+            .arg(&image)
+            .arg("16M")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mke2fs failed to build the Browser image fixture: {}{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        fs::read(image).unwrap()
+    }
+
     #[tokio::test]
     async fn source_home_producer_pin_prepares_on_local_engine_launch_only_in_dev_mode() {
         let temp = tempfile::tempdir().unwrap();
@@ -1442,7 +1587,8 @@ pub(super) mod tests {
         let platform = guest_platform(&super::super::detect_platform())
             .unwrap()
             .to_owned();
-        let (bytes, mut info) = archive(&fixture_for_platform(b"source-image", &platform));
+        let rootfs = verified_guest_rootfs();
+        let (bytes, mut info) = archive(&fixture_for_platform(&rootfs, &platform));
         info.cid = Some(super::super::catalog_head_cid(&bytes).unwrap());
         install_archive(&data, &bytes, &info, &platform).unwrap();
         fs::write(
