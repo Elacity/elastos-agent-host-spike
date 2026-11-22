@@ -3298,7 +3298,10 @@ fn launch_available_bytes(path: &Path) -> Result<u64, String> {
         return Err(std::io::Error::last_os_error().to_string());
     }
     let stats = unsafe { stats.assume_init() };
-    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize))
+    // f_bavail is u32 on macOS and u64 on Linux, so the cast is needed on one.
+    #[allow(clippy::unnecessary_cast)]
+    let available = stats.f_bavail as u64;
+    Ok(available.saturating_mul(stats.f_frsize))
 }
 
 fn copy_verified_boot_file(
