@@ -678,7 +678,7 @@ fn rows() -> Vec<Row> {
             "release component",
             "CID+DID",
             "P2-2",
-            1,
+            2,
         ),
         row(
             "elastos-server/src/setup.rs",

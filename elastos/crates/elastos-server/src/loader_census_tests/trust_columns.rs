@@ -727,8 +727,8 @@ fn columns() -> Vec<TrustColumn> {
             call: "component install",
             class: "n/a",
             trust_root: "release-signature",
-            verified_when: "at-install-only",
-            evidence: ["download_", "component("].concat(),
+            verified_when: "at-every-start",
+            evidence: "admit_installed_components(data_dir, context)".into(),
             os_path: "",
         },
         TrustColumn {
@@ -1593,9 +1593,9 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&28));
     assert_eq!(roots.get("staged-cid"), Some(&8));
-    assert_eq!(times.get("at-every-start"), Some(&31));
+    assert_eq!(times.get("at-every-start"), Some(&32));
     assert_eq!(times.get("at-overlay-creation"), Some(&4));
-    assert_eq!(times.get("at-install-only"), Some(&8));
+    assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
     assert_eq!(times.get("never"), Some(&49));
     assert_eq!(to_gate, 30);

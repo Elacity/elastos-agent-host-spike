@@ -1132,7 +1132,7 @@ def prepare_from_root(policy, root, manifest_name, fetch, snapshot_root, held_ro
                         require(value.get("strategy") in ("browser-vm-image", "prebuilt"),
                                 "VM image entry requires a packaged platform row")
                         image = value.get("vm_image")
-                        require(type(image) is dict and set(image) == {"path", "size", "sha256", "cid"},
+                        require(type(image) is dict and set(image) == {"path", "size", "sha256", "cid", "kernel", "initrd"},
                                 "signed VM image entry required")
                         require(image["path"] == "rootfs.ext4" and type(image["size"]) is int
                                 and 0 < image["size"] <= 64 * 1024**3,
@@ -1140,6 +1140,13 @@ def prepare_from_root(policy, root, manifest_name, fetch, snapshot_root, held_ro
                         require(type(image["sha256"]) is str and HASH.fullmatch(image["sha256"])
                                 and image["cid"] == cid_from_hash(image["sha256"]),
                                 "signed VM image raw CID differs from SHA-256")
+                        for role, path in (("kernel", "vmlinux"), ("initrd", "initrd")):
+                            file = image[role]
+                            require(type(file) is dict and set(file) == {"path", "size", "sha256"}
+                                    and file["path"] == path and type(file["size"]) is int
+                                    and 0 < file["size"] <= 64 * 1024**3
+                                    and type(file["sha256"]) is str and HASH.fullmatch(file["sha256"]),
+                                    f"signed VM image {role} entry refused")
                     else:
                         require("vm_image" not in value, "VM image entry outside VM package")
                     if "cid" in value:

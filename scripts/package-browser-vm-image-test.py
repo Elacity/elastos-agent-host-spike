@@ -168,7 +168,9 @@ class BrowserImagePackageTest(unittest.TestCase):
                     "checksum": "sha256:" + sha(content), "size": len(content),
                     "vm_image": {"path": "rootfs.ext4", "size": len(self.payloads["rootfs.ext4"]),
                                  "sha256": sha(self.payloads["rootfs.ext4"]),
-                                 "cid": "b" + __import__("base64").b32encode(bytes.fromhex("01551220" + sha(self.payloads["rootfs.ext4"]))).decode().lower().rstrip("=")}})
+                                 "cid": "b" + __import__("base64").b32encode(bytes.fromhex("01551220" + sha(self.payloads["rootfs.ext4"]))).decode().lower().rstrip("="),
+                                 "kernel": {"path": "vmlinux", "size": len(self.payloads["vmlinux"]), "sha256": sha(self.payloads["vmlinux"])},
+                                 "initrd": {"path": "initrd", "size": len(self.payloads["initrd"]), "sha256": sha(self.payloads["initrd"])}}})
                 self.assertEqual(json.loads(self.metadata.read_bytes()), overlay)
                 self.assertEqual(content[4:8], bytes(4), "gzip time must be reproducible")
                 with tarfile.open(self.archive, "r:gz") as archive:

@@ -129,7 +129,9 @@ def package(image, platform, archive, manifest_output, release_path):
                                               "checksum": checksum, "size": size,
                                               "vm_image": {"path": "rootfs.ext4", "size": receipt["size"],
                                                            "sha256": receipt["sha256"],
-                                                           "cid": "b" + base64.b32encode(bytes.fromhex("01551220" + receipt["sha256"])).decode().lower().rstrip("=")}}}}
+                                                           "cid": "b" + base64.b32encode(bytes.fromhex("01551220" + receipt["sha256"])).decode().lower().rstrip("="),
+                                                           "kernel": {"path": "vmlinux", "size": receipt["kernel"]["size"], "sha256": receipt["kernel"]["sha256"]},
+                                                           "initrd": {"path": "initrd", "size": receipt["initrd"]["size"], "sha256": receipt["initrd"]["sha256"]}}}}}
         overlay = {"external": {"browser-vm-image": component}, "profiles": {}}
         metadata_bytes = (json.dumps(overlay, sort_keys=True, indent=2) + "\n").encode()
         # Release outputs are immutable. An identical rerun succeeds without

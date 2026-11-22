@@ -1061,12 +1061,17 @@ class SignerTests(unittest.TestCase):
         row = components["external"]["localhost-provider"]["platforms"]["linux-amd64"]
         image = b"final raw VM image bytes"
         row.update(strategy="browser-vm-image", vm_image={"path": "rootfs.ext4", "size": len(image),
-                   "sha256": S.sha256(image), "cid": S.raw_cid(image)})
+                   "sha256": S.sha256(image), "cid": S.raw_cid(image),
+                   "kernel": {"path": "vmlinux", "size": 6, "sha256": S.sha256(b"kernel")},
+                   "initrd": {"path": "initrd", "size": 6, "sha256": S.sha256(b"initrd")}})
         self.reapprove_components(components)
         publication = dict(S.sign_publication(self.prepare(), FakeBackend()))
         signed = S.parse_json(publication["components-x86_64-linux.json"].read_bytes())
         self.assertEqual(signed["external"]["localhost-provider"]["platforms"]["linux-amd64"]["vm_image"], row["vm_image"])
-        for change in (lambda r: r.pop("vm_image"), lambda r: r["vm_image"].update(cid=S.raw_cid(b"changed"))):
+        for change in (lambda r: r.pop("vm_image"),
+                       lambda r: r["vm_image"].update(cid=S.raw_cid(b"changed")),
+                       lambda r: r["vm_image"].pop("kernel"),
+                       lambda r: r["vm_image"]["initrd"].update(path="wrong")):
             invalid = copy.deepcopy(components)
             change(invalid["external"]["localhost-provider"]["platforms"]["linux-amd64"])
             for path in self.snapshot.iterdir():

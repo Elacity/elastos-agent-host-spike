@@ -20,6 +20,9 @@ pub(crate) use browser_config::linux_host_setup_message;
 pub(crate) use browser_config::repair_browser_host_components_for_open;
 mod browser_linux;
 mod browser_vm_image;
+#[cfg(test)]
+pub(crate) use browser_vm_image::tests::install_signed_browser_vm_image_fixture;
+pub(crate) use browser_vm_image::BrowserVmImageInvalid;
 pub mod verified_executable;
 mod vm_image;
 pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
@@ -1420,6 +1423,45 @@ async fn ensure_browser_vm_image_in_context(
     data_dir: &Path,
     context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
+    if !source_home_dev_mode(data_dir) {
+        // Read and admit the installed signed release before accepting even a
+        // cached image. Its components bytes are checked on every local launch.
+        let admitted = admit_installed_components(data_dir, context)?
+            .context("Browser local Engine requires an installed signed release")?;
+        let platform = detect_platform();
+        let info = browser_vm_image::component_info(&admitted.manifest, &platform)?;
+        match browser_vm_image::signed_image(info) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(BrowserVmImageInvalid::new(anyhow::anyhow!(
+                    "Browser local Engine requires a signed VM image entry"
+                ))
+                .into())
+            }
+            Err(error) => return Err(BrowserVmImageInvalid::new(error).into()),
+        }
+        let dest = data_dir.join(browser_vm_image::INSTALL_PATH);
+        let existing_image = dest.is_dir();
+        if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
+            return Ok(());
+        }
+        let row = admitted_row(
+            data_dir,
+            Some(&admitted),
+            &admitted.manifest,
+            browser_vm_image::NAME,
+            info,
+        )?;
+        return download_component(data_dir, &row, &dest, context)
+            .await
+            .map_err(|error| {
+                if existing_image {
+                    BrowserVmImageInvalid::new(error).into()
+                } else {
+                    error
+                }
+            });
+    }
     let check_dir = data_dir.to_path_buf();
     let pending =
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<ComponentsManifest>> {

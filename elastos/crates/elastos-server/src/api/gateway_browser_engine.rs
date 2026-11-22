@@ -41,7 +41,7 @@ pub(in crate::api::gateway) async fn resolve_browser_engine_adapter(
                 .await
                 .map_err(|_| BrowserCompatibilityError::EngineUnavailable)?
                 .map_err(|_| BrowserCompatibilityError::EngineNotReady {
-                    reason: BrowserEngineReadinessReason::PreparationRequired,
+                    reason: BrowserEngineReadinessReason::ArtifactInvalid,
                 })?,
             ),
             None => None,
@@ -52,8 +52,8 @@ pub(in crate::api::gateway) async fn resolve_browser_engine_adapter(
 #[allow(clippy::too_many_arguments)]
 async fn resolve_browser_engine_adapter_with_preparation<F, Fut>(
     registry: &ProviderRegistry,
-    data_dir: &FsPath,
-    platform: &str,
+    _data_dir: &FsPath,
+    _platform: &str,
     principal_id: &str,
     requested_adapter: Option<&str>,
     display_mode: BrowserDisplayMode,
@@ -96,16 +96,18 @@ where
     let mut readiness_budget = std::time::Duration::from_secs(12);
     let mut unavailable_reason = BrowserEngineReadinessReason::ReadinessUnsupported;
     for adapter in candidates {
-        if adapter.engine == "chromium_microvm"
-            && adapter.backing_substrate == "local_microvm"
-            && browser_engine_runtime_image_path(registry, data_dir, &adapter.id, platform)
-                .await
-                .is_some()
-        {
+        if adapter.engine == "chromium_microvm" && adapter.backing_substrate == "local_microvm" {
             if let Err(error) = prepare_image().await {
                 tracing::warn!(adapter_id = %adapter.id, error = %error,
                     "Browser local Engine image preparation failed");
-                unavailable_reason = BrowserEngineReadinessReason::PreparationRequired;
+                unavailable_reason = if error
+                    .downcast_ref::<crate::setup::BrowserVmImageInvalid>()
+                    .is_some()
+                {
+                    BrowserEngineReadinessReason::ArtifactInvalid
+                } else {
+                    BrowserEngineReadinessReason::PreparationRequired
+                };
                 continue;
             }
         }
@@ -1056,7 +1058,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn image_acquisition_is_lazy_for_remote_selection_and_custom_providers() {
+    async fn image_acquisition_is_lazy_for_remote_selection() {
         let dir = tempfile::tempdir().unwrap();
         write_image_config(dir.path());
         for (name, adapters, requested, expected) in [
@@ -1077,12 +1079,6 @@ mod tests {
                 ],
                 Some("remote"),
                 "remote",
-            ),
-            (
-                "custom-provider",
-                vec![image_adapter("local", "local_microvm", true)],
-                None,
-                "local",
             ),
         ] {
             let (registry, calls) = image_registry(name, adapters, std::time::Duration::ZERO).await;
@@ -1107,7 +1103,40 @@ mod tests {
     #[tokio::test]
     async fn image_acquisition_missing_release_stops_selected_local_before_probe() {
         let dir = tempfile::tempdir().unwrap();
-        write_image_config(dir.path());
+        for provider in ["capsule-provider", "custom-provider"] {
+            let (registry, calls) = image_registry(
+                provider,
+                vec![image_adapter("local", "local_microvm", true)],
+                std::time::Duration::ZERO,
+            )
+            .await;
+            let error = resolve_browser_engine_adapter_with_preparation(
+                &registry,
+                dir.path(),
+                "linux-arm64",
+                "person:test",
+                Some("local"),
+                BrowserDisplayMode::WebrtcRemoteDisplay,
+                BrowserGuaranteeLevel::MechanismMicrovm,
+                || crate::setup::ensure_browser_vm_image_for_local_engine(dir.path()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error,
+                BrowserCompatibilityError::EngineNotReady {
+                    reason: BrowserEngineReadinessReason::PreparationRequired
+                },
+                "{provider}"
+            );
+            assert_eq!(*calls.lock().unwrap(), ["status"], "{provider}");
+            assert!(!dir.path().join("browser-vm").exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_local_image_reports_artifact_invalid_before_probe() {
+        let dir = tempfile::tempdir().unwrap();
         let (registry, calls) = image_registry(
             "capsule-provider",
             vec![image_adapter("local", "local_microvm", true)],
@@ -1122,18 +1151,22 @@ mod tests {
             Some("local"),
             BrowserDisplayMode::WebrtcRemoteDisplay,
             BrowserGuaranteeLevel::MechanismMicrovm,
-            || crate::setup::ensure_browser_vm_image_for_local_engine(dir.path()),
+            || async {
+                Err(crate::setup::BrowserVmImageInvalid::new(anyhow::anyhow!(
+                    "kernel differs from signed VM image entry"
+                ))
+                .into())
+            },
         )
         .await
         .unwrap_err();
         assert_eq!(
             error,
             BrowserCompatibilityError::EngineNotReady {
-                reason: BrowserEngineReadinessReason::PreparationRequired
+                reason: BrowserEngineReadinessReason::ArtifactInvalid
             }
         );
         assert_eq!(*calls.lock().unwrap(), ["status"]);
-        assert!(!dir.path().join("browser-vm").exists());
     }
 
     #[tokio::test]
