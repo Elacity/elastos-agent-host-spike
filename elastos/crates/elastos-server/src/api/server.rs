@@ -481,6 +481,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
     let capsule_mgmt_routes = Router::new()
         .route("/api/capsules", get(routes::list_capsules))
         .route("/api/capsules", post(routes::launch_capsule))
+        .route("/api/capsules/stop-agent", post(routes::stop_agent_session))
         .route("/api/capsules/:id", delete(routes::stop_capsule))
         .route("/api/launch/open", post(routes::open_launch))
         .route(

@@ -696,6 +696,61 @@ pub(super) async fn launch_runtime_agent(
     })
 }
 
+/// One session the Runtime stopped. The hop sends the agent id and nothing
+/// else: the Runtime chooses the row by that principal.
+pub(super) struct StoppedRuntimeAgent {
+    pub(super) session_id: String,
+    pub(super) status: String,
+}
+
+#[derive(Deserialize)]
+struct RuntimeAgentStopResponse {
+    stopped: Vec<RuntimeStoppedSession>,
+}
+
+#[derive(Deserialize)]
+struct RuntimeStoppedSession {
+    session_id: String,
+    status: String,
+}
+
+/// Ask the live Home Runtime to stop the live rows whose principal is
+/// `agent_id`. The body is that id. It does not name a capsule.
+pub(super) async fn stop_runtime_agent(
+    data_dir: &FsPath,
+    agent_id: &str,
+) -> anyhow::Result<Vec<StoppedRuntimeAgent>> {
+    let coords = load_live_runtime_coords(data_dir)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let shell =
+        gateway_attach_runtime_token(&client, &coords.api_url, &coords.attach_secret, "shell")
+            .await?;
+    let response = client
+        .post(format!("{}/api/capsules/stop-agent", coords.api_url))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .json(&serde_json::json!({ "agent_id": agent_id }))
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("runtime stop failed ({}): {}", status, text.trim());
+    }
+    let payload = response.json::<RuntimeAgentStopResponse>().await?;
+    Ok(payload
+        .stopped
+        .into_iter()
+        .map(|session| StoppedRuntimeAgent {
+            session_id: session.session_id,
+            status: session.status,
+        })
+        .collect())
+}
+
 async fn ensure_home_target_package(
     data_dir: &FsPath,
     target: &str,

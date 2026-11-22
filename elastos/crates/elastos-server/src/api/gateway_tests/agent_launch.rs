@@ -22,6 +22,7 @@ const ENABLE: &str = "/api/apps/system/agents/enable";
 const CREATE: &str = "/api/apps/system/agents/create";
 const ACTIVATE: &str = "/api/apps/system/agents/activate";
 const LAUNCH: &str = "/api/apps/system/agents/launch";
+const STOP: &str = "/api/apps/system/agents/stop";
 const HOST: &str = "agent-host";
 const ORIGIN: &str = "http://localhost:61180";
 
@@ -39,7 +40,9 @@ struct Person {
 struct RuntimeHost {
     task: tokio::task::JoinHandle<()>,
     seen: Arc<std::sync::Mutex<Vec<Value>>>,
+    stops: Arc<std::sync::Mutex<Vec<Value>>>,
     runtime: Arc<crate::runtime::Runtime>,
+    audit: Arc<elastos_runtime::primitives::audit::AuditLog>,
 }
 
 impl Drop for RuntimeHost {
@@ -280,6 +283,84 @@ async fn start(
     .await
 }
 
+async fn stop(world: &World, person: &Person, agent_id: &str) -> (StatusCode, String) {
+    call(
+        &world.app,
+        STOP,
+        &person.system_token,
+        "null",
+        Some(json!({ "agent_id": agent_id })),
+    )
+    .await
+}
+
+async fn live(world: &World) -> Vec<crate::runtime::RunningCapsuleInfo> {
+    world
+        .runtime
+        .runtime
+        .list_capsules()
+        .await
+        .into_iter()
+        .filter(|info| info.ended_at.is_none())
+        .collect()
+}
+
+fn live_principal(rows: &[crate::runtime::RunningCapsuleInfo], principal: &str) -> usize {
+    rows.iter()
+        .filter(|info| info.principal.as_deref() == Some(principal))
+        .count()
+}
+
+/// `(agent_id, owner, host cid, launch id, session)` from launch and stop audits.
+fn audit_tuples(world: &World, kind: &str) -> Vec<(String, String, String, String, String)> {
+    use elastos_runtime::primitives::audit::AuditEvent;
+    world
+        .runtime
+        .audit
+        .recent_events(usize::MAX)
+        .into_iter()
+        .filter_map(|event| match (kind, event) {
+            (
+                "launch",
+                AuditEvent::CapsuleLaunch {
+                    agent_id: Some(agent_id),
+                    owner: Some(owner),
+                    cid: Some(cid),
+                    launch_id: Some(launch_id),
+                    session_id: Some(session_id),
+                    ..
+                },
+            )
+            | (
+                "stop",
+                AuditEvent::CapsuleStop {
+                    agent_id: Some(agent_id),
+                    owner: Some(owner),
+                    cid: Some(cid),
+                    launch_id: Some(launch_id),
+                    session_id: Some(session_id),
+                    ..
+                },
+            ) => Some((agent_id, owner, cid, launch_id, session_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn plain_host_row(principal: &str) -> crate::runtime::RunningCapsuleInfo {
+    crate::runtime::RunningCapsuleInfo {
+        id: "plain-host-session".to_string(),
+        name: HOST.to_string(),
+        status: "running".to_string(),
+        capsule_type: elastos_common::CapsuleType::Wasm,
+        handle: None,
+        session_id: "plain-host-session".to_string(),
+        principal: Some(principal.to_string()),
+        cause: None,
+        ended_at: None,
+    }
+}
+
 fn grant_payload(token: &str) -> Value {
     let bytes = URL_SAFE_NO_PAD.decode(token).unwrap();
     let envelope: Value = serde_json::from_slice(&bytes).unwrap();
@@ -294,13 +375,19 @@ fn mints(world: &World) -> u64 {
     agent_launch_grants_minted_for_test(&world.home.data)
 }
 
+struct RecordedRuntimePosts {
+    launches: Arc<std::sync::Mutex<Vec<Value>>>,
+    stops: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
 async fn record_capsule_post(
-    axum::extract::State(seen): axum::extract::State<Arc<std::sync::Mutex<Vec<Value>>>>,
+    axum::extract::State(seen): axum::extract::State<Arc<RecordedRuntimePosts>>,
     request: axum::http::Request<Body>,
     next: axum::middleware::Next,
 ) -> Response {
-    let record =
-        request.method() == axum::http::Method::POST && request.uri().path() == "/api/capsules";
+    let path = request.uri().path().to_string();
+    let record = request.method() == axum::http::Method::POST
+        && (path == "/api/capsules" || path == "/api/capsules/stop-agent");
     if !record {
         return next.run(request).await;
     }
@@ -309,7 +396,12 @@ async fn record_capsule_post(
         .await
         .unwrap_or_default();
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-        seen.lock().expect("recorded launches").push(value);
+        let slot = if path == "/api/capsules/stop-agent" {
+            &seen.stops
+        } else {
+            &seen.launches
+        };
+        slot.lock().expect("recorded runtime posts").push(value);
     }
     next.run(axum::http::Request::from_parts(parts, Body::from(bytes)))
         .await
@@ -338,6 +430,7 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         .await
         .unwrap();
     let audit = Arc::new(AuditLog::new());
+    let kept_audit = audit.clone();
     let sessions = Arc::new(SessionRegistry::new(audit.clone()));
     let store = Arc::new(CapabilityStore::new());
     let manager = Arc::new(CapabilityManager::new(
@@ -346,8 +439,19 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         Arc::new(MetricsManager::new()),
     ));
     let pending = Arc::new(PendingRequestStore::new(audit.clone()));
+    // The probe's first bridge call waits on a capability request. Without
+    // this, the guest ends before an owner's Stop can see a live row.
+    runtime
+        .set_provider_registry(
+            Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+            manager.clone(),
+            pending.clone(),
+            data.to_path_buf(),
+        )
+        .await;
     let secret = "agent-start-attach".to_string();
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stops = Arc::new(std::sync::Mutex::new(Vec::new()));
     let router = crate::api::server::build_router(crate::api::server::ServerConfig {
         runtime: runtime.clone(),
         session_registry: sessions,
@@ -370,7 +474,10 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
     })
     .unwrap()
     .layer(axum::middleware::from_fn_with_state(
-        seen.clone(),
+        Arc::new(RecordedRuntimePosts {
+            launches: seen.clone(),
+            stops: stops.clone(),
+        }),
         record_capsule_post,
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -412,7 +519,9 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
     RuntimeHost {
         task,
         seen,
+        stops,
         runtime,
+        audit: kept_audit,
     }
 }
 
@@ -672,7 +781,9 @@ async fn system_agent_launch_refuses_a_guest() {
 async fn system_agent_launch_expired_step_up_starts_zero_guests() {
     let world = world().await;
     let token = step_up(&world.app, &world.admin, &world.agent_a).await;
-    advance_passkey_step_up_clock_for_test(&world.home.data, 181);
+    // 121 seconds is past Start's 120 second window and inside the token's
+    // own 180 second lifetime, so this refuses because of the Start cap.
+    advance_passkey_step_up_clock_for_test(&world.home.data, 121);
     let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
     assert_eq!(
         guests(&world).await,
@@ -703,4 +814,134 @@ async fn system_agent_launch_other_owner_step_up_starts_zero_guests() {
         "another owner's step-up minted a grant: {status} {body}"
     );
     assert_ne!(status, StatusCode::OK, "{body}");
+}
+
+async fn started(world: &World, agent_id: &str) -> Value {
+    let token = step_up(&world.app, &world.admin, agent_id).await;
+    let (status, body) = start(world, &world.admin, agent_id, &token).await;
+    assert_eq!(status, StatusCode::OK, "start {agent_id}: {body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+#[tokio::test]
+async fn owner_stop_stops_that_agents_row_and_writes_the_audit() {
+    let world = world().await;
+    let started = started(&world, &world.agent_a).await;
+    let session = started["session_id"].as_str().unwrap().to_string();
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "owner stop: {body}");
+    let rows = live(&world).await;
+    assert_eq!(
+        live_principal(&rows, &world.agent_a),
+        0,
+        "the owner's stop left this agent's row running: {body}"
+    );
+    let launches = audit_tuples(&world, "launch");
+    let stops = audit_tuples(&world, "stop");
+    assert_eq!(
+        stops, launches,
+        "the stop audit does not record the start tuple"
+    );
+    assert_eq!(stops.len(), 1, "one stop record: {stops:?}");
+    assert_eq!(stops[0].0, world.agent_a);
+    assert_eq!(stops[0].1, world.admin.principal_id);
+    assert!(!stops[0].2.is_empty(), "the host CID is empty");
+    assert!(
+        stops[0].3.starts_with("launch:"),
+        "launch id {}",
+        stops[0].3
+    );
+    assert_eq!(stops[0].4, session);
+    let posted = world.runtime.stops.lock().expect("recorded stops").clone();
+    assert_eq!(
+        posted.len(),
+        1,
+        "the hop did not ask the Runtime once: {posted:?}"
+    );
+    assert_eq!(
+        posted[0].as_object().map(|body| body.len()),
+        Some(1),
+        "the hop sent more than the agent id: {posted:?}"
+    );
+    assert_eq!(posted[0]["agent_id"], world.agent_a);
+}
+
+#[tokio::test]
+async fn stop_of_agent_a_leaves_agent_b_running() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    started(&world, &world.agent_b).await;
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    let rows = live(&world).await;
+    assert!(
+        status == StatusCode::OK
+            && live_principal(&rows, &world.agent_a) == 0
+            && live_principal(&rows, &world.agent_b) == 1,
+        "stopping A stopped B: {status} {body} rows={rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn stop_by_another_owner_or_a_guest_is_refused() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    let (other_status, other_body) = stop(&world, &world.other, &world.agent_a).await;
+    let (guest_status, guest_body) = stop(&world, &world.guest, &world.agent_a).await;
+    let rows = live(&world).await;
+    assert!(
+        other_status != StatusCode::OK
+            && guest_status != StatusCode::OK
+            && live_principal(&rows, &world.agent_a) == 1,
+        "other={other_status} {other_body} guest={guest_status} {guest_body} rows={rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn stop_of_a_non_agent_capsule_with_the_hosts_name_is_refused() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    world
+        .runtime
+        .runtime
+        .register_capsule(plain_host_row(&world.admin.principal_id))
+        .await;
+    let (host_status, host_body) = stop(&world, &world.admin, HOST).await;
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    let rows = live(&world).await;
+    assert!(
+        host_status != StatusCode::OK
+            && status == StatusCode::OK
+            && live_principal(&rows, &world.agent_a) == 0
+            && live_principal(&rows, &world.admin.principal_id) == 1
+            && rows.iter().any(|row| row.name == HOST),
+        "stopping the agent stopped the non-agent capsule with the host's name: host={host_status} {host_body} agent={status} {body} rows={rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn two_starts_with_one_step_up_start_one_guest() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let first = start(&world, &world.admin, &world.agent_a, &token);
+    let second = start(&world, &world.admin, &world.agent_a, &token);
+    let ((left_status, left_body), (right_status, right_body)) = tokio::join!(first, second);
+    let oks = [left_status, right_status]
+        .into_iter()
+        .filter(|status| *status == StatusCode::OK)
+        .count();
+    assert_eq!(
+        oks, 1,
+        "two starts shared one step-up: {left_status} {left_body} / {right_status} {right_body}"
+    );
+    let rows = live(&world).await;
+    assert_eq!(
+        live_principal(&rows, &world.agent_a),
+        1,
+        "two starts shared one step-up and both guests are running"
+    );
+    assert_eq!(
+        mints(&world),
+        1,
+        "two starts shared one step-up and both minted"
+    );
 }

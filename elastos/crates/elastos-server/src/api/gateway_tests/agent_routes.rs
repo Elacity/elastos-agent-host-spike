@@ -12,6 +12,8 @@ const RENAME: &str = "/api/apps/system/agents/rename";
 const ACTIVATE: &str = "/api/apps/system/agents/activate";
 #[cfg(not(feature = "prototype-agents"))]
 const LAUNCH: &str = "/api/apps/system/agents/launch";
+#[cfg(not(feature = "prototype-agents"))]
+const STOP: &str = "/api/apps/system/agents/stop";
 const LIST: &str = "/api/apps/system/agents";
 
 /// Sends one request and returns its status and body text.
@@ -95,6 +97,7 @@ mod off {
                 LAUNCH,
                 Some(json!({ "agent_id": &agent_id, "step_up_token": "step-up" })),
             ),
+            (STOP, Some(json!({ "agent_id": &agent_id }))),
         ];
         for (path, body) in routes {
             assert_eq!(

@@ -48,11 +48,24 @@ pub enum AuditEvent {
         session_id: Option<String>,
     },
 
-    /// Capsule stopped
+    /// Capsule stopped. An owner's stop of an agent session also names the
+    /// agent, the owner, the host bundle CID, the launch id, and the session.
+    /// A stop that is not that action leaves those fields empty.
     CapsuleStop {
         timestamp: SecureTimestamp,
         capsule_id: String,
         reason: StopReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        /// Host bundle CID of the agent session this stop ended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
 
     /// Capability granted
@@ -388,6 +401,11 @@ impl AuditLog {
             timestamp: SecureTimestamp::now(),
             capsule_id: capsule_id.to_string(),
             reason,
+            agent_id: None,
+            owner: None,
+            cid: None,
+            launch_id: None,
+            session_id: None,
         });
     }
 

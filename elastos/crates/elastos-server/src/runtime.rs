@@ -276,6 +276,27 @@ pub struct Runtime {
 #[derive(Default)]
 struct AgentLaunchState {
     used: HashMap<String, u64>,
+    /// The start record for a live agent session, keyed by session id.
+    sessions: HashMap<String, AgentSessionRecord>,
+}
+
+/// The facts a Start keeps so the owner's Stop can write the same tuple.
+pub(crate) struct AgentStartFacts<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) owner: &'a str,
+    pub(crate) host_cid: &'a str,
+    pub(crate) launch_id: &'a str,
+    pub(crate) expires_at: u64,
+}
+
+/// One agent session's audit tuple, stored at Start and taken at Stop.
+#[derive(Clone)]
+pub(crate) struct AgentSessionRecord {
+    pub(crate) agent_id: String,
+    pub(crate) owner: String,
+    pub(crate) host_cid: String,
+    pub(crate) launch_id: String,
+    pub(crate) session_id: String,
 }
 
 /// One launch's content in the Runtime's table, for as long as this value
@@ -1180,12 +1201,13 @@ impl Runtime {
 
     /// Consume the short grant once. Distinct grants may start independent
     /// sessions for the same Agent; the gate covers provider start and registry insertion.
+    /// The session record is written before this returns, under the same lock
+    /// as the one-use mark, so a Stop that sees the row can take the tuple.
     pub(crate) async fn start_agent_once(
         &self,
         path: &Path,
         admission: crate::agent_admission::AdmissionContext,
-        launch_id: &str,
-        expires_at: u64,
+        facts: AgentStartFacts<'_>,
     ) -> Result<(CapsuleHandle, Signer)> {
         let mut state = self.agent_launches.lock().await;
         let now = std::time::SystemTime::now()
@@ -1193,18 +1215,51 @@ impl Runtime {
             .unwrap_or_default()
             .as_secs();
         state.used.retain(|_, expiry| *expiry > now);
-        if expires_at <= now {
+        if facts.expires_at <= now {
             return Err(ElastosError::InvalidManifest(
                 "agent launch grant expired".into(),
             ));
         }
-        if state.used.contains_key(launch_id) {
+        if state.used.contains_key(facts.launch_id) {
             return Err(ElastosError::InvalidManifest(
                 "agent launch grant was already used".into(),
             ));
         }
-        state.used.insert(launch_id.to_string(), expires_at);
-        self.start_local_admitted(path, vec![], admission).await
+        state
+            .used
+            .insert(facts.launch_id.to_string(), facts.expires_at);
+        let started = self.start_local_admitted(path, vec![], admission).await?;
+        let session_id = started.0.id.0.clone();
+        state.sessions.insert(
+            session_id.clone(),
+            AgentSessionRecord {
+                agent_id: facts.agent_id.to_string(),
+                owner: facts.owner.to_string(),
+                host_cid: facts.host_cid.to_string(),
+                launch_id: facts.launch_id.to_string(),
+                session_id,
+            },
+        );
+        Ok(started)
+    }
+
+    /// Live session ids whose principal is `agent_id`. The capsule name is
+    /// not read: two rows that share a host name stay distinct, and a row
+    /// with no principal is not this agent.
+    pub(crate) async fn live_sessions_for_agent(&self, agent_id: &str) -> Vec<String> {
+        let capsules = self.running_capsules.read().await;
+        let mut ids: Vec<String> = capsules
+            .values()
+            .filter(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id))
+            .map(|info| info.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Take the start record for this session, if Start stored one.
+    pub(crate) async fn take_agent_session(&self, session_id: &str) -> Option<AgentSessionRecord> {
+        self.agent_launches.lock().await.sessions.remove(session_id)
     }
 
     /// Both admitted entries derive the same actor and ceiling from the

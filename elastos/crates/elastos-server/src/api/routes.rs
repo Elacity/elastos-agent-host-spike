@@ -8,7 +8,7 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use elastos_runtime::primitives::audit::{AuditEvent, AuditLog, TrustLevel};
+use elastos_runtime::primitives::audit::{AuditEvent, AuditLog, StopReason, TrustLevel};
 use elastos_runtime::primitives::SecureTimestamp;
 use serde::{Deserialize, Serialize};
 
@@ -159,10 +159,20 @@ pub async fn launch_capsule(
     // the status and cause when the guest ends.
     let started = match admission {
         Some(admission) => {
-            let (_, _, _, launch_id, expires_at) =
+            let (agent_id, owner, host_cid, launch_id, expires_at) =
                 agent_audit.as_ref().expect("agent admission has a grant");
             runtime
-                .start_agent_once(path, admission, launch_id, *expires_at)
+                .start_agent_once(
+                    path,
+                    admission,
+                    crate::runtime::AgentStartFacts {
+                        agent_id,
+                        owner,
+                        host_cid,
+                        launch_id,
+                        expires_at: *expires_at,
+                    },
+                )
                 .await
         }
         None => {
@@ -414,6 +424,109 @@ pub async fn stop_capsule(
         )
             .into_response(),
     }
+}
+
+/// Body of `POST /api/capsules/stop-agent`. The only selector is the agent
+/// id, which is the principal on the Runtime row. A capsule name is not a
+/// field: an unknown field is refused and nothing is stopped.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopAgentRequest {
+    agent_id: String,
+}
+
+#[derive(Serialize)]
+struct StoppedAgentBody {
+    session_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct StopAgentResponse {
+    stopped: Vec<StoppedAgentBody>,
+}
+
+/// Stops every live row whose principal is this agent, and writes one audit
+/// record for each: agent id, owner, host CID, launch id, and session.
+/// A row is chosen by that principal. The host's capsule name is not read.
+pub async fn stop_agent_session(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    Extension(audit_log): Extension<Arc<AuditLog>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let request = match serde_json::from_slice::<StopAgentRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            let refusal =
+                serde_json::json!({"error": "invalid_stop_request", "detail": error.to_string()});
+            return (StatusCode::BAD_REQUEST, Json(refusal)).into_response();
+        }
+    };
+    let agent_id = request.agent_id;
+    if agent_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "an agent stop needs an agent id".to_string(),
+        )
+            .into_response();
+    }
+    let ids = runtime.live_sessions_for_agent(&agent_id).await;
+    if ids.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("agent {agent_id} has no running session"),
+        )
+            .into_response();
+    }
+    let mut stopped = Vec::with_capacity(ids.len());
+    for id in ids {
+        let info = match runtime.stop_capsule_with_reason(&id, "owner").await {
+            Ok(Some(info)) => info,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("agent session {id} disappeared"),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to stop agent session: {error}"),
+                )
+                    .into_response();
+            }
+        };
+        let Some(record) = runtime.take_agent_session(&id).await else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("agent session {id} has no start record"),
+            )
+                .into_response();
+        };
+        if record.agent_id != agent_id {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stopped session record names a different agent".to_string(),
+            )
+                .into_response();
+        }
+        audit_log.emit(AuditEvent::CapsuleStop {
+            timestamp: SecureTimestamp::now(),
+            capsule_id: record.session_id.clone(),
+            reason: StopReason::Requested,
+            agent_id: Some(record.agent_id),
+            owner: Some(record.owner),
+            cid: Some(record.host_cid),
+            launch_id: Some(record.launch_id),
+            session_id: Some(record.session_id.clone()),
+        });
+        stopped.push(StoppedAgentBody {
+            session_id: record.session_id,
+            status: info.status,
+        });
+    }
+    (StatusCode::OK, Json(StopAgentResponse { stopped })).into_response()
 }
 
 #[cfg(test)]
@@ -7447,7 +7560,17 @@ pub(crate) mod tests {
         }
         let err = home
             .runtime
-            .start_agent_once(&home.capsule_dir, admission, &launch_id, verified_exp)
+            .start_agent_once(
+                &home.capsule_dir,
+                admission,
+                crate::runtime::AgentStartFacts {
+                    agent_id: agent,
+                    owner: principal.as_str(),
+                    host_cid: "cid",
+                    launch_id: &launch_id,
+                    expires_at: verified_exp,
+                },
+            )
             .await
             .expect_err("the runtime gate refuses the expired grant");
         match err {

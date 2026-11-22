@@ -38,7 +38,7 @@ function el(doc, tag, className, textContent) {
   return node;
 }
 
-export function bindAgents(doc, request) {
+export function bindAgents(doc, request, confirmStepUp) {
   const [listNode, statusNode, formNode, nameInput, hostInput, createButton, allowButton, retryButton] = [
     "#agents-list", "#agents-status", "#agent-form", "#agent-name", "#agent-host", "#agent-create", "#agent-allow", "#agent-retry",
   ].map((id) => doc.querySelector(id));
@@ -57,14 +57,29 @@ export function bindAgents(doc, request) {
       const pending = pendingId === agent.agent_id ? pendingLabel : "";
       const state = el(doc, "div", "pc2-card-sublabel", stateText(agent, pending));
       state.dataset.agentState = agent.agent_id;
+      const agentId = el(doc, "div", "pc2-card-sublabel", text(agent.agent_id));
+      agentId.dataset.agentId = agent.agent_id;
       const button = el(doc, "button", "pc2-btn pc2-btn-secondary", agent.active === true ? "Turn off" : "Turn on");
       button.type = "button";
       button.disabled = busy || (agent.active !== true && agent.active !== false);
       button.addEventListener("click", () => run(turnJob(agent, agent.active !== true)));
+      const actions = el(doc, "div");
+      actions.append(button);
+      if (agent.active === true) {
+        const start = el(doc, "button", "pc2-btn pc2-btn-secondary", "Start");
+        start.type = "button";
+        start.disabled = busy;
+        start.addEventListener("click", () => run(startJob(agent)));
+        const stop = el(doc, "button", "pc2-btn pc2-btn-secondary", "Stop");
+        stop.type = "button";
+        stop.disabled = busy;
+        stop.addEventListener("click", () => run(stopJob(agent)));
+        actions.append(start, stop);
+      }
       const copy = el(doc, "div");
-      copy.append(el(doc, "div", "pc2-card-label", text(agent.display_name) || "Unnamed agent"), state);
+      copy.append(el(doc, "div", "pc2-card-label", text(agent.display_name) || "Unnamed agent"), agentId, state);
       const row = el(doc, "div", "pc2-card-row");
-      row.append(copy, button);
+      row.append(copy, actions);
       return row;
     });
     if (gate === "ready" && !rows.length && !failure && pendingId !== "create") rows.push(el(doc, "p", "pc2-card-sublabel", "You have no agents."));
@@ -140,6 +155,33 @@ export function bindAgents(doc, request) {
 
   function allowJob() {
     return post("allow", "Allowing", "/api/apps/system/agents/enable", null, (reply) => reply && reply.enabled === true);
+  }
+
+  function startJob(agent) {
+    const id = agent.agent_id;
+    return async () => {
+      pendingId = id;
+      pendingLabel = `Start ${id}`;
+      paint();
+      if (typeof confirmStepUp !== "function") {
+        throw pageRefusal("Open System from Home to verify your passkey.");
+      }
+      const stepUpToken = await confirmStepUp(agent);
+      const reply = await request("/api/apps/system/agents/launch", {
+        method: "POST",
+        body: JSON.stringify({ agent_id: id, step_up_token: stepUpToken }),
+      });
+      if (!reply || reply.agent_id !== id || typeof reply.session_id !== "string") {
+        throw pageRefusal("The Home did not confirm that change.");
+      }
+      await load();
+    };
+  }
+
+  function stopJob(agent) {
+    return post(agent.agent_id, "Stopping", "/api/apps/system/agents/stop", {
+      agent_id: agent.agent_id,
+    }, (reply) => reply && reply.agent_id === agent.agent_id && Array.isArray(reply.stopped) && reply.stopped.length > 0);
   }
 
   createButton.addEventListener("click", () => { if (gate === "ready") run(createJob()); });
