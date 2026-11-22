@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt as _;
@@ -893,6 +894,21 @@ async fn run() -> Result<(), String> {
             .expect("Browser VZ profile disk owner")
             .initialize,
     );
+    trace_stage("prepare_rootfs_start", "");
+    owner.launch_rootfs = Some(post_effect_try!(prepare_launch_rootfs(&owner.paths)));
+    trace_stage(
+        "prepared_rootfs",
+        format!(
+            "base={} launch={}",
+            owner.paths.rootfs_path.display(),
+            owner
+                .launch_rootfs
+                .as_ref()
+                .expect("Browser VZ launch rootfs owner")
+                .path
+                .display()
+        ),
+    );
     checkpoint!();
     owner.turn_process = true;
     owner.turn_cleanup = TurnCleanupEvidence::Indeterminate;
@@ -910,25 +926,23 @@ async fn run() -> Result<(), String> {
             return Err(owner.finish_cleanup(error.message, None).await);
         }
     }
-    trace_stage("prepare_rootfs_start", "");
-    owner.launch_rootfs = Some(post_effect_try!(prepare_launch_rootfs(&owner.paths)));
-    trace_stage(
-        "prepared_rootfs",
-        format!(
-            "base={} launch={}",
-            owner.paths.rootfs_path.display(),
-            owner
-                .launch_rootfs
-                .as_ref()
-                .expect("Browser VZ launch rootfs owner")
-                .path
-                .display()
-        ),
-    );
-
     trace_stage("provider_init_start", "");
+    let boot_kernel_path = owner
+        .launch_rootfs
+        .as_ref()
+        .expect("Browser VZ boot files owner")
+        .boot
+        .kernel_path
+        .clone();
+    let boot_initrd_path = owner
+        .launch_rootfs
+        .as_ref()
+        .expect("Browser VZ boot files owner")
+        .boot
+        .initrd_path
+        .clone();
     let provider_config = VzConfig::new()
-        .with_kernel_path(&owner.paths.kernel_path)
+        .with_kernel_path(&boot_kernel_path)
         .with_state_dir(&owner.paths.state_dir)
         .with_rootfs_cache_dir(&owner.paths.rootfs_cache_dir);
     #[cfg(target_os = "linux")]
@@ -953,7 +967,7 @@ async fn run() -> Result<(), String> {
 
     let mut vm_config = VmConfig {
         vm_id: post_effect_try!(browser_vm_id(&owner.transport)),
-        kernel_path: owner.paths.kernel_path.clone(),
+        kernel_path: boot_kernel_path,
         boot_args,
         rootfs_path: owner
             .launch_rootfs
@@ -971,7 +985,7 @@ async fn run() -> Result<(), String> {
         network_disabled: true,
         interactive_stdio: false,
         carrier_socket_path: None,
-        initramfs_path: owner.paths.initramfs_path.clone(),
+        initramfs_path: Some(boot_initrd_path),
     };
     vm_config.data_disk_path = Some(
         owner
@@ -3187,9 +3201,32 @@ fn validate_unix_socket_path_budget(label: &str, path: &Path) -> Result<(), Stri
 struct PreparedLaunchRootfs {
     path: PathBuf,
     _lock: Option<LifetimeFileLock>,
+    boot: PreparedBootFiles,
     /// A Linux launch overlay: removed when the launch ends, before its lease
     /// is released, so a free lease beside an overlay marks a crashed launch.
     overlay: bool,
+}
+
+#[derive(Debug)]
+struct PreparedBootFiles {
+    rootfs_copy_path: PathBuf,
+    kernel_path: PathBuf,
+    initrd_path: PathBuf,
+    owned: [bool; 3],
+}
+
+impl Drop for PreparedBootFiles {
+    fn drop(&mut self) {
+        for (path, owned) in [
+            (&self.rootfs_copy_path, self.owned[0]),
+            (&self.kernel_path, self.owned[1]),
+            (&self.initrd_path, self.owned[2]),
+        ] {
+            if owned {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
 }
 
 impl PreparedLaunchRootfs {
@@ -3214,51 +3251,222 @@ impl Drop for PreparedLaunchRootfs {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn shared_writable_rootfs() -> bool {
+fn shared_writable_rootfs_requested() -> bool {
     std::env::var("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH")
         .map(|value| value == "0" || value.eq_ignore_ascii_case("false"))
         .unwrap_or(false)
 }
 
-fn recheck_verified_rootfs(paths: &LaunchPaths) -> Result<(), String> {
-    paths
-        .verified_rootfs
-        .as_ref()
-        .ok_or_else(|| "Browser launch requires Runtime verified_rootfs identity".to_string())?
-        .check(&paths.rootfs_path)
+/// Match Runtime's explicit source Home opt-in before accepting the legacy
+/// setting. The launch still boots a checked private copy in either mode.
+fn source_home_dev_mode(data_dir: &Path) -> bool {
+    const MAX_CONFIG: u64 = 64 * 1024;
+    let read = || -> Result<bool, String> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(data_dir.join("config.toml"))
+            .map_err(|error| error.to_string())?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file() || metadata.len() > MAX_CONFIG {
+            return Ok(false);
+        }
+        let mut text = String::new();
+        file.take(MAX_CONFIG + 1)
+            .read_to_string(&mut text)
+            .map_err(|error| error.to_string())?;
+        if text.len() as u64 > MAX_CONFIG {
+            return Ok(false);
+        }
+        let config: toml::Table = toml::from_str(&text).map_err(|error| error.to_string())?;
+        Ok(config.get("dev_mode").and_then(toml::Value::as_bool) == Some(true))
+    };
+    read().unwrap_or(false)
+}
+
+fn require_private_rootfs_setting(data_dir: &Path) -> Result<(), String> {
+    if shared_writable_rootfs_requested() && !source_home_dev_mode(data_dir) {
+        return Err("Browser shared rootfs boot is refused; use a private launch disk".into());
+    }
+    Ok(())
+}
+
+fn launch_available_bytes(path: &Path) -> Result<u64, String> {
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let stats = unsafe { stats.assume_init() };
+    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize))
+}
+
+fn copy_verified_boot_file(
+    source: &Path,
+    destination: &Path,
+    expected: &str,
+    check: impl Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let destination_existed = fs::symlink_metadata(destination).is_ok();
+    let result = copy_verified_boot_file_inner(source, destination, expected, check);
+    if result.is_err() && !destination_existed {
+        let _ = fs::remove_file(destination);
+    }
+    result
+}
+
+fn copy_verified_boot_file_inner(
+    source: &Path,
+    destination: &Path,
+    expected: &str,
+    check: impl Fn(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("Browser launch requires signed boot artifact digests".into());
+    }
+    check(source)?;
+    let mut held =
+        File::open(source).map_err(|error| format!("Browser boot artifact open: {error}"))?;
+    if !held
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("Browser boot artifact must be a regular file".into());
+    }
+    check(source)?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+        .map_err(|error| format!("Browser private boot artifact create: {error}"))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = held.read(&mut buffer).map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+        output
+            .write_all(&buffer[..count])
+            .map_err(|error| error.to_string())?;
+    }
+    if format!("{:x}", digest.finalize()) != expected {
+        return Err(
+            "Browser boot artifact changed after Runtime admission; retry Browser open".into(),
+        );
+    }
+    output.sync_all().map_err(|error| error.to_string())?;
+    check(source)?;
+    let mut output = File::open(destination).map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    loop {
+        let count = output
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    if format!("{:x}", digest.finalize()) != expected {
+        return Err("Browser private boot artifact differs from signed bytes".into());
+    }
+    Ok(())
 }
 
 fn prepare_launch_rootfs(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, String> {
+    require_private_rootfs_setting(&browser_data_dir())?;
+    let verified = paths
+        .verified_rootfs
+        .as_ref()
+        .ok_or_else(|| "Browser launch requires Runtime verified_rootfs identity".to_string())?;
+    let rootfs_hash = verified
+        .sha256
+        .as_deref()
+        .ok_or_else(|| "Browser launch requires signed rootfs digest".to_string())?;
+    let kernel = verified
+        .kernel
+        .as_ref()
+        .ok_or_else(|| "Browser launch requires signed kernel digest".to_string())?;
+    let initrd = verified
+        .initrd
+        .as_ref()
+        .ok_or_else(|| "Browser launch requires signed initrd digest".to_string())?;
+    let initrd_source = paths
+        .initramfs_path
+        .as_ref()
+        .ok_or_else(|| "Browser launch requires signed initrd path".to_string())?;
+    let rootfs_bytes = fs::metadata(&paths.rootfs_path)
+        .map_err(|e| e.to_string())?
+        .len();
+    let boot_bytes = rootfs_bytes
+        .saturating_add(
+            fs::metadata(&paths.kernel_path)
+                .map_err(|e| e.to_string())?
+                .len(),
+        )
+        .saturating_add(
+            fs::metadata(initrd_source)
+                .map_err(|e| e.to_string())?
+                .len(),
+        );
+    let required_before_floor = boot_bytes.saturating_add(if cfg!(target_os = "linux") {
+        rootfs_bytes
+    } else {
+        0
+    });
+    if let Some(refusal) = rootfs_overlay_space_refusal(
+        required_before_floor,
+        launch_available_bytes(&paths.session_dir)?,
+    ) {
+        return Err(refusal);
+    }
+    let mut boot = PreparedBootFiles {
+        rootfs_copy_path: paths.session_dir.join("verified-rootfs.ext4"),
+        kernel_path: paths.session_dir.join("verified-vmlinux"),
+        initrd_path: paths.session_dir.join("verified-initrd"),
+        owned: [false; 3],
+    };
+    copy_verified_boot_file(
+        &paths.rootfs_path,
+        &boot.rootfs_copy_path,
+        rootfs_hash,
+        |path| verified.check(path),
+    )?;
+    boot.owned[0] = true;
+    copy_verified_boot_file(
+        &paths.kernel_path,
+        &boot.kernel_path,
+        &kernel.sha256,
+        |path| kernel.check(path),
+    )?;
+    boot.owned[1] = true;
+    copy_verified_boot_file(initrd_source, &boot.initrd_path, &initrd.sha256, |path| {
+        initrd.check(path)
+    })?;
+    boot.owned[2] = true;
+    for path in [&boot.kernel_path, &boot.initrd_path] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o400))
+            .map_err(|error| format!("protect Browser boot artifact: {error}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    fs::set_permissions(&boot.rootfs_copy_path, fs::Permissions::from_mode(0o400))
+        .map_err(|error| format!("protect Browser rootfs backing: {error}"))?;
     // Every Linux launch boots an overlay, so no guest can write the seed.
     #[cfg(target_os = "linux")]
     {
-        prepare_launch_rootfs_overlay(paths)
+        prepare_launch_rootfs_overlay(paths, boot)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        if shared_writable_rootfs() {
-            let lock = LifetimeFileLock::acquire_disk_sidecar(
-                &paths.rootfs_path,
-                "shared writable Browser VZ rootfs",
-            )?;
-            recheck_verified_rootfs(paths)?;
-            return Ok(PreparedLaunchRootfs {
-                path: paths.rootfs_path.clone(),
-                _lock: Some(lock),
-                overlay: false,
-            });
-        }
-        let launch_rootfs = paths.session_dir.join("rootfs.ext4");
-        recheck_verified_rootfs(paths)?;
-        clone_or_copy_writable_rootfs(&paths.rootfs_path, &launch_rootfs).map_err(|err| {
-            format!(
-                "failed to prepare per-launch Browser VM rootfs {} from {}: {}",
-                launch_rootfs.display(),
-                paths.rootfs_path.display(),
-                err
-            )
-        })?;
+        let launch_rootfs = boot.rootfs_copy_path.clone();
         // The Mac overlay is separately shipped and remains part of that
         // host's closure; Linux consumes the admitted guest's baked service.
         #[cfg(target_os = "macos")]
@@ -3267,6 +3475,7 @@ fn prepare_launch_rootfs(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, St
         Ok(PreparedLaunchRootfs {
             path: launch_rootfs,
             _lock: None,
+            boot,
             overlay: false,
         })
     }
@@ -3278,12 +3487,10 @@ const ROOTFS_OVERLAY_NAME: &str = "rootfs.qcow2";
 
 /// Free space a launch keeps beyond its overlay's worst case (every block of
 /// the seed rewritten): the room the Home keeps for update staging.
-#[cfg(any(target_os = "linux", test))]
 const ROOTFS_OVERLAY_FREE_FLOOR: u64 = 4 * 1024 * 1024 * 1024;
 
 /// The refusal when this computer cannot hold a launch overlay's worst case
 /// plus the floor.
-#[cfg(any(target_os = "linux", test))]
 fn rootfs_overlay_space_refusal(seed_bytes: u64, available: u64) -> Option<String> {
     let required = seed_bytes.saturating_add(ROOTFS_OVERLAY_FREE_FLOOR);
     (available < required).then(|| {
@@ -3299,14 +3506,13 @@ fn rootfs_overlay_space_refusal(seed_bytes: u64, available: u64) -> Option<Strin
     })
 }
 
-/// Linux boots a per-launch qcow2 overlay whose backing file is the
-/// read-only seed: guest writes go to the overlay and everything else is
-/// read from the seed, so a launch copies nothing (#90: copying the 4 GiB
-/// seed took minutes on a Jetson SD card and starved the whole host). The
-/// overlay's lease is held from before it exists until it is removed, and by
-/// crosvm's disk workers.
+/// Linux boots a per-launch qcow2 overlay backed by a private copy of the
+/// signed rootfs. The launch owns the copy and its overlay until VM cleanup.
 #[cfg(target_os = "linux")]
-fn prepare_launch_rootfs_overlay(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, String> {
+fn prepare_launch_rootfs_overlay(
+    paths: &LaunchPaths,
+    boot: PreparedBootFiles,
+) -> Result<PreparedLaunchRootfs, String> {
     if webrtc_send_overlay_requested() {
         return Err(
             "Browser webrtc send overlay edits a rootfs copy; a Linux launch boots an overlay of the read-only seed"
@@ -3316,7 +3522,7 @@ fn prepare_launch_rootfs_overlay(paths: &LaunchPaths) -> Result<PreparedLaunchRo
     if let Some(session_root) = paths.session_dir.parent() {
         remove_stale_rootfs_overlays(session_root);
     }
-    let seed_bytes = fs::metadata(&paths.rootfs_path)
+    let seed_bytes = fs::metadata(&boot.rootfs_copy_path)
         .map_err(|error| format!("Browser VM rootfs seed: {error}"))?
         .len();
     if let Some(refusal) =
@@ -3329,11 +3535,15 @@ fn prepare_launch_rootfs_overlay(paths: &LaunchPaths) -> Result<PreparedLaunchRo
     let prepared = PreparedLaunchRootfs {
         path: overlay,
         _lock: Some(lock),
+        boot,
         overlay: true,
     };
-    recheck_verified_rootfs(paths)?;
-    linux::create_rootfs_overlay(&linux::crosvm_binary(), &paths.rootfs_path, &prepared.path)
-        .map_err(|error| format!("failed to prepare the Browser VM rootfs overlay: {error}"))?;
+    linux::create_rootfs_overlay(
+        &linux::crosvm_binary(),
+        &prepared.boot.rootfs_copy_path,
+        &prepared.path,
+    )
+    .map_err(|error| format!("failed to prepare the Browser VM rootfs overlay: {error}"))?;
     Ok(prepared)
 }
 
@@ -3356,6 +3566,13 @@ fn remove_stale_rootfs_overlays(session_root: &Path) {
             continue;
         };
         if try_lock_exclusive(&lease) == Ok(true) && fs::remove_file(&overlay).is_ok() {
+            for name in [
+                "verified-rootfs.ext4",
+                "verified-vmlinux",
+                "verified-initrd",
+            ] {
+                let _ = fs::remove_file(entry.path().join(name));
+            }
             trace_stage(
                 "stale_rootfs_overlay_removed",
                 overlay.display().to_string(),
@@ -3609,45 +3826,6 @@ fn overlay_guest_webrtc_send_diagnostic(rootfs: &Path) -> Result<(), String> {
         start.display(),
         start_hash
     ));
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn clone_or_copy_writable_rootfs(source: &Path, destination: &Path) -> std::io::Result<()> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    match fs::remove_file(destination) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
-    }
-
-    #[cfg(target_os = "macos")]
-    let cloned = matches!(
-        std::process::Command::new("/bin/cp")
-            .arg("-c")
-            .arg(source)
-            .arg(destination)
-            .spawn_gated().and_then(|mut child| child.wait()),
-        Ok(status) if status.success()
-    );
-    #[cfg(not(target_os = "macos"))]
-    let cloned = false;
-
-    if !cloned {
-        // A failed clone can leave a partial copy with the immutable seed mode.
-        // Recreate the owned destination before the fallback opens it for writes.
-        match fs::remove_file(destination) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        fs::copy(source, destination)?;
-    }
-    // The seed can be immutable. Guest overlays and the writable VZ attachment
-    // own only this launch's copy, including when cp preserves the seed mode.
-    fs::set_permissions(destination, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
@@ -5491,6 +5669,7 @@ async fn wait_for_shutdown_or_transport_expiry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use elastos_common::browser_vm_seed::{BrowserVmBootArtifact, BrowserVmSeedIdentity};
     use std::ffi::CString;
     use std::os::fd::{FromRawFd, IntoRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -5506,6 +5685,22 @@ mod tests {
     }
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn admitted_boot_set(rootfs: &Path, kernel: &Path, initrd: &Path) -> BrowserVmSeedIdentity {
+        let artifact = |path: &Path| {
+            let identity = BrowserVmSeedIdentity::read(path).unwrap();
+            BrowserVmBootArtifact {
+                link: identity.link,
+                target: identity.target,
+                sha256: format!("{:x}", Sha256::digest(fs::read(path).unwrap())),
+            }
+        };
+        let mut root = BrowserVmSeedIdentity::read(rootfs).unwrap();
+        root.sha256 = Some(format!("{:x}", Sha256::digest(fs::read(rootfs).unwrap())));
+        root.kernel = Some(artifact(kernel));
+        root.initrd = Some(artifact(initrd));
+        root
+    }
 
     #[test]
     fn browser_vm_vcpus_linux_reserves_host_capacity() {
@@ -6253,6 +6448,12 @@ mod tests {
             _lock: Some(
                 LifetimeFileLock::acquire_disk_sidecar(&rootfs_path, "test rootfs").unwrap(),
             ),
+            boot: PreparedBootFiles {
+                rootfs_copy_path: root.path().join("verified-rootfs"),
+                kernel_path: root.path().join("kernel"),
+                initrd_path: root.path().join("initrd"),
+                owned: [false; 3],
+            },
             overlay: false,
         });
         let (started_tx, started_rx) = mpsc::channel();
@@ -8087,7 +8288,10 @@ mod tests {
         fs::write(&seed, b"immutable guest image").unwrap();
         fs::set_permissions(&seed, fs::Permissions::from_mode(0o444)).unwrap();
 
-        clone_or_copy_writable_rootfs(&seed, &launch).unwrap();
+        fs::create_dir_all(launch.parent().unwrap()).unwrap();
+        let identity = BrowserVmSeedIdentity::read(&seed).unwrap();
+        let expected = format!("{:x}", Sha256::digest(fs::read(&seed).unwrap()));
+        copy_verified_boot_file(&seed, &launch, &expected, |path| identity.check(path)).unwrap();
 
         assert_eq!(fs::metadata(&seed).unwrap().mode() & 0o777, 0o444);
         assert_eq!(fs::metadata(&launch).unwrap().mode() & 0o777, 0o600);
@@ -8106,8 +8310,72 @@ mod tests {
     }
 
     #[test]
+    fn held_descriptor_copy_ignores_a_replaced_seed_path() {
+        use std::cell::Cell;
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = tmp.path().join("rootfs.ext4");
+        let old = tmp.path().join("old.ext4");
+        let private = tmp.path().join("verified-rootfs.ext4");
+        fs::write(&seed, b"signed-image").unwrap();
+        let identity = BrowserVmSeedIdentity::read(&seed).unwrap();
+        let expected = format!("{:x}", Sha256::digest(b"signed-image"));
+        let calls = Cell::new(0);
+        copy_verified_boot_file(&seed, &private, &expected, |path| {
+            let call = calls.get();
+            calls.set(call + 1);
+            if call < 2 {
+                identity.check(path)?;
+            }
+            if call == 1 {
+                fs::rename(path, &old).unwrap();
+                fs::write(path, b"forged-image").unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(fs::read(&private).unwrap(), b"signed-image");
+        assert_eq!(fs::read(&seed).unwrap(), b"forged-image");
+    }
+
+    #[test]
+    fn same_size_write_after_identity_check_is_refused_by_digest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = tmp.path().join("rootfs.ext4");
+        let private = tmp.path().join("verified-rootfs.ext4");
+        fs::write(&seed, b"signed-image").unwrap();
+        let identity = BrowserVmSeedIdentity::read(&seed).unwrap();
+        let expected = format!("{:x}", Sha256::digest(b"signed-image"));
+        identity.check(&seed).unwrap();
+        fs::write(&seed, b"forged-image").unwrap();
+        let error = copy_verified_boot_file(&seed, &private, &expected, |_| Ok(())).unwrap_err();
+        assert!(error.contains("changed after Runtime admission"), "{error}");
+        assert!(!private.exists());
+        fs::write(&private, b"foreign").unwrap();
+        assert!(copy_verified_boot_file(&seed, &private, &expected, |_| Ok(())).is_err());
+        assert_eq!(fs::read(&private).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn image_recheck_precedes_turnserver_start() {
+        let source = fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/bin/browser-vz-engine-supervisor.rs"
+        ))
+        .unwrap();
+        let launch = source
+            .split("async fn run() -> Result<(), String> {")
+            .nth(1)
+            .unwrap();
+        let recheck = launch
+            .find("owner.launch_rootfs = Some(post_effect_try!(prepare_launch_rootfs")
+            .unwrap();
+        let turn = launch.find("match LaunchTurn::start(").unwrap();
+        assert!(recheck < turn);
+    }
+
+    #[test]
     fn launch_refuses_seed_changed_after_runtime_admission() {
-        for setting in ["0", "1"] {
+        for setting in ["1", "true"] {
             let tmp = tempfile::tempdir().unwrap();
             let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
             let _per_launch = EnvVarRestore::capture("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
@@ -8123,14 +8391,15 @@ mod tests {
             std::env::set_var("ELASTOS_BROWSER_VM_CROSVM_BIN", &crosvm);
             let seed = tmp.path().join("rootfs.ext4");
             fs::write(&seed, vec![0x5a; 64 * 1024]).unwrap();
-            let paths = LaunchPaths {
-                verified_rootfs: elastos_common::browser_vm_seed::BrowserVmSeedIdentity::read(
-                    &seed,
-                )
-                .ok(),
-                kernel_path: tmp.path().join("kernel"),
+            let kernel = tmp.path().join("kernel");
+            let initrd = tmp.path().join("initrd");
+            fs::write(&kernel, b"kernel").unwrap();
+            fs::write(&initrd, b"initrd").unwrap();
+            let mut paths = LaunchPaths {
+                verified_rootfs: Some(admitted_boot_set(&seed, &kernel, &initrd)),
+                kernel_path: kernel,
                 rootfs_path: seed.clone(),
-                initramfs_path: None,
+                initramfs_path: Some(initrd),
                 state_dir: tmp.path().join("state"),
                 rootfs_cache_dir: tmp.path().join("rootfs-cache"),
                 session_dir: tmp.path().join("bvm/vz-launch"),
@@ -8146,15 +8415,25 @@ mod tests {
             fs::write(&seed, vec![0x78; 64 * 1024]).unwrap();
             let error = prepare_launch_rootfs(&paths).unwrap_err();
             assert!(error.contains("changed after Runtime admission"), "{error}");
-            assert!(!paths.session_dir.join("rootfs.ext4").exists());
+            assert!(!paths.session_dir.join("verified-rootfs.ext4").exists());
             assert!(!paths.session_dir.join("rootfs.qcow2").exists());
+
+            fs::write(&seed, vec![0x5a; 64 * 1024]).unwrap();
+            paths.verified_rootfs = Some(admitted_boot_set(
+                &seed,
+                &paths.kernel_path,
+                paths.initramfs_path.as_ref().unwrap(),
+            ));
+            fs::write(&paths.kernel_path, b"forged").unwrap();
+            let error = prepare_launch_rootfs(&paths).unwrap_err();
+            assert!(error.contains("changed after Runtime admission"), "{error}");
+            assert!(!paths.session_dir.join("verified-rootfs.ext4").exists());
+            assert!(!paths.session_dir.join("verified-vmlinux").exists());
         }
     }
 
     #[test]
-    fn the_shared_seed_setting_never_hands_a_linux_guest_the_seed() {
-        // ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH=0 selects the shared writable
-        // seed on macOS only; a Linux launch still boots its own overlay.
+    fn the_shared_seed_setting_refuses_every_guest() {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _per_launch = EnvVarRestore::capture("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
@@ -8188,22 +8467,31 @@ mod tests {
         };
         fs::create_dir_all(&paths.session_dir).unwrap();
 
-        let prepared = prepare_launch_rootfs(&paths).unwrap();
-        #[cfg(target_os = "linux")]
-        {
-            assert_eq!(prepared.path, paths.session_dir.join(ROOTFS_OVERLAY_NAME));
-            assert!(prepared.overlay);
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            assert_eq!(prepared.path, seed, "macOS keeps the shared seed setting");
-            assert!(!prepared.overlay);
-        }
+        let error = prepare_launch_rootfs(&paths).unwrap_err();
+        assert!(error.contains("shared rootfs boot is refused"), "{error}");
+        assert!(!paths.session_dir.join("verified-rootfs.ext4").exists());
+    }
+
+    #[test]
+    fn legacy_shared_seed_setting_requires_explicit_source_home_dev_mode() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _per_launch = EnvVarRestore::capture("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
+        std::env::set_var("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH", "0");
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config.toml");
+        assert!(require_private_rootfs_setting(temp.path()).is_err());
+        fs::write(&config, b"dev_mode = false\n").unwrap();
+        assert!(require_private_rootfs_setting(temp.path()).is_err());
+        fs::write(&config, b"dev_mode = true\n").unwrap();
+        require_private_rootfs_setting(temp.path()).unwrap();
+        fs::rename(&config, temp.path().join("saved.toml")).unwrap();
+        std::os::unix::fs::symlink(temp.path().join("saved.toml"), &config).unwrap();
+        assert!(require_private_rootfs_setting(temp.path()).is_err());
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_launch_boots_an_overlay_of_the_untouched_seed_and_removes_it() {
+    fn linux_launch_boots_an_overlay_of_the_verified_private_copy_and_removes_it() {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _per_launch = EnvVarRestore::capture("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
@@ -8227,6 +8515,10 @@ mod tests {
         let seed_bytes = vec![0x5a; 256 * 1024];
         fs::write(&seed, &seed_bytes).unwrap();
         fs::set_permissions(&seed, fs::Permissions::from_mode(0o600)).unwrap();
+        let kernel = tmp.path().join("kernel");
+        let initrd = tmp.path().join("initrd");
+        fs::write(&kernel, b"kernel").unwrap();
+        fs::write(&initrd, b"initrd").unwrap();
         let seed_identity = |metadata: fs::Metadata| {
             (
                 metadata.ino(),
@@ -8238,11 +8530,10 @@ mod tests {
         };
         let before = seed_identity(fs::metadata(&seed).unwrap());
         let paths = LaunchPaths {
-            verified_rootfs: elastos_common::browser_vm_seed::BrowserVmSeedIdentity::read(&seed)
-                .ok(),
-            kernel_path: tmp.path().join("kernel"),
+            verified_rootfs: Some(admitted_boot_set(&seed, &kernel, &initrd)),
+            kernel_path: kernel,
             rootfs_path: seed.clone(),
-            initramfs_path: None,
+            initramfs_path: Some(initrd),
             state_dir: tmp.path().join("state"),
             rootfs_cache_dir: tmp.path().join("rootfs-cache"),
             session_dir: tmp.path().join("bvm/vz-launch"),
@@ -8260,20 +8551,25 @@ mod tests {
         assert_eq!(prepared.path, overlay);
         let metadata = fs::metadata(&overlay).unwrap();
         assert_eq!(metadata.mode() & 0o777, 0o600);
-        assert_eq!(metadata.len(), 8, "the launch copies nothing of the seed");
+        assert_eq!(metadata.len(), 8);
+        assert_eq!(
+            fs::read(&prepared.boot.rootfs_copy_path).unwrap(),
+            seed_bytes
+        );
         assert_eq!(
             fs::read_to_string(&calls).unwrap(),
             format!(
                 "create_qcow2 --backing-file {} {}\n",
-                seed.canonicalize().unwrap().display(),
+                prepared
+                    .boot
+                    .rootfs_copy_path
+                    .canonicalize()
+                    .unwrap()
+                    .display(),
                 overlay.display()
             )
         );
-        assert_eq!(
-            fs::read_dir(&paths.session_dir).unwrap().count(),
-            2,
-            "overlay and its lease only"
-        );
+        assert_eq!(fs::read_dir(&paths.session_dir).unwrap().count(), 5);
         // The launch holds the overlay's lease (crosvm's disk workers get it too).
         let lease = open_lifetime_lock(&disk_lifetime_lock_path(&overlay), false).unwrap();
         assert!(!try_lock_exclusive(&lease).unwrap());
@@ -8281,6 +8577,7 @@ mod tests {
         // The launch's end removes the overlay before its lease is free.
         drop(prepared);
         assert!(!overlay.exists());
+        assert!(!paths.session_dir.join("verified-rootfs.ext4").exists());
         assert!(try_lock_exclusive(&lease).unwrap());
         drop(lease);
         assert_eq!(fs::read(&seed).unwrap(), seed_bytes);
@@ -8339,7 +8636,7 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn shared_writable_rootfs_rejects_a_second_vm_owner() {
+    fn shared_writable_rootfs_refuses_before_a_vm_owner() {
         let tmp = tempfile::tempdir().unwrap();
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _restore = EnvVarRestore::capture("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
@@ -8364,7 +8661,8 @@ mod tests {
             memory_mib: 2048,
             vcpu_count: 2,
         };
-        let owner = prepare_launch_rootfs(&paths).unwrap();
+        let error = prepare_launch_rootfs(&paths).unwrap_err();
+        assert!(error.contains("shared rootfs boot is refused"), "{error}");
         let lock_path = disk_lifetime_lock_path(&paths.rootfs_path);
         assert_eq!(
             lock_path,
@@ -8374,17 +8672,9 @@ mod tests {
                 DISK_LIFETIME_LOCK_SUFFIX
             ))
         );
-        assert_eq!(fs::metadata(&lock_path).unwrap().mode() & 0o777, 0o600);
+        assert!(!lock_path.exists());
         assert_disk_inode_is_unlocked(&paths.rootfs_path);
-
-        let error = prepare_launch_rootfs(&paths).unwrap_err();
-        let typed: Value = serde_json::from_str(&error).unwrap();
-        assert_eq!(typed["code"], "resources_in_use");
-        assert_eq!(typed["resource"], "shared writable Browser VZ rootfs");
-        assert_eq!(typed["path"], paths.rootfs_path.to_string_lossy().as_ref());
-
-        drop(owner);
-        prepare_launch_rootfs(&paths).unwrap();
+        assert!(!paths.session_dir.join("verified-rootfs.ext4").exists());
     }
 
     fn assert_disk_inode_is_unlocked(disk_path: &Path) {

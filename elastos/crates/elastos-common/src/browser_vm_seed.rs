@@ -32,6 +32,33 @@ impl FileIdentity {
 pub struct BrowserVmSeedIdentity {
     pub link: FileIdentity,
     pub target: FileIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<BrowserVmBootArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initrd: Option<BrowserVmBootArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserVmBootArtifact {
+    pub link: FileIdentity,
+    pub target: FileIdentity,
+    pub sha256: String,
+}
+
+impl BrowserVmBootArtifact {
+    pub fn check(&self, path: &Path) -> Result<(), String> {
+        let current = BrowserVmSeedIdentity::read(path)
+            .map_err(|error| format!("Browser boot artifact identity: {error}"))?;
+        if current.link != self.link || current.target != self.target {
+            return Err(
+                "Browser boot artifact changed after Runtime admission; retry Browser open".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 impl BrowserVmSeedIdentity {
@@ -46,13 +73,16 @@ impl BrowserVmSeedIdentity {
         Ok(Self {
             link: FileIdentity::from_metadata(&fs::symlink_metadata(path)?),
             target: FileIdentity::from_metadata(&target),
+            sha256: None,
+            kernel: None,
+            initrd: None,
         })
     }
 
     pub fn check(&self, path: &Path) -> Result<(), String> {
         let current =
             Self::read(path).map_err(|error| format!("Browser rootfs seed identity: {error}"))?;
-        if &current != self {
+        if current.link != self.link || current.target != self.target {
             return Err(
                 "Browser rootfs seed changed after Runtime admission; retry Browser open".into(),
             );

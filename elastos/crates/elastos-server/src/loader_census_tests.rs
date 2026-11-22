@@ -477,7 +477,7 @@ fn rows() -> Vec<Row> {
             "elastos-server/src/runtime.rs",
             "run_signer",
             "provider.load",
-            "capsule compute",
+            "non-VM capsule compute; crosvm refuses unsigned load",
             "none",
             "P2-8",
             1,

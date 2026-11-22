@@ -116,9 +116,7 @@ impl RunningVm {
         let _ = tokio::fs::remove_file(&self.socket_path).await;
 
         // Build crosvm run command
-        let mut checked = self.config.clone();
-        checked.rootfs_path = format!("/proc/self/fd/{rootfs_fd}").into();
-        let crosvm_args = checked.to_crosvm_args();
+        let crosvm_args = verified_crosvm_args(&self.config, rootfs_fd);
 
         tracing::info!(
             "Starting crosvm VM '{}': {} run --socket {} {}",
@@ -334,6 +332,12 @@ impl RunningVm {
     }
 }
 
+fn verified_crosvm_args(config: &VmConfig, rootfs_fd: std::os::fd::RawFd) -> Vec<String> {
+    let mut checked = config.clone();
+    checked.rootfs_path = format!("/proc/self/fd/{rootfs_fd}").into();
+    checked.to_crosvm_args()
+}
+
 impl Drop for RunningVm {
     fn drop(&mut self) {
         // Try to clean up the VM if it's still running
@@ -368,5 +372,24 @@ mod tests {
         let error = vm.start(&temp.path().join("crosvm")).await.unwrap_err();
         assert!(error.to_string().contains("Unverified VM rootfs refused"));
         assert!(!temp.path().join("vm.sock").exists());
+    }
+
+    #[test]
+    fn crosvm_command_uses_the_held_rootfs_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest: CapsuleManifest = serde_json::from_value(serde_json::json!({
+            "schema": "elastos.capsule/v1", "version": "0.1.0", "name": "test-vm",
+            "role": "app", "type": "microvm", "entrypoint": "rootfs.ext4"
+        }))
+        .unwrap();
+        let config = VmConfig::from_manifest(&manifest, temp.path(), &temp.path().join("vmlinux"));
+        let args = verified_crosvm_args(&config, 17);
+        assert!(
+            args.iter().any(|arg| arg.contains("path=/proc/self/fd/17")),
+            "{args:?}"
+        );
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains(&temp.path().join("rootfs.ext4").display().to_string())));
     }
 }

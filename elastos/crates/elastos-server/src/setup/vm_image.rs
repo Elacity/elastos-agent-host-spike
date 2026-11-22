@@ -20,7 +20,21 @@ pub fn checked_vm_image(
     let manifest: ComponentsManifest = serde_json::from_slice(&bytes)?;
     let platform = super::detect_platform();
     let (component, info) = selected_info(&manifest, name, &platform)?;
-    let install = super::resolve_install_path(component, Some(info))
+    checked_capsule_install_dir(data, dir, component, info)?;
+    open_signed_image(dir, entrypoint, info)
+}
+
+fn checked_capsule_install_dir(
+    data: &Path,
+    dir: &Path,
+    component: &super::Component,
+    info: &PlatformInfo,
+) -> Result<()> {
+    let metadata = component
+        .capsule_metadata
+        .as_ref()
+        .context("Unsigned VM image refused: no signed capsule metadata")?;
+    let install = super::resolve_component_capsule_metadata_install_path(metadata, Some(info))
         .context("Unsigned VM image refused: no install path")?;
     ensure!(
         Path::new(install)
@@ -32,7 +46,7 @@ pub fn checked_vm_image(
         dir == data.join(install),
         "VM image path refused: selected directory differs from signed install path"
     );
-    open_signed_image(dir, entrypoint, info)
+    Ok(())
 }
 
 fn selected_info<'a>(
@@ -44,9 +58,11 @@ fn selected_info<'a>(
         .external
         .get(name)
         .context("Unsigned VM image refused: no signed component")?;
-    let info = component
-        .platforms
-        .get(platform)
+    let metadata = component
+        .capsule_metadata
+        .as_ref()
+        .context("Unsigned VM image refused: no signed capsule metadata")?;
+    let info = super::resolve_component_capsule_metadata_platform_info(metadata, platform)
         .context("Wrong VM image platform refused")?;
     Ok((component, info))
 }
@@ -87,11 +103,24 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Seek};
 
+    const KERNEL: &[u8] = b"ext4 virtio_blk virtio_pci";
+    const INITRD: &[u8] = b"signed initrd";
+
+    fn write_image_set(dir: &Path, rootfs: &[u8]) {
+        fs::write(dir.join("rootfs.ext4"), rootfs).unwrap();
+        fs::write(dir.join("vmlinux"), KERNEL).unwrap();
+        fs::write(dir.join("initrd"), INITRD).unwrap();
+    }
+
     fn row(bytes: &[u8]) -> PlatformInfo {
         let digest = format!("{:x}", Sha256::digest(bytes));
         serde_json::from_value(serde_json::json!({
             "strategy":"prebuilt", "vm_image":{"path":"rootfs.ext4", "size":bytes.len(),
-                "sha256":digest, "cid":super::super::catalog_head_cid(bytes).unwrap()}
+                "sha256":digest, "cid":super::super::catalog_head_cid(bytes).unwrap(),
+                "kernel":{"path":"vmlinux","size":KERNEL.len(),
+                    "sha256":format!("{:x}", Sha256::digest(KERNEL))},
+                "initrd":{"path":"initrd","size":INITRD.len(),
+                    "sha256":format!("{:x}", Sha256::digest(INITRD))}}
         }))
         .unwrap()
     }
@@ -100,7 +129,7 @@ mod tests {
     async fn signed_vm_image_loads_and_changed_image_refuses_before_start() {
         let temp = tempfile::tempdir().unwrap();
         let image_path = temp.path().join("rootfs.ext4");
-        fs::write(&image_path, b"signed image").unwrap();
+        write_image_set(temp.path(), b"signed image");
         let info = row(b"signed image");
         let (image, digest) = open_signed_image(temp.path(), "rootfs.ext4", &info).unwrap();
         let overlays = RootfsManager::new(temp.path().join("cache"));
@@ -115,7 +144,6 @@ mod tests {
         file.read_to_end(&mut checked).unwrap();
         assert_eq!(checked, b"signed image");
         let kernel = temp.path().join("vmlinux");
-        fs::write(&kernel, b"ext4 virtio_blk virtio_pci").unwrap();
         let binary = temp.path().join("crosvm");
         fs::write(&binary, b"test placeholder").unwrap();
         let provider = CrosvmProvider::new(
@@ -176,7 +204,7 @@ mod tests {
     async fn stale_overlay_and_replaced_image_path_refuse() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("rootfs.ext4");
-        fs::write(&path, b"signed image").unwrap();
+        write_image_set(temp.path(), b"signed image");
         let info = row(b"signed image");
         let (image, digest) = open_signed_image(temp.path(), "rootfs.ext4", &info).unwrap();
         let overlays = RootfsManager::new(temp.path().join("cache"));
@@ -206,7 +234,7 @@ mod tests {
     #[test]
     fn unsigned_path_and_wrong_platform_refuse() {
         let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("rootfs.ext4"), b"signed image").unwrap();
+        write_image_set(temp.path(), b"signed image");
         assert!(
             checked_vm_image(temp.path(), temp.path(), "vm", "rootfs.ext4")
                 .unwrap_err()
@@ -227,11 +255,69 @@ mod tests {
         invalid.extra["vm_image"]["cid"] =
             serde_json::json!(super::super::catalog_head_cid(b"changed").unwrap());
         assert!(open_signed_image(temp.path(), "rootfs.ext4", &invalid).is_err());
-        let manifest: ComponentsManifest = serde_json::from_value(serde_json::json!({"external":{"vm":{"platforms":{"darwin-arm64":row(b"signed image")}}},"profiles":{}})).unwrap();
+        let manifest: ComponentsManifest = serde_json::from_value(serde_json::json!({"external":{"vm":{
+            "install_path":"bin/vm", "platforms":{"darwin-arm64":{}},
+            "capsule_metadata":{"install_path":"capsules/vm","platforms":{"darwin-arm64":row(b"signed image")}}
+        }},"profiles":{}})).unwrap();
         assert!(selected_info(&manifest, "vm", "linux-amd64")
             .err()
             .unwrap()
             .to_string()
             .contains("Wrong VM image platform refused"));
+        let (component, info) = selected_info(&manifest, "vm", "darwin-arm64").unwrap();
+        let capsule = temp.path().join("capsules/vm");
+        fs::create_dir_all(&capsule).unwrap();
+        write_image_set(&capsule, b"signed image");
+        checked_capsule_install_dir(temp.path(), &capsule, component, info).unwrap();
+        let (image, digest) = open_signed_image(&capsule, "rootfs.ext4", info).unwrap();
+        assert_eq!(
+            image.metadata().unwrap().len(),
+            b"signed image".len() as u64
+        );
+        assert_eq!(digest, format!("{:x}", Sha256::digest(b"signed image")));
+        assert!(checked_capsule_install_dir(
+            temp.path(),
+            &temp.path().join("bin/vm"),
+            component,
+            info
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn signed_capsule_metadata_reaches_checked_vm_image() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let capsule = data.join("capsules/shell");
+        fs::create_dir_all(&capsule).unwrap();
+        write_image_set(&capsule, b"signed image");
+        let platform = super::super::detect_platform();
+        let components = serde_json::json!({
+            "external":{"shell":{
+                "install_path":"bin/shell", "platforms":{(platform.clone()):{}},
+                "capsule_metadata":{
+                    "install_path":"capsules/shell",
+                    "platforms":{(platform.clone()):row(b"signed image")}
+                }
+            }}, "profiles":{}
+        });
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec(&components).unwrap(),
+        )
+        .unwrap();
+        crate::protected_content_config::tests::sign_test_install(data);
+
+        let (mut image, digest) = checked_vm_image(data, &capsule, "shell", "rootfs.ext4").unwrap();
+        let mut bytes = Vec::new();
+        image.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"signed image");
+        assert_eq!(digest, format!("{:x}", Sha256::digest(&bytes)));
+        let error =
+            checked_vm_image(data, &data.join("bin/shell"), "shell", "rootfs.ext4").unwrap_err();
+        assert!(
+            error.to_string().contains("selected directory differs"),
+            "{error}"
+        );
     }
 }

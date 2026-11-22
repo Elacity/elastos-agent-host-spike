@@ -149,7 +149,7 @@ fn verify_signed_image(
 
 // Like AuthState's verified-file cache, use inode plus nanosecond change time:
 // a same-size rewrite with restored mtime still requires verification.
-use elastos_common::browser_vm_seed::{BrowserVmSeedIdentity, FileIdentity};
+use elastos_common::browser_vm_seed::{BrowserVmBootArtifact, BrowserVmSeedIdentity, FileIdentity};
 
 #[derive(Clone, PartialEq, Eq)]
 struct VerifiedSetKey {
@@ -268,14 +268,39 @@ fn verified_seed_identity_in(
         .filter(|entry| entry.verification.result.get().is_some_and(Result::is_ok))
         .map(|entry| entry.key.clone())
         .collect::<Vec<_>>();
-    ensure!(
-        keys.iter().any(|key| {
+    let admitted = keys
+        .iter()
+        .find(|key| {
             key.platform == platform
                 && key.identities[1].1 == identity.target
                 && image_identities(&key.paths).is_ok_and(|current| current == key.identities)
-        }),
-        "Browser rootfs seed has no current Runtime admission; retry Browser open"
-    );
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Browser rootfs seed has no current Runtime admission; retry Browser open"
+            )
+        })?;
+    let verification = cache
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .find(|entry| entry.key == *admitted)
+        .ok_or_else(|| anyhow::anyhow!("Browser image admission expired; retry Browser open"))?
+        .verification
+        .clone();
+    let digests = verification.wait(None)?;
+    let mut identity = identity;
+    identity.sha256 = Some(digests[0].clone());
+    identity.kernel = Some(BrowserVmBootArtifact {
+        link: admitted.identities[2].0.clone(),
+        target: admitted.identities[2].1.clone(),
+        sha256: digests[1].clone(),
+    });
+    identity.initrd = Some(BrowserVmBootArtifact {
+        link: admitted.identities[3].0.clone(),
+        target: admitted.identities[3].1.clone(),
+        sha256: digests[2].clone(),
+    });
     Ok(identity)
 }
 

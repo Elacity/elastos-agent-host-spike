@@ -115,7 +115,7 @@ fn places() -> Vec<Place> {
             "run_signer",
             label_of("provider", &load),
             1,
-            "folder start: trusted key, dev mode, or installed release",
+            "non-VM folder start; crosvm refuses this unsigned load",
         ),
         place(
             "elastos-server/src/runtime.rs",
@@ -340,7 +340,7 @@ fn places() -> Vec<Place> {
             "launch_capsule",
             label_of("vm", &start),
             1,
-            P2_2,
+            "signed capsule-metadata image checked before overlay; Linux KVM required",
         ),
         place(
             "elastos-server/src/server_infra.rs",
@@ -1078,4 +1078,21 @@ fn production() { component.start_resident(&handle); }
 fn census_source_cannot_supply_its_own_spawn_site() {
     let own = include_str!("start_census_tests.rs");
     assert!(sites("start_census_tests.rs", own).is_empty());
+}
+
+#[test]
+fn launch_capsule_keeps_signed_image_admission_before_vm_start() {
+    let sources = production_sources();
+    let source = &sources["elastos-server/src/supervisor.rs"];
+    let launch = source
+        .split("async fn launch_capsule(")
+        .nth(1)
+        .unwrap()
+        .split("async fn launch_carrier_service(")
+        .next()
+        .unwrap();
+    let check = launch.find("crate::setup::checked_vm_image(").unwrap();
+    let load = launch.find(".create_verified_overlay(").unwrap();
+    let start = launch.find("vm.start(").unwrap();
+    assert!(check < load && load < start);
 }
