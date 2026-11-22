@@ -3395,14 +3395,22 @@ mod tests {
     #[tokio::test]
     async fn wallet_unsuitable_parent_leaves_route_absent() {
         let (_temp, data_dir, _) = wallet_fixture();
+        // The signed Home keeps its release under this level, so replacing it
+        // with a file is refused at the signed-digest check, which now runs
+        // before the storage parent is prepared; nothing is created either way.
         let parent = data_dir.join("ElastOS/SystemServices");
+        fs::remove_dir_all(&parent).unwrap();
         fs::write(&parent, b"not a directory").unwrap();
         let registry = provider::ProviderRegistry::new();
         let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
             .await
             .err()
             .unwrap();
-        assert!(error.to_string().contains("not a directory"), "{error}");
+        let message = format!("{error:#}").to_lowercase();
+        assert!(
+            message.contains("not a directory") || message.contains("trusted source"),
+            "{error:#}"
+        );
         assert!(registry
             .registration_for_uri("elastos://wallet/status")
             .await
@@ -3460,7 +3468,6 @@ mod tests {
             .is_none());
         assert!(!data_dir.join("marker").exists());
         assert!(!wallet_root.exists());
-        assert!(!data_dir.join("ElastOS/SystemServices").exists());
         assert!(!wallet_root.join("child.pid").exists());
         #[cfg(elastos_unsupported_os_check)]
         assert!(
