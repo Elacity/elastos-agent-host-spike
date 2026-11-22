@@ -3,6 +3,7 @@
 //! authenticator the identity crate uses. The request table is process memory.
 
 use super::*;
+use axum::response::IntoResponse;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 const SECRET: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg";
@@ -1458,21 +1459,34 @@ async fn command_prints_one_grant_after_approval() {
     let (app, url) = serve_app(dir.path()).await;
     let token = owner.home_token.clone();
     let approver = app.clone();
-    let result =
-        super::super::gateway_home_cli_mint::request_and_wait_for_exported_home_cli_grant_for_test(
-            &url,
-            std::time::Duration::from_millis(20),
-            move |request_id| {
-                let approver = approver.clone();
-                let token = token.clone();
-                async move {
-                    approve_id(&approver, &token, &request_id).await;
-                }
-            },
-        )
-        .await;
-    let (stdout, stderr, code) = command_text(result);
-    assert_eq!(code, 0, "{stderr}");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen_for_wait = seen.clone();
+    let mut notice = Vec::new();
+    let result = super::super::gateway_home_cli_mint::request_and_wait_observed_for_test(
+        &url,
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_secs(5),
+        &mut notice,
+        move |request_id| {
+            *seen_for_wait.lock().unwrap() = request_id.clone();
+            let approver = approver.clone();
+            let token = token.clone();
+            async move {
+                approve_id(&approver, &token, &request_id).await;
+            }
+        },
+    )
+    .await;
+    let request_id = seen.lock().unwrap().clone();
+    let code = super::super::gateway_home_cli_mint::terminal_request_code(&request_id)
+        .expect("request code");
+    let notice = String::from_utf8(notice).unwrap();
+    assert_eq!(notice, format!("Approve terminal request {code} in Home\n"));
+    assert_eq!(code, home_terminal_request_code(&request_id));
+    assert!(!notice.contains(&request_id), "{notice}");
+    assert!(code.chars().count() >= 8, "{code}");
+    let (stdout, stderr, exit) = command_text(result);
+    assert_eq!(exit, 0, "{stderr}");
     assert!(stderr.is_empty(), "{stderr}");
     let grant = stdout.trim_end().to_string();
     assert_eq!(stdout, format!("{grant}\n"));
@@ -1715,4 +1729,356 @@ async fn cli_mint_api_url_reads_the_loopback_home() {
         super::super::gateway_home_cli_mint::cli_mint_api_url(dir.path()).unwrap(),
         "http://127.0.0.1:9"
     );
+}
+
+fn home_terminal_request_code(request_id: &str) -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let script = r#"
+globalThis.document = {
+  body: { dataset: {} },
+  querySelector() { return null; },
+  getElementById() { return null; },
+  createElement() { return { dataset: {}, style: {}, classList: { add() {}, remove() {} } }; },
+};
+globalThis.location = new URL("http://127.0.0.1/home/");
+globalThis.window = {
+  location: globalThis.location,
+  sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+  matchMedia() { return { matches: false }; },
+  setTimeout, clearTimeout,
+  setInterval() { return 1; },
+  clearInterval() {},
+  addEventListener() {},
+};
+const mod = await import("./capsules/home/browser/shell-auth.js");
+process.stdout.write(mod.terminalRequestCode(process.env.REQUEST_ID));
+"#;
+    let output = std::process::Command::new("node")
+        .current_dir(root)
+        .env("REQUEST_ID", request_id)
+        .arg("--input-type=module")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .expect("node");
+    assert!(
+        output.status.success(),
+        "node: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn terminal_request_code_matches_home() {
+    let request_id = "0123456789abcdef0123456789abcdef";
+    let code = super::super::gateway_home_cli_mint::terminal_request_code(request_id)
+        .expect("request code");
+    assert_eq!(code, home_terminal_request_code(request_id));
+    assert_eq!(code, "0123-4567");
+    assert!(code.chars().count() >= 8);
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[derive(Clone)]
+struct ClaimStub {
+    request_id: String,
+    expires_at: u64,
+    claim_request_id: String,
+    grant: String,
+    /// Hang this many claim attempts, then deliver. `usize::MAX` hangs every claim.
+    hang_first: usize,
+    claims: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn stub_request(
+    axum::extract::State(stub): axum::extract::State<ClaimStub>,
+    axum::Json(_body): axum::Json<Value>,
+) -> axum::Json<Value> {
+    axum::Json(json!({
+        "schema": "elastos.home.cli-mint.request.result/v1",
+        "request_id": stub.request_id,
+        "expires_at": stub.expires_at,
+        "status": "pending",
+    }))
+}
+
+async fn stub_claim(
+    axum::extract::State(stub): axum::extract::State<ClaimStub>,
+) -> axum::response::Response {
+    let seen = stub
+        .claims
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if seen < stub.hang_first {
+        std::future::pending::<()>().await;
+    }
+    axum::Json(json!({
+        "schema": "elastos.home.cli-mint.claim.result/v1",
+        "request_id": stub.claim_request_id,
+        "status": "delivered",
+        "grant": stub.grant,
+    }))
+    .into_response()
+}
+
+async fn serve_claim_stub(stub: ClaimStub) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = axum::Router::new()
+        .route(
+            "/api/home/cli-mint/request",
+            axum::routing::post(stub_request),
+        )
+        .route("/api/home/cli-mint/claim", axum::routing::post(stub_claim))
+        .with_state(stub);
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    wait_until_accepts(addr).await;
+    format!("http://{addr}")
+}
+
+async fn wait_until_accepts(addr: std::net::SocketAddr) {
+    let started = std::time::Instant::now();
+    loop {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(2) {
+            panic!("stub server did not accept connections");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn command_refusal_reaches_the_terminal() {
+    let _mint = mint_test_guard().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _owner = software_owner(dir.path());
+    let (_app, url) = serve_app(dir.path()).await;
+    let started = std::time::Instant::now();
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        super::super::gateway_home_cli_mint::request_and_wait_for_exported_home_cli_grant_for_test(
+            &url,
+            std::time::Duration::from_millis(20),
+            |request_id| async move {
+                super::super::gateway_home_cli_mint::cli_mint_rewrite_for_test(
+                    &request_id,
+                    "state",
+                    "refused",
+                );
+            },
+        ),
+    )
+    .await
+    .expect("a refused approval kept the terminal waiting");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    let (stdout, stderr, code) = command_text(waited);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(stderr, "cli mint request was refused\n");
+    assert_eq!(code, 1);
+    assert!(!stderr.contains("timed out"), "{stderr}");
+}
+
+#[tokio::test]
+async fn claim_after_a_bad_passkey_is_refused() {
+    let _mint = mint_test_guard().await;
+    let dir = tempfile::tempdir().unwrap();
+    let owner = software_owner(dir.path());
+    let app = app(dir.path());
+    let (registered, body) = register(&app, SECRET).await;
+    assert_eq!(registered, StatusCode::OK, "{body}");
+    let request_id = serde_json::from_str::<Value>(&body).unwrap()["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = begin(&app, &owner.home_token, &request_id).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let challenge = serde_json::from_str::<Value>(&body).unwrap()["options"]["publicKey"]
+        ["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = approve(
+        &app,
+        &owner.home_token,
+        &request_id,
+        assertion(&challenge, false),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    let (status, body) = claim(&app, &request_id, SECRET).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body, "cli mint request was refused");
+    assert!(!body.contains(LAUNCH_TOKEN), "{body}");
+}
+
+#[tokio::test]
+async fn command_lost_reply_does_not_ask_for_another_approval() {
+    let request_id = "0123456789abcdef0123456789abcdef".to_string();
+    let claims = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let url = serve_claim_stub(ClaimStub {
+        request_id: request_id.clone(),
+        expires_at: unix_now() + 6,
+        claim_request_id: request_id.clone(),
+        grant: "granttoken".to_string(),
+        hang_first: usize::MAX,
+        claims: claims.clone(),
+    })
+    .await;
+    let mut notice = Vec::new();
+    let result = super::super::gateway_home_cli_mint::request_and_wait_observed_for_test(
+        &url,
+        std::time::Duration::from_millis(30),
+        std::time::Duration::from_millis(200),
+        &mut notice,
+        |_| async {},
+    )
+    .await;
+    assert!(
+        claims.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "a transport timeout ended the wait on the first claim"
+    );
+    let (stdout, stderr, code) = command_text(result);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(
+        stderr,
+        "Home did not answer the terminal. A grant may already have been delivered. Do not approve again.\n"
+    );
+    assert!(!stderr.contains("Home is not running"), "{stderr}");
+    assert!(
+        !stderr
+            .to_ascii_lowercase()
+            .contains("request the terminal grant again"),
+        "{stderr}"
+    );
+    assert_eq!(code, 1);
+    let notice = String::from_utf8(notice).unwrap();
+    assert_eq!(notice, "Approve terminal request 0123-4567 in Home\n");
+}
+
+#[tokio::test]
+async fn command_retries_a_lost_claim_and_prints_one_grant() {
+    let request_id = "0123456789abcdef0123456789abcdef".to_string();
+    let url = serve_claim_stub(ClaimStub {
+        request_id: request_id.clone(),
+        expires_at: unix_now() + 10,
+        claim_request_id: request_id,
+        grant: "granttoken".to_string(),
+        hang_first: 1,
+        claims: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    })
+    .await;
+    let mut notice = Vec::new();
+    let result = super::super::gateway_home_cli_mint::request_and_wait_observed_for_test(
+        &url,
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(200),
+        &mut notice,
+        |_| async {},
+    )
+    .await;
+    let (stdout, stderr, code) = command_text(result);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(stdout, "granttoken\n");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(
+        String::from_utf8(notice).unwrap(),
+        "Approve terminal request 0123-4567 in Home\n"
+    );
+}
+
+#[tokio::test]
+async fn command_rejects_a_claim_for_a_different_request() {
+    let request_id = "0123456789abcdef0123456789abcdef".to_string();
+    let url = serve_claim_stub(ClaimStub {
+        request_id: request_id.clone(),
+        expires_at: unix_now() + 10,
+        claim_request_id: "ffffffffffffffffffffffffffffffff".to_string(),
+        grant: "granttoken".to_string(),
+        hang_first: 0,
+        claims: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    })
+    .await;
+    let mut notice = Vec::new();
+    let result = super::super::gateway_home_cli_mint::request_and_wait_observed_for_test(
+        &url,
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_secs(1),
+        &mut notice,
+        |_| async {},
+    )
+    .await;
+    let (stdout, stderr, code) = command_text(result);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert_eq!(stderr, "cli mint request mismatch\n");
+    assert!(!stderr.contains("granttoken"), "{stderr}");
+    assert_eq!(code, 1);
+}
+
+#[tokio::test]
+async fn command_names_home_when_nothing_is_listening() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let mut notice = Vec::new();
+    let result = super::super::gateway_home_cli_mint::request_and_wait_observed_for_test(
+        &format!("http://{addr}"),
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(200),
+        &mut notice,
+        |_| async {},
+    )
+    .await;
+    let (stdout, stderr, code) = command_text(result);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(notice.is_empty(), "{notice:?}");
+    assert_eq!(
+        stderr,
+        "Home is not running. Start Home, then request the terminal grant again.\n"
+    );
+    assert_eq!(code, 1);
+}
+
+#[tokio::test]
+async fn command_unanswered_registration_asks_again_without_blaming_a_stopped_home() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            if let Ok((socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    drop(socket);
+                });
+            }
+        }
+    });
+    wait_until_accepts(addr).await;
+    let mut notice = Vec::new();
+    let result = super::super::gateway_home_cli_mint::request_and_wait_observed_for_test(
+        &format!("http://{addr}"),
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(200),
+        &mut notice,
+        |_| async {},
+    )
+    .await;
+    let (stdout, stderr, code) = command_text(result);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(notice.is_empty(), "{notice:?}");
+    assert_eq!(
+        stderr,
+        "Home did not answer. Request the terminal grant again.\n"
+    );
+    assert!(!stderr.contains("Home is not running"), "{stderr}");
+    assert_eq!(code, 1);
 }

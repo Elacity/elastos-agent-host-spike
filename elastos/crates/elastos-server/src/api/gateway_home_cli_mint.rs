@@ -1,10 +1,13 @@
 //! Bound request, passkey approval, and one-time delivery of an exported Home CLI grant.
 //!
 //! `elastos home --cli-launch-token` registers a request with a fresh secret and
-//! polls the claim route. Home shows that waiting request to the signed-in human
-//! admin. Home begins the request and then sends a fresh passkey assertion.
-//! The claim signs only after that approved record matches the request id,
-//! the secret hash, the bound owner, session, proof, grant, and operation.
+//! polls the claim route. While it waits, it prints a request code on stderr.
+//! That code is the first eight hex characters of the request id. Home shows the
+//! same code to the signed-in human admin and, when several requests are waiting,
+//! asks the admin to choose. Home begins the chosen request and then sends a
+//! fresh passkey assertion. The claim signs only after that approved record
+//! matches the request id, the secret hash, the bound owner, session, proof,
+//! grant, and operation. A refused passkey and a cancelled request stop the wait.
 //!
 //! The request table lives only in this process. A same-user process can write
 //! the data directory, so a file there is not an approval and cannot deliver a
@@ -67,6 +70,7 @@ const ALREADY_WAITING: &str = "cli mint request is already waiting for approval"
 const NOT_APPROVED: &str = "cli mint request is not approved";
 const ALREADY_DELIVERED: &str = "cli mint grant was already delivered";
 const CANCELLED: &str = "cli mint request was cancelled";
+const REFUSED: &str = "cli mint request was refused";
 const SECRET_MISMATCH: &str = "cli mint requester secret does not match";
 const EXPIRED: &str = "cli mint request expired";
 const MISMATCH: &str = "cli mint request mismatch";
@@ -76,10 +80,15 @@ const CREDENTIAL_UNAVAILABLE: &str = "cli mint passkey credential is unavailable
 const DIFFERENT_PASSKEY: &str = "cli mint used a different registered passkey";
 const CAPACITY_ERROR: &str = "cli mint request capacity";
 const WAIT_POLL: Duration = Duration::from_secs(1);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 const WAIT_DEADLINE_SLACK_SECS: u64 = 180;
 const WAIT_TIMEOUT: &str = "cli mint request timed out";
 const WAIT_UNAVAILABLE: &str =
     "Home is not running. Start Home, then request the terminal grant again.";
+const WAIT_UNANSWERED: &str = "Home did not answer. Request the terminal grant again.";
+const WAIT_LOST_REPLY: &str = "Home did not answer the terminal. A grant may already have been delivered. Do not approve again.";
+const WAIT_NOTICE_PREFIX: &str = "Approve terminal request ";
+const WAIT_NOTICE_SUFFIX: &str = " in Home";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClaimPhase {
@@ -599,6 +608,7 @@ fn claim_state_error(state: &str) -> &'static str {
     match state {
         STATE_DELIVERED => ALREADY_DELIVERED,
         STATE_CANCELLED => CANCELLED,
+        STATE_REFUSED => REFUSED,
         _ => NOT_APPROVED,
     }
 }
@@ -1118,6 +1128,9 @@ enum WaitKind {
     Timeout,
     Mismatch,
     Unavailable,
+    Unanswered,
+    LostReply,
+    Refused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1149,6 +1162,24 @@ impl CliMintWaitError {
             kind: WaitKind::Unavailable,
         }
     }
+
+    fn unanswered() -> Self {
+        Self {
+            kind: WaitKind::Unanswered,
+        }
+    }
+
+    fn lost_reply() -> Self {
+        Self {
+            kind: WaitKind::LostReply,
+        }
+    }
+
+    fn refused() -> Self {
+        Self {
+            kind: WaitKind::Refused,
+        }
+    }
 }
 
 impl std::fmt::Display for CliMintWaitError {
@@ -1158,6 +1189,9 @@ impl std::fmt::Display for CliMintWaitError {
             WaitKind::Timeout => WAIT_TIMEOUT,
             WaitKind::Mismatch => MISMATCH,
             WaitKind::Unavailable => WAIT_UNAVAILABLE,
+            WaitKind::Unanswered => WAIT_UNANSWERED,
+            WaitKind::LostReply => WAIT_LOST_REPLY,
+            WaitKind::Refused => REFUSED,
         })
     }
 }
@@ -1170,6 +1204,23 @@ enum ClaimPoll {
     Cancel,
     Timeout,
     Mismatch,
+    Refused,
+}
+
+/// The code Home shows for this request. Eight hex characters, upper case,
+/// grouped as `ABCD-EFGH`. It is not the requester secret.
+pub(super) fn terminal_request_code(request_id: &str) -> Option<String> {
+    if valid_request_id(request_id).is_err() {
+        return None;
+    }
+    let head = request_id[..8].to_ascii_uppercase();
+    Some(format!("{}-{}", &head[..4], &head[4..8]))
+}
+
+fn write_wait_notice(request_id: &str, notice: &mut dyn Write) -> Result<(), CliMintWaitError> {
+    let code = terminal_request_code(request_id).ok_or_else(CliMintWaitError::mismatch)?;
+    writeln!(notice, "{WAIT_NOTICE_PREFIX}{code}{WAIT_NOTICE_SUFFIX}")
+        .map_err(|_| CliMintWaitError::mismatch())
 }
 
 fn fresh_requester_secret() -> Result<String, CliMintWaitError> {
@@ -1186,14 +1237,14 @@ fn printable_grant(grant: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
-fn outcome_from_claim(status: StatusCode, body: &str) -> ClaimPoll {
+fn outcome_from_claim(status: StatusCode, body: &str, request_id: &str) -> ClaimPoll {
     if status == StatusCode::OK {
         let Ok(parsed) = serde_json::from_str::<ClaimResult>(body) else {
             return ClaimPoll::Mismatch;
         };
         if parsed.schema == CLAIM_RESULT_SCHEMA
             && parsed.status == STATE_DELIVERED
-            && parsed.request_id.len() == 32
+            && parsed.request_id == request_id
             && printable_grant(&parsed.grant)
         {
             return ClaimPoll::Grant(parsed.grant);
@@ -1204,7 +1255,24 @@ fn outcome_from_claim(status: StatusCode, body: &str) -> ClaimPoll {
         CANCELLED => ClaimPoll::Cancel,
         EXPIRED => ClaimPoll::Timeout,
         NOT_APPROVED => ClaimPoll::Pending,
+        REFUSED => ClaimPoll::Refused,
         _ => ClaimPoll::Mismatch,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransportClass {
+    /// The attempt never connected, so this attempt delivered nothing.
+    Unreachable,
+    /// The attempt connected or the reply was lost. A grant may already exist.
+    Interrupted,
+}
+
+fn transport_class(err: &reqwest::Error) -> TransportClass {
+    if err.is_connect() {
+        TransportClass::Unreachable
+    } else {
+        TransportClass::Interrupted
     }
 }
 
@@ -1212,29 +1280,43 @@ async fn post_mint(
     client: &reqwest::Client,
     url: &str,
     body: serde_json::Value,
-) -> Result<(StatusCode, String), CliMintWaitError> {
+) -> Result<(StatusCode, String), TransportClass> {
     let response = client
         .post(url)
         .json(&body)
         .send()
         .await
-        .map_err(|_| CliMintWaitError::unavailable())?;
+        .map_err(|err| transport_class(&err))?;
     let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|_| CliMintWaitError::unavailable())?;
+    let text = response.text().await.map_err(|err| transport_class(&err))?;
     Ok((status, text))
 }
 
-async fn request_and_wait<F, Fut>(
+fn deadline_without_grant(
+    possible_delivery: bool,
+    saw_reply: bool,
+    saw_unreachable: bool,
+) -> CliMintWaitError {
+    if possible_delivery {
+        CliMintWaitError::lost_reply()
+    } else if saw_unreachable && !saw_reply {
+        CliMintWaitError::unavailable()
+    } else {
+        CliMintWaitError::timeout()
+    }
+}
+
+async fn request_and_wait<F, Fut, W>(
     api_url: &str,
     poll: Duration,
+    http_timeout: Duration,
+    notice: &mut W,
     on_registered: F,
 ) -> Result<String, CliMintWaitError>
 where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = ()>,
+    W: Write + Send,
 {
     let api_url = api_url.trim().trim_end_matches('/');
     crate::local_http::LoopbackHttpBaseUrl::parse(api_url)
@@ -1242,10 +1324,11 @@ where
     let secret = fresh_requester_secret()?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .timeout(http_timeout)
         .build()
         .map_err(|_| CliMintWaitError::unavailable())?;
-    let (status, body) = post_mint(
+    let (status, body) = match post_mint(
         &client,
         &format!("{api_url}/api/home/cli-mint/request"),
         serde_json::json!({
@@ -1253,7 +1336,13 @@ where
             "requester_secret": secret,
         }),
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        // No claim has been sent, so no grant was received.
+        Err(TransportClass::Unreachable) => return Err(CliMintWaitError::unavailable()),
+        Err(TransportClass::Interrupted) => return Err(CliMintWaitError::unanswered()),
+    };
     if body.contains(&secret) || status != StatusCode::OK {
         return Err(CliMintWaitError::mismatch());
     }
@@ -1277,12 +1366,20 @@ where
     if expires_at > now.saturating_add(WAIT_DEADLINE_SLACK_SECS) {
         return Err(CliMintWaitError::mismatch());
     }
+    write_wait_notice(&request_id, notice)?;
     on_registered(request_id.clone()).await;
+    let mut possible_delivery = false;
+    let mut saw_reply = false;
+    let mut saw_unreachable = false;
     loop {
         if now_ts() >= expires_at {
-            return Err(CliMintWaitError::timeout());
+            return Err(deadline_without_grant(
+                possible_delivery,
+                saw_reply,
+                saw_unreachable,
+            ));
         }
-        let (status, body) = post_mint(
+        match post_mint(
             &client,
             &format!("{api_url}/api/home/cli-mint/claim"),
             serde_json::json!({
@@ -1291,16 +1388,33 @@ where
                 "requester_secret": secret,
             }),
         )
-        .await?;
-        if body.contains(&secret) {
-            return Err(CliMintWaitError::mismatch());
-        }
-        match outcome_from_claim(status, &body) {
-            ClaimPoll::Grant(grant) => return Ok(grant),
-            ClaimPoll::Pending => tokio::time::sleep(poll).await,
-            ClaimPoll::Cancel => return Err(CliMintWaitError::cancelled()),
-            ClaimPoll::Timeout => return Err(CliMintWaitError::timeout()),
-            ClaimPoll::Mismatch => return Err(CliMintWaitError::mismatch()),
+        .await
+        {
+            Ok((status, body)) => {
+                if body.contains(&secret) {
+                    return Err(CliMintWaitError::mismatch());
+                }
+                match outcome_from_claim(status, &body, &request_id) {
+                    ClaimPoll::Grant(grant) => return Ok(grant),
+                    ClaimPoll::Pending => {
+                        saw_reply = true;
+                        possible_delivery = false;
+                        tokio::time::sleep(poll).await;
+                    }
+                    ClaimPoll::Cancel => return Err(CliMintWaitError::cancelled()),
+                    ClaimPoll::Timeout => return Err(CliMintWaitError::timeout()),
+                    ClaimPoll::Mismatch => return Err(CliMintWaitError::mismatch()),
+                    ClaimPoll::Refused => return Err(CliMintWaitError::refused()),
+                }
+            }
+            Err(TransportClass::Unreachable) => {
+                saw_unreachable = true;
+                tokio::time::sleep(poll).await;
+            }
+            Err(TransportClass::Interrupted) => {
+                possible_delivery = true;
+                tokio::time::sleep(poll).await;
+            }
         }
     }
 }
@@ -1322,7 +1436,10 @@ pub(super) fn cli_mint_api_url(data_dir: &Path) -> Result<String, CliMintWaitErr
 pub async fn request_and_wait_for_exported_home_cli_grant(
     api_url: &str,
 ) -> Result<String, CliMintWaitError> {
-    request_and_wait(api_url, WAIT_POLL, |_| async {}).await
+    let mut stderr = std::io::stderr();
+    request_and_wait(api_url, WAIT_POLL, CLIENT_TIMEOUT, &mut stderr, |_| async {
+    })
+    .await
 }
 
 pub fn write_cli_launch_token_command(
@@ -1377,7 +1494,23 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    request_and_wait(api_url, poll, on_registered).await
+    let mut notice = Vec::new();
+    request_and_wait(api_url, poll, CLIENT_TIMEOUT, &mut notice, on_registered).await
+}
+
+#[cfg(test)]
+pub(super) async fn request_and_wait_observed_for_test<F, Fut>(
+    api_url: &str,
+    poll: Duration,
+    http_timeout: Duration,
+    notice: &mut Vec<u8>,
+    on_registered: F,
+) -> Result<String, CliMintWaitError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    request_and_wait(api_url, poll, http_timeout, notice, on_registered).await
 }
 
 #[cfg(test)]

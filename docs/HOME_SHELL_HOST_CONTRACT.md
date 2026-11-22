@@ -102,13 +102,27 @@ open, the gateway gives the Runtime a `home-shell` projection grant bound to
 `home`; the Runtime accepts that grant only on its internal content-open hop.
 `elastos home --cli-launch-token` asks the Home on this computer for one
 exported grant. The command creates a fresh secret, registers a bound request,
-and waits. Home shows that waiting request to the signed-in human admin and
-asks for a fresh passkey. Home begins the request and then sends the passkey
-assertion. Home does not approve a request it has not begun. When the admin
-approves, the command prints the grant once. When the admin cancels, the
-request times out, or the request does not match, the command prints no grant
-and stops with a non-zero status. The gateway keeps the approval in its own
-memory. It signs only when that memory record is approved and the request, the
+and waits. While it waits, its error output prints `Approve terminal request
+ABCD-EFGH in Home`. That code is the first eight hex characters of the request
+id, in upper case, with a hyphen after the fourth character. It is not the
+secret. Home shows that same code to the signed-in human admin. When one
+request is waiting, Home asks for a fresh passkey for that request. When more
+than one request is waiting, Home shows each code and asks the admin to choose.
+Home does not open a passkey prompt for one of those requests by itself, and an
+open prompt stays on the request it opened for. Home begins the chosen request
+and then sends the passkey assertion. Home does not approve a request it has
+not begun. When the admin approves, the command prints the grant once. When the
+admin refuses the passkey or dismisses it, the command prints no grant and
+stops as refused or cancelled. When the admin cancels before the claim commits,
+the request times out, or the request does not match, the command prints no
+grant and stops with a non-zero status. A cancel that arrives after the claim
+has committed is refused. If the signer then succeeds, the command still prints
+that one grant. If the signer then fails, the command prints no grant. If Home
+cannot be reached before a request is registered, the command says Home is not
+running and the admin can request the grant again. If the command loses Home's
+reply after a claim may have been delivered, it does not ask the admin to
+approve again. The gateway keeps the approval in its own memory. It signs
+only when that memory record is approved and the request, the
 secret, the owner, the session, the proof, the grant, and the operation match.
 It marks the record delivered in that same memory before returning the grant.
 The grant lasts 5 minutes from the signature. A stolen grant still reaches only
@@ -315,8 +329,12 @@ Only approved first-party targets may ask Home for fresh passkey authority.
 Home binds that proof to the requesting capsule, operation, and request before
 returning a new target-scoped token to the same source and origin. Home also
 asks for a fresh passkey when a terminal is waiting for an exported Home CLI
-grant. That prompt begins the waiting request and then approves it. The passkey
-result stays in Home. The waiting command receives the grant.
+grant. That prompt shows the same request code the terminal printed. When
+several requests are waiting, Home asks the admin to choose one code before
+the passkey prompt. The prompt begins the chosen request and then approves it.
+The passkey result stays in Home. The waiting command receives the grant. A
+cancel after the claim has committed does not take a delivered grant back. The
+admin signs out to revoke a grant the terminal already received.
 
 Both shells can sign out. Browser `home-cli` sign-out is a launch-token-bound
 terminal host intent; `home-gui` uses the same host message contract. Neither
