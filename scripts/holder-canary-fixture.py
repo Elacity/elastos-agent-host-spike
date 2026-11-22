@@ -105,6 +105,54 @@ def source_capsule_without_release_checksum(name, component, info, installed, ca
     return True
 
 
+def local_model_engine_bundle(name, info, installed):
+    """The preinstalled llama.cpp directory, checked by its engine receipt.
+
+    With `binary_path` set, Runtime install state calls
+    `local_model_engine_receipt::verify` on `.elastos-engine.json` and does
+    not read `.elastos-artifact-sha256` in this folder. Cache setup writes
+    that receipt and returns. The scan inventories every other file, and
+    source setup rejects an unexpected file in the bundle before it locks
+    the directory at mode 0o500. The archive digest is `archive_sha256`.
+    The same digest is already on the capsule copy.
+    """
+    if name != "llama-server" or not isinstance(info, dict):
+        return False
+    if not isinstance(info.get("binary_path"), str):
+        return False
+    return installed.is_dir() and not installed.is_symlink()
+
+
+def engine_receipt_body(path):
+    """The installed `.elastos-engine.json` object, or a fixture failure."""
+    if path.is_symlink() or not path.is_file():
+        raise AssertionError(f"invalid fixture receipt: {path}")
+    try:
+        body = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeError) as error:
+        raise AssertionError(f"invalid fixture receipt: {path}") from error
+    if not isinstance(body, dict) or body.get("schema") != "elastos.local-model-engine/v2":
+        raise AssertionError(f"invalid fixture receipt: {path}")
+    return body
+
+
+def capsule_archive_checksum(component, platform_key):
+    """The capsule-copy archive digest, when metadata names one."""
+    if not isinstance(component, dict):
+        return None
+    metadata = component.get("capsule_metadata")
+    if not isinstance(metadata, dict):
+        return None
+    platforms = metadata.get("platforms")
+    if not isinstance(platforms, dict):
+        return None
+    info = platforms.get(platform_key, platforms.get("*"))
+    if not isinstance(info, dict) or blank_catalogue_checksum(info.get("checksum")):
+        return None
+    relative = info.get("install_path") or metadata.get("install_path")
+    return relative, info.get("checksum")
+
+
 def prepare_installed_components(data):
     """Give installed fixture components the receipts written by release setup."""
     catalogue = data / "components.json"
@@ -148,7 +196,41 @@ def prepare_installed_components(data):
         expected = digest(info.get("checksum"), name)
         if info.get("extract_path"):
             if installed.is_dir() and not installed.is_symlink():
-                receipt(installed / ".elastos-artifact-sha256", expected)
+                if local_model_engine_bundle(name, info, installed):
+                    # Do not create `.elastos-artifact-sha256` here. The
+                    # Runtime compares `archive_sha256` to the catalogue
+                    # checksum exactly, and an extra file fails that inventory.
+                    receipt_path = installed / ".elastos-engine.json"
+                    body = engine_receipt_body(receipt_path)
+                    version = component.get("version") if isinstance(component, dict) else None
+                    if not isinstance(version, str) or version == "":
+                        raise AssertionError("llama-server bundle version is missing")
+                    if (body.get("version") != version
+                            or body.get("platform") != platform_key
+                            or body.get("archive_sha256") != "sha256:" + expected):
+                        raise AssertionError(
+                            f"fixture receipt differs from catalogue: {receipt_path}")
+                    artifact = installed / ".elastos-artifact-sha256"
+                    if artifact.exists() or artifact.is_symlink():
+                        receipt(artifact, expected)
+                    named = capsule_archive_checksum(component, platform_key)
+                    if named is not None:
+                        metadata_relative, checksum = named
+                        metadata_parts = Path(metadata_relative).parts \
+                            if isinstance(metadata_relative, str) else ()
+                        assert isinstance(metadata_relative, str) and metadata_parts and all(
+                            part not in ("", ".", "..") for part in metadata_parts
+                        ) and not Path(metadata_relative).is_absolute(), \
+                            f"{name} archive metadata is missing"
+                        metadata_root = data / metadata_relative
+                        assert metadata_root.is_dir() and not metadata_root.is_symlink(), \
+                            f"{name} archive metadata is missing"
+                        marker = metadata_root / ".elastos-artifact-sha256"
+                        if not (marker.exists() or marker.is_symlink()):
+                            raise AssertionError(f"invalid fixture receipt: {marker}")
+                        receipt(marker, digest(checksum, f"{name} metadata"))
+                else:
+                    receipt(installed / ".elastos-artifact-sha256", expected)
             elif installed.is_file() and not installed.is_symlink():
                 # A release can extract one binary and keep its archive
                 # metadata in a separate capsule (for example, Kubo).

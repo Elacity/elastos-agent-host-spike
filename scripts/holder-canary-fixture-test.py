@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -99,6 +100,164 @@ class HolderFixtureTests(unittest.TestCase):
                         ):
                             fixture.prepare_installed_components(data)
                     self.assertFalse((data / "capsules/services/.elastos-artifact-sha256").exists())
+
+    def test_read_only_engine_bundle_skips_artifact_receipt_and_keeps_mode(self):
+        archive = "sha256:" + hashlib.sha256(b"engine-archive").hexdigest()
+        other = "sha256:" + hashlib.sha256(b"capsule-archive").hexdigest()
+
+        def identity(path):
+            metadata = path.lstat()
+            return (metadata.st_mode, metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+        def build(data, checksum=archive, version="b10516", binary_path="llama-server",
+                  archive_sha256=None, artifact=None, capsule=None, strategy="source-build"):
+            bundle = data / "libexec/llama.cpp/b10516/linux-amd64"
+            bundle.mkdir(parents=True)
+            (bundle / "llama-server").write_bytes(b"engine")
+            body = {
+                "schema": "elastos.local-model-engine/v2",
+                "version": version,
+                "platform": "linux-amd64",
+                "archive_sha256": archive if archive_sha256 is None else archive_sha256,
+                "entries": [],
+            }
+            receipt_path = bundle / ".elastos-engine.json"
+            receipt_path.write_text(json.dumps(body, sort_keys=True) + "\n")
+            if artifact is not None:
+                (bundle / ".elastos-artifact-sha256").write_text(artifact)
+            platform_info = {
+                "checksum": checksum, "extract_path": "llama-b10516",
+                "install_path": "libexec/llama.cpp/b10516/linux-amd64",
+                "strategy": strategy}
+            if binary_path is not None:
+                platform_info["binary_path"] = binary_path
+            manifest = {"external": {"llama-server": {
+                "version": version, "platforms": {"linux-amd64": platform_info}}}}
+            capsule_dir = data / "capsules/llama-server"
+            if capsule is not None:
+                capsule_dir.mkdir(parents=True)
+                if capsule["text"] is not None:
+                    (capsule_dir / ".elastos-artifact-sha256").write_text(capsule["text"])
+                manifest["external"]["llama-server"]["capsule_metadata"] = {
+                    "install_path": "capsules/llama-server",
+                    "platforms": {"linux-amd64": {
+                        "checksum": capsule["checksum"],
+                        "extract_path": "llama-b10516",
+                        "install_path": "capsules/llama-server"}}}
+            (data / "components.json").write_text(json.dumps(manifest))
+            for path in (bundle / "llama-server", receipt_path):
+                path.chmod(0o500 if path.name == "llama-server" else 0o400)
+            if artifact is not None:
+                (bundle / ".elastos-artifact-sha256").chmod(0o400)
+            bundle.chmod(0o500)
+            if capsule is not None:
+                marker = capsule_dir / ".elastos-artifact-sha256"
+                if marker.exists():
+                    marker.chmod(0o400)
+                capsule_dir.chmod(0o500)
+            return bundle, receipt_path, capsule_dir
+
+        def unlock(root):
+            for path in sorted(root.rglob("*"), reverse=True):
+                path.chmod(0o700)
+            root.chmod(0o700)
+
+        def prepare(data):
+            with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                fixture.prepare_installed_components(data)
+
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            try:
+                bundle, receipt_path, capsule_dir = build(
+                    data, capsule={"checksum": other, "text": other[7:] + "\n"})
+                before = identity(bundle), identity(receipt_path), identity(capsule_dir)
+                catalogue = (data / "components.json").read_bytes()
+                receipt_bytes = receipt_path.read_bytes()
+                capsule_bytes = (capsule_dir / ".elastos-artifact-sha256").read_bytes()
+                prepare(data)
+                self.assertFalse((bundle / ".elastos-artifact-sha256").exists())
+                self.assertEqual((identity(bundle), identity(receipt_path), identity(capsule_dir)), before)
+                self.assertEqual(stat.S_IMODE(bundle.stat().st_mode), 0o500)
+                self.assertEqual(stat.S_IMODE(capsule_dir.stat().st_mode), 0o500)
+                self.assertEqual((data / "components.json").read_bytes(), catalogue)
+                self.assertEqual(receipt_path.read_bytes(), receipt_bytes)
+                self.assertEqual((capsule_dir / ".elastos-artifact-sha256").read_bytes(), capsule_bytes)
+            finally:
+                unlock(data)
+
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            try:
+                bundle, _, _ = build(data, artifact="sha256:" + archive[7:] + "\n")
+                before = identity(bundle), identity(bundle / ".elastos-artifact-sha256")
+                prepare(data)
+                self.assertEqual((bundle / ".elastos-artifact-sha256").read_text(),
+                                 "sha256:" + archive[7:] + "\n")
+                self.assertEqual((identity(bundle), identity(bundle / ".elastos-artifact-sha256")), before)
+            finally:
+                unlock(data)
+
+        failures = (
+            ("engine digest", {"archive_sha256": "sha256:" + other[7:]}, "differs from catalogue"),
+            ("bare engine digest", {"archive_sha256": archive[7:]}, "differs from catalogue"),
+            ("missing engine receipt", {"archive_sha256": False}, "invalid fixture receipt"),
+            ("artifact digest", {"artifact": "0" * 64 + "\n"}, "differs from catalogue"),
+            ("blank checksum", {"checksum": ""}, "blank catalogue checksum"),
+            ("malformed checksum", {"checksum": "sha256:abcd"}, "signed SHA-256 digest"),
+            ("capsule digest", {"capsule": {"checksum": other, "text": archive[7:] + "\n"}},
+             "differs from catalogue"),
+            ("missing capsule receipt", {"capsule": {"checksum": other, "text": None}},
+             "invalid fixture receipt"),
+            ("malformed capsule checksum",
+             {"capsule": {"checksum": "sha256:abcd", "text": other[7:] + "\n"}},
+             "signed SHA-256 digest"),
+        )
+        for label, overrides, message in failures:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    data = Path(directory)
+                    try:
+                        kwargs = {}
+                        drop_receipt = overrides.get("archive_sha256") is False
+                        if "archive_sha256" in overrides and not drop_receipt:
+                            kwargs["archive_sha256"] = overrides["archive_sha256"]
+                        for key in ("artifact", "checksum", "capsule"):
+                            if key in overrides:
+                                kwargs[key] = overrides[key]
+                        bundle, _, capsule_dir = build(data, **kwargs)
+                        if drop_receipt:
+                            bundle.chmod(0o700)
+                            (bundle / ".elastos-engine.json").chmod(0o600)
+                            (bundle / ".elastos-engine.json").unlink()
+                            bundle.chmod(0o500)
+                        watched = [bundle]
+                        artifact_path = bundle / ".elastos-artifact-sha256"
+                        if artifact_path.exists():
+                            watched.append(artifact_path)
+                        if capsule_dir.is_dir():
+                            watched.append(capsule_dir)
+                        before = [identity(path) for path in watched]
+                        planted = artifact_path.read_text() if artifact_path.exists() else None
+                        with self.assertRaisesRegex(AssertionError, message):
+                            prepare(data)
+                        self.assertEqual([identity(path) for path in watched], before)
+                        if planted is None:
+                            self.assertFalse(artifact_path.exists())
+                        else:
+                            self.assertEqual(artifact_path.read_text(), planted)
+                    finally:
+                        unlock(data)
+
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            try:
+                bundle, _, _ = build(data, binary_path=None)
+                bundle.chmod(0o700)
+                prepare(data)
+                self.assertEqual((bundle / ".elastos-artifact-sha256").read_text(), archive[7:] + "\n")
+            finally:
+                unlock(data)
 
     def test_registry_checksum_still_requires_a_catalogue_digest(self):
         with tempfile.TemporaryDirectory() as directory:
