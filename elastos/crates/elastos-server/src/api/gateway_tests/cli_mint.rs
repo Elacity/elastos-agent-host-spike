@@ -255,6 +255,7 @@ fn dummy_assertion() -> Value {
     })
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn exported_grant_refuses_environment_mint() {
     let _lock = super::home_system::HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
@@ -308,6 +309,7 @@ async fn request_refuses_a_short_secret() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn begin_refuses_a_guest() {
     let _mint = mint_test_guard().await;
@@ -329,6 +331,7 @@ async fn begin_refuses_a_guest() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn begin_refuses_an_agent_home_token() {
     let _mint = mint_test_guard().await;
@@ -346,6 +349,7 @@ async fn begin_refuses_an_agent_home_token() {
     assert_eq!(body, "Gateway request requires an admitted host and caller");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn approve_refuses_a_different_owner_session() {
     let _mint = mint_test_guard().await;
@@ -366,6 +370,7 @@ async fn approve_refuses_a_different_owner_session() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bad_signature_does_not_approve() {
     let _mint = mint_test_guard().await;
@@ -398,6 +403,7 @@ async fn bad_signature_does_not_approve() {
     assert_eq!(record["state"], "refused");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn fresh_assertion_approves_without_a_launch_grant() {
     let _mint = mint_test_guard().await;
@@ -444,6 +450,7 @@ fn cli_mint_source_does_not_name_an_issuer() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn second_approve_is_already_decided() {
     let _mint = mint_test_guard().await;
@@ -471,6 +478,7 @@ async fn second_approve_is_already_decided() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn begin_refuses_an_expired_request() {
     let _mint = mint_test_guard().await;
@@ -524,6 +532,7 @@ async fn request_refuses_past_capacity() {
     assert!(status == StatusCode::TOO_MANY_REQUESTS && body.contains("capacity"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn approve_before_begin_is_not_waiting() {
     let _mint = mint_test_guard().await;
@@ -541,6 +550,7 @@ async fn approve_before_begin_is_not_waiting() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn second_begin_is_already_waiting() {
     let _mint = mint_test_guard().await;
@@ -560,6 +570,7 @@ async fn second_begin_is_already_waiting() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn disk_record_cannot_make_a_request_approved() {
     let _mint = mint_test_guard().await;
@@ -614,6 +625,7 @@ async fn disk_record_cannot_make_a_request_approved() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn request_refuses_a_capsule_token_with_a_null_origin() {
     let _mint = mint_test_guard().await;

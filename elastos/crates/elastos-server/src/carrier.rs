@@ -14677,6 +14677,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn recorded_content_ops(requests: &StdMutex<Vec<serde_json::Value>>) -> Vec<String> {
         requests
             .lock()
@@ -15296,6 +15297,7 @@ pub(crate) mod tests {
     }
 
     /// Makes `registry` a receiving Home: real Content over [`ReceiverIpfs`].
+    #[cfg(unix)]
     pub(crate) async fn register_shared_content_receiver(
         registry: &Arc<ProviderRegistry>,
         data_dir: &std::path::Path,
@@ -15319,6 +15321,7 @@ pub(crate) mod tests {
     }
 
     /// A sender's Home holding one file, reachable from `fixture`'s local node.
+    #[cfg(unix)]
     async fn shared_file_holder(
         seed: u8,
         fixture: &PeerDidRouteFixture,

@@ -1179,7 +1179,6 @@ mod agent_routes;
 mod assistant_workspace_v2;
 mod browser_profile;
 mod browser_reconciliation;
-#[cfg(unix)]
 mod cli_mint;
 mod collaboration_presence;
 mod content_sandbox;

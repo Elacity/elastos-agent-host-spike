@@ -12275,3 +12275,19 @@ mod r5a_tests {
         unstored_publish_row("empty_trash");
     }
 }
+
+/// Windows refuses the published index (the published-index writer is
+/// Unix-only in P2-11 step 6): the write fails and leaves the data folder empty.
+#[cfg(all(test, not(unix)))]
+mod windows_published_index_refusal {
+    #[test]
+    fn published_index_write_refuses_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = super::update_published_index(temp.path(), |_| {}).unwrap_err();
+        assert!(
+            format!("{error:#}").to_lowercase().contains("unsupported"),
+            "{error:#}"
+        );
+        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
+}
