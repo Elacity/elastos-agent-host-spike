@@ -116,12 +116,15 @@ fn public_read(path: &str) -> bool {
         || !path.starts_with("/api/") && !path.starts_with("/.well-known/")
 }
 
-/// A terminal may register a bound mint request before it holds a launch grant.
-/// A null origin is a sandboxed frame and stays refused. Begin and approve
-/// stay behind the launch gate.
+/// A terminal may register a bound mint request, or claim its one grant,
+/// before it holds a launch grant. A null origin is a sandboxed frame and
+/// stays refused. Begin, approve, and cancel stay behind the launch gate.
 fn cli_mint_request(path: &str, method: &Method, headers: &HeaderMap) -> bool {
     method == Method::POST
-        && path == "/api/home/cli-mint/request"
+        && matches!(
+            path,
+            "/api/home/cli-mint/request" | "/api/home/cli-mint/claim"
+        )
         && match single_header(headers, "origin") {
             None => !headers.contains_key("origin"),
             Some("null") => false,
@@ -285,8 +288,9 @@ pub(super) async fn gateway_admission(
     }
     // Home reopens Browser only for a signed Browser launch token that expired
     // or lost its session. Another app's token stays the generic refusal, and
-    // so does every other route. A terminal may register a bound mint request
-    // without a launch grant. Begin and approve stay on the launch gate.
+    // so does every other route. A terminal may register a bound mint request,
+    // or claim its one grant, without a launch grant. Begin, approve, and
+    // cancel stay on the launch gate.
     let mut browser_launch_renewal = None;
     let cli_mint_request = cli_mint_request(path, method, headers);
     if !public && !sign_in && !ticket && !runtime_session && !cli_mint_request {

@@ -1,7 +1,9 @@
-//! Bound request and passkey approval for an exported Home CLI grant.
+//! Bound request, passkey approval, and one-time delivery of an exported Home CLI grant.
 //!
 //! A terminal registers a request. The signed-in human admin approves it with
-//! a fresh passkey assertion. This module does not sign a launch grant.
+//! a fresh passkey assertion. The waiting terminal claims the grant once.
+//! The claim signs only after that approved record matches the request id,
+//! the secret hash, the bound owner, session, proof, grant, and operation.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -19,24 +21,36 @@ use super::*;
 const REQUEST_SCHEMA: &str = "elastos.home.cli-mint.request/v1";
 const BEGIN_SCHEMA: &str = "elastos.home.cli-mint.begin/v1";
 const APPROVE_SCHEMA: &str = "elastos.home.cli-mint.approve/v1";
+const CLAIM_SCHEMA: &str = "elastos.home.cli-mint.claim/v1";
+const CANCEL_SCHEMA: &str = "elastos.home.cli-mint.cancel/v1";
 const RECORD_SCHEMA: &str = "elastos.home.cli-mint.record/v1";
 const REQUEST_RESULT_SCHEMA: &str = "elastos.home.cli-mint.request.result/v1";
 const BEGIN_RESULT_SCHEMA: &str = "elastos.home.cli-mint.begin.result/v1";
 const APPROVE_RESULT_SCHEMA: &str = "elastos.home.cli-mint.approve.result/v1";
+const CLAIM_RESULT_SCHEMA: &str = "elastos.home.cli-mint.claim.result/v1";
+const CANCEL_RESULT_SCHEMA: &str = "elastos.home.cli-mint.cancel.result/v1";
 const OPERATION: &str = "home-cli.export-grant";
 const DIRECTORY: &str = "home-cli-mint";
 const REQUEST_TTL_SECS: u64 = 120;
+/// Exported grant lifetime, measured from the signature.
+const EXPORT_TTL_SECS: u64 = 5 * 60;
 const CAPACITY: usize = 32;
 const STATE_PENDING: &str = "pending";
 const STATE_BEGUN: &str = "begun";
 const STATE_APPROVED: &str = "approved";
 const STATE_REFUSED: &str = "refused";
+const STATE_CANCELLED: &str = "cancelled";
+const STATE_DELIVERED: &str = "delivered";
 
 const HUMAN_REQUIRED: &str = "a human Home owner is required";
 const SESSION_MISMATCH: &str = "cli mint owner session mismatch";
 const NOT_WAITING: &str = "cli mint request is not waiting for approval";
 const ALREADY_DECIDED: &str = "cli mint request is already decided";
 const ALREADY_WAITING: &str = "cli mint request is already waiting for approval";
+const NOT_APPROVED: &str = "cli mint request is not approved";
+const ALREADY_DELIVERED: &str = "cli mint grant was already delivered";
+const CANCELLED: &str = "cli mint request was cancelled";
+const SECRET_MISMATCH: &str = "cli mint requester secret does not match";
 const EXPIRED: &str = "cli mint request expired";
 const MISMATCH: &str = "cli mint request mismatch";
 const ORIGIN_MISMATCH: &str = "cli mint passkey origin mismatch";
@@ -91,6 +105,36 @@ struct ApproveResult {
     status: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ClaimBody {
+    schema: String,
+    request_id: String,
+    requester_secret: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ClaimResult {
+    schema: String,
+    request_id: String,
+    status: String,
+    grant: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CancelBody {
+    schema: String,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CancelResult {
+    schema: String,
+    request_id: String,
+    status: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MintRecord {
@@ -135,6 +179,27 @@ pub(super) async fn home_cli_mint_approve(
     Json(input): Json<ApproveBody>,
 ) -> Response {
     match approve_request(&state, &headers, input).await {
+        Ok(body) => Json(body).into_response(),
+        Err(err) => mint_error(err),
+    }
+}
+
+pub(super) async fn home_cli_mint_claim(
+    State(state): State<GatewayState>,
+    Json(input): Json<ClaimBody>,
+) -> Response {
+    match claim_request(&state.data_dir, input) {
+        Ok(body) => Json(body).into_response(),
+        Err(err) => mint_error(err),
+    }
+}
+
+pub(super) async fn home_cli_mint_cancel(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<CancelBody>,
+) -> Response {
+    match cancel_request(&state.data_dir, &headers, input) {
         Ok(body) => Json(body).into_response(),
         Err(err) => mint_error(err),
     }
@@ -326,6 +391,208 @@ async fn approve_request(
     })
 }
 
+fn claim_request(data_dir: &Path, input: ClaimBody) -> anyhow::Result<ClaimResult> {
+    if input.schema != CLAIM_SCHEMA {
+        anyhow::bail!("unsupported cli mint claim schema");
+    }
+    valid_secret(&input.requester_secret)?;
+    let _guard = mint_lock()?;
+    let now = now_ts();
+    let mut record = load_record(data_dir, &input.request_id, now)?;
+    if record.state != STATE_APPROVED {
+        anyhow::bail!(claim_state_error(&record.state));
+    }
+    if hex::encode(Sha256::digest(input.requester_secret.as_bytes())) != record.secret_sha256 {
+        anyhow::bail!(SECRET_MISMATCH);
+    }
+    if record.request_id != input.request_id {
+        anyhow::bail!(MISMATCH);
+    }
+    bound_export_matches(data_dir, &record)?;
+    let context = signing_context(data_dir, &record)?;
+    let issued_at = signature_issued_at(data_dir);
+    // The existing signer stays after the approved-state, secret, request-id,
+    // and bound owner, session, proof, grant, and operation checks.
+    let grant = gateway_home_token::issue_home_launch_token_at(
+        data_dir,
+        &gateway_home_token::HomeLaunchContext::projection("home-launch", HOME_CLI_SHELL_ID),
+        &context,
+        issued_at,
+        Some(issued_at.saturating_add(EXPORT_TTL_SECS)),
+    )?;
+    record.state = STATE_DELIVERED.to_string();
+    store_record(data_dir, &record)?;
+    Ok(ClaimResult {
+        schema: CLAIM_RESULT_SCHEMA.to_string(),
+        request_id: record.request_id,
+        status: STATE_DELIVERED.to_string(),
+        grant,
+    })
+}
+
+fn cancel_request(
+    data_dir: &Path,
+    headers: &HeaderMap,
+    input: CancelBody,
+) -> anyhow::Result<CancelResult> {
+    if input.schema != CANCEL_SCHEMA {
+        anyhow::bail!("unsupported cli mint cancel schema");
+    }
+    let context = home_admin_context(data_dir, headers)?;
+    let _guard = mint_lock()?;
+    let now = now_ts();
+    let mut record = load_record(data_dir, &input.request_id, now)?;
+    if matches!(record.state.as_str(), STATE_BEGUN | STATE_APPROVED)
+        && !binding_matches_context(&record, &context)
+    {
+        anyhow::bail!(SESSION_MISMATCH);
+    }
+    if !matches!(
+        record.state.as_str(),
+        STATE_PENDING | STATE_BEGUN | STATE_APPROVED
+    ) {
+        anyhow::bail!(ALREADY_DECIDED);
+    }
+    record.state = STATE_CANCELLED.to_string();
+    store_record(data_dir, &record)?;
+    Ok(CancelResult {
+        schema: CANCEL_RESULT_SCHEMA.to_string(),
+        request_id: record.request_id,
+        status: STATE_CANCELLED.to_string(),
+    })
+}
+
+fn claim_state_error(state: &str) -> &'static str {
+    match state {
+        STATE_DELIVERED => ALREADY_DELIVERED,
+        STATE_CANCELLED => CANCELLED,
+        _ => NOT_APPROVED,
+    }
+}
+
+fn binding_matches_context(record: &MintRecord, context: &HomeLaunchTokenContext) -> bool {
+    record.principal_id.as_deref() == Some(context.principal_id())
+        && record.session_id.as_deref() == Some(context.session_id())
+        && record.proof_binding_id.as_deref() == context.proof_binding_id()
+        && record.grant_id.as_deref() == Some(context.grant_id())
+}
+
+/// The bound owner, session, proof, grant, and operation still name one live
+/// admin session. This is the match that stays in front of the signer.
+fn bound_export_matches(data_dir: &Path, record: &MintRecord) -> anyhow::Result<()> {
+    if record.operation != OPERATION {
+        anyhow::bail!(MISMATCH);
+    }
+    let context = signing_context(data_dir, record)?;
+    if context.root().kind() != Some(crate::auth::PrincipalKind::Human) {
+        anyhow::bail!(HUMAN_REQUIRED);
+    }
+    let auth_data_dir = home_launch_auth_data_dir(data_dir);
+    require_admin_principal(&auth_data_dir, &context)?;
+    let proof = context
+        .proof_binding_id()
+        .ok_or_else(|| anyhow::anyhow!(SESSION_MISMATCH))?;
+    let live =
+        crate::auth::load_active_session_grant(&auth_data_dir, context.session_id(), now_ts())
+            .map_err(|_| anyhow::anyhow!(SESSION_MISMATCH))?;
+    if live.principal_id != context.principal_id()
+        || live.session_id != context.session_id()
+        || live.proof_binding_id != proof
+        || live.grant_id != context.grant_id()
+    {
+        anyhow::bail!(SESSION_MISMATCH);
+    }
+    Ok(())
+}
+
+fn signing_context(data_dir: &Path, record: &MintRecord) -> anyhow::Result<HomeLaunchTokenContext> {
+    let principal_id = required_bound(record.principal_id.as_deref())?;
+    let session_id = required_bound(record.session_id.as_deref())?;
+    let grant_id = required_bound(record.grant_id.as_deref())?;
+    let proof = required_bound(record.proof_binding_id.as_deref())?;
+    let auth_data_dir = home_launch_auth_data_dir(data_dir);
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, &auth_data_dir, principal_id)?;
+    Ok(HomeLaunchTokenContext::resolved(
+        root,
+        session_id.to_string(),
+        Some(proof.to_string()),
+        grant_id.to_string(),
+    ))
+}
+
+fn required_bound(value: Option<&str>) -> anyhow::Result<&str> {
+    value
+        .filter(|item| !item.is_empty())
+        .ok_or_else(|| anyhow::anyhow!(SESSION_MISMATCH))
+}
+
+fn signature_issued_at(data_dir: &Path) -> u64 {
+    let now = now_ts();
+    #[cfg(test)]
+    {
+        apply_signature_skew(data_dir, now)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = data_dir;
+        now
+    }
+}
+
+#[cfg(test)]
+static SIGNATURE_SKEW: Mutex<Vec<(PathBuf, i64)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn apply_signature_skew(data_dir: &Path, now: u64) -> u64 {
+    let skew = SIGNATURE_SKEW
+        .lock()
+        .map(|guard| {
+            guard
+                .iter()
+                .find(|(path, _)| path == data_dir)
+                .map(|(_, skew)| *skew)
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    if skew < 0 {
+        now.saturating_sub(skew.unsigned_abs())
+    } else {
+        now.saturating_add(skew as u64)
+    }
+}
+
+#[cfg(test)]
+pub(super) struct CliMintSignatureSkewGuard {
+    data_dir: PathBuf,
+}
+
+#[cfg(test)]
+impl Drop for CliMintSignatureSkewGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = SIGNATURE_SKEW.lock() {
+            guard.retain(|(path, _)| path != &self.data_dir);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn set_cli_mint_signature_skew_for_test(
+    data_dir: &Path,
+    skew_secs: i64,
+) -> CliMintSignatureSkewGuard {
+    let mut guard = SIGNATURE_SKEW
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = guard.iter_mut().find(|(path, _)| path == data_dir) {
+        entry.1 = skew_secs;
+    } else {
+        guard.push((data_dir.to_path_buf(), skew_secs));
+    }
+    CliMintSignatureSkewGuard {
+        data_dir: data_dir.to_path_buf(),
+    }
+}
+
 fn passkey_for_context(
     data_dir: &Path,
     context: &HomeLaunchTokenContext,
@@ -360,7 +627,12 @@ fn load_record(data_dir: &Path, request_id: &str, now: u64) -> anyhow::Result<Mi
         || record.expires_at <= record.created_at
         || !matches!(
             record.state.as_str(),
-            STATE_PENDING | STATE_BEGUN | STATE_APPROVED | STATE_REFUSED
+            STATE_PENDING
+                | STATE_BEGUN
+                | STATE_APPROVED
+                | STATE_REFUSED
+                | STATE_CANCELLED
+                | STATE_DELIVERED
         )
     {
         anyhow::bail!(MISMATCH);

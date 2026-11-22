@@ -105,7 +105,7 @@ impl HomeLaunchContext {
         }
     }
 
-    fn projection(selected_resource: &str, executable_actor: &str) -> Self {
+    pub(in crate::api) fn projection(selected_resource: &str, executable_actor: &str) -> Self {
         Self {
             schema: HOME_LAUNCH_CONTEXT_SCHEMA.to_string(),
             selected_resource: selected_resource.to_string(),
@@ -445,7 +445,7 @@ pub(crate) fn issue_home_projection_launch_token_with_context_at(
     )
 }
 
-fn issue_home_launch_token_at(
+pub(in crate::api) fn issue_home_launch_token_at(
     data_dir: &std::path::Path,
     launch_context: &HomeLaunchContext,
     context: &HomeLaunchTokenContext,
