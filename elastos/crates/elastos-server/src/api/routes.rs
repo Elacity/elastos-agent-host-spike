@@ -274,42 +274,23 @@ fn principal_from_launch_request(
     let launch_grant = launch_grant
         .map(|grant| grant.trim().to_string())
         .filter(|grant| !grant.is_empty());
-    if launch_grant.is_none() {
-        return Ok((None, None));
-    }
-    if data_dir.is_none() {
+    if launch_grant.is_some() && data_dir.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
             "principal launch grant unavailable".to_string(),
         ));
     }
-    let capsule_name = launch_capsule_name(capsule_dir)?;
-    let principal = principal_from_capsule_name(data_dir, &capsule_name, launch_grant)?;
-    Ok((principal, Some(capsule_name)))
-}
-
-fn launch_capsule_name(capsule_dir: &std::path::Path) -> Result<String, (StatusCode, String)> {
-    let manifest_path = capsule_dir.join("capsule.json");
-    let bytes = elastos_common::capsule_manifest_file::read(&manifest_path).map_err(|err| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("read capsule manifest for launch grant: {err}"),
-        )
-    })?;
-    let manifest: elastos_common::CapsuleManifest =
-        serde_json::from_slice(&bytes).map_err(|err| {
+    let capsule_name = crate::agent_admission::walk_launch(capsule_dir)
+        .map_err(|err| {
             (
                 StatusCode::BAD_REQUEST,
-                format!("parse capsule manifest for launch grant: {err}"),
+                format!("launch_name_not_walked: {err}"),
             )
-        })?;
-    if manifest.name.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "capsule manifest name is required for launch grant".to_string(),
-        ));
-    }
-    Ok(manifest.name)
+        })?
+        .manifest
+        .name;
+    let principal = principal_from_capsule_name(data_dir, &capsule_name, launch_grant)?;
+    Ok((principal, Some(capsule_name)))
 }
 
 /// The body of `DELETE /api/capsules/:id`: an optional reason (M1-R A10-R).
@@ -423,14 +404,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn launch_without_grant_stays_principal_less() {
+    fn launch_without_grant_stays_principal_less_and_keeps_walked_name() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "chat-wasm");
 
         let principal =
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, None).unwrap();
 
-        assert_eq!(principal, (None, None));
+        assert_eq!(principal, (None, Some("chat-wasm".to_string())));
     }
 
     #[test]
@@ -540,15 +521,15 @@ pub(crate) mod tests {
         let err =
             principal_from_launch_request(Some(dir.path()), &capsule_dir, None, grant).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        let expected = "parse capsule manifest for launch grant: unknown field `cid`";
+        let expected =
+            "launch_name_not_walked: parse the launching capsule's manifest: unknown field `cid`";
         assert!(err.1.starts_with(expected), "{}", err.1);
     }
 
-    /// `POST /api/capsules` without a grant, for a pinned manifest: the
-    /// request reaches the launch entry, whose parse refuses it. Nothing is
-    /// launched, so no launch is written to the audit log.
+    /// A grantless folder still walks before launch. The pinned manifest is
+    /// refused at that walk, so the launch entry is never reached.
     #[tokio::test]
-    async fn a_launch_without_a_grant_stops_at_the_launch_entry_for_a_pinned_requirement() {
+    async fn a_launch_without_a_grant_stops_at_the_walk_for_a_pinned_requirement() {
         use crate::runtime::tests::{test_runtime, write_fixture_capsule, PINNED_MANIFEST};
         let (runtime, temp) = test_runtime().await;
         runtime
@@ -573,7 +554,8 @@ pub(crate) mod tests {
             panic!("a pinned manifest was launched");
         };
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        let expected = "Invalid manifest: Failed to parse capsule.json: unknown field `cid`";
+        let expected =
+            "launch_name_not_walked: parse the launching capsule's manifest: unknown field `cid`";
         assert!(message.starts_with(expected), "{message}");
         assert!(audit_log.recent_events(2).is_empty());
     }
@@ -7238,6 +7220,8 @@ pub struct OpenLaunchResponse {
     id: String,
     page: String,
     entrypoint: String,
+    content_name: String,
+    binding: String,
 }
 
 pub async fn open_launch(
@@ -7251,12 +7235,8 @@ pub async fn open_launch(
         StatusCode::SERVICE_UNAVAILABLE,
         "no data folder for launches".to_string(),
     ))?;
-    let person = super::gateway::require_internal_shell_launch_grant_for_any_context(
-        &data_dir,
-        &headers,
-        &[super::gateway::HOME_CAPSULE_ID],
-    )
-    .map_err(|err| (StatusCode::UNAUTHORIZED, err.to_string()))?;
+    let person = super::gateway::require_internal_shell_content_open_context(&data_dir, &headers)
+        .map_err(|err| (StatusCode::UNAUTHORIZED, err.to_string()))?;
     match runtime
         .open_for_page(&data_dir, &req.cid, person.principal_id())
         .await
@@ -7265,6 +7245,8 @@ pub async fn open_launch(
             id: opened.id,
             page: opened.page,
             entrypoint: opened.entrypoint,
+            content_name: opened.content_name,
+            binding: opened.binding,
         })),
         Err(OpenRefusal::Start(refusal)) => Err((
             StatusCode::BAD_REQUEST,
@@ -7299,21 +7281,38 @@ pub async fn open_launch(
 }
 
 /// Who reads a kept launch: the page's own launch token, bound to
-/// `elastos://launch/<id>` with the page the launch was kept for as its
+/// `elastos://launch/<id>/<content>/<binding>` with the page the launch was kept for as its
 /// executable, gives the person. Nothing else does.
 fn kept_launch_reader(
     runtime: &Runtime,
     data_dir: Option<&std::path::Path>,
     headers: &HeaderMap,
     id: &str,
-) -> Option<(String, String)> {
-    let page = runtime.kept_launch_page(id)?;
-    let bound = format!("elastos://launch/{id}");
+) -> Result<Option<(String, String)>, &'static str> {
+    let Some(page) = runtime.kept_launch_page(id) else {
+        return Ok(None);
+    };
+    let Some(content_name) = runtime.kept_launch_content_name(id) else {
+        return Ok(None);
+    };
+    let Some(binding) = runtime.kept_launch_binding(id) else {
+        return Ok(None);
+    };
+    let bound = format!("elastos://launch/{id}/{content_name}/{binding}");
     let token = super::gateway::require_internal_shell_projection_context(
-        data_dir?, headers, &bound, &page,
+        data_dir.ok_or("not_found")?,
+        headers,
+        &bound,
+        &page,
     )
-    .ok()?;
-    Some((token.principal_id().to_string(), page))
+    .map_err(|err| {
+        if err.to_string().contains("kept_launch_grant_mismatch") {
+            "kept_launch_grant_mismatch"
+        } else {
+            "not_found"
+        }
+    })?;
+    Ok(Some((token.principal_id().to_string(), page)))
 }
 
 /// The answer to a read of a kept launch: its bytes, never stored by the
@@ -7341,12 +7340,17 @@ pub async fn kept_launch_output(
     axum::extract::Path((id, name)): axum::extract::Path<(String, String)>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let read = kept_launch_reader(&runtime, data_dir.as_deref(), &headers, &id).and_then(
-        |(person, page)| {
-            let what = crate::page_launch::KeptRead::Output(&name);
-            runtime.read_kept_launch(&id, &person, &page, what)
-        },
-    );
+    let reader = match kept_launch_reader(&runtime, data_dir.as_deref(), &headers, &id) {
+        Ok(reader) => reader,
+        Err("kept_launch_grant_mismatch") => {
+            return (StatusCode::FORBIDDEN, "kept_launch_grant_mismatch").into_response()
+        }
+        Err(_) => None,
+    };
+    let read = reader.and_then(|(person, page)| {
+        let what = crate::page_launch::KeptRead::Output(&name);
+        runtime.read_kept_launch(&id, &person, &page, what)
+    });
     kept_launch_answer(read)
 }
 
@@ -7359,12 +7363,17 @@ pub async fn kept_launch_content(
     axum::extract::Path((id, path)): axum::extract::Path<(String, String)>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let read = kept_launch_reader(&runtime, data_dir.as_deref(), &headers, &id).and_then(
-        |(person, page)| {
-            let what = crate::page_launch::KeptRead::Content(&path);
-            runtime.read_kept_launch(&id, &person, &page, what)
-        },
-    );
+    let reader = match kept_launch_reader(&runtime, data_dir.as_deref(), &headers, &id) {
+        Ok(reader) => reader,
+        Err("kept_launch_grant_mismatch") => {
+            return (StatusCode::FORBIDDEN, "kept_launch_grant_mismatch").into_response()
+        }
+        Err(_) => None,
+    };
+    let read = reader.and_then(|(person, page)| {
+        let what = crate::page_launch::KeptRead::Content(&path);
+        runtime.read_kept_launch(&id, &person, &page, what)
+    });
     kept_launch_answer(read)
 }
 
@@ -7386,6 +7395,17 @@ pub(crate) mod kept_launch_test_tokens {
         let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
         super::super::gateway::issue_home_launch_token_with_context(data_dir, "home", &context)
             .unwrap()
+    }
+
+    pub(crate) fn shell(data_dir: &std::path::Path) -> String {
+        let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
+        super::super::gateway::issue_home_projection_launch_token_with_context(
+            data_dir,
+            "home",
+            "home-shell",
+            &context,
+        )
+        .unwrap()
     }
 
     /// A page's token bound to `resource`, with `page` as its executable.

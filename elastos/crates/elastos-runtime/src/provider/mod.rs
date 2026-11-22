@@ -25,6 +25,8 @@ mod seccomp_program;
 pub use bridge::{
     CapsuleProvider, Confined, ProviderBridge, ProviderConfig as BridgeProviderConfig,
 };
+#[cfg(target_os = "macos")]
+pub use checked_executable::recover_verified_copies;
 pub use checked_executable::CheckedExecutable;
 pub use registry::{
     decode_provider_stream_payload, EntryType, LocalIpfsCapacityObservation, Provider,

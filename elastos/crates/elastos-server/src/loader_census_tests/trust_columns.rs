@@ -111,6 +111,29 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
+        // The macOS confined start checks the storage root's identity and
+        // wraps the provider in a Seatbelt profile. Neither checks the
+        // executable's bytes; the caller's admission does that.
+        TrustColumn {
+            file: "elastos-runtime/src/provider/os_entry.rs",
+            function: "macos_command",
+            call: "command",
+            class: "n/a",
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["Command::new", "(launcher)"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-runtime/src/provider/os_entry.rs",
+            function: "macos_start",
+            call: "spawn()",
+            class: "n/a",
+            trust_root: "none",
+            verified_when: "never",
+            evidence: [".spa", "wn()"].concat(),
+            os_path: "",
+        },
         TrustColumn {
             file: "elastos-server/src/agent_admission.rs",
             function: "verify_agent_host",
@@ -321,6 +344,8 @@ fn columns() -> Vec<TrustColumn> {
             evidence: [".start_b", "y_bundle("].concat(),
             os_path: "",
         },
+        // Custody provisioning requires a signed digest before command
+        // creation; the source-Home dev_mode path is refused before spawn.
         TrustColumn {
             file: "elastos-server/src/protected_content_config.rs",
             function: "provision_custody_node_with_installed_provider",
@@ -656,8 +681,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "shell_capsule_command",
             call: "command",
             class: "other",
-            trust_root: "release-signature",
-            verified_when: "at-every-start",
+            trust_root: "none",
+            verified_when: "never",
             evidence: ["Command::new", "(shell_path)"].concat(),
             os_path: "",
         },
@@ -699,6 +724,19 @@ fn columns() -> Vec<TrustColumn> {
             trust_root: "components-json-in-data-dir",
             verified_when: "at-every-start",
             evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        // start_did_provider admits the exact binary through
+        // verify_installed_component_start and pins that signed digest.
+        // A Home with no signed digest, including dev_mode, is refused.
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "start_did_provider",
+            call: concat!("ProviderBridge::spawn", "_confined"),
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBridge::", "spawn_confined("].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1324,7 +1362,7 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
     let mut census = BTreeSet::new();
     for row in &listed {
         assert!(
-            census.insert((row.file, row.function, row.call)),
+            census.insert((row.file, row.function, row.call.as_str())),
             "duplicate census key"
         );
     }
@@ -1335,7 +1373,7 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         assert!(census.contains(&key), "overlay lacks census row: {key:?}");
         let row = listed
             .iter()
-            .find(|row| (row.file, row.function, row.call) == key)
+            .find(|row| (row.file, row.function, row.call.as_str()) == key)
             .unwrap();
         if row.kind == "host process" {
             assert!(
@@ -1480,6 +1518,12 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             ["ProviderBridge::", "spawn(&path, did_config)"].concat(),
+            0,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "start_did_provider",
+            ["ProviderBridge::", "spawn_confined("].concat(),
             1,
         ),
         (
@@ -1581,23 +1625,23 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 101);
-    assert_eq!(classes.get("n/a"), Some(&52));
+    assert_eq!(columns.len(), 104);
+    assert_eq!(classes.get("n/a"), Some(&55));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&53));
+    assert_eq!(roots.get("none"), Some(&56));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&24));
     assert_eq!(roots.get("staged-cid"), Some(&8));
     assert_eq!(times.get("at-every-start"), Some(&31));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
-    assert_eq!(times.get("never"), Some(&53));
-    assert_eq!(to_gate, 30);
+    assert_eq!(times.get("never"), Some(&56));
+    assert_eq!(to_gate, 31);
 }
 
 #[test]
@@ -1612,7 +1656,8 @@ fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
         let column = columns
             .iter()
             .find(|column| {
-                (column.file, column.function, column.call) == (row.file, row.function, row.call)
+                (column.file, column.function, column.call)
+                    == (row.file, row.function, row.call.as_str())
             })
             .unwrap();
         assert_eq!(column.trust_root, "none");
@@ -1623,6 +1668,15 @@ fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
 #[test]
 fn installed_component_start_callers_keep_the_signed_gate() {
     let sources = source::production_sources();
+    let browser = &sources["elastos-server/src/setup/browser_config.rs"];
+    let browser_code = source::code_only(browser);
+    let start_gate = ["verify_installed_", "component_start("].concat();
+    assert!(
+        browser
+            .match_indices(&start_gate)
+            .all(|(at, _)| { source::enclosing_fn(&browser_code, at) != "browser_available" }),
+        "browser_available remains pure; the catalogue host check owns release verification"
+    );
     for (file, function) in [
         ("elastos-server/src/home_cmd.rs", "run_home_cli_renderer"),
         ("elastos-server/src/main.rs", "serve_web_capsule"),
@@ -1653,6 +1707,22 @@ fn installed_component_start_callers_keep_the_signed_gate() {
                 == "provision_custody_node_with_installed_provider"
         }),
         "custody start must admit the resolver's selected binary"
+    );
+    let custody_code = source::code_only(custody);
+    let guard = "prepared.signed_checksum()?;";
+    let guard_at = custody_code
+        .find(guard)
+        .expect("custody start lost signed-digest guard");
+    assert_eq!(
+        source::enclosing_fn(&custody_code, guard_at),
+        "provision_custody_node_with_installed_provider"
+    );
+    let spawn_at = custody_code
+        .find("let mut child = command")
+        .expect("custody spawn moved");
+    assert!(
+        guard_at < spawn_at,
+        "custody digest guard moved after spawn"
     );
 }
 
@@ -1701,7 +1771,7 @@ fn dev_opt_in_start_is_one_honest_row_behind_the_installed_release() {
         let release = at("let Some(source) = installed_release_source(data_dir)? else {");
         let opt_in = at("if !source_home_dev_mode(data_dir) {");
         let unchecked = at(row.evidence);
-        let signed = at("read_signed_release(data_dir, &runtime, &source, false)");
+        let signed = at("read_signed_release(data_dir, &runtime, &source, false, true)");
         assert!(release < opt_in && opt_in < unchecked && unchecked < signed);
     }
     // No other production code starts a component unchecked.

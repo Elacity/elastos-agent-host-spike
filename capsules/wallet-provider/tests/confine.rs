@@ -2113,66 +2113,31 @@ fn model_inert_bindings(name: &str) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Lab stand-in for the Runtime's provider launch, not the Runtime.
-///
-/// This function is a lane copy that is to move under the one shared stand-in,
-/// `lab/agent-conformance/standin-runtime/` (owned by cx-agent-conformance),
-/// per Flint and Rong, 2026-10-27 19:25; the move is not done. Draft PR #309
-/// at `513988ebd` names no provider-launch ask, a gap routed to Flint, so this
-/// function copies `ProviderBridge::spawn`'s inputs instead of an RA route.
-///
-/// It copies the inputs of `ProviderBridge::spawn(binary_path, config)` with
-/// `ProviderConfig.base_path` (read only, in `elastos/`), plus the provider
-/// name, the host report, the one confinement policy and the declared rights
-/// the lab generator profiles from. `Ok(ConfinedProvider)` is Started: the
-/// provider answered `init` `ok` under the generated profile. `Err(String)` is
-/// Refused: no provider is returned, and the reason says why.
-///
-/// It refuses, in this order:
-///
-/// 1. a host that `standin_host_refusal` refuses under this policy, with that
-///    one reason, before any tool, binary or profile check, so a refused host
-///    writes no profile and creates no storage root. A host that reports a
-///    missing primitive is refused whatever its OS. The reason starts
-///    `{name} start on {os} is refused:` and holds the words of its own case
-///    for a host that reports a primitive unavailable, for an OS with no
-///    confinement design, for a simulated Linux host that reports nothing
-///    missing under a `Seatbelt` policy, and for a host that is not Linux under
-///    a `Seccomp` policy;
-/// 2. an absent `sandbox_exec`, with a reason that names the OS and the path;
-/// 3. a present `sandbox_exec` that is not `SANDBOX_EXEC`, with a reason that
-///    names the OS, the given path and `SANDBOX_EXEC`, so the tool the stand-in
-///    checks is the one `start_under` runs;
-/// 4. a `Seccomp` or `Landlock` policy whose list was generated for another
-///    provider, with a reason that names both providers, and a `Landlock`
-///    policy whose ruleset was generated for another provider, with a reason
-///    that names both providers;
-/// 5. a `binary_path` that is not a file, with a reason that names the
-///    provider and that path, before any profile is written;
-/// 6. a refusal of `write_generated_profile`, returned unchanged;
-/// 7. a start that `sandbox-exec` refuses, with the `try_send` failure;
-/// 8. an `init` that does not answer `ok`, with the answer.
-///
-/// `policy` is the one input that says how the start is confined. A `Seatbelt`
-/// policy writes the profile the one lab writer generates from the declared
-/// rights into `profile_dir`, creates the shared ancestors, starts
-/// `binary_path` under that profile through `start_under` with the canonical
-/// bindings for `name`, `base_path` and `binary_path`, and never starts
-/// `binary_path` outside `sandbox-exec`. A `Seccomp` policy writes no profile
-/// and starts that same `binary_path` through the same `ConfinedProvider::spawn`
-/// by `start_under_seccomp`, which installs the allow list in `pre_exec`; on a
-/// host without a filter that call refuses the start by name, so no provider
-/// starts unconfined on any host this build runs on. A `Landlock` policy starts
-/// through `start_under_landlock`, the same launch with the ruleset installed
-/// before the filter. Before that fork the launcher creates and syncs
-/// `STORAGE_ROOT`: a path rule needs a descriptor on the path, and the actor
-/// that creates the root publishes its entry. The provider does not publish a
-/// directory another actor created. A failure there refuses the start and names
-/// the path. Both then send `init` with
-/// the provider config from `provider_init_config`. `name` and `binary_path`
-/// are inputs rather than this provider's constants, so another provider's
-/// binary can start through this same function.
 fn standin_spawn_confined_provider(
+    host: StandinHost,
+    policy: StandinPolicy<'_>,
+    name: &str,
+    binary_path: &Path,
+    base_path: &Path,
+    declared: &Value,
+    profile_dir: &Path,
+) -> Result<ConfinedProvider, String> {
+    agent_conformance::standin_runtime::provider_launcher::standin_spawn_confined_provider(
+        host,
+        policy,
+        name,
+        binary_path,
+        base_path,
+        declared,
+        profile_dir,
+        standin_spawn_confined_provider_body,
+    )
+}
+
+/// The confinement decisions exercised by every lab stand-in journey.
+/// The lab launcher calls this body so registered plants in this file change
+/// the path that starts each provider.
+fn standin_spawn_confined_provider_body(
     host: StandinHost,
     policy: StandinPolicy<'_>,
     name: &str,
@@ -5745,6 +5710,59 @@ fn standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host() {
     }
 }
 
+/// The model leg's host refusal is checked without a sandbox process. A host
+/// with no design or a missing primitive must stop before binary or profile IO.
+#[test]
+fn model_standin_refuses_unconfinable_hosts_before_start() {
+    let declared = read_declared_rights(MODEL_PROVIDER, &declared_rights_path(MODEL_PROVIDER))
+        .expect("model declared rights");
+    let hosts = [
+        (StandinHost::reporting("plan9"), "has no confinement design"),
+        (
+            StandinHost::linux_missing(StandinPrimitive::Landlock),
+            "the kernel has no Landlock",
+        ),
+        (
+            StandinHost::linux_missing(StandinPrimitive::UserNamespaces),
+            "user namespaces are turned off",
+        ),
+        (
+            StandinHost::linux_missing(StandinPrimitive::SeccompFilter),
+            "the seccomp filter cannot be installed",
+        ),
+    ];
+    for (host, reason) in hosts {
+        let base = tempfile::tempdir().expect("model refusal root");
+        let profiles = tempfile::tempdir().expect("model profile root");
+        let refused = standin_spawn_confined_provider(
+            host,
+            StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
+            MODEL_PROVIDER,
+            Path::new("/absent-model-provider"),
+            base.path(),
+            &declared,
+            profiles.path(),
+        )
+        .err()
+        .expect("an unconfinable model host must refuse startup");
+        assert!(
+            refused.contains(MODEL_PROVIDER) && refused.contains(reason),
+            "model host refusal must name its cause: {refused}"
+        );
+        assert!(
+            fs::read_dir(profiles.path())
+                .expect("model profile directory")
+                .next()
+                .is_none(),
+            "a refused model start must write no profile"
+        );
+        assert!(
+            !provider_storage_root(MODEL_PROVIDER, base.path()).exists(),
+            "a refused model start must create no storage root"
+        );
+    }
+}
+
 /// The class one suite case must answer with, carried by the entry the suite
 /// pushes for that case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7312,6 +7330,24 @@ fn standin_oracle_start(name: &str, binary: &Path, root: &Path) -> ConfinedProvi
     ConfinedProvider::start_under(&confine_oracle_path(name), &paths, binary)
 }
 
+fn standin_b3_start(
+    name: &str,
+    binary: &Path,
+    root: &Path,
+    declared: &Value,
+    profile_dir: &Path,
+) -> Result<ConfinedProvider, String> {
+    standin_spawn_confined_provider(
+        StandinHost::reporting(std::env::consts::OS),
+        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
+        name,
+        binary,
+        root,
+        declared,
+        profile_dir,
+    )
+}
+
 /// One provider's leg of the B3 journey, from its committed declared-rights
 /// file to its permitted and denied suite record.
 ///
@@ -7340,16 +7376,9 @@ fn standin_b3_journey(provider: &B3Provider) {
     let standin_root = resolved(standin_fixture.path());
     let profile_fixture = tempfile::tempdir().expect("temporary profile root");
     let profile_dir = resolved(profile_fixture.path());
-    let mut standin = standin_spawn_confined_provider(
-        StandinHost::reporting(std::env::consts::OS),
-        StandinPolicy::Seatbelt(Path::new(SANDBOX_EXEC)),
-        name,
-        provider.binary,
-        &standin_root,
-        &declared,
-        &profile_dir,
-    )
-    .unwrap_or_else(|err| panic!("{name} B3 journey: the stand-in start is refused: {err}"));
+    let binary = provider.binary;
+    let mut standin = standin_b3_start(name, binary, &standin_root, &declared, &profile_dir)
+        .unwrap_or_else(|err| panic!("{name} B3 journey: the stand-in start is refused: {err}"));
 
     let launched = read_launched_profile(name, &profile_dir)
         .unwrap_or_else(|err| panic!("{name} B3 journey: {err}"));
@@ -7492,6 +7521,61 @@ fn standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite() {
     for provider in &providers {
         standin_b3_journey(provider);
     }
+}
+
+/// The lab journey must keep its stand-in path when a sandbox run is unavailable.
+/// A one-line replacement of the B3 start with `standin_oracle_start` fails
+/// here before an oracle-only journey can be counted as a stand-in journey.
+#[test]
+fn standin_journeys_keep_the_shared_launcher_path() {
+    let source = include_str!("confine.rs");
+    let function = |name: &str| {
+        let marker = format!("\nfn {name}(");
+        let start = source
+            .find(&marker)
+            .unwrap_or_else(|| panic!("the {name} journey must exist"));
+        let body = &source[start + marker.len()..];
+        let end = body
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("the {name} journey must close"));
+        &body[..end]
+    };
+    assert!(
+        function("standin_b3_journey").contains("let mut standin = standin_b3_start(name, binary,"),
+        "the B3 journey must start through the shared launcher"
+    );
+    for caller in [
+        "standin_b3_start",
+        "standin_confined_journey",
+        "standin_refusals_for",
+    ] {
+        assert!(
+            function(caller).contains("standin_spawn_confined_provider("),
+            "{caller} must call the shared launcher"
+        );
+    }
+    let adapter = function("standin_spawn_confined_provider");
+    assert!(
+        adapter.contains(
+            "agent_conformance::standin_runtime::provider_launcher::standin_spawn_confined_provider("
+        ) && adapter.contains("standin_spawn_confined_provider_body,"),
+        "the test adapter must call the lab-owned launcher with the registered plant path"
+    );
+    for journey in [
+        "standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite",
+        "standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host",
+    ] {
+        let body = function(journey);
+        assert!(
+            body.contains("name: MODEL_PROVIDER,") || body.contains("MODEL_PROVIDER,"),
+            "{journey} must include the model provider"
+        );
+    }
+    assert!(
+        function("standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite")
+            .contains("for provider in &providers {\n        standin_b3_journey(provider);\n    }"),
+        "the B3 journey must run the model leg through the same launcher path"
+    );
 }
 
 /// The stand-in start uses the generated profile, not the committed file.

@@ -10,7 +10,7 @@ use crate::start_census_tests as source;
 struct Row {
     file: &'static str,
     function: &'static str,
-    call: &'static str,
+    call: String,
     kind: &'static str,
     checks: &'static str,
     check_id: &'static str,
@@ -20,7 +20,7 @@ struct Row {
 fn row(
     file: &'static str,
     function: &'static str,
-    call: &'static str,
+    call: impl Into<String>,
     kind: &'static str,
     checks: &'static str,
     check_id: &'static str,
@@ -29,7 +29,7 @@ fn row(
     Row {
         file,
         function,
-        call,
+        call: call.into(),
         kind,
         checks,
         check_id,
@@ -40,6 +40,7 @@ fn row(
 /// The authority input is local to the entry, not inherited from a caller's
 /// name. `none` and `checksum` document paths that later slices must gate.
 fn rows() -> Vec<Row> {
+    let confined_spawn = ["ProviderBridge::spawn", "_confined"].concat();
     vec![
         row(
             "elastos-runtime/src/capsule/manager.rs",
@@ -119,6 +120,24 @@ fn rows() -> Vec<Row> {
             "command",
             "host process",
             "CID+DID",
+            "P2-8",
+            1,
+        ),
+        row(
+            "elastos-runtime/src/provider/os_entry.rs",
+            "macos_command",
+            "command",
+            "native provider",
+            "none",
+            "P2-8",
+            1,
+        ),
+        row(
+            "elastos-runtime/src/provider/os_entry.rs",
+            "macos_start",
+            "spawn()",
+            "native provider",
+            "checked storage+Seatbelt profile",
             "P2-8",
             1,
         ),
@@ -613,7 +632,7 @@ fn rows() -> Vec<Row> {
             "shell_capsule_command",
             "command",
             "host process",
-            "checksum",
+            "none",
             "P2-8",
             1,
         ),
@@ -651,7 +670,16 @@ fn rows() -> Vec<Row> {
             "native provider",
             "checksum",
             "P2-8",
-            17,
+            16,
+        ),
+        row(
+            "elastos-server/src/server_infra.rs",
+            "start_did_provider",
+            confined_spawn,
+            "native provider",
+            "admitted binary+OS gate+confined storage",
+            "P2-8",
+            1,
         ),
         row(
             "elastos-server/src/server_infra.rs",
@@ -1024,15 +1052,13 @@ fn every_executable_loader_has_an_authority_row() {
                 | "CID"
                 | "DID"
                 | "checksum"
+                | "admitted binary+OS gate+confined storage"
+                | "checked storage+Seatbelt profile"
                 | "none"
                 | "admitted rights+checked directory+bound executable"
         ));
         assert!(!row.kind.is_empty());
-        let key = (
-            row.file.to_string(),
-            row.function.to_string(),
-            row.call.to_string(),
-        );
+        let key = (row.file.to_string(), row.function.to_string(), row.call);
         assert!(listed.insert(key.clone()), "duplicate loader row: {key:?}");
         assert_eq!(
             found.get(&key).copied().unwrap_or(0),
@@ -1131,6 +1157,16 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
             "elastos-server/src/binaries.rs",
             "checked_native_provider_with_data_dir",
             "verify_installed_component_start(",
+        ),
+        (
+            "elastos-server/src/binaries.rs",
+            "checked_executable",
+            "verify_installed_component_start(",
+        ),
+        (
+            "elastos-server/src/binaries.rs",
+            "checked_executable",
+            "signed_checksum()",
         ),
         // A hosted plane admits against the Home it serves, never the
         // default Home.

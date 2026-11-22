@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { readChatSummary, readLaunchToken, redactLaunchTokens } from "./chat-summary-smoke-client.mjs";
+
 const CAMOFOX_BASE = process.env.CAMOFOX_BASE || "http://127.0.0.1:9377";
 const ELASTOS_BASE_URL = (process.env.ELASTOS_BASE_URL || "http://127.0.0.1:8090").replace(/\/+$/, "");
 const HOME_URL = process.env.HOME_URL || `${ELASTOS_BASE_URL}/apps/home/`;
@@ -193,8 +195,7 @@ async function launchShellTarget(tabId, target) {
 
 async function inboxAction(tabId, actionId) {
   const launched = await launchShellTarget(tabId, "inbox");
-  const token = new URL(launched.route, HOST_ORIGIN).searchParams.get("home_token");
-  assert(token, "Inbox launch did not return a home token", launched);
+  const token = readLaunchToken(launched.route, HOST_ORIGIN, "inbox");
   return evaluate(
     HOME_USER_ID,
     tabId,
@@ -214,12 +215,17 @@ async function inboxAction(tabId, actionId) {
 }
 
 async function cleanupRoomState(tabId) {
-  const summary = await browserJson(HOME_USER_ID, tabId, "/api/apps/chat-room/summary");
+  const summary = await chatSummary(tabId);
   if (Array.isArray(summary.pending_requests)) {
     for (const request of summary.pending_requests) {
       await inboxAction(tabId, `room-deny-request:${request.request_id}`);
     }
   }
+}
+
+async function chatSummary(tabId) {
+  const launched = await launchShellTarget(tabId, "chat-room");
+  return readChatSummary(launched.route, HOST_ORIGIN);
 }
 
 async function shellFrameState(tabId) {
@@ -333,8 +339,9 @@ async function main() {
       return state.badge === "Waiting";
     }, 12_000, 500);
 
+    const chatLaunch = await launchShellTarget(shellTab, "chat-room");
     const requestId = await waitForValue(async () => {
-      const summary = await browserJson(HOME_USER_ID, shellTab, "/api/apps/chat-room/summary");
+      const summary = await readChatSummary(chatLaunch.route, HOST_ORIGIN);
       const request = summary.pending_requests?.find((entry) => entry.display_name === "Guest QA");
       return request?.request_id || null;
     }, 12_000, 500);
@@ -399,9 +406,9 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error.stack || error.message || String(error));
+  console.error(redactLaunchTokens(error.stack || error.message || String(error)));
   if (error.details) {
-    console.error(JSON.stringify(error.details, null, 2));
+    console.error(redactLaunchTokens(JSON.stringify(error.details, null, 2)));
   }
   process.exitCode = 1;
 });

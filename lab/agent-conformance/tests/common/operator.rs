@@ -16,7 +16,7 @@ pub struct Operator<'a> {
 impl<'a> Operator<'a> {
     pub fn start(home: &'a ThrowawayHome) -> Result<Self, Box<dyn std::error::Error>> {
         let runtime = runtime_under_test()?;
-        super::write_operator_home(home)?;
+        super::write_operator_home(home, &runtime.binary)?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
         let port = listener.local_addr()?.port();
         drop(listener);

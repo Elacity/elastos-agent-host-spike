@@ -266,7 +266,7 @@ pub(crate) fn verify_agent_host(
     // The release envelope and its components, read and verified against the
     // configured publisher keys. Its `signer_did` is the key that verified it.
     let (release, components) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false, false)?;
     let release: serde_json::Value = serde_json::from_slice(&release)?;
     let Some(release_signer) = release["signer_did"].as_str() else {
         return Err(refuse("is from a release with no signer"));

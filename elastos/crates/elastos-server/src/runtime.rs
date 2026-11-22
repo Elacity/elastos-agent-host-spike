@@ -1701,6 +1701,7 @@ impl Runtime {
             }
             BundleKind::Program | BundleKind::Page => None,
         };
+        let content_name = launch.as_ref().map(|_| admitted.manifest().name.clone());
         let pins = admitted.take_pins();
         // Every bundle admitted so far, by its CID: the name it carries, the
         // deepest place a pin has reached it at, and its own pins. The
@@ -1846,6 +1847,7 @@ impl Runtime {
             accepted,
             launch,
             page: kept_page,
+            content_name,
         })
     }
 

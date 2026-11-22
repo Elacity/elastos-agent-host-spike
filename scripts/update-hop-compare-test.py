@@ -1079,6 +1079,43 @@ class CliFixtureTests(unittest.TestCase):
         self.assertEqual(cleanup["remaining_pids"], [])
         self.assertFalse(cleanup["errors"])
 
+    def test_cleanup_rechecks_fd_exec_provider_hash_before_signalling(self):
+        class Exited:
+            pid, returncode = 33000, 0
+            def poll(self):
+                return 0
+            def wait(self, timeout=None):
+                return 0
+
+        executable = self.root / "payload/kubo"
+        expected_hash = observer.digest(executable)
+        manager = observer.CliProcesses(self.root)
+        manager.processes = [Exited()]
+        manager.roots[str(executable)] = {expected_hash}
+        row = {"pid": 33001, "parent": 1, "group": 33000, "command": "/proc/self/fd/9"}
+        rows = [row]
+        def kill(pid, sig):
+            rows.clear()
+        with patch.object(observer, "cli_census", side_effect=lambda: list(rows)), \
+             patch.object(observer.os, "readlink", return_value=str(executable)) as readlink, \
+             patch.object(observer.os, "kill", side_effect=kill) as pids, patch.object(observer.time, "sleep"):
+            cleanup = manager.cleanup()
+        self.assertFalse(cleanup["errors"])
+        self.assertEqual(cleanup["remaining_pids"], [])
+        self.assertEqual({call.args[0] for call in pids.call_args_list}, {row["pid"]})
+        readlink.assert_called()
+
+        executable.write_bytes(b"changed installed provider")
+        manager = observer.CliProcesses(self.root)
+        manager.processes = [Exited()]
+        manager.roots[str(executable)] = {expected_hash}
+        with patch.object(observer, "cli_census", return_value=[row]), \
+             patch.object(observer.os, "readlink", return_value=str(executable)), \
+             patch.object(observer.os, "kill") as pids, patch.object(observer.time, "sleep"):
+            cleanup = manager.cleanup()
+        pids.assert_not_called()
+        self.assertTrue(any("cleanup executable hash differs" in error for error in cleanup["errors"]))
+
     def test_paths_private_json_and_phase_mapping_are_refused(self):
         with self.assertRaisesRegex(ValueError, "noncanonical"):
             observer.cli_path(self.root, "payload/../outside")
@@ -1180,6 +1217,14 @@ class CliFixtureTests(unittest.TestCase):
         for name, provides in (("ipfs-provider", "elastos://ipfs/*"), ("localhost-provider", "localhost://*")):
             registry["external"][name]["provider_runtime"] = {"role": "provider", "substrate": "native",
                 "runtime_abi": "elastos.provider-stdio/v1", "execution": "native-provider", "provides": provides}
+        if observer.CLI_DID_SETUP:
+            did = support / "capsules/did-provider/capsule.json"
+            did.parent.mkdir(parents=True, exist_ok=True)
+            observer.write(did, {"schema": "elastos.capsule/v1", "name": "did-provider", "role": "provider",
+                                 "provides": "elastos://did/*", "authority": {"capabilities": []}})
+            registry["external"]["did-provider"]["provider_runtime"] = {
+                "role": "provider", "substrate": "native", "runtime_abi": "elastos.provider-stdio/v1",
+                "execution": "native-provider", "provides": "elastos://did/*"}
         registry["external"]["home"] = {"install_path": "capsules/home", "description": "Qualified source Home",
             "platforms": {"*": {"release_path": "home.tar.gz", "extract_path": "home", "install_path": "capsules/home"}}}
         registry["external"]["custody-provider"] = {"install_path": "bin/custody-provider", "platforms": {
@@ -1270,7 +1315,8 @@ class CliFixtureTests(unittest.TestCase):
             entries[name], capsule_paths, _ = observer.cli_qualified_home(support, "darwin-arm64", name)
             paths.extend(capsule_paths)
         mapping = {}
-        for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths]:
+        did_paths = [support / "capsules/did-provider/capsule.json"] if observer.CLI_DID_SETUP else []
+        for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths, *did_paths]:
             target = path.relative_to(support).as_posix()
             mapping[target] = self.add("setup/" + target, path.read_bytes(), 0o755 if target.startswith("bin/") else 0o600)
         mapping[observer.CLI_OPENER] = self.add("setup/opener", b"fixture no-op utility", 0o700)
@@ -1297,6 +1343,8 @@ class CliFixtureTests(unittest.TestCase):
                 components["capsules"][name] = {**entries[name], "cid": binding["cid"],
                     "sha256": "sha256:" + binding["sha256"], "size": binding["bytes"]}
             components["external"][name] = {"install_path": target, "platforms": {"darwin-arm64": selected}}
+            if name == "did-provider":
+                components["external"][name]["provider_runtime"] = observer.cli_json(support / "components.json")["external"][name]["provider_runtime"]
         if metadata_path is not None:
             qualified = observer.cli_json(support / "components.json")
             descriptor = qualified["external"]["localhost-provider"]
@@ -1361,6 +1409,58 @@ class CliFixtureTests(unittest.TestCase):
                 self.assertTrue(member.isfile())
                 self.assertEqual((member.uid, member.gid, member.mtime), (0, 0, 0))
                 self.assertEqual(package.extractfile(member).read(), (self.root / expected[member.name]).read_bytes())
+
+    def test_did_helper_manifest_is_pinned_home_support_after_setup(self):
+        self.setup_fixture(initial_home=True)
+        mapping = observer.cli_admit_setup(self.root, self.manifest)
+        observer.cli_admit_home_support(self.root, self.manifest)
+        target = "capsules/did-provider/capsule.json"
+        self.assertIn("bin/did-provider", mapping)
+        self.assertNotIn(target, mapping)
+        self.assertIn(target, self.manifest["consumer"]["files"])
+        self.assertIn(target, self.manifest["initial_home"]["files"])
+        installed = self.root / "installed-support"
+        installed.mkdir()
+        observer.cli_copy(self.root, self.manifest,
+                          {target: self.manifest["consumer"]["files"][target]}, installed)
+        self.assertEqual(observer.digest(installed / target),
+                         self.manifest["files"][self.manifest["consumer"]["files"][target]]["sha256"])
+        missing = copy.deepcopy(self.manifest)
+        del missing["consumer"]["files"][target]
+        with self.assertRaisesRegex(ValueError, "DID helper manifest is absent"):
+            observer.cli_admit_setup(self.root, missing)
+
+    def test_cli_initial_home_admission_requires_did_manifest_mapping(self):
+        self.setup_fixture(initial_home=True)
+        target = "capsules/did-provider/capsule.json"
+        missing = copy.deepcopy(self.manifest)
+        del missing["consumer"]["files"][target]
+        with self.assertRaisesRegex(ValueError, "installed DID helper manifest is absent from Home support"):
+            observer.cli_admit_home_support(self.root, missing)
+
+    def test_cli_old_support_view_never_inherits_new_did_manifest(self):
+        target = "capsules/did-provider/capsule.json"
+        manifest = {
+            "consumer": {"files": {
+                target: "new-did",
+                "capsules/home/browser/index.html": "new-home",
+                "state/value": "shared",
+            }},
+            "previous": {
+                "setup": {"artifacts": {}},
+                "support": {"capsules/home/browser/index.html": "old-home"},
+                "qualified_capsules": "old-qualified-capsules",
+            },
+            "publications": {"old": {"release": "old-release"}},
+        }
+        old = observer.cli_support_view(manifest, "old")
+        self.assertNotIn(target, old["consumer"]["files"])
+        self.assertEqual(old["consumer"]["files"]["capsules/home/browser/index.html"], "old-home")
+        self.assertEqual(old["consumer"]["files"]["state/value"], "shared")
+
+        manifest["previous"]["support"][target] = "old-did"
+        old = observer.cli_support_view(manifest, "old")
+        self.assertEqual(old["consumer"]["files"][target], "old-did")
 
     def test_setup_admission_refuses_incomplete_or_unmodeled_artifacts(self):
         self.setup_fixture()
@@ -1564,6 +1664,7 @@ class CliFixtureTests(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.assertIn("state/value", copied)
         self.assertIn(observer.CLI_OPENER, copied)
+        self.assertIn("capsules/did-provider/capsule.json", copied)
 
     def test_prepare_refuses_setup_support_drift_before_copying_sentinels(self):
         self.setup_fixture()
@@ -1586,7 +1687,8 @@ class CliFixtureTests(unittest.TestCase):
         support = self.qualified_home_support()
         entry, paths, _ = observer.cli_qualified_home(support, "darwin-arm64")
         mapping = {}
-        for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths]:
+        did_paths = [support / "capsules/did-provider/capsule.json"] if observer.CLI_DID_SETUP else []
+        for path in [*(support / "bin" / name for name in observer.CLI_NATIVE_SETUP), *paths, *did_paths]:
             target = path.relative_to(support).as_posix()
             mapping[target] = self.add("initial/" + target, path.read_bytes(), 0o755 if target.startswith("bin/") else 0o600)
         mapping[observer.CLI_OPENER] = self.add("initial/opener", b"fixture no-op utility", 0o700)
@@ -2294,7 +2396,7 @@ class CliFixtureTests(unittest.TestCase):
                     "old": {"version": pinned}, "new": {"version": "0.8.0-alpha.9"},
                     "previous_release": {"version": pinned},
                     "paths": {"m1-install": {"checks": {**refusals, "initial-home": {
-                        "system": {"provider_warnings": {"new": []},
+                        "system": {"did_provider_started": True, "provider_warnings": {"new": []},
                                    "published_system": {"phase": "updated", "from": pinned, "to": "0.8.0-alpha.9"},
                                    "installer_required": {"phase": "failed", "home_kept": True, "support_unchanged": True},
                                    "stages": {"refused": {"current_version": "0.8.0-alpha.9"},
@@ -2321,11 +2423,15 @@ class CliFixtureTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "cannot install changed support from System"):
                         observer.cli_check_result(result(pinned), linux)
         # Only a Linux hop installs the default Ubuntu account layout.
+        home = lambda value: value["paths"]["m1-install"]["checks"]["initial-home"]  # noqa: E731
         mac = result()
         mac.update(platform="aarch64-darwin")
         mac["paths"]["m2-discovery"]["checks"].pop(observer.CLI_UBUNTU_CASE)
         self.assertEqual(observer.cli_check_result(mac, "aarch64-darwin")["next"], "0.8.0-alpha.10")
-        home = lambda value: value["paths"]["m1-install"]["checks"]["initial-home"]  # noqa: E731
+        mac_skipped = json.loads(json.dumps(mac))
+        home(mac_skipped)["system"]["did_provider_started"] = False
+        with self.assertRaisesRegex(ValueError, "did not start the confined DID helper"):
+            observer.cli_check_result(mac_skipped, "aarch64-darwin")
 
         # What alpha.6 recorded: its System refused changed support and kept Home, then its CLI
         # updated. For an alpha.8 pin that is a failure, whether recorded that way or as a restore.
@@ -2339,6 +2445,7 @@ class CliFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "System did not install the release with changed support"):
                 observer.cli_check_result(value, linux)
         faults = {"failed run": lambda value: value.update(status="failed", failure="System did not update"),
+                  "DID helper skipped": lambda value: home(value)["system"].update(did_provider_started=False),
                   "new provider warning": lambda value: home(value)["system"]["provider_warnings"].update(new=["provider refused"]),
                   "same-build hop": lambda value: value.pop("previous_release"),
                   "other old release": lambda value: value["old"].update(version="0.8.0-alpha.7"),
@@ -3224,11 +3331,12 @@ class PreviousReleaseInstallTests(unittest.TestCase):
             target.start()
             self.addCleanup(target.stop)
 
-    def published(self, case, home_components=None):
+    def published(self, case, home_components=None, with_did=False):
         """The pinned release as Runtime installs it, its signed release and components, and the pin."""
         root = self.root / case
         installed, stage, optional = root / "installed", root / "stage", root / "optional"
-        home_components = list(observer.CLI_SETUP_COMPONENTS if home_components is None else home_components)
+        home_components = list((name for name in observer.CLI_SETUP_COMPONENTS if with_did or name not in observer.CLI_DID_SETUP)
+                               if home_components is None else home_components)
         builder = re.search(r"(?ms)^create_capsule_tar\(\) \{\n.*?^\}\n", Path(__file__).with_name("publish-release.sh").read_text())[0]
 
         def put(path, raw, mode):
@@ -3267,6 +3375,14 @@ class PreviousReleaseInstallTests(unittest.TestCase):
             put((installed if name in home_components else optional) / "bin" / name, natives[name], 0o755)
             external[name] = {"install_path": "bin/" + name, "platforms": {self.PLATFORM: entry(
                 natives[name], name + "-" + self.PLATFORM, install_path="bin/" + name)}}
+        if with_did:
+            name = "did-provider"
+            natives[name] = b"native did-provider"
+            put(installed / "bin" / name, natives[name], 0o755)
+            did = observer.cli_json(Path(__file__).resolve().parents[1] / "capsules/did-provider/capsule.json")
+            external[name] = {"install_path": "bin/" + name, "platforms": {self.PLATFORM: entry(
+                natives[name], name + "-" + self.PLATFORM, install_path="bin/" + name)},
+                "provider_runtime": {"provides": did["provides"]}}
         external["localhost-provider"]["capsule_metadata"] = metadata
         # Kubo's upstream archive is not rebuilt; setup's receipts bind what it extracted.
         natives["kubo"] = b"kubo executable"
@@ -3347,6 +3463,28 @@ class PreviousReleaseInstallTests(unittest.TestCase):
             observer.cli_qualified_home(support, self.PLATFORM, name)
         self.assertEqual({name: (support / "bin" / name).read_bytes() for name in fixture["natives"]}, fixture["natives"])
         self.assertFalse((fixture["root"] / "home").exists())
+
+    def test_new_did_helper_is_absent_from_previous_release_but_checked_when_shared(self):
+        old = self.published("before-did")
+        self.install(old)
+        support = old["root"] / "previous/support"
+        components = observer.cli_json(support / "components.json")
+        self.assertNotIn("did-provider", components["external"])
+        self.assertNotIn("did-provider", components["profiles"]["home"]["components"])
+        self.assertFalse((support / "bin/did-provider").exists())
+        self.assertFalse((support / "capsules/did-provider/capsule.json").exists())
+        self.assertIn("did-provider", observer.CLI_SETUP_COMPONENTS)
+
+        shared = self.published("with-did", with_did=True)
+        self.install(shared)
+        shared_support = shared["root"] / "previous/support"
+        self.assertEqual((shared_support / "bin/did-provider").read_bytes(), shared["natives"]["did-provider"])
+        self.assertEqual(observer.cli_json(shared_support / "capsules/did-provider/capsule.json")["name"], "did-provider")
+
+        changed = self.published("with-did-changed", with_did=True)
+        (changed["installed"] / "bin/did-provider").write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "did-provider-.* differs from its signed hash"):
+            self.install(changed)
 
     def test_setup_selects_both_protected_providers_and_custody_like_upstream(self):
         fixture = self.published("setup-argv")

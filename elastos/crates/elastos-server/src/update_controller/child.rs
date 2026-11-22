@@ -333,9 +333,14 @@ pub(crate) fn process_identity(pid: u32) -> io::Result<Option<String>> {
         )));
     }
     let error = io::Error::last_os_error();
+    // libproc removes the birth record as a child exits, even while its PID
+    // remains reserved until wait. KERN_PROC_PID still reports that zombie.
+    if let Some(start) = macos_sysctl_birth(pid)? {
+        return Ok(Some(start));
+    }
     if bytes == 0 && error.raw_os_error() == Some(libc::ESRCH) {
-        // An inaccessible or unreaped process is ambiguous even if libproc
-        // cannot supply its birth record. Signal zero is an existence check.
+        // An inaccessible process remains ambiguous after both kernel views.
+        // Signal zero only proves that the PID has gone away.
         if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0
             && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         {
@@ -347,6 +352,61 @@ pub(crate) fn process_identity(pid: u32) -> io::Result<Option<String>> {
     } else {
         io::Error::other("incomplete update child birth record")
     })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sysctl_birth(pid: u32) -> io::Result<Option<String>> {
+    // The first fields of sys/proc.h's extern_proc. Its first union member is
+    // p_starttime, followed by two pointers, p_flag, p_stat and p_pid.
+    #[repr(C)]
+    struct ProcPrefix {
+        start: libc::timeval,
+        vmspace: *mut libc::c_void,
+        sigacts: *mut libc::c_void,
+        flag: libc::c_int,
+        stat: libc::c_char,
+        pid: libc::pid_t,
+    }
+
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_PID,
+        pid as libc::c_int,
+    ];
+    let mut buffer = [0u64; 512];
+    let mut size = std::mem::size_of_val(&buffer);
+    let result = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) || error.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    if size == 0 {
+        return Ok(None);
+    }
+    if size < std::mem::size_of::<ProcPrefix>() {
+        return Err(io::Error::other("incomplete update child sysctl record"));
+    }
+    let proc = unsafe { buffer.as_ptr().cast::<ProcPrefix>().read_unaligned() };
+    if proc.pid != pid as libc::pid_t {
+        return Err(io::Error::other("update child sysctl PID mismatch"));
+    }
+    Ok(Some(format!(
+        "macos:{}:{}",
+        proc.start.tv_sec, proc.start.tv_usec
+    )))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -591,6 +651,31 @@ mod tests {
             assert!(tokio::time::Instant::now() < deadline, "child did not exit");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sysctl_keeps_the_birth_of_an_unreaped_child() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("60");
+        let child = OwnedChild::spawn(&mut command).unwrap();
+        let pid = child.pid();
+        let birth = process_identity(pid).unwrap().unwrap();
+        assert_eq!(
+            macos_sysctl_birth(pid).unwrap().as_deref(),
+            Some(birth.as_str())
+        );
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) }, 0);
+        assert_eq!(wait_for_exit(&child).await.signal(), Some(libc::SIGKILL));
+        assert_eq!(
+            macos_sysctl_birth(pid).unwrap().as_deref(),
+            Some(birth.as_str())
+        );
+        assert_eq!(
+            process_identity(pid).unwrap().as_deref(),
+            Some(birth.as_str())
+        );
+        drop(child);
     }
 
     #[tokio::test]
