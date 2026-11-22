@@ -3309,7 +3309,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
         "no Home token, nothing opened"
     );
     assert_eq!(home.runtime.kept_launch_count(), 0);
-    let (status, _, body) = send(open(&cid, Some(tokens::home(&data)))).await;
+    let (status, _, body) = send(open(&cid, Some(tokens::shell(&data)))).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let opened: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let (id, page) = (
@@ -3317,6 +3317,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
         opened["page"].as_str().unwrap(),
     );
     assert_eq!(page, "page");
+    let binding = home.runtime.kept_launch_binding(id).unwrap();
     home.runtime.write_kept_output(id, "playlist.json", b"[1]");
 
     let read = |uri: String, token: Option<String>| {
@@ -3329,7 +3330,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     let own = || {
         Some(tokens::page(
             &data,
-            &format!("elastos://launch/{id}"),
+            &format!("elastos://launch/{id}/pictures/{binding}"),
             "page",
         ))
     };
@@ -3347,7 +3348,76 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     .await;
     assert_eq!((status, body), (StatusCode::OK, b"a picture".to_vec()));
 
+    let (status, _, body) = send(open(&cid, Some(tokens::shell(&data)))).await;
+    assert_eq!(status, StatusCode::OK);
+    let second: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    assert_ne!(id, second_id);
+    let (status, _, body) = send(read(
+        format!("/api/launch/{second_id}/content/{ENTRYPOINT}"),
+        own(),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+    let wrong_case = tokens::page(
+        &data,
+        &format!("elastos://launch/{id}/Pictures/{binding}"),
+        "page",
+    );
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(wrong_case),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+
     let other = "0".repeat(32);
+    let wrong_content = tokens::page(
+        &data,
+        &format!("elastos://launch/{id}/another-set/{binding}"),
+        "page",
+    );
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(wrong_content),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+    let wrong_launch = tokens::page(
+        &data,
+        &format!("elastos://launch/{other}/pictures/{binding}"),
+        "page",
+    );
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(wrong_launch),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
     for (uri, token) in [
         (format!("/api/launch/{id}/content/{ENTRYPOINT}"), None),
         (
@@ -3358,15 +3428,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
             format!("/api/launch/{id}/content/{ENTRYPOINT}"),
             Some(tokens::page(
                 &data,
-                &format!("elastos://launch/{other}"),
-                "page",
-            )),
-        ),
-        (
-            format!("/api/launch/{id}/content/{ENTRYPOINT}"),
-            Some(tokens::page(
-                &data,
-                &format!("elastos://launch/{id}"),
+                &format!("elastos://launch/{id}/pictures/{binding}"),
                 "another-page",
             )),
         ),
@@ -3385,10 +3447,57 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
         );
     }
 
+    for name in ["pictures..backup", "pictures/backup"] {
+        let token = tokens::page(
+            &data,
+            &format!("elastos://launch/{id}/{name}/{binding}"),
+            "page",
+        );
+        let (status, _, _) = send(read(
+            format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+            Some(token),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{name}");
+    }
+
+    let old_token = own().unwrap();
+    home.runtime.expire_kept_launches();
+    let (status, _, body) = send(open(&cid, Some(tokens::shell(&data)))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let reopened: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let new_id = reopened["id"].as_str().unwrap();
+    home.runtime.reuse_kept_id_for_test(id, new_id, &binding);
+    let new_binding = home.runtime.kept_launch_binding(id).unwrap();
+    assert_ne!(binding, new_binding);
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(old_token),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+    let new_token = tokens::page(
+        &data,
+        &format!("elastos://launch/{id}/pictures/{new_binding}"),
+        "page",
+    );
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(new_token),
+    ))
+    .await;
+    assert_eq!((status, body), (StatusCode::OK, b"a picture".to_vec()));
+
     let program = home
         .staged("core", &manifest("core"), &quiet_component(), &publisher)
         .await;
-    let (status, _, body) = send(open(&program, Some(tokens::home(&data)))).await;
+    let (status, _, body) = send(open(&program, Some(tokens::shell(&data)))).await;
     assert_eq!(
         (status, body),
         (StatusCode::BAD_REQUEST, b"not_content".to_vec())
@@ -4138,7 +4247,7 @@ async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tamper
             .method("POST")
             .uri("/api/launch/open")
             .header("content-type", "application/json")
-            .header("x-elastos-home-token", tokens::home(&data))
+            .header("x-elastos-home-token", tokens::shell(&data))
             .body(Body::from(serde_json::json!({"cid": cid}).to_string()))
             .unwrap()
     };
@@ -4223,7 +4332,7 @@ struct ServerHome {
     app: axum::Router,
     shell_token: String,
     shell_id: String,
-    home_token: String,
+    open_grant: String,
 }
 
 impl ServerHome {
@@ -4241,13 +4350,13 @@ impl ServerHome {
             bridge.pending.clone(),
             Some(bridge.data()),
         );
-        let home_token = crate::api::routes::kept_launch_test_tokens::home(&bridge.data());
+        let open_grant = crate::api::routes::kept_launch_test_tokens::shell(&bridge.data());
         ServerHome {
             bridge,
             app,
             shell_token: shell.token,
             shell_id: shell.id.to_string(),
-            home_token,
+            open_grant,
         }
     }
 
@@ -4284,7 +4393,7 @@ impl ServerHome {
         let (app, shell, token) = (
             self.app.clone(),
             self.shell_token.clone(),
-            self.home_token.clone(),
+            self.open_grant.clone(),
         );
         let body = serde_json::json!({"cid": cid}).to_string();
         tokio::spawn(async move {
@@ -4427,7 +4536,7 @@ async fn a_valid_signature_grants_nothing_on_the_server_home() {
         &home.shell_token,
         "POST",
         "/api/launch/open",
-        Some(&home.home_token),
+        Some(&home.open_grant),
         Some(&body),
     )
     .await;
