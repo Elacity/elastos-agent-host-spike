@@ -1663,4 +1663,7 @@ fn home_error_response(err: anyhow::Error) -> Response {
 mod gateway_browser_tests;
 #[cfg(test)]
 #[path = "gateway_tests/mod.rs"]
+// P2-11 step 6: tests that write state Windows refuses are cfg(unix); the
+// fixtures only they use are unused in the Windows test build.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub(in crate::api) mod gateway_tests;

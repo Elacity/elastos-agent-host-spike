@@ -9677,6 +9677,9 @@ pub async fn try_p2p_discovery(
 }
 
 #[cfg(test)]
+// P2-11 step 6: tests that publish through state Windows refuses are cfg(unix);
+// the fixtures only they use are unused in the Windows test build.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
