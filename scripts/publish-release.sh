@@ -720,6 +720,7 @@ record_direct_asset() {
     local install_path="$4"
     local release_path="$5"
     local extract_path="${6:-}"
+    local executable_checksum="${7:-}"
     local checksum size
 
     checksum=$(sha256 "$staged") || return
@@ -732,8 +733,9 @@ record_direct_asset() {
             --arg install_path "$install_path" \
             --arg extract_path "$extract_path" \
             --arg release_path "$release_path" \
+            --arg executable_checksum "$executable_checksum" \
             --argjson size "$size" \
-            '.[$name] = {checksum: $checksum, size: $size, install_path: $install_path, extract_path: $extract_path, release_path: $release_path}'
+            '.[$name] = {checksum: $checksum, size: $size, install_path: $install_path, extract_path: $extract_path, release_path: $release_path} | if $executable_checksum != "" then .[$name].executable_checksum = $executable_checksum else . end'
     else
         echo "$updates_json" | jq \
             --arg name "$name" \
@@ -834,7 +836,7 @@ build_supported_direct_assets() {
     local setup_platform="$2"
     local target="${3:-}"
     local use_cross="${4:-false}"
-    local stage_dir updates_json name binary staged install_path release_path archive
+    local stage_dir updates_json name binary staged install_path release_path archive executable_checksum
 
     stage_dir="${TMPDIR}/supported-assets-${platform}"
     mkdir -p "$stage_dir" || return
@@ -857,11 +859,12 @@ build_supported_direct_assets() {
 
     # Home CLI remains one capsule; its terminal renderer makes this archive native.
     binary=$(build_support_binary home-cli "$platform" "$target" "$use_cross") || return
+    executable_checksum=$(sha256 "$binary") || return
     archive=$(build_packaged_capsule_archive "$platform" home-cli "$binary") || return
     release_path="home-cli-${setup_platform}.tar.gz"
     staged="${stage_dir}/${release_path}"
     cp "$archive" "$staged" || return
-    updates_json=$(record_direct_asset "$updates_json" home-cli "$staged" "capsules/home-cli" "$release_path" home-cli) || return
+    updates_json=$(record_direct_asset "$updates_json" home-cli "$staged" "capsules/home-cli" "$release_path" home-cli "sha256:${executable_checksum}") || return
 
     if jq -e --arg platform "$setup_platform" \
         '.external["browser-vz-engine-supervisor"].platforms[$platform]' components.json >/dev/null; then

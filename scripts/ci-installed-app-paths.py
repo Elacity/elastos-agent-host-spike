@@ -13,10 +13,11 @@ import os
 import subprocess
 import sys
 
-# Lab crates that a manifest outside lab/ names by path: capsules/model-provider
-# has a dev-dependency on lab/agent-conformance, which names the other two. The
-# locked release build of that capsule loads their manifests to resolve its
-# dependencies. It does not compile them, so their other files are lab files.
+# Lab crates that a manifest outside lab/ names by path: the model and wallet
+# providers have dev-dependencies on lab/agent-conformance, which names the
+# other two. Their locked release builds load these manifests to resolve
+# dependencies. Those builds do not compile the lab crates, so their other
+# files remain lab files.
 LAB_CRATES_THE_BUILD_LOADS = ("lab/agent-conformance/", "lab/capsule-identity/", "lab/grant-binding/")
 # The Runtime serves these from its source checkout (ALLOWED_DOCS in
 # elastos/crates/elastos-server/src/api/handlers/docs.rs).

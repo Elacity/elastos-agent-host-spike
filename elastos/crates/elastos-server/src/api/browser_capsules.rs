@@ -266,6 +266,11 @@ async fn serve_browser_capsule_asset(
         content_type(relative_path),
         "text/html; charset=utf-8" | "application/xhtml+xml" | "image/svg+xml"
     );
+    let referrer_policy = if app == HOME_CAPSULE_ID && relative_path == capsule.entrypoint {
+        "same-origin"
+    } else {
+        "no-referrer"
+    };
     let cache_control = browser_capsule_cache_control(relative_path, raw_query);
     let etag = browser_capsule_versioned_static_asset(relative_path, raw_query)
         .then(|| browser_capsule_etag(&bytes));
@@ -291,7 +296,7 @@ async fn serve_browser_capsule_asset(
                 axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
                 BROWSER_CAPSULE_OPAQUE_ORIGIN.parse().unwrap(),
             );
-            headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+            headers.insert("referrer-policy", referrer_policy.parse().unwrap());
             headers.insert("x-content-type-options", "nosniff".parse().unwrap());
             if is_document {
                 if let Some(policy) = shell_content_security_policy(
@@ -326,7 +331,7 @@ async fn serve_browser_capsule_asset(
         axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
         BROWSER_CAPSULE_OPAQUE_ORIGIN.parse().unwrap(),
     );
-    headers.insert("referrer-policy", "no-referrer".parse().unwrap());
+    headers.insert("referrer-policy", referrer_policy.parse().unwrap());
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     if is_document {
         if let Some(policy) = shell_content_security_policy(
@@ -1107,6 +1112,20 @@ mod tests {
         assert_eq!(capsule.manifest.name, "test-home");
         assert_eq!(capsule.entrypoint, "index.html");
         assert!(capsule.root.ends_with("capsules/test-home/browser"));
+    }
+
+    #[tokio::test]
+    async fn home_document_sends_referrer_only_to_its_own_origin() {
+        let data_dir = tempfile::tempdir().unwrap();
+        write_test_wasm_browser_capsule(data_dir.path(), "home", "Home", "app");
+        write_test_wasm_browser_capsule(data_dir.path(), "system", "System", "app");
+        for (app, expected) in [("home", "same-origin"), ("system", "no-referrer")] {
+            let response =
+                serve_browser_capsule_path(data_dir.path(), &test_request_headers(), app, None)
+                    .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["referrer-policy"], expected);
+        }
     }
 
     #[test]

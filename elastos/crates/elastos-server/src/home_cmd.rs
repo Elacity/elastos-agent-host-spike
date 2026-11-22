@@ -618,7 +618,14 @@ impl Drop for LoggingSuppressionGuard {
     }
 }
 
-pub(crate) async fn run(status: bool, json: bool) -> anyhow::Result<()> {
+pub(crate) async fn run(status: bool, json: bool, cli_launch_token: bool) -> anyhow::Result<()> {
+    if cli_launch_token {
+        let token = elastos_server::api::gateway::issue_gateway_owned_home_cli_launch_grant(
+            &default_data_dir(),
+        )?;
+        writeln!(std::io::stdout().lock(), "{token}")?;
+        return Ok(());
+    }
     let snapshot = gather_snapshot().await?;
 
     if json {
@@ -1672,11 +1679,16 @@ fn run_home_cli_renderer(
     session: &HomeSession,
 ) -> anyhow::Result<()> {
     let renderer = resolve_home_cli_renderer_program(data_dir)?;
-    let status = Command::new(&renderer)
+    let prepared =
+        crate::setup::verify_installed_component_start(data_dir, HOME_CLI_CAPSULE_NAME, &renderer)?;
+    let mut command = Command::new(prepared.exec_path());
+    command
         .arg(&session.uri_root)
         .env("ELASTOS_API", api_url)
         .env("ELASTOS_TOKEN", client_token)
-        .env_remove("ELASTOS_CARRIER_PATH")
+        .env_remove("ELASTOS_CARRIER_PATH");
+    prepared.attach_std(&mut command, false)?;
+    let status = command
         .status()
         .with_context(|| format!("failed to start Home CLI renderer {}", renderer.display()))?;
     if !status.success() {
