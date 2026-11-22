@@ -306,7 +306,7 @@ mod tests {
             serde_json::to_vec(&components).unwrap(),
         )
         .unwrap();
-        crate::protected_content_config::tests::sign_test_install(data);
+        crate::installed_release::tests::sign_test_install(data);
 
         let (mut image, digest) = checked_vm_image(data, &capsule, "shell", "rootfs.ext4").unwrap();
         let mut bytes = Vec::new();
