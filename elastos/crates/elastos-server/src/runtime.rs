@@ -16,6 +16,8 @@ use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
 use elastos_runtime::capsule::check_entrypoint_file;
+use elastos_runtime::primitives::audit::AuditEvent;
+use elastos_runtime::primitives::SecureTimestamp;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
 
@@ -244,8 +246,10 @@ pub struct Runtime {
     /// ended without the Runtime handle.
     running_capsules: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
     /// Agent starts share this gate so a replay cannot pass between grant
-    /// consumption and registration of its running session.
-    agent_launches: tokio::sync::Mutex<AgentLaunchState>,
+    /// consumption and registration of its running session. The activation's
+    /// end holds the same mutex: it puts the start tuple on the one stop
+    /// audit, then drops the record.
+    agent_launches: Arc<tokio::sync::Mutex<AgentLaunchState>>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
@@ -276,6 +280,29 @@ pub struct Runtime {
 #[derive(Default)]
 struct AgentLaunchState {
     used: HashMap<String, u64>,
+    /// The start record for an agent session, keyed by session id. The
+    /// session's one end removes it, whether the owner stopped the guest or
+    /// the guest ended on its own.
+    sessions: HashMap<String, AgentSessionRecord>,
+}
+
+/// The facts a Start keeps so the owner's Stop can write the same tuple.
+pub(crate) struct AgentStartFacts<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) owner: &'a str,
+    pub(crate) host_cid: &'a str,
+    pub(crate) launch_id: &'a str,
+    pub(crate) expires_at: u64,
+}
+
+/// One agent session's audit tuple, stored at Start and taken at Stop.
+#[derive(Clone)]
+pub(crate) struct AgentSessionRecord {
+    pub(crate) agent_id: String,
+    pub(crate) owner: String,
+    pub(crate) host_cid: String,
+    pub(crate) launch_id: String,
+    pub(crate) session_id: String,
 }
 
 /// One launch's content in the Runtime's table, for as long as this value
@@ -401,6 +428,9 @@ struct ActivationContextHeld {
     /// route hold.
     stop: Arc<ActivationStop>,
     authority: Option<InstanceAuthority>,
+    /// Start records for agent sessions. The one end reads the tuple onto
+    /// its stop audit, then removes the record once `ended_at` is visible.
+    agent_sessions: Arc<tokio::sync::Mutex<AgentLaunchState>>,
     /// How long the ended entry stays before the sweeper removes it:
     /// [`ENDED_CAPSULE_RETENTION`], which only a unit row shortens.
     retention: std::time::Duration,
@@ -443,6 +473,7 @@ impl ActivationContextHeld {
             launch_contents: runtime.launch_contents.clone(),
             stop,
             authority,
+            agent_sessions: runtime.agent_launches.clone(),
             armed: true,
             owed: OwedEnd::Task,
             settled: None,
@@ -528,10 +559,28 @@ impl ActivationContextHeld {
         };
         self.release().await;
         if let (Some(authority), false) = (&self.authority, self.audited) {
-            authority
-                .capability_manager
-                .audit_log()
-                .capsule_stop(&self.id.0, stop_reason(&status, &cause));
+            let record = self
+                .agent_sessions
+                .lock()
+                .await
+                .sessions
+                .get(&self.id.0)
+                .cloned();
+            let reason = stop_reason(&status, &cause);
+            let log = authority.capability_manager.audit_log();
+            match record {
+                Some(record) => log.emit(AuditEvent::CapsuleStop {
+                    timestamp: SecureTimestamp::now(),
+                    capsule_id: self.id.0.clone(),
+                    reason,
+                    agent_id: Some(record.agent_id),
+                    owner: Some(record.owner),
+                    cid: Some(record.host_cid),
+                    launch_id: Some(record.launch_id),
+                    session_id: Some(record.session_id),
+                }),
+                None => log.capsule_stop(&self.id.0, reason),
+            }
             self.audited = true;
         }
         let ended_at = std::time::Instant::now();
@@ -549,6 +598,11 @@ impl ActivationContextHeld {
             false
         };
         drop(capsules);
+
+        // The start record goes after `ended_at` is visible. A reader that
+        // finds no record also finds the session ended, so a second stop does
+        // not treat a live guest as a missing record.
+        self.agent_sessions.lock().await.sessions.remove(&self.id.0);
 
         // The stop request is taken away only after the entry records the
         // end, so a stop that finds the entry not ended also finds its
@@ -589,6 +643,7 @@ impl ActivationContextHeld {
             launch_contents: self.launch_contents.clone(),
             stop: self.stop.clone(),
             authority: self.authority.clone(),
+            agent_sessions: self.agent_sessions.clone(),
             armed: true,
             owed: self.owed,
             settled: self.settled.take(),
@@ -779,7 +834,7 @@ impl Runtime {
             unsigned_capsules: RwLock::new(UnsignedCapsules::Refused(None)),
             provider_registry: RwLock::new(None),
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
-            agent_launches: tokio::sync::Mutex::new(AgentLaunchState::default()),
+            agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -804,7 +859,7 @@ impl Runtime {
             unsigned_capsules: RwLock::new(UnsignedCapsules::Refused(None)),
             provider_registry: RwLock::new(None),
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
-            agent_launches: tokio::sync::Mutex::new(AgentLaunchState::default()),
+            agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -1180,12 +1235,13 @@ impl Runtime {
 
     /// Consume the short grant once. Distinct grants may start independent
     /// sessions for the same Agent; the gate covers provider start and registry insertion.
+    /// The session record is written before this returns, under the same lock
+    /// as the one-use mark, so a Stop that sees the row can take the tuple.
     pub(crate) async fn start_agent_once(
         &self,
         path: &Path,
         admission: crate::agent_admission::AdmissionContext,
-        launch_id: &str,
-        expires_at: u64,
+        facts: AgentStartFacts<'_>,
     ) -> Result<(CapsuleHandle, Signer)> {
         let mut state = self.agent_launches.lock().await;
         let now = std::time::SystemTime::now()
@@ -1193,18 +1249,73 @@ impl Runtime {
             .unwrap_or_default()
             .as_secs();
         state.used.retain(|_, expiry| *expiry > now);
-        if expires_at <= now {
+        if facts.expires_at <= now {
             return Err(ElastosError::InvalidManifest(
                 "agent launch grant expired".into(),
             ));
         }
-        if state.used.contains_key(launch_id) {
+        if state.used.contains_key(facts.launch_id) {
             return Err(ElastosError::InvalidManifest(
                 "agent launch grant was already used".into(),
             ));
         }
-        state.used.insert(launch_id.to_string(), expires_at);
-        self.start_local_admitted(path, vec![], admission).await
+        state
+            .used
+            .insert(facts.launch_id.to_string(), facts.expires_at);
+        let started = self.start_local_admitted(path, vec![], admission).await?;
+        let session_id = started.0.id.0.clone();
+        state.sessions.insert(
+            session_id.clone(),
+            AgentSessionRecord {
+                agent_id: facts.agent_id.to_string(),
+                owner: facts.owner.to_string(),
+                host_cid: facts.host_cid.to_string(),
+                launch_id: facts.launch_id.to_string(),
+                session_id,
+            },
+        );
+        Ok(started)
+    }
+
+    /// Live session ids whose principal is `agent_id`. The capsule name is
+    /// not read: two rows that share a host name stay distinct, and a row
+    /// with no principal is not this agent.
+    pub(crate) async fn live_sessions_for_agent(&self, agent_id: &str) -> Vec<String> {
+        let capsules = self.running_capsules.read().await;
+        let mut ids: Vec<String> = capsules
+            .values()
+            .filter(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id))
+            .map(|info| info.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The start record for this session, if Start stored one and the
+    /// session has not ended. Looking does not take the record: the session's
+    /// one end removes it after `ended_at` is visible.
+    pub(crate) async fn agent_session(&self, session_id: &str) -> Option<AgentSessionRecord> {
+        self.agent_launches
+            .lock()
+            .await
+            .sessions
+            .get(session_id)
+            .cloned()
+    }
+
+    /// Test only: plant a start record the launch route did not write.
+    ///
+    /// The caller lives in the agents build's launch tests. This allow keeps
+    /// the helper when that build is off, where those tests are not compiled.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) async fn insert_agent_session_for_test(&self, record: AgentSessionRecord) {
+        let session_id = record.session_id.clone();
+        self.agent_launches
+            .lock()
+            .await
+            .sessions
+            .insert(session_id, record);
     }
 
     /// Both admitted entries derive the same actor and ceiling from the
