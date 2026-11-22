@@ -162,8 +162,8 @@ pub(crate) fn walk_launch(capsule_dir: &Path) -> anyhow::Result<WalkedLaunch> {
 /// that person's key. A launch that cannot meet any of that is refused here,
 /// before any provider starts and before any principal is bound.
 ///
-/// `walked` is the one value `walk_launch` produced; the grant check already
-/// read this manifest's name, and the loader compiles its entrypoint. Admission
+/// `walked` is the one value `walk_launch` produced; the grant check bound
+/// this manifest's name and Agent ID, and the loader compiles its entrypoint. Admission
 /// opens no file in the launching folder.
 pub(crate) fn admit_launch(
     data_dir: &Path,

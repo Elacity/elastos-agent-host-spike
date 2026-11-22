@@ -346,7 +346,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
 
-        /// Print a session-bound Home launch grant from the authenticated owner CLI
+        /// Refuse an exported Home CLI grant. The process environment is not a mint
         #[arg(long, conflicts_with_all = &["status", "json"])]
         cli_launch_token: bool,
     },
