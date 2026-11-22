@@ -337,7 +337,7 @@ fn places() -> Vec<Place> {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             spawn.clone(),
-            16,
+            15,
             P2_2,
         ),
         place(

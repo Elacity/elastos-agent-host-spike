@@ -715,7 +715,7 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["ProviderBridge::", "spawn_confined("].concat(),
             os_path: "",
         },
-TrustColumn {
+        TrustColumn {
             file: "elastos-server/src/server_infra.rs",
             function: "start_wallet_provider",
             call: concat!("ProviderBridge::spawn", "_confined"),

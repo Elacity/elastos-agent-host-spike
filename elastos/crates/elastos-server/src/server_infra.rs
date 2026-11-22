@@ -331,10 +331,6 @@ async fn check_and_register_wallet_provider_v2(
 ))]
 const WALLET_UNSUPPORTED_OS: &str = "provider start is refused: this operating system has no confinement, so the provider binary does not start";
 
-#[cfg(any(test, all(not(elastos_unsupported_os_check), target_os = "macos")))]
-const WALLET_MACOS_NO_SPAWN: &str =
-    "provider start on macos is refused: the Seatbelt profile has no spawn path yet";
-
 /// Return the Runtime's confined-start refusal before creating `SystemServices`.
 /// The row below checks these texts against the Runtime's private OS entry.
 fn wallet_confinement_refusal() -> Option<&'static str> {
@@ -348,7 +344,8 @@ fn wallet_confinement_refusal() -> Option<&'static str> {
     }
     #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
     {
-        Some(WALLET_MACOS_NO_SPAWN)
+        // The Runtime starts the wallet under its Seatbelt profile here.
+        None
     }
     #[cfg(any(
         elastos_unsupported_os_check,
@@ -2981,15 +2978,8 @@ mod tests {
             .split('"')
             .nth(1)
             .unwrap();
-        let macos = runtime
-            .split_once("const MACOS_NO_SPAWN: &str =")
-            .unwrap()
-            .1
-            .split('"')
-            .nth(1)
-            .unwrap();
         assert_eq!(WALLET_UNSUPPORTED_OS, unsupported);
-        assert_eq!(WALLET_MACOS_NO_SPAWN, macos);
+        assert!(!runtime.contains("const MACOS_NO_SPAWN"));
 
         // The three choices must use the Runtime's Linux, macOS and
         // unsupported-OS cfg arms, in that order.
@@ -3013,12 +3003,14 @@ mod tests {
             .map(|(position, _)| position)
             .collect();
         assert_eq!(dispatches.len(), 3);
-        for (choice, dispatch) in [
-            ("        None\n", dispatches[0]),
-            ("Some(WALLET_MACOS_NO_SPAWN)", dispatches[1]),
-            ("Some(WALLET_UNSUPPORTED_OS)", dispatches[2]),
+        let linux = choices.find("        None\n").unwrap();
+        let macos = linux + 1 + choices[linux + 1..].find("        None\n").unwrap();
+        let unsupported_choice = choices.find("Some(WALLET_UNSUPPORTED_OS)").unwrap();
+        for (position, dispatch) in [
+            (linux, dispatches[0]),
+            (macos, dispatches[1]),
+            (unsupported_choice, dispatches[2]),
         ] {
-            let position = choices.find(choice).unwrap();
             assert_eq!(cfg_before(choices, position), cfg_before(runtime, dispatch));
         }
 
@@ -3031,8 +3023,6 @@ mod tests {
                 )
             )) {
             Some(WALLET_UNSUPPORTED_OS)
-        } else if cfg!(target_os = "macos") {
-            Some(WALLET_MACOS_NO_SPAWN)
         } else {
             None
         };
@@ -3301,7 +3291,7 @@ mod tests {
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
     }
 
-    #[cfg(any(target_os = "macos", elastos_unsupported_os_check))]
+    #[cfg(elastos_unsupported_os_check)]
     #[tokio::test]
     async fn wallet_os_refusal_leaves_marker_storage_and_route_absent() {
         let (_temp, data_dir, _) = wallet_fixture();
