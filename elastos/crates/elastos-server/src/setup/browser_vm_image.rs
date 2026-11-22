@@ -1458,18 +1458,202 @@ pub(super) mod tests {
         assert_eq!(image_identities(&paths).unwrap(), old_image);
     }
 
-    #[tokio::test]
-    async fn source_home_producer_pin_prepares_on_local_engine_launch_only_in_dev_mode() {
-        let temp = tempfile::tempdir().unwrap();
-        let data = temp.path().join("xdg/elastos");
-        fs::create_dir_all(&data).unwrap();
-        fs::write(data.join("config.toml"), "dev_mode = true\n").unwrap();
+    const GUEST_ROOTFS_MANIFEST: &str = r#"{
+  "schema": "elastos.browser.vm-target/v1",
+  "engine": "chromium_microvm",
+  "network_mode": "runtime_net_only",
+  "direct_network": false,
+  "wallet_injection": false,
+  "media_transport": "runtime_relay",
+  "display_mode": "webrtc_remote_display",
+  "guarantee_level": "mechanism_microvm",
+  "runtime_exit_transport": "vsock_relay",
+  "display_backend": "vm_selkies_gstreamer_webrtc",
+  "control_transport": "vsock_relay",
+  "control_port": 19092
+}
+"#;
+
+    const GUEST_INIT: &str = r#"#!/bin/sh
+rootfs_checkpoint() { :; }
+ELASTOS_BROWSER_VM_SERIAL_LOG_DEV=""
+rootfs_checkpoint "rootfs diagnostics initialized"
+rootfs_checkpoint "runtime filesystems mounted"
+virtio_net
+/opt/elastos/bin/browser-vm-runtime-relay
+rootfs_checkpoint "starting browser stack"
+/opt/elastos/bin/browser-vm-selkies-start
+rootfs_checkpoint "browser control socket present"
+ELASTOS_BROWSER_SELKIES_CONTROL_CONFIG=
+/opt/elastos/bin/node /opt/elastos/bin/browser-selkies-control-service.mjs
+ELASTOS_BROWSER_VM_CONTROL_BRIDGE_CONFIG=
+/opt/elastos/bin/browser-vm-guest-control-bridge
+rootfs_checkpoint "guest control bridge started"
+"#;
+
+    const GUEST_SELKIES_START: &str = r#"#!/bin/sh
+selkies_checkpoint() { :; }
+selkies_checkpoint "dependencies checked"
+echo runtime_net_only
+echo '--proxy-server={proxy_url}'
+echo '--host-resolver-rules=MAP * ~NOTFOUND'
+echo '--web_root=/opt/gst-web'
+echo 'ELASTOS_BROWSER_VM_SELKIES_ENCODER'
+echo '--encoder="$ELASTOS_BROWSER_VM_SELKIES_ENCODER"'
+echo 'PipeWire is required for Browser audio'
+echo 'pipewire-pulse is required for Browser audio'
+echo 'WirePlumber is required for Browser audio'
+echo 'pw-cli is required for Browser audio'
+echo configure_browser_wireplumber_headless
+echo browser-vm-wireplumber-config.log
+echo 'alsa_monitor.properties["alsa.reserve"] = false'
+echo 'bluez_monitor.properties["with-logind"] = false'
+echo 'support.logind = disabled'
+echo 'pulsesrc.set_property("device", "auto_null.monitor")'
+echo 'gst-inspect-1.0 pulsesrc'
+/opt/elastos/bin/browser-native-proxy-engine
+selkies-gstreamer
+cat > /run/elastos/browser-selkies-control.json <<'JSON'
+{}
+JSON
+"#;
+
+    const GUEST_STUBS: &[&str] = &[
+        "opt/elastos/bin/browser-native-proxy-engine",
+        "opt/elastos/bin/browser-vm-runtime-relay",
+        "opt/elastos/bin/browser-vm-guest-control-bridge",
+        "opt/elastos/bin/browser-selkies-control-service.mjs",
+        "opt/elastos/bin/node",
+        "opt/elastos/bin/chromium",
+        "usr/bin/Xvfb",
+        "usr/bin/python3",
+        "usr/bin/gst-inspect-1.0",
+        "usr/bin/pipewire",
+        "usr/bin/pipewire-pulse",
+        "usr/bin/wireplumber",
+        "usr/bin/pw-cli",
+    ];
+
+    fn write_guest_file(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    }
+
+    fn e2fs_program(name: &str) -> Option<PathBuf> {
+        if let Some(paths) = std::env::var_os("PATH") {
+            for directory in std::env::split_paths(&paths) {
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        for directory in [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/opt/homebrew/opt/e2fsprogs/sbin",
+            "/usr/local/opt/e2fsprogs/sbin",
+            "/usr/sbin",
+            "/sbin",
+        ] {
+            let candidate = Path::new(directory).join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn mke2fs_program() -> PathBuf {
+        e2fs_program("mke2fs")
+            .expect("mke2fs from e2fsprogs is required to build the Browser image fixture")
+    }
+
+    fn debugfs_program() -> PathBuf {
+        e2fs_program("debugfs")
+            .expect("debugfs from e2fsprogs is required to inspect the Browser image fixture")
+    }
+
+    /// Directory of the resolved debugfs, then the caller's PATH. The source-home
+    /// harness drops every `ELASTOS_*` variable, so the preflight can see debugfs
+    /// only through `PATH`.
+    fn path_with_debugfs_first() -> std::ffi::OsString {
+        let directory = debugfs_program()
+            .parent()
+            .expect("debugfs path includes its directory")
+            .to_path_buf();
+        let mut directories = vec![directory];
+        if let Some(path) = std::env::var_os("PATH") {
+            directories.extend(std::env::split_paths(&path));
+        }
+        std::env::join_paths(directories).expect("debugfs directory can be placed on PATH")
+    }
+
+    /// Build an ext4 rootfs whose guest files satisfy `browser-vm-artifact-preflight.sh`.
+    /// `mke2fs -d` is the same pack the image preflight smoke uses. debugfs reads
+    /// these paths and script snippets during `--verify-image-set` when this test
+    /// has found debugfs.
+    fn verified_guest_rootfs() -> Vec<u8> {
+        guest_rootfs_image(None)
+    }
+
+    fn guest_rootfs_image(omit: Option<&str>) -> Vec<u8> {
+        debugfs_program();
+        if let Some(skipped) = omit {
+            assert!(
+                GUEST_STUBS.contains(&skipped),
+                "omitted guest path {skipped} is not one of the expected guest files"
+            );
+        }
+        let scratch = tempfile::tempdir().unwrap();
+        let tree = scratch.path().join("guest");
+        write_guest_file(
+            &tree,
+            "etc/elastos/browser-vm-target.json",
+            GUEST_ROOTFS_MANIFEST,
+        );
+        write_guest_file(&tree, "opt/elastos/bin/browser-vm-init", GUEST_INIT);
+        write_guest_file(
+            &tree,
+            "opt/elastos/bin/browser-vm-selkies-start",
+            GUEST_SELKIES_START,
+        );
+        for relative in GUEST_STUBS {
+            if omit.is_some_and(|skipped| skipped == *relative) {
+                continue;
+            }
+            write_guest_file(&tree, relative, "#!/bin/sh\nexit 0\n");
+        }
+        let image = scratch.path().join("rootfs.ext4");
+        let output = std::process::Command::new(mke2fs_program())
+            .args(["-q", "-t", "ext4", "-d"])
+            .arg(&tree)
+            .arg("-F")
+            .arg(&image)
+            .arg("16M")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mke2fs failed to build the Browser image fixture: {}{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        fs::read(image).unwrap()
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
+
+    fn install_guest_image_set(data: &Path, rootfs: &[u8]) -> String {
         let platform = guest_platform(&super::super::detect_platform())
             .unwrap()
             .to_owned();
-        let (bytes, mut info) = archive(&fixture_for_platform(b"source-image", &platform));
+        let (bytes, mut info) = archive(&fixture_for_platform(rootfs, &platform));
         info.cid = Some(super::super::catalog_head_cid(&bytes).unwrap());
-        install_archive(&data, &bytes, &info, &platform).unwrap();
+        install_archive(data, &bytes, &info, &platform).unwrap();
         fs::write(
             data.join("components.json"),
             serde_json::to_vec(&json!({"external": {NAME: {
@@ -1478,13 +1662,103 @@ pub(super) mod tests {
             .unwrap(),
         )
         .unwrap();
-        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let output = std::process::Command::new("python3")
-            .arg(repo.join("scripts/setup-source-home-native-browser-test.py"))
+        platform
+    }
+
+    fn run_retained_browser_pin(data: &Path) -> std::process::Output {
+        std::process::Command::new("python3")
+            .arg(repo_root().join("scripts/setup-source-home-native-browser-test.py"))
             .arg("--emit-retained-browser-pin")
-            .arg(&data)
+            .arg(data)
+            .env("PATH", path_with_debugfs_first())
             .output()
-            .unwrap();
+            .unwrap()
+    }
+
+    /// The source-home harness does not return `rootfs_contract`. Run the same
+    /// preflight the harness runs, with debugfs's directory first on PATH and
+    /// without `ELASTOS_DEBUGFS_BIN`, and require the smoke's inspection fields.
+    fn preflight_installed_image(data: &Path, platform: &str) -> Value {
+        let image_aliases = aliases(platform);
+        let kernel = data.join(
+            image_aliases
+                .iter()
+                .find(|(_, file)| *file == "vmlinux")
+                .expect("vmlinux alias")
+                .0,
+        );
+        let initrd = data.join(
+            image_aliases
+                .iter()
+                .find(|(_, file)| *file == "initrd")
+                .expect("initrd alias")
+                .0,
+        );
+        let output = std::process::Command::new(
+            repo_root().join("scripts/browser-vm-artifact-preflight.sh"),
+        )
+        .arg("--verify-image-set")
+        .env("PATH", path_with_debugfs_first())
+        .env_remove("ELASTOS_DEBUGFS_BIN")
+        .env("ELASTOS_BROWSER_VM_PLATFORM", platform)
+        .env("ELASTOS_BROWSER_VM_DATA_DIR", data)
+        .env("ELASTOS_BROWSER_VM_STAGED_ROOTFS", "")
+        .env(
+            "ELASTOS_BROWSER_VM_ROOTFS",
+            data.join("browser-vm/rootfs.ext4"),
+        )
+        .env(
+            "ELASTOS_BROWSER_VM_ROOTFS_MANIFEST",
+            data.join("browser-vm/browser-vm-rootfs-manifest.json"),
+        )
+        .env("ELASTOS_BROWSER_VM_KERNEL", &kernel)
+        .env("ELASTOS_BROWSER_VM_INITRAMFS", &initrd)
+        .env("ELASTOS_BROWSER_VM_INITRD", &initrd)
+        .output()
+        .expect("browser-vm-artifact-preflight.sh runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+            panic!("preflight did not return JSON ({error}): {stderr}{stdout}")
+        })
+    }
+
+    fn assert_ext4_inspection_ran(proof: &Value) {
+        let contract = &proof["rootfs_contract"];
+        assert_eq!(
+            contract["source_kind"],
+            json!("ext4_image"),
+            "receipt-only fallback skips ext4 inspection: {proof}"
+        );
+        assert_eq!(
+            contract["inspectable"],
+            json!(true),
+            "receipt-only fallback skips ext4 inspection: {proof}"
+        );
+        println!(
+            "browser image inspection source_kind={} inspectable={} ok={} debugfs={}",
+            contract["source_kind"],
+            contract["inspectable"],
+            proof["ok"],
+            contract["debugfs"]["path"]
+        );
+    }
+
+    #[tokio::test]
+    async fn source_home_producer_pin_prepares_on_local_engine_launch_only_in_dev_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("xdg/elastos");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("config.toml"), "dev_mode = true\n").unwrap();
+        let platform = install_guest_image_set(&data, &verified_guest_rootfs());
+        let proof = preflight_installed_image(&data, &platform);
+        assert_ext4_inspection_ran(&proof);
+        assert_eq!(
+            proof["ok"],
+            json!(true),
+            "valid ext4 image was refused: {proof}"
+        );
+        let output = run_retained_browser_pin(&data);
         assert!(
             output.status.success(),
             "{}",
@@ -1528,6 +1802,43 @@ pub(super) mod tests {
             )
             .await
             .is_err()
+        );
+    }
+
+    #[test]
+    fn source_home_setup_refuses_real_ext4_missing_guest_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("xdg/elastos");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("config.toml"), "dev_mode = true\n").unwrap();
+        let platform = install_guest_image_set(&data, &guest_rootfs_image(Some("usr/bin/Xvfb")));
+        let proof = preflight_installed_image(&data, &platform);
+        assert_ext4_inspection_ran(&proof);
+        assert_eq!(
+            proof["ok"],
+            json!(false),
+            "ext4 image missing a guest file was accepted: {proof}"
+        );
+        let missing = proof["rootfs_contract"]["missing"]
+            .as_array()
+            .expect("inspection reports missing guest files");
+        assert!(
+            missing.iter().any(|item| item == "xvfb"),
+            "inspection did not report the omitted guest file: {proof}"
+        );
+        let output = run_retained_browser_pin(&data);
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            !output.status.success(),
+            "setup accepted an ext4 image missing a guest file: {combined}"
+        );
+        assert!(
+            combined.contains("Browser image set failed verification"),
+            "{combined}"
         );
     }
 
