@@ -594,6 +594,11 @@ echo "[local-carrier-setup] running Carrier-only setup smoke"
 
 stop_source_runtime
 
+# Setup has installed the consumer's final catalogue and native providers.
+# Keep its Carrier source while binding those bytes to a disposable release.
+python3 "${REPO_ROOT}/scripts/holder-canary-fixture.py" sign-install \
+    "${TEST_ROOT}" "${DATA_DIR}" "${ELASTOS_BIN}" --preserve-source
+
 for installed in \
     "${DATA_DIR}/bin/kubo" \
     "${DATA_DIR}/capsules/kubo/capsule.json" \

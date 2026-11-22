@@ -72,6 +72,47 @@ class HolderFixtureTests(unittest.TestCase):
                  patch.object(fixture.platform, "machine", return_value=machine):
                 self.assertEqual(fixture.release_platform(), expected)
 
+    def test_sign_install_updates_private_pair_and_keeps_carrier_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            data = home / "data"
+            installation = data / "installation"
+            installation.mkdir(parents=True)
+            for name in ("release.json", "release-head.json"):
+                (installation / name).write_bytes(b"old release")
+                (installation / name).chmod(0o600)
+            (data / "components.json").write_bytes(b"final components")
+            original = {"schema": "elastos.trusted-sources/v1", "default_source": "source",
+                "sources": [{"name": "source", "publisher_dids": ["did:key:source"],
+                             "channel": "stable", "connect_ticket": "fixture-ticket",
+                             "install_path": "", "installed_version": "", "head_cid": ""}]}
+            (data / "sources.json").write_text(json.dumps(original))
+            runtime = home / "elastos"
+            runtime.write_bytes(b"runtime")
+
+            def run(argv, **kwargs):
+                if argv[1] == "--version":
+                    return subprocess.CompletedProcess(argv, 0, stdout="elastos 2.0.1\n")
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
+                    "signature": "fixture-signature", "signer_did": "did:key:fixture"}).encode())
+
+            with patch.object(fixture.subprocess, "run", side_effect=run), \
+                 patch.object(fixture, "release_platform", return_value="x86_64-linux"):
+                fixture.sign_install(home, data, runtime, lambda path: {"HOME": str(path)},
+                                     preserve_source=True)
+
+            publisher = data / "ElastOS/SystemServices/Publisher"
+            for name in ("release.json", "release-head.json"):
+                self.assertEqual((installation / name).read_bytes(), (publisher / name).read_bytes())
+                self.assertEqual((installation / name).stat().st_mode & 0o777, 0o600)
+            source = json.loads((data / "sources.json").read_text())["sources"][0]
+            self.assertEqual(source["publisher_dids"], ["did:key:source", "did:key:fixture"])
+            self.assertEqual(source["connect_ticket"], "fixture-ticket")
+            self.assertEqual(json.loads((installation / "release.json").read_bytes())["payload"]["channel"],
+                             source["channel"])
+            self.assertEqual(source["install_path"], str(runtime))
+            self.assertFalse((data / ".ci-publisher.key").exists())
+
     def test_restrict_components_keeps_only_installed_native_providers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

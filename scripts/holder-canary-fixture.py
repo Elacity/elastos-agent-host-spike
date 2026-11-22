@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import re
+import stat
 import subprocess
 from pathlib import Path
 
@@ -52,8 +53,14 @@ def component_platform():
     }[release_platform()]
 
 
-def sign_install(home, data, runtime, environment):
+def sign_install(home, data, runtime, environment, preserve_source=False):
     """Install a release trusted only by this fixture Home; discard its signing key."""
+    sources = json.loads((data / "sources.json").read_text()) if preserve_source else None
+    selected = None
+    if sources is not None:
+        assert sources["schema"] == "elastos.trusted-sources/v1"
+        selected, = [row for row in sources["sources"] if row["name"] == sources["default_source"]]
+    channel = selected["channel"] if selected is not None else "stable"
     key = data / ".ci-publisher.key"
     with os.fdopen(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w") as output:
         output.write(os.urandom(32).hex())
@@ -71,11 +78,11 @@ def sign_install(home, data, runtime, environment):
         version = subprocess.run([str(runtime), "--version"], capture_output=True, text=True,
                                  env=environment(home), cwd=home, timeout=30, check=True).stdout.strip().removeprefix("elastos ")
         assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", version)
-        release = json.dumps(sign({"schema": "elastos.release/v1", "version": version, "channel": "stable",
+        release = json.dumps(sign({"schema": "elastos.release/v1", "version": version, "channel": channel,
             "platforms": {release_platform(): {"binary": descriptor(runtime),
                                                "components": descriptor(data / "components.json")}}},
             "elastos.release.v1"), sort_keys=True, separators=(",", ":")).encode()
-        head = json.dumps(sign({"schema": "elastos.release.head/v1", "version": version, "channel": "stable",
+        head = json.dumps(sign({"schema": "elastos.release.head/v1", "version": version, "channel": channel,
             "latest_release_cid": raw_cid(hashlib.sha256(release).digest()),
             "release_sha256": hashlib.sha256(release).hexdigest()},
             "elastos.release.head.v1"), sort_keys=True, separators=(",", ":")).encode()
@@ -83,11 +90,26 @@ def sign_install(home, data, runtime, environment):
         publisher.mkdir(mode=0o700, parents=True, exist_ok=True)
         (publisher / "release.json").write_bytes(release)
         (publisher / "release-head.json").write_bytes(head)
-        (data / "sources.json").write_text(json.dumps({"schema": "elastos.trusted-sources/v1",
-            "default_source": "holder-ci", "sources": [{"name": "holder-ci",
-            "publisher_dids": [json.loads(head)["signer_did"]], "channel": "stable",
-            "installed_version": version, "install_path": str(runtime),
-            "head_cid": raw_cid(hashlib.sha256(head).digest())}]}))
+        installation = data / "installation"
+        if installation.exists():
+            assert installation.is_dir() and not installation.is_symlink()
+            for name, contents in (("release.json", release), ("release-head.json", head)):
+                path = installation / name
+                metadata = path.lstat()
+                assert stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+                assert metadata.st_mode & 0o077 == 0
+                path.write_bytes(contents)
+        signer_did = json.loads(head)["signer_did"]
+        head_cid = raw_cid(hashlib.sha256(head).digest())
+        if sources is None:
+            sources = {"schema": "elastos.trusted-sources/v1",
+                "default_source": "holder-ci", "sources": [{"name": "holder-ci",
+                "publisher_dids": [signer_did], "channel": "stable"}]}
+            selected = sources["sources"][0]
+        else:
+            selected["publisher_dids"] = list(dict.fromkeys([*selected["publisher_dids"], signer_did]))
+        selected.update(installed_version=version, install_path=str(runtime), head_cid=head_cid)
+        (data / "sources.json").write_text(json.dumps(sources))
     finally:
         key.unlink(missing_ok=True)
 
@@ -133,6 +155,7 @@ if __name__ == "__main__":
     signing.add_argument("home", type=Path)
     signing.add_argument("data", type=Path)
     signing.add_argument("runtime", type=Path)
+    signing.add_argument("--preserve-source", action="store_true")
     restricting = commands.add_parser("restrict-components")
     restricting.add_argument("data", type=Path)
     restricting.add_argument("published", type=Path)
@@ -141,6 +164,7 @@ if __name__ == "__main__":
     if args.command == "sign-install":
         def environment(home):
             return {**os.environ, "HOME": str(home), "XDG_DATA_HOME": str(args.data.parent)}
-        sign_install(args.home.resolve(), args.data.resolve(), args.runtime.resolve(), environment)
+        sign_install(args.home.resolve(), args.data.resolve(), args.runtime.resolve(), environment,
+                     preserve_source=args.preserve_source)
     else:
         restrict_components(args.data.resolve(), args.published.resolve(), args.names)

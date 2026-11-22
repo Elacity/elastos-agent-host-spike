@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub mod operator;
 pub mod signed_bundle;
@@ -23,7 +24,10 @@ pub fn operator_platform() -> Result<&'static str, &'static str> {
 
 /// Prepare a fresh Home only. Exclusive creation refuses existing destinations,
 /// including symlinks, before a copy or manifest write can follow them.
-pub fn write_operator_home(home: &ThrowawayHome) -> Result<PathBuf, Box<dyn Error>> {
+pub fn write_operator_home(
+    home: &ThrowawayHome,
+    runtime: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
     home.guard(home.home(), home.data())?;
     let provider = localhost_provider_under_test()?;
     let bytes = fs::read(&provider.binary)?;
@@ -37,6 +41,17 @@ pub fn write_operator_home(home: &ThrowawayHome) -> Result<PathBuf, Box<dyn Erro
     )?;
     File::create_new(home.data().join("config.toml"))?
         .write_all(include_bytes!("../../fixtures/operator-config.toml"))?;
+    // The fixture signs the final provider and catalogue before serve starts.
+    let signing = Command::new("python3")
+        .arg(repository().join("scripts/holder-canary-fixture.py"))
+        .arg("sign-install")
+        .arg(home.home())
+        .arg(home.data())
+        .arg(runtime)
+        .output()?;
+    if !signing.status.success() {
+        return Err("operator fixture release signing failed".into());
+    }
     Ok(installed)
 }
 
