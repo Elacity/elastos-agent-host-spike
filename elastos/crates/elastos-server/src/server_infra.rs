@@ -69,6 +69,25 @@ const MEDIA_PROVIDER_PROTOCOL_VERSION: &str = "elastos.media-provider/v1";
 const MEDIA_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const WALLET_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
+fn report_missing_home_provider(data_dir: &Path, name: &str, consequence: &str) {
+    let required = match std::fs::read(data_dir.join("components.json")) {
+        Ok(bytes) => serde_json::from_slice::<elastos_server::setup::ComponentsManifest>(&bytes)
+            .map(|manifest| {
+                manifest.profiles.get("home").is_some_and(|profile| {
+                    profile.components.iter().any(|component| component == name)
+                })
+            })
+            .unwrap_or(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    };
+    if required {
+        tracing::warn!("{name} binary is not installed; {consequence}");
+    } else {
+        tracing::debug!("{name} binary is not installed; {consequence}");
+    }
+}
+
 #[cfg(test)]
 use api::model_provider_bridge_config;
 use api::model_provider_config as model_provider_startup_config;
@@ -651,6 +670,76 @@ async fn serve_capability_store(
         .map_err(|err| anyhow::anyhow!("capability store unavailable: {err}"))
 }
 
+async fn start_did_provider(
+    data_dir: &Path,
+    provider_registry: &provider::ProviderRegistry,
+    device_key_hex: &str,
+) -> anyhow::Result<Option<Arc<provider::ProviderBridge>>> {
+    let Some(admitted) = binaries::AdmittedProvider::admit(data_dir, "did-provider")? else {
+        return Ok(None);
+    };
+    let data_dir_metadata = std::fs::symlink_metadata(data_dir).with_context(|| {
+        format!(
+            "failed to inspect DID provider data root {}",
+            data_dir.display()
+        )
+    })?;
+    if data_dir_metadata.file_type().is_symlink() {
+        anyhow::bail!("provider start is refused: the storage root's parent is a symlink");
+    }
+    let confined_data_dir = std::fs::canonicalize(data_dir).with_context(|| {
+        format!(
+            "failed to resolve DID provider data root {}",
+            data_dir.display()
+        )
+    })?;
+    let did_config = provider::BridgeProviderConfig {
+        base_path: confined_data_dir.to_string_lossy().to_string(),
+        allowed_paths: file_backed_prefixes(),
+        read_only: false,
+        encryption_key: device_key_hex.to_owned(),
+        ..Default::default()
+    };
+    let confined = provider::ProviderBridge::spawn_confined(
+        admitted.key(),
+        admitted.authority(),
+        admitted.path(),
+        &confined_data_dir.join("did"),
+        did_config,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("Failed to spawn did-provider: {err}"))?;
+    let bridge = Arc::clone(confined.bridge());
+    let provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::from_confined(confined, "did"));
+    if let Err(registration_error) = provider_registry
+        .register_sub_provider("did", provider)
+        .await
+    {
+        let shutdown_error = bridge.shutdown().await.err();
+        if let Some(shutdown_error) = shutdown_error {
+            anyhow::bail!(
+                "Failed to register elastos://did sub-provider: {registration_error}; shutdown failed: {shutdown_error}"
+            );
+        }
+        anyhow::bail!("Failed to register elastos://did sub-provider: {registration_error}");
+    }
+    tracing::info!("did-provider capsule from {}", admitted.path().display());
+    Ok(Some(bridge))
+}
+
+async fn start_did_provider_for_server(
+    data_dir: &Path,
+    provider_registry: &provider::ProviderRegistry,
+    device_key_hex: &str,
+) -> anyhow::Result<()> {
+    if let Err(err) = start_did_provider(data_dir, provider_registry, device_key_hex).await {
+        tracing::warn!("Skipping did-provider: {}", err);
+        return Err(err);
+    }
+    Ok(())
+}
+
 async fn setup_server_infrastructure_impl(
     spawn_host_providers: bool,
     ipfs_role: elastos_server::ipfs::IpfsHostRole,
@@ -750,34 +839,7 @@ async fn setup_server_infrastructure_impl(
         Ok(())
     };
 
-    match binaries::resolve_verified_native_provider_binary("did-provider") {
-        Ok(Some(path)) => {
-            let did_config = provider::BridgeProviderConfig {
-                base_path: data_dir.to_string_lossy().to_string(),
-                allowed_paths: file_backed_prefixes(),
-                read_only: false,
-                encryption_key: device_key_hex.clone(),
-                ..Default::default()
-            };
-            match provider::ProviderBridge::spawn(&path, did_config).await {
-                Ok(bridge) => {
-                    let provider: Arc<dyn provider::Provider> = Arc::new(
-                        provider::CapsuleProvider::with_scheme(Arc::new(bridge), "did"),
-                    );
-                    if let Err(e) = provider_registry
-                        .register_sub_provider("did", provider)
-                        .await
-                    {
-                        tracing::warn!("Failed to register elastos://did sub-provider: {}", e);
-                    }
-                    tracing::info!("did-provider capsule from {}", path.display());
-                }
-                Err(e) => tracing::warn!("Failed to spawn did-provider: {}", e),
-            }
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!("Skipping did-provider due to verification failure: {}", e),
-    }
+    let _ = start_did_provider_for_server(&data_dir, &provider_registry, &device_key_hex).await;
 
     if spawn_host_providers {
         let binary_path = binaries::resolve_verified_native_provider_binary("localhost-provider")?
@@ -921,8 +983,10 @@ async fn setup_server_infrastructure_impl(
             }
         }
         Ok(None) => {
-            tracing::warn!(
-                "object-provider binary is not installed; Library object operations will fail closed"
+            report_missing_home_provider(
+                &data_dir,
+                "object-provider",
+                "Library object operations will fail closed",
             );
         }
         Err(e) => tracing::warn!(
@@ -950,8 +1014,10 @@ async fn setup_server_infrastructure_impl(
             }
         }
         Ok(None) => {
-            tracing::warn!(
-                "webspace-provider binary is not installed; WebSpace roots will fail closed"
+            report_missing_home_provider(
+                &data_dir,
+                "webspace-provider",
+                "WebSpace roots will fail closed",
             );
         }
         Err(e) => tracing::warn!(
@@ -1542,8 +1608,10 @@ async fn setup_server_infrastructure_impl(
             );
         }
     } else {
-        tracing::warn!(
-            "custody-provider binary is not installed; the inactive Runtime custody route will be unavailable"
+        report_missing_home_provider(
+            &data_dir,
+            "custody-provider",
+            "the inactive Runtime custody route will be unavailable",
         );
     }
 
@@ -2189,6 +2257,388 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn absent_optional_home_providers_are_quiet_but_required_provider_warns() {
+        use std::io::Write;
+
+        #[derive(Clone)]
+        struct WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for WarningWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("components.json"),
+            serde_json::json!({"external": {}, "profiles": {"home": {
+                "components": ["ipfs-provider"]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let writer = WarningWriter(log.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        for name in ["custody-provider", "object-provider", "webspace-provider"] {
+            report_missing_home_provider(temp.path(), name, "unavailable");
+        }
+        assert!(log.lock().unwrap().is_empty(), "optional providers warned");
+
+        fs::write(
+            temp.path().join("components.json"),
+            serde_json::json!({"external": {}, "profiles": {"home": {
+                "components": ["object-provider"]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        report_missing_home_provider(temp.path(), "object-provider", "unavailable");
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("object-provider binary is not installed"),
+            "{output}"
+        );
+
+        fs::write(temp.path().join("components.json"), "{").unwrap();
+        report_missing_home_provider(temp.path(), "custody-provider", "unavailable");
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("custody-provider binary is not installed"),
+            "{output}"
+        );
+    }
+
+    fn did_fixture() -> (TempDir, PathBuf, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        let bin = data_dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let binary = bin.join("did-provider");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let source = temp.path().join("did-probe.rs");
+            let text = include_str!("../tests/fixtures/did_confined_probe.rs").replace(
+                "@@ROOT@@",
+                &fs::canonicalize(&data_dir)
+                    .unwrap()
+                    .join("did")
+                    .to_string_lossy(),
+            );
+            fs::write(&source, text).unwrap();
+            let output = Command::new("rustc")
+                .args(["--edition", "2021", "-o"])
+                .arg(&binary)
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            fs::write(
+                &binary,
+                format!("#!/bin/sh\ntouch '{}'\n", data_dir.join("marker").display()),
+            )
+            .unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        use sha2::Digest as _;
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(fs::read(&binary).unwrap()))
+        );
+        let row = serde_json::json!({"external": {"did-provider": {
+            "install_path": "bin/did-provider",
+            "provider_runtime": {"role": "provider", "substrate": "native",
+                "runtime_abi": "elastos.provider-stdio/v1", "execution": "native-provider",
+                "provides": "elastos://did/*"},
+            "platforms": {elastos_server::setup::detect_platform(): {
+                "checksum": checksum, "install_path": "bin/did-provider"}}
+        }}, "capsules": {}, "profiles": {}});
+        fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&row).unwrap(),
+        )
+        .unwrap();
+        let manifest_dir = data_dir.join("capsules/did-provider");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../capsules/did-provider/capsule.json"),
+            manifest_dir.join("capsule.json"),
+        )
+        .unwrap();
+        (temp, data_dir, binary)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn did_probe_failure(data_dir: &Path) -> String {
+        let path = data_dir.join("did/probe.error");
+        match fs::read_to_string(&path) {
+            Ok(report) => {
+                let mut lines: Vec<_> = report.lines().rev().take(8).collect();
+                lines.reverse();
+                format!("probe error (last lines): {}", lines.join("\n"))
+            }
+            Err(error) => format!("probe error unavailable at {}: {error}", path.display()),
+        }
+    }
+
+    #[test]
+    fn did_caller_has_one_confined_start_and_no_plain_spawn() {
+        let source = include_str!("server_infra.rs");
+        let start = source.find("async fn start_did_provider(").unwrap();
+        let end = source[start..]
+            .find("\n    if spawn_host_providers {")
+            .unwrap()
+            + start;
+        let block = &source[start..end];
+        assert_eq!(
+            block
+                .matches("AdmittedProvider::admit(data_dir, \"did-provider\")")
+                .count(),
+            1
+        );
+        assert_eq!(block.matches("ProviderBridge::spawn_confined(").count(), 1);
+        assert!(!block.contains("ProviderBridge::spawn("));
+        assert_eq!(
+            block
+                .matches("if let Err(err) = start_did_provider(")
+                .count(),
+            1
+        );
+        assert!(block.contains("let _ = start_did_provider_for_server("));
+        assert_eq!(block.matches("bridge.shutdown().await").count(), 1);
+        assert!(block.contains("CapsuleProvider::from_confined(confined, \"did\")"));
+    }
+
+    #[tokio::test]
+    async fn did_missing_row_leaves_route_and_storage_absent() {
+        let temp = TempDir::new().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let fixture = bin.join("did-provider");
+        fs::write(
+            &fixture,
+            format!(
+                "#!/bin/sh\ntouch '{}'\n",
+                temp.path().join("marker").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = provider::ProviderRegistry::new();
+        assert!(start_did_provider(temp.path(), &registry, "fixture")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        assert!(!temp.path().join("did").exists());
+        assert!(!temp.path().join("marker").exists());
+    }
+
+    #[tokio::test]
+    async fn did_unadmitted_bytes_leave_route_storage_and_marker_absent() {
+        let (_temp, data_dir, binary) = did_fixture();
+        fs::write(&binary, b"changed after the row checksum").unwrap();
+        let registry = provider::ProviderRegistry::new();
+        let error = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("checksum"), "{error}");
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        assert!(!data_dir.join("did").exists());
+        assert!(!data_dir.join("marker").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn did_data_dir_symlink_is_refused_before_storage_creation() {
+        let (temp, data_dir, _) = did_fixture();
+        let linked_data_dir = temp.path().join("linked-data");
+        std::os::unix::fs::symlink(&data_dir, &linked_data_dir).unwrap();
+        let registry = provider::ProviderRegistry::new();
+        let error = match start_did_provider(&linked_data_dir, &registry, "fixture").await {
+            Err(error) => error,
+            Ok(Some(bridge)) => {
+                bridge.shutdown().await.unwrap();
+                panic!("a symlinked data directory started the DID provider");
+            }
+            Ok(None) => panic!("the admitted DID provider row was not found"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: the storage root's parent is a symlink"
+        );
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        assert!(!data_dir.join("did").exists());
+        assert!(!data_dir.join("marker").exists());
+    }
+
+    #[cfg(elastos_unsupported_os_check)]
+    #[tokio::test]
+    async fn did_os_refusal_keeps_child_and_route_absent() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        let error = start_did_provider_for_server(&data_dir, &registry, "fixture")
+            .await
+            .err()
+            .unwrap();
+        #[cfg(elastos_unsupported_os_check)]
+        assert!(
+            error.to_string().contains(
+                "this operating system has no confinement, so the provider binary does not start"
+            ),
+            "{error}"
+        );
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        #[cfg(target_os = "linux")]
+        assert!(!data_dir.join("did/child.pid").exists());
+        #[cfg(not(target_os = "linux"))]
+        assert!(!data_dir.join("marker").exists());
+        assert!(!data_dir.join("did").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn did_linux_admitted_row_answers_and_stays_confined() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
+            .unwrap();
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_some());
+        let response = registry
+            .send_raw("did", &serde_json::json!({"op":"get_did"}))
+            .await
+            .unwrap();
+        assert_eq!(response["data"]["did"], "did:key:zFixture");
+        registry
+            .send_raw("did", &serde_json::json!({"op":"set_nickname"}))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(data_dir.join("did/nickname")).unwrap(), b"Ada");
+        let outside = registry
+            .send_raw("did", &serde_json::json!({"op":"probe_outside_write"}))
+            .await
+            .unwrap();
+        assert_eq!(outside["data"]["outside_write_refused"], true);
+        assert!(!data_dir.join("outside").exists());
+        let pid: libc::pid_t = fs::read_to_string(data_dir.join("did/child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        assert!(status.lines().any(|line| line == "Seccomp:\t2"), "{status}");
+        assert!(
+            status.lines().any(|line| line == "NoNewPrivs:\t1"),
+            "{status}"
+        );
+        bridge.shutdown().await.unwrap();
+        assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[tokio::test]
+    async fn did_macos_admitted_row_answers_and_stays_confined() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
+            .unwrap();
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_some());
+        let answer = registry
+            .send_raw("did", &serde_json::json!({"op":"get_did"}))
+            .await
+            .unwrap();
+        assert_eq!(answer["data"]["did"], "did:key:zFixture");
+        registry
+            .send_raw("did", &serde_json::json!({"op":"set_nickname"}))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(data_dir.join("did/nickname")).unwrap(), b"Ada");
+        let outside = registry
+            .send_raw("did", &serde_json::json!({"op":"probe_outside_write"}))
+            .await
+            .unwrap();
+        assert_eq!(outside["data"]["outside_write_refused"], true);
+        assert!(!data_dir.join("outside").exists());
+        bridge.shutdown().await.unwrap();
+        assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn did_registration_collision_sends_shutdown_and_reaps_child() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        registry
+            .register_sub_provider(
+                "did",
+                Arc::new(DocumentsProvider::new(
+                    data_dir.clone(),
+                    std::sync::Weak::new(),
+                )),
+            )
+            .await
+            .unwrap();
+        let error = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("already registered"),
+            "{error}; {}",
+            did_probe_failure(&data_dir)
+        );
+        assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
+        let pid: libc::pid_t = fs::read_to_string(data_dir.join("did/child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
 
     fn test_provider_bridge(
         status: serde_json::Value,
