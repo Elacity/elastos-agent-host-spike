@@ -1423,13 +1423,21 @@ async fn ensure_browser_vm_image_in_context(
     data_dir: &Path,
     context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
-    if !source_home_dev_mode(data_dir) {
+    ensure_browser_vm_image_in_context_for_platform(data_dir, context, detect_platform()).await
+}
+
+async fn ensure_browser_vm_image_in_context_for_platform(
+    data_dir: &Path,
+    context: FirstPartyCarrierContext,
+    platform: String,
+) -> anyhow::Result<()> {
+    if !source_home_dev_mode(data_dir) || installed_release_source(data_dir)?.is_some() {
         // Read and admit the installed signed release before accepting even a
         // cached image. Its components bytes are checked on every local launch.
         let admitted = admit_installed_components(data_dir, context)?
             .context("Browser local Engine requires an installed signed release")?;
-        let platform = detect_platform();
-        let info = browser_vm_image::component_info(&admitted.manifest, &platform)?;
+        let info = browser_vm_image::component_info(&admitted.manifest, &platform)
+            .map_err(BrowserVmImageInvalid::new)?;
         match browser_vm_image::signed_image(info) {
             Ok(Some(_)) => {}
             Ok(None) => {
@@ -1463,9 +1471,10 @@ async fn ensure_browser_vm_image_in_context(
             });
     }
     let check_dir = data_dir.to_path_buf();
+    let check_platform = platform.clone();
     let pending =
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<ComponentsManifest>> {
-            let platform = detect_platform();
+            let platform = check_platform;
             let manifest_path = check_dir.join("components.json");
             if !manifest_path.exists() {
                 browser_vm_image::verify_legacy_or_missing_release(&check_dir, &platform)?;
@@ -1476,7 +1485,8 @@ async fn ensure_browser_vm_image_in_context(
                 browser_vm_image::verify_legacy_or_missing_release(&check_dir, &platform)?;
                 return Ok(None);
             }
-            let info = browser_vm_image::component_info(&manifest, &platform)?;
+            let info = browser_vm_image::component_info(&manifest, &platform)
+                .map_err(BrowserVmImageInvalid::new)?;
             let missing = browser_vm_image::verify_installed(&check_dir, info, &platform).is_err();
             Ok(missing.then_some(manifest))
         })
@@ -1486,12 +1496,12 @@ async fn ensure_browser_vm_image_in_context(
     };
     // The image row comes from the admitted release, not the earlier read; a
     // Runtime caller holds the writer until the image is written.
-    let platform = detect_platform();
     let admitted = admit_installed_components(data_dir, context)?;
     let manifest = admitted
         .as_ref()
         .map_or(&local, |admitted| &admitted.manifest);
-    let info = browser_vm_image::component_info(manifest, &platform)?;
+    let info = browser_vm_image::component_info(manifest, &platform)
+        .map_err(BrowserVmImageInvalid::new)?;
     if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
         return Ok(());
     }

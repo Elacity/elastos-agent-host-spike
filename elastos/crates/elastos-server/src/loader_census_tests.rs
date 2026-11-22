@@ -673,9 +673,9 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/setup.rs",
-            "ensure_browser_vm_image_in_context",
+            "ensure_browser_vm_image_in_context_for_platform",
             "component install",
-            "release component",
+            "signed release image or source Home dev-pinned image",
             "CID+DID",
             "P2-2",
             2,

@@ -214,6 +214,7 @@ pub(crate) fn read_signed_release(
     Ok((installed.release, components))
 }
 
+#[cfg(test)]
 pub(crate) fn release_cid(data: &Path, binary: &Path, source: &TrustedSource) -> Result<String> {
     let (release, _) = read_signed_release(data, binary, source, false)?;
     let head = if consumed_present(data)? {

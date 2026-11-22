@@ -10913,7 +10913,7 @@ async fn browser_open_repairs_helpers_after_viewer_load(
     if enabled {
         // Admit helper repair through a signed release without installing an
         // image: host refusal must follow repair before image preparation.
-        crate::protected_content_config::tests::sign_test_install(&data);
+        crate::installed_release::tests::sign_test_install(&data);
     }
     let source = if enabled {
         crate::sources::load_trusted_sources(&data)

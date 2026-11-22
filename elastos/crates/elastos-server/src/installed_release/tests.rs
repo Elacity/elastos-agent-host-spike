@@ -3,6 +3,72 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 
 use serde_json::{json, Value};
 
+#[cfg(unix)]
+pub(crate) fn sign_test_install(data_dir: &Path) {
+    use ed25519_dalek::SigningKey;
+    use elastos_common::localhost::{publisher_release_head_path, publisher_release_manifest_path};
+    let cid = |bytes: &[u8]| {
+        cid::Cid::new_v1(
+            0x55,
+            cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap(),
+        )
+        .to_string()
+    };
+    let descriptor = |bytes: &[u8]| {
+        serde_json::json!({
+            "cid":cid(bytes), "sha256":hex::encode(Sha256::digest(bytes)), "size":bytes.len()
+        })
+    };
+    let key = SigningKey::from_bytes(&[0x71; 32]);
+    let publisher = crate::crypto::encode_signing_key_did(&key);
+    let signed = |payload: serde_json::Value, domain: &str| {
+        let (signature, signer_did) = crate::crypto::domain_separated_sign(
+            &key,
+            domain,
+            &serde_json::to_vec(&payload).unwrap(),
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "payload":payload, "signature":signature, "signer_did":signer_did
+        }))
+        .unwrap()
+    };
+    let runtime = data_dir.join("fixture-runtime-bin");
+    let runtime_bytes = b"fixture runtime";
+    std::fs::write(&runtime, runtime_bytes).unwrap();
+    let components = std::fs::read(data_dir.join("components.json")).unwrap();
+    let release = signed(
+        serde_json::json!({
+            "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
+            "platforms":{(crate::update::detect_release_platform()):{
+                "binary":descriptor(runtime_bytes), "components":descriptor(&components)
+            }}
+        }),
+        "elastos.release.v1",
+    );
+    let head = signed(
+        serde_json::json!({
+            "schema":"elastos.release.head/v1", "version":"0.7.0", "channel":"stable",
+            "latest_release_cid":cid(&release), "release_sha256":hex::encode(Sha256::digest(&release))
+        }),
+        "elastos.release.head.v1",
+    );
+    let head_path = publisher_release_head_path(data_dir);
+    std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
+    std::fs::write(head_path, &head).unwrap();
+    std::fs::write(publisher_release_manifest_path(data_dir), &release).unwrap();
+    std::fs::write(
+        data_dir.join("sources.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema":"elastos.trusted-sources/v1", "default_source":"fixture", "sources":[{
+                "name":"fixture", "publisher_dids":[publisher], "channel":"stable",
+                "installed_version":"0.7.0", "install_path":runtime, "head_cid":cid(&head)
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn start_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
     let mut fixture = Fixture::new();
     let path = fixture.data.join("bin/shell");
