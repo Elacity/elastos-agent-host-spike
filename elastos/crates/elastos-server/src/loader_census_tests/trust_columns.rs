@@ -716,15 +716,15 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
-        // AdmittedProvider::admit checks the binary's checksum against the
-        // data-dir components.json at each start. It reads the release
-        // signer but does not check the binary against it.
+        // start_did_provider admits the exact binary through
+        // verify_installed_component_start and pins that signed digest.
+        // A Home with no signed digest, including dev_mode, is refused.
         TrustColumn {
             file: "elastos-server/src/server_infra.rs",
             function: "start_did_provider",
             call: concat!("ProviderBridge::spawn", "_confined"),
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: ["ProviderBridge::", "spawn_confined("].concat(),
             os_path: "",
@@ -1621,11 +1621,11 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&12));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("none"), Some(&56));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&23));
+    assert_eq!(roots.get("release-signature"), Some(&24));
     assert_eq!(roots.get("staged-cid"), Some(&7));
     assert_eq!(times.get("at-every-start"), Some(&31));
     assert_eq!(times.get("at-install-only"), Some(&8));

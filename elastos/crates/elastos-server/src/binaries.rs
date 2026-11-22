@@ -319,10 +319,23 @@ impl AdmittedProvider {
         &self.path
     }
 
-    /// The admitted bytes as the bridge's spawn-time check: the signed digest
-    /// is pinned here and re-checked when the provider starts.
+    /// The admitted bytes as the bridge's spawn-time check. The exact path is
+    /// admitted through the signed release; the signed digest is pinned here
+    /// and re-checked when the provider starts. A Home with no signed digest,
+    /// including `dev_mode`, is refused.
     pub fn checked_executable(&self, data_dir: &Path) -> Result<CheckedExecutable, String> {
-        CheckedExecutable::pinned(&self.path, &self.checksum)
+        let verified = setup::verify_installed_component_start(data_dir, &self.key, &self.path)
+            .map_err(|error| format!("provider signed release admission refused: {error}"))?;
+        let signed = verified
+            .signed_checksum()
+            .map_err(|error| format!("provider signed release admission refused: {error}"))?;
+        if signed != self.checksum {
+            return Err(
+                "provider signed release admission refused: signed digest differs from the admitted row"
+                    .to_string(),
+            );
+        }
+        CheckedExecutable::pinned(&self.path, signed)
             .map(|checked| checked.with_home_data_dir(data_dir))
     }
 

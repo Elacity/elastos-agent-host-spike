@@ -691,6 +691,10 @@ async fn start_did_provider(
     provider_registry: &provider::ProviderRegistry,
     device_key_hex: &str,
 ) -> anyhow::Result<Option<Arc<provider::ProviderBridge>>> {
+    // Refuse a symlink root before admission reads the signed release through it.
+    if std::fs::symlink_metadata(data_dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        anyhow::bail!("provider start is refused: the storage root's parent is a symlink");
+    }
     let Some(admitted) = binaries::AdmittedProvider::admit(data_dir, "did-provider")? else {
         return Ok(None);
     };
@@ -2374,6 +2378,10 @@ mod tests {
     fn did_fixture() -> (TempDir, PathBuf, PathBuf) {
         let temp = TempDir::new().unwrap();
         let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        // The signed source names this path. Canonicalize it so the release
+        // record and the start-time check name the same file.
+        let data_dir = fs::canonicalize(&data_dir).unwrap();
         let bin = data_dir.join("bin");
         fs::create_dir_all(&bin).unwrap();
         let binary = bin.join("did-provider");
@@ -2435,6 +2443,8 @@ mod tests {
             manifest_dir.join("capsule.json"),
         )
         .unwrap();
+        #[cfg(unix)]
+        sign_test_home(&data_dir);
         (temp, data_dir, binary)
     }
 
@@ -2523,6 +2533,47 @@ mod tests {
             .is_none());
         assert!(!data_dir.join("did").exists());
         assert!(!data_dir.join("marker").exists());
+    }
+
+    /// A Home with no signed release, and the same Home with `dev_mode`,
+    /// refuses the DID start. The route, storage root and marker stay absent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn did_unsigned_and_dev_mode_homes_refuse_before_anything_is_created() {
+        for dev_mode in [false, true] {
+            let (_temp, data_dir, _) = did_fixture();
+            fs::remove_file(data_dir.join("sources.json")).unwrap();
+            if dev_mode {
+                fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
+            }
+            let registry = provider::ProviderRegistry::new();
+            let error = start_did_provider(&data_dir, &registry, "fixture")
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the DID provider"));
+            let message = error.to_string();
+            if dev_mode {
+                assert!(
+                    message.contains("no signed release digest"),
+                    "dev_mode={dev_mode}: {message}"
+                );
+            } else {
+                assert!(
+                    message.contains("No trusted source configured"),
+                    "dev_mode={dev_mode}: {message}"
+                );
+            }
+            assert!(registry
+                .registration_for_uri("elastos://did/identity")
+                .await
+                .is_none());
+            assert!(!data_dir.join("did").exists(), "dev_mode={dev_mode}");
+            assert!(!data_dir.join("marker").exists(), "dev_mode={dev_mode}");
+            assert!(
+                !data_dir.join("provider-copies").exists(),
+                "dev_mode={dev_mode}"
+            );
+        }
     }
 
     #[cfg(unix)]

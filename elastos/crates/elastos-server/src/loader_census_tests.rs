@@ -1149,6 +1149,16 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
             "checked_native_provider_with_data_dir",
             "verify_installed_component_start(",
         ),
+        (
+            "elastos-server/src/binaries.rs",
+            "checked_executable",
+            "verify_installed_component_start(",
+        ),
+        (
+            "elastos-server/src/binaries.rs",
+            "checked_executable",
+            "signed_checksum()",
+        ),
         // A hosted plane admits against the Home it serves, never the
         // default Home.
         (

@@ -6,6 +6,8 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::collections::BTreeMap;
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicBool;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -643,6 +645,10 @@ struct ForkChild {
     /// True once the status was received; the waitpid task has reaped the pid,
     /// so `Drop` must not signal it again.
     reaped: bool,
+    /// Set by the waitpid task once it has reaped this child. The confined
+    /// macOS copy watcher reads it while the bridge is still held.
+    #[cfg(target_os = "macos")]
+    exited: Arc<AtomicBool>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1026,12 +1032,20 @@ impl ForkChild {
             Err(_) => return Err(refuse_child_without_process_handle(pid)),
         };
         let (sender, status) = oneshot::channel();
+        #[cfg(target_os = "macos")]
+        let exited = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "macos")]
+        let exited_flag = Arc::clone(&exited);
         tokio::task::spawn_blocking(move || {
             pause_before_reap(pid);
             let mut word = 0;
             loop {
                 let waited = unsafe { libc::waitpid(pid, &mut word, 0) };
                 if waited == pid {
+                    // The child has exited and this task has reaped it. The
+                    // macOS copy watcher observes this before shutdown runs.
+                    #[cfg(target_os = "macos")]
+                    exited_flag.store(true, Ordering::Release);
                     break;
                 }
                 if waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
@@ -1047,6 +1061,8 @@ impl ForkChild {
             pidfd,
             status,
             reaped: false,
+            #[cfg(target_os = "macos")]
+            exited,
         })
     }
 
@@ -1905,6 +1921,8 @@ impl ProviderBridge {
             #[cfg(target_os = "macos")]
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         };
+        #[cfg(target_os = "macos")]
+        bridge.watch_confined_executable_copy();
         let mut start = ConfinedStart {
             bridge: Some(bridge),
             root: created_root,
@@ -2675,6 +2693,33 @@ impl ProviderBridge {
         });
     }
 
+    /// Remove the confined provider's verified copy once its fork child has
+    /// been reaped, including when the bridge stays held after the exit.
+    #[cfg(target_os = "macos")]
+    fn watch_confined_executable_copy(&self) {
+        let Some(exited) = self
+            .fork
+            .try_lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|fork| Arc::clone(&fork.exited)))
+        else {
+            return;
+        };
+        let copy = Arc::clone(&self.executable_copy);
+        tokio::spawn(async move {
+            loop {
+                if copy.lock().await.is_none() {
+                    return;
+                }
+                if exited.load(Ordering::Acquire) {
+                    copy.lock().await.take();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        });
+    }
+
     /// The one Init implementation: send `Init`, bound by `init_timeout`, and
     /// settle a failed start through `shutdown`.
     async fn init_provider(
@@ -2980,6 +3025,10 @@ impl ProviderBridge {
             drop(fork);
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             self.stop_local_brokers().await;
+            // The fork is reaped. The verified copy the confined start held
+            // goes here, including when the child was already found exited.
+            #[cfg(target_os = "macos")]
+            self.executable_copy.lock().await.take();
             return match (protocol_error, status_error) {
                 (Some(error), _) => Err(error),
                 (None, Some(error)) => Err(error),
@@ -4256,6 +4305,133 @@ mod tests {
         })
         .await
         .expect("the killed provider's copy must go while the bridge remains live");
+    }
+
+    /// A confined provider that answers Init. `exit_on_second_line` makes it
+    /// answer the next request and exit; otherwise it answers until shutdown.
+    #[cfg(target_os = "macos")]
+    fn write_confined_stdio_provider(dir: &Path, exit_on_second_line: bool) -> PathBuf {
+        let source = dir.join("confined-stdio.c");
+        let binary = dir.join("did-provider");
+        let body = if exit_on_second_line {
+            r#"
+#include <stdio.h>
+int main(void) {
+    char line[65536];
+    int n = 0;
+    while (fgets(line, sizeof line, stdin)) {
+        fputs("{\"status\":\"ok\"}\n", stdout);
+        fflush(stdout);
+        if (++n == 2) return 0;
+    }
+    return 0;
+}
+"#
+        } else {
+            r#"
+#include <stdio.h>
+#include <string.h>
+int main(void) {
+    char line[65536];
+    while (fgets(line, sizeof line, stdin)) {
+        fputs("{\"status\":\"ok\"}\n", stdout);
+        fflush(stdout);
+        if (strstr(line, "\"op\":\"shutdown\"")) return 0;
+    }
+    return 0;
+}
+"#
+        };
+        std::fs::write(&source, body).unwrap();
+        let status = std::process::Command::new("/usr/bin/clang")
+            .args(["-O2", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .expect("clang is available");
+        assert!(
+            status.success(),
+            "clang failed to build the confined provider"
+        );
+        binary
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn start_confined_stdio(
+        exit_on_second_line: bool,
+    ) -> (tempfile::TempDir, PathBuf, Confined) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = write_confined_stdio_provider(temp.path(), exit_on_second_line);
+        let root = temp.path().join("storage");
+        let confined = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &CheckedExecutable::for_test(&binary),
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("confined start: {error}"));
+        let copy_dir = confined
+            .bridge()
+            .executable_copy
+            .lock()
+            .await
+            .as_ref()
+            .expect("the confined start keeps its verified copy")
+            .exec_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(
+            copy_dir.starts_with(temp.path().join("provider-copies")),
+            "copy {} is under the Home provider-copies",
+            copy_dir.display()
+        );
+        let name = copy_dir.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("elastos-provider-"),
+            "copy directory {name}"
+        );
+        assert!(
+            copy_dir.exists(),
+            "the verified copy exists while the provider runs"
+        );
+        (temp, copy_dir, confined)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_macos_copy_goes_after_shutdown() {
+        let (_temp, copy_dir, confined) = start_confined_stdio(false).await;
+        confined.bridge().shutdown().await.unwrap();
+        assert!(
+            !copy_dir.exists(),
+            "the verified copy under provider-copies goes after the confined provider shuts down"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_macos_copy_goes_when_fork_child_exits() {
+        let (_temp, copy_dir, confined) = start_confined_stdio(true).await;
+        let response = confined
+            .bridge()
+            .request(ProviderRequest::Exists {
+                path: "exit".into(),
+                token: String::new(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(response, ProviderResponse::Ok { .. }));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while copy_dir.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the verified copy goes after the confined fork child exits");
     }
 
     #[cfg(target_os = "macos")]
