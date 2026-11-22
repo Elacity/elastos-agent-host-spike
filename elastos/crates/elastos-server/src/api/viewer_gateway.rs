@@ -944,7 +944,7 @@ pub async fn viewer_launch_content(
 }
 
 /// A page's read of its kept launch. Only the page's own launch token opens
-/// it: bound to `elastos://launch/<id>` with `viewer` as its executable. The
+/// it: bound to the launch id, content name and per-open binding with `viewer` as its executable. The
 /// gateway then asks the Runtime as the shell, carrying that same token, and
 /// passes back its bytes, never to be stored. Anything else alike answers
 /// `not_found`, and the Runtime is not asked for a token or a path that
@@ -958,7 +958,7 @@ async fn viewer_launch_read(
     plain: bool,
 ) -> Response {
     let not_found = || (StatusCode::NOT_FOUND, "not_found").into_response();
-    let Ok((id, _content_name, token, context)) =
+    let Ok((id, _content_name, _binding, token, context)) =
         require_launch_bound_token(data_dir, headers, viewer, false)
     else {
         return not_found();
@@ -1046,6 +1046,7 @@ struct RuntimeOpened {
     page: String,
     entrypoint: String,
     content_name: String,
+    binding: String,
 }
 
 /// `POST /api/home/launch/content`: Home opens a content capsule by its CID
@@ -1072,6 +1073,7 @@ pub async fn home_launch_content(
         &opened.id,
         &opened.page,
         &opened.content_name,
+        &opened.binding,
         &context,
     ) {
         Ok(token) => token,
@@ -1136,9 +1138,12 @@ async fn open_at_runtime(
         && crate::page_launch::plain_content_path(&opened.page);
     let content_name = !opened.content_name.is_empty()
         && !opened.content_name.contains('/')
+        && !opened.content_name.contains("..")
         && crate::page_launch::plain_content_path(&opened.content_name);
+    let binding =
+        opened.binding.len() == 32 && opened.binding.bytes().all(|byte| byte.is_ascii_hexdigit());
     let entrypoint = crate::page_launch::plain_content_path(&opened.entrypoint);
-    match launch_id && page && content_name && entrypoint {
+    match launch_id && page && content_name && binding && entrypoint {
         true => Ok(opened),
         false => Err(odd()),
     }

@@ -274,10 +274,11 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
     page.insert("x-elastos-home-token", token.parse().unwrap());
     page.insert(HOST, "localhost:61180".parse().unwrap());
     page.insert("origin", "null".parse().unwrap());
-    let (id, content_name, _, _) =
+    let (id, content_name, binding, _, _) =
         require_launch_bound_token(dir.path(), &page, "image-viewer", false).unwrap();
     assert_eq!(id, LAUNCH);
     assert_eq!(content_name, "photo-set");
+    assert_eq!(binding, "cd".repeat(16));
     let refused = require_home_launch_token_for_any_context(dir.path(), &page, &["image-viewer"])
         .unwrap_err();
     assert!(
@@ -439,7 +440,13 @@ async fn home_open_encodes_the_pages_address_and_uses_only_a_well_formed_answer(
         format!("/api/launch/{LAUNCH}/page/browser/my%20page%231.html")
     );
 
-    for cid in ["bafy-badid", "bafy-badentry", "bafy-badpage"] {
+    for cid in [
+        "bafy-badid",
+        "bafy-badentry",
+        "bafy-badpage",
+        "bafy-dotdotname",
+        "bafy-slashname",
+    ] {
         let (status, body) = open(&app, cid, Some(&cookie), None).await;
         assert_eq!(
             (status, String::from_utf8_lossy(&body).to_string()),
