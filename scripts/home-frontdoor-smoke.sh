@@ -190,6 +190,7 @@ SOURCE_API_PORT="$(free_port)"
 SETUP_PLATFORM="$(host_platform)"
 mkdir -p "$SOURCE_RUNTIME_DATA_DIR/bin"
 install -m 755     "$ROOT/elastos/target/release/localhost-provider"     "$SOURCE_RUNTIME_DATA_DIR/bin/localhost-provider"
+install -m 755 "$ROOT/elastos/target/release/shell" "$SOURCE_RUNTIME_DATA_DIR/bin/shell"
 
 COMPONENTS_SRC="$SOURCE_COMPONENTS_MANIFEST" COMPONENTS_DEST="$SOURCE_RUNTIME_DATA_DIR/components.json" DATA_DIR="$SOURCE_RUNTIME_DATA_DIR" PUBLISHER_ROOT="$SOURCE_RUNTIME_DATA_DIR/ElastOS/SystemServices/Publisher" SETUP_PLATFORM="$SETUP_PLATFORM" SHELL_BIN="$ROOT/elastos/target/release/shell" LOCALHOST_PROVIDER_BIN="$ROOT/elastos/target/release/localhost-provider" DID_PROVIDER_BIN="$ROOT/capsules/did-provider/target/release/did-provider" CHAIN_PROVIDER_BIN="$ROOT/capsules/chain-provider/target/release/chain-provider" NET_PROVIDER_BIN="$ROOT/capsules/net-provider/target/release/net-provider" EXIT_PROVIDER_BIN="$ROOT/capsules/exit-provider/target/release/exit-provider" BROWSER_ENGINE_ADAPTER_BIN="$ROOT/capsules/browser-engine-adapter/target/release/browser-engine-adapter" BROWSER_LOCAL_EXIT_BIN="$ROOT/elastos/tools/browser-local-exit/target/release/browser-local-exit" WEBSPACE_PROVIDER_BIN="$ROOT/capsules/webspace-provider/target/release/webspace-provider" WALLET_PROVIDER_BIN="$ROOT/capsules/wallet-provider/target/release/wallet-provider" OBJECT_PROVIDER_BIN="$ROOT/capsules/object-provider/target/release/object-provider" CONTENT_BLOCK_GRAPH_PROVIDER_BIN="$ROOT/capsules/content-block-graph-provider/target/release/content-block-graph-provider" HOME_CLI_DIR="$SOURCE_HOME_CLI_DIR" HOME_CAPSULE_DIR="$SOURCE_HOME_DIR" HOME_GUI_CAPSULE_DIR="$SOURCE_HOME_GUI_DIR" SYSTEM_CAPSULE_DIR="$SOURCE_SYSTEM_DIR" SERVICES_CAPSULE_DIR="$SOURCE_SERVICES_DIR" PEOPLE_CAPSULE_DIR="$SOURCE_PEOPLE_DIR" BROWSER_CAPSULE_DIR="$SOURCE_BROWSER_DIR" DOCUMENTS_CAPSULE_DIR="$SOURCE_DOCUMENTS_DIR" LIBRARY_CAPSULE_DIR="$SOURCE_LIBRARY_DIR" MARKETPLACE_CAPSULE_DIR="$SOURCE_MARKETPLACE_DIR" ARCHIVE_MANAGER_CAPSULE_DIR="$SOURCE_ARCHIVE_MANAGER_DIR" INBOX_CAPSULE_DIR="$SOURCE_INBOX_DIR" WALLET_CAPSULE_DIR="$SOURCE_WALLET_DIR" WALLET_METAMASK_CAPSULE_DIR="$SOURCE_WALLET_METAMASK_DIR" WALLET_UNISAT_CAPSULE_DIR="$SOURCE_WALLET_UNISAT_DIR" WALLET_WALLETCONNECT_CAPSULE_DIR="$SOURCE_WALLET_WALLETCONNECT_DIR" python3 - <<'PY2'
 import hashlib
@@ -303,7 +304,15 @@ components_dest.parent.mkdir(parents=True, exist_ok=True)
 components_dest.write_text(json.dumps(manifest, indent=2) + "\n")
 PY2
 
-HOME="$SOURCE_RUNTIME_HOME" XDG_DATA_HOME="$SOURCE_RUNTIME_XDG" "$ROOT/elastos/target/debug/elastos" serve --addr "127.0.0.1:${SOURCE_API_PORT}"     >"$SOURCE_RUNTIME_LOG" 2>&1 &
+printf 'dev_mode = true\n' > "$SOURCE_RUNTIME_DATA_DIR/config.toml"
+PUBLISHED_COMPONENTS="${HOME_DIR}/published-components.json"
+cp "$SOURCE_RUNTIME_DATA_DIR/components.json" "$PUBLISHED_COMPONENTS"
+python3 "$ROOT/scripts/holder-canary-fixture.py" restrict-components \
+    "$SOURCE_RUNTIME_DATA_DIR" "$PUBLISHED_COMPONENTS" localhost-provider
+install -m 700 "$ROOT/elastos/target/debug/elastos" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos"
+python3 "$ROOT/scripts/holder-canary-fixture.py" sign-install \
+    "$SOURCE_RUNTIME_HOME" "$SOURCE_RUNTIME_DATA_DIR" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos"
+HOME="$SOURCE_RUNTIME_HOME" XDG_DATA_HOME="$SOURCE_RUNTIME_XDG" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos" serve --addr "127.0.0.1:${SOURCE_API_PORT}"     >"$SOURCE_RUNTIME_LOG" 2>&1 &
 SOURCE_RUNTIME_PID=$!
 
 for _ in $(seq 1 60); do
@@ -325,6 +334,14 @@ if ! curl -fsS --max-time 2 "http://127.0.0.1:${SOURCE_API_PORT}/api/health" >/d
     echo "[home-frontdoor] source runtime never became healthy. See $SOURCE_RUNTIME_LOG" >&2
     exit 1
 fi
+for _ in $(seq 1 60); do
+    grep -Fq 'Spawned shell capsule' "$SOURCE_RUNTIME_LOG" && break
+    sleep 0.5
+done
+if ! grep -Fq 'Spawned shell capsule' "$SOURCE_RUNTIME_LOG"; then
+    echo "[home-frontdoor] source shell capsule did not start. See $SOURCE_RUNTIME_LOG" >&2
+    exit 1
+fi
 
 mapfile -t SOURCE_BOOTSTRAP < <(discover_source_bootstrap "$SOURCE_RUNTIME_COORDS")
 SOURCE_CONNECT_TICKET="${SOURCE_BOOTSTRAP[0]:-}"
@@ -342,10 +359,27 @@ if [[ ! -f "$SOURCE_COMPONENTS_MANIFEST" ]]; then
 fi
 
 echo "[home-frontdoor] setup home profile"
-cp "$SOURCE_RUNTIME_DATA_DIR/components.json" "$HOME_DIR/xdg-data/elastos/components.json"
+cp "$PUBLISHED_COMPONENTS" "$HOME_DIR/xdg-data/elastos/components.json"
 # A source-manifest setup manages collaboration itself: a pinned release network in
 # components.json is neither required beside the manifest nor joined (live Community).
-HOME="$HOME_DIR" XDG_DATA_HOME="$HOME_DIR/xdg-data" ELASTOS_COLLABORATION_STARTUP_MODE=isolated ELASTOS_COMPONENTS_MANIFEST="$SOURCE_RUNTIME_DATA_DIR/components.json" "$ROOT/elastos/target/debug/elastos" setup --profile home >/tmp/elastos-home-frontdoor-setup.log
+HOME="$HOME_DIR" XDG_DATA_HOME="$HOME_DIR/xdg-data" ELASTOS_COLLABORATION_STARTUP_MODE=isolated ELASTOS_COMPONENTS_MANIFEST="$PUBLISHED_COMPONENTS" "$ROOT/elastos/target/debug/elastos" setup --profile home >/tmp/elastos-home-frontdoor-setup.log
+
+# Bind the final setup catalogue to the source binary used by both PTY runs.
+# The installed Home keeps its Carrier source and private release pair.
+HOME_TEST_BIN="$(python3 - "$HOME_DIR/xdg-data/elastos/sources.json" <<'PY2'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    sources = json.load(stream)
+source, = (row for row in sources["sources"] if row["name"] == sources["default_source"])
+print(source["install_path"])
+PY2
+)"
+[[ "$HOME_TEST_BIN" == "$HOME_DIR/"* && -f "$HOME_TEST_BIN" ]]
+install -m 700 "$ROOT/elastos/target/debug/elastos" "$HOME_TEST_BIN"
+python3 "$ROOT/scripts/holder-canary-fixture.py" sign-install \
+    "$HOME_DIR" "$HOME_DIR/xdg-data/elastos" "$HOME_TEST_BIN" --preserve-source
 
 INSTALLED_HOME_CLI_DIR="$HOME_DIR/xdg-data/elastos/capsules/home-cli"
 if [[ ! -d "$INSTALLED_HOME_CLI_DIR" ]]; then
@@ -406,7 +440,7 @@ done
 mv "$INSTALLED_HOME_CLI_DIR" "${INSTALLED_HOME_CLI_DIR}.installed"
 
 echo "[home-frontdoor] prove current source elastos + current source Home CLI component against clean-home data"
-HOME_DIR="$HOME_DIR" ROOT="$ROOT" SOURCE_COMPONENTS_MANIFEST="$SOURCE_COMPONENTS_MANIFEST" python3 - <<'PY'
+HOME_DIR="$HOME_DIR" HOME_TEST_BIN="$HOME_TEST_BIN" SOURCE_COMPONENTS_MANIFEST="$SOURCE_COMPONENTS_MANIFEST" python3 - <<'PY'
 import os
 import pty
 import select
@@ -415,14 +449,13 @@ import subprocess
 import time
 
 home = os.environ["HOME_DIR"]
-root = os.environ["ROOT"]
 env = os.environ.copy()
 env["HOME"] = home
 env["XDG_DATA_HOME"] = f"{home}/xdg-data"
 # Keep the smoke hermetic: chat launched from Home must stay on the slave PTY
 # instead of probing the caller's controlling terminal via /dev/tty.
 env["ELASTOS_CHAT_FORCE_STDIN"] = "1"
-cmd = [f"{root}/elastos/target/debug/elastos"]
+cmd = [os.environ["HOME_TEST_BIN"]]
 def launch_pty():
     master, slave = pty.openpty()
     proc = subprocess.Popen(

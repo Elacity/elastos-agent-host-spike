@@ -88,6 +88,8 @@ impl VerifiedExecutable {
                 "private executable copy differs from signed release digest"
             );
             Ok(Self {
+                // The child can keep running after this private path is unlinked.
+                // Future macOS helpers must not resolve resources from current_exe().
                 _private_dir: private_dir,
                 exec_path,
                 checksum: checksum.map(str::to_owned),
