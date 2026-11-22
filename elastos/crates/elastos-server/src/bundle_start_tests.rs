@@ -3652,14 +3652,17 @@ async fn a_page_whose_entrypoint_is_not_plain_is_refused_by_name_and_nothing_kep
     let core = home
         .staged("core", &manifest("core"), &quiet_component(), &publisher)
         .await;
-    for (label, entrypoint) in [
+    // Both names are legal file names only on Unix; on Windows the list is empty,
+    // so it carries an explicit type.
+    let cases: &[(&str, &str)] = &[
         // A file name that contains a backslash exists only on Unix.
         #[cfg(unix)]
         ("backslash", "browser\\a.html"),
         // Windows does not allow a tab in a file name either.
         #[cfg(unix)]
         ("tab", "browser/a\tb.html"),
-    ] {
+    ];
+    for &(label, entrypoint) in cases {
         let mut page = page_manifest("page", &[("core", &core)]);
         page["entrypoint"] = entrypoint.into();
         let folder = home.bundle(&format!("page-{label}"), &page.to_string(), b"a page");
