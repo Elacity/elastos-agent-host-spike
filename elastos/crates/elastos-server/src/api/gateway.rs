@@ -161,9 +161,15 @@ pub(crate) use gateway_home_system::{
     authorize_home_service_exit, carrier_source_is_contact_of, sync_runtime_services_mailboxes,
 };
 use gateway_home_terminal::*;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(super) use gateway_home_token::agent_launch_grants_minted_for_test;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
+#[cfg(test)]
+pub(super) use gateway_home_token::issue_home_agent_launch_token_at_for_test;
+pub(super) use gateway_home_token::issue_home_agent_launch_token_with_context;
 #[cfg(test)]
 pub(super) use gateway_home_token::issue_home_launch_token_with_context;
 #[cfg(test)]
@@ -180,11 +186,11 @@ pub(super) use gateway_home_token::{
     require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
     require_home_page_or_cli_launch_context, require_home_projection_launch_token_context,
     require_home_runtime_wallet_authority, require_home_token, require_home_token_context,
-    require_home_viewer_launch_token_context, require_internal_shell_content_open_context,
-    require_internal_shell_launch_grant_principal, require_internal_shell_projection_context,
-    require_internal_shell_runtime_wallet_authority, require_launch_bound_token,
-    require_runtime_wallet_authority, runtime_wallet_authority, HomeLaunchContext,
-    RequiredHomeLaunchToken,
+    require_home_viewer_launch_token_context, require_internal_shell_agent_launch_grant,
+    require_internal_shell_content_open_context, require_internal_shell_launch_grant_principal,
+    require_internal_shell_projection_context, require_internal_shell_runtime_wallet_authority,
+    require_launch_bound_token, require_runtime_wallet_authority, runtime_wallet_authority,
+    HomeLaunchContext, RequiredHomeLaunchToken,
 };
 use gateway_home_update::*;
 
@@ -891,6 +897,7 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route("/api/apps/system/agents/retire", post(agents_retire))
         .route("/api/apps/system/agents/rename", post(agents_rename))
         .route("/api/apps/system/agents/activate", post(agents_activate))
+        .route("/api/apps/system/agents/launch", post(agents_launch))
         .route(
             "/api/apps/system/community",
             get(system_community_membership_get).post(system_community_membership_update),

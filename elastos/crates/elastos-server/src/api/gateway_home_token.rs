@@ -187,6 +187,7 @@ impl VerifiedLaunchGrant {
 
 #[derive(Debug, Clone)]
 pub(in crate::api) struct RequiredHomeLaunchToken {
+    pub(in crate::api) issued_at: u64,
     pub(in crate::api) expires_at: u64,
     pub(in crate::api) launch_id: String,
     pub(in crate::api) launch_context: HomeLaunchContext,
@@ -422,6 +423,75 @@ pub(in crate::api) fn issue_home_projection_launch_token_with_context(
         context,
         now_ts(),
         None,
+    )
+}
+
+/// The internal grant for one Agent Host start. The resource is that agent,
+/// the executable is the host `verify_agent_host` named, and the lifetime is
+/// at most 60 seconds. The System route calls this only after it has consumed
+/// the one-use passkey step-up for the same agent.
+pub(in crate::api) fn issue_home_agent_launch_token_with_context(
+    data_dir: &std::path::Path,
+    agent_id: &str,
+    executable_actor: &str,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<String> {
+    let issued_at = now_ts();
+    let expiry = grant_bound_token_expiry(data_dir, context, issued_at, 60)?;
+    let token = issue_home_launch_token_at(
+        data_dir,
+        &HomeLaunchContext::projection(&format!("elastos://agent/{agent_id}"), executable_actor),
+        context,
+        issued_at,
+        Some(expiry),
+    )?;
+    #[cfg(test)]
+    note_agent_launch_grant_minted(data_dir);
+    Ok(token)
+}
+
+/// Counts grants this process minted for one Home. A refused Start stays at
+/// zero, including a refusal that happens before the guest is asked to run.
+#[cfg(test)]
+static AGENT_LAUNCH_GRANTS_MINTED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn note_agent_launch_grant_minted(data_dir: &std::path::Path) {
+    *AGENT_LAUNCH_GRANTS_MINTED
+        .lock()
+        .expect("agent launch mint counter")
+        .entry(data_dir.to_path_buf())
+        .or_insert(0) += 1;
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(in crate::api) fn agent_launch_grants_minted_for_test(data_dir: &std::path::Path) -> u64 {
+    AGENT_LAUNCH_GRANTS_MINTED
+        .lock()
+        .expect("agent launch mint counter")
+        .get(data_dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(in crate::api) fn issue_home_agent_launch_token_at_for_test(
+    data_dir: &std::path::Path,
+    agent_id: &str,
+    executable_actor: &str,
+    context: &HomeLaunchTokenContext,
+    issued_at: u64,
+    expires_at: u64,
+) -> anyhow::Result<String> {
+    issue_home_launch_token_at(
+        data_dir,
+        &HomeLaunchContext::projection(&format!("elastos://agent/{agent_id}"), executable_actor),
+        context,
+        issued_at,
+        Some(expires_at),
     )
 }
 
@@ -683,8 +753,8 @@ pub(crate) fn require_internal_shell_content_open_context(
 }
 
 /// The same signed grant check as its sibling, but it hands back the typed
-/// principal a bridge may run as. This is the only production caller of
-/// `BridgePrincipal::from_grant`.
+/// principal a bridge may run as. Agent launches use the same constructor
+/// after their narrower grant check.
 pub(crate) fn require_internal_shell_launch_grant_principal(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
@@ -699,6 +769,32 @@ pub(crate) fn require_internal_shell_launch_grant_principal(
     )?;
     Ok(crate::resource_bridge::BridgePrincipal::from_grant(
         &required.grant,
+    ))
+}
+
+pub(crate) fn require_internal_shell_agent_launch_grant(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+    agent_id: &str,
+    executable_actor: &str,
+) -> anyhow::Result<(crate::resource_bridge::BridgePrincipal, String, u64)> {
+    let required = require_home_launch_token_for_any_from_with_origin(
+        data_dir,
+        headers,
+        &[executable_actor],
+        None,
+        HomeLaunchOriginPolicy::InternalShell,
+    )?;
+    if required.launch_context.selected_resource != format!("elastos://agent/{agent_id}")
+        || required.launch_context.executable_actor != executable_actor
+        || required.expires_at.saturating_sub(required.issued_at) > 60
+    {
+        anyhow::bail!("agent launch grant binding mismatch");
+    }
+    Ok((
+        crate::resource_bridge::BridgePrincipal::from_grant(&required.grant),
+        required.launch_id,
+        required.expires_at,
     ))
 }
 
@@ -1455,6 +1551,7 @@ fn verify_home_launch_token_value(
         principal_id: root.principal_id().to_string(),
     };
     Ok(RequiredHomeLaunchToken {
+        issued_at: envelope.payload.iat,
         expires_at: envelope.payload.exp,
         launch_id: envelope.payload.launch_id,
         launch_context: envelope.payload.launch_context,

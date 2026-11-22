@@ -4375,10 +4375,10 @@ pub(crate) mod tests {
             expected_counts(&[("elastos-server/src/agent_admission.rs", 1)]),
             "AdmissionContext construction literal"
         );
-        // The one production caller of each constructor.
+        // The production callers of each constructor.
         assert_eq!(
             production_counts("BridgePrincipal::from_grant("),
-            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 2)]),
             "BridgePrincipal::from_grant callers"
         );
         assert_eq!(
@@ -4386,12 +4386,13 @@ pub(crate) mod tests {
             expected_counts(&[("elastos-server/src/runtime.rs", 1)]),
             "BridgePrincipal::from_admission callers"
         );
-        // The accessors: one read per agent refusal, one consuming conversion
-        // per route boundary. Definitions are excluded.
+        // The accessors: routes read the typed launcher for admission and
+        // audit; Runtime and supervisor each read it at their own boundary.
+        // Definitions are excluded.
         assert_eq!(
             production_counts("principal_str"),
             expected_counts(&[
-                ("elastos-server/src/api/routes.rs", 1),
+                ("elastos-server/src/api/routes.rs", 2),
                 ("elastos-server/src/runtime.rs", 1),
                 ("elastos-server/src/supervisor.rs", 1),
             ]),
@@ -4505,6 +4506,10 @@ pub(crate) mod tests {
             ("start_loaded", &[("elastos-server/src/runtime.rs", 2)][..]),
             (
                 "start_local_admitted",
+                &[("elastos-server/src/runtime.rs", 1)][..],
+            ),
+            (
+                "start_agent_once",
                 &[("elastos-server/src/api/routes.rs", 1)][..],
             ),
             ("run_local_admitted", &[][..]),
@@ -9088,9 +9093,14 @@ pub async fn production_after() {
             production_counts_ignoring_cfg_test("issue_home_launch_token_at("),
             expected_counts(&[
                 ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
-                ("elastos-server/src/api/gateway_home_token.rs", 4),
+                ("elastos-server/src/api/gateway_home_token.rs", 5),
             ]),
-            "the one signing issuer's callers"
+            "the one signing issuer's callers, including the agent start grant"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_agent_launch_token_with_context("),
+            expected_counts(&[("elastos-server/src/api/gateway_agents.rs", 1)]),
+            "agent start grant issuer callers"
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("HomeLaunchTokenContext::resolved("),

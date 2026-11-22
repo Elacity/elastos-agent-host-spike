@@ -14,7 +14,7 @@
 //!   present. No receipt file written by whoever prepares a directory decides
 //!   that identity.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use elastos_bundle_identity::{checked_bundle_within, MANIFEST_FILE};
 use elastos_common::CapsuleManifest;
@@ -28,23 +28,36 @@ use crate::bundle_admission::BUNDLE_WALK_BUDGET;
 pub(crate) const NOT_THE_HOME: &str =
     "agents stay on their owner's Home: this Runtime's sign-in store is not its own";
 
-/// An Agent Host package that passed `verify_agent_host`: the package name
-/// and the registry CID of its entry in the signed components record.
-pub(crate) struct VerifiedAgentHost(AgentHostPackage);
+/// An Agent Host package that passed `verify_agent_host`: the package name,
+/// the registry CID of its entry in the signed components record, and the
+/// directory that check read. A launch starts this directory.
+pub(crate) struct VerifiedAgentHost {
+    package: AgentHostPackage,
+    directory: PathBuf,
+}
 
 impl VerifiedAgentHost {
     pub(crate) fn package(&self) -> &AgentHostPackage {
-        &self.0
+        &self.package
+    }
+
+    /// The directory `verify_agent_host` checked. The launch sends this path
+    /// and does not resolve the host by name again.
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
     }
 
     /// A package no check has passed, for tests of what follows the check.
     #[cfg(test)]
     pub(crate) fn unchecked_for_test(name: &str, registry_cid: &str, bundle_cid: &str) -> Self {
-        Self(AgentHostPackage {
-            name: name.to_string(),
-            registry_cid: registry_cid.to_string(),
-            bundle_cid: bundle_cid.to_string(),
-        })
+        Self {
+            package: AgentHostPackage {
+                name: name.to_string(),
+                registry_cid: registry_cid.to_string(),
+                bundle_cid: bundle_cid.to_string(),
+            },
+            directory: PathBuf::new(),
+        }
     }
 }
 
@@ -162,8 +175,8 @@ pub(crate) fn walk_launch(capsule_dir: &Path) -> anyhow::Result<WalkedLaunch> {
 /// that person's key. A launch that cannot meet any of that is refused here,
 /// before any provider starts and before any principal is bound.
 ///
-/// `walked` is the one value `walk_launch` produced; the grant check already
-/// read this manifest's name, and the loader compiles its entrypoint. Admission
+/// `walked` is the one value `walk_launch` produced; the grant check bound
+/// this manifest's name and Agent ID, and the loader compiles its entrypoint. Admission
 /// opens no file in the launching folder.
 pub(crate) fn admit_launch(
     data_dir: &Path,
@@ -325,11 +338,14 @@ pub(crate) fn verify_agent_host(
             "is not signed by the key that signed its installed release",
         ));
     }
-    Ok(VerifiedAgentHost(AgentHostPackage {
-        name: agent_host.to_string(),
-        registry_cid: entry.cid.clone(),
-        bundle_cid: bundle.cid().to_string(),
-    }))
+    Ok(VerifiedAgentHost {
+        package: AgentHostPackage {
+            name: agent_host.to_string(),
+            registry_cid: entry.cid.clone(),
+            bundle_cid: bundle.cid().to_string(),
+        },
+        directory: dir,
+    })
 }
 
 #[cfg(test)]
