@@ -382,8 +382,6 @@ pub async fn stop_capsule(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    #![cfg(unix)]
-
     use super::*;
     use crate::api::gateway;
     use std::future::Future;
