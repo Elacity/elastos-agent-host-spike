@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod browser_config;
+#[cfg(unix)]
+mod catalogue_release_cache;
+#[cfg(windows)]
+#[path = "setup/catalogue_release_cache_windows.rs"]
 mod catalogue_release_cache;
 pub use browser_config::browser_available;
 pub(crate) use browser_config::linux_host_setup_message;
@@ -37,6 +41,10 @@ mod browser_vm_image;
 #[cfg(windows)]
 #[path = "setup/browser_vm_image_windows.rs"]
 mod browser_vm_image;
+#[cfg(unix)]
+pub mod verified_executable;
+#[cfg(windows)]
+#[path = "setup/verified_executable_windows.rs"]
 pub mod verified_executable;
 pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
 pub(crate) use browser_vm_image::verified_seed_identity as verified_browser_vm_seed_identity;
