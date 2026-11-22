@@ -13238,12 +13238,46 @@ pub(crate) mod tests {
         let metadata_from_real_holder = metadata == index;
 
         // The real holder saw only bounded reads, one per piece, none whole-file.
-        let served = holder_requests.lock().unwrap().clone();
-        assert_eq!(
-            served.len(),
-            4 + 1 + 1 + usize::from(metadata_from_real_holder),
-            "{served:#?}"
-        );
+        // A busy machine can push the real holder's answer past the consumer's
+        // 5 s Carrier timeout; the consumer then fails over to the next holder,
+        // and the abandoned read still lands in this log a moment later. Wait,
+        // bounded, for the log to settle before counting it.
+        let settle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let served = loop {
+            let served = holder_requests.lock().unwrap().clone();
+            let weight_read_count = served
+                .iter()
+                .filter(|request| request["path"] == "weights.gguf")
+                .count();
+            let manifest_read_count = served.len() - weight_read_count;
+            // Every exact read is logged before its answer reaches the consumer.
+            // The metadata read is logged once the real holder has answered it;
+            // after a timeout fail-over its abandoned read lands a moment later,
+            // so wait for that record and accept its absence only once the wait
+            // is spent.
+            let settled = weight_read_count == 4 + 1 + 1
+                && (manifest_read_count == 1
+                    || (!metadata_from_real_holder
+                        && tokio::time::Instant::now() >= settle_deadline));
+            if settled {
+                break served;
+            }
+            assert!(
+                tokio::time::Instant::now() < settle_deadline,
+                "holder request log did not settle within 30 seconds: {served:#?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        let weight_read_count = served
+            .iter()
+            .filter(|request| request["path"] == "weights.gguf")
+            .count();
+        let manifest_read_count = served.len() - weight_read_count;
+        assert_eq!(weight_read_count, 4 + 1 + 1, "{served:#?}");
+        assert!(manifest_read_count <= 1, "{served:#?}");
+        if metadata_from_real_holder {
+            assert_eq!(manifest_read_count, 1, "{served:#?}");
+        }
         for request in &served {
             assert_eq!(request["op"], "cat");
             assert_eq!(request["bounded_read"], true);
