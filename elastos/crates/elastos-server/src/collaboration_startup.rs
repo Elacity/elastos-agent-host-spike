@@ -1637,6 +1637,7 @@ mod tests {
             .exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn configured_service_worker_direct_gateway_and_supervisor_share_one_core() {
         let (temp, _) = configured_root(true);
@@ -1824,6 +1825,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn one_worker_projects_presence_before_send_and_after_durable_receive() {
         let (temp, _) = configured_root(true);
@@ -2669,6 +2671,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn stalled_history_does_not_block_live_gossip_and_shutdown_joins_it() {
         let (temp, _) = configured_root(true);
@@ -2824,6 +2827,7 @@ mod tests {
         assert!(service.history_task.is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn worker_projects_received_chat_while_outgoing_or_receipt_send_is_blocked() {
         for blocked_outgoing in [true, false] {
@@ -3127,6 +3131,7 @@ mod tests {
         assert_eq!(carrier.requests().len(), stopped_count);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn worker_cycle_attempts_directions_independently_and_retains_obligations_until_receipt()
     {

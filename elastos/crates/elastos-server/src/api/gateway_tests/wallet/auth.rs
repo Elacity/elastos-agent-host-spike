@@ -1,5 +1,6 @@
 use super::super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_token_cannot_read_chain_provider() {
     let dir = tempfile::tempdir().unwrap();
@@ -21,6 +22,7 @@ async fn test_home_token_cannot_read_chain_provider() {
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_evm_wallet_link_requires_passkey_authority_and_reuses_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -308,6 +310,7 @@ async fn test_evm_wallet_link_requires_passkey_authority_and_reuses_session() {
     assert_eq!(standard.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_auth_session_revoke_rejects_other_principal_home_and_system_tokens() {
     let dir = tempfile::tempdir().unwrap();
@@ -345,6 +348,7 @@ async fn test_auth_session_revoke_rejects_other_principal_home_and_system_tokens
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_auth_session_revoke_allows_admin_to_revoke_guest_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -382,6 +386,7 @@ async fn test_auth_session_revoke_allows_admin_to_revoke_guest_session() {
     .unwrap());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_metamask_connector_token_can_link_evm_wallet() {
     let dir = tempfile::tempdir().unwrap();
@@ -471,6 +476,7 @@ async fn test_metamask_connector_token_can_link_evm_wallet() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_metamask_can_link_multiple_accounts_and_wallet_can_remove_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -634,6 +640,7 @@ async fn test_metamask_can_link_multiple_accounts_and_wallet_can_remove_one() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_metamask_connector_token_can_link_erc1271_wallet() {
     let dir = tempfile::tempdir().unwrap();
@@ -720,6 +727,7 @@ async fn test_metamask_connector_token_can_link_erc1271_wallet() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_evm_auth_challenge_uses_http_for_loopback_home() {
     let dir = tempfile::tempdir().unwrap();
@@ -764,6 +772,7 @@ async fn test_evm_auth_challenge_uses_http_for_loopback_home() {
     assert!(message.contains("URI: http://127.0.0.1:61180/home/"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_evm_wallet_link_rejects_system_token_without_connector() {
     let dir = tempfile::tempdir().unwrap();
@@ -793,6 +802,7 @@ async fn test_evm_wallet_link_rejects_system_token_without_connector() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_btc_wallet_link_rejects_system_token_without_connector() {
     let dir = tempfile::tempdir().unwrap();
@@ -820,6 +830,7 @@ async fn test_btc_wallet_link_rejects_system_token_without_connector() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_token_cannot_link_bip322_account() {
     let dir = tempfile::tempdir().unwrap();
@@ -858,6 +869,7 @@ async fn test_wallet_token_cannot_link_bip322_account() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_unisat_token_can_link_bip322_account_without_minting_home_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -974,6 +986,7 @@ async fn test_unisat_token_can_link_bip322_account_without_minting_home_session(
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_evm_auth_challenge_is_single_use() {
     let dir = tempfile::tempdir().unwrap();
@@ -1043,6 +1056,7 @@ async fn test_evm_auth_challenge_is_single_use() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_evm_auth_challenge_rejects_client_supplied_origin_fields() {
     let dir = tempfile::tempdir().unwrap();
@@ -1124,6 +1138,7 @@ async fn test_evm_auth_challenge_requires_wallet_provider() {
     assert!(text.contains("wallet provider unavailable"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_evm_auth_challenge_requires_passkey_front_door() {
     let dir = tempfile::tempdir().unwrap();

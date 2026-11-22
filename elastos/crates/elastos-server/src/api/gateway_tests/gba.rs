@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn gba_viewer_storage_requires_exact_preconditions_and_preserves_the_winner() {
     let dir = tempfile::tempdir().unwrap();
@@ -133,6 +134,7 @@ fn gba_nonogram_manifest_parses_through_canonical_capsule_schema() {
     assert_eq!(manifest.icon.as_deref(), Some("icons"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_content_launch_uses_the_bound_gba_viewer_without_compute() {
     let dir = tempfile::tempdir().unwrap();
@@ -263,6 +265,7 @@ async fn home_content_launch_uses_the_bound_gba_viewer_without_compute() {
     assert_eq!(resource_substitution.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_launches_gba_nonogram_through_the_bound_viewer() {
     let dir = tempfile::tempdir().unwrap();
@@ -324,6 +327,7 @@ async fn home_launches_gba_nonogram_through_the_bound_viewer() {
     assert_eq!(content.status(), StatusCode::OK);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn old_install_upgrade_encrypts_ucity_save_and_state_before_normal_round_trip() {
     let dir = tempfile::tempdir().unwrap();
@@ -548,6 +552,7 @@ async fn old_install_upgrade_encrypts_ucity_save_and_state_before_normal_round_t
     assert!(backup_dir.join("root-000/receipt.json").is_file());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn selected_gba_content_token_rejects_resource_substitution() {
     let dir = tempfile::tempdir().unwrap();
@@ -626,6 +631,7 @@ async fn selected_gba_content_token_rejects_resource_substitution() {
         .contains("projection authority mismatch"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn gba_viewer_reads_only_compatible_library_objects_as_raw_bytes() {
     let dir = tempfile::tempdir().unwrap();
@@ -702,6 +708,7 @@ async fn gba_viewer_reads_only_compatible_library_objects_as_raw_bytes() {
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn gba_viewer_save_storage_is_scoped_to_the_launch_principal() {
     let dir = tempfile::tempdir().unwrap();
@@ -753,6 +760,7 @@ fn set_test_capsule_storage(data_dir: &std::path::Path, name: &str, storage: &st
     std::fs::write(path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn viewer_storage_cannot_reach_the_agents_area() {
     let dir = tempfile::tempdir().unwrap();
@@ -863,6 +871,7 @@ fn walkdir_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 /// The path resolver trims surrounding whitespace, so a grant for
 /// "Agents /*" (space, tab or newline) names the real Agents folder. The
 /// viewer checks the string it resolves: nothing there is read or written.
+#[cfg(unix)]
 #[tokio::test]
 async fn viewer_storage_whitespace_root_cannot_reach_the_agents_area() {
     let dir = tempfile::tempdir().unwrap();

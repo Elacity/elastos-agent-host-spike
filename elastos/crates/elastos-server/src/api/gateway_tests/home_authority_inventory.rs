@@ -1292,6 +1292,7 @@ fn viewer_launch_read_starts_with_its_bound_gate_and_existing_rows_remain() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_session_cannot_open_a_launch_bound_viewer_page() {
     let dir = tempfile::tempdir().unwrap();
@@ -1309,6 +1310,7 @@ async fn home_session_cannot_open_a_launch_bound_viewer_page() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_session_cannot_pass_an_app_only_gate() {
     let dir = tempfile::tempdir().unwrap();
@@ -1348,6 +1350,7 @@ impl Provider for CountedDocumentsProvider {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_session_cannot_invoke_an_app_only_documents_operation() {
     let dir = tempfile::tempdir().unwrap();

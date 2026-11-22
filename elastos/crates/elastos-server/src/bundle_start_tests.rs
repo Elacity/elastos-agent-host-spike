@@ -3255,6 +3255,7 @@ async fn only_a_started_content_is_kept_for_its_page() {
 /// page token bound to another launch or naming another page, a path that is
 /// not plain, an id that is not kept. A program, not content, is not opened.
 /// (The routes sit behind the shell-only layers in `api/server.rs`.)
+#[cfg(unix)]
 #[tokio::test]
 async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     use crate::api::routes::kept_launch_test_tokens as tokens;
@@ -4117,6 +4118,7 @@ async fn a_signature_grants_nothing() {
 /// D1a-http-hash. `POST /api/launch/open` starts a signed content bundle by
 /// its CID for a Home token, and the same request on a slot whose entrypoint
 /// changed is refused by the mismatch code.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tampered_one() {
     use crate::api::routes::kept_launch_test_tokens as tokens;

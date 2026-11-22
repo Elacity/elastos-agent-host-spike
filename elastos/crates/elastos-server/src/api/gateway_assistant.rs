@@ -454,6 +454,7 @@ mod r3_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn parent_signed_workspace_reads_parent_root_and_keeps_protection_gate() {
         let dir = tempfile::tempdir().unwrap();
@@ -551,6 +552,7 @@ mod r8d_passkey_rows {
     /// The child holds no protection for this person's root, so the save is
     /// refused and creates nothing. The route answers the same refusal with
     /// 403 and the bare text.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_assistant_workspace_save_for_the_passkey_person() {
         let person: PasskeyPerson = passkey_person(ASSISTANT_CAPSULE_ID);

@@ -1936,6 +1936,7 @@ mod tests {
         assert_eq!(provider.summary.required_action.as_deref(), Some("read"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn generic_invoke_executes_runtime_binding_and_never_dispatches_provider_path() {
         let data_dir = tempfile::tempdir().unwrap();

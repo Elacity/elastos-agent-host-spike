@@ -158,6 +158,7 @@ impl Provider for MalformedRecoveryWalletProvider {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_token_can_review_and_reject_wallet_approvals() {
     let dir = tempfile::tempdir().unwrap();
@@ -232,6 +233,7 @@ async fn test_system_token_can_review_and_reject_wallet_approvals() {
         .is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_can_create_managed_wallet_account() {
     let dir = tempfile::tempdir().unwrap();
@@ -303,6 +305,7 @@ async fn test_system_can_create_managed_wallet_account() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_app_can_create_and_summarize_accounts() {
     let dir = tempfile::tempdir().unwrap();
@@ -432,6 +435,7 @@ async fn test_wallet_summary_preserves_unavailable_provider_schema() {
         .contains("wallet provider unavailable"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_transaction_default_also_drives_browser_connect_default() {
     let dir = tempfile::tempdir().unwrap();
@@ -519,6 +523,7 @@ fn system_wallet_account_summary_defaults_missing_signing_availability_to_false(
     assert!(!summary.signing_available);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_app_can_delete_managed_account() {
     let dir = tempfile::tempdir().unwrap();
@@ -634,6 +639,7 @@ async fn test_wallet_app_can_delete_managed_account() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_app_can_rename_account() {
     let dir = tempfile::tempdir().unwrap();
@@ -714,6 +720,7 @@ async fn test_wallet_app_can_rename_account() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_recovery_key_requires_passkey_step_up() {
     let dir = tempfile::tempdir().unwrap();
@@ -878,6 +885,7 @@ async fn test_wallet_recovery_key_requires_passkey_step_up() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_recovery_key_import_requires_passkey_step_up() {
     let dir = tempfile::tempdir().unwrap();
@@ -973,6 +981,7 @@ async fn test_wallet_recovery_key_import_requires_passkey_step_up() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_managed_recovery_key_routes_reject_unverified_or_mismatched_intent_before_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -1122,6 +1131,7 @@ async fn test_managed_recovery_key_routes_reject_unverified_or_mismatched_intent
     assert!(wallet_provider.requests.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_managed_recovery_key_routes_fail_closed_on_provider_errors() {
     let unavailable_dir = tempfile::tempdir().unwrap();
@@ -1259,6 +1269,7 @@ fn p1j_t1_assert_audit(dir: &std::path::Path, event_type: &str, ids: &(String, S
     assert_eq!(event.session_id.as_deref(), Some(ids.1.as_str()));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn p1j_t1_gateway_browser_wallet_binds_principal_not_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -1278,6 +1289,7 @@ async fn p1j_t1_gateway_browser_wallet_binds_principal_not_session() {
     p1j_t1_binds_value(&approvals.last().expect("account access")["payload"], &ids);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn p1j_t1_gateway_browser_wallet_reads_binds_principal_not_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -1293,6 +1305,7 @@ async fn p1j_t1_gateway_browser_wallet_reads_binds_principal_not_session() {
     p1j_t1_assert_audit(dir.path(), "browser.chain_read.requested", &ids);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn p1j_t1_gateway_wallet_accounts_binds_principal_not_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -1315,6 +1328,7 @@ async fn p1j_t1_gateway_wallet_accounts_binds_principal_not_session() {
     p1j_t1_assert_audit(dir.path(), "wallet.default.updated", &ids);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn p1j_t1_gateway_browser_wallet_bridge_binds_principal_not_session() {
     let dir = tempfile::tempdir().unwrap();

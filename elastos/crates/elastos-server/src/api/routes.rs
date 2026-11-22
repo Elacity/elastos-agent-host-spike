@@ -466,6 +466,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_launch_rejects_raw_principal_id_even_with_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -487,6 +488,7 @@ pub(crate) mod tests {
         assert!(err.1.contains("not launch authority"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_launch_accepts_home_launch_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -509,6 +511,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_launch_rejects_grant_without_runtime_data_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -524,6 +527,7 @@ pub(crate) mod tests {
         assert_eq!(err.1, "principal launch grant unavailable");
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_launch_rejects_wrong_app_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -1951,6 +1955,7 @@ pub(crate) mod tests {
     /// own id and root, and the same holds after a stop and relaunch. Row 6b
     /// rides here too: the manifest declares the agent kind and names no id,
     /// and the audited actor is still the id the request named.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_binds_each_agents_own_principal_and_root() {
         if crate::agents::require_build().is_err() {
@@ -2076,6 +2081,7 @@ pub(crate) mod tests {
     /// object its own agent wrote: its envelope names that agent, that root
     /// and that URI, so the bytes under one root cannot be the other agent's
     /// object.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_journal_and_memory_sit_only_under_its_own_root_on_disk() {
         if crate::agents::require_build().is_err() {
@@ -2159,6 +2165,7 @@ pub(crate) mod tests {
     /// running. Two registry entries are `running` with distinct id, session
     /// and principal, and both end `stopped` with cause `completed` after
     /// their calls are granted.
+    #[cfg(unix)]
     #[tokio::test]
     async fn two_agents_resident_at_once() {
         if crate::agents::require_build().is_err() {
@@ -2668,6 +2675,7 @@ pub(crate) mod tests {
     /// The launch answers `starting` with its session while its guest runs; the
     /// entry is `running` from the moment the worker reports `started` until the
     /// guest ends.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn the_launch_answers_starting_and_the_entry_runs_from_the_workers_started() {
         if crate::agents::require_build().is_err() {
@@ -2713,6 +2721,7 @@ pub(crate) mod tests {
 
     /// A worker that cannot enter the guest leaves the admitted entry failed
     /// with the start error; it never reports running.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn a_pre_guest_start_failure_ends_failed_with_its_cause() {
         if crate::agents::require_build().is_err() {
@@ -2743,6 +2752,7 @@ pub(crate) mod tests {
 
     /// Dropping the route while registration waits releases the admission
     /// context and the loaded component through the launch guard.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_a_launch_before_registration_releases_its_context() {
         if crate::agents::require_build().is_err() {
@@ -2787,6 +2797,7 @@ pub(crate) mod tests {
 
     /// A natural return ends the entry `stopped` with cause `completed`, and
     /// the list route carries the session and the cause.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_natural_return_ends_the_entry_stopped_with_cause_completed() {
         if crate::agents::require_build().is_err() {
@@ -2820,6 +2831,7 @@ pub(crate) mod tests {
     }
 
     /// A guest that traps ends the entry `failed` with the trap's cause.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_trap_ends_the_entry_failed_with_its_cause() {
         if crate::agents::require_build().is_err() {
@@ -2877,6 +2889,7 @@ pub(crate) mod tests {
     /// revoked, its guest ran once (five calls in one session), and it is
     /// never launched again. B, held in its own first call the whole time, is
     /// untouched and then completes.
+    #[cfg(unix)]
     #[tokio::test]
     async fn trap_recorded_once() {
         if crate::agents::require_build().is_err() {
@@ -3044,6 +3057,7 @@ pub(crate) mod tests {
     /// when the guest traps is denied by the Runtime with a reason that names
     /// the cause, and the grant it made before the trap no longer validates.
     /// A pending request of another session is left pending.
+    #[cfg(unix)]
     #[tokio::test]
     async fn failure_settles_and_revokes() {
         use elastos_runtime::capability::manager::ValidationError;
@@ -3215,6 +3229,7 @@ pub(crate) mod tests {
     /// and its one `capsule_stop` carries that cause. The Home restarted from
     /// its store and that list refuses every grant; the store alone would
     /// accept them.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unsaved_revoke_ends_the_activation_unsettled() {
         use elastos_runtime::capability::manager::ValidationError;
@@ -3300,6 +3315,7 @@ pub(crate) mod tests {
     /// Then a second run is stopped while its guest is held in its first
     /// call; the stop leaves the entry to the run's own end. Each run ends
     /// exactly once, with one cause and one `capsule_stop` that carries it.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stop_racing_a_trap_ends_once() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -3450,6 +3466,7 @@ pub(crate) mod tests {
     /// `stopped: <reason>` as its cause, one `Requested` stop is audited, and
     /// the entry is kept for its session. The other agent is untouched and
     /// completes.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_mid_compute() {
         if crate::agents::require_build().is_err() {
@@ -3564,6 +3581,7 @@ pub(crate) mod tests {
 
     /// The route's optional body: a bodyless `DELETE` records the reason
     /// `user`, as the API's earlier stop did.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bodyless_stop_records_the_user_reason() {
         if crate::agents::require_build().is_err() {
@@ -3590,6 +3608,7 @@ pub(crate) mod tests {
     /// its cause, and the request it was waiting on is denied by the Runtime
     /// with that cause. B, held in its own first call throughout, is
     /// untouched and then completes.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_mid_wait() {
         if crate::agents::require_build().is_err() {
@@ -3686,6 +3705,7 @@ pub(crate) mod tests {
     /// `Requested` stop is audited. A stop given to the provider only once
     /// the entry is `running` (F-startskip) leaves the start function to run
     /// to its own ending, which is then the entry's.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stop_during_start_ends_it_before_run() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -3756,6 +3776,7 @@ pub(crate) mod tests {
     /// later `DELETE` with another reason answers the same and removes
     /// nothing. A request taken away before the end is recorded (F-earlydrop)
     /// sends the stop down the launcher's path, which removes the entry.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stop_racing_an_end_keeps_its_record_for_60_s() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -3853,6 +3874,7 @@ pub(crate) mod tests {
     /// text. The activation runs on with no stop recorded or audited. An
     /// empty body is still the stop with the reason `user`. A refused body
     /// read as no body (F-lenient) makes the first refusal a stop.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_malformed_stop_body_is_refused() {
         if crate::agents::require_build().is_err() {
@@ -3893,6 +3915,7 @@ pub(crate) mod tests {
     /// and both stops, and a third after the end, answer that one outcome.
     /// One stop is audited. (`runtime::tests::a_later_stop_keeps_the_first_cause`
     /// holds the rule itself.)
+    #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_stops_answer_the_first_recorded_cause() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -3945,6 +3968,7 @@ pub(crate) mod tests {
 
     /// An ended entry is listed for the 60 s retention and is gone after it,
     /// read at a caller's instant rather than waited for.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_ended_entry_is_listed_for_sixty_seconds() {
         if crate::agents::require_build().is_err() {
@@ -4169,6 +4193,7 @@ pub(crate) mod tests {
     /// reason; the ask it was already granted is revoked, the one still
     /// pending is denied by the Runtime, its ceiling and provider entry are
     /// gone, a late call is refused, and its entry leaves the list at 60 s.
+    #[cfg(unix)]
     #[tokio::test]
     async fn nothing_remains_after_stop() {
         if crate::agents::require_build().is_err() {
@@ -4219,6 +4244,7 @@ pub(crate) mod tests {
     /// with the stop's cause, and the instance leaves no live grant, no
     /// pending request, no context or principal, no accepting late call and
     /// no entry after 60 s.
+    #[cfg(unix)]
     #[tokio::test]
     async fn nothing_remains_after_cancel() {
         if crate::agents::require_build().is_err() {
@@ -4271,6 +4297,7 @@ pub(crate) mod tests {
     /// another agent's stored root; the grants it had are revoked, the ask
     /// still pending is denied by the Runtime, the context and principal are
     /// gone, a late call is refused, and the entry leaves the list at 60 s.
+    #[cfg(unix)]
     #[tokio::test]
     async fn nothing_remains_after_failure() {
         if crate::agents::require_build().is_err() {
@@ -4330,6 +4357,7 @@ pub(crate) mod tests {
     /// stored root. The bridge refuses the request, nothing under Y's root is
     /// read or audited for X, and X's activation ends `failed` with that
     /// refusal as its cause.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_refuses_another_agents_stored_root() {
         if crate::agents::require_build().is_err() {
@@ -4409,6 +4437,7 @@ pub(crate) mod tests {
     /// root is an envelope on disk, and only the owner's stored key opens it.
     /// The activation ends only when the guest's own bridge read returns the
     /// bytes it wrote, so the read half is already proven by its end.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_object_is_encrypted_and_needs_the_owners_key() {
         if crate::agents::require_build().is_err() {
@@ -4490,6 +4519,7 @@ pub(crate) mod tests {
     /// stays beyond the probe host's `.../self/*` ceiling, and the traversal
     /// spellings stay outside the root. The capturing localhost double shows
     /// exactly which calls fell past the protected path.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_serves_its_own_root_on_the_component_bridge() {
         if crate::agents::require_build().is_err() {
@@ -4629,6 +4659,7 @@ pub(crate) mod tests {
     /// request, and it carries none of Y's data. Each bare spelling is also
     /// sent as the operation itself with X's held grant, and that answer
     /// carries none of Y's names, bytes or root segment either.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_is_refused_every_other_spelling_of_another_agents_root() {
         if crate::agents::require_build().is_err() {
@@ -4925,6 +4956,7 @@ pub(crate) mod tests {
     /// request, and it carries none of Y's data. Each bare spelling is also
     /// sent as the operation itself with X's held grant, and that answer
     /// carries none of Y's names, bytes or root segment either.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path() {
         if crate::agents::require_build().is_err() {
@@ -5634,6 +5666,7 @@ pub(crate) mod tests {
 
     /// A9-R clause one, ISO-journal: with both agents live, B is refused A's
     /// agent journal through the real Runtime, and A reads its own.
+    #[cfg(unix)]
     #[tokio::test]
     async fn both_resident_b_is_refused_a_journal_and_a_reads_its_own() {
         if crate::agents::require_build().is_err() {
@@ -5662,6 +5695,7 @@ pub(crate) mod tests {
 
     /// A9-R clause two, ISO-memory: with both agents live, B is refused A's
     /// `memory/notes.md`, and A reads its own.
+    #[cfg(unix)]
     #[tokio::test]
     async fn both_resident_b_is_refused_a_memory_file_and_a_reads_its_own() {
         if crate::agents::require_build().is_err() {
@@ -5690,6 +5724,7 @@ pub(crate) mod tests {
 
     /// A9-R clause three, ISO-foreign: with both agents live, B is refused a
     /// file of A's that is neither journal nor memory, and A reads its own.
+    #[cfg(unix)]
     #[tokio::test]
     async fn both_resident_b_is_refused_a_foreign_file_and_a_reads_its_own() {
         if crate::agents::require_build().is_err() {
@@ -5721,6 +5756,7 @@ pub(crate) mod tests {
     /// folder. This is the attached start route that row 4's route 4 lacks.
     /// The folder declares no agent, so this row stops at the principal rule
     /// and not at the launcher rule.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_attached_start_refuses_a_stored_agents_principal() {
         if crate::agents::require_build().is_err() {
@@ -5760,6 +5796,7 @@ pub(crate) mod tests {
     /// but its entrypoint bytes are other code. Admission compares the walk of
     /// the folder with the CID the Runtime stored at creation, so the forged
     /// receipt decides nothing. Nothing is bound and no launch is audited.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_refuses_a_forged_package_receipt() {
         use crate::agents;
@@ -5908,6 +5945,7 @@ pub(crate) mod tests {
     /// one walked manifest, not against an earlier read of `capsule.json`.
     /// The stored host's own bytes are unchanged; a grant that names another
     /// capsule is refused before admission and before any principal binds.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_refuses_a_grant_for_another_capsule() {
         if crate::agents::require_build().is_err() {
@@ -5960,6 +5998,7 @@ pub(crate) mod tests {
     /// can: a signer key that does not decode, a signature that does not
     /// verify, and a signature by a key this Home does not trust. Each gives
     /// the one refusal, and each takes the same steps before it.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_route_refuses_three_slot_signature_failures_with_the_same_work() {
         use elastos_compute::providers::ComponentProvider;
@@ -6118,6 +6157,7 @@ pub(crate) mod tests {
     /// Host's byte CID still loads through the real strict parser, and every
     /// launch of it is refused by name. The missing CID is never re-derived
     /// from `.elastos-cid` or from the release record.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_older_agent_record_without_byte_identity_refuses_launch() {
         if crate::agents::require_build().is_err() {
@@ -6185,6 +6225,7 @@ pub(crate) mod tests {
     /// A capsule whose manifest does not declare an agent cannot be launched
     /// as one, whatever the request names or the person owns. With agents off
     /// the launch is refused before any folder is read, by name.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_capsule_that_does_not_declare_an_agent_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -6258,6 +6299,7 @@ pub(crate) mod tests {
     /// Row 8: the record of a real bridge call from an admitted agent is the
     /// agent as actor (`principal_id`) and the person it acts for (the owner),
     /// named in the existing `reason` field as `owner=<id>`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bridge_call_from_an_admitted_agent_names_the_agent_and_its_owner() {
         if crate::agents::require_build().is_err() {
@@ -6312,6 +6354,7 @@ pub(crate) mod tests {
     /// `launch_capsule` without its launcher. A request that names the agent
     /// and holds no grant stops at admission; a request that names no agent
     /// stops at the start, because the manifest declares one.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_without_a_grant_refuses_on_launch_capsule() {
         if crate::agents::require_build().is_err() {
@@ -6363,6 +6406,7 @@ pub(crate) mod tests {
     /// Row 5, entrance two: the attach route. `run_cmd` and `capsule_cmd`
     /// attach a component with `Runtime::run_local`, which has no launcher and
     /// no admission context, so a manifest that declares an agent is refused.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_component_attached_without_an_admitted_launch_refuses_an_agent_host() {
         if crate::agents::require_build().is_err() {
@@ -6388,6 +6432,7 @@ pub(crate) mod tests {
     /// Row 5: unsigned. The same attach start of an unsigned copy of the Agent
     /// Host refuses by the signature rule before any launcher question, and
     /// nothing starts.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unsigned_agent_host_refuses_the_attach_route_by_name() {
         if crate::agents::require_build().is_err() {
@@ -6424,6 +6469,7 @@ pub(crate) mod tests {
     /// Row 5: an agent retired or unknown. A retired agent still holds its id
     /// and root; both spellings of "no such agent of yours" refuse the launch
     /// with the same literal, and nothing starts.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_retired_or_unknown_agent_refuses_its_launch() {
         use crate::agents;
@@ -6464,6 +6510,7 @@ pub(crate) mod tests {
     /// Row 5: the launcher is a stored person whose current protection is
     /// gone. The agent's data key cannot open, so admission refuses before
     /// anything starts and mints nothing.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_refuses_an_owner_without_current_protection() {
         if crate::agents::require_build().is_err() {
@@ -6494,6 +6541,7 @@ pub(crate) mod tests {
     /// Row 6, second half: a manifest claim that names another agent's root
     /// neither selects the actor nor moves its root. The actor is the id
     /// admission recorded, and every call names that agent's own root.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_manifest_claim_naming_another_agents_root_leaves_the_actors_id() {
         if crate::agents::require_build().is_err() {
@@ -6697,6 +6745,7 @@ pub(crate) mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn over_cap_refused_before_dispatch() {
         if crate::agents::require_build().is_err() {
@@ -6718,6 +6767,7 @@ pub(crate) mod tests {
         assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn resident_create_after_launch_returns_is_reserved() {
         if crate::agents::require_build().is_err() {
@@ -6745,6 +6795,7 @@ pub(crate) mod tests {
         assert_eq!(create_calls(&model).len(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn retry_not_double_charged() {
         if crate::agents::require_build().is_err() {
@@ -6771,6 +6822,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn changed_offer_retry_refused_before_dispatch() {
         if crate::agents::require_build().is_err() {
@@ -6814,6 +6866,7 @@ pub(crate) mod tests {
         assert_eq!(calls[0]["offer_id"], "offer:fixture");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn changed_revision_retry_refused_before_dispatch() {
         if crate::agents::require_build().is_err() {
@@ -6856,6 +6909,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_creates_share_cap() {
         if crate::agents::require_build().is_err() {
@@ -6910,6 +6964,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn b_unaffected_by_a_exhaustion() {
         if crate::agents::require_build().is_err() {
@@ -6943,6 +6998,7 @@ pub(crate) mod tests {
         assert_eq!(calls[1]["runtime_binding"]["principal_id"], b);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_cannot_raise_cap() {
         if crate::agents::require_build().is_err() {
@@ -6970,6 +7026,7 @@ pub(crate) mod tests {
 
     /// An admitted agent whose signed manifest asks for no model tokens cannot
     /// reach the model. The provider records no call.
+    #[cfg(unix)]
     #[tokio::test]
     async fn no_ask_no_model() {
         if crate::agents::require_build().is_err() {
@@ -6990,6 +7047,7 @@ pub(crate) mod tests {
     /// a larger ask. The body here names 0, which would refuse the call if the
     /// decision read it. The call still reaches the provider, and the Runtime
     /// map still holds the signed ceiling.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bridge_holds_signed_ceiling() {
         if crate::agents::require_build().is_err() {
@@ -7031,6 +7089,7 @@ pub(crate) mod tests {
 
     /// An admitted agent with a positive signed ceiling reaches the model.
     /// The provider records one call.
+    #[cfg(unix)]
     #[tokio::test]
     async fn positive_ceiling_reaches_model() {
         if crate::agents::require_build().is_err() {
@@ -7048,6 +7107,7 @@ pub(crate) mod tests {
     /// records the file's own object and only the Runtime's `op`. The `invoke`
     /// line beside it still sends `{"path": …}`, so the wrapper the fixture
     /// has always sent is unchanged.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_plan_send_line_sends_the_body_files_own_bytes() {
         if crate::agents::require_build().is_err() {

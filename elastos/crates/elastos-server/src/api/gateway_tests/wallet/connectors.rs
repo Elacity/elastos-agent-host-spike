@@ -1,5 +1,6 @@
 use super::super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_connector_route_requires_connector_launch_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -22,6 +23,7 @@ async fn test_wallet_connector_route_requires_connector_launch_token() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_connector_route_rejects_unknown_connector_capsule() {
     let dir = tempfile::tempdir().unwrap();
@@ -49,6 +51,7 @@ async fn test_wallet_connector_route_rejects_unknown_connector_capsule() {
     assert!(text.contains("unknown wallet connector capsule"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_wallet_connector_bridge_rejects_invalid_authority_before_wallet_provider() {
     let dir = tempfile::tempdir().unwrap();
@@ -320,6 +323,7 @@ async fn test_home_wallet_connector_bridge_rejects_invalid_authority_before_wall
     wallet_provider.assert_no_requests().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_injected_connector_direct_effect_routes_reach_neither_wallet_provider() {
     let dir = tempfile::tempdir().unwrap();
@@ -376,6 +380,7 @@ async fn test_injected_connector_direct_effect_routes_reach_neither_wallet_provi
     wallet_provider.assert_no_requests().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_walletconnect_connector_requires_pinned_config() {
     let dir = tempfile::tempdir().unwrap();
@@ -442,6 +447,7 @@ fn test_marketplace_lists_walletconnect_only_once_its_config_is_pinned() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_walletconnect_connector_accepts_pinned_config() {
     let dir = tempfile::tempdir().unwrap();
@@ -472,6 +478,7 @@ async fn test_walletconnect_connector_accepts_pinned_config() {
     assert_eq!(json["linked_count"], 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_walletconnect_connector_config_returns_pinned_sdk_contract() {
     let dir = tempfile::tempdir().unwrap();
@@ -517,6 +524,7 @@ async fn test_walletconnect_connector_config_returns_pinned_sdk_contract() {
     assert_eq!(json["evm_chains"][1]["chainName"], "Base");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_summary_reports_walletconnect_available_only_when_pinned() {
     let dir = tempfile::tempdir().unwrap();
@@ -575,6 +583,7 @@ async fn test_wallet_summary_reports_walletconnect_available_only_when_pinned() 
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_metamask_connector_config_returns_runtime_evm_chain_metadata() {
     let dir = tempfile::tempdir().unwrap();
@@ -629,6 +638,7 @@ fn seed_walletconnect_connector_config(data_dir: &std::path::Path) {
     .unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_metamask_connector_lists_external_wallet_accounts() {
     let dir = tempfile::tempdir().unwrap();
@@ -705,6 +715,7 @@ async fn test_metamask_connector_lists_external_wallet_accounts() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_connector_approvals_are_scoped_to_connector() {
     let dir = tempfile::tempdir().unwrap();
@@ -785,6 +796,7 @@ async fn test_wallet_connector_approvals_are_scoped_to_connector() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_unisat_connector_lists_only_unisat_bitcoin_accounts() {
     let dir = tempfile::tempdir().unwrap();
@@ -850,6 +862,7 @@ async fn test_unisat_connector_lists_only_unisat_bitcoin_accounts() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_app_can_approve_wallet_scoped_external_request() {
     let dir = tempfile::tempdir().unwrap();
@@ -940,6 +953,7 @@ async fn test_wallet_app_can_approve_wallet_scoped_external_request() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_metamask_connector_approves_external_wallet_request_with_handoff() {
     let dir = tempfile::tempdir().unwrap();
@@ -1040,6 +1054,7 @@ async fn test_metamask_connector_approves_external_wallet_request_with_handoff()
         .starts_with("did:key:"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_metamask_connector_completes_external_wallet_handoff() {
     let dir = tempfile::tempdir().unwrap();

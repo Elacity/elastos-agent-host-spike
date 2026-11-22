@@ -11171,6 +11171,7 @@ mod tests {
         assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn content_boundary_refuses_forged_holder_signature() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11192,6 +11193,7 @@ mod tests {
         assert!(matches!(result, DistinctHolderGate::Unproven));
     }
 
+    #[cfg(unix)]
     #[test]
     fn plant_boundary_refuses_old_signature_with_matching_row_nonce() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11210,6 +11212,7 @@ mod tests {
         eprintln!("P26B plant boundary replay: RED, old signed row refused");
     }
 
+    #[cfg(unix)]
     #[test]
     fn content_boundary_refuses_a_row_without_collector_nonce() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11228,6 +11231,7 @@ mod tests {
         assert!(matches!(result, DistinctHolderGate::Unproven));
     }
 
+    #[cfg(unix)]
     #[test]
     fn distinct_holder_refusal_does_not_sign_a_foreign_cid_row() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11246,6 +11250,7 @@ mod tests {
         assert!(answer.get("receipt_set").is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn distinct_holder_refusal_signs_only_rows_for_the_requested_cid() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11273,6 +11278,7 @@ mod tests {
         assert_eq!(receipts[0].requested_cid, TEST_CID);
     }
 
+    #[cfg(unix)]
     #[test]
     fn content_boundary_does_not_sign_only_foreign_cid_rows() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11330,6 +11336,7 @@ mod tests {
         eprintln!("P26B plant set verifier replay: RED, old signed row refused");
     }
 
+    #[cfg(unix)]
     #[test]
     fn plant_fresh_honest_answer_passes_boundary_and_set_verifier() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11589,6 +11596,7 @@ mod tests {
 
     /// A distinct-holder answer gains the requester's signed set and the
     /// honest attestation label, replacing the self-attested one.
+    #[cfg(unix)]
     #[tokio::test]
     async fn distinct_holder_answer_carries_a_requester_signed_set() {
         let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
@@ -11664,6 +11672,7 @@ mod tests {
 
     /// A distinct-holder refusal keeps its code and signed rows instead of
     /// collapsing into an error string.
+    #[cfg(unix)]
     #[tokio::test]
     async fn distinct_holder_refusal_answer_keeps_its_signed_set() {
         let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
@@ -11781,6 +11790,7 @@ mod tests {
 
     /// A local copy does not answer a distinct-holder fetch. Two verified
     /// holders still produce their receipts and the signed set.
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_copy_with_distinct_holders_returns_holder_receipts() {
         let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -11978,6 +11988,7 @@ mod tests {
 
     /// A bridge that answers success with no receipts is refused. The bytes
     /// stay unreturned, including the local copy.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_success_without_receipts_returns_no_bytes() {
         let cid = fixture_file_cid(BRIDGE_BYTES);
@@ -12000,6 +12011,7 @@ mod tests {
 
     /// One verified receipt does not prove a request for two, even when the
     /// answer's own count fields say the requirement is met.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_success_with_one_holder_when_two_are_required_is_refused() {
         let cid = fixture_file_cid(BRIDGE_BYTES);
@@ -12086,6 +12098,7 @@ mod tests {
     /// An availability error with one verified receipt and a required count of
     /// 1, while the caller asked for 2, is the refusal. The signed set says
     /// required 2 and observed 1.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_error_with_required_one_signs_the_callers_two() {
         assert_availability_error_signs_the_callers_two(distinct_holder_error_answer(true)).await;
@@ -12093,6 +12106,7 @@ mod tests {
 
     /// The same error with the required-count field omitted is the same
     /// refusal: required 2 and observed 1.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_error_without_required_count_signs_the_callers_two() {
         assert_availability_error_signs_the_callers_two(distinct_holder_error_answer(false)).await;
@@ -12130,6 +12144,7 @@ mod tests {
     }
 
     /// Two verified receipts for another CID do not prove this CID.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_success_for_another_cid_is_refused() {
         let cid = fixture_file_cid(BRIDGE_BYTES);

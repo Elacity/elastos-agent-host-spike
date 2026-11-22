@@ -1701,6 +1701,7 @@ mod tests {
         assert!(err.to_string().contains("regular file"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_existing_device_signing_key_matches_load_or_create_did_without_creating() {
         let missing = tempfile::tempdir().unwrap();
@@ -1745,6 +1746,7 @@ mod tests {
         assert!(err.to_string().contains("regular file"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn update_profile_authority_rejects_invalid_state_without_writing_a_bundle() {
         let now = 1_785_900_000;
@@ -1884,6 +1886,7 @@ mod tests {
         assert!(!path.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn profile_chain_segment_is_contiguous_and_bounded() {
         let dir = owner_only_tempdir();
@@ -1936,6 +1939,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn update_profile_authority_preserves_profile_did_and_revision_chain() {
         let dir = owner_only_tempdir();
@@ -1987,6 +1991,7 @@ mod tests {
         assert!(loaded.authorizes_endpoint(&device_did));
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_profile_authority_rejects_tampered_or_noncanonical_bundles() {
         let dir = owner_only_tempdir();

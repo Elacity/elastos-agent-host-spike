@@ -1207,6 +1207,7 @@ mod r4_root_tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn parent_signed_viewer_storage_round_trips_under_parent_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -1286,6 +1287,7 @@ mod r4_root_tests {
         assert!(!crate::auth::principal_object_io::writes(dir.path()).contains(&child_path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn r4_viewer_target_and_storage_grant_reach_agent_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -1501,6 +1503,7 @@ mod r8d_passkey_rows {
 
     /// The child holds no protection for this person's root, so the write is
     /// refused and creates nothing.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_viewer_storage_save_for_the_passkey_person() {
         let person = passkey_person(GBA_VIEWER);
@@ -1540,6 +1543,7 @@ mod r8d_passkey_rows {
 
     /// Today a viewer whose manifest declares no storage grant is refused,
     /// and nothing is written.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_viewer_storage_save_is_refused_for_a_viewer_without_a_storage_grant() {
         let person = passkey_person(DOCUMENTS);

@@ -1183,6 +1183,52 @@ fn windows_refuses_unisolated_providers() {
     }
 }
 
+#[cfg(all(test, not(unix)))]
+#[test]
+fn windows_refuses_runtime_media_digest_verification_for_an_existing_private_pair() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let supplied = dir.path().join("supplied-tools");
+    std::fs::create_dir_all(&supplied).unwrap();
+    std::fs::write(supplied.join("ffmpeg"), b"ffmpeg-bytes").unwrap();
+    std::fs::write(supplied.join("ffprobe"), b"ffprobe-bytes").unwrap();
+    let config = runtime_media_provider_config_path(data_dir);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, b"{}\n").unwrap();
+    let before = std::fs::read(&config).unwrap();
+    let trust = MediaToolsTrust::SignedRelease(SignedMediaToolDigests {
+        ffmpeg: [7u8; 32],
+        ffprobe: [8u8; 32],
+    });
+
+    let err = prepare_runtime_media_provider_prerequisite(data_dir, &supplied, trust).unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::Unsupported)
+    );
+    assert!(
+        err.to_string()
+            .contains("runtime-media digest verification is unsupported on this platform"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    let private_tools = runtime_media_provider_tools_root(data_dir);
+    assert!(
+        !private_tools.join("ffmpeg").exists() && !private_tools.join("ffprobe").exists(),
+        "digest refusal must not import a private pair"
+    );
+    assert_eq!(
+        std::fs::read(supplied.join("ffmpeg")).unwrap(),
+        b"ffmpeg-bytes"
+    );
+    assert_eq!(
+        std::fs::read(supplied.join("ffprobe")).unwrap(),
+        b"ffprobe-bytes"
+    );
+}
+
 pub async fn register_inactive_custody_provider(
     registry: &Arc<ProviderRegistry>,
     binary_path: &Path,
@@ -1855,11 +1901,36 @@ pub(crate) fn runtime_media_import_differs(
     )
 }
 
+#[cfg(not(unix))]
+fn runtime_media_digest_verification_unsupported() -> anyhow::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "runtime-media digest verification is unsupported on this platform",
+    )
+    .into()
+}
+
 pub(crate) fn prepare_runtime_media_provider_prerequisite(
     data_dir: &Path,
     tools_dir: &Path,
     trust: MediaToolsTrust,
 ) -> anyhow::Result<()> {
+    // An existing private pair is compared, and a signed release replaces it,
+    // only where owner-only no-follow checks can verify those bytes. Windows
+    // has no such check, so an existing config is refused before any import.
+    #[cfg(not(unix))]
+    {
+        match fs::symlink_metadata(runtime_media_provider_config_path(data_dir)) {
+            Ok(_) => {
+                let _ = (tools_dir, trust);
+                return Err(runtime_media_digest_verification_unsupported());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(invalid_media_provider_config("config file is unavailable"));
+            }
+        }
+    }
     // Open the complete supplied pair before creating or changing private state.
     let mut ffmpeg = open_runtime_media_tool(tools_dir, "ffmpeg")?;
     let mut ffprobe = open_runtime_media_tool(tools_dir, "ffprobe")?;
@@ -1897,7 +1968,11 @@ pub(crate) fn prepare_runtime_media_provider_prerequisite(
                 })?;
             }
             #[cfg(not(unix))]
-            let _ = digests;
+            {
+                let _ = digests;
+                return Err(runtime_media_digest_verification_unsupported());
+            }
+            #[cfg(unix)]
             return Ok(());
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

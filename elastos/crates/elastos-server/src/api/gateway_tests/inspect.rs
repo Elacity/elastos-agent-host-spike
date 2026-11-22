@@ -173,6 +173,7 @@ async fn inspect_act_test_state(
     (state, calls)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_gateway_is_system_read_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -275,6 +276,7 @@ async fn inspect_gateway_is_system_read_only() {
     assert_eq!(revoke.status(), StatusCode::NOT_FOUND);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_planning_exposes_only_wallet_status_without_provider_invocation() {
     let dir = tempfile::tempdir().unwrap();
@@ -363,6 +365,7 @@ async fn inspect_planning_exposes_only_wallet_status_without_provider_invocation
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_requires_inbox_approval_before_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -736,6 +739,7 @@ async fn inspect_action_rejects_stale_step_up_before_dispatch() {
     assert!(calls.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_audits_approved_dispatch_failure() {
     let dir = tempfile::tempdir().unwrap();
@@ -828,6 +832,7 @@ async fn inspect_action_audits_approved_dispatch_failure() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_rejects_runtime_metadata_before_inbox() {
     let dir = tempfile::tempdir().unwrap();
@@ -883,6 +888,7 @@ async fn inspect_action_rejects_runtime_metadata_before_inbox() {
     assert!(!has_inspect_action);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_rejects_raw_carrier_route_metadata_before_inbox() {
     let dir = tempfile::tempdir().unwrap();
@@ -1238,6 +1244,7 @@ async fn esp_inspect_action_rejects_every_mutated_binding_field_before_dispatch(
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_duplicate_requests_keep_distinct_pending_records() {
     let dir = tempfile::tempdir().unwrap();
@@ -1467,6 +1474,7 @@ async fn inspect_action_requests_are_principal_scoped_in_inbox_and_approval() {
     assert!(home_entries_of_kind(&requester_home, "inspect_action_request").is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_can_be_denied_without_dispatch() {
     let dir = tempfile::tempdir().unwrap();

@@ -1,5 +1,6 @@
 use super::super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_inbox_approves_wallet_requests_through_runtime_wallet_signing() {
     let dir = tempfile::tempdir().unwrap();
@@ -452,6 +453,7 @@ async fn test_capability_request_from_guest_launched_capsule_waits_for_admin() {
     assert_eq!(*runtime.granted.lock().await, vec!["cap-guest".to_string()]);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_approval_journey_creates_request_reviews_in_inbox_and_signs() {
     let dir = tempfile::tempdir().unwrap();
@@ -655,6 +657,7 @@ async fn test_wallet_approval_journey_creates_request_reviews_in_inbox_and_signs
         .starts_with("did:key:"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_btc_wallet_approval_journey_reviews_in_inbox_and_signs() {
     let dir = tempfile::tempdir().unwrap();

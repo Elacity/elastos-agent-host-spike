@@ -472,6 +472,7 @@ mod r3_tests {
         assert_eq!(read(dir.path(), &context).unwrap(), saved);
     }
 
+    #[cfg(unix)]
     #[test]
     fn parent_signed_workspace_reads_parent_root_and_keeps_protection_gate() {
         let dir = tempfile::tempdir().unwrap();
@@ -565,6 +566,7 @@ mod r8d_rows {
     /// The person's record is kept on the parent and the child holds no
     /// protection for their root, so the save answers 403 with the bare
     /// refusal text and writes nothing.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_assistant_workspace_v2_save_is_refused_for_the_passkey_person() {
         let person = passkey_person("assistant");

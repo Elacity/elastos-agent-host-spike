@@ -362,6 +362,7 @@ fn json(body: &str) -> serde_json::Value {
     serde_json::from_str(body).unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_contact_request_refuses_callers_without_a_chat_session() {
     let home = ContactRequestHome::new().await;
@@ -390,6 +391,7 @@ async fn test_chat_contact_request_refuses_callers_without_a_chat_session() {
     assert!(home.outgoing_requests().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_contact_request_queues_a_request_by_did_with_discovery_off() {
     let home = ContactRequestHome::new().await;
@@ -436,6 +438,7 @@ async fn test_chat_contact_request_queues_a_request_by_did_with_discovery_off() 
     assert!(!home.store.discovery_enabled().unwrap());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_contact_request_binds_to_the_listing_of_a_person_visible_in_discovery() {
     let home = ContactRequestHome::new().await;
@@ -463,6 +466,7 @@ async fn test_chat_contact_request_binds_to_the_listing_of_a_person_visible_in_d
     assert_eq!(home.outgoing_requests().len(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_profile_id_is_released_only_for_a_listed_person() {
     let home = ContactRequestHome::new().await;
@@ -504,6 +508,7 @@ async fn test_chat_profile_id_is_released_only_for_a_listed_person() {
     assert!(home.outgoing_requests().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_contact_request_by_did_answers_each_status_without_echoing_the_did() {
     let home = ContactRequestHome::new().await;
@@ -634,6 +639,7 @@ async fn test_people_contact_request_by_did_answers_each_status_without_echoing_
     assert_eq!(home.outgoing_requests().len(), 2);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_refuses_the_device_did_of_someone_who_posted_in_community() {
     // Not a contact and no presence: only their signed Community post names
@@ -656,6 +662,7 @@ async fn test_people_refuses_the_device_did_of_someone_who_posted_in_community()
     assert!(home.outgoing_requests().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_a_did_another_profile_only_declares_is_still_asked() {
     // A member lists the victim's Profile DID among their own devices and
@@ -682,6 +689,7 @@ async fn test_a_did_another_profile_only_declares_is_still_asked() {
     assert_eq!(home.outgoing_requests().len(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn left_home_refuses_new_contact_intent_and_both_inbox_decisions_without_mutation() {
     let mut home = ContactRequestHome::new().await;
@@ -771,6 +779,7 @@ async fn left_home_refuses_new_contact_intent_and_both_inbox_decisions_without_m
     assert_eq!(home.outgoing_requests().len(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn community_presence_choice_is_the_callers_own_and_separate_from_discovery() {
     let mut home = ContactRequestHome::new().await;

@@ -70,6 +70,7 @@ fn token_life(token: &str) -> (u64, u64) {
 /// that person, and answers the page's name, its address under the launch,
 /// and the page's own token, bound to that launch with the page as its
 /// executable, for fifteen minutes at most, refused by every other check.
+#[cfg(unix)]
 #[tokio::test]
 async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -134,6 +135,7 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
 /// both) names that file and no other. A 200 from the Runtime in any other
 /// shape (an id that is not 32 hex, an entrypoint or page name that is not
 /// plain) is a 502, and no token is minted.
+#[cfg(unix)]
 #[tokio::test]
 async fn home_open_encodes_the_pages_address_and_uses_only_a_well_formed_answer() {
     let dir = tempfile::tempdir().unwrap();
@@ -186,6 +188,7 @@ async fn home_open_encodes_the_pages_address_and_uses_only_a_well_formed_answer(
 /// is not asked: no session at all, or another app's token sent as that app's
 /// frame sends it (`Origin: null`), so that only Home's own check refuses it. The Runtime's
 /// refusals are passed on as they are, by name, and no token is minted.
+#[cfg(unix)]
 #[tokio::test]
 async fn home_open_needs_homes_session_and_passes_refusals_on_by_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -234,6 +237,7 @@ async fn home_open_needs_homes_session_and_passes_refusals_on_by_name() {
 /// among what `img-src` allows), `nosniff`, `no-referrer` and the opaque
 /// origin; an asset byte for byte, with no policy. A path that is not plain,
 /// or an id that is no launch id, is `not_found` and the Runtime is not asked.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_page_of_a_kept_launch_is_served_under_the_app_policy() {
     let dir = tempfile::tempdir().unwrap();

@@ -409,6 +409,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervisor_launch_accepts_signed_launch_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -431,6 +432,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervisor_launch_rejects_wrong_app_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -464,6 +466,7 @@ mod tests {
     /// No part of this row depends on the agents build switch: the stored
     /// human grant path and the two refusals behave the same in both builds.
     /// The agent refusal itself is covered by its own gated row.
+    #[cfg(unix)]
     #[tokio::test]
     async fn r6_launch_capsule_reaches_the_microvm_gate_with_the_typed_person() {
         use crate::setup::{CapsuleEntry, ComponentsManifest};
@@ -995,6 +998,7 @@ mod tests {
     /// (`supervisor_launch_principal_from_input`), as its sibling row does.
     /// (ii) A token minted for another capsule is refused through the real
     /// HTTP handler.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_supervisor_launch_principal_comes_from_a_person_grant() {
         use elastos_runtime::auth::AuthSessionGrantV1;

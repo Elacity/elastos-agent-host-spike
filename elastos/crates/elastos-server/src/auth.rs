@@ -2843,6 +2843,7 @@ mod guest_registration_tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn full_guest_store_refuses_new_records_but_keeps_completion_replay() {
         let (root, mut identity) = fixture();
@@ -2947,6 +2948,7 @@ mod guest_registration_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn guest_capacity_retry_uses_only_known_terminal_expiry() {
         let (root, mut identity) = fixture();
@@ -2987,6 +2989,7 @@ mod guest_registration_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn guest_registration_restart_reconciles_each_effect_boundary_once() {
         for fault in [
@@ -3059,6 +3062,7 @@ mod guest_registration_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn guest_registration_concurrent_ceremonies_and_retries_preserve_grants() {
         for same_ceremony in [false, true] {
@@ -3123,6 +3127,7 @@ mod guest_registration_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn guest_registration_terminal_replay_requires_original_expiry_and_current_policy() {
         for denial in ["expiry", "session", "guest", "admin", "policy"] {
@@ -3311,6 +3316,7 @@ mod owner_recovery_tests {
         std::fs::read(auth_state_path(home.root.path()).unwrap()).unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_recovery_binds_new_passkey_to_admin_kit_once() {
         let mut home = home();
@@ -3346,6 +3352,7 @@ mod owner_recovery_tests {
         assert_eq!(auth_bytes(&home), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_recovery_refusals_leave_auth_state_byte_identical() {
         for case in [
@@ -3461,6 +3468,7 @@ mod owner_recovery_tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_recovery_code_is_burned_after_five_wrong_codes() {
         let mut home = home();
@@ -3478,6 +3486,7 @@ mod owner_recovery_tests {
         assert!(begin(&mut home, &code).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_recovery_unarmed_or_expired_refuses_without_writing() {
         let home = home();
@@ -3497,6 +3506,7 @@ mod owner_recovery_tests {
         assert_eq!(auth_bytes(&home), before, "expired");
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_recovery_retry_reconciles_credential_saved_before_a_crash() {
         let mut home = home();
@@ -3540,6 +3550,7 @@ mod owner_recovery_tests {
         record
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_owner_recovery_leaves_the_agent_record_unchanged() {
         let mut home = home();
@@ -3564,6 +3575,7 @@ mod owner_recovery_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn quarantined_agent_record_lets_the_owner_recover() {
         for case in 0..MALFORMED_AGENT_CASES {
@@ -3593,6 +3605,7 @@ mod owner_recovery_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_control_owner_recovery_of_a_person_succeeds() {
         let mut home = home();
@@ -3649,6 +3662,7 @@ mod owner_enrollment_tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_intent_validates_name_and_strict_shape() {
         assert!(
@@ -3695,6 +3709,7 @@ mod owner_enrollment_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_intent_is_bound_before_attestation() {
         for intent in [
@@ -3780,6 +3795,7 @@ mod owner_enrollment_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_intent_survives_verified_and_consumed_retries() {
         for intent in [
@@ -3924,6 +3940,7 @@ mod owner_enrollment_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_native_label_is_not_public_profile_consent() {
         let root = tempfile::tempdir().unwrap();
@@ -4046,6 +4063,7 @@ mod owner_enrollment_tests {
         assert!(load_auth_state(root.path()).unwrap().sessions.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_concurrent_claims_and_completions_have_one_owner() {
         let root = tempfile::tempdir().unwrap();
@@ -4136,6 +4154,7 @@ mod owner_enrollment_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_recovery_preserves_counter_and_rejects_revoked_credential() {
         for revoke in [false, true] {
@@ -4218,6 +4237,7 @@ mod owner_enrollment_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_expired_local_attempt_can_restart_but_history_cannot() {
         let root = tempfile::tempdir().unwrap();
@@ -4291,6 +4311,7 @@ mod owner_enrollment_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_nested_save_and_outer_save_cache_match_disk() {
         let root = tempfile::tempdir().unwrap();
@@ -4333,6 +4354,7 @@ mod owner_enrollment_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_restart_recovers_exact_candidate_and_one_terminal_grant() {
         for fault in [
@@ -13416,6 +13438,7 @@ mod scan_tests;
 pub(crate) mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn r4_users_ai_protection_requires_agent_record_kind() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -13482,6 +13505,7 @@ pub(crate) mod tests {
     /// quarantine reason. The protection rows share `authorize_principal_protection`.
     /// The object rows share `validate_principal_root_object_binding_in_state`.
     /// Owner recovery calls the same protection gate.
+    #[cfg(unix)]
     #[test]
     fn quarantined_principal_is_refused_for_protection_and_recovery() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -13626,6 +13650,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     #[test]
     fn verified_auth_state_cache_returns_equivalent_state_on_unchanged_dir() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -13653,6 +13678,7 @@ pub(crate) mod tests {
         assert!(second.guest_registration_enabled);
     }
 
+    #[cfg(unix)]
     #[test]
     fn verified_auth_state_cache_invalidates_after_save_mutation() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -13666,6 +13692,7 @@ pub(crate) mod tests {
         assert_eq!(disabled.audit.len(), enabled.audit.len() + 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn verified_auth_state_cache_does_not_return_stale_after_external_rewrite() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -13696,6 +13723,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn verified_auth_state_cache_retries_when_files_change_before_cache_fill() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -13741,6 +13769,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn verified_auth_state_cache_retries_when_files_change_before_cache_hit_return() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -13791,6 +13820,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn verified_auth_state_cache_retries_when_runtime_device_key_changes_before_cache_fill() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -13818,6 +13848,7 @@ pub(crate) mod tests {
         assert!(!repeat_error.to_string().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn verified_auth_state_cache_retries_when_runtime_device_key_changes_before_cache_hit_return() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -14117,6 +14148,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn cache_after_own_write_matches_fresh_full_load() {
         let root = tempfile::tempdir().unwrap();
@@ -14136,6 +14168,7 @@ pub(crate) mod tests {
         assert_own_write_cache_matches_disk(data);
     }
 
+    #[cfg(unix)]
     #[test]
     fn concurrent_appends_keep_cache_coherent() {
         let root = tempfile::tempdir().unwrap();
@@ -14173,6 +14206,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn external_rewrite_after_own_write_is_fully_verified() {
         let root = tempfile::tempdir().unwrap();
@@ -14197,6 +14231,7 @@ pub(crate) mod tests {
         assert!(verify_audit_chain_call_count(data) > before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_race_replacement_and_in_place_write_are_not_cached() {
         for replace in [false, true] {
@@ -14236,6 +14271,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn checked_save_rejects_edits_forgery_dropped_links_and_swapped_anchors() {
         // Each case enters save with a verified baseline and must leave both files intact.
@@ -14279,6 +14315,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn device_key_change_during_mutation_forces_full_verify() {
         let root = tempfile::tempdir().unwrap();
@@ -14299,6 +14336,7 @@ pub(crate) mod tests {
         assert!(load_auth_state(data).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn fault_after_auth_state_write_invalidates_cache_and_recovers_checkpoint() {
         let root = tempfile::tempdir().unwrap();
@@ -14325,6 +14363,7 @@ pub(crate) mod tests {
         assert_own_write_cache_matches_disk(data);
     }
 
+    #[cfg(unix)]
     #[test]
     fn rollback_to_older_signed_own_write_after_cache_fill_fails_closed() {
         let root = tempfile::tempdir().unwrap();
@@ -14340,6 +14379,7 @@ pub(crate) mod tests {
             .contains("rollback"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn nested_bare_save_then_outer_baseline_save_keeps_cache_coherent() {
         let root = tempfile::tempdir().unwrap();
@@ -14364,6 +14404,7 @@ pub(crate) mod tests {
         assert_eq!(load_auth_state(data).unwrap().audit.len(), 5);
     }
 
+    #[cfg(unix)]
     #[test]
     fn append_at_cap_verifies_only_new_signatures() {
         let root = tempfile::tempdir().unwrap();
@@ -14382,6 +14423,7 @@ pub(crate) mod tests {
         assert_eq!(audit_signature_count(data) - before, 1026);
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "manual Mac before/after measurement; timing is not an assertion"]
     fn warm_library_sized_append_measurement() {
@@ -14449,6 +14491,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_at_cap_verifies_only_new_signatures() {
         let root = tempfile::tempdir().unwrap();
@@ -14511,6 +14554,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_fusion_rejects_authority_and_audit_mismatches_without_writes() {
         for case in [
@@ -14569,6 +14613,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_fusion_audit_and_save_failure_preserve_grant_and_checkpoint() {
         for fault in [
@@ -14699,6 +14744,7 @@ pub(crate) mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovered_root_reassignment_retires_initial_profile_consent() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -14804,6 +14850,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovered_root_reassignment_refuses_usersai_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -14863,6 +14910,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovered_root_reassignment_carries_admin_role_to_guest_importer() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -14891,6 +14939,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovered_root_reassignment_refuses_kit_without_this_homes_root_key() {
         for case in ["wrong-data-key", "no-stored-binding"] {
@@ -14933,6 +14982,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovered_root_reassignment_refused_at_commit_leaves_no_archive_key() {
         for case in ["importer-revoked", "audit-rejected"] {
@@ -14971,6 +15021,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovered_root_reassignment_keeps_archive_key_once_auth_state_is_written() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15013,6 +15064,7 @@ pub(crate) mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovered_root_reassignment_refuses_to_leave_home_without_admin() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15028,6 +15080,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovered_root_reassignment_rejects_invalid_audit_signatures_before_mutation() {
         for case in ["malformed", "substituted", "wrong-runtime-signer"] {
@@ -15137,6 +15190,7 @@ pub(crate) mod tests {
 
     /// An existing stored Agent keeps its kind-derived UsersAI root when its
     /// binding is upserted under a new id. The stored kind chooses the root.
+    #[cfg(unix)]
     #[test]
     fn stored_agent_upsert_keeps_its_usersai_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15241,6 +15295,7 @@ pub(crate) mod tests {
         assert!(err.contains("last admin passkey cannot be demoted"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn guest_registration_defaults_off_and_can_be_toggled() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15269,6 +15324,7 @@ pub(crate) mod tests {
             .is_some_and(|signature| signature.len() == 128)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn persisted_audit_events_are_always_runtime_signed() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15302,6 +15358,7 @@ pub(crate) mod tests {
             .is_some_and(|did| did.starts_with("did:key:")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn concurrent_audit_appends_do_not_race_on_temp_file() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15364,6 +15421,7 @@ pub(crate) mod tests {
         assert_eq!(state.audit_chain.len(), state.audit.len());
     }
 
+    #[cfg(unix)]
     #[test]
     fn audit_chain_rejects_tampered_event_content() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15396,6 +15454,7 @@ pub(crate) mod tests {
         assert!(err.to_string().contains("audit event signature is invalid"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn audit_chain_activation_recovers_and_rejects_signed_state_rollback() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15433,6 +15492,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&marker_path).unwrap(), advanced_marker);
     }
 
+    #[cfg(unix)]
     #[test]
     fn audit_chain_activation_rejects_same_sequence_substitution() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15463,6 +15523,7 @@ pub(crate) mod tests {
         assert!(error.contains("truncation or substitution detected"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn first_authority_write_activates_the_signed_audit_checkpoint() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15478,6 +15539,7 @@ pub(crate) mod tests {
         assert_eq!(activation.checkpoint.head_hash, AUDIT_CHAIN_GENESIS);
     }
 
+    #[cfg(unix)]
     #[test]
     fn audit_chain_rejects_foreign_signers_for_every_artifact() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15543,6 +15605,7 @@ pub(crate) mod tests {
             .contains("audit chain state signer is not the Runtime identity"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn retained_audit_chain_requires_its_signed_anchor() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15581,6 +15644,7 @@ pub(crate) mod tests {
         assert!(err.contains("does not continue from its retained anchor"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_unchained_authority_is_rejected_before_expiry_pruning() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15663,6 +15727,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn concurrent_session_grants_do_not_lose_tokens() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15710,6 +15775,7 @@ pub(crate) mod tests {
         assert_eq!(state.sessions.len(), 24);
     }
 
+    #[cfg(unix)]
     #[test]
     fn atomic_write_supports_concurrent_writers() {
         let dir = tempfile::tempdir().unwrap();
@@ -15748,6 +15814,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn atomic_write_cleans_up_a_staged_file_when_rename_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -15765,6 +15832,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_root_object_stays_plaintext_without_protection() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15822,6 +15890,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_root_object_encrypts_when_root_is_protected() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15859,6 +15928,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn required_protected_read_refuses_plaintext_and_observes_each_current_protection() {
         let root = tempfile::tempdir().unwrap();
@@ -15978,6 +16048,7 @@ pub(crate) mod tests {
         .is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn protected_principal_root_create_only_preserves_encrypted_bytes_on_collision() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16079,6 +16150,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_root_conditional_write_preserves_protection_and_rejects_stale_revision() {
         let data = tempfile::tempdir().unwrap();
@@ -16154,6 +16226,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_root_conditional_write_serializes_same_revision_and_first_create() {
         let data = tempfile::tempdir().unwrap();
@@ -16434,6 +16507,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_root_write_rejects_a_path_that_does_not_match_its_uri() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16462,6 +16536,7 @@ pub(crate) mod tests {
         assert!(!data_dir.path().join("escaped").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_root_object_rejects_plaintext_when_root_is_protected() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16488,6 +16563,7 @@ pub(crate) mod tests {
             .contains("protected principal-root object is not encrypted"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_root_object_read_rejects_symlink_and_non_regular_paths() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16526,6 +16602,7 @@ pub(crate) mod tests {
         assert!(err.to_string().contains("regular file"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_protection_activation_rejects_untouched_declared_plaintext_without_mutation() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16571,6 +16648,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn recovery_activation_migrates_first_run_plaintext_under_new_protection() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16632,6 +16710,7 @@ pub(crate) mod tests {
         .expect("strict activation passes once the root is clean");
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_protection_activation_rejects_plaintext_despite_existing_protection() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16663,6 +16742,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_protection_activation_accepts_exact_retained_key_binding() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16689,6 +16769,7 @@ pub(crate) mod tests {
         .expect("the exact retained protection must authenticate its envelope");
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_protection_activation_rejects_substituted_data_key_binding() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16730,6 +16811,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(path).unwrap(), encrypted);
     }
 
+    #[cfg(unix)]
     #[test]
     fn tampered_ciphertext_passes_activation_and_start_and_fails_at_open() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16788,6 +16870,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(path).unwrap(), tampered);
     }
 
+    #[cfg(unix)]
     #[test]
     fn root_protection_activation_rejects_malformed_envelope_distinctly() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16834,6 +16917,7 @@ pub(crate) mod tests {
         assert!(notices[0].starts_with("Documents/malformed.json does not carry the label"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn fresh_root_protection_rejects_preexisting_envelope_shaped_data() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16875,6 +16959,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(path).unwrap(), encrypted);
     }
 
+    #[cfg(unix)]
     #[test]
     fn declarative_preflight_migrates_plaintext_beside_a_tampered_body() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -16951,6 +17036,7 @@ pub(crate) mod tests {
         .contains("failed the integrity check"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn offline_migration_uses_explicit_hashes_owner_only_backups_and_round_trip() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -17227,6 +17313,7 @@ pub(crate) mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn migration_capacity_refuses_before_journal_or_object_changes() {
         let fixture = OfflineMigrationFixture::new(1);
@@ -17248,6 +17335,7 @@ pub(crate) mod tests {
         require_no_principal_root_migration_journal(fixture.data_dir.path()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn online_migration_capacity_refuses_before_new_protection() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -17284,6 +17372,7 @@ pub(crate) mod tests {
         require_no_principal_root_migration_journal(data_dir.path()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn online_migration_recovers_pending_ownership_before_capacity_admission() {
         let fixture = OfflineMigrationFixture::new(1);
@@ -17386,6 +17475,7 @@ pub(crate) mod tests {
             .is_file());
     }
 
+    #[cfg(unix)]
     #[test]
     fn declared_migration_admits_the_complete_root_batch_before_changes() {
         let fixture = OfflineMigrationFixture::new(1);
@@ -17427,6 +17517,7 @@ pub(crate) mod tests {
         require_no_principal_root_migration_journal(fixture.data_dir.path()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn committed_migration_recovers_at_capacity_and_cleanup_drains_every_batch() {
         let fixture = OfflineMigrationFixture::new(1);
@@ -17498,6 +17589,7 @@ pub(crate) mod tests {
             .is_file());
     }
 
+    #[cfg(unix)]
     #[test]
     fn completed_legacy_receipt_history_does_not_exhaust_cleanup_capacity() {
         let mut fixture = OfflineMigrationFixture::new(1);
@@ -17631,6 +17723,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn encrypted_migration_cleanup_is_retryable_and_retains_receipt() {
         let fixture = OfflineMigrationFixture::new(2);
@@ -17652,6 +17745,7 @@ pub(crate) mod tests {
         fixture.assert_all_encrypted();
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_keeps_backup_unless_fully_authenticated() {
         let fixture = OfflineMigrationFixture::new(1);
@@ -17730,6 +17824,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn encrypted_backup_recovery_rejects_wrong_object_binding() {
         let fixture = OfflineMigrationFixture::new(2);
@@ -17763,6 +17858,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_plaintext_journal_recovers_after_partial_commit() {
         let fixture = OfflineMigrationFixture::new(2);
@@ -17785,6 +17881,7 @@ pub(crate) mod tests {
         assert!(!path.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn committed_recovery_rollback_retires_cleanup_record() {
         let fixture = OfflineMigrationFixture::new(1);
@@ -17802,6 +17899,7 @@ pub(crate) mod tests {
         assert!(record.journal.objects[0].backup_path.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_manual_plaintext_cleanup_requires_original_plan_and_keeps_ambiguous_files() {
         for extra in [false, true] {
@@ -17858,6 +17956,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_runtime_plaintext_backup_is_discovered_and_cleaned_after_readiness() {
         let mut fixture = OfflineMigrationFixture::new(1);
@@ -17885,6 +17984,7 @@ pub(crate) mod tests {
             .is_file());
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_plaintext_backups_beyond_record_capacity_are_all_cleaned() {
         let mut fixture = OfflineMigrationFixture::new(1);
@@ -18101,6 +18201,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn offline_migration_changes_only_exactly_selected_objects() {
         let fixture = OfflineMigrationFixture::new(1);
@@ -18126,6 +18227,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn offline_migration_faults_leave_all_plaintext_or_all_verified_encrypted() {
         for fault in [
@@ -18161,6 +18263,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn offline_migration_recovers_partial_commit_after_restart() {
         let fixture = OfflineMigrationFixture::new(2);
@@ -18291,6 +18394,7 @@ pub(crate) mod tests {
         fixture.assert_all_encrypted();
     }
 
+    #[cfg(unix)]
     #[test]
     fn offline_upgrade_preflights_every_configured_root_before_mutation() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -18332,6 +18436,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn offline_upgrade_names_a_damaged_later_root_and_refuses_over_limit_before_mutation() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -18428,6 +18533,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(second_path).unwrap(), damaged);
     }
 
+    #[cfg(unix)]
     #[test]
     fn offline_upgrade_recovers_incomplete_journal_and_requires_an_explicit_rerun() {
         let fixture = OfflineMigrationFixture::new(2);
@@ -18526,6 +18632,7 @@ pub(crate) mod tests {
         assert!(error.to_string().contains("symlink"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn declarative_inventory_and_migration_plans_are_bounded() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -18603,6 +18710,7 @@ pub(crate) mod tests {
         assert!(error.to_string().contains("1-64 objects"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn passkey_revoke_marks_binding_and_sessions_revoked() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -18640,6 +18748,7 @@ pub(crate) mod tests {
     }
     /// A passkey-less human record keeps the human Users/ root; the kind is
     /// stored, not inferred from the missing passkey.
+    #[cfg(unix)]
     #[test]
     fn human_principal_without_passkey_keeps_the_users_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -18676,6 +18785,7 @@ pub(crate) mod tests {
     }
 
     /// An Agent record roots under UsersAI/ with the same suffix rule.
+    #[cfg(unix)]
     #[test]
     fn agent_principal_owns_the_usersai_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -18805,6 +18915,7 @@ pub(crate) mod tests {
     }
 
     /// A stored record without `kind` loads as Human and keeps Users/.
+    #[cfg(unix)]
     #[test]
     fn old_principal_record_without_kind_loads_as_human() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -18901,6 +19012,7 @@ pub(crate) mod tests {
     /// protection covers the `UsersAI/` root, so nothing but the kind check
     /// stands before the open. The same file and protection serve the Human
     /// record's own root.
+    #[cfg(unix)]
     #[test]
     fn protected_read_refuses_an_agent_records_users_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19271,6 +19383,7 @@ pub(crate) mod tests {
         assert!(failed.is_empty(), "failing rows:\n{}", failed.join("\n"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn inspect_refuses_an_agent_records_users_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19372,6 +19485,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolved_root_refuses_a_principal_with_no_stored_record() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19384,6 +19498,7 @@ pub(crate) mod tests {
             .contains("has no stored record"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn r8_resolve_uses_stored_human_and_agent_roots() {
         let (runtime_dir, auth_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -19475,6 +19590,7 @@ pub(crate) mod tests {
     /// UsersAI root, never a person's Users root. The record is minted the way
     /// `agent_principal_owns_the_usersai_root` mints one; no production API
     /// mints an Agent kind yet.
+    #[cfg(unix)]
     #[test]
     fn resolved_root_of_a_stored_agent_is_usersai_never_users() {
         let (data_dir, auth_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -19527,6 +19643,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolved_root_refuses_a_foreign_device_id() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19604,6 +19721,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn stored_device_prefix_agent_uses_record_kind() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19626,6 +19744,7 @@ pub(crate) mod tests {
         assert!(error.contains("quarantined agent record"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn own_device_id_with_stored_agent_record_resolves_stored_kind_first() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19642,6 +19761,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn recordless_scan_refuses_declaration_outside_stored_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19668,6 +19788,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn noncanonical_stored_human_root_is_used_by_resolve_and_string_io() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19715,6 +19836,7 @@ pub(crate) mod tests {
         .exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn typed_io_refuses_foreign_uri_with_its_correct_path() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19742,6 +19864,7 @@ pub(crate) mod tests {
         assert!(principal_object_io::reads(data_dir.path()).contains(&path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn typed_io_refuses_in_root_uri_with_wrong_path() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19793,6 +19916,7 @@ pub(crate) mod tests {
         assert!(!path.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn plain_twin_creates_its_parent_only_after_its_checks() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19853,6 +19977,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn plain_twin_leaves_no_parent_when_its_protection_key_is_unrecoverable() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19892,6 +20017,7 @@ pub(crate) mod tests {
         assert!(!path.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn typed_io_refuses_a_quarantined_record() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19938,6 +20064,7 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"sentinel");
     }
 
+    #[cfg(unix)]
     #[test]
     fn own_device_string_io_refuses_wrong_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19962,6 +20089,7 @@ pub(crate) mod tests {
         assert!(!path.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn own_device_string_io_refuses_out_of_root_uri() {
         use sha2::Digest as _;
@@ -20098,6 +20226,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_record_round_trips_in_auth_state() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -20138,6 +20267,7 @@ pub(crate) mod tests {
 
     /// A malformed record keeps the JSON value it was loaded as, including an
     /// unknown field. A save that renames the owner leaves that value equal.
+    #[cfg(unix)]
     #[test]
     fn quarantined_record_keeps_the_json_value_it_was_loaded_as() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -20214,6 +20344,7 @@ pub(crate) mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn populated_older_auth_state_round_trips_person_records() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -20240,6 +20371,7 @@ pub(crate) mod tests {
         assert_eq!(person_record_bytes(&reloaded), expected);
     }
 
+    #[cfg(unix)]
     #[test]
     fn auth_state_without_agent_records_is_unchanged() {
         const FIXTURE: &[u8] = include_bytes!("../fixtures/auth-state-no-agent.json");
@@ -20337,6 +20469,7 @@ pub(crate) mod tests {
         assert_eq!(auth_state_file_bytes(data_dir), before, "{label}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_save_over_an_unreadable_auth_state() {
         // A missing file is still the first run: the human store creates it.
@@ -20369,6 +20502,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_kind_agent_without_the_binding() {
         let data_dir = person_file_with_agent();
@@ -20392,6 +20526,7 @@ pub(crate) mod tests {
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_the_binding_without_kind_agent() {
         let data_dir = person_file_with_agent();
@@ -20503,6 +20638,7 @@ pub(crate) mod tests {
             .clone()
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_an_added_agent_root_protection() {
         for permit in every_agent_permit() {
@@ -20536,6 +20672,7 @@ pub(crate) mod tests {
             .expect("a person root protection still saves");
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_protection_for_an_agent_id_under_a_non_agent_root() {
         for permit in every_agent_permit() {
@@ -20576,6 +20713,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_changed_agent_root_protection() {
         for permit in every_agent_permit() {
@@ -20600,6 +20738,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_removed_agent_root_protection() {
         for permit in every_agent_permit() {
@@ -20626,6 +20765,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn save_refuses_an_added_owner_root_protection() {
         let data_dir = person_file_with_agent();
@@ -20645,6 +20785,7 @@ pub(crate) mod tests {
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn save_refuses_a_changed_owner_root_protection() {
         let data_dir = person_file_with_agent();
@@ -20669,6 +20810,7 @@ pub(crate) mod tests {
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn save_keeps_an_unchanged_owner_root_protection() {
         let data_dir = person_file_with_agent();
@@ -20698,6 +20840,7 @@ pub(crate) mod tests {
         }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_an_added_agent_session() {
         for permit in every_agent_permit() {
@@ -20728,6 +20871,7 @@ pub(crate) mod tests {
         save_auth_state(data_dir.path(), &state, None).expect("a person session still saves");
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_passkey_sign_in_refuses_to_change_the_record() {
         let data_dir = seeded_passkey_agent(RuntimePrincipalRole::Guest);
@@ -20741,6 +20885,7 @@ pub(crate) mod tests {
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_account_upsert_refuses_to_change_the_record() {
         let data_dir = seeded_passkey_agent(RuntimePrincipalRole::Guest);
@@ -20761,6 +20906,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_recovered_root_reassignment_refuses_to_change_the_record() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -20812,6 +20958,7 @@ pub(crate) mod tests {
         assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{label}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_an_owner_change() {
         refuse_agent_field_edit(
@@ -20821,6 +20968,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_binding_change() {
         refuse_agent_field_edit(
@@ -20833,6 +20981,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_root_change() {
         refuse_agent_field_edit(
@@ -20844,6 +20993,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_kind_change() {
         refuse_agent_field_edit(
@@ -20853,6 +21003,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_version_change() {
         assert_eq!(
@@ -20866,6 +21017,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_an_id_change() {
         refuse_agent_field_edit(
@@ -20875,6 +21027,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_new_record() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -20940,6 +21093,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_subject_must_equal_the_principal_id() {
         assert_invalid_agent_refused("agent admission subject mismatch", |agent| {
@@ -20947,6 +21101,7 @@ pub(crate) mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_record_shape_is_refused_on_save_and_load() {
         assert_invalid_agent_refused("agent admission kind invalid", |agent| {
@@ -20986,6 +21141,7 @@ pub(crate) mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_kind_binding_cross_check_is_refused_on_save_and_load() {
         assert_invalid_agent_refused("agent kind binding mismatch", |agent| {
@@ -20995,6 +21151,7 @@ pub(crate) mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn quarantined_agent_record_lets_the_owner_sign_in() {
         for case in 0..MALFORMED_AGENT_CASES {
@@ -21112,6 +21269,7 @@ pub(crate) mod tests {
         assert_eq!(auth_state_file_bytes(data_dir.path()), before, "{label}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_duplicate_binding_id() {
         refuse_duplicate_agent_records(
@@ -21132,6 +21290,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_duplicate_principal_id() {
         refuse_duplicate_agent_records(
@@ -21152,6 +21311,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_duplicate_root() {
         refuse_duplicate_agent_records(
@@ -21171,6 +21331,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_a_duplicate_binding_id_in_either_order() {
         refuse_duplicate_agent_records(
@@ -21190,6 +21351,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_refuses_every_named_operation() {
         for permit in [
@@ -21217,6 +21379,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_control_passkey_sign_in_of_a_person_succeeds() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -21232,6 +21395,7 @@ pub(crate) mod tests {
         sign_in_passkey(data_dir.path()).expect("passkey sign-in of a person succeeds");
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_control_account_upsert_of_a_person_succeeds() {
         let data_dir = person_file_with_agent();
@@ -21244,6 +21408,7 @@ pub(crate) mod tests {
         .expect("account upsert of a person succeeds");
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_control_person_mutation_succeeds() {
         let data_dir = person_file_with_agent();
@@ -21259,6 +21424,7 @@ pub(crate) mod tests {
         .expect("a person record mutation succeeds");
     }
 
+    #[cfg(unix)]
     #[test]
     fn agent_admission_guard_control_reassignment_of_a_person_succeeds() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -21367,6 +21533,7 @@ pub(crate) mod tests {
     /// A person stored on this Runtime, with no Recovery Kit: both plain
     /// writes save the bytes as given, and the protected write keeps today's
     /// refusal.
+    #[cfg(unix)]
     #[test]
     fn kept_elsewhere_case_1_a_stored_person_writes_plain_on_their_own_runtime() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -21412,6 +21579,7 @@ pub(crate) mod tests {
     /// The record is kept in another store and this Runtime holds no
     /// protection: every held-root write refuses with the typed error and
     /// creates nothing.
+    #[cfg(unix)]
     #[test]
     fn kept_elsewhere_case_3_a_stored_person_on_another_runtime_is_refused() {
         let runtime_dir = tempfile::tempdir().unwrap();
@@ -21444,6 +21612,7 @@ pub(crate) mod tests {
 
     /// The record is kept in another store and this Runtime holds protection
     /// for the person's root: every held-root write seals.
+    #[cfg(unix)]
     #[test]
     fn kept_elsewhere_case_4_a_stored_person_with_protection_here_writes_sealed() {
         let runtime_dir = owner_only_tempdir();
@@ -21482,6 +21651,7 @@ pub(crate) mod tests {
     /// the record's store makes the same folder compare unequal: the write
     /// refuses without protection here, and seals once this Runtime holds
     /// protection for the root.
+    #[cfg(unix)]
     #[test]
     fn kept_elsewhere_case_5_one_folder_spelled_two_ways_refuses_or_seals() {
         let runtime_dir = owner_only_tempdir();

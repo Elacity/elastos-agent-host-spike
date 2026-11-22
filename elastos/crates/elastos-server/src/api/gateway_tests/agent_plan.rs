@@ -302,6 +302,7 @@ async fn owner_card(app: &Router, token: &str, request_id: &str) -> serde_json::
     cards[0].clone()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_approve_requires_the_exact_plan_shown() {
     // The binding the card showed is approved as shown after one fresh
@@ -492,6 +493,7 @@ async fn a15r_approve_requires_the_exact_plan_shown() {
     assert!(record["result"].is_null());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_approve_is_the_owners_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -588,6 +590,7 @@ async fn a15r_approve_is_the_owners_alone() {
     assert_eq!(read_record(dir.path(), self_id)["status"], "pending");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_approve_a_writing_step_needs_a_fresh_passkey() {
     let dir = tempfile::tempdir().unwrap();
@@ -673,6 +676,7 @@ async fn a15r_approve_a_writing_step_needs_a_fresh_passkey() {
     assert_eq!(record["result"]["status"], "refused");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_double_clicks_claim_one_plan() {
     let dir = tempfile::tempdir().unwrap();
@@ -731,6 +735,7 @@ async fn a15r_double_clicks_claim_one_plan() {
     assert_eq!(read_record(dir.path(), request_id)["status"], "completed");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_dispatch_once_stored_body_receipt_and_audit() {
     let dir = tempfile::tempdir().unwrap();
@@ -846,6 +851,7 @@ async fn approve_plan_for_row_with_grant(
     (request_id.to_string(), read_record(dir, request_id))
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_cross_person_zero_provider_calls() {
     // A approves the exact card. The bridge's principal-root rule refuses B.
@@ -890,6 +896,7 @@ async fn a15r_cross_person_zero_provider_calls() {
         }));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_protected_root_zero_provider_calls() {
     let dir = tempfile::tempdir().unwrap();
@@ -942,6 +949,7 @@ async fn a15r_protected_root_zero_provider_calls() {
     assert!(calls.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_manifest_ceiling_zero_provider_calls() {
     let dir = tempfile::tempdir().unwrap();
@@ -952,6 +960,7 @@ async fn a15r_manifest_ceiling_zero_provider_calls() {
     assert!(calls.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_shared_resource_requires_admin_grant() {
     for granted in [false, true] {
@@ -1002,6 +1011,7 @@ async fn a15r_shared_resource_requires_admin_grant() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_agent_standing_rechecked_at_dispatch() {
     for disable in [true, false] {
@@ -1037,6 +1047,7 @@ async fn a15r_agent_standing_rechecked_at_dispatch() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_approved_own_root_write_completes_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -1097,6 +1108,7 @@ async fn a15r_approved_own_root_write_completes_once() {
     assert!(calls.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_transport_error_is_unknown_and_redacted() {
     let dir = tempfile::tempdir().unwrap();
@@ -1140,6 +1152,7 @@ async fn a15r_unapproved_zero_provider_calls() {
     assert_eq!(read_record(dir.path(), id)["status"], "pending");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_replay_zero_after_restart_and_cancelled_request() {
     let dir = tempfile::tempdir().unwrap();
@@ -1495,6 +1508,7 @@ impl RealCase {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_real_journey_one_step_one_result() {
     if !crate::agents::build_allows() {
@@ -1592,6 +1606,7 @@ async fn a15r_real_journey_one_step_one_result() {
     assert!(agent_plan_cards(&case.app, &case.token).await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_real_unapproved_zero() {
     let case = RealCase::new(303).await;
@@ -1606,6 +1621,7 @@ async fn a15r_real_unapproved_zero() {
     assert!(case.calls.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_real_changed_plan_zero() {
     let case = RealCase::new(304).await;
@@ -1619,6 +1635,7 @@ async fn a15r_real_changed_plan_zero() {
     assert!(case.calls.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_real_self_approval_zero() {
     let case = RealCase::new(305).await;
@@ -1656,6 +1673,7 @@ async fn a15r_real_self_approval_zero() {
     assert!(case.calls.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_real_replay_zero() {
     let case = RealCase::new(306).await;
@@ -1682,6 +1700,7 @@ async fn a15r_real_replay_zero() {
     assert!(case.calls.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a15r_real_restart_zero() {
     let case = RealCase::new(307).await;

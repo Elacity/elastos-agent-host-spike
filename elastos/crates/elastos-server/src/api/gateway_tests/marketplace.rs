@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_marketplace_catalog_route_is_registered_and_auth_gated() {
     let dir = tempfile::tempdir().unwrap();

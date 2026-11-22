@@ -19,6 +19,7 @@ async fn test_documents_provider_routes_require_home_launch_token() {
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_inbox_routes_require_home_token_and_return_notifications() {
     let dir = tempfile::tempdir().unwrap();
@@ -72,6 +73,7 @@ async fn test_inbox_routes_require_home_token_and_return_notifications() {
     assert_eq!(bad_action.status(), StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_documents_provider_round_trip() {
     let dir = tempfile::tempdir().unwrap();
@@ -366,6 +368,7 @@ async fn test_documents_provider_scopes_documents_to_launch_principal() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_library_home_token_can_read_documents_provider_summary() {
     let dir = tempfile::tempdir().unwrap();
@@ -393,6 +396,7 @@ async fn test_library_home_token_can_read_documents_provider_summary() {
     assert!(summary_payload["data"]["documents"].is_array());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_library_home_token_cannot_mutate_documents_provider() {
     let dir = tempfile::tempdir().unwrap();
@@ -419,6 +423,7 @@ async fn test_library_home_token_cannot_mutate_documents_provider() {
     assert!(denied_text.contains("home launch token is not authorized for this provider"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_viewer_gateway_routes_list_and_serve_viewer_bound_capsules() {
     let dir = tempfile::tempdir().unwrap();
@@ -575,6 +580,7 @@ async fn test_viewer_gateway_routes_list_and_serve_viewer_bound_capsules() {
     assert_eq!(non_viewer.status(), StatusCode::NOT_FOUND);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_viewer_gateway_storage_routes_require_home_token_and_round_trip_bytes() {
     let dir = tempfile::tempdir().unwrap();
@@ -634,6 +640,7 @@ async fn test_viewer_gateway_storage_routes_require_home_token_and_round_trip_by
     assert_eq!(&body[..], b"save-state");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_viewer_gateway_storage_scopes_users_self_to_launch_principal() {
     let dir = tempfile::tempdir().unwrap();

@@ -1651,6 +1651,7 @@ mod tests {
         sign_launch_token_for_test(data_dir, envelope, HOME_LAUNCH_TOKEN_DOMAIN)
     }
 
+    #[cfg(unix)]
     #[test]
     fn r8_bad_signature_refuses_device_witness_and_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -1674,6 +1675,7 @@ mod tests {
         assert!(error.contains("invalid home launch token:"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn r8_wrong_signer_refuses_device_witness_and_root() {
         let parent = tempfile::tempdir().unwrap();
@@ -1706,6 +1708,7 @@ mod tests {
         assert!(error.contains("Signer DID mismatch"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn r8_local_launch_uses_this_runtime_device_root() {
         use sha2::Digest as _;
@@ -1732,6 +1735,7 @@ mod tests {
         assert_eq!(checked.context.root().localhost_root(), expected_root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn proofless_parent_token_uses_stored_device_record_before_witness_root() {
         // A device id is not an agent id. Kind Agent on that record is
@@ -1784,6 +1788,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn proofless_parent_token_without_record_uses_witness_device_root() {
         use sha2::Digest as _;
@@ -1809,6 +1814,7 @@ mod tests {
         assert_eq!(verified.context.root().localhost_root(), expected_root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_sessions_are_isolated_between_localhost_ports() {
         let first = tempfile::tempdir().unwrap();
@@ -1888,6 +1894,7 @@ mod tests {
         assert!(home_session_cookie_name(&first_headers).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn browser_launch_token_requires_an_opaque_capsule_origin() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -1933,6 +1940,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn projection_token_binds_resource_actor_and_unique_launch() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2062,6 +2070,7 @@ mod tests {
         assert!(renew().is_err(), "another principal's parent");
     }
 
+    #[cfg(unix)]
     #[test]
     fn proof_bound_home_projection_uses_home_as_its_non_transitive_authority() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2161,6 +2170,7 @@ mod tests {
         .contains("authority context mismatch"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn proof_bound_tokens_end_with_the_grant() {
         let data = tempfile::tempdir().unwrap();
@@ -2199,6 +2209,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_token_rejects_expiry_stale_schema_and_mixed_shape() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2321,6 +2332,7 @@ mod tests {
         .contains("must be non-delegatable"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_token_requires_exact_session_authority_and_origin() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2550,6 +2562,7 @@ mod tests {
             .contains("missing same-origin provenance"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_grant_accepts_explicit_parent_gateway_signer() {
         let parent = tempfile::tempdir().unwrap();
@@ -2607,6 +2620,7 @@ mod tests {
         .contains("must not carry browser provenance"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_grant_checks_parent_auth_sessions_for_child_runtime() {
         let parent = tempfile::tempdir().unwrap();
@@ -2674,6 +2688,7 @@ mod tests {
         assert_eq!(parent_auth_result.context.session_id, "auth:alice");
     }
 
+    #[cfg(unix)]
     #[test]
     fn internal_shell_runtime_wallet_authority_accepts_only_home_cli_without_browser_provenance() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2767,6 +2782,7 @@ mod tests {
 
     /// R1: the local context stores the device root, and a launch token rebuilt
     /// from the wire keeps it. Same Users root as before.
+    #[cfg(unix)]
     #[test]
     fn r1_local_context_and_token_verification_keep_the_device_users_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2790,6 +2806,7 @@ mod tests {
 
     /// R1: an auth-grant launch stores the stored Human's root, the same Users
     /// root the id rule gave before.
+    #[cfg(unix)]
     #[test]
     fn r1_auth_grant_launch_keeps_the_stored_humans_users_root() {
         use elastos_runtime::auth::AuthSessionGrantV1;
@@ -2854,6 +2871,7 @@ mod tests {
 
     /// R1: an unstored principal refuses before a token is minted. The named
     /// error replaces the id-rule fallback.
+    #[cfg(unix)]
     #[test]
     fn r1_auth_grant_issue_refuses_a_principal_with_no_stored_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -2866,6 +2884,7 @@ mod tests {
 
     /// R1: a token whose principal has no stored record refuses when verified,
     /// with the same named error.
+    #[cfg(unix)]
     #[test]
     fn r1_launch_token_verification_refuses_a_principal_with_no_stored_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -2892,6 +2911,7 @@ mod tests {
     /// copies the principal the signed token names. A real signed token from
     /// the stored-human fixture is verified through the same function route 3
     /// and route 1 use, and the grant it carries names that literal person.
+    #[cfg(unix)]
     #[test]
     fn r6_verified_launch_token_carries_its_grant_principal() {
         use elastos_runtime::auth::AuthSessionGrantV1;
@@ -2994,6 +3014,7 @@ mod tests {
     /// `require_gateway_launch` refuses it by the Agent literal for every
     /// gateway fence route and in both carriers. The same shape with a person
     /// principal is admitted.
+    #[cfg(unix)]
     #[test]
     fn gateway_admission_refuses_a_valid_agent_token_on_every_fence_route_and_both_carriers() {
         let dir = tempfile::tempdir().unwrap();
@@ -3051,6 +3072,7 @@ mod tests {
     /// A production device token stays admitted after the guard. The same test
     /// asserts an agent token is refused, so removing or widening the guard
     /// reddens it at the Agent literal or at the device acceptance.
+    #[cfg(unix)]
     #[test]
     fn gateway_admission_keeps_a_device_token_and_refuses_an_agent_token() {
         let dir = tempfile::tempdir().unwrap();

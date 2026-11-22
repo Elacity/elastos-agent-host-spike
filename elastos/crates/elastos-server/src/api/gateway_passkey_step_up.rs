@@ -1590,6 +1590,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn proof_bound_step_up_ends_with_the_grant() {
         let fixture = fixture();
@@ -1633,6 +1634,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn begin_limits_authentication_to_original_passkey_and_cancel_is_one_shot() {
         let fixture = fixture();
@@ -1714,6 +1716,7 @@ mod tests {
         assert!(replay.to_string().contains("unavailable"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn complete_rejects_substituted_credential_before_webauthn() {
         let fixture = fixture();
@@ -1761,6 +1764,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn begin_rejects_same_credential_id_with_different_public_key() {
         let fixture = fixture();
@@ -1797,6 +1801,7 @@ mod tests {
             .contains("original passkey credential is unavailable"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn signed_step_up_is_exact_intent_and_single_use() {
         let fixture = fixture();
@@ -1924,6 +1929,7 @@ mod tests {
         assert!(replay.to_string().contains("already been used"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn prepared_effect_validates_before_reserving_and_consumes_after_reservation() {
         let fixture = fixture();
@@ -1999,6 +2005,7 @@ mod tests {
         assert!(recovered.recovered);
     }
 
+    #[cfg(unix)]
     #[test]
     fn transaction_effect_recovery_accepts_only_the_identical_consumed_step_up() {
         let fixture = fixture();
@@ -2057,6 +2064,7 @@ mod tests {
         assert!(ordinary_replay.to_string().contains("already been used"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn token_rejects_expiry_mixed_schema_and_extra_envelope_fields() {
         let fixture = fixture();
@@ -2127,6 +2135,7 @@ mod tests {
         .contains("invalid passkey step-up token payload"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn committed_record_publication_never_overwrites_a_collision() {
         let fixture = fixture();
@@ -2167,6 +2176,7 @@ mod tests {
             }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn replay_is_rejected_after_consumed_state_is_reopened() {
         let fixture = fixture();
@@ -2208,6 +2218,7 @@ mod tests {
         assert!(replay.to_string().contains("already been used"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn committed_state_rejects_malformed_and_nonregular_records() {
         let malformed = fixture();
@@ -2252,6 +2263,7 @@ mod tests {
             .contains("malformed passkey step-up state"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_removes_only_exact_private_staging_names() {
         let fixture = fixture();
@@ -2329,6 +2341,7 @@ mod tests {
         assert_eq!(mode(&consumed_path), 0o600);
     }
 
+    #[cfg(unix)]
     #[test]
     fn completion_audit_binds_only_verified_context_and_request_hash() {
         let fixture = fixture();
@@ -2391,6 +2404,7 @@ mod tests {
         assert!(!event.reason.contains("request_id"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn completion_fails_closed_when_audit_cannot_be_persisted() {
         let fixture = fixture();
@@ -2421,6 +2435,7 @@ mod tests {
             .contains("auth session is not active"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn state_rejects_malformed_entries_and_both_capacity_overflows() {
         let malformed = fixture();
@@ -2511,6 +2526,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_home_token_step_up_bodies_are_rejected() {
         let fixture = fixture();

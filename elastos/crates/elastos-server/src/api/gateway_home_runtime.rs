@@ -1938,6 +1938,7 @@ async fn home_list_runtime_capsules(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn home_token_projection_lapsed_grant_returns_unauthorized() {
         let data = tempfile::tempdir().unwrap();
@@ -1999,6 +2000,7 @@ mod tests {
     /// in its own folder. The person's record is kept on the parent, so the
     /// migration's write refuses; launch proceeds and the legacy file stays,
     /// with no new object beside it.
+    #[cfg(unix)]
     #[test]
     fn a_refused_legacy_contacts_migration_does_not_fail_launch() {
         use super::super::gateway_tests::r8d_passkey_rows::passkey_person;
@@ -2268,6 +2270,7 @@ mod tests {
         .expect("sample manifest parses")
     }
 
+    #[cfg(unix)]
     #[test]
     fn append_home_launch_token_keeps_authority_out_of_the_request_url() {
         let dir = tempfile::tempdir().unwrap();

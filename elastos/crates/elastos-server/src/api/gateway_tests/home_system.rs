@@ -355,6 +355,7 @@ pub(super) fn write_home_principal_object_json_for_authority(
     .unwrap();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_entry_serves_browser_surface() {
     let dir = tempfile::tempdir().unwrap();
@@ -1762,6 +1763,7 @@ async fn test_home_summary_reports_identity_and_launch_targets() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_summary_requires_services_token_and_reports_browser_exit() {
     let dir = tempfile::tempdir().unwrap();
@@ -1848,6 +1850,7 @@ async fn test_services_summary_requires_services_token_and_reports_browser_exit(
         }));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_summary_projects_configured_remote_exit_without_ticket() {
     let dir = tempfile::tempdir().unwrap();
@@ -2048,6 +2051,7 @@ async fn test_services_selection_state_is_principal_scoped() {
     assert!(!dir.path().join("config/services-state.json").exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_ignores_services_state_left_unencrypted_before_root_protection() {
     let dir = tempfile::tempdir().unwrap();
@@ -2094,6 +2098,7 @@ async fn test_home_summary_ignores_services_state_left_unencrypted_before_root_p
     assert_eq!(payload["services"]["local_offer_count"], 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_ignores_invalid_protected_services_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -2492,6 +2497,7 @@ async fn services_messages(bus: &Arc<TokioMutex<FakePeerBus>>) -> Vec<serde_json
         .collect()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_contact_authority_rejects_other_principal_and_removed_contact() {
     let left = tempfile::tempdir().unwrap();
@@ -2563,6 +2569,7 @@ async fn test_services_contact_authority_rejects_other_principal_and_removed_con
     assert!(!left.path().join("config/exit-provider.json").exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_contact_authority_ignores_substituted_legacy_endpoint() {
     let left = tempfile::tempdir().unwrap();
@@ -2710,6 +2717,7 @@ fn services_contact_saved_state(
     .unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_contact_authority_rechecks_pending_approval_before_delivery() {
     for substituted in [false, true] {
@@ -2765,6 +2773,7 @@ async fn test_services_contact_authority_rechecks_pending_approval_before_delive
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_contact_authority_rechecks_pending_decision_before_install() {
     for case in ["removed", "saved_endpoint", "grant_endpoint"] {
@@ -2862,6 +2871,7 @@ fn test_services_exit_refresh_is_runtime_owned() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_exit_activation_waits_for_provider_ack() {
     let left = tempfile::tempdir().unwrap();
@@ -3025,6 +3035,7 @@ impl elastos_runtime::provider::Provider for ServicesCarrierRelayProvider {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_admin_with_two_passkeys_serves_a_shared_exit_grant() {
     let left = tempfile::tempdir().unwrap();
@@ -3370,6 +3381,7 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_exit_decision_order_preserves_pending_and_committed_denial() {
     for pending in [true, false] {
@@ -3544,6 +3556,7 @@ async fn test_services_exit_decision_order_preserves_pending_and_committed_denia
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_exit_activation_fences_held_ack_and_rolls_back_failed_state_write() {
     for fail_state_write in [false, true] {
@@ -3650,6 +3663,7 @@ async fn test_services_exit_activation_fences_held_ack_and_rolls_back_failed_sta
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_remote_exit_request_delivers_provider_inbox_notification() {
     let left = tempfile::tempdir().unwrap();
@@ -3891,6 +3905,7 @@ async fn test_services_remote_exit_request_delivers_provider_inbox_notification(
     assert_eq!(installed_exit["max_active_streams_per_principal"], 64);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_remote_exit_request_local_only_does_not_save_requested_state() {
     let left = tempfile::tempdir().unwrap();
@@ -3994,6 +4009,7 @@ async fn test_services_remote_exit_request_local_only_does_not_save_requested_st
         .any(|offer| offer["offer_id"] == offer_id));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_does_not_turn_conversation_members_into_people_contacts() {
     let dir = tempfile::tempdir().unwrap();
@@ -4093,6 +4109,7 @@ async fn test_home_summary_does_not_turn_conversation_members_into_people_contac
         .is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_root_only_recovery_export_preserves_later_profile_consent() {
     let dir = tempfile::tempdir().unwrap();
@@ -4234,6 +4251,7 @@ fn assert_recovery_setup_required_projection(payload: &Value, reason: &str, path
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn existing_profile_setup_protects_root_without_claiming_recovery() {
     let dir = tempfile::tempdir().unwrap();
@@ -4379,6 +4397,7 @@ async fn existing_profile_setup_protects_root_without_claiming_recovery() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn online_activation_refuses_over_limit_before_protection() {
     let dir = tempfile::tempdir().unwrap();
@@ -4439,6 +4458,7 @@ async fn online_activation_refuses_over_limit_before_protection() {
     assert!(!dir.path().join("backups").exists(), "no migration backup");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_recovery_readiness_does_not_claim_profile_coverage() {
     let dir = tempfile::tempdir().unwrap();
@@ -4521,6 +4541,7 @@ async fn test_recovery_readiness_does_not_claim_profile_coverage() {
 /// reads the protection record and, with a Profile, opens only the Profile
 /// authority. The summaries around it start no scan (they still read their
 /// own Home state files).
+#[cfg(unix)]
 #[tokio::test]
 async fn realtime_readiness_walks_nothing_and_opens_only_the_profile_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -4655,6 +4676,7 @@ async fn home_test_get_text(
 /// damaged. The shell, the Home summary and the System summary still answer
 /// with the defaults, Recovery names the file, and a save over it is
 /// refused with the notice that names it.
+#[cfg(unix)]
 #[tokio::test]
 async fn damaged_home_state_file_leaves_shell_and_summaries_answering() {
     for (file, save) in [
@@ -4769,6 +4791,7 @@ async fn damaged_home_state_file_leaves_shell_and_summaries_answering() {
 
 /// #447 N1: System → Appearance upload and reset never delete a damaged
 /// background image; both are refused with a message that names the image.
+#[cfg(unix)]
 #[tokio::test]
 async fn damaged_background_image_survives_upload_and_reset() {
     let dir = tempfile::tempdir().unwrap();
@@ -4926,6 +4949,7 @@ async fn upload_background_image(
 /// An upload that names the current image, while a sibling of another format
 /// is damaged, is refused before anything is written: the current image keeps
 /// its bytes and the refusal names the damaged file.
+#[cfg(unix)]
 #[tokio::test]
 async fn same_name_image_upload_with_a_damaged_sibling_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -4983,6 +5007,7 @@ async fn same_name_image_upload_with_a_damaged_sibling_is_refused() {
 
 /// An upload whose destination is itself damaged is refused before the write,
 /// so the damaged image stays byte for byte rather than being replaced.
+#[cfg(unix)]
 #[tokio::test]
 async fn same_name_image_upload_over_a_damaged_image_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -5023,6 +5048,7 @@ async fn same_name_image_upload_over_a_damaged_image_is_refused() {
 
 /// A same-name upload over a readable image succeeds: one image remains and
 /// it holds the new bytes.
+#[cfg(unix)]
 #[tokio::test]
 async fn same_name_image_upload_replaces_the_bytes() {
     let dir = tempfile::tempdir().unwrap();
@@ -5065,6 +5091,7 @@ async fn same_name_image_upload_replaces_the_bytes() {
 /// An upload of another format while a sibling is damaged is refused before
 /// anything is written or removed: both images keep their bytes and the new
 /// name does not appear.
+#[cfg(unix)]
 #[tokio::test]
 async fn different_name_image_upload_with_a_damaged_sibling_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -5172,6 +5199,7 @@ async fn unreadable_background_image_get_answers_only_the_file_name() {
 /// An upload whose image folder cannot be created answers one fixed sentence.
 /// The creation error names the folder, which holds the data folder and the
 /// person's root, so the answer leaves both out.
+#[cfg(unix)]
 #[tokio::test]
 async fn blocked_image_folder_upload_answers_one_fixed_sentence() {
     let dir = tempfile::tempdir().unwrap();
@@ -5197,6 +5225,7 @@ async fn blocked_image_folder_upload_answers_one_fixed_sentence() {
     assert_eq!(std::fs::read(&folder).unwrap(), b"not a folder");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_recovery_readiness_projects_unavailable_and_first_profile_fails_closed() {
     let dir = tempfile::tempdir().unwrap();
@@ -5266,6 +5295,7 @@ async fn test_recovery_readiness_projects_unavailable_and_first_profile_fails_cl
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_invite_create_route_is_absent_and_read_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -5333,6 +5363,7 @@ async fn test_people_contact_remove_requires_profile_contact_authority() {
     assert!(text.contains("Save your Profile before using People contacts"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_contact_remove_removes_exact_profile_contact_locally() {
     const NETWORK: &str = "gateway-profile-contact-remove";
@@ -5733,6 +5764,7 @@ async fn test_home_events_stream_requires_home_authority_and_serves_sse() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_and_events_include_browser_wallet_approvals() {
     let dir = tempfile::tempdir().unwrap();
@@ -5846,6 +5878,7 @@ async fn test_home_summary_and_events_include_browser_wallet_approvals() {
         .any(|event| { event["kind"] == "wallet.requests.changed" && event["scope"] == "wallet" }));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_updates_home_background_image() {
     let dir = tempfile::tempdir().unwrap();
@@ -6155,6 +6188,7 @@ async fn test_system_updates_home_background_image() {
     assert_eq!(guest_image_after_admin_reset.status(), StatusCode::OK);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_runtime_ensure_reuses_running_runtime() {
     let dir = tempfile::tempdir().unwrap();
@@ -6314,6 +6348,7 @@ async fn test_system_summary_reports_trusted_source_update_policy() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_guest_registration_requires_admin_passkey() {
     let dir = tempfile::tempdir().unwrap();
@@ -6400,6 +6435,7 @@ async fn test_system_guest_registration_requires_admin_passkey() {
         .starts_with("localhost://Users/"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn system_community_membership_is_home_wide_and_requires_current_owner_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -6613,6 +6649,7 @@ async fn test_removed_system_identity_mutations_cannot_succeed_or_mutate_state()
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_profile_update_rejects_proofless_launch_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -6643,6 +6680,7 @@ async fn test_people_profile_update_rejects_proofless_launch_token() {
         .is_none());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_profile_update_creates_signed_profile_under_passkey_principal_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -6812,6 +6850,7 @@ async fn test_people_profile_update_creates_signed_profile_under_passkey_princip
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_profile_update_uses_people_launch_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -6932,6 +6971,7 @@ async fn test_home_and_people_summary_without_profile_are_side_effect_free() {
     assert!(!profile_path.parent().unwrap().exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn invalid_profile_projects_unavailable_without_mutating_or_claiming_setup() {
     let dir = tempfile::tempdir().unwrap();
@@ -6992,6 +7032,7 @@ async fn invalid_profile_projects_unavailable_without_mutating_or_claiming_setup
     assert_eq!(file_snapshot(dir.path()), before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn authenticated_home_people_inbox_and_realtime_reads_are_observationally_pure() {
     const NETWORK: &str = "gateway-read-purity";
@@ -7254,6 +7295,7 @@ async fn authenticated_home_people_inbox_and_realtime_reads_are_observationally_
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_ignores_old_profile_card_identity_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -7367,6 +7409,7 @@ async fn test_people_summary_requires_people_launch_token() {
     assert!(payload["discovery"].get("peer_id").is_none());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_launch_validates_shell_targets() {
     let dir = tempfile::tempdir().unwrap();
@@ -7690,6 +7733,7 @@ async fn test_home_launch_validates_shell_targets() {
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_window_policy_survives_discovery_catalog_and_home_launch() {
     for policy in ["single", "multiple", "hybrid"] {
@@ -7861,6 +7905,7 @@ async fn test_home_active_shell_without_developer_mode_resets_terminal_to_deskto
     assert_eq!(selected.status(), StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_active_shell_uses_catalog_shell_candidates() {
     let dir = tempfile::tempdir().unwrap();
@@ -8646,6 +8691,7 @@ async fn test_home_active_shell_repairs_saved_home_state_but_rejects_home_update
     assert_eq!(saved_state["active"], HOME_GUI_SHELL_ID);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_browser_state_is_encrypted_for_protected_principal_root() {
     let dir = tempfile::tempdir().unwrap();
@@ -8710,6 +8756,7 @@ async fn test_home_browser_state_is_encrypted_for_protected_principal_root() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_browser_state_isolated_by_verified_principal() {
     let dir = tempfile::tempdir().unwrap();
@@ -8790,6 +8837,7 @@ async fn test_home_browser_state_isolated_by_verified_principal() {
     assert!(admin_state_path.is_file());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_browser_state_read_fallbacks_do_not_overwrite_protected_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -9326,6 +9374,7 @@ async fn test_home_browser_state_defaults_preserve_malformed_state_and_refuse_ov
     assert_eq!(std::fs::read(&state_path).unwrap(), malformed_before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_browser_state_defaults_preserve_protected_plaintext_and_refuse_overwrite() {
     let dir = tempfile::tempdir().unwrap();
@@ -9418,6 +9467,7 @@ async fn test_home_browser_state_defaults_preserve_protected_plaintext_and_refus
     assert_eq!(std::fs::read(&state_path).unwrap(), plaintext_before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
     let dir = tempfile::tempdir().unwrap();
@@ -9480,6 +9530,7 @@ async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
         .any(|event| event["kind"] == "capsule_launch"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity() {
     let dir = tempfile::tempdir().unwrap();
@@ -9600,6 +9651,7 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_launch_rejects_source_wasi_materialization() {
     let dir = tempfile::tempdir().unwrap();
@@ -9662,6 +9714,7 @@ async fn test_home_launch_rejects_source_wasi_materialization() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_launch_reports_system_launch_failure_when_runtime_cannot_start() {
     let dir = tempfile::tempdir().unwrap();
@@ -9845,6 +9898,7 @@ fn test_chat_request_bodies_reject_hidden_identity_fields() {
     }));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_appearance_preferences_are_principal_scoped_and_exact_one_field() {
     let dir = tempfile::tempdir().unwrap();
@@ -10055,6 +10109,7 @@ async fn test_home_appearance_preferences_are_principal_scoped_and_exact_one_fie
     assert_eq!(reloaded_guest["appearance"]["focus_mode"], false);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_appearance_preferences_fail_closed_and_signed_out_defaults_stay_fixed() {
     let dir = tempfile::tempdir().unwrap();
@@ -10318,6 +10373,7 @@ fn services_engine_offer(fixture: &ServicesContactFixture) -> String {
     )
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_private_engine_request_requires_share_before_inbox_approval() {
     for model_shared in [false, true] {
@@ -10535,6 +10591,7 @@ async fn test_services_inbox_request_copy_matches_engine_or_exit_and_exact_appro
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_inbox_projects_approved_model_grant_outside_pending_counts() {
     let dir = tempfile::tempdir().unwrap();
@@ -10708,6 +10765,7 @@ async fn test_inbox_projects_approved_model_grant_outside_pending_counts() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_only_an_admin_approves_a_hosted_model_request() {
     let dir = tempfile::tempdir().unwrap();
@@ -10779,6 +10837,7 @@ async fn test_only_an_admin_approves_a_hosted_model_request() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_only_an_admin_approves_an_offer_its_listing_marks_hosted() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
@@ -11524,6 +11583,7 @@ async fn configured_services_runtime_assert_preserved(
     assert_eq!(did, fixture.peer_provider.state.did);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_configured_services_runtime_request_uses_existing_peer_without_coords() {
     let left = tempfile::tempdir().unwrap();
@@ -11612,6 +11672,7 @@ fn services_direct_route_ticket(peer_id: &str) -> String {
     encoded
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_configured_services_runtime_request_ignores_legacy_direct_ticket_file() {
     let left = tempfile::tempdir().unwrap();
@@ -11685,6 +11746,7 @@ async fn test_configured_services_runtime_request_ignores_legacy_direct_ticket_f
     assert!(request.get("requester_connect_ticket").is_none());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_configured_services_runtime_request_rejects_legacy_contact_route_override() {
     let left = tempfile::tempdir().unwrap();
@@ -11764,6 +11826,7 @@ async fn test_configured_services_runtime_request_rejects_legacy_contact_route_o
     assert!(request.get("requester_connect_ticket").is_none());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_configured_services_runtime_request_ignores_mismatched_direct_ticket() {
     let left = tempfile::tempdir().unwrap();
@@ -11818,6 +11881,7 @@ async fn test_configured_services_runtime_request_ignores_mismatched_direct_tick
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_configured_services_runtime_errors_preserve_state_without_starting_runtime() {
     let left = tempfile::tempdir().unwrap();
@@ -11941,6 +12005,7 @@ async fn services_wait_for_background(mut ready: impl FnMut() -> bool) {
     .expect("Runtime Services receive progress must not require an Inbox launch");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_services_runtime_mailbox_receives_and_activates_without_inbox_or_services_refresh() {
     let left = tempfile::tempdir().unwrap();
@@ -12075,6 +12140,7 @@ async fn test_services_runtime_mailbox_receives_and_activates_without_inbox_or_s
         .all(|r| r["installed_remote_exit_id"].as_str().is_some()));
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_services_runtime_mailbox_receives_requests_when_only_models_are_shared() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
@@ -12261,6 +12327,7 @@ async fn test_services_runtime_mailbox_receives_requests_when_only_models_are_sh
     }
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_services_runtime_mailbox_requires_current_sharing_contact_and_signed_message() {
     let left = tempfile::tempdir().unwrap();
@@ -13107,6 +13174,7 @@ async fn test_system_ai_provider_share_guest_forbidden() {
     assert!(shareable_hosted_ids(dir.path()).is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_share_requires_terms_and_preserves_peer() {
     let dir = tempfile::tempdir().unwrap();
@@ -13482,6 +13550,7 @@ async fn home_external_link_raw(
     (status, String::from_utf8(body.to_vec()).unwrap())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_external_link_names_the_launched_app_and_the_exact_address() {
     let dir = tempfile::tempdir().unwrap();
@@ -13810,6 +13879,7 @@ async fn home_shared_content_post(
 /// Alice's Home gets a file her contact Bob linked in Community, straight
 /// from Bob's Home over Carrier: check, then one get per check id, under
 /// Home-shell authority only, and only the exact bytes of the linked CID.
+#[cfg(unix)]
 #[tokio::test]
 async fn home_shared_content_check_then_get_fetches_a_contacts_linked_file_once() {
     const CHECK: &str = "/api/apps/home/shared-content/check";
@@ -14034,6 +14104,7 @@ async fn home_shared_content_check_then_get_fetches_a_contacts_linked_file_once(
     crate::carrier::tests::shutdown_test_carrier_node(alice_node).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_published_file_is_served_only_to_the_publishers_contacts() {
     let alice_dir = tempfile::tempdir().unwrap();
@@ -14120,6 +14191,7 @@ fn store_carrier_passkey_principal(data_dir: &std::path::Path) -> String {
 /// L1 from the R1 reviews: a listed principal whose stored root does not
 /// resolve is not a contact. The verified state is cached for the listing read,
 /// and the record read then finds a state that fails to load.
+#[cfg(unix)]
 #[test]
 fn an_unresolvable_principal_root_is_not_a_contact() {
     let dir = tempfile::tempdir().unwrap();

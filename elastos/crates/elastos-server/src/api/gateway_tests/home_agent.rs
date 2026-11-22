@@ -81,6 +81,7 @@ async fn home_agent_workspace_absent_get_is_read_only_and_returns_revision_zero(
     assert!(!object_path.exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_agent_workspace_round_trip_and_restart_preserve_exact_document() {
     let dir = tempfile::tempdir().unwrap();
@@ -105,6 +106,7 @@ async fn home_agent_workspace_round_trip_and_restart_preserve_exact_document() {
     assert_eq!(response_json(loaded).await, stored_json);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_agent_workspace_wrong_capsule_is_forbidden_and_principals_stay_isolated() {
     let dir = tempfile::tempdir().unwrap();
@@ -149,6 +151,7 @@ async fn home_agent_workspace_wrong_capsule_is_forbidden_and_principals_stay_iso
     assert_eq!(response_json(other_view).await["revision"], 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_agent_workspace_stale_and_future_revisions_fail_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
@@ -179,6 +182,7 @@ async fn home_agent_workspace_stale_and_future_revisions_fail_without_mutation()
     assert_eq!(loaded_json["document"]["composerDraft"], "Draft note");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_agent_workspace_invalid_requests_fail_closed_without_mutation() {
     let dir = tempfile::tempdir().unwrap();
@@ -228,6 +232,7 @@ async fn home_agent_workspace_invalid_requests_fail_closed_without_mutation() {
     assert!(!object_path.exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_agent_workspace_is_declared_for_recovery_and_written_as_ciphertext() {
     let dir = tempfile::tempdir().unwrap();

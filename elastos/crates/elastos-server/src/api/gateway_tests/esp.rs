@@ -417,6 +417,7 @@ async fn esp_initialize_negotiates_schema_tags_without_granting_method_authority
     assert_eq!(payload["supported"], json!(["0"]));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn esp_generic_invocation_executes_only_explicit_runtime_bindings() {
     let dir = tempfile::tempdir().unwrap();

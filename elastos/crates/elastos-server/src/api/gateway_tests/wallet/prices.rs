@@ -82,6 +82,7 @@ fn test_wallet_price_source_policy_round_trips() {
     assert_eq!(policy.approved_by_principal_id, "person:local:admin");
 }
 
+#[cfg(unix)]
 #[test]
 fn test_wallet_price_fetch_audit_records_external_effect() {
     let dir = tempfile::tempdir().unwrap();
@@ -206,6 +207,7 @@ async fn test_wallet_prices_raise_inbox_request_only_when_wallet_asks_and_not_af
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inbox_wallet_price_approve_keys_policy_and_audit_to_the_acting_principal_and_session() {
     let dir = tempfile::tempdir().unwrap();
