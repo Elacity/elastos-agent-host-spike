@@ -1086,9 +1086,10 @@ impl Supervisor {
         let guest_payload = config;
 
         // Create VM config from manifest, override vsock CID
+        // The booted kernel is checked_image.kernel. Start replaces kernel_path
+        // with that descriptor; the capsule vmlinux path is not the boot file.
         let mut vm_config =
             VmConfig::from_manifest(&manifest, &capsule_dir, &self.crosvm_config.kernel_path);
-        vm_config.kernel_path = capsule_dir.join("vmlinux");
         vm_config.vsock_cid = cid;
         vm_config.boot_args = format!("{} elastos.data_dir=/opt/elastos", vm_config.boot_args);
         vm_config.interactive_stdio = interactive;

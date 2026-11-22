@@ -49,6 +49,11 @@ pub struct BrowserVmBootArtifact {
 }
 
 impl BrowserVmBootArtifact {
+    /// Byte length of the file admitted at launch. The copy stops at this size.
+    pub fn admitted_len(&self) -> u64 {
+        self.target.len
+    }
+
     pub fn check(&self, path: &Path) -> Result<(), String> {
         let current = BrowserVmSeedIdentity::read(path)
             .map_err(|error| format!("Browser boot artifact identity: {error}"))?;
@@ -62,6 +67,11 @@ impl BrowserVmBootArtifact {
 }
 
 impl BrowserVmSeedIdentity {
+    /// Byte length of the file admitted at launch. The copy stops at this size.
+    pub fn admitted_len(&self) -> u64 {
+        self.target.len
+    }
+
     pub fn read(path: &Path) -> io::Result<Self> {
         let target = fs::metadata(path)?;
         if !target.is_file() {

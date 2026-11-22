@@ -1,6 +1,7 @@
+use std::ffi::{CStr, CString, OsStr};
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, Write};
 use std::net::Shutdown;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -2657,19 +2658,203 @@ fn is_anonymous_unix_stream_socket(fd: RawFd) -> bool {
 }
 
 fn validate_owner_only_root_if_present(label: &str, root: &Path) -> Result<(), String> {
-    let Ok(metadata) = fs::metadata(root) else {
-        return Ok(());
-    };
-    if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::geteuid() }
-        || metadata.permissions().mode() & 0o077 != 0
+    match fs::symlink_metadata(root) {
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!(
+            "Browser VZ {label} root is unavailable: {} ({err})",
+            root.display()
+        )),
+        Ok(_) => require_private_directory(label, root),
+    }
+}
+
+/// lstat `root` and refuse a symlink, a foreign owner, or group/other bits.
+fn require_private_directory(label: &str, root: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(root).map_err(|err| {
+        format!(
+            "Browser VZ {label} root is unavailable: {} ({err})",
+            root.display()
+        )
+    })?;
+    if let Some(error) = private_directory_error(label, &metadata, &root.display().to_string()) {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn private_directory_error(label: &str, metadata: &fs::Metadata, display: &str) -> Option<String> {
+    if metadata.file_type().is_symlink() {
+        return Some(format!(
+            "Browser VZ {label} root must be a real directory, not a symlink: {display}"
+        ));
+    }
+    if !metadata.is_dir() {
+        return Some(format!(
+            "Browser VZ {label} root must be a real directory: {display}"
+        ));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Some(format!(
+            "Browser VZ {label} root must be owned by the current user: {display}"
+        ));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Some(format!(
+            "Browser VZ {label} root must not grant group or other access: {display}"
+        ));
+    }
+    None
+}
+
+fn require_private_fd(label: &str, file: &File, display: &str) -> Result<(), String> {
+    let metadata = file
+        .metadata()
+        .map_err(|err| format!("Browser VZ {label} root metadata failed: {err}"))?;
+    if let Some(error) = private_directory_error(label, &metadata, display) {
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Create `root` as mode 0700 when it is absent, then open it with `O_NOFOLLOW`.
+///
+/// An existing symlink, a directory owned by someone else, or a directory with
+/// group or other permission bits is refused. This does not chmod through a
+/// symlink.
+fn ensure_private_directory(label: &str, root: &Path) -> Result<File, String> {
+    match fs::symlink_metadata(root) {
+        Ok(_) => {}
+        Err(err) if err.kind() == ErrorKind::NotFound => create_private_directory(label, root)?,
+        Err(err) => {
+            return Err(format!(
+                "Browser VZ {label} root is unavailable: {} ({err})",
+                root.display()
+            ));
+        }
+    }
+    require_private_directory(label, root)?;
+    let file = open_nofollow_directory(label, root)?;
+    confirm_open_directory(label, root, &file)?;
+    require_private_fd(label, &file, &root.display().to_string())?;
+    Ok(file)
+}
+
+fn create_private_directory(label: &str, root: &Path) -> Result<(), String> {
+    if let Some(parent) = root.parent() {
+        if !parent.as_os_str().is_empty() && fs::symlink_metadata(parent).is_err() {
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("Browser VZ {label} root creation failed: {err}"))?;
+        }
+    }
+    let c_path = CString::new(root.as_os_str().as_bytes()).map_err(|err| err.to_string())?;
+    if unsafe { libc::mkdir(c_path.as_ptr(), 0o700 as libc::mode_t) } != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != ErrorKind::AlreadyExists {
+            return Err(format!("Browser VZ {label} root creation failed: {err}"));
+        }
+    }
+    Ok(())
+}
+
+fn nofollow_directory_flags() -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+    }
+}
+
+fn open_nofollow_directory(label: &str, path: &Path) -> Result<File, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nofollow_directory_flags())
+        .open(path)
+        .map_err(|err| {
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                format!(
+                    "Browser VZ {label} root must be a real directory, not a symlink: {} ({err})",
+                    path.display()
+                )
+            } else {
+                format!(
+                    "Browser VZ {label} root open failed: {} ({err})",
+                    path.display()
+                )
+            }
+        })?;
+    let metadata = file.metadata().map_err(|err| err.to_string())?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "Browser VZ {label} root must be a real directory: {}",
+            path.display()
+        ));
+    }
+    Ok(file)
+}
+
+fn confirm_open_directory(label: &str, path: &Path, file: &File) -> Result<(), String> {
+    let listed = fs::symlink_metadata(path).map_err(|err| err.to_string())?;
+    let opened = file.metadata().map_err(|err| err.to_string())?;
+    if listed.file_type().is_symlink()
+        || !listed.is_dir()
+        || listed.dev() != opened.dev()
+        || listed.ino() != opened.ino()
     {
         return Err(format!(
-            "Browser VZ {label} root must be an owner-only directory: {}",
-            root.display()
+            "Browser VZ {label} root changed while it was opened: {}",
+            path.display()
         ));
     }
     Ok(())
+}
+
+fn open_directory_at(dir: &File, name: &OsStr) -> Result<File, String> {
+    let c_name = CString::new(name.as_bytes()).map_err(|err| err.to_string())?;
+    let fd = unsafe { libc::openat(dir.as_raw_fd(), c_name.as_ptr(), nofollow_directory_flags()) };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            return Err(format!(
+                "Browser VZ session directory must be a real directory, not a symlink ({err})"
+            ));
+        }
+        return Err(format!("Browser VZ session directory open failed: {err}"));
+    }
+    // SAFETY: `fd` is a new descriptor from `openat`, or we already returned.
+    let file = unsafe { File::from_raw_fd(fd) };
+    let metadata = file.metadata().map_err(|err| err.to_string())?;
+    if !metadata.is_dir() {
+        return Err("Browser VZ session directory must be a real directory".to_string());
+    }
+    Ok(file)
+}
+
+fn mkdir_at(dir: &File, name: &OsStr) -> Result<(), String> {
+    let c_name = CString::new(name.as_bytes()).map_err(|err| err.to_string())?;
+    if unsafe { libc::mkdirat(dir.as_raw_fd(), c_name.as_ptr(), 0o700 as libc::mode_t) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
+/// Open the session directory through an `O_NOFOLLOW` handle on its root.
+fn open_private_session(session_dir: &Path) -> Result<File, String> {
+    let root = session_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| "Browser VZ session root is unavailable".to_string())?;
+    let name = session_dir
+        .file_name()
+        .ok_or_else(|| "Browser VZ session directory name is unavailable".to_string())?;
+    require_private_directory("session", root)?;
+    let root_fd = open_nofollow_directory("session", root)?;
+    confirm_open_directory("session", root, &root_fd)?;
+    let session = open_directory_at(&root_fd, name)?;
+    require_private_fd("session", &session, &session_dir.display().to_string())?;
+    Ok(session)
 }
 
 struct TurnPortBindings {
@@ -2922,20 +3107,25 @@ fn create_owned_launch_paths(
         .session_dir
         .parent()
         .ok_or_else(|| "Browser VZ session root is unavailable".to_string())?;
-    fs::create_dir_all(session_root)
-        .map_err(|err| format!("Browser VZ session root creation failed: {err}"))?;
-    fs::set_permissions(session_root, fs::Permissions::from_mode(0o700))
-        .map_err(|err| format!("Browser VZ session root permissions failed: {err}"))?;
+    let session_root_fd = ensure_private_directory("session", session_root)?;
     fs::create_dir(&paths.socket_dir)
         .map_err(|err| format!("Browser VZ binding socket directory creation failed: {err}"))?;
     acquired.socket_directory = true;
     fs::set_permissions(&paths.socket_dir, fs::Permissions::from_mode(0o700))
         .map_err(|err| format!("Browser VZ binding socket permissions failed: {err}"))?;
-    fs::create_dir(&paths.session_dir)
+    let session_name = paths
+        .session_dir
+        .file_name()
+        .ok_or_else(|| "Browser VZ session directory name is unavailable".to_string())?;
+    mkdir_at(&session_root_fd, session_name)
         .map_err(|err| format!("Browser VZ session directory creation failed: {err}"))?;
     acquired.session_directory = true;
-    fs::set_permissions(&paths.session_dir, fs::Permissions::from_mode(0o700))
-        .map_err(|err| format!("Browser VZ session permissions failed: {err}"))?;
+    let session_fd = open_directory_at(&session_root_fd, session_name)?;
+    require_private_fd(
+        "session",
+        &session_fd,
+        &paths.session_dir.display().to_string(),
+    )?;
     let owner = json!({
         "schema": "elastos.browser.vz-socket-owner/v1",
         "binding_hash": transport.authority["binding_hash"],
@@ -3304,24 +3494,41 @@ fn launch_available_bytes(path: &Path) -> Result<u64, String> {
     Ok(available.saturating_mul(stats.f_frsize))
 }
 
+#[cfg(test)]
 fn copy_verified_boot_file(
     source: &Path,
     destination: &Path,
     expected: &str,
+    expected_len: u64,
     check: impl Fn(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    let destination_existed = fs::symlink_metadata(destination).is_ok();
-    let result = copy_verified_boot_file_inner(source, destination, expected, check);
-    if result.is_err() && !destination_existed {
-        let _ = fs::remove_file(destination);
-    }
-    result
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| "Browser private boot artifact directory is unavailable".to_string())?;
+    let name = destination
+        .file_name()
+        .ok_or_else(|| "Browser private boot artifact name is unavailable".to_string())?;
+    let dir = open_nofollow_directory("boot", parent)?;
+    confirm_open_directory("boot", parent, &dir)?;
+    copy_verified_boot_file_in(
+        source,
+        &dir,
+        name,
+        destination,
+        expected,
+        expected_len,
+        check,
+    )
 }
 
-fn copy_verified_boot_file_inner(
+fn copy_verified_boot_file_in(
     source: &Path,
-    destination: &Path,
+    destination_dir: &File,
+    destination_name: &OsStr,
+    destination_path: &Path,
     expected: &str,
+    expected_len: u64,
     check: impl Fn(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     if expected.len() != 64
@@ -3331,6 +3538,7 @@ fn copy_verified_boot_file_inner(
     {
         return Err("Browser launch requires signed boot artifact digests".into());
     }
+    let name = CString::new(destination_name.as_bytes()).map_err(|err| err.to_string())?;
     check(source)?;
     let mut held =
         File::open(source).map_err(|error| format!("Browser boot artifact open: {error}"))?;
@@ -3342,24 +3550,14 @@ fn copy_verified_boot_file_inner(
         return Err("Browser boot artifact must be a regular file".into());
     }
     check(source)?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(destination)
-        .map_err(|error| format!("Browser private boot artifact create: {error}"))?;
+    let mut output = create_private_boot_file(destination_dir, &name)?;
+    let mut created = RemoveBootFile {
+        dir: destination_dir,
+        name: &name,
+        armed: true,
+    };
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let count = held.read(&mut buffer).map_err(|error| error.to_string())?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buffer[..count]);
-        output
-            .write_all(&buffer[..count])
-            .map_err(|error| error.to_string())?;
-    }
+    copy_bounded(&mut held, &mut output, &mut digest, expected_len)?;
     if format!("{:x}", digest.finalize()) != expected {
         return Err(
             "Browser boot artifact changed after Runtime admission; retry Browser open".into(),
@@ -3367,19 +3565,142 @@ fn copy_verified_boot_file_inner(
     }
     output.sync_all().map_err(|error| error.to_string())?;
     check(source)?;
-    let mut output = File::open(destination).map_err(|error| error.to_string())?;
-    let mut digest = Sha256::new();
+    let stored = hash_bounded(&mut output, expected_len)?;
+    if stored != expected {
+        return Err("Browser private boot artifact differs from signed bytes".into());
+    }
+    confirm_copied_name(destination_dir, &name, &output, destination_path)?;
+    created.armed = false;
+    Ok(())
+}
+
+/// Removes a boot file this copy created when the copy does not succeed.
+struct RemoveBootFile<'a> {
+    dir: &'a File,
+    name: &'a CStr,
+    armed: bool,
+}
+
+impl Drop for RemoveBootFile<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = unlink_at(self.dir, self.name);
+        }
+    }
+}
+
+fn create_private_boot_file(dir: &File, name: &CStr) -> Result<File, String> {
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600 as libc::c_uint,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "Browser private boot artifact create: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `fd` is a new descriptor from `openat`, or we already returned.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn unlink_at(dir: &File, name: &CStr) -> std::io::Result<()> {
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn copy_bounded(
+    from: &mut File,
+    to: &mut File,
+    digest: &mut Sha256,
+    expected_len: u64,
+) -> Result<(), String> {
+    let mut copied = 0u64;
+    let mut limited = from.take(expected_len.saturating_add(1));
+    let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let count = output
+        let count = limited
             .read(&mut buffer)
             .map_err(|error| error.to_string())?;
         if count == 0 {
             break;
         }
+        if copied.saturating_add(count as u64) > expected_len {
+            return Err("Browser boot artifact is larger than the signed entry".into());
+        }
         digest.update(&buffer[..count]);
+        to.write_all(&buffer[..count])
+            .map_err(|error| error.to_string())?;
+        copied += count as u64;
     }
-    if format!("{:x}", digest.finalize()) != expected {
+    if copied != expected_len {
+        return Err("Browser boot artifact is smaller than the signed entry".into());
+    }
+    Ok(())
+}
+
+fn hash_bounded(file: &mut File, expected_len: u64) -> Result<String, String> {
+    file.rewind().map_err(|error| error.to_string())?;
+    let mut digest = Sha256::new();
+    let mut checked = 0u64;
+    let mut limited = file.take(expected_len.saturating_add(1));
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = limited
+            .read(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        if count == 0 {
+            break;
+        }
+        if checked.saturating_add(count as u64) > expected_len {
+            return Err("Browser private boot artifact is larger than the signed entry".into());
+        }
+        digest.update(&buffer[..count]);
+        checked += count as u64;
+    }
+    if checked != expected_len {
         return Err("Browser private boot artifact differs from signed bytes".into());
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn confirm_copied_name(dir: &File, name: &CStr, file: &File, path: &Path) -> Result<(), String> {
+    let opened = file.metadata().map_err(|err| err.to_string())?;
+    let mut listed = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            listed.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let listed = unsafe { listed.assume_init() };
+    let listed_path = fs::symlink_metadata(path).map_err(|err| err.to_string())?;
+    let kind = listed.st_mode & libc::S_IFMT;
+    // macOS st_dev is 32-bit. Linux st_dev and both hosts' st_ino are 64-bit.
+    #[allow(clippy::unnecessary_cast)]
+    let listed_dev = listed.st_dev as u64;
+    #[allow(clippy::unnecessary_cast)]
+    let listed_ino = listed.st_ino as u64;
+    if kind != libc::S_IFREG
+        || listed_dev != opened.dev()
+        || listed_ino != opened.ino()
+        || listed_path.file_type().is_symlink()
+        || listed_path.dev() != opened.dev()
+        || listed_path.ino() != opened.ino()
+    {
+        return Err("Browser private boot artifact path does not name the copied file".into());
     }
     Ok(())
 }
@@ -3406,6 +3727,7 @@ fn prepare_launch_rootfs(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, St
         .initramfs_path
         .as_ref()
         .ok_or_else(|| "Browser launch requires signed initrd path".to_string())?;
+    let session = open_private_session(&paths.session_dir)?;
     let rootfs_bytes = fs::metadata(&paths.rootfs_path)
         .map_err(|e| e.to_string())?
         .len();
@@ -3437,23 +3759,35 @@ fn prepare_launch_rootfs(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, St
         initrd_path: paths.session_dir.join("verified-initrd"),
         owned: [false; 3],
     };
-    copy_verified_boot_file(
+    copy_verified_boot_file_in(
         &paths.rootfs_path,
+        &session,
+        OsStr::new("verified-rootfs.ext4"),
         &boot.rootfs_copy_path,
         rootfs_hash,
+        verified.admitted_len(),
         |path| verified.check(path),
     )?;
     boot.owned[0] = true;
-    copy_verified_boot_file(
+    copy_verified_boot_file_in(
         &paths.kernel_path,
+        &session,
+        OsStr::new("verified-vmlinux"),
         &boot.kernel_path,
         &kernel.sha256,
+        kernel.admitted_len(),
         |path| kernel.check(path),
     )?;
     boot.owned[1] = true;
-    copy_verified_boot_file(initrd_source, &boot.initrd_path, &initrd.sha256, |path| {
-        initrd.check(path)
-    })?;
+    copy_verified_boot_file_in(
+        initrd_source,
+        &session,
+        OsStr::new("verified-initrd"),
+        &boot.initrd_path,
+        &initrd.sha256,
+        initrd.admitted_len(),
+        |path| initrd.check(path),
+    )?;
     boot.owned[2] = true;
     for path in [&boot.kernel_path, &boot.initrd_path] {
         fs::set_permissions(path, fs::Permissions::from_mode(0o400))
@@ -5676,6 +6010,7 @@ mod tests {
     use std::ffi::CString;
     use std::os::fd::{FromRawFd, IntoRawFd};
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::sync::{mpsc, Mutex};
 
     #[test]
@@ -5703,6 +6038,32 @@ mod tests {
         root.kernel = Some(artifact(kernel));
         root.initrd = Some(artifact(initrd));
         root
+    }
+
+    fn create_private_session(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        if let Some(parent) = path.parent() {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    fn launch_paths_for(root: &Path, session_dir: PathBuf) -> LaunchPaths {
+        LaunchPaths {
+            verified_rootfs: None,
+            kernel_path: root.join("kernel"),
+            rootfs_path: root.join("rootfs"),
+            initramfs_path: None,
+            state_dir: root.join("state"),
+            rootfs_cache_dir: root.join("cache"),
+            session_dir,
+            socket_dir: root.join("socket"),
+            control_socket_path: root.join("socket/c.sock"),
+            runtime_stream_path: root.join("runtime.sock"),
+            control_port: DEFAULT_CONTROL_PORT,
+            memory_mib: 2048,
+            vcpu_count: 2,
+        }
     }
 
     #[test]
@@ -8294,7 +8655,10 @@ mod tests {
         fs::create_dir_all(launch.parent().unwrap()).unwrap();
         let identity = BrowserVmSeedIdentity::read(&seed).unwrap();
         let expected = format!("{:x}", Sha256::digest(fs::read(&seed).unwrap()));
-        copy_verified_boot_file(&seed, &launch, &expected, |path| identity.check(path)).unwrap();
+        copy_verified_boot_file(&seed, &launch, &expected, identity.admitted_len(), |path| {
+            identity.check(path)
+        })
+        .unwrap();
 
         assert_eq!(fs::metadata(&seed).unwrap().mode() & 0o777, 0o444);
         assert_eq!(fs::metadata(&launch).unwrap().mode() & 0o777, 0o600);
@@ -8323,18 +8687,24 @@ mod tests {
         let identity = BrowserVmSeedIdentity::read(&seed).unwrap();
         let expected = format!("{:x}", Sha256::digest(b"signed-image"));
         let calls = Cell::new(0);
-        copy_verified_boot_file(&seed, &private, &expected, |path| {
-            let call = calls.get();
-            calls.set(call + 1);
-            if call < 2 {
-                identity.check(path)?;
-            }
-            if call == 1 {
-                fs::rename(path, &old).unwrap();
-                fs::write(path, b"forged-image").unwrap();
-            }
-            Ok(())
-        })
+        copy_verified_boot_file(
+            &seed,
+            &private,
+            &expected,
+            identity.admitted_len(),
+            |path| {
+                let call = calls.get();
+                calls.set(call + 1);
+                if call < 2 {
+                    identity.check(path)?;
+                }
+                if call == 1 {
+                    fs::rename(path, &old).unwrap();
+                    fs::write(path, b"forged-image").unwrap();
+                }
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(fs::read(&private).unwrap(), b"signed-image");
         assert_eq!(fs::read(&seed).unwrap(), b"forged-image");
@@ -8350,12 +8720,160 @@ mod tests {
         let expected = format!("{:x}", Sha256::digest(b"signed-image"));
         identity.check(&seed).unwrap();
         fs::write(&seed, b"forged-image").unwrap();
-        let error = copy_verified_boot_file(&seed, &private, &expected, |_| Ok(())).unwrap_err();
+        let admitted_len = b"signed-image".len() as u64;
+        let error = copy_verified_boot_file(&seed, &private, &expected, admitted_len, |_| Ok(()))
+            .unwrap_err();
         assert!(error.contains("changed after Runtime admission"), "{error}");
         assert!(!private.exists());
         fs::write(&private, b"foreign").unwrap();
-        assert!(copy_verified_boot_file(&seed, &private, &expected, |_| Ok(())).is_err());
+        assert!(
+            copy_verified_boot_file(&seed, &private, &expected, admitted_len, |_| Ok(())).is_err()
+        );
         assert_eq!(fs::read(&private).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn copy_refuses_bytes_past_the_admitted_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = tmp.path().join("rootfs.ext4");
+        let private = tmp.path().join("verified-rootfs.ext4");
+        let bytes = vec![b'a'; 256 * 1024];
+        fs::write(&seed, &bytes).unwrap();
+        let expected = format!("{:x}", Sha256::digest(&bytes));
+        let error =
+            copy_verified_boot_file(&seed, &private, &expected, 32, |_| Ok(())).unwrap_err();
+        assert!(error.contains("larger than the signed entry"), "{error}");
+        assert!(!private.exists());
+    }
+
+    #[test]
+    fn symlinked_session_root_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let attacker = tmp.path().join("attacker");
+        fs::create_dir_all(attacker.join("vz-launch")).unwrap();
+        fs::set_permissions(&attacker, fs::Permissions::from_mode(0o777)).unwrap();
+        let link = tmp.path().join("evzs");
+        std::os::unix::fs::symlink(&attacker, &link).unwrap();
+        let error = require_private_directory("session", &link).unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+
+        let paths = launch_paths_for(tmp.path(), link.join("vz-binding"));
+        let transport = transport_fixture('s');
+        let mut acquired = AcquiredLaunchPaths::default();
+        let error = create_owned_launch_paths(&paths, &transport, &mut acquired).unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+        assert!(
+            attacker.join("vz-binding").symlink_metadata().is_err(),
+            "session directory was created through the symlink"
+        );
+        assert!(attacker
+            .join("vz-launch")
+            .join("verified-vmlinux")
+            .symlink_metadata()
+            .is_err());
+    }
+
+    #[test]
+    fn session_root_with_group_or_other_bits_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("evzs");
+        fs::create_dir(&root).unwrap();
+        for mode in [0o755, 0o770, 0o707, 0o701] {
+            fs::set_permissions(&root, fs::Permissions::from_mode(mode)).unwrap();
+            let error = require_private_directory("session", &root).unwrap_err();
+            assert!(error.contains("group or other"), "{mode:o} {error}");
+            let paths = launch_paths_for(tmp.path(), root.join("vz-binding"));
+            let transport = transport_fixture('g');
+            let mut acquired = AcquiredLaunchPaths::default();
+            let error = create_owned_launch_paths(&paths, &transport, &mut acquired).unwrap_err();
+            assert!(error.contains("group or other"), "{mode:o} {error}");
+            assert!(!root.join("vz-binding").exists());
+        }
+    }
+
+    #[test]
+    fn foreign_owned_session_root_is_refused_when_one_exists() {
+        let euid = unsafe { libc::geteuid() };
+        let candidates = ["/var/root", "/private/var/root", "/private/etc", "/bin"];
+        let found = candidates.iter().map(Path::new).find(|path| {
+            fs::symlink_metadata(path).is_ok_and(|meta| {
+                meta.is_dir() && !meta.file_type().is_symlink() && meta.uid() != euid
+            })
+        });
+        if euid == 0 {
+            assert!(
+                found.is_none(),
+                "root can own a foreign directory in this test"
+            );
+            return;
+        }
+        let path = found.expect("a directory owned by another user");
+        let error = require_private_directory("session", path).unwrap_err();
+        assert!(
+            error.contains("owned by the current user"),
+            "{error} for {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn owned_private_session_root_receives_the_session_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("evzs");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let paths = launch_paths_for(tmp.path(), root.join("vz-binding"));
+        let transport = transport_fixture('p');
+        let mut acquired = AcquiredLaunchPaths::default();
+        create_owned_launch_paths(&paths, &transport, &mut acquired).unwrap();
+        let meta = fs::symlink_metadata(&paths.session_dir).unwrap();
+        assert!(meta.is_dir());
+        assert!(!meta.file_type().is_symlink());
+        assert_eq!(meta.mode() & 0o777, 0o700);
+        assert_eq!(meta.uid(), unsafe { libc::geteuid() });
+        let root_meta = fs::symlink_metadata(&root).unwrap();
+        assert!(!root_meta.file_type().is_symlink());
+        assert_eq!(root_meta.mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    fn prepare_launch_refuses_a_symlinked_session_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _per_launch = EnvVarRestore::capture("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
+        std::env::remove_var("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
+        let seed = tmp.path().join("rootfs.ext4");
+        let kernel = tmp.path().join("kernel");
+        let initrd = tmp.path().join("initrd");
+        fs::write(&seed, b"rootfs-bytes").unwrap();
+        fs::write(&kernel, b"kernel").unwrap();
+        fs::write(&initrd, b"initrd").unwrap();
+        let attacker = tmp.path().join("attacker");
+        fs::create_dir_all(attacker.join("vz-launch")).unwrap();
+        fs::set_permissions(&attacker, fs::Permissions::from_mode(0o777)).unwrap();
+        let link = tmp.path().join("evzs");
+        std::os::unix::fs::symlink(&attacker, &link).unwrap();
+        let mut paths = launch_paths_for(tmp.path(), link.join("vz-launch"));
+        paths.verified_rootfs = Some(admitted_boot_set(&seed, &kernel, &initrd));
+        paths.kernel_path = kernel;
+        paths.rootfs_path = seed;
+        paths.initramfs_path = Some(initrd);
+        let error = prepare_launch_rootfs(&paths).unwrap_err();
+        assert!(error.contains("symlink"), "{error}");
+        for name in [
+            "verified-vmlinux",
+            "verified-rootfs.ext4",
+            "verified-initrd",
+        ] {
+            assert!(
+                attacker
+                    .join("vz-launch")
+                    .join(name)
+                    .symlink_metadata()
+                    .is_err(),
+                "{name} was written through the symlink"
+            );
+        }
     }
 
     #[test]
@@ -8413,7 +8931,7 @@ mod tests {
                 memory_mib: 2048,
                 vcpu_count: 2,
             };
-            fs::create_dir_all(&paths.session_dir).unwrap();
+            create_private_session(&paths.session_dir);
 
             fs::write(&seed, vec![0x78; 64 * 1024]).unwrap();
             let error = prepare_launch_rootfs(&paths).unwrap_err();
@@ -8468,7 +8986,7 @@ mod tests {
             memory_mib: 2048,
             vcpu_count: 2,
         };
-        fs::create_dir_all(&paths.session_dir).unwrap();
+        create_private_session(&paths.session_dir);
 
         let error = prepare_launch_rootfs(&paths).unwrap_err();
         assert!(error.contains("shared rootfs boot is refused"), "{error}");
@@ -8547,7 +9065,7 @@ mod tests {
             memory_mib: 2048,
             vcpu_count: 2,
         };
-        fs::create_dir_all(&paths.session_dir).unwrap();
+        create_private_session(&paths.session_dir);
 
         let prepared = prepare_launch_rootfs(&paths).unwrap();
         let overlay = paths.session_dir.join(ROOTFS_OVERLAY_NAME);

@@ -145,6 +145,22 @@ fn open_signed_image(
     })
 }
 
+fn directory_available_bytes(path: &Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .context("VM kernel private copy refused: directory path")?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("VM kernel private copy refused: free space unavailable");
+    }
+    let stats = unsafe { stats.assume_init() };
+    // f_bavail is u32 on macOS and u64 on Linux, so the cast is needed on one.
+    #[allow(clippy::unnecessary_cast)]
+    let available = stats.f_bavail as u64;
+    Ok(available.saturating_mul(stats.f_frsize))
+}
+
 /// Copy the opened kernel into an unnamed file, hashing the bytes written.
 ///
 /// The digest that is compared is the digest of that private file. The capsule
@@ -156,23 +172,36 @@ fn private_kernel_copy(
     expected_size: u64,
     expected_sha256: &str,
 ) -> Result<File> {
+    let available = directory_available_bytes(directory)?;
+    ensure!(
+        available >= expected_size,
+        "VM kernel private copy refused: {expected_size} bytes required, {available} bytes free"
+    );
     let mut private =
         elastos_crosvm::open_private_file(directory).context("VM kernel private copy refused")?;
     let mut written = Sha256::new();
     let mut copied = 0u64;
     let mut chunk = [0u8; 64 * 1024];
-    loop {
-        let count = kernel.read(&mut chunk)?;
-        if count == 0 {
-            break;
+    // Stop one byte past the signed size. A source that grows during the copy
+    // must not fill the disk before the size check.
+    {
+        let mut limited = kernel.take(expected_size.saturating_add(1));
+        loop {
+            let count = limited.read(&mut chunk)?;
+            if count == 0 {
+                break;
+            }
+            if copied.saturating_add(count as u64) > expected_size {
+                anyhow::bail!("Changed VM kernel refused: larger than the signed entry");
+            }
+            private
+                .write_all(&chunk[..count])
+                .context("VM kernel private copy refused: write failed")?;
+            written.update(&chunk[..count]);
+            copied = copied
+                .checked_add(count as u64)
+                .context("VM kernel private copy refused: size overflow")?;
         }
-        private
-            .write_all(&chunk[..count])
-            .context("VM kernel private copy refused: write failed")?;
-        written.update(&chunk[..count]);
-        copied = copied
-            .checked_add(count as u64)
-            .context("VM kernel private copy refused: size overflow")?;
     }
     ensure!(
         copied == expected_size,
@@ -187,15 +216,21 @@ fn private_kernel_copy(
         .context("VM kernel private copy refused: rewind failed")?;
     let mut stored = Sha256::new();
     let mut checked = 0u64;
-    loop {
-        let count = private.read(&mut chunk)?;
-        if count == 0 {
-            break;
+    {
+        let mut limited = Read::by_ref(&mut private).take(expected_size.saturating_add(1));
+        loop {
+            let count = limited.read(&mut chunk)?;
+            if count == 0 {
+                break;
+            }
+            if checked.saturating_add(count as u64) > expected_size {
+                anyhow::bail!("Changed VM kernel refused: larger than the signed entry");
+            }
+            stored.update(&chunk[..count]);
+            checked = checked
+                .checked_add(count as u64)
+                .context("VM kernel private copy refused: size overflow")?;
         }
-        stored.update(&chunk[..count]);
-        checked = checked
-            .checked_add(count as u64)
-            .context("VM kernel private copy refused: size overflow")?;
     }
     ensure!(
         checked == expected_size && format!("{:x}", stored.finalize()) == expected_sha256,
@@ -504,6 +539,87 @@ mod tests {
                 "booted kernel is still the capsule file"
             );
         }
+    }
+
+    #[test]
+    fn private_kernel_copy_stops_at_the_signed_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let kernel_path = temp.path().join("vmlinux");
+        let mut bytes = vec![b'k'; 256 * 1024];
+        bytes.extend_from_slice(b"tail");
+        fs::write(&kernel_path, &bytes).unwrap();
+        let mut source = File::open(&kernel_path).unwrap();
+        let admitted = 64u64;
+        let full_hash = format!("{:x}", Sha256::digest(&bytes));
+        let error =
+            private_kernel_copy(temp.path(), &mut source, &kernel_path, admitted, &full_hash)
+                .unwrap_err();
+        assert!(
+            error.to_string().contains("larger than the signed entry"),
+            "{error}"
+        );
+        assert!(
+            source.stream_position().unwrap() <= admitted + 1,
+            "copy read past the signed size"
+        );
+    }
+
+    #[test]
+    fn private_kernel_copy_refuses_when_the_directory_cannot_hold_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let kernel_path = temp.path().join("vmlinux");
+        fs::write(&kernel_path, KERNEL).unwrap();
+        let mut source = File::open(&kernel_path).unwrap();
+        let error = private_kernel_copy(
+            temp.path(),
+            &mut source,
+            &kernel_path,
+            u64::MAX,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("bytes free"), "{error}");
+        assert_eq!(source.stream_position().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn verified_kernel_loads_when_capsule_vmlinux_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        write_image_set(temp.path(), b"signed image");
+        fs::rename(
+            temp.path().join("vmlinux"),
+            temp.path().join("guest-kernel"),
+        )
+        .unwrap();
+        let info = row(b"signed image");
+        let checked =
+            open_signed_image(temp.path(), "rootfs.ext4", Some("guest-kernel"), &info).unwrap();
+        assert!(!temp.path().join("vmlinux").exists());
+        let binary = temp.path().join("crosvm");
+        fs::write(&binary, b"test placeholder").unwrap();
+        let host_kernel = temp.path().join("host-vmlinux");
+        fs::write(&host_kernel, KERNEL).unwrap();
+        let provider = CrosvmProvider::new(
+            CrosvmConfig::new()
+                .with_crosvm_bin(binary)
+                .with_kernel_path(&host_kernel)
+                .with_socket_dir(temp.path().join("sockets"))
+                .with_rootfs_cache_dir(temp.path().join("provider-cache")),
+        )
+        .unwrap();
+        provider.init().await.unwrap();
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../capsules/shell/capsule.json"
+            )))
+            .unwrap();
+        let image = checked.rootfs;
+        let digest = checked.rootfs_sha256;
+        provider
+            .load_verified(temp.path(), manifest, &image, &digest, checked.kernel)
+            .await
+            .unwrap();
     }
 
     #[test]

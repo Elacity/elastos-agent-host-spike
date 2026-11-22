@@ -189,9 +189,11 @@ fn open_anonymous_overlay(path: &Path) -> io::Result<fs::File> {
 
 /// Open an unnamed file in `directory`.
 ///
-/// Linux uses `O_TMPFILE`. Other hosts use an unlinked temporary file. The
-/// file has no directory entry, so a later write to a named file in
-/// `directory` cannot change the bytes this descriptor reads.
+/// Linux uses `O_TMPFILE` and refuses when this filesystem cannot create one.
+/// It does not fall back to a named file. `O_EXCL` keeps the inode unlinked.
+/// Other hosts use an unlinked temporary file. The file has no directory
+/// entry, so a later write to a named file in `directory` cannot change the
+/// bytes this descriptor reads.
 pub fn open_private_file(directory: &Path) -> io::Result<fs::File> {
     #[cfg(target_os = "linux")]
     {
@@ -201,12 +203,12 @@ pub fn open_private_file(directory: &Path) -> io::Result<fs::File> {
             libc::openat(
                 dir.as_raw_fd(),
                 c".".as_ptr(),
-                libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
+                libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC | libc::O_EXCL,
                 0o600,
             )
         };
         if fd < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(private_file_open_error(io::Error::last_os_error()));
         }
         // SAFETY: `fd` is a new descriptor from `openat`, or we already returned.
         Ok(unsafe { fs::File::from_raw_fd(fd) })
@@ -217,10 +219,60 @@ pub fn open_private_file(directory: &Path) -> io::Result<fs::File> {
     }
 }
 
+/// `O_TMPFILE` failed. Say so, and do not offer a named file instead.
+///
+/// Linux calls this from `open_private_file`. Tests on every host check the
+/// message. A non-Linux library build does not include it.
+#[cfg(any(target_os = "linux", test))]
+fn private_file_open_error(err: io::Error) -> io::Error {
+    let unsupported = matches!(err.raw_os_error(), Some(code) if {
+        code == libc::EOPNOTSUPP || code == libc::ENOTSUP
+    });
+    let detail = if unsupported {
+        format!(
+            "O_TMPFILE is not supported on this filesystem ({err}); refusing to create a named file"
+        )
+    } else {
+        format!("O_TMPFILE open failed ({err}); refusing to create a named file")
+    };
+    io::Error::new(
+        if unsupported {
+            io::ErrorKind::Unsupported
+        } else {
+            err.kind()
+        },
+        detail,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
+
+    #[test]
+    fn open_private_file_leaves_no_named_file() {
+        let temp = tempdir().unwrap();
+        let file = open_private_file(temp.path()).unwrap();
+        assert_eq!(file.metadata().unwrap().nlink(), 0);
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn tmpfile_unsupported_refuses_a_named_file() {
+        let err = private_file_open_error(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+        let text = err.to_string();
+        assert!(text.contains("O_TMPFILE is not supported"), "{text}");
+        assert!(text.contains("refusing to create a named file"), "{text}");
+        let other = private_file_open_error(io::Error::from_raw_os_error(libc::EACCES));
+        let other_text = other.to_string();
+        assert!(
+            other_text.contains("refusing to create a named file"),
+            "{other_text}"
+        );
+        assert!(!other_text.contains("not supported"), "{other_text}");
+    }
 
     #[tokio::test]
     async fn test_rootfs_manager_init() {

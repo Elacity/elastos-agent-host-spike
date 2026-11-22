@@ -39,8 +39,8 @@ impl CrosvmProvider {
         kernel: std::fs::File,
     ) -> Result<CapsuleHandle> {
         let id = CapsuleId::new(format!("microvm-{}", uuid::Uuid::new_v4()));
+        // Boot uses the admitted kernel descriptor. A capsule path is not that file.
         let mut config = VmConfig::from_manifest(&manifest, path, &self.config.kernel_path);
-        config.kernel_path = path.join("vmlinux");
         let (overlay, rootfs_file) = self
             .rootfs_manager
             .create_verified_overlay(
@@ -67,9 +67,6 @@ impl CrosvmProvider {
             return Err(ElastosError::Compute(
                 "VM image requires a MicroVM capsule".into(),
             ));
-        }
-        if !vm_config.kernel_path.exists() {
-            return Err(ElastosError::Compute("Kernel not found".into()));
         }
         let socket_path = self.socket_path(&id);
         if let Some(size_mb) = manifest

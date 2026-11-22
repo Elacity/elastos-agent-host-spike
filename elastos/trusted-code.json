@@ -15,6 +15,7 @@
     "elastos/crates/elastos-server/src/bundle_admission.rs",
     "elastos/crates/elastos-server/src/stage_cmd.rs",
     "elastos/crates/elastos-server/src/setup.rs",
+    "elastos/crates/elastos-server/src/setup/vm_image.rs",
     "elastos/crates/elastos-bundle-identity/src/lib.rs",
     "elastos/crates/elastos-common/src/manifest.rs",
     "elastos/crates/elastos-common/src/pinned_manifest.rs",
