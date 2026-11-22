@@ -3396,8 +3396,9 @@ mod tests {
     async fn wallet_unsuitable_parent_leaves_route_absent() {
         let (_temp, data_dir, _) = wallet_fixture();
         // The signed Home keeps its release under this level, so replacing it
-        // with a file is refused at the signed-digest check, which now runs
-        // before the storage parent is prepared; nothing is created either way.
+        // with a file is refused when the provider is admitted (the release
+        // envelope's parents are checked), before the signed-digest check and
+        // before the storage parent is prepared; nothing is created.
         let parent = data_dir.join("ElastOS/SystemServices");
         fs::remove_dir_all(&parent).unwrap();
         fs::write(&parent, b"not a directory").unwrap();
@@ -3408,7 +3409,7 @@ mod tests {
             .unwrap();
         let message = format!("{error:#}").to_lowercase();
         assert!(
-            message.contains("not a directory") || message.contains("trusted source"),
+            message.contains("installed release inputs require repair"),
             "{error:#}"
         );
         assert!(registry
