@@ -1,5 +1,6 @@
 //! Normal Home setup uses the same Engine/Exit configuration as source Homes.
 use std::fs;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

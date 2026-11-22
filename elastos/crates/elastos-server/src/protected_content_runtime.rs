@@ -11,7 +11,9 @@ pub(crate) mod tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Write as _};
+#[cfg(unix)]
+use std::io::{Seek as _, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt, PermissionsExt as _};
 use std::path::{Path, PathBuf};

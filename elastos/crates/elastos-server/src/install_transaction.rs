@@ -2,7 +2,9 @@
 //! Updates stage all five release files; the installer leaves components to setup.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;

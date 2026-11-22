@@ -386,6 +386,16 @@ pub(crate) mod tests {
     use crate::api::gateway;
     use std::future::Future;
 
+    pub(crate) fn make_admin(data_dir: &std::path::Path, principal_id: &str) {
+        let mut state = crate::auth::load_auth_state(data_dir).unwrap();
+        for principal in &mut state.principals {
+            if principal.principal_id == principal_id {
+                principal.role = crate::auth::RuntimePrincipalRole::Admin;
+            }
+        }
+        crate::auth::save_auth_state(data_dir, &state, None).unwrap();
+    }
+
     fn write_test_capsule(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let capsule_dir = dir.join(name);
         std::fs::create_dir_all(&capsule_dir).unwrap();
@@ -1080,7 +1090,7 @@ pub(crate) mod tests {
             let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
             let owner = context.principal_id().to_string();
             crate::auth::store_test_principal_root_protection(&data_dir, &owner);
-            crate::agents::tests::make_admin(&data_dir, &owner);
+            make_admin(&data_dir, &owner);
             let record = crate::auth::stored_principal_record(&data_dir, &owner)
                 .unwrap()
                 .unwrap();
@@ -5786,7 +5796,7 @@ pub(crate) mod tests {
         let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
         let owner = context.principal_id().to_string();
         crate::auth::store_test_principal_root_protection(&data_dir, &owner);
-        crate::agents::tests::make_admin(&data_dir, &owner);
+        make_admin(&data_dir, &owner);
         let record = crate::auth::stored_principal_record(&data_dir, &owner)
             .unwrap()
             .unwrap();
@@ -6019,7 +6029,7 @@ pub(crate) mod tests {
         let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
         let owner = context.principal_id().to_string();
         crate::auth::store_test_principal_root_protection(&data_dir, &owner);
-        crate::agents::tests::make_admin(&data_dir, &owner);
+        make_admin(&data_dir, &owner);
         let grant =
             gateway::issue_home_launch_token_with_context(&data_dir, name, &context).unwrap();
 

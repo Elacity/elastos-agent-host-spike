@@ -29,7 +29,9 @@ use elastos_model_contract::{
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::io::BufReader;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use elastos_runtime::auth::RuntimeAuditEventV1;
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};

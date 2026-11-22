@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
+#[cfg(unix)]
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

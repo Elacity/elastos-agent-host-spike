@@ -43,7 +43,9 @@ use futures_lite::StreamExt;
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
-use tokio::io::{self, AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::io;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
