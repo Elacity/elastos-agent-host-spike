@@ -985,6 +985,14 @@ struct FailFirstPreparationCancel {
 }
 #[async_trait::async_trait]
 impl ProviderCarrierInvoker for FailFirstPreparationCancel {
+    async fn remember_peer_ticket(
+        &self,
+        peer_did: &str,
+        ticket: &str,
+    ) -> Result<(), ProviderError> {
+        self.inner.remember_peer_ticket(peer_did, ticket).await
+    }
+
     async fn invoke_carrier_provider(
         &self,
         route: &ProviderCarrierRoute,
@@ -1004,6 +1012,23 @@ impl ProviderCarrierInvoker for FailFirstPreparationCancel {
             .invoke_carrier_provider(route, invocation, request)
             .await
     }
+}
+
+#[tokio::test]
+async fn fail_first_preparation_cancel_forwards_ticket_validation() {
+    let wrapper = FailFirstPreparationCancel {
+        inner: crate::carrier::CarrierProviderInvoker::new(),
+        remaining: std::sync::atomic::AtomicBool::new(false),
+    };
+    let error = wrapper
+        .remember_peer_ticket("invalid peer DID", "invalid ticket")
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ProviderError::Provider(message)
+            if message == "Carrier provider invocation peer_did is invalid"
+    ));
 }
 
 // Runs after a real signed approval has been denied on B. Readiness was proven
