@@ -6,7 +6,7 @@ use super::{
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 use std::path::{Component, Path};
 
 #[derive(Debug)]
@@ -110,7 +110,7 @@ fn open_signed_image(
         "Changed VM image refused: size differs from signed entry"
     );
     // The manifest may select another file only when its bytes match the
-    // signed kernel. Keep that opened file for the crosvm command.
+    // signed kernel. Boot the private copy of those bytes, not this file.
     let kernel_name = kernel_override.unwrap_or(&entry.kernel.path);
     ensure!(
         Path::new(kernel_name)
@@ -123,32 +123,108 @@ fn open_signed_image(
         fs::symlink_metadata(&kernel_path)?.file_type().is_file(),
         "VM kernel path refused: kernel is not a regular file"
     );
-    let mut kernel = options
+    let mut source = options
         .open(&kernel_path)
         .context("VM kernel path refused: open failed")?;
     ensure!(
-        kernel.metadata()?.len() == entry.kernel.size,
+        source.metadata()?.len() == entry.kernel.size,
         "Changed VM kernel refused: size differs from signed entry"
     );
-    let mut hasher = Sha256::new();
+    let kernel = private_kernel_copy(
+        dir,
+        &mut source,
+        &kernel_path,
+        entry.kernel.size,
+        &entry.kernel.sha256,
+    )?;
+    drop(source);
+    Ok(CheckedVmImage {
+        rootfs: image,
+        rootfs_sha256: entry.sha256,
+        kernel,
+    })
+}
+
+/// Copy the opened kernel into an unnamed file, hashing the bytes written.
+///
+/// The digest that is compared is the digest of that private file. The capsule
+/// file is not the descriptor that boots.
+fn private_kernel_copy(
+    directory: &Path,
+    kernel: &mut File,
+    kernel_path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<File> {
+    let mut private =
+        elastos_crosvm::open_private_file(directory).context("VM kernel private copy refused")?;
+    let mut written = Sha256::new();
+    let mut copied = 0u64;
     let mut chunk = [0u8; 64 * 1024];
     loop {
         let count = kernel.read(&mut chunk)?;
         if count == 0 {
             break;
         }
-        hasher.update(&chunk[..count]);
+        private
+            .write_all(&chunk[..count])
+            .context("VM kernel private copy refused: write failed")?;
+        written.update(&chunk[..count]);
+        copied = copied
+            .checked_add(count as u64)
+            .context("VM kernel private copy refused: size overflow")?;
     }
     ensure!(
-        format!("{:x}", hasher.finalize()) == entry.kernel.sha256,
+        copied == expected_size,
+        "Changed VM kernel refused: size differs from signed entry"
+    );
+    ensure!(
+        format!("{:x}", written.finalize()) == expected_sha256,
         "Changed VM kernel refused: digest differs from signed entry"
     );
-    kernel.rewind()?;
-    Ok(CheckedVmImage {
-        rootfs: image,
-        rootfs_sha256: entry.sha256,
-        kernel,
-    })
+    private
+        .rewind()
+        .context("VM kernel private copy refused: rewind failed")?;
+    let mut stored = Sha256::new();
+    let mut checked = 0u64;
+    loop {
+        let count = private.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        stored.update(&chunk[..count]);
+        checked = checked
+            .checked_add(count as u64)
+            .context("VM kernel private copy refused: size overflow")?;
+    }
+    ensure!(
+        checked == expected_size && format!("{:x}", stored.finalize()) == expected_sha256,
+        "Changed VM kernel refused: private copy digest differs from signed entry"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let opened = kernel.metadata()?;
+        let selected = fs::symlink_metadata(kernel_path)?;
+        ensure!(
+            selected.file_type().is_file()
+                && opened.dev() == selected.dev()
+                && opened.ino() == selected.ino(),
+            "VM kernel path replaced after verification"
+        );
+        let copied_meta = private.metadata()?;
+        ensure!(
+            copied_meta.dev() != opened.dev() || copied_meta.ino() != opened.ino(),
+            "VM kernel private copy refused: copy shares the source file"
+        );
+    }
+    private
+        .sync_all()
+        .context("VM kernel private copy refused: sync failed")?;
+    private
+        .rewind()
+        .context("VM kernel private copy refused: rewind failed")?;
+    Ok(private)
 }
 
 #[cfg(test)]
@@ -381,6 +457,53 @@ mod tests {
         fs::write(temp.path().join("vmlinux"), &changed).unwrap();
         let error = open_signed_image(temp.path(), "rootfs.ext4", None, &info).unwrap_err();
         assert!(error.to_string().contains("digest differs"), "{error}");
+    }
+
+    #[test]
+    fn source_write_after_kernel_check_does_not_change_booted_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        write_image_set(temp.path(), b"signed image");
+        let info = row(b"signed image");
+        let mut checked = open_signed_image(temp.path(), "rootfs.ext4", None, &info).unwrap();
+        let kernel_path = temp.path().join("vmlinux");
+        #[cfg(unix)]
+        let source_id = {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::symlink_metadata(&kernel_path).unwrap();
+            (meta.dev(), meta.ino())
+        };
+        let tampered = vec![b'Z'; KERNEL.len()];
+        // Truncate the same inode. Replacing the path would leave the old
+        // descriptor on the hashed bytes and hide this fault.
+        fs::write(&kernel_path, &tampered).unwrap();
+        assert_eq!(fs::read(&kernel_path).unwrap(), tampered);
+        let mut booted = Vec::new();
+        checked.kernel.read_to_end(&mut booted).unwrap();
+        assert_eq!(
+            booted, KERNEL,
+            "booted kernel changed after the source write"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&booted)),
+            format!("{:x}", Sha256::digest(KERNEL))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::symlink_metadata(&kernel_path).unwrap();
+            assert_eq!(
+                (meta.dev(), meta.ino()),
+                source_id,
+                "write replaced the kernel inode"
+            );
+            checked.kernel.rewind().unwrap();
+            let booted_meta = checked.kernel.metadata().unwrap();
+            assert_ne!(
+                (booted_meta.dev(), booted_meta.ino()),
+                source_id,
+                "booted kernel is still the capsule file"
+            );
+        }
     }
 
     #[test]

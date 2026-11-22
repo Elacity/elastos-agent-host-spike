@@ -184,10 +184,19 @@ fn open_anonymous_overlay(path: &Path) -> io::Result<fs::File> {
             "overlay exists",
         ));
     }
+    open_private_file(path.parent().unwrap())
+}
+
+/// Open an unnamed file in `directory`.
+///
+/// Linux uses `O_TMPFILE`. Other hosts use an unlinked temporary file. The
+/// file has no directory entry, so a later write to a named file in
+/// `directory` cannot change the bytes this descriptor reads.
+pub fn open_private_file(directory: &Path) -> io::Result<fs::File> {
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::{AsRawFd, FromRawFd};
-        let dir = fs::File::open(path.parent().unwrap())?;
+        let dir = fs::File::open(directory)?;
         let fd = unsafe {
             libc::openat(
                 dir.as_raw_fd(),
@@ -199,11 +208,12 @@ fn open_anonymous_overlay(path: &Path) -> io::Result<fs::File> {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: `fd` is a new descriptor from `openat`, or we already returned.
         Ok(unsafe { fs::File::from_raw_fd(fd) })
     }
     #[cfg(not(target_os = "linux"))]
     {
-        tempfile::tempfile_in(path.parent().unwrap())
+        tempfile::tempfile_in(directory)
     }
 }
 

@@ -61,7 +61,7 @@ impl RunningVm {
         }
     }
 
-    /// Hold the kernel descriptor that was checked against the signed image entry.
+    /// Hold the private kernel copy whose bytes matched the signed image entry.
     pub fn with_verified_kernel(mut self, kernel: File) -> Self {
         self.verified_kernel = Some(kernel);
         self
