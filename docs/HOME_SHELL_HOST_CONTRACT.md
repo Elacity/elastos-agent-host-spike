@@ -104,9 +104,14 @@ open, the gateway gives the Runtime a `home-shell` projection grant bound to
 environment. The command refuses. A terminal may register a bound request with
 `POST /api/home/cli-mint/request`. The signed-in human admin begins that request
 and approves it with a fresh passkey assertion. The gateway keeps that decision
-in its own memory and returns no launch grant. A file in the data directory is
-not an approval. A restart drops a request that is still waiting. `Origin: null`
-cannot register a request, including when the caller presents a launch token.
+in its own memory and returns no launch grant. The waiting terminal claims one
+grant with `POST /api/home/cli-mint/claim`. The gateway signs only when that
+memory record is approved and the request, the secret, the owner, the session,
+the proof, the grant, and the operation match. It marks the record delivered in
+that same memory before returning the grant. The grant lasts 5 minutes. A file
+in the data directory is not an approval and cannot deliver a grant. A restart
+drops a request that is still waiting. `Origin: null` cannot register a request
+or claim a grant, including when the caller presents a launch token.
 The gateway still gives its `elastos home` TUI
 child the terminal environment. That child uses the environment for an internal
 projection token. The TUI has no host shell and no export-mint action. The

@@ -330,6 +330,10 @@ fn grant_text(body: &str) -> String {
         .to_string()
 }
 
+fn signature_calls(dir: &std::path::Path) -> u64 {
+    super::super::gateway_home_token::home_launch_signature_calls_for_test(dir)
+}
+
 #[tokio::test]
 async fn exported_grant_refuses_environment_mint() {
     let _lock = super::home_system::HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
@@ -514,6 +518,21 @@ fn cli_mint_source_calls_the_existing_signer_once() {
     )
     .unwrap();
     assert_eq!(source.matches("issue_home_launch_token_at(").count(), 1);
+    let hash_fn = source
+        .split_once("fn secret_hash_matches")
+        .expect("secret hash compare")
+        .1
+        .split_once("\nstruct ")
+        .expect("secret hash compare ends")
+        .0;
+    assert!(
+        hash_fn.contains(".ct_eq("),
+        "secret hash compare is not constant time"
+    );
+    assert!(
+        !hash_fn.contains("!="),
+        "secret hash compare uses a variable-time operator"
+    );
     assert!(!source.contains("issue_home_cli_launch_grant"));
     assert!(!source.contains("issue_home_projection_launch_token"));
     assert!(!source.contains("issue_home_launch_token_with_context"));
@@ -726,8 +745,10 @@ async fn claim_after_approve_returns_a_grant_that_verifies() {
     let owner = software_owner(dir.path());
     let app = app(dir.path());
     let request_id = approved_request(&app, &owner.home_token).await;
+    let before = signature_calls(dir.path());
     let (status, body) = claim(&app, &request_id, SECRET).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(signature_calls(dir.path()), before + 1);
     let parsed: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(parsed["status"], "delivered");
     assert!(!body.contains(SECRET));
@@ -757,8 +778,10 @@ async fn second_claim_fails() {
     let request_id = approved_request(&app, &owner.home_token).await;
     let (status, body) = claim(&app, &request_id, SECRET).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let before = signature_calls(dir.path());
     let (status, body) = claim(&app, &request_id, SECRET).await;
     assert_eq!(body, "cli mint grant was already delivered");
+    assert_eq!(signature_calls(dir.path()), before);
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -769,8 +792,10 @@ async fn claim_refuses_a_wrong_secret() {
     let owner = software_owner(dir.path());
     let app = app(dir.path());
     let request_id = approved_request(&app, &owner.home_token).await;
+    let before = signature_calls(dir.path());
     let (status, body) = claim(&app, &request_id, WRONG_SECRET).await;
     assert_eq!(body, "cli mint requester secret does not match");
+    assert_eq!(signature_calls(dir.path()), before);
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let record: Value = serde_json::from_str(&record_text(&request_id)).unwrap();
     assert_eq!(record["state"], "approved");
@@ -784,9 +809,15 @@ async fn claim_refuses_a_mismatched_session() {
     let app = app(dir.path());
     let request_id = approved_request(&app, &owner.home_token).await;
     rewrite_record(&request_id, "session_id", "auth:mismatched-session");
+    let before = signature_calls(dir.path());
     let (status, body) = claim(&app, &request_id, SECRET).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body, "cli mint owner session mismatch");
+    assert_eq!(
+        signature_calls(dir.path()),
+        before,
+        "signer ran before the bound session match"
+    );
     let record: Value = serde_json::from_str(&record_text(&request_id)).unwrap();
     assert_eq!(record["state"], "approved");
 }
@@ -799,8 +830,10 @@ async fn claim_before_approve_fails() {
     let app = app(dir.path());
     let request_id = approved_request(&app, &owner.home_token).await;
     rewrite_record(&request_id, "state", "pending");
+    let before = signature_calls(dir.path());
     let (status, body) = claim(&app, &request_id, SECRET).await;
     assert_eq!(body, "cli mint request is not approved");
+    assert_eq!(signature_calls(dir.path()), before);
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let (registered, body) = register(&app, SECRET).await;
     assert_eq!(registered, StatusCode::OK, "{body}");
@@ -847,6 +880,7 @@ async fn cancel_then_claim_fails() {
     let owner = software_owner(dir.path());
     let app = app(dir.path());
     let request_id = approved_request(&app, &owner.home_token).await;
+    let before = signature_calls(dir.path());
     let (status, body) = cancel(&app, &owner.home_token, &request_id).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let parsed: Value = serde_json::from_str(&body).unwrap();
@@ -855,6 +889,207 @@ async fn cancel_then_claim_fails() {
     let (status, body) = claim(&app, &request_id, SECRET).await;
     assert_eq!(body, "cli mint request was cancelled");
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(signature_calls(dir.path()), before);
     let record = record_text(&request_id);
     assert!(record.contains("cancelled") && !record.contains(LAUNCH_TOKEN));
+}
+
+#[tokio::test]
+async fn claim_refuses_an_expired_request() {
+    let _mint = mint_test_guard().await;
+    let dir = tempfile::tempdir().unwrap();
+    let owner = software_owner(dir.path());
+    let app = app(dir.path());
+    let request_id = approved_request(&app, &owner.home_token).await;
+    super::super::gateway_home_cli_mint::cli_mint_expire_for_test(&request_id);
+    let before = signature_calls(dir.path());
+    let (status, body) = claim(&app, &request_id, SECRET).await;
+    assert_eq!(body, "cli mint request expired");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(signature_calls(dir.path()), before);
+    let record: Value = serde_json::from_str(&record_text(&request_id)).unwrap();
+    assert_eq!(record["state"], "approved");
+}
+
+#[tokio::test]
+async fn claim_refuses_a_mismatched_principal_proof_or_grant() {
+    let _mint = mint_test_guard().await;
+    let dir = tempfile::tempdir().unwrap();
+    let owner = software_owner(dir.path());
+    let other = passkey_authority(dir.path());
+    let app = app(dir.path());
+    let request_id = approved_request(&app, &owner.home_token).await;
+    let saved: Value = serde_json::from_str(&record_text(&request_id)).unwrap();
+    let replacements = [
+        (
+            "principal_id",
+            other.principal_id.as_str(),
+            saved["principal_id"].as_str().unwrap(),
+        ),
+        (
+            "proof_binding_id",
+            other.proof_binding_id.as_str(),
+            saved["proof_binding_id"].as_str().unwrap(),
+        ),
+        (
+            "grant_id",
+            other.grant_id.as_str(),
+            saved["grant_id"].as_str().unwrap(),
+        ),
+    ];
+    for (field, value, original) in replacements {
+        rewrite_record(&request_id, field, value);
+        let before = signature_calls(dir.path());
+        let (status, body) = claim(&app, &request_id, SECRET).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{field} {body}");
+        assert_eq!(body, "cli mint owner session mismatch", "{field}");
+        assert_eq!(signature_calls(dir.path()), before, "{field}");
+        let record: Value = serde_json::from_str(&record_text(&request_id)).unwrap();
+        assert_eq!(record["state"], "approved", "{field}");
+        rewrite_record(&request_id, field, original);
+    }
+}
+
+#[tokio::test]
+async fn claim_checks_the_secret_before_the_state() {
+    let _mint = mint_test_guard().await;
+    let dir = tempfile::tempdir().unwrap();
+    let owner = software_owner(dir.path());
+    let app = app(dir.path());
+    let (status, body) = register(&app, SECRET).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let pending = serde_json::from_str::<Value>(&body).unwrap()["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = claim(&app, &pending, WRONG_SECRET).await;
+    assert_eq!(body, "cli mint requester secret does not match");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    super::super::gateway_home_cli_mint::cli_mint_expire_for_test(&pending);
+    let (status, body) = claim(&app, &pending, WRONG_SECRET).await;
+    assert_eq!(body, "cli mint requester secret does not match");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let request_id = approved_request(&app, &owner.home_token).await;
+    let (status, body) = claim(&app, &request_id, SECRET).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before = signature_calls(dir.path());
+    let (status, body) = claim(&app, &request_id, WRONG_SECRET).await;
+    assert_eq!(body, "cli mint requester secret does not match");
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(signature_calls(dir.path()), before);
+}
+
+#[tokio::test]
+async fn cancel_by_another_admin_session_is_refused() {
+    let _mint = mint_test_guard().await;
+    let dir = tempfile::tempdir().unwrap();
+    let owner = software_owner(dir.path());
+    let other = passkey_authority(dir.path());
+    let app = app(dir.path());
+    let approved = approved_request(&app, &owner.home_token).await;
+    let before = signature_calls(dir.path());
+    let (status, body) = cancel(&app, &other.home_token, &approved).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body, "cli mint owner session mismatch");
+    assert_eq!(signature_calls(dir.path()), before);
+    let record: Value = serde_json::from_str(&record_text(&approved)).unwrap();
+    assert_eq!(record["state"], "approved");
+    let (status, body) = register(&app, SECRET).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let begun = serde_json::from_str::<Value>(&body).unwrap()["request_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, body) = begin(&app, &owner.home_token, &begun).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = cancel(&app, &other.home_token, &begun).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body, "cli mint owner session mismatch");
+    let record: Value = serde_json::from_str(&record_text(&begun)).unwrap();
+    assert_eq!(record["state"], "begun");
+}
+
+#[tokio::test]
+async fn claim_refuses_a_null_origin_with_a_launch_token() {
+    let _mint = mint_test_guard().await;
+    let dir = tempfile::tempdir().unwrap();
+    let owner = software_owner(dir.path());
+    let app = app(dir.path());
+    let request_id = approved_request(&app, &owner.home_token).await;
+    let token = issue_home_launch_token(dir.path(), "assistant").unwrap();
+    let before = signature_calls(dir.path());
+    let request = test_browser_request("localhost:61180", "null")
+        .method("POST")
+        .uri("/api/home/cli-mint/claim")
+        .header("x-elastos-home-token", token);
+    let (status, body) = post_json(
+        &app,
+        request,
+        json!({
+            "schema": CLAIM_SCHEMA,
+            "request_id": request_id,
+            "requester_secret": SECRET,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body, "cli mint request origin is refused");
+    assert_eq!(signature_calls(dir.path()), before);
+    let record: Value = serde_json::from_str(&record_text(&request_id)).unwrap();
+    assert_eq!(record["state"], "approved");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_concurrent_claims_sign_once() {
+    let _mint = mint_test_guard().await;
+    let dir = tempfile::tempdir().unwrap();
+    let owner = software_owner(dir.path());
+    let app = app(dir.path());
+    let request_id = approved_request(&app, &owner.home_token).await;
+    let before = signature_calls(dir.path());
+    let _overlap = super::super::gateway_home_cli_mint::arm_cli_mint_overlap_for_test(&request_id);
+    let app_left = app.clone();
+    let app_right = app.clone();
+    let id_left = request_id.clone();
+    let id_right = request_id.clone();
+    let mut left = tokio::spawn(async move { claim(&app_left, &id_left, SECRET).await });
+    let mut right = tokio::spawn(async move { claim(&app_right, &id_right, SECRET).await });
+    let started = std::time::Instant::now();
+    loop {
+        let arrived = super::super::gateway_home_cli_mint::cli_mint_overlap_arrived_for_test();
+        assert!(arrived < 2, "two claims reached the signer");
+        if arrived == 1 || started.elapsed() > std::time::Duration::from_secs(5) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        super::super::gateway_home_cli_mint::cli_mint_overlap_arrived_for_test(),
+        1,
+        "one claim should be waiting at the signer"
+    );
+    let (which, loser) = tokio::select! {
+        result = &mut left => ("left", result.expect("left claim")),
+        result = &mut right => ("right", result.expect("right claim")),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            panic!("the second claim did not finish while the first waited at the signer");
+        }
+    };
+    assert_eq!(
+        super::super::gateway_home_cli_mint::cli_mint_overlap_arrived_for_test(),
+        1,
+        "two claims reached the signer"
+    );
+    assert_ne!(loser.0, StatusCode::OK, "{}", loser.1);
+    assert!(!loser.1.contains(LAUNCH_TOKEN), "{}", loser.1);
+    super::super::gateway_home_cli_mint::release_cli_mint_overlap_for_test();
+    let winner = if which == "left" {
+        right.await.expect("winning claim")
+    } else {
+        left.await.expect("winning claim")
+    };
+    assert_eq!(winner.0, StatusCode::OK, "{}", winner.1);
+    assert_eq!(signature_calls(dir.path()), before + 1);
+    let record: Value = serde_json::from_str(&record_text(&request_id)).unwrap();
+    assert_eq!(record["state"], "delivered");
 }

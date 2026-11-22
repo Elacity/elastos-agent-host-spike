@@ -445,6 +445,33 @@ pub(crate) fn issue_home_projection_launch_token_with_context_at(
     )
 }
 
+#[cfg(test)]
+static HOME_LAUNCH_SIGNATURE_CALLS: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_home_launch_signature_for_test(data_dir: &std::path::Path) {
+    let mut guard = HOME_LAUNCH_SIGNATURE_CALLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = guard.iter_mut().find(|(path, _)| path == data_dir) {
+        entry.1 = entry.1.saturating_add(1);
+    } else {
+        guard.push((data_dir.to_path_buf(), 1));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn home_launch_signature_calls_for_test(data_dir: &std::path::Path) -> u64 {
+    HOME_LAUNCH_SIGNATURE_CALLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find(|(path, _)| path == data_dir)
+        .map(|(_, count)| *count)
+        .unwrap_or(0)
+}
+
 pub(in crate::api) fn issue_home_launch_token_at(
     data_dir: &std::path::Path,
     launch_context: &HomeLaunchContext,
@@ -452,6 +479,8 @@ pub(in crate::api) fn issue_home_launch_token_at(
     issued_at: u64,
     grant_expires_at: Option<u64>,
 ) -> anyhow::Result<String> {
+    #[cfg(test)]
+    note_home_launch_signature_for_test(data_dir);
     launch_context.validate()?;
     if context.principal_id().trim().is_empty()
         || context.session_id().trim().is_empty()

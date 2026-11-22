@@ -8,10 +8,17 @@
 //! The request table lives only in this process. A same-user process can write
 //! the data directory, so a file there is not an approval and cannot deliver a
 //! grant. A gateway restart drops every waiting request. The table holds 32
-//! live requests for 120 seconds.
+//! live requests for 120 seconds. The claim compares the secret before it
+//! reports the request state, and it does not hold the table lock while it
+//! reads the session or signs.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Condvar;
 use std::sync::{Mutex, OnceLock};
 
 use elastos_identity::{AuthenticationResponse, CredentialDescriptor, RequestOptions};
@@ -59,8 +66,15 @@ const CREDENTIAL_UNAVAILABLE: &str = "cli mint passkey credential is unavailable
 const DIFFERENT_PASSKEY: &str = "cli mint used a different registered passkey";
 const CAPACITY_ERROR: &str = "cli mint request capacity";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaimHold {
+    Checking,
+    Committed,
+}
+
 struct MintTable {
     records: HashMap<String, MintRecord>,
+    claim_held: HashMap<String, ClaimHold>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,9 +206,10 @@ pub(super) async fn home_cli_mint_approve(
 
 pub(super) async fn home_cli_mint_claim(
     State(state): State<GatewayState>,
+    headers: HeaderMap,
     Json(input): Json<ClaimBody>,
 ) -> Response {
-    match claim_request(&state.data_dir, input) {
+    match claim_request(&state.data_dir, &headers, input) {
         Ok(body) => Json(body).into_response(),
         Err(err) => mint_error(err),
     }
@@ -398,25 +413,35 @@ async fn approve_request(
     })
 }
 
-fn claim_request(data_dir: &Path, input: ClaimBody) -> anyhow::Result<ClaimResult> {
+fn claim_request(
+    data_dir: &Path,
+    headers: &HeaderMap,
+    input: ClaimBody,
+) -> anyhow::Result<ClaimResult> {
     if input.schema != CLAIM_SCHEMA {
         anyhow::bail!("unsupported cli mint claim schema");
     }
+    if !super::gateway_frontdoor::cli_mint_request_origin_allowed(headers) {
+        anyhow::bail!(REQUEST_ORIGIN_REFUSED);
+    }
     valid_secret(&input.requester_secret)?;
-    let mut table = mint_table()?;
-    let now = now_ts();
-    let mut record = load_record(&table, &input.request_id, now)?;
-    if record.state != STATE_APPROVED {
-        anyhow::bail!(claim_state_error(&record.state));
-    }
-    if hex::encode(Sha256::digest(input.requester_secret.as_bytes())) != record.secret_sha256 {
-        anyhow::bail!(SECRET_MISMATCH);
-    }
-    if record.request_id != input.request_id {
-        anyhow::bail!(MISMATCH);
-    }
+    valid_request_id(&input.request_id)?;
+    let record = {
+        let mut table = mint_table()?;
+        reserve_claim(&mut table, &input, now_ts())?
+    };
+    let mut ticket = ClaimTicket::arm(record.request_id.clone());
     bound_export_matches(data_dir, &record)?;
     let context = signing_context(data_dir, &record)?;
+    commit_claim(&record, &input.requester_secret)?;
+    #[cfg(test)]
+    {
+        assert!(
+            !table_lock_held_on_this_thread(),
+            "claim holds the table lock across the signer"
+        );
+        overlap_before_sign(&record.request_id);
+    }
     let issued_at = signature_issued_at(data_dir);
     // The existing signer stays after the approved-state, secret, request-id,
     // and bound owner, session, proof, grant, and operation checks.
@@ -427,9 +452,8 @@ fn claim_request(data_dir: &Path, input: ClaimBody) -> anyhow::Result<ClaimResul
         issued_at,
         Some(issued_at.saturating_add(EXPORT_TTL_SECS)),
     )?;
-    record.state = STATE_DELIVERED.to_string();
-    let request_id = record.request_id.clone();
-    table.records.insert(request_id.clone(), record);
+    let request_id = mark_delivered(&record.request_id)?;
+    ticket.disarm();
     Ok(ClaimResult {
         schema: CLAIM_RESULT_SCHEMA.to_string(),
         request_id,
@@ -448,6 +472,10 @@ fn cancel_request(
     }
     let context = home_admin_context(data_dir, headers)?;
     let mut table = mint_table()?;
+    if table.claim_held.get(&input.request_id) == Some(&ClaimHold::Committed) {
+        anyhow::bail!(ALREADY_DECIDED);
+    }
+    table.claim_held.remove(&input.request_id);
     let now = now_ts();
     let mut record = load_record(&table, &input.request_id, now)?;
     if matches!(record.state.as_str(), STATE_BEGUN | STATE_APPROVED)
@@ -511,11 +539,16 @@ fn bound_export_matches(data_dir: &Path, record: &MintRecord) -> anyhow::Result<
     let live =
         crate::auth::load_active_session_grant(&auth_data_dir, context.session_id(), now_ts())
             .map_err(|_| anyhow::anyhow!(SESSION_MISMATCH))?;
-    if live.principal_id != context.principal_id()
-        || live.session_id != context.session_id()
-        || live.proof_binding_id != proof
-        || live.grant_id != context.grant_id()
-    {
+    if live.principal_id != context.principal_id() {
+        anyhow::bail!(SESSION_MISMATCH);
+    }
+    if live.session_id != context.session_id() {
+        anyhow::bail!(SESSION_MISMATCH);
+    }
+    if live.proof_binding_id != proof {
+        anyhow::bail!(SESSION_MISMATCH);
+    }
+    if live.grant_id != context.grant_id() {
         anyhow::bail!(SESSION_MISMATCH);
     }
     Ok(())
@@ -657,16 +690,207 @@ fn load_record(table: &MintTable, request_id: &str, now: u64) -> anyhow::Result<
     Ok(record)
 }
 
-fn mint_table() -> anyhow::Result<std::sync::MutexGuard<'static, MintTable>> {
+fn reserve_claim(table: &mut MintTable, input: &ClaimBody, now: u64) -> anyhow::Result<MintRecord> {
+    let Some(record) = table.records.get(&input.request_id).cloned() else {
+        anyhow::bail!(NOT_WAITING);
+    };
+    if record.schema != RECORD_SCHEMA
+        || record.request_id != input.request_id
+        || record.secret_sha256.len() != 64
+        || record.expires_at <= record.created_at
+    {
+        anyhow::bail!(MISMATCH);
+    }
+    refuse_wrong_secret(&input.requester_secret, &record)?;
+    refuse_if_expired(&record, now)?;
+    if record.operation != OPERATION {
+        anyhow::bail!(MISMATCH);
+    }
+    refuse_unless_approved(&record)?;
+    if table.claim_held.contains_key(&record.request_id) {
+        anyhow::bail!(ALREADY_DELIVERED);
+    }
+    table
+        .claim_held
+        .insert(record.request_id.clone(), ClaimHold::Checking);
+    Ok(record)
+}
+
+fn commit_claim(expected: &MintRecord, secret: &str) -> anyhow::Result<()> {
+    let mut table = mint_table()?;
+    let Some(live) = table.records.get(&expected.request_id).cloned() else {
+        anyhow::bail!(NOT_WAITING);
+    };
+    if table.claim_held.get(&expected.request_id) != Some(&ClaimHold::Checking) {
+        if live.state == STATE_CANCELLED {
+            anyhow::bail!(CANCELLED);
+        }
+        anyhow::bail!(ALREADY_DELIVERED);
+    }
+    refuse_wrong_secret(secret, &live)?;
+    refuse_if_expired(&live, now_ts())?;
+    if live.operation != OPERATION || live.operation != expected.operation {
+        anyhow::bail!(MISMATCH);
+    }
+    refuse_unless_approved(&live)?;
+    if live.principal_id != expected.principal_id
+        || live.session_id != expected.session_id
+        || live.proof_binding_id != expected.proof_binding_id
+        || live.grant_id != expected.grant_id
+    {
+        anyhow::bail!(SESSION_MISMATCH);
+    }
+    table
+        .claim_held
+        .insert(expected.request_id.clone(), ClaimHold::Committed);
+    Ok(())
+}
+
+fn mark_delivered(request_id: &str) -> anyhow::Result<String> {
+    let mut table = mint_table()?;
+    let hold = table.claim_held.get(request_id).copied();
+    let Some(mut record) = table.records.get(request_id).cloned() else {
+        anyhow::bail!(NOT_WAITING);
+    };
+    if hold != Some(ClaimHold::Committed) || record.state != STATE_APPROVED {
+        table.claim_held.remove(request_id);
+        if record.state == STATE_CANCELLED {
+            anyhow::bail!(CANCELLED);
+        }
+        anyhow::bail!(claim_state_error(&record.state));
+    }
+    record.state = STATE_DELIVERED.to_string();
+    let id = record.request_id.clone();
+    table.records.insert(id.clone(), record);
+    table.claim_held.remove(request_id);
+    Ok(id)
+}
+
+fn refuse_wrong_secret(secret: &str, record: &MintRecord) -> anyhow::Result<()> {
+    if !secret_hash_matches(secret, &record.secret_sha256) {
+        anyhow::bail!(SECRET_MISMATCH);
+    }
+    Ok(())
+}
+
+fn refuse_if_expired(record: &MintRecord, now: u64) -> anyhow::Result<()> {
+    if now >= record.expires_at {
+        anyhow::bail!(EXPIRED);
+    }
+    Ok(())
+}
+
+fn refuse_unless_approved(record: &MintRecord) -> anyhow::Result<()> {
+    if !matches!(
+        record.state.as_str(),
+        STATE_PENDING
+            | STATE_BEGUN
+            | STATE_APPROVED
+            | STATE_REFUSED
+            | STATE_CANCELLED
+            | STATE_DELIVERED
+    ) {
+        anyhow::bail!(MISMATCH);
+    }
+    if record.state != STATE_APPROVED {
+        anyhow::bail!(claim_state_error(&record.state));
+    }
+    Ok(())
+}
+
+fn secret_hash_matches(secret: &str, stored_hex: &str) -> bool {
+    use subtle::ConstantTimeEq as _;
+    let digest = Sha256::digest(secret.as_bytes());
+    let decoded = hex::decode(stored_hex).unwrap_or_default();
+    let mut stored = [0u8; 32];
+    let same_len = decoded.len() == digest.len();
+    if same_len {
+        stored.copy_from_slice(&decoded);
+    }
+    bool::from(stored.as_slice().ct_eq(digest.as_slice())) & same_len
+}
+
+struct ClaimTicket {
+    request_id: String,
+    armed: bool,
+}
+
+impl ClaimTicket {
+    fn arm(request_id: String) -> Self {
+        Self {
+            request_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ClaimTicket {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut table) = mint_table() {
+            table.claim_held.remove(&self.request_id);
+        }
+    }
+}
+
+struct TableGuard {
+    guard: std::sync::MutexGuard<'static, MintTable>,
+}
+
+impl Drop for TableGuard {
+    fn drop(&mut self) {
+        if let Ok(mut owner) = TABLE_OWNER.lock() {
+            *owner = None;
+        }
+    }
+}
+
+impl Deref for TableGuard {
+    type Target = MintTable;
+
+    fn deref(&self) -> &MintTable {
+        &self.guard
+    }
+}
+
+impl DerefMut for TableGuard {
+    fn deref_mut(&mut self) -> &mut MintTable {
+        &mut self.guard
+    }
+}
+
+static TABLE_OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+
+#[cfg(test)]
+fn table_lock_held_on_this_thread() -> bool {
+    TABLE_OWNER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        == Some(&std::thread::current().id())
+}
+
+fn mint_table() -> anyhow::Result<TableGuard> {
     static TABLE: OnceLock<Mutex<MintTable>> = OnceLock::new();
-    TABLE
+    let guard = TABLE
         .get_or_init(|| {
             Mutex::new(MintTable {
                 records: HashMap::new(),
+                claim_held: HashMap::new(),
             })
         })
         .lock()
-        .map_err(|_| anyhow::anyhow!("cli mint state lock is poisoned"))
+        .map_err(|_| anyhow::anyhow!("cli mint state lock is poisoned"))?;
+    if let Ok(mut owner) = TABLE_OWNER.lock() {
+        *owner = Some(std::thread::current().id());
+    }
+    Ok(TableGuard { guard })
 }
 
 fn valid_request_id(value: &str) -> anyhow::Result<()> {
@@ -710,7 +934,9 @@ fn mint_error(err: anyhow::Error) -> Response {
 
 #[cfg(test)]
 pub(super) fn clear_cli_mint_for_test() {
-    mint_table().expect("cli mint state lock").records.clear();
+    let mut table = mint_table().expect("cli mint state lock");
+    table.records.clear();
+    table.claim_held.clear();
 }
 
 #[cfg(test)]
@@ -743,5 +969,91 @@ pub(super) fn cli_mint_rewrite_for_test(request_id: &str, field: &str, value: &s
         "grant_id" => record.grant_id = Some(value.to_string()),
         "secret_sha256" => record.secret_sha256 = value.to_string(),
         other => panic!("cli mint test cannot rewrite {other}"),
+    }
+}
+
+#[cfg(test)]
+struct OverlapGate {
+    request_id: String,
+    arrived: usize,
+    release: bool,
+}
+
+#[cfg(test)]
+static OVERLAP: Mutex<Option<OverlapGate>> = Mutex::new(None);
+
+#[cfg(test)]
+static OVERLAP_CV: Condvar = Condvar::new();
+
+#[cfg(test)]
+pub(super) struct CliMintOverlapGuard;
+
+#[cfg(test)]
+impl Drop for CliMintOverlapGuard {
+    fn drop(&mut self) {
+        let mut guard = OVERLAP
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(gate) = guard.as_mut() {
+            gate.release = true;
+        }
+        OVERLAP_CV.notify_all();
+    }
+}
+
+#[cfg(test)]
+pub(super) fn arm_cli_mint_overlap_for_test(request_id: &str) -> CliMintOverlapGuard {
+    let mut guard = OVERLAP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(OverlapGate {
+        request_id: request_id.to_string(),
+        arrived: 0,
+        release: false,
+    });
+    CliMintOverlapGuard
+}
+
+#[cfg(test)]
+pub(super) fn cli_mint_overlap_arrived_for_test() -> usize {
+    OVERLAP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .map(|gate| gate.arrived)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(super) fn release_cli_mint_overlap_for_test() {
+    let mut guard = OVERLAP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(gate) = guard.as_mut() {
+        gate.release = true;
+    }
+    OVERLAP_CV.notify_all();
+}
+
+#[cfg(test)]
+fn overlap_before_sign(request_id: &str) {
+    let mut guard = OVERLAP
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut counted = false;
+    loop {
+        match guard.as_mut() {
+            Some(gate) if gate.request_id == request_id && !gate.release => {
+                if !counted {
+                    gate.arrived += 1;
+                    counted = true;
+                    OVERLAP_CV.notify_all();
+                }
+            }
+            _ => return,
+        }
+        guard = OVERLAP_CV
+            .wait(guard)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
     }
 }
