@@ -2,7 +2,7 @@ use super::*;
 use elastos_runtime::signature::{generate_keypair, SigningKey};
 
 const HOME_CLI_CAPSULE_ID_FOR_TEST: &str = "home-cli";
-static HOME_GATEWAY_TEST_ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
+pub(super) static HOME_GATEWAY_TEST_ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
 struct EnvRestore {
     key: &'static str,

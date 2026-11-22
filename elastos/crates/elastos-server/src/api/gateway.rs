@@ -70,6 +70,8 @@ mod gateway_esp;
 mod gateway_frontdoor;
 #[path = "gateway_home_agent.rs"]
 mod gateway_home_agent;
+#[path = "gateway_home_cli_mint.rs"]
+mod gateway_home_cli_mint;
 #[path = "gateway_home_external_link.rs"]
 mod gateway_home_external_link;
 #[path = "gateway_home_runtime.rs"]
@@ -163,6 +165,10 @@ pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
 #[cfg(test)]
+pub(super) use gateway_home_token::issue_home_agent_launch_token_at_for_test;
+#[cfg(test)]
+pub(super) use gateway_home_token::issue_home_agent_launch_token_with_context;
+#[cfg(test)]
 pub(super) use gateway_home_token::issue_home_launch_token_with_context;
 #[cfg(test)]
 pub(super) use gateway_home_token::launch_principal_root;
@@ -178,11 +184,11 @@ pub(super) use gateway_home_token::{
     require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
     require_home_page_or_cli_launch_context, require_home_projection_launch_token_context,
     require_home_runtime_wallet_authority, require_home_token, require_home_token_context,
-    require_home_viewer_launch_token_context, require_internal_shell_content_open_context,
-    require_internal_shell_launch_grant_principal, require_internal_shell_projection_context,
-    require_internal_shell_runtime_wallet_authority, require_launch_bound_token,
-    require_runtime_wallet_authority, runtime_wallet_authority, HomeLaunchContext,
-    RequiredHomeLaunchToken,
+    require_home_viewer_launch_token_context, require_internal_shell_agent_launch_grant,
+    require_internal_shell_content_open_context, require_internal_shell_launch_grant_principal,
+    require_internal_shell_projection_context, require_internal_shell_runtime_wallet_authority,
+    require_launch_bound_token, require_runtime_wallet_authority, runtime_wallet_authority,
+    HomeLaunchContext, RequiredHomeLaunchToken,
 };
 use gateway_home_update::*;
 
@@ -193,6 +199,7 @@ pub(super) use gateway_home_system_ai_provider::{
     install_venice_validate_double, OpenRouterModelsDouble, VeniceAuthDouble,
 };
 
+use gateway_home_cli_mint::{home_cli_mint_approve, home_cli_mint_begin, home_cli_mint_request};
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
     issue_expired_home_launch_token_with_context, issue_home_launch_token,
@@ -400,17 +407,15 @@ pub fn issue_gateway_owned_home_cli_launch_token(
     ))
 }
 
-/// Give an authenticated Home owner a grant for the two headless Home launch
-/// operations. The gateway-owned terminal supplies the session context; the
-/// existing projection issuer supplies the signer, session check and expiry.
+/// Refuse an exported Home CLI grant. This function does not read the process
+/// environment and does not sign a launch grant.
 pub fn issue_gateway_owned_home_cli_launch_grant(
-    data_dir: &std::path::Path,
+    _data_dir: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let context = gateway_owned_home_cli_launch_context_from_env(data_dir)?
-        .ok_or_else(|| anyhow::anyhow!("an authenticated Home CLI session is required"))?;
-    issue_home_cli_launch_grant_for_context(data_dir, &context)
+    anyhow::bail!("exported home cli grant requires a fresh passkey approval");
 }
 
+#[cfg(test)]
 fn issue_home_cli_launch_grant_for_context(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
@@ -737,6 +742,18 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/auth/passkey-step-up/cancel",
             post(passkey_step_up_cancel).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/request",
+            post(home_cli_mint_request).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/begin",
+            post(home_cli_mint_begin).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/approve",
+            post(home_cli_mint_approve).layer(DefaultBodyLimit::max(96 * 1024)),
         )
         .route(
             "/api/browser/session/request",
