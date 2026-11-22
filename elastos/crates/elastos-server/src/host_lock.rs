@@ -207,6 +207,10 @@ struct BinaryFileStamp {
     device_id: u64,
     #[cfg(unix)]
     inode: u64,
+    /// Windows has no inode; a renamed-in replacement keeps its own, later
+    /// creation time, so a same-size, same-mtime swap still changes the stamp.
+    #[cfg(windows)]
+    created: std::time::SystemTime,
 }
 
 trait BinarySnapshotReader {
@@ -391,6 +395,8 @@ fn binary_file_stamp_from_metadata(metadata: &fs::Metadata) -> anyhow::Result<Bi
             use std::os::unix::fs::MetadataExt as _;
             metadata.ino()
         },
+        #[cfg(windows)]
+        created: metadata.created()?,
     })
 }
 

@@ -3656,6 +3656,8 @@ async fn a_page_whose_entrypoint_is_not_plain_is_refused_by_name_and_nothing_kep
         // A file name that contains a backslash exists only on Unix.
         #[cfg(unix)]
         ("backslash", "browser\\a.html"),
+        // Windows does not allow a tab in a file name either.
+        #[cfg(unix)]
         ("tab", "browser/a\tb.html"),
     ] {
         let mut page = page_manifest("page", &[("core", &core)]);
