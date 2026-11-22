@@ -2565,7 +2565,7 @@ impl ProviderBridge {
         };
         #[cfg(not(unix))]
         let _ = own_helpers;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         prepared.configure_command(&mut command);
         swap_after_verify();
         let mut child = command
@@ -4785,6 +4785,7 @@ mod tests {
         assert_eq!(data["journal_alias_write_errno"], libc::EPERM);
         assert_eq!(data["journal_write_errno"], 0);
         assert_eq!(data["base_canonical_errno"], 0);
+        assert_eq!(data["inherited_regular_fds"], 0);
         assert_eq!(data["inherited_writable_regular_fds"], 0);
         bridge.shutdown().await.unwrap();
         assert!(!Path::new(&sockets["fixture-local"]).exists());

@@ -27,8 +27,8 @@ pub struct PreparedExecutable {
     /// Removing this directory removes the only path to the verified copy.
     /// The provider bridge owns it until the provider process is reaped, so a
     /// provider that resolves `current_exe()` after Init still finds itself.
-    /// The lock survives exec in the provider, so recovery leaves a live copy
-    /// alone even if its parent Runtime exits first.
+    /// The bridge keeps the lock until it reaps the provider. The lock is
+    /// close-on-exec so the provider and its descendants receive no access to it.
     #[cfg(target_os = "macos")]
     _private_dir: tempfile::TempDir,
     #[cfg(target_os = "macos")]
@@ -252,21 +252,6 @@ impl PreparedExecutable {
             });
         }
     }
-
-    #[cfg(target_os = "macos")]
-    pub(super) fn configure_command(&self, command: &mut tokio::process::Command) {
-        use std::os::unix::process::CommandExt as _;
-        let fd = self._liveness_lock.as_raw_fd();
-        unsafe {
-            command.as_std_mut().pre_exec(move || {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
 }
 
 /// The release owner supplies the signed component checksum. Runtime checks it
@@ -458,7 +443,50 @@ mod macos_recovery_tests {
     use super::*;
 
     #[tokio::test]
-    async fn provider_keeps_copy_lock_after_parent_releases_it() {
+    async fn provider_exec_closes_copy_lock_descriptor() {
+        let home = tempfile::tempdir().unwrap();
+        let source = home.path().join("fd-probe.c");
+        let binary = home.path().join("fd-probe");
+        std::fs::write(
+            &source,
+            r#"#include <fcntl.h>
+#include <sys/stat.h>
+int main(void) {
+    for (int fd = 3; fd < 256; fd++) {
+        struct stat info;
+        if (fcntl(fd, F_GETFD) >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode))
+            return 1;
+    }
+    return 0;
+}
+"#,
+        )
+        .unwrap();
+        assert!(std::process::Command::new("/usr/bin/clang")
+            .args(["-O2", "-Wall", "-Wextra", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let checksum = format!(
+            "sha256:{:x}",
+            Sha256::digest(std::fs::read(&binary).unwrap())
+        );
+        let prepared = CheckedExecutable::pinned(&binary, &checksum)
+            .unwrap()
+            .with_home_data_dir(home.path())
+            .verify_at_spawn()
+            .unwrap();
+        let status = tokio::process::Command::new(prepared.exec_path())
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success(), "provider received a regular descriptor");
+    }
+
+    #[tokio::test]
+    async fn owner_keeps_copy_lock_until_provider_is_reaped() {
         let home = tempfile::tempdir().unwrap();
         let binary = home.path().join("provider");
         std::fs::write(&binary, b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
@@ -472,26 +500,28 @@ mod macos_recovery_tests {
             .with_home_data_dir(home.path())
             .verify_at_spawn()
             .unwrap();
-        let mut command = tokio::process::Command::new(prepared.exec_path());
-        prepared.configure_command(&mut command);
-        let mut child = command.kill_on_drop(true).spawn().unwrap();
+        let flags = unsafe { libc::fcntl(prepared._liveness_lock.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        let mut child = tokio::process::Command::new(prepared.exec_path())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        recover_verified_copies(home.path()).unwrap();
+        assert!(
+            prepared.exec_path().exists(),
+            "the owner holds the live copy"
+        );
+        child.kill().await.unwrap();
         let PreparedExecutable {
             _private_dir,
             _liveness_lock,
             exec_path,
         } = prepared;
-        // Simulate parent death: the directory remains, but its descriptor closes.
+        // A killed owner leaves a stale directory for the next recovery.
         std::mem::forget(_private_dir);
         drop(_liveness_lock);
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "provider exited before recovery"
-        );
         recover_verified_copies(home.path()).unwrap();
-        assert!(exec_path.exists(), "the provider inherited the lock");
-        child.kill().await.unwrap();
-        recover_verified_copies(home.path()).unwrap();
-        assert!(!exec_path.exists(), "the reaped provider released its lock");
+        assert!(!exec_path.exists(), "the reaped provider left a stale copy");
     }
 
     #[test]
