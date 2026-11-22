@@ -8,7 +8,8 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use elastos_runtime::primitives::audit::{AgentLaunchAudit, AuditLog, TrustLevel};
+use elastos_runtime::primitives::audit::{AuditEvent, AuditLog, TrustLevel};
+use elastos_runtime::primitives::SecureTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::resource_bridge::BridgePrincipal;
@@ -183,17 +184,18 @@ pub async fn launch_capsule(
                 _ => None,
             };
             if let Some((agent_id, owner, host_cid, launch_id, _)) = agent_audit {
-                audit_log.agent_capsule_launch(
-                    &handle.id.0,
-                    &handle.manifest.name,
-                    signer_did,
-                    AgentLaunchAudit {
-                        host_cid: &host_cid,
-                        agent_id: &agent_id,
-                        owner: &owner,
-                        launch_id: &launch_id,
-                    },
-                );
+                audit_log.emit(AuditEvent::CapsuleLaunch {
+                    timestamp: SecureTimestamp::now(),
+                    capsule_id: handle.id.0.clone(),
+                    capsule_name: handle.manifest.name.clone(),
+                    cid: Some(host_cid),
+                    trust_level: TrustLevel::Untrusted,
+                    signer_did: signer_did.map(String::from),
+                    agent_id: Some(agent_id),
+                    owner: Some(owner),
+                    launch_id: Some(launch_id),
+                    session_id: Some(handle.id.0.clone()),
+                });
             } else {
                 audit_log.capsule_launch(
                     &handle.id.0,
@@ -7353,6 +7355,9 @@ pub(crate) mod tests {
         ] {
             let (status, body) = post_agent_grant(&home, a, &grant).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {body}");
+            if case == "expired" {
+                assert!(body.contains("expired"), "{case}: {body}");
+            }
             assert!(
                 home.runtime.list_capsules().await.is_empty(),
                 "{case} started a guest"
@@ -7426,24 +7431,30 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn agent_launch_refuses_a_second_live_session_with_a_fresh_grant() {
+    async fn agent_launch_double_click_with_one_grant_starts_one_guest() {
         if crate::agents::require_build().is_err() {
             return;
         }
         let home = ProbeLaunch::new(&["a"]).await;
         let agent = &home.agents[0];
-        let mint = || {
-            gateway::issue_home_agent_launch_token_with_context(
-                &home.data_dir,
-                agent,
-                PROBE_HOST,
-                &home.context,
-            )
-            .unwrap()
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let (first, second) = tokio::join!(
+            post_agent_grant(&home, agent, &grant),
+            post_agent_grant(&home, agent, &grant)
+        );
+        let (success, refusal) = match (first, second) {
+            ((StatusCode::OK, success), (StatusCode::BAD_REQUEST, refusal))
+            | ((StatusCode::BAD_REQUEST, refusal), (StatusCode::OK, success)) => (success, refusal),
+            other => panic!("double click outcomes: {other:?}"),
         };
-        let (status, body) = post_agent_grant(&home, agent, &mint()).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(refusal.contains("already used"), "{refusal}");
+        let answer: serde_json::Value = serde_json::from_str(&success).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if !home.pending_store.list_pending().await.is_empty() {
@@ -7454,13 +7465,10 @@ pub(crate) mod tests {
         })
         .await
         .expect("the first guest remains live in its bridge call");
-        let (status, body) = post_agent_grant(&home, agent, &mint()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "second live start: {body}");
-        assert!(body.contains("live session"), "{body}");
         assert_eq!(
             home.runtime.list_capsules().await.len(),
             1,
-            "second start made no guest"
+            "double click started only one guest"
         );
         let grants =
             grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());

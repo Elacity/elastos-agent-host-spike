@@ -693,8 +693,8 @@ pub(crate) fn require_internal_shell_content_open_context(
 }
 
 /// The same signed grant check as its sibling, but it hands back the typed
-/// principal a bridge may run as. This is the only production caller of
-/// `BridgePrincipal::from_grant`.
+/// principal a bridge may run as. Agent launches use the same constructor
+/// after their narrower grant check.
 pub(crate) fn require_internal_shell_launch_grant_principal(
     data_dir: &std::path::Path,
     headers: &HeaderMap,

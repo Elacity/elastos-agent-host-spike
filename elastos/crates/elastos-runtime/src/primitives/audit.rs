@@ -258,14 +258,6 @@ pub enum FetchSource {
 /// Maximum events to keep in memory buffer
 const MAX_MEMORY_EVENTS: usize = 1000;
 
-/// Verified fields attached to an Agent's capsule_launch event.
-pub struct AgentLaunchAudit<'a> {
-    pub host_cid: &'a str,
-    pub agent_id: &'a str,
-    pub owner: &'a str,
-    pub launch_id: &'a str,
-}
-
 /// Audit log manager
 pub struct AuditLog {
     writer: Option<Mutex<BufWriter<File>>>,
@@ -387,28 +379,6 @@ impl AuditLog {
             owner: None,
             launch_id: None,
             session_id: None,
-        });
-    }
-
-    /// Record an admitted Agent launch on the same capsule_launch event.
-    pub fn agent_capsule_launch(
-        &self,
-        capsule_id: &str,
-        capsule_name: &str,
-        signer_did: Option<&str>,
-        agent: AgentLaunchAudit<'_>,
-    ) {
-        self.emit(AuditEvent::CapsuleLaunch {
-            timestamp: SecureTimestamp::now(),
-            capsule_id: capsule_id.to_string(),
-            capsule_name: capsule_name.to_string(),
-            cid: Some(agent.host_cid.to_string()),
-            trust_level: TrustLevel::Untrusted,
-            signer_did: signer_did.map(String::from),
-            agent_id: Some(agent.agent_id.to_string()),
-            owner: Some(agent.owner.to_string()),
-            launch_id: Some(agent.launch_id.to_string()),
-            session_id: Some(capsule_id.to_string()),
         });
     }
 
