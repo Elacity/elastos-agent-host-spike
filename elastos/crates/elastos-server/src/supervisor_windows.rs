@@ -102,6 +102,13 @@ impl Supervisor {
     ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
         Err(MicroVmUnavailable.into())
     }
+
+    pub(crate) async fn load_capsule_manifest(
+        &self,
+        _name: &str,
+    ) -> anyhow::Result<(PathBuf, elastos_common::CapsuleManifest)> {
+        Err(MicroVmUnavailable.into())
+    }
 }
 
 #[cfg(test)]

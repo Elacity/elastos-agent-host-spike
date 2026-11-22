@@ -993,6 +993,13 @@ fn missing_manifest_message() -> String {
 /// non-symlink `{data_dir}/config.toml`. Read-only; anything else is no opt-in.
 fn source_home_dev_mode(data_dir: &Path) -> bool {
     const MAX_CONFIG: u64 = 64 * 1024;
+    #[cfg(windows)]
+    {
+        // No O_NOFOLLOW read on Windows yet: no opt-in, so a source Home never starts unchecked.
+        let _ = (data_dir, MAX_CONFIG);
+        false
+    }
+    #[cfg(unix)]
     let read = || -> anyhow::Result<bool> {
         use std::os::unix::fs::OpenOptionsExt;
         let file = fs::OpenOptions::new()
@@ -1006,6 +1013,7 @@ fn source_home_dev_mode(data_dir: &Path) -> bool {
         let config: toml::Table = toml::from_str(&text)?;
         Ok(config.get("dev_mode").and_then(toml::Value::as_bool) == Some(true))
     };
+    #[cfg(unix)]
     read().unwrap_or(false)
 }
 
