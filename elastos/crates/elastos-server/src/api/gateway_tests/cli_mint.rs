@@ -1,6 +1,9 @@
 //! Passkey approval for an exported Home CLI grant. These tests use the real
 //! routes. The software passkey is the same in-process p256 authenticator the
 //! identity crate uses. Slice 1 records the approval and does not sign a grant.
+// Twelve tests here write auth state, which Windows refuses (P2-11 step 6), so they
+// are cfg(unix); the helpers only they use are unused on Windows.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use super::*;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

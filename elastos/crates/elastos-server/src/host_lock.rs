@@ -653,16 +653,21 @@ mod tests {
         write_file(&replacement, b"same bytes");
         // Two writes microseconds apart can share one file-clock tick (Windows ticks
         // are coarse), so give the replacement a clearly different mtime.
-        let later = fs::metadata(&exe)
+        // On Unix keep the original mtime so only the inode and device can reveal
+        // the swap; Windows has no inode, so there the replacement is later.
+        let original_mtime = fs::metadata(&exe)
             .expect("original metadata")
             .modified()
-            .expect("mtime")
-            + std::time::Duration::from_secs(2);
+            .expect("mtime");
+        #[cfg(not(unix))]
+        let replacement_mtime = original_mtime + std::time::Duration::from_secs(2);
+        #[cfg(unix)]
+        let replacement_mtime = original_mtime;
         fs::File::options()
             .write(true)
             .open(&replacement)
             .expect("open replacement")
-            .set_modified(later)
+            .set_modified(replacement_mtime)
             .expect("set replacement mtime");
         fs::rename(&replacement, &exe).expect("replace file");
 
@@ -703,16 +708,21 @@ mod tests {
         // Same size as the original and written within one Windows file-clock
         // tick; Windows has no inode, so give the replacement a clearly later
         // mtime, as a real replacement has.
-        let later = fs::metadata(&exe)
+        // On Unix keep the original mtime so only the inode and device can reveal
+        // the swap; Windows has no inode, so there the replacement is later.
+        let original_mtime = fs::metadata(&exe)
             .expect("original metadata")
             .modified()
-            .expect("mtime")
-            + std::time::Duration::from_secs(2);
+            .expect("mtime");
+        #[cfg(not(unix))]
+        let replacement_mtime = original_mtime + std::time::Duration::from_secs(2);
+        #[cfg(unix)]
+        let replacement_mtime = original_mtime;
         fs::File::options()
             .write(true)
             .open(&replacement)
             .expect("open replacement")
-            .set_modified(later)
+            .set_modified(replacement_mtime)
             .expect("set replacement mtime");
         fs::rename(&replacement, &exe).expect("replace file");
 

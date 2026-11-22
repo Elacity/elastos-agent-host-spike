@@ -13305,6 +13305,7 @@ pub(crate) mod tests {
     }
 
     /// As `start_content_holder_runtime`, answering reads as `behavior` says.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) async fn start_slow_content_holder_runtime(
         seed: u8,
         files: std::collections::BTreeMap<String, Vec<u8>>,
@@ -13316,6 +13317,7 @@ pub(crate) mod tests {
     }
 
     /// As `start_slow_content_holder_runtime`, under the device key `sk`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) async fn start_content_holder_runtime_as(
         sk: ed25519_dalek::SigningKey,
         did: String,
@@ -14040,10 +14042,12 @@ pub(crate) mod tests {
     /// book makes resolution in-process, so a routed invocation does not depend
     /// on public discovery timing. Nothing here is visible to apps: the route
     /// stays a peer DID and the address never leaves Runtime.
+    #[cfg_attr(not(unix), allow(dead_code))]
     async fn peer_did_route_fixture(local_seed: u8, remote_seed: u8) -> PeerDidRouteFixture {
         peer_did_route_fixture_with_address(local_seed, remote_seed, true).await
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     async fn peer_did_route_fixture_with_address(
         local_seed: u8,
         remote_seed: u8,
@@ -14163,6 +14167,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     async fn assert_private_carrier_reply_bound(target: &str, operation: &str, limit: usize) {
         let fixture = peer_did_route_fixture(181, 182).await;
         let payload_size = 32 * 1024;
@@ -15331,6 +15336,7 @@ pub(crate) mod tests {
         shared_file_holder_with_address(seed, fixture, bytes, behavior, true).await
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     async fn shared_file_holder_with_address(
         seed: u8,
         fixture: &PeerDidRouteFixture,
