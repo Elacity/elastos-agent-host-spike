@@ -1216,6 +1216,13 @@ def serve_as_seed(data):
         path.mkdir(mode=0o700, exist_ok=True)
 
 
+def sign_fixture_install(home, data):
+    """Bind this journey's final component bytes to its disposable publisher."""
+    subprocess.run([sys.executable, str(Path(__file__).with_name("holder-canary-fixture.py")),
+                    "sign-install", str(home), str(data), str(data / "bin/elastos")],
+                   check=True, timeout=60)
+
+
 def start_holder(home, data, consumer_data, consumer_environment, evidence=None):
     """Start the separate holder Home and name it as the consumer's one Carrier peer.
 
@@ -1225,6 +1232,10 @@ def start_holder(home, data, consumer_data, consumer_environment, evidence=None)
     """
     environment = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(data.parent))
     serve_as_seed(data)
+    subprocess.run([sys.executable, str(Path(__file__).with_name("holder-canary-fixture.py")),
+                    "restrict-components", str(data), str(data / "components.json"),
+                    "localhost-provider", "ipfs-provider", "kubo"], check=True, timeout=30)
+    sign_fixture_install(home, data)
     installed, number = str(data / "bin/elastos"), free_port()
     with (home / "holder-runtime.private.log").open("wb") as log:
         child = subprocess.Popen([installed, "gateway", "--addr", f"127.0.0.1:{number}"], env=environment,
@@ -1540,6 +1551,7 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0, repair=Fa
                 config.write(f'carrier_bind_addr = "127.0.0.1:{free_port(socket.SOCK_DGRAM)}"\n')
     subprocess.run(["node", "scripts/ci-model-package.mjs", str(package_data), str(data), str(inputs), str(evidence), *(["--model-repair"] if repair else [])],
                    env=environment, check=True)
+    sign_fixture_install(home, data)
     record["fixture_package_receipt_sha256"] = digest(evidence / "package.json")
     record["fixture_components_sha256"] = digest(data / "components.json")
     cid = json.loads((evidence / "package.json").read_text())["cid"]

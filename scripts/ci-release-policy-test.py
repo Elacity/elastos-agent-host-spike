@@ -306,16 +306,26 @@ def cargo_configs(directory):
 
 
 def capsule_inputs(crate):
-    """A capsule crate is wholly an input, with every crate it names by path, transitively."""
-    found, queue, seen = set(), [crate], set()
+    """A release build reads dev manifests but compiles only normal and build dependencies."""
+    found, queue, seen = set(), [(crate, True)], set()
     while queue:
-        crate = queue.pop()
-        if crate in seen:
+        crate, compiled = queue.pop()
+        if (crate, compiled) in seen:
             continue
-        seen.add(crate)
-        found |= tracked_under(crate)
-        queue += [os.path.normpath(f"{crate}/{dependency}")
-                  for dependency in PATH_DEPENDENCY.findall((REPO / crate / "Cargo.toml").read_text())]
+        seen.add((crate, compiled))
+        if compiled:
+            found |= tracked_under(crate)
+        else:
+            found |= tracked_under(crate + "/Cargo.toml")
+        table = ""
+        for line in (REPO / crate / "Cargo.toml").read_text().splitlines():
+            header = re.fullmatch(r"\s*\[([^]]+)\]\s*", line)
+            if header:
+                table = header[1]
+            for dependency in PATH_DEPENDENCY.findall(line):
+                path = os.path.normpath(f"{crate}/{dependency}")
+                is_dev = table == "dev-dependencies" or table.endswith(".dev-dependencies")
+                queue.append((path, compiled and not is_dev))
     return found
 
 
@@ -2412,6 +2422,9 @@ class ReleasePolicyTests(unittest.TestCase):
             inputs = job_inputs(WORKFLOW, SOURCE, job)
             self.assertIn("scripts/setup-source-home.sh", inputs, job)
             self.assertIn("capsules/model-provider/Cargo.toml", inputs, job)
+            if job.startswith("source-home-"):
+                self.assertIn("lab/agent-conformance/Cargo.toml", inputs, job)
+            self.assertNotIn("lab/agent-conformance/standin-runtime/provider_launcher.rs", inputs, job)
             self.assertEqual(sorted(path for path in inputs if rule.is_notes_or_lab(path)), [], job)
         # Capsule folders are inputs whole, so a README.md inside one is no notes path.
         self.assertIn("capsules/home/README.md", inputs)
@@ -3011,6 +3024,7 @@ class InstalledJourneyTests(unittest.TestCase):
         response.__enter__.return_value.status = 200
         self.holder = mock.Mock(return_value=(mock.Mock(pid=23456), {"holder_did": "did:key:holder"}))
         self.finite = finite or mock.Mock()
+        self.sign = mock.Mock()
 
         def node_journey(*args, **kwargs):
             if args[0][1] == "scripts/ci-model-package.mjs":
@@ -3039,7 +3053,8 @@ class InstalledJourneyTests(unittest.TestCase):
                     "capacity_bytes": 100 * 1024 ** 3, "available_bytes": available},
                     "process_rows": lambda: {},
                     "cleanup_runtime": lambda *_, **__: {"status": "passed", "before": {}, "after": {}},
-                    "start_holder": self.holder, "FiniteRuntime": self.finite}):
+                    "start_holder": self.holder, "FiniteRuntime": self.finite,
+                    "sign_fixture_install": self.sign, "free_port": lambda *_: 14321}):
             try:
                 journey["run"](home, data, evidence, carrier=carrier, memory_gib=memory_gib)
             finally:
@@ -3120,6 +3135,7 @@ class InstalledJourneyTests(unittest.TestCase):
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
                 home, data, evidence, _ = self.fixture(Path(temp), platform)
                 child = self.execute(home, data, evidence)
+                self.sign.assert_called_once_with(home, data)
                 self.assertEqual(self.gateway.call_args.args[0][:2],
                                  [str(data / "bin/elastos"), "gateway"])
                 self.assertEqual(self.node.call_args.args[0][:2],
@@ -3272,7 +3288,8 @@ class InstalledJourneyTests(unittest.TestCase):
                         mock.patch.dict(journey["run"].__globals__, {"disk_observation": lambda _: {
                             "capacity_bytes": 100 * 1024 ** 3, "available_bytes": 20 * 1024 ** 3},
                             "process_rows": lambda: {},
-                            "cleanup_runtime": lambda *_, **__: {"status": "passed", "before": {"llama_server": 1 if appeared == "engine_process" else 0}, "after": {"llama_server": 0}}}):
+                            "cleanup_runtime": lambda *_, **__: {"status": "passed", "before": {"llama_server": 1 if appeared == "engine_process" else 0}, "after": {"llama_server": 0}},
+                            "sign_fixture_install": mock.Mock(), "free_port": lambda *_: 14321}):
                     if appeared:
                         with self.assertRaises((AssertionError, RuntimeError, subprocess.CalledProcessError)):
                             journey["run"](target_home, target, evidence, model=False)

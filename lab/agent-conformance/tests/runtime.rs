@@ -178,7 +178,8 @@ fn runtime_data_dir_is_under_throwaway_home() {
 fn serve_refuses_provider_whose_bytes_differ_from_its_hash() {
     let runtime = runtime_under_test().expect("build the checkout Runtime offline");
     let home = ThrowawayHome::new().unwrap();
-    let installed = common::write_operator_home(&home).expect("install the operator fixture");
+    let installed =
+        common::write_operator_home(&home, &runtime.binary).expect("install the operator fixture");
     let provider = localhost_provider_under_test().unwrap();
     assert!(provider.binary.is_absolute());
     assert!(std::ptr::eq(

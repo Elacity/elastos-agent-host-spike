@@ -665,7 +665,7 @@ for line in sys.stdin:
         .unwrap();
         // The gateway start admits ipfs-provider against this Home's signed
         // release, so the fixture Home carries one over its components.json.
-        crate::protected_content_config::tests::sign_test_install(root.path());
+        crate::installed_release::tests::sign_test_install(root.path());
         root
     }
 

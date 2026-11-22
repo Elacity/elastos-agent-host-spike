@@ -19,7 +19,7 @@ pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> Ch
     // Home they run against; an executable inside the Home is always admitted.
     #[cfg(test)]
     if path.is_file() && !path.starts_with(data_dir) {
-        return crate::test_support::fixture_executable(path);
+        return crate::test_support::fixture_executable(path).with_home_data_dir(data_dir);
     }
     let admitted = path
         .file_name()
@@ -29,12 +29,10 @@ pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> Ch
         // Admission holds the signed bytes; the bridge re-checks the same
         // digest at spawn and runs the bytes it checked (CheckedExecutable).
         .and_then(|verified| {
-            // A dev-mode unchecked start has no signed digest to pin; a native
-            // provider still needs one.
-            let checksum = verified.checksum().ok_or_else(|| {
-                anyhow::anyhow!("no signed release digest (dev_mode start is unchecked)")
-            })?;
-            CheckedExecutable::pinned(path, checksum).map_err(anyhow::Error::msg)
+            let checksum = verified.signed_checksum()?;
+            CheckedExecutable::pinned(path, checksum)
+                .map(|checked| checked.with_home_data_dir(data_dir))
+                .map_err(anyhow::Error::msg)
         });
     admitted.unwrap_or_else(|error| {
         CheckedExecutable::refused(
@@ -254,9 +252,7 @@ pub fn resolve_verified_native_provider_binary(
 
 /// A native provider whose executable, manifest and authority the resolver
 /// verified. The fields are private; only `admit_with_bin_dir` writes them.
-/// No production caller in this slice: S1 calls `admit`.
-#[allow(dead_code)]
-pub(crate) struct AdmittedProvider {
+pub struct AdmittedProvider {
     key: String,
     path: PathBuf,
     checksum: String,
@@ -264,11 +260,10 @@ pub(crate) struct AdmittedProvider {
     authority: ProviderAuthority,
 }
 
-#[allow(dead_code)]
 impl AdmittedProvider {
     /// `Ok(None)` when no row resolves for `key` here; `Err` when a resolved
     /// row or the manifest beside it does not verify.
-    pub(crate) fn admit(data_dir: &Path, key: &str) -> anyhow::Result<Option<Self>> {
+    pub fn admit(data_dir: &Path, key: &str) -> anyhow::Result<Option<Self>> {
         let bin_dir = std::env::var_os("ELASTOS_CAPSULE_BIN_DIR").map(PathBuf::from);
         let signers = setup::installed_release_signers(data_dir)?;
         Self::admit_with_bin_dir(data_dir, key, bin_dir.as_deref(), &signers)
@@ -316,23 +311,45 @@ impl AdmittedProvider {
         }))
     }
 
-    pub(crate) fn key(&self) -> &str {
+    pub fn key(&self) -> &str {
         &self.key
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// The admitted bytes as the bridge's spawn-time check. The exact path is
+    /// admitted through the signed release; the signed digest is pinned here
+    /// and re-checked when the provider starts. A Home with no signed digest,
+    /// including `dev_mode`, is refused.
+    pub fn checked_executable(&self, data_dir: &Path) -> Result<CheckedExecutable, String> {
+        let verified = setup::verify_installed_component_start(data_dir, &self.key, &self.path)
+            .map_err(|error| format!("provider signed release admission refused: {error}"))?;
+        let signed = verified
+            .signed_checksum()
+            .map_err(|error| format!("provider signed release admission refused: {error}"))?;
+        if signed != self.checksum {
+            return Err(
+                "provider signed release admission refused: signed digest differs from the admitted row"
+                    .to_string(),
+            );
+        }
+        CheckedExecutable::pinned(&self.path, signed)
+            .map(|checked| checked.with_home_data_dir(data_dir))
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn checksum(&self) -> &str {
         &self.checksum
     }
 
+    #[allow(dead_code)]
     pub(crate) fn signer_did(&self) -> Option<&str> {
         self.signer_did.as_deref()
     }
 
-    pub(crate) fn authority(&self) -> &ProviderAuthority {
+    pub fn authority(&self) -> &ProviderAuthority {
         &self.authority
     }
 }
@@ -780,7 +797,7 @@ mod tests {
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with("//"))
             .collect();
-        assert_eq!(header_code, ["#[allow(dead_code)]", "pub(crate)"]);
+        assert_eq!(header_code, ["pub"]);
         let body = &source[at..][..source[at..].find("\n}\n").unwrap()];
         assert!(!body.contains("pub"), "{body}");
 
@@ -805,6 +822,12 @@ mod tests {
         let impl_at = code.find(&impl_head).unwrap();
         let impl_block = &code[impl_at..][..code[impl_at..].find("\n}\n").unwrap()];
         assert!(!impl_block.contains("mut"), "{impl_block}");
+        for accessor in ["admit", "key", "path", "authority"] {
+            assert!(impl_block.contains(&format!("pub fn {accessor}(")));
+        }
+        for accessor in ["checksum", "signer_did"] {
+            assert!(impl_block.contains(&format!("pub(crate) fn {accessor}(")));
+        }
 
         let self_open = ["Self", "{"].concat();
         let maker = source.find("fn admit_with_bin_dir(").unwrap();

@@ -2,6 +2,10 @@
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "macos")]
 use std::io::{Seek, SeekFrom};
+#[cfg(target_os = "macos")]
+use std::os::fd::{AsRawFd as _, FromRawFd as _};
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::PermissionsExt as _;
 #[cfg(target_os = "linux")]
 use std::os::{
     fd::{AsRawFd, FromRawFd},
@@ -23,11 +27,199 @@ pub struct PreparedExecutable {
     /// Removing this directory removes the only path to the verified copy.
     /// The provider bridge owns it until the provider process is reaped, so a
     /// provider that resolves `current_exe()` after Init still finds itself.
-    /// A Runtime crash leaves the 0700 directory in the per-user `TMPDIR`;
-    /// macOS removes stale entries there, and it holds no secret.
+    /// The bridge keeps the lock until it reaps the provider. The lock is
+    /// close-on-exec so the provider and its descendants receive no access to it.
     #[cfg(target_os = "macos")]
     _private_dir: tempfile::TempDir,
+    #[cfg(target_os = "macos")]
+    _liveness_lock: std::fs::File,
     exec_path: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+const COPY_PREFIX: &str = "elastos-provider-";
+#[cfg(target_os = "macos")]
+const COPY_LOCK: &str = ".copy-live.lock";
+#[cfg(target_os = "macos")]
+fn copy_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("provider-copies")
+}
+
+#[cfg(target_os = "macos")]
+fn private_copy_root(data_dir: &Path, create: bool) -> Result<Option<PathBuf>, String> {
+    if create {
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| format!("provider copy Home cannot be created: {e}"))?;
+    }
+    let home = std::fs::symlink_metadata(data_dir)
+        .map_err(|e| format!("provider copy Home cannot be inspected: {e}"))?;
+    if !home.is_dir()
+        || home.uid() != unsafe { libc::geteuid() }
+        || home.permissions().mode() & 0o022 != 0
+    {
+        return Err("provider copy Home has unsafe ownership or permissions".into());
+    }
+    let root = copy_root(data_dir);
+    if create {
+        use std::os::unix::fs::DirBuilderExt as _;
+        match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "provider copy directory cannot be created: {error}"
+                ))
+            }
+        }
+    }
+    let metadata = match std::fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "provider copy directory cannot be inspected: {error}"
+            ))
+        }
+    };
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err("provider copy directory has unsafe ownership or permissions".into());
+    }
+    Ok(Some(root))
+}
+
+#[cfg(target_os = "macos")]
+fn create_copy_lock(directory: &Path) -> Result<std::fs::File, String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(directory.join(COPY_LOCK))
+        .map_err(|e| format!("provider copy lock cannot be created: {e}"))?;
+    // A provider's standard streams can replace descriptors below three.
+    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if fd < 0 {
+        return Err(format!(
+            "provider copy lock descriptor cannot be held: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let held = unsafe { std::fs::File::from_raw_fd(fd) };
+    if unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
+        return Err(format!(
+            "provider copy lock cannot be held: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(held)
+}
+
+/// Recover only copies whose own lock is free. Commands that start providers
+/// without the Home host lock can still own copies in this directory.
+#[cfg(target_os = "macos")]
+pub fn recover_verified_copies(data_dir: &Path) -> Result<(), String> {
+    let Some(root) = private_copy_root(data_dir, false)? else {
+        return Ok(());
+    };
+    let entries = std::fs::read_dir(&root)
+        .map_err(|e| format!("provider copy directory cannot be listed: {e}"))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!("provider copy entry cannot be read: {error}");
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(COPY_PREFIX))
+        else {
+            continue;
+        };
+        if suffix.len() != 6 || !suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), "provider copy cannot be inspected: {error}");
+                continue;
+            }
+        };
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o777 != 0o700
+        {
+            continue;
+        }
+        let lock_path = path.join(COPY_LOCK);
+        let lock_meta = match std::fs::symlink_metadata(&lock_path) {
+            Ok(meta)
+                if meta.is_file()
+                    && meta.uid() == unsafe { libc::geteuid() }
+                    && meta.permissions().mode() & 0o777 == 0o600 =>
+            {
+                meta
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::warn!(path = %lock_path.display(), "provider copy lock cannot be inspected: {error}");
+                continue;
+            }
+        };
+        let lock = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&lock_path)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::warn!(path = %lock_path.display(), "provider copy lock cannot be opened: {error}");
+                continue;
+            }
+        };
+        let opened = match lock.metadata() {
+            Ok(meta) if (meta.dev(), meta.ino()) == (lock_meta.dev(), lock_meta.ino()) => meta,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::warn!(path = %lock_path.display(), "provider copy lock changed: {error}");
+                continue;
+            }
+        };
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                tracing::warn!(path = %lock_path.display(), "provider copy lock cannot be taken: {error}");
+            }
+            continue;
+        }
+        if !matches!(std::fs::symlink_metadata(&lock_path), Ok(current)
+            if (current.dev(), current.ino()) == (opened.dev(), opened.ino()))
+        {
+            continue;
+        }
+        match std::fs::symlink_metadata(&path) {
+            Ok(current) if (metadata.dev(), metadata.ino()) == (current.dev(), current.ino()) => {}
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), "provider copy changed during recovery: {error}");
+                continue;
+            }
+        }
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            tracing::warn!(path = %path.display(), "provider copy cannot be removed: {error}");
+        }
+    }
+    Ok(())
 }
 
 impl PreparedExecutable {
@@ -69,6 +261,7 @@ pub struct CheckedExecutable {
     digest: [u8; 32],
     refusal: Option<String>,
     siblings: Vec<&'static str>,
+    home_data_dir: Option<PathBuf>,
 }
 
 impl CheckedExecutable {
@@ -84,6 +277,7 @@ impl CheckedExecutable {
             digest,
             refusal: None,
             siblings: Vec::new(),
+            home_data_dir: None,
         })
     }
 
@@ -93,7 +287,14 @@ impl CheckedExecutable {
             digest: [0; 32],
             refusal: Some(reason),
             siblings: Vec::new(),
+            home_data_dir: None,
         }
+    }
+
+    /// Bind the verified provider's private copy to the Home it serves.
+    pub fn with_home_data_dir(mut self, data_dir: &Path) -> Self {
+        self.home_data_dir = Some(data_dir.to_path_buf());
+        self
     }
 
     /// Names a companion file the provider finds beside its own executable.
@@ -164,11 +365,18 @@ impl CheckedExecutable {
         }
         #[cfg(target_os = "macos")]
         {
-            use std::os::unix::fs::PermissionsExt as _;
+            let data_dir = self
+                .home_data_dir
+                .as_ref()
+                .ok_or("provider executable copy requires a Home data directory")?;
+            let root = private_copy_root(data_dir, true)?.unwrap();
             let private_dir = tempfile::Builder::new()
-                .prefix("elastos-provider-")
-                .tempdir()
+                .prefix(COPY_PREFIX)
+                .tempdir_in(&root)
                 .map_err(|e| format!("provider executable copy cannot be created: {e}"))?;
+            std::fs::set_permissions(private_dir.path(), std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("provider executable copy cannot be made private: {e}"))?;
+            let liveness_lock = create_copy_lock(private_dir.path())?;
             let exec_path = private_dir.path().join("provider");
             let mut copy = std::fs::OpenOptions::new()
                 .write(true)
@@ -221,11 +429,184 @@ impl CheckedExecutable {
             }
             Ok(PreparedExecutable {
                 _private_dir: private_dir,
+                _liveness_lock: liveness_lock,
                 exec_path,
             })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         Err("provider executable execution is unsupported on this OS".into())
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn provider_exec_closes_copy_lock_descriptor() {
+        let home = tempfile::tempdir().unwrap();
+        let source = home.path().join("fd-probe.c");
+        let binary = home.path().join("fd-probe");
+        std::fs::write(
+            &source,
+            r#"#include <fcntl.h>
+#include <sys/stat.h>
+int main(void) {
+    for (int fd = 3; fd < 256; fd++) {
+        struct stat info;
+        if (fcntl(fd, F_GETFD) >= 0 && fstat(fd, &info) == 0 && S_ISREG(info.st_mode))
+            return 1;
+    }
+    return 0;
+}
+"#,
+        )
+        .unwrap();
+        assert!(std::process::Command::new("/usr/bin/clang")
+            .args(["-O2", "-Wall", "-Wextra", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        let checksum = format!(
+            "sha256:{:x}",
+            Sha256::digest(std::fs::read(&binary).unwrap())
+        );
+        let prepared = CheckedExecutable::pinned(&binary, &checksum)
+            .unwrap()
+            .with_home_data_dir(home.path())
+            .verify_at_spawn()
+            .unwrap();
+        let status = tokio::process::Command::new(prepared.exec_path())
+            .status()
+            .await
+            .unwrap();
+        assert!(status.success(), "provider received a regular descriptor");
+    }
+
+    #[tokio::test]
+    async fn owner_keeps_copy_lock_until_provider_is_reaped() {
+        let home = tempfile::tempdir().unwrap();
+        let binary = home.path().join("provider");
+        std::fs::write(&binary, b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let checksum = format!(
+            "sha256:{:x}",
+            Sha256::digest(std::fs::read(&binary).unwrap())
+        );
+        let prepared = CheckedExecutable::pinned(&binary, &checksum)
+            .unwrap()
+            .with_home_data_dir(home.path())
+            .verify_at_spawn()
+            .unwrap();
+        let flags = unsafe { libc::fcntl(prepared._liveness_lock.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        let mut child = tokio::process::Command::new(prepared.exec_path())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        recover_verified_copies(home.path()).unwrap();
+        assert!(
+            prepared.exec_path().exists(),
+            "the owner holds the live copy"
+        );
+        child.kill().await.unwrap();
+        let PreparedExecutable {
+            _private_dir,
+            _liveness_lock,
+            exec_path,
+        } = prepared;
+        // A killed owner leaves a stale directory for the next recovery.
+        std::mem::forget(_private_dir);
+        drop(_liveness_lock);
+        recover_verified_copies(home.path()).unwrap();
+        assert!(!exec_path.exists(), "the reaped provider left a stale copy");
+    }
+
+    #[test]
+    fn checked_executable_recovery_removes_only_owned_copies() {
+        let home = tempfile::tempdir().unwrap();
+        let root = private_copy_root(home.path(), true).unwrap().unwrap();
+        let stale = tempfile::Builder::new()
+            .prefix(COPY_PREFIX)
+            .tempdir_in(&root)
+            .unwrap();
+        let stale_path = stale.path().to_path_buf();
+        std::fs::set_permissions(&stale_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(create_copy_lock(&stale_path).unwrap());
+        let target = home.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, stale_path.join("external")).unwrap();
+        std::mem::forget(stale);
+        let foreign = root.join("other-provider-ABCDEF");
+        std::fs::create_dir(&foreign).unwrap();
+        let link = root.join("elastos-provider-ABCDEF");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let linked_lock = root.join("elastos-provider-LOCK12");
+        std::fs::create_dir(&linked_lock).unwrap();
+        std::fs::set_permissions(&linked_lock, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&target, linked_lock.join(COPY_LOCK)).unwrap();
+
+        recover_verified_copies(home.path()).unwrap();
+        assert!(!stale_path.exists(), "{}", stale_path.display());
+        assert!(foreign.exists());
+        assert!(link.exists());
+        assert!(linked_lock.exists());
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn checked_executable_recovery_refuses_unsafe_root() {
+        let home = tempfile::tempdir().unwrap();
+        let root = private_copy_root(home.path(), true).unwrap().unwrap();
+        let copy = tempfile::Builder::new()
+            .prefix(COPY_PREFIX)
+            .tempdir_in(&root)
+            .unwrap();
+        let copy_path = copy.path().to_path_buf();
+        std::fs::set_permissions(&copy_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(create_copy_lock(&copy_path).unwrap());
+        std::mem::forget(copy);
+        // The caller warns and continues when this root is unsafe.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(recover_verified_copies(home.path()).is_err());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        recover_verified_copies(home.path()).unwrap();
+        assert!(!copy_path.exists(), "{}", copy_path.display());
+    }
+
+    #[test]
+    fn checked_executable_recovery_continues_after_undeletable_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let root = private_copy_root(home.path(), true).unwrap().unwrap();
+        let blocked = tempfile::Builder::new()
+            .prefix(COPY_PREFIX)
+            .tempdir_in(&root)
+            .unwrap();
+        let blocked_path = blocked.path().to_path_buf();
+        std::fs::set_permissions(&blocked_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(create_copy_lock(&blocked_path).unwrap());
+        let inner = blocked_path.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        std::fs::write(inner.join("file"), b"held").unwrap();
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::mem::forget(blocked);
+        let removable = tempfile::Builder::new()
+            .prefix(COPY_PREFIX)
+            .tempdir_in(&root)
+            .unwrap();
+        let removable_path = removable.path().to_path_buf();
+        std::fs::set_permissions(&removable_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(create_copy_lock(&removable_path).unwrap());
+        std::mem::forget(removable);
+
+        recover_verified_copies(home.path()).unwrap();
+        assert!(blocked_path.exists());
+        assert!(!removable_path.exists());
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o700)).unwrap();
+        recover_verified_copies(home.path()).unwrap();
+        assert!(!blocked_path.exists());
     }
 }
 
@@ -245,6 +626,7 @@ impl CheckedExecutable {
             digest: Sha256::digest(bytes).into(),
             refusal: None,
             siblings: Vec::new(),
+            home_data_dir: path.parent().map(Path::to_path_buf),
         }
     }
 }

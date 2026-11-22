@@ -31,14 +31,19 @@ fn gate_decisions() -> BTreeMap<&'static str, (bool, &'static str)> {
     BTreeMap::from([
         ("require_home_launch_token", (true, "")),
         ("require_home_launch_token_context", (true, "")),
+        ("require_home_page_or_cli_launch_context", (true, "")),
+        (
+            "require_home_page_launch_request",
+            (false, "Page provenance only"),
+        ),
         ("require_home_launch_grant", (true, "")),
         ("require_home_launch_token_for_any_context", (true, "")),
         ("require_home_launch_token_for_any_app_context", (true, "")),
         ("require_home_projection_launch_token_context", (true, "")),
         ("require_home_viewer_launch_token_context", (true, "")),
         (
-            "require_internal_shell_launch_grant_for_any_context",
-            (true, ""),
+            "require_internal_shell_content_open_context",
+            (false, "home-shell actor only"),
         ),
         ("require_internal_shell_launch_grant_principal", (true, "")),
         ("require_internal_shell_projection_context", (true, "")),
@@ -221,7 +226,6 @@ fn rows() -> Vec<AuthorityRow> {
     const SITE: &str = "elastos-server/src/api/gateway_site.rs";
     const CONNECTORS: &str = "elastos-server/src/api/gateway_wallet_connectors.rs";
     const HOME_CONNECTOR: &str = "elastos-server/src/api/gateway_home_wallet_connector.rs";
-    const MARKETPLACE: &str = "elastos-server/src/api/gateway_marketplace.rs";
     let row = |file, function, gate, count, authority| AuthorityRow {
         file,
         function,
@@ -310,9 +314,9 @@ fn rows() -> Vec<AuthorityRow> {
         row(
             HOME_RUNTIME,
             "home_launch",
-            "require_home_launch_token_context",
+            "require_home_page_or_cli_launch_context",
             1,
-            "app-grant:OPEN P2-4 follow-up; conditional model+peer via Inbox services sync",
+            "home-own:Home page or home-cli grant; conditional model+peer via Inbox services sync",
         ),
         row(
             FRONTDOOR,
@@ -427,18 +431,11 @@ fn rows() -> Vec<AuthorityRow> {
             "runtime-admin:claim_pending+complete_authentication",
         ),
         row(
-            ROOM,
-            "chat_room_summary",
-            "require_home_token",
-            1,
-            "app-grant:OPEN P2-4 follow-up",
-        ),
-        row(
             ROUTES,
             "principal_from_capsule_name",
             "require_internal_shell_launch_grant_principal",
             1,
-            "app-grant:OPEN; conditional: admits Home when the name resolves to home",
+            "app-grant:walked manifest name binds grant; admits Home only when the walked name is home",
         ),
         row(
             ROUTES,
@@ -446,13 +443,6 @@ fn rows() -> Vec<AuthorityRow> {
             "require_internal_shell_projection_context",
             1,
             "app-grant:launch-bound page token; Home actor only when the kept page resolves to home",
-        ),
-        row(
-            ROUTES,
-            "open_launch",
-            "require_internal_shell_launch_grant_for_any_context",
-            1,
-            "app-grant:OPEN P2-4 follow-up",
         ),
         row(
             VIEWER,
@@ -473,14 +463,14 @@ fn rows() -> Vec<AuthorityRow> {
             "supervisor_launch_principal_from_input",
             "require_internal_shell_launch_grant_principal",
             1,
-            "app-grant:OPEN; conditional: admits Home when the name resolves to home",
+            "app-grant:installed manifest name binds grant; admits Home only when the walked name is home",
         ),
         row(
             VIEWER,
             "home_launch_content",
-            "require_home_token_context",
+            "require_home_page_or_cli_launch_context",
             1,
-            "app-grant:OPEN P2-4 follow-up",
+            "home-own:Home page or home-cli grant; content page gets its own launch-bound token",
         ),
         row(
             FRONTDOOR,
@@ -616,8 +606,6 @@ fn rows() -> Vec<AuthorityRow> {
             "home-own:catalog read"),
         row(CATALOG, "capsule_interfaces", "require_capsule_catalog_token", 1,
             "home-own:interface read"),
-        row(MARKETPLACE, "marketplace_catalog", "require_capsule_catalog_token", 1,
-            "app-grant:OPEN; catalog read"),
         row(HOME_CONNECTOR, "home_wallet_connector_evm_link_challenge", "require_home_wallet_connector_authority", 1,
             "delegates:wallet via connector authority"),
         row(HOME_CONNECTOR, "home_wallet_connector_evm_link_verify", "require_home_wallet_connector_authority", 1,
@@ -1263,13 +1251,12 @@ fn viewer_launch_read_starts_with_its_bound_gate_and_existing_rows_remain() {
         !gate_body.contains(&format!("{home_gate}(")),
         "launch-bound gate also accepts a Home session"
     );
-    assert_eq!(
-        rows()
-            .iter()
-            .filter(|row| row.authority.contains("OPEN"))
-            .count(),
-        7
-    );
+    let open_rows: Vec<_> = rows()
+        .into_iter()
+        .filter(|row| row.authority.contains("OPEN"))
+        .map(|row| row.function)
+        .collect();
+    assert!(open_rows.is_empty(), "Home launch/open rows are closed");
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api/gateway_tests/launch_reads.rs");
     let text = fs::read_to_string(path).unwrap();
