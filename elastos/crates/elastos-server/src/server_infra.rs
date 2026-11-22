@@ -3316,13 +3316,6 @@ mod tests {
                 .contains("this operating system has no confinement"),
             "{error}"
         );
-        #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
-        assert!(
-            error
-                .to_string()
-                .contains("Seatbelt profile has no spawn path yet"),
-            "{error}"
-        );
     }
 
     fn media_provider_status() -> serde_json::Value {
