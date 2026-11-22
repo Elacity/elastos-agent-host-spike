@@ -14294,6 +14294,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn connect_ticket_invocation(
         remote_addr: iroh::EndpointAddr,
         remote_did: &str,
@@ -14662,6 +14663,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn peer_did_content_invocation(
         peer_did: &str,
         request: serde_json::Value,
