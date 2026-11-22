@@ -136,8 +136,6 @@ x-wing = { version = "=0.1.0", features = ["hazmat", "zeroize"] }
 # The rand generation iroh-gossip's membership state machine takes; the
 # Community hub test drives that state machine directly.
 gossip-rand = { package = "rand", version = "0.10", default-features = false, features = ["std_rng"] }
-# In-process WebAuthn authenticator for the agent Start route tests.
-p256 = { version = "0.13", features = ["ecdsa"] }
 
 [features]
 default = []
