@@ -718,9 +718,9 @@ async fn start_did_provider(
     };
     // The bridge re-checks the admitted signed digest at spawn and starts the
     // bytes it checked.
-    let checked = provider::CheckedExecutable::pinned(admitted.path(), admitted.checksum())
-        .map_err(anyhow::Error::msg)?
-        .with_home_data_dir(data_dir);
+    let checked = admitted
+        .checked_executable(data_dir)
+        .map_err(anyhow::Error::msg)?;
     let confined = provider::ProviderBridge::spawn_confined(
         admitted.key(),
         admitted.authority(),

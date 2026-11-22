@@ -319,7 +319,15 @@ impl AdmittedProvider {
         &self.path
     }
 
-    pub fn checksum(&self) -> &str {
+    /// The admitted bytes as the bridge's spawn-time check: the signed digest
+    /// is pinned here and re-checked when the provider starts.
+    pub fn checked_executable(&self, data_dir: &Path) -> Result<CheckedExecutable, String> {
+        CheckedExecutable::pinned(&self.path, &self.checksum)
+            .map(|checked| checked.with_home_data_dir(data_dir))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn checksum(&self) -> &str {
         &self.checksum
     }
 
