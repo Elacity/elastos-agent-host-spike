@@ -7499,6 +7499,7 @@ async fn home_launch_gate_accepts_page_and_cli_then_checks_target() {
     assert_eq!(cli_launch.status(), StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_launch_refuses_agent_home_page_before_minting() {
     let dir = tempfile::tempdir().unwrap();
@@ -7526,6 +7527,7 @@ async fn home_launch_refuses_agent_home_page_before_minting() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_launch_routes_keep_cli_scope_refusal_on_wire() {
     let dir = tempfile::tempdir().unwrap();
@@ -7564,6 +7566,7 @@ async fn home_launch_routes_keep_cli_scope_refusal_on_wire() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_launch_validates_shell_targets() {
     let dir = tempfile::tempdir().unwrap();

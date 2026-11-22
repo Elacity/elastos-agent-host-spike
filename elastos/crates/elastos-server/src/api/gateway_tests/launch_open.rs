@@ -65,6 +65,7 @@ fn token_life(token: &str) -> (u64, u64) {
     )
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_launch_grant_is_refused_by_wallet_authority_itself() {
     let dir = tempfile::tempdir().unwrap();
@@ -78,6 +79,7 @@ fn cli_launch_grant_is_refused_by_wallet_authority_itself() {
     assert_eq!(error.to_string(), "home_cli_launch_grant_scope_mismatch");
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_launch_grant_is_refused_by_front_door_without_wallet_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -90,6 +92,7 @@ fn cli_launch_grant_is_refused_by_front_door_without_wallet_authority() {
     assert_eq!(error.to_string(), "home_launch_grant_scope_mismatch");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn owner_cli_issuer_limits_headless_launch_and_open_gates() {
     let dir = tempfile::tempdir().unwrap();
@@ -184,6 +187,7 @@ async fn owner_cli_issuer_limits_headless_launch_and_open_gates() {
     assert_eq!(opened.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_issuer_refuses_guest_and_unbound_context() {
     let dir = tempfile::tempdir().unwrap();
@@ -205,6 +209,7 @@ fn cli_issuer_refuses_guest_and_unbound_context() {
     assert!(issue_home_cli_launch_grant_for_context(dir.path(), &device).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_issuer_refuses_agent_principal() {
     let dir = tempfile::tempdir().unwrap();
@@ -293,6 +298,7 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn content_open_gate_accepts_page_and_cli_before_runtime_lookup() {
     let dir = tempfile::tempdir().unwrap();
@@ -319,6 +325,7 @@ async fn content_open_gate_accepts_page_and_cli_before_runtime_lookup() {
     assert_eq!(answer.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn content_open_names_non_home_page_and_accepts_cli_grant() {
     let dir = tempfile::tempdir().unwrap();
@@ -375,6 +382,7 @@ async fn content_open_names_non_home_page_and_accepts_cli_grant() {
     assert_eq!(runtime.kept_launch_reads.lock().await.len(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn content_open_refuses_agent_home_page_before_minting() {
     let dir = tempfile::tempdir().unwrap();

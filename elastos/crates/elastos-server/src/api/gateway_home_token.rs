@@ -3266,6 +3266,7 @@ mod tests {
         assert_eq!(refused.to_string(), FENCE_AGENT_REFUSAL);
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_page_launch_gate_names_other_callers_and_keeps_cli_grant_narrow() {
         let dir = tempfile::tempdir().unwrap();
@@ -3337,6 +3338,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_and_shell_launch_gates_refuse_verified_agent_contexts() {
         let dir = tempfile::tempdir().unwrap();
@@ -3403,6 +3405,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn shell_content_open_grant_is_bound_to_its_operation() {
         let dir = tempfile::tempdir().unwrap();
