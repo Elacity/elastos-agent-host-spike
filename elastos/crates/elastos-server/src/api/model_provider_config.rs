@@ -2028,7 +2028,7 @@ mod hosted_hint_tests {
         assert!(!status_debug.contains("sk-or-fixture-valid"));
         assert!(!status_debug.contains("openrouter.ai"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn decision_model_stays_private() {
         let dir = tempfile::tempdir().unwrap();
@@ -2121,6 +2121,7 @@ mod hosted_hint_tests {
         assert_eq!(preserved["share"]["processor"], "OpenRouter");
         assert_eq!(preserved["share"]["payer"], "this Home");
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn staged_hosted_key_waits_for_save_and_preserves_existing_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -2193,7 +2194,7 @@ mod hosted_hint_tests {
             "first-key"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn editing_jev_keeps_other_instances() {
         let dir = tempfile::tempdir().unwrap();
@@ -2232,7 +2233,7 @@ mod hosted_hint_tests {
             "typesafe/jev-1.13-20260917"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn replacing_shared_text_with_jev_clears_share() {
         let dir = tempfile::tempdir().unwrap();

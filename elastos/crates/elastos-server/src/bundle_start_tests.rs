@@ -1059,7 +1059,7 @@ fn the_list_and_the_refused_keys_cover_the_manifest_type() {
         "model_content",
         "signature",
     ];
-    let source = include_str!("../../elastos-common/src/manifest.rs");
+    let source = include_str!("../../elastos-common/src/manifest.rs").replace("\r\n", "\n");
     let start = source.find("pub struct CapsuleManifest {").unwrap();
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     let mut fields = Vec::new();
@@ -1259,7 +1259,7 @@ async fn a_runtime_without_a_component_provider_cannot_start_a_bundle() {
 /// (`a_manifest_with_asks_is_held_to_their_resources_and_their_actions`).
 #[test]
 fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
-    let source = include_str!("runtime.rs");
+    let source = include_str!("runtime.rs").replace("\r\n", "\n");
     let handler = &source[source.find("component.set_bus_hostcall(Arc::new(").unwrap()..];
     let handler = &handler[..handler.find("\n            }));\n").unwrap()];
     let lookup = "let manifest_capabilities = host_manifest_capabilities\n                    \
@@ -1438,7 +1438,7 @@ fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
 /// in `stage_cmd`, does not count this file.)
 #[test]
 fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
-    let source = include_str!("runtime.rs");
+    let source = include_str!("runtime.rs").replace("\r\n", "\n");
     let body_of = |signature: &str| {
         let body = &source[source.find(signature).unwrap()..];
         &body[..body.find("\n    }\n").unwrap()]
@@ -1449,7 +1449,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     // impl that owns the type is the anchor, and the close matches that
     // function's own indent.
     assert_eq!(source.matches("impl VerifiedBundle {").count(), 1);
-    let maker = fn_body(source, "impl VerifiedBundle {", "pub(crate) fn check(");
+    let maker = fn_body(&source, "impl VerifiedBundle {", "pub(crate) fn check(");
     let walk = ["checked_bundle", "_within("].concat();
     assert_eq!(start.matches(&walk).count(), 0);
     // The walk, then the moment after it, then the one maker. The CID, the
@@ -1628,7 +1628,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
 /// that `into_component` binds.
 #[test]
 fn verified_bundle_has_one_maker_and_start_by_bundle_takes_it() {
-    let source = include_str!("runtime.rs");
+    let source = include_str!("runtime.rs").replace("\r\n", "\n");
     let header = "\nmod verified_bundle {\n";
     assert_eq!(source.matches(header).count(), 1, "one private module");
     assert!(!source.contains("pub mod verified_bundle"));
@@ -1646,7 +1646,7 @@ fn verified_bundle_has_one_maker_and_start_by_bundle_takes_it() {
         .filter(|line| verified_bundle_literal(line, true))
         .collect();
     assert_eq!(in_module.len(), 1, "{in_module:?}");
-    let check = fn_body(source, "impl VerifiedBundle {", "pub(crate) fn check(");
+    let check = fn_body(&source, "impl VerifiedBundle {", "pub(crate) fn check(");
     let in_check: Vec<&str> = check
         .lines()
         .filter(|line| verified_bundle_literal(line, true))
@@ -1718,8 +1718,12 @@ fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
         .iter()
         .map(|path| {
             let text = fs::read_to_string(path).expect("read");
-            let name = path.strip_prefix(&sources).unwrap().to_string_lossy();
-            (name.into_owned(), text.matches(&taken_off).count())
+            let name = path
+                .strip_prefix(&sources)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            (name, text.matches(&taken_off).count())
         })
         .filter(|(_, count)| *count > 0)
         .collect();
@@ -3649,6 +3653,8 @@ async fn a_page_whose_entrypoint_is_not_plain_is_refused_by_name_and_nothing_kep
         .staged("core", &manifest("core"), &quiet_component(), &publisher)
         .await;
     for (label, entrypoint) in [
+        // A file name that contains a backslash exists only on Unix.
+        #[cfg(unix)]
         ("backslash", "browser\\a.html"),
         ("tab", "browser/a\tb.html"),
     ] {
@@ -4338,7 +4344,7 @@ async fn wait_for_request(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
-
+#[cfg(unix)]
 /// B1-R. A trusted publisher's signature admits a start by CID on the server
 /// Home and grants nothing. While the core waits on its one read of the
 /// probe, the live view is empty and the audit log has no grant for that

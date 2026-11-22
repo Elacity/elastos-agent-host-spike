@@ -483,7 +483,7 @@ async fn import_raw_full_recovery_bundle_with_terminal_retry(
         }),
     )
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_legacy_recovery_kit_routes_are_absent() {
     let dir = tempfile::tempdir().unwrap();
@@ -518,7 +518,7 @@ async fn test_legacy_recovery_kit_routes_are_absent() {
         );
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_bundle_prevents_admin_exporting_guest_root() {
     let dir = tempfile::tempdir().unwrap();

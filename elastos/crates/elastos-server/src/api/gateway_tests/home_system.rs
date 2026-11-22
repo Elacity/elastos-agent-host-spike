@@ -936,7 +936,7 @@ async fn assert_terminal_routes_refused(app: &axum::Router, token: &str) {
         }
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_cli_terminal_defaults_off_and_malformed_settings_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
@@ -1298,7 +1298,7 @@ async fn test_home_cli_terminal_stream_requires_cli_launch_token() {
         .unwrap();
     assert_eq!(closed.status(), StatusCode::OK);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_grant() {
     let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
@@ -1357,7 +1357,7 @@ async fn home_summary_accepts_gateway_owned_home_cli_token_under_home_owned_gran
     assert_eq!(payload["authority"]["signed_in"], true);
     assert_eq!(payload["authority"]["principal_id"], context.principal_id());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
     let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
@@ -1396,7 +1396,7 @@ async fn direct_home_cli_token_rejects_home_owned_grant_authority() {
             .to_string();
     assert!(err.contains("home launch token authority context mismatch"));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_authority() {
     let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
@@ -1465,7 +1465,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
         HOME_CAPSULE_ID
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_reports_identity_and_launch_targets() {
     let dir = tempfile::tempdir().unwrap();
@@ -1964,7 +1964,7 @@ async fn test_services_summary_projects_configured_remote_exit_without_ticket() 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(String::from_utf8_lossy(&body).contains("managed by Exit Provider config"));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_selection_state_is_principal_scoped() {
     let dir = tempfile::tempdir().unwrap();
@@ -5333,7 +5333,7 @@ async fn test_people_invite_create_route_is_absent_and_read_only() {
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(file_snapshot(dir.path()), before);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_contact_remove_requires_profile_contact_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -5655,7 +5655,7 @@ async fn test_people_contact_remove_removes_exact_profile_contact_locally() {
         "Remote Profile"
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_events_long_poll_returns_cursor_and_keepalive() {
     let dir = tempfile::tempdir().unwrap();
@@ -5708,7 +5708,7 @@ async fn test_home_events_long_poll_returns_cursor_and_keepalive() {
     assert_eq!(second_json["keepalive"], true);
     assert!(second_json["events"].as_array().unwrap().is_empty());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_events_stream_requires_home_authority_and_serves_sse() {
     let dir = tempfile::tempdir().unwrap();
@@ -6218,7 +6218,7 @@ async fn test_home_runtime_ensure_reuses_running_runtime() {
     assert!(payload["note"].is_null());
     assert_eq!(payload["running_capsules"], json!([]));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_summary_reports_identity_and_app_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -6279,7 +6279,7 @@ async fn test_system_summary_reports_identity_and_app_id() {
     assert!(payload.get("instance").is_none());
     assert_eq!(payload["runtime_log"]["available"], false);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_summary_reports_trusted_source_update_policy() {
     let dir = tempfile::tempdir().unwrap();
@@ -6589,7 +6589,7 @@ fn system_runtime_activity_filters_attach_noise() {
         ]
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_removed_system_identity_mutations_cannot_succeed_or_mutate_state() {
     let dir = tempfile::tempdir().unwrap();
@@ -6905,7 +6905,7 @@ async fn test_people_profile_update_uses_people_launch_token() {
         "People Name"
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_and_people_summary_without_profile_are_side_effect_free() {
     let dir = tempfile::tempdir().unwrap();
@@ -7337,7 +7337,7 @@ async fn test_home_summary_ignores_old_profile_card_identity_file() {
     assert!(payload["identity"]["profile"].is_null());
     assert_eq!(payload["identity"]["profile_setup_display_name"], "Alex");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_fails_closed_for_invalid_existing_device_key() {
     let dir = tempfile::tempdir().unwrap();
@@ -7357,7 +7357,7 @@ async fn test_home_summary_fails_closed_for_invalid_existing_device_key() {
     };
     assert!(err.to_string().contains("device.key has invalid length"));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_people_summary_requires_people_launch_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -7843,7 +7843,7 @@ async fn test_window_policy_survives_discovery_catalog_and_home_launch() {
         }
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_active_shell_without_developer_mode_resets_terminal_to_desktop() {
     let dir = tempfile::tempdir().unwrap();
@@ -8428,7 +8428,7 @@ async fn test_home_active_shell_uses_catalog_shell_candidates() {
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["active"], "home-cli");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_shell_switch_preserves_runtime_facts_and_recovers_after_launch_failure() {
     let dir = tempfile::tempdir().unwrap();
@@ -8585,7 +8585,7 @@ async fn test_home_shell_switch_preserves_runtime_facts_and_recovers_after_launc
         shared_before
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_active_shell_repairs_saved_home_state_but_rejects_home_updates() {
     let dir = tempfile::tempdir().unwrap();
@@ -8938,7 +8938,7 @@ async fn test_home_browser_state_read_fallbacks_do_not_overwrite_protected_state
         );
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_browser_state_accepts_trusted_shells_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -8990,7 +8990,7 @@ async fn test_home_browser_state_accepts_trusted_shells_only() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_browser_state_drops_unknown_targets() {
     let dir = tempfile::tempdir().unwrap();
@@ -9080,7 +9080,7 @@ async fn test_home_browser_state_drops_unknown_targets() {
     assert_eq!(json["session"]["windows"][1]["target"], "system");
     assert_eq!(json["recent_targets"], json!(["people", "system"]));
 }
-
+#[cfg(unix)]
 /// Archive opens only from Library. A window, shortcut or recent entry an
 /// earlier release saved for it is dropped when Home loads its state, and
 /// Library can still open it.
@@ -9171,7 +9171,7 @@ async fn test_home_drops_a_saved_archive_window_and_library_still_opens_archive(
     );
     assert!(home_launch_target(dir.path(), "archive-manager").is_some());
 }
-
+#[cfg(unix)]
 /// Services is hidden until sharing moves into People: it is not in the
 /// launcher, on the desktop or in Marketplace, and a window, shortcut or recent
 /// entry an earlier release saved for it is dropped when Home loads its state.
@@ -9281,7 +9281,7 @@ async fn test_home_drops_a_saved_services_window_and_marketplace_does_not_list_s
         .unwrap();
     assert_eq!(page.status(), StatusCode::NOT_FOUND);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_home_browser_state_defaults_preserve_malformed_state_and_refuse_overwrite() {
     let dir = tempfile::tempdir().unwrap();
@@ -11516,7 +11516,7 @@ async fn p2a_i_a_wiring_loop_resolve_reads_the_listing_store() {
     .unwrap();
     assert_eq!(grant.provider_principal_id, bob.authority.principal_id);
 }
-
+#[cfg(unix)]
 /// The one reachable refusal (Rong 1106 sec. 3): a provider principal with no
 /// stored record is refused by the root resolver even though its Services
 /// selection state shares the local model offer. The control principal proves
@@ -12590,7 +12590,7 @@ fn hosted_secret(data_dir: &std::path::Path, offer_id: &str) -> String {
     )
     .unwrap()
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_guest_save_forbidden_and_absent() {
     let dir = tempfile::tempdir().unwrap();
@@ -12616,7 +12616,7 @@ async fn test_system_ai_provider_guest_save_forbidden_and_absent() {
     assert!(!body.contains("sk-or-fixture-valid"));
     assert!(!ai_provider_config_path(dir.path()).exists());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_guest_get_forbidden() {
     let dir = tempfile::tempdir().unwrap();
@@ -12638,7 +12638,7 @@ async fn test_system_ai_provider_guest_get_forbidden() {
     assert!(!body.contains("sk-or"));
     assert!(!body.contains("sk-vnz"));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_requires_a_passkey_bound_admin_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -12689,7 +12689,7 @@ async fn test_system_ai_provider_requires_a_passkey_bound_admin_session() {
     .await;
     assert_eq!(status, StatusCode::OK);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_invalid_key_leaves_that_provider_absent() {
     for (provider, api_key, invalid_text, install) in [
@@ -12754,7 +12754,7 @@ async fn test_system_ai_provider_invalid_key_leaves_that_provider_absent() {
         assert!(!ai_provider_config_path(dir.path()).exists());
     }
 }
-
+#[cfg(unix)]
 /// OpenRouter serves its model list to any caller, so a rejected key must be
 /// caught by the key endpoint before the list is loaded.
 #[tokio::test]
@@ -12796,7 +12796,7 @@ async fn test_system_ai_provider_openrouter_key_rejected_by_provider_is_not_save
         assert!(!ai_provider_config_path(dir.path()).exists());
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_admin_save_replace_disconnect_keeps_peer() {
     let dir = tempfile::tempdir().unwrap();
@@ -13128,7 +13128,7 @@ fn operator_share_enabled(data_dir: &std::path::Path, offer_id: &str) -> bool {
         .and_then(serde_json::Value::as_bool)
         == Some(true)
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_share_guest_forbidden() {
     let dir = tempfile::tempdir().unwrap();
@@ -13372,7 +13372,7 @@ async fn test_system_ai_provider_share_requires_terms_and_preserves_peer() {
     assert!(!stored.contains(&openrouter_id));
     assert!(stored.contains(&venice_id));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_two_openrouter_instances_and_venice() {
     let dir = tempfile::tempdir().unwrap();
@@ -13473,7 +13473,7 @@ async fn test_system_ai_provider_two_openrouter_instances_and_venice() {
     assert!(names.contains(&"Venice".to_string()));
     assert!(operator_share_enabled(dir.path(), &ids[0]));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_ai_provider_migrates_legacy_openrouter_secret() {
     let dir = tempfile::tempdir().unwrap();
@@ -13750,7 +13750,7 @@ fn store_home_cli_principal(dir: &std::path::Path) {
     let id = "person:home-cli-test".to_string();
     crate::auth::upsert_principal_for_binding_as(dir, binding, id, now_ts()).unwrap();
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn gateway_context_refuses_an_unstored_person() {
     let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
@@ -13762,7 +13762,7 @@ async fn gateway_context_refuses_an_unstored_person() {
         .to_string()
         .contains("has no stored record"));
 }
-
+#[cfg(unix)]
 /// Gateway wiring: a person stored only in the auth store (not the runtime
 /// data dir) resolves, so the gateway reads principals from `auth_data_dir`.
 #[tokio::test]
@@ -13780,7 +13780,7 @@ async fn gateway_context_resolves_a_person_stored_in_the_auth_store() {
     );
     assert_eq!(context.unwrap().principal_id(), "person:home-cli-test");
 }
-
+#[cfg(unix)]
 /// Proof-bound row (Rong 0344 L-1499-1): with a proof binding, the active
 /// session grant is loaded from the same trusted auth dir as the principal.
 /// A grant stored only in the runtime data dir does not count.
@@ -13823,7 +13823,7 @@ async fn gateway_context_checks_a_proof_bound_grant_in_the_auth_store() {
         Some("proof:passkey:home-cli-test")
     );
 }
-
+#[cfg(unix)]
 /// Converse (Codex r1 #1462): a record only in the runtime data dir, not the
 /// selected auth store, refuses; the runtime dir is not a principal store.
 #[tokio::test]

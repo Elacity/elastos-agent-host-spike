@@ -774,7 +774,7 @@ mod tests {
         ));
         assert!(!missing_data_root.exists());
     }
-
+    #[cfg(unix)]
     #[test]
     fn valid_initial_restart_and_complete_successor_chain_persist_only_the_head() {
         let fixture = Fixture::new();
@@ -928,7 +928,7 @@ mod tests {
             .contains("chain exceeds"));
         assert!(!loader.config_dir.exists());
     }
-
+    #[cfg(unix)]
     #[test]
     fn persisted_head_rejects_removal_rollback_fork_network_and_trust_change() {
         let fixture = Fixture::new();
@@ -985,7 +985,7 @@ mod tests {
             .to_string()
             .contains("trust-root change"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn head_grant_presence_and_exact_cid_are_fail_closed() {
         let fixture = Fixture::new();
@@ -1047,7 +1047,7 @@ mod tests {
             NETWORK.to_string()
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn retained_namespace_without_accepted_head_fails_closed() {
         let fixture = Fixture::new();

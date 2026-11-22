@@ -1788,7 +1788,7 @@ mod tests {
         let ready = managed_runtime_ready(&coords_path, env!("ELASTOS_VERSION")).await;
         assert!(ready.is_none());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn managed_runtime_ready_accepts_matching_health() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1934,7 +1934,7 @@ mod tests {
             home.join("Library/Application Support/elastos")
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_managed_runtime_copies_parent_components_manifest_into_child_data_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1978,7 +1978,7 @@ mod tests {
         );
         assert!(!child_data_dir.join("model-catalog.json").exists());
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_managed_runtime_copies_signed_model_catalog_into_child_data_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2004,7 +2004,7 @@ mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_managed_runtime_starts_without_a_missing_or_mismatched_catalogue() {
         for case in ["missing", "mismatched"] {
@@ -2045,7 +2045,7 @@ mod tests {
             .contains("managed home runtime requires installed manifest"));
         assert!(error.to_string().contains("components.json"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_managed_runtime_requires_verified_parent_provider_binary() {
         let tmp = tempfile::tempdir().unwrap();

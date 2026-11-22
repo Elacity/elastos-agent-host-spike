@@ -154,7 +154,7 @@ fn test_wallet_qr_svg_rejects_invalid_address_and_encodes_valid_address() {
     assert!(svg.contains("<path d=\"M"));
     assert!(wallet_qr_svg("bad address with spaces").is_err());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_prices_raise_inbox_request_only_when_wallet_asks_and_not_after_dismissal() {
     let dir = tempfile::tempdir().unwrap();

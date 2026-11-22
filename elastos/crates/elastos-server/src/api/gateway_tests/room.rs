@@ -298,7 +298,7 @@ async fn test_room_service_assets_serve() {
         Some("application/wasm")
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_gateway_carrier_bootstrap_route_returns_live_ticket() {
     let dir = tempfile::tempdir().unwrap();
@@ -463,7 +463,7 @@ async fn test_gateway_carrier_bootstrap_publisher_role_uses_gateway_ticket() {
     assert_eq!(payload["role"], "publisher");
     assert!(payload.get("did").is_none());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_summary_requires_signed_launch_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -509,7 +509,7 @@ async fn test_chat_room_summary_requires_signed_launch_authority() {
         "Collaboration is isolated on this Runtime."
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn legacy_chat_room_summary_admits_only_chat_or_home() {
     let dir = tempfile::tempdir().unwrap();
@@ -1837,7 +1837,7 @@ async fn test_chat_room_shell_can_approve_browser_access_request() {
     let approved_payload: serde_json::Value = serde_json::from_slice(&approved_body).unwrap();
     assert_eq!(approved_payload["status"], "approved");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_summary_omits_display_name_suggestion() {
     let dir = tempfile::tempdir().unwrap();
@@ -1882,7 +1882,7 @@ async fn test_room_service_summary_does_not_create_identity_on_read() {
     assert!(!dir.path().join("identity").join("device.key").exists());
     assert!(load_home_runtime_coords(dir.path()).is_none());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_summary_includes_hosted_guest_urls() {
     let dir = tempfile::tempdir().unwrap();
@@ -1988,7 +1988,7 @@ async fn test_room_service_summary_blocks_browser_access_when_seeded_room_has_no
         .unwrap()
         .contains("not part of this conversation"));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn browser_room_cookie_capabilities_require_signed_home_admission() {
     let dir = tempfile::tempdir().unwrap();
@@ -2056,7 +2056,7 @@ async fn browser_room_cookie_capabilities_require_signed_home_admission() {
     }
     assert_eq!(room_store_snapshot(dir.path()), before);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_browser_session_request_and_status_routes_chat_room() {
     let dir = tempfile::tempdir().unwrap();
@@ -2109,7 +2109,7 @@ async fn test_browser_session_request_and_status_routes_chat_room() {
     let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
     assert_eq!(status_json["status"].as_str(), Some("pending"));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn browser_session_request_status_requires_its_secret_not_the_request_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -2218,7 +2218,7 @@ async fn test_browser_session_pair_is_forbidden_when_seeded_room_has_no_runtime_
             .unwrap();
     assert_eq!(pair_resp.status(), StatusCode::FORBIDDEN);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_browser_access_and_object_flow() {
     let dir = tempfile::tempdir().unwrap();
@@ -2341,7 +2341,7 @@ async fn test_room_service_browser_access_and_object_flow() {
     assert_eq!(feed_json["objects"][1]["kind"].as_str(), Some("text"));
     assert_eq!(approved.display_name, "Alice");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_attachment_upload_and_fetch() {
     let dir = tempfile::tempdir().unwrap();
@@ -2479,7 +2479,7 @@ async fn test_room_service_attachment_upload_and_fetch() {
         .unwrap();
     assert_eq!(&bytes[..], b"png-data");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_audio_attachment_upload_is_inline_media() {
     let dir = tempfile::tempdir().unwrap();
@@ -2613,7 +2613,7 @@ async fn test_room_service_audio_attachment_upload_is_inline_media() {
         Some("inline; filename=\"voice.ogg\"")
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_session_leave_appends_system_object() {
     let dir = tempfile::tempdir().unwrap();

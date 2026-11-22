@@ -635,7 +635,7 @@ pub(crate) mod tests {
 
     #[test]
     fn serve_and_the_test_server_build_one_router() {
-        let source = include_str!("server.rs");
+        let source = include_str!("server.rs").replace("\r\n", "\n");
         let (production, tests) = source.split_once("\n#[cfg(test)]\n").unwrap();
         let serve = production
             .split_once("fn start_server_with_sessions(")

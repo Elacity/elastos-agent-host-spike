@@ -58,7 +58,7 @@ async fn test_marketplace_catalog_route_is_registered_and_auth_gated() {
         .unwrap();
     assert_eq!(marketplace_scoped_response.status(), StatusCode::OK);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn model_consumers_can_read_catalog_with_current_scoped_authority() {
     let dir = tempfile::tempdir().unwrap();

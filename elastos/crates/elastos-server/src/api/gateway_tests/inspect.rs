@@ -681,7 +681,7 @@ async fn inspect_action_requires_inbox_approval_before_dispatch() {
     assert_eq!(approved_again.status(), StatusCode::BAD_REQUEST);
     assert_eq!(calls.lock().await.len(), 1);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_rejects_stale_step_up_before_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -953,7 +953,7 @@ async fn inspect_action_rejects_raw_carrier_route_metadata_before_inbox() {
         .any(|entry| entry["kind"] == "inspect_action_request");
     assert!(!has_inspect_action);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_rejects_stale_authority_plan_before_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -1065,7 +1065,7 @@ async fn inspect_action_rejects_stale_authority_plan_before_dispatch() {
         });
     assert!(!still_pending);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_rejects_changed_request_binding_before_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -1157,7 +1157,7 @@ async fn inspect_action_rejects_changed_request_binding_before_dispatch() {
         });
     assert!(!still_pending);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn esp_inspect_action_rejects_every_mutated_binding_field_before_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -1304,7 +1304,7 @@ async fn inspect_action_duplicate_requests_keep_distinct_pending_records() {
         .collect::<Vec<_>>();
     assert_eq!(inspect_actions.len(), 2);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn inspect_action_requests_are_principal_scoped_in_inbox_and_approval() {
     let dir = tempfile::tempdir().unwrap();

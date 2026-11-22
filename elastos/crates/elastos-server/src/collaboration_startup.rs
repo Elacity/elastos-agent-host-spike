@@ -1500,7 +1500,7 @@ mod tests {
         .await
         .unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn absent_config_is_pure_and_retained_marker_makes_removal_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
@@ -1597,7 +1597,7 @@ mod tests {
             assert!(load_and_accept_collaboration_startup_configuration(temp.path()).is_err());
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn configured_namespace_without_grant_starts_no_core_join_or_worker() {
         let isolated_temp = tempfile::tempdir().unwrap();
@@ -1970,7 +1970,7 @@ mod tests {
             0
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn worker_projects_known_chat_once_and_restart_keeps_it_acknowledged() {
         let (temp, _) = configured_root(true);
@@ -2091,7 +2091,7 @@ mod tests {
             0
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn worker_projects_outgoing_before_send_and_retries_room_and_core_failures() {
         let (temp, _) = configured_root(true);
@@ -2270,7 +2270,7 @@ mod tests {
             1
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn worker_projection_failure_stays_pending_then_retries_once() {
         let (temp, _) = configured_root(true);
@@ -2357,7 +2357,7 @@ mod tests {
             1
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn worker_handoff_failure_does_not_block_later_chat_or_presence_and_retries_next_cycle() {
         let (temp, _) = configured_root(true);
@@ -2465,7 +2465,7 @@ mod tests {
             completed.latest_seq
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn configured_default_room_requires_carrier_and_starts_one_joinable_worker() {
         let (missing_temp, _) = configured_root(true);
@@ -2557,7 +2557,7 @@ mod tests {
             ["gossip_join_exact", "gossip_peek", "gossip_ack"]
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn community_connection_status_refreshes_with_the_incoming_cycle() {
         let (temp, _) = configured_root(true);
@@ -2595,7 +2595,7 @@ mod tests {
         }
         service.shutdown().await.unwrap();
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn stalled_connection_status_allows_the_next_incoming_cycle() {
         let (temp, _) = configured_root(true);
@@ -3103,7 +3103,7 @@ mod tests {
         worker.await.unwrap();
         assert_eq!(active.load(Ordering::SeqCst), 0);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn worker_shutdown_cancels_and_joins_a_pending_provider_call() {
         let (temp, _) = configured_root(true);
@@ -3780,7 +3780,7 @@ mod tests {
             .await
             .unwrap();
     }
-
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn community_link_watchdog_exhaustion_updates_product_status_and_peer_return_clears_it() {
         let (temp, _) = configured_root(true);

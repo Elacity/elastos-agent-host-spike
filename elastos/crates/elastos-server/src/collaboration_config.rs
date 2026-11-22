@@ -679,7 +679,7 @@ mod tests {
             .to_string();
         assert!(error.contains("not a trusted signer"), "{error}");
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn deterministic_golden_generation_and_pure_round_trip() {
         let (key, peer, expected) = valid_config();
@@ -750,7 +750,7 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_dir(isolated.path()).unwrap().count(), 0);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn key_and_config_files_are_owner_only_no_follow_and_create_new() {
         let temp = tempfile::tempdir().unwrap();
@@ -865,7 +865,7 @@ mod tests {
             assert!(read_collaboration_startup_config_candidate(&oversized).is_err());
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_bootstrap_export_is_canonical_private_redacted_and_pre_effect() {
         let temp = tempfile::tempdir().unwrap();
@@ -1014,7 +1014,7 @@ mod tests {
         assert!(!error.contains("attach-secret-must-not-render"));
         assert!(!error.contains(stopped_runtime_root.path().to_string_lossy().as_ref()));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_bootstrap_export_uses_only_the_explicit_gateway_coordinate() {
         let temp = tempfile::tempdir().unwrap();

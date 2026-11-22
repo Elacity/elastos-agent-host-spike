@@ -9024,7 +9024,7 @@ mod tests {
         let parsed = serde_json::from_value::<super::ObjectProviderRequest>(named);
         assert!(parsed.is_err(), "{parsed:?}");
     }
-
+    #[cfg(unix)]
     /// A5-S3c-0a: the Roots handler returns this stored Agent's UsersAI root.
     #[test]
     fn a_stored_agents_library_roots_are_under_its_usersai_root() {
@@ -11711,7 +11711,7 @@ mod r5a_tests {
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
-
+    #[cfg(unix)]
     #[test]
     fn publish_record_write_leaves_an_unstored_principals_index_byte_identical() {
         let dir = tempfile::tempdir().unwrap();
@@ -12219,50 +12219,57 @@ mod r5a_tests {
     fn unstored_publish_row(op: &'static str) {
         unstored_index_stays(op, |dir| unstored_publish_op(op, dir));
     }
-
+    #[cfg(unix)]
     #[test]
     fn publish_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("publish");
     }
-
+    #[cfg(unix)]
     #[test]
     fn unpublish_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("unpublish");
     }
-
+    #[cfg(unix)]
     #[test]
     fn repair_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("repair");
     }
-
+    #[cfg(unix)]
     #[test]
     fn share_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("share");
     }
+    #[cfg(unix)]
     #[test]
     fn chat_attach_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("chat_attach");
     }
+    #[cfg(unix)]
     #[test]
     fn rename_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("rename");
     }
+    #[cfg(unix)]
     #[test]
     fn move_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("move");
     }
+    #[cfg(unix)]
     #[test]
     fn trash_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("trash");
     }
+    #[cfg(unix)]
     #[test]
     fn restore_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("restore");
     }
+    #[cfg(unix)]
     #[test]
     fn delete_permanently_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("delete_permanently");
     }
+    #[cfg(unix)]
     #[test]
     fn empty_trash_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("empty_trash");

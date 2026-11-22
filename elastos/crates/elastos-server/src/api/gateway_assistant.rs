@@ -380,7 +380,7 @@ mod r3_tests {
         fixture, seed, verified_parent_device_context, HUMAN_ROOT, NEEDS_PROTECTION,
     };
     use super::*;
-
+    #[cfg(unix)]
     #[test]
     fn agent_uri_uses_stored_root() {
         let (_dir, context) = fixture(true);
@@ -393,7 +393,7 @@ mod r3_tests {
             "R3 assistant URI uses UsersAI"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn agent_read_uses_stored_root() {
         let (dir, context) = fixture(true);
@@ -404,7 +404,7 @@ mod r3_tests {
             .map_err(|err| err.to_string());
         assert_eq!(result, Ok(7), "R3 assistant read uses UsersAI");
     }
-
+    #[cfg(unix)]
     #[test]
     fn agent_write_uses_stored_root() {
         let (dir, context) = fixture(true);
@@ -427,7 +427,7 @@ mod r3_tests {
             "R3 assistant write reaches UsersAI protection gate"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn human_keeps_workspace_round_trip() {
         let (dir, context) = fixture(false);

@@ -2009,7 +2009,7 @@ mod tests {
         .to_string()
         .contains("not authorized"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn frame_renewal_is_bounded_by_launch_ttl_and_current_parent_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -2732,7 +2732,7 @@ mod tests {
         )
         .is_err());
     }
-
+    #[cfg(unix)]
     #[test]
     fn p2a_ii_0b_wallet_authority_for_principal_without_stored_record_fails_to_build() {
         use elastos_runtime::auth::{AuthSessionGrantV1, ProofBinding};

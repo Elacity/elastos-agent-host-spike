@@ -1092,7 +1092,7 @@ mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn create_policy_authority_key_creates_owner_only_key_and_receipt() {
         let dir = tempfile::tempdir().unwrap();

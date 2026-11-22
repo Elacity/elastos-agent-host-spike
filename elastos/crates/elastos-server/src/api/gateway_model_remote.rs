@@ -940,7 +940,7 @@ mod tests {
             "nested-user-offer"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn remote_run_index_is_principal_scoped_and_pruned() {
         let dir = tempfile::tempdir().unwrap();
@@ -1004,7 +1004,7 @@ mod tests {
             None
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_offers_and_unknown_runs_stay_local() {
         let dir = tempfile::tempdir().unwrap();

@@ -4129,7 +4129,7 @@ pub(crate) mod tests {
                     .strip_prefix(crates)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 found.push((name, count));
             }
         }
@@ -4355,7 +4355,7 @@ pub(crate) mod tests {
                     .strip_prefix(crates)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 found.push((name, count));
             }
         }
@@ -4653,8 +4653,12 @@ pub(crate) mod tests {
             let text = production_text(&std::fs::read_to_string(&file).unwrap());
             let calls = text.matches(".resource_authority_bounds()").count();
             if calls > 0 {
-                let name = file.strip_prefix(crates).unwrap().to_string_lossy();
-                callers.push((name.into_owned(), calls));
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                callers.push((name, calls));
             }
         }
         callers.sort();
@@ -4727,7 +4731,7 @@ pub(crate) mod tests {
             scope_current_user_alias("localhost://UsersAI/self", Some(h), Some(human.path()));
         assert_eq!(refused.unwrap_err(), not_area("UsersAI"));
     }
-
+    #[cfg(unix)]
     /// F-S3-protected: the protected write path takes the stored Agent root,
     /// so the same id's Users root is refused with a data dir present.
     #[test]
@@ -4793,7 +4797,7 @@ pub(crate) mod tests {
         std::fs::write(crate::auth::auth_state_path(temp.path()).unwrap(), b"{").unwrap();
         assert!(refused(&ctx).contains("failed to parse"));
     }
-
+    #[cfg(unix)]
     /// F-S3b-area: UsersAI paths take the protected path. A stored Agent is
     /// refused a foreign UsersAI root there, and the remote bridge refuses
     /// UsersAI root storage instead of dispatching it.
@@ -5845,7 +5849,7 @@ pub(crate) mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     /// S5-rem-f43-agent-id (rulings v4 R-B/R-C, route 4 fence part (b)): the
     /// same direct drive of the attached bridge entry as F4.3, run once with a
     /// stored agent's id. An agent's own root area takes the protected path, so
@@ -8749,7 +8753,7 @@ pub(crate) mod tests {
         let response = submit_with_write(&ctx, 80, &submitted_plan(serde_json::json!({}))).await;
         assert_submit_refused(&response, &ctx, &provider, "owns no agent with that id").await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn a15r_bus_submit_refused_for_a_quarantined_identity() {
         let temp = tempfile::tempdir().unwrap();

@@ -3534,7 +3534,7 @@ mod owner_recovery_tests {
         home.identity.reload_credentials().unwrap();
         assert_eq!(home.identity.credentials().len(), credentials + 1);
     }
-
+    #[cfg(unix)]
     #[test]
     fn owner_recovery_needs_an_owned_home() {
         let root = tempfile::tempdir().unwrap();
@@ -13617,7 +13617,7 @@ pub(crate) mod tests {
             assert!(require_secure_owner_persistence(&data).is_err());
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn auth_state_lock_excludes_another_process_and_releases() {
         let root = tempfile::tempdir().unwrap();
@@ -15145,7 +15145,7 @@ pub(crate) mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn passkey_principal_upsert_preserves_creation_time() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15163,7 +15163,7 @@ pub(crate) mod tests {
         assert_eq!(second.role, RuntimePrincipalRole::Guest);
         assert!(second.localhost_root.starts_with("localhost://Users/"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn passkey_principal_role_and_root_are_explicit() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15218,7 +15218,7 @@ pub(crate) mod tests {
         );
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
-
+    #[cfg(unix)]
     #[test]
     fn passkey_promotion_changes_active_guest_to_admin() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15241,7 +15241,7 @@ pub(crate) mod tests {
             1
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn passkey_demotion_changes_active_admin_to_guest_but_keeps_one_admin() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15275,7 +15275,7 @@ pub(crate) mod tests {
             load_principal_for_proof_binding(data_dir.path(), &primary.proof_binding_id).unwrap();
         assert_eq!(primary.role, RuntimePrincipalRole::Admin);
     }
-
+    #[cfg(unix)]
     #[test]
     fn passkey_demotion_rejects_last_admin() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15475,7 +15475,7 @@ pub(crate) mod tests {
         let err = load_auth_state(data_dir.path()).unwrap_err().to_string();
         assert!(err.contains("audit chain rollback detected"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn audit_chain_activation_advances_after_an_interrupted_checkpoint_publish() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -18819,7 +18819,7 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(error.contains("quarantined agent record"), "{error}");
     }
-
+    #[cfg(unix)]
     /// Each kind's own root only; the other kind's root is refused.
     #[test]
     fn principal_root_binding_accepts_only_the_record_kind_root() {
@@ -19545,7 +19545,7 @@ pub(crate) mod tests {
             .to_string();
         assert!(error.contains("has no stored record"), "{error}");
     }
-
+    #[cfg(unix)]
     #[test]
     fn resolved_device_root_is_todays_users_root_never_usersai() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -19656,7 +19656,7 @@ pub(crate) mod tests {
             .to_string()
             .contains("has no stored record"));
     }
-
+    #[cfg(unix)]
     /// A bare device id has no authority to select its matching hash root.
     #[test]
     fn unverified_device_object_binding_refuses_matching_root() {
@@ -19898,7 +19898,7 @@ pub(crate) mod tests {
         assert!(principal_object_io::writes(data_dir.path()).contains(&wrong_path));
         assert!(principal_object_io::reads(data_dir.path()).contains(&wrong_path));
     }
-
+    #[cfg(unix)]
     #[test]
     fn typed_io_refuses_remote_root_even_with_canonical_local_path() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -21554,7 +21554,7 @@ pub(crate) mod tests {
             assert_eq!(std::fs::read(&path).unwrap(), b"plain", "{label}");
         }
     }
-
+    #[cfg(unix)]
     /// The device arm has no stored record, so both plain writes save the
     /// bytes as given and the protected write keeps today's refusal.
     #[test]

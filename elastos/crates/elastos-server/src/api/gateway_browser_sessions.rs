@@ -4017,7 +4017,7 @@ mod tests {
         registry.lock().await.sessions.remove(&key);
         assert!(!browser_inspection_owner_current(dir.path(), &owner).await);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn display_attach_late_input_cannot_revive_retiring_owner() {
         for input_failed in [false, true] {
@@ -4244,7 +4244,7 @@ mod tests {
             vm_key_hash: Some("sha256:vmhash".to_string()),
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn remote_engine_deserialized_reservation_cannot_release_reused_serial_owner() {
         let old_root = tempfile::tempdir().unwrap();
@@ -4311,7 +4311,7 @@ mod tests {
             .sessions
             .contains_key(&current.id));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn recoverable_service_selection_preserves_request_and_isolation() {
         for (engine_id, exit_id) in [(None, None), (Some("mock-adapter"), Some("exit:chosen"))] {
@@ -4399,7 +4399,7 @@ mod tests {
             clear_browser_lifecycle_memory_for_restart(dir.path()).await;
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn service_selection_survives_reconciliation_promotion_and_legacy_records() {
         for selection in [
@@ -4546,7 +4546,7 @@ mod tests {
         #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn viewer_turn_refresh_and_cleanup_keep_capability_ephemeral() {
         let dir = tempfile::tempdir().unwrap();
@@ -4737,7 +4737,7 @@ mod tests {
         assert_eq!(browser_engine_cleanup_obligation_count(dir.path()).await, 0);
         assert!(!ownership_path.exists());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn fresh_start_requires_available_verified_scope() {
         let dir = tempfile::tempdir().unwrap();
@@ -4803,7 +4803,7 @@ mod tests {
         }
         clear_browser_lifecycle_memory_for_restart(dir.path()).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn fresh_start_blocks_matching_launch_and_active_page_but_allows_other_window() {
         let dir = tempfile::tempdir().unwrap();
@@ -4853,7 +4853,7 @@ mod tests {
         }
         clear_browser_lifecycle_memory_for_restart(dir.path()).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn fresh_start_checks_live_open_jobs_before_session_reservation() {
         let dir = tempfile::tempdir().unwrap();
@@ -4933,7 +4933,7 @@ mod tests {
         assert_eq!(status["window_close_ownership"]["state"], "unresolved");
         clear_browser_lifecycle_memory_for_restart(dir.path()).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn window_close_absence_keeps_an_aged_pending_open() {
         let dir = tempfile::tempdir().unwrap();
@@ -4974,7 +4974,7 @@ mod tests {
         forget_browser_open_job_for_owner(dir.path(), "person:local:test", "launch:pending").await;
         clear_browser_lifecycle_memory_for_restart(dir.path()).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn fresh_start_respects_completed_job_retention_release_and_expiry() {
         let dir = tempfile::tempdir().unwrap();
@@ -5028,7 +5028,7 @@ mod tests {
         assert_eq!(status["fresh_start_allowed"], true);
         clear_browser_lifecycle_memory_for_restart(dir.path()).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn fresh_start_blocks_ambiguous_matching_active_owners() {
         let dir = tempfile::tempdir().unwrap();
@@ -5074,7 +5074,7 @@ mod tests {
         assert_eq!(other["fresh_start_allowed"], true);
         clear_browser_lifecycle_memory_for_restart(dir.path()).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn fresh_start_preserves_principal_cleanup_admission_barriers() {
         for kind in ["reconciliation", "engine", "stream"] {
@@ -5142,7 +5142,7 @@ mod tests {
             clear_browser_lifecycle_memory_for_restart(dir.path()).await;
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn fresh_start_requires_capacity_even_for_an_independent_window() {
         let dir = tempfile::tempdir().unwrap();
@@ -5268,7 +5268,7 @@ mod tests {
 
         assert_eq!(scope_a_count, 1);
     }
-
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn stale_take_preserves_exact_stream_cleanup_across_retry_and_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -5364,7 +5364,7 @@ mod tests {
             .loaded_scopes
             .remove(&scope);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn durable_terminal_proof_retains_binding_and_all_transport_effects() {
         let dir = tempfile::tempdir().unwrap();
@@ -5474,7 +5474,7 @@ mod tests {
         assert_eq!(replayed[0].terminal_proof, stored[0].terminal_proof);
         assert_eq!(replayed[0].profile_durability, stored[0].profile_durability);
     }
-
+    #[cfg(unix)]
     #[test]
     fn durable_reaped_page_tombstones_are_exact_bounded_retained_and_expire() {
         let dir = tempfile::tempdir().unwrap();
@@ -5870,7 +5870,7 @@ mod tests {
         .unwrap();
         assert!(after_terminal_race.should_spawn);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn browser_lifecycle_replay_and_capacity_conflict_preserve_healthy_owner() {
         let dir = tempfile::tempdir().unwrap();
@@ -5999,7 +5999,7 @@ mod tests {
         assert!(error.contains("unsafe"));
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn engine_delete_failure_retains_retryable_in_memory_obligation() {
         let dir = tempfile::tempdir().unwrap();
@@ -6063,7 +6063,7 @@ mod tests {
         )
         .await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn stream_delete_failure_retains_retryable_in_memory_obligation() {
         let dir = tempfile::tempdir().unwrap();
@@ -6091,7 +6091,7 @@ mod tests {
         assert_eq!(browser_stream_cleanup_obligation_count(dir.path()).await, 0);
         assert!(!cleanup_path.exists());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_restart_recovers_exact_durable_cleanup_ownership_by_browser_instance() {
         let dir = tempfile::tempdir().unwrap();
@@ -6203,7 +6203,7 @@ mod tests {
         .unwrap()
         .is_none());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_restart_recovers_indeterminate_launch_and_blocks_replacement() {
         let dir = tempfile::tempdir().unwrap();

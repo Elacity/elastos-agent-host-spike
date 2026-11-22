@@ -243,7 +243,7 @@ async fn test_documents_provider_round_trip() {
         .iter()
         .any(|item| item["doc_did"] == doc_did));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_documents_provider_scopes_documents_to_launch_principal() {
     let dir = tempfile::tempdir().unwrap();

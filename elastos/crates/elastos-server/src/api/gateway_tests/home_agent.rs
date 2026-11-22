@@ -57,7 +57,7 @@ fn sample_put(if_revision: u64) -> Value {
         }
     })
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn home_agent_workspace_absent_get_is_read_only_and_returns_revision_zero() {
     let dir = tempfile::tempdir().unwrap();

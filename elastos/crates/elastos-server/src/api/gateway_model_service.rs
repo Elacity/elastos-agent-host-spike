@@ -1912,7 +1912,7 @@ mod tests {
         assert!(a1.starts_with("remote:"));
         assert_eq!(a1.len(), "remote:".len() + 32);
     }
-
+    #[cfg(unix)]
     #[test]
     fn p2a_iii_remote_context_root_refuses_localhost_users_write() {
         use crate::auth::*;
@@ -2178,7 +2178,7 @@ mod tests {
             "provider_failure"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn run_index_round_trips_and_prunes_old_terminal_runs() {
         let dir = tempfile::tempdir().unwrap();

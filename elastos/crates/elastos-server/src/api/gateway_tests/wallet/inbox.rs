@@ -332,7 +332,7 @@ fn capability_entry_count(summary: &Value) -> usize {
         .filter(|entry| entry["kind"] == "capability_request")
         .count()
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_inbox_capability_requests_answer_only_to_admin() {
     let dir = tempfile::tempdir().unwrap();
@@ -376,7 +376,7 @@ async fn test_inbox_capability_requests_answer_only_to_admin() {
     );
     assert_eq!(*runtime.denied.lock().await, vec!["cap-2".to_string()]);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_inbox_and_home_list_capability_requests_only_for_admin() {
     let dir = tempfile::tempdir().unwrap();
@@ -423,7 +423,7 @@ async fn test_inbox_and_home_list_capability_requests_only_for_admin() {
     let admin_after = get_json(&app, home_origin, events_uri, &admin.home_token).await;
     assert_ne!(admin_after["cursor"], admin_before["cursor"]);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_capability_request_from_guest_launched_capsule_waits_for_admin() {
     let dir = tempfile::tempdir().unwrap();

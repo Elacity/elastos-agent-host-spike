@@ -1446,7 +1446,7 @@ mod tests {
         validate_profile_authority_transition(rotated.document(), revoked.document()).unwrap();
         assert!(!revoked.authorizes_endpoint(&second_endpoint));
     }
-
+    #[cfg(unix)]
     #[test]
     fn load_profile_authority_empty_root_is_side_effect_free() {
         let dir = tempfile::tempdir().unwrap();
@@ -1678,7 +1678,7 @@ mod tests {
             }
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn load_existing_device_did_rejects_symlink_and_non_regular_paths() {
         let dir = tempfile::tempdir().unwrap();

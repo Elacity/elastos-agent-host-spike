@@ -367,7 +367,7 @@ mod r3_tests {
         fixture, seed, verified_parent_device_context, AGENT_ID, AGENT_ROOT, NEEDS_PROTECTION,
     };
     use super::*;
-
+    #[cfg(unix)]
     #[test]
     fn agent_location_uses_stored_root() {
         let (dir, context) = fixture(true);
@@ -385,7 +385,7 @@ mod r3_tests {
             ))
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn agent_optional_read_uses_stored_root() {
         let (dir, context) = fixture(true);
@@ -402,7 +402,7 @@ mod r3_tests {
             "R3 v2 read uses UsersAI"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn agent_legacy_identity_uses_stored_root() {
         let (dir, context) = fixture(true);
@@ -426,7 +426,7 @@ mod r3_tests {
             "R3 v2 legacy identity uses UsersAI"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn agent_write_uses_stored_root() {
         let (dir, context) = fixture(true);
@@ -451,7 +451,7 @@ mod r3_tests {
             "R3 v2 write reaches UsersAI protection gate"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn human_keeps_workspace_round_trip() {
         let (dir, context) = fixture(false);

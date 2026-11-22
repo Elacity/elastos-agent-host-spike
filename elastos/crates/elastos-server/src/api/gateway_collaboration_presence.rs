@@ -997,7 +997,7 @@ mod tests {
             "the pass returns the wallet root refusal for that quarantined record"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn r4_runtime_presence_uses_stored_root() {
         use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};

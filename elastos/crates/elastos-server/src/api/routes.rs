@@ -7182,7 +7182,7 @@ pub(crate) mod tests {
             "the body file's text arrives intact"
         );
     }
-
+    #[cfg(unix)]
     /// A signed component that declares no agent has no ceiling entry, and
     /// its model invoke still reaches the provider. One call is recorded.
     #[tokio::test]

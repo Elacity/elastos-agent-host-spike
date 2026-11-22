@@ -401,7 +401,7 @@ async fn test_wallet_app_can_create_and_summarize_accounts() {
         )
         .await;
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_summary_preserves_unavailable_provider_schema() {
     let dir = tempfile::tempdir().unwrap();

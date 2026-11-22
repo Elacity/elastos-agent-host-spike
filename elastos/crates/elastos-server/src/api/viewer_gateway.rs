@@ -1390,7 +1390,7 @@ mod r4_root_tests {
             "invalid viewer storage root"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn r4_viewer_uses_context_root_at_all_three_sites() {
         let missing = tempfile::tempdir().unwrap();

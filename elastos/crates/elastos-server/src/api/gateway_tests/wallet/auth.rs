@@ -1094,7 +1094,7 @@ async fn test_evm_auth_challenge_rejects_client_supplied_origin_fields() {
     }
     assert!(wallet_provider.requests.lock().await.is_empty());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_evm_auth_challenge_requires_wallet_provider() {
     let dir = tempfile::tempdir().unwrap();

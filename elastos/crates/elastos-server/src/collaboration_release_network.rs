@@ -579,7 +579,7 @@ pub(crate) mod tests {
         }
         dir
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_leave_survives_restart_update_and_rejoin_keeps_the_accepted_head() {
         let (_, chain) = signed_profile_chain_config(2);
@@ -629,7 +629,7 @@ pub(crate) mod tests {
             .is_err()
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_membership_refuses_foreign_malformed_and_public_state() {
         let data = private_data_dir();
@@ -654,7 +654,7 @@ pub(crate) mod tests {
             .unwrap()
             .joined());
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_intent_guard_serializes_leave_and_rechecks_the_choice() {
         let data = private_data_dir();
@@ -689,7 +689,7 @@ pub(crate) mod tests {
         membership.set_joined(true).unwrap();
         membership.lock_joined().unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn a_new_home_joins_the_pinned_release_network() {
         let (_signer, chain) = signed_profile_chain_config(1);
@@ -727,7 +727,7 @@ pub(crate) mod tests {
             "setup again is idempotent"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn an_isolated_home_stays_isolated() {
         let (_signer, chain) = signed_profile_chain_config(1);
@@ -751,7 +751,7 @@ pub(crate) mod tests {
         });
         fs::write(data.join("components.json"), manifest.to_string()).unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn isolation_before_the_first_start_removes_the_release_network() {
         let (_signer, chain) = signed_profile_chain_config(1);
@@ -773,7 +773,7 @@ pub(crate) mod tests {
         assert!(fs::symlink_metadata(data.path().join(COLLABORATION_STARTUP_CONFIG_FILE)).is_err());
         choose_isolated(data.path()).unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn isolation_is_refused_after_a_home_joined() {
         let (_signer, chain) = signed_profile_chain_config(1);
@@ -794,7 +794,7 @@ pub(crate) mod tests {
             chain[0]
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn isolation_keeps_an_operator_network() {
         let (_signer, chain) = signed_profile_chain_config(1);
@@ -818,7 +818,7 @@ pub(crate) mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn an_interrupted_isolation_finishes_on_the_next_run() {
         let (_signer, chain) = signed_profile_chain_config(1);
@@ -849,7 +849,7 @@ pub(crate) mod tests {
 
         assert!(fs::symlink_metadata(data.path().join(COLLABORATION_STARTUP_CONFIG_FILE)).is_err());
     }
-
+    #[cfg(unix)]
     #[test]
     fn isolation_waits_for_a_startup_that_is_accepting_the_network() {
         let (_signer, chain) = signed_profile_chain_config(1);
@@ -941,7 +941,7 @@ pub(crate) mod tests {
             .to_string()
             .contains("signer set"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn an_update_advances_along_the_same_signed_chain() {
         let (_signer, chain) = signed_profile_chain_config(2);
@@ -957,7 +957,7 @@ pub(crate) mod tests {
         let dest = data.path().join(COLLABORATION_STARTUP_CONFIG_FILE);
         assert_eq!(fs::read(&dest).unwrap(), chain[1]);
     }
-
+    #[cfg(unix)]
     #[test]
     fn an_operator_configuration_for_another_network_is_kept() {
         let (_signer_a, operator_chain) = signed_profile_chain_config(1);
@@ -990,7 +990,7 @@ pub(crate) mod tests {
 
         assert!(err.contains("is missing"), "{err}");
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_home_that_needs_no_release_bytes_fetches_nothing() {
         let (_signer, chain) = signed_profile_chain_config(1);

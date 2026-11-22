@@ -1290,7 +1290,15 @@ mod tests {
             .filter(|capsule| capsule.role == CapsuleRole::Shell && capsule.launchable)
             .map(|capsule| capsule.name)
             .collect::<Vec<_>>();
-        assert_eq!(developer_shells, vec!["home-cli", "home-gui"]);
+        // An absent auth store means guests are disabled, so developer mode
+        // offers home-cli. When that read is refused, the policy keeps the
+        // terminal hidden.
+        let expected_developer_shells = if cfg!(unix) {
+            vec!["home-cli".to_string(), "home-gui".to_string()]
+        } else {
+            vec!["home-gui".to_string()]
+        };
+        assert_eq!(developer_shells, expected_developer_shells);
         let marketplace = catalog
             .capsules
             .iter()

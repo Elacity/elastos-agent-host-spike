@@ -534,7 +534,7 @@ mod tests {
             BinarySupersessionWatch::from_reader(Path::new("/unused"), &reader).expect("watch");
         (watch, reader)
     }
-
+    #[cfg(unix)]
     #[test]
     fn second_host_lock_for_same_data_dir_is_rejected() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -548,7 +548,7 @@ mod tests {
             "unexpected error: {err}"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn model_host_lock_is_data_root_scoped() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -595,7 +595,7 @@ mod tests {
         lock.release().expect("release reports its unlock");
         assert!(test_support::lock_is_free(&path));
     }
-
+    #[cfg(unix)]
     #[test]
     fn active_host_process_reports_live_owner() {
         let temp = tempfile::tempdir().expect("tempdir");

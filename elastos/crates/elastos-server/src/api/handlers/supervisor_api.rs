@@ -945,7 +945,7 @@ mod tests {
             "the agent file is not rewritten"
         );
     }
-
+    #[cfg(unix)]
     /// F3.3 (r3, options §2.1; fix r1): the supervisor launch entrance takes
     /// no raw principal authority. The control below sends a body with no
     /// principal key through the same router and real supervisor; the

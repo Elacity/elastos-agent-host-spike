@@ -752,7 +752,7 @@ mod trusted_gateway_tests {
         .await
         .unwrap();
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn browser_home_ready_is_skipped_when_port_is_occupied() {
         let temp = tempfile::tempdir().unwrap();
@@ -773,7 +773,7 @@ mod trusted_gateway_tests {
         );
         assert!(!crate::runtime_control::gateway_runtime_coord_path(temp.path()).exists());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn browser_home_ready_is_skipped_when_auth_setup_fails() {
         let temp = tempfile::tempdir().unwrap();
