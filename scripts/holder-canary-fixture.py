@@ -53,6 +53,100 @@ def component_platform():
     }[release_platform()]
 
 
+def prepare_installed_components(data):
+    """Give installed fixture components the receipts written by release setup."""
+    catalogue = data / "components.json"
+    manifest = json.loads(catalogue.read_bytes())
+    platform_key = component_platform()
+
+    def digest(value, name):
+        assert isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value), \
+            f"{name} requires a signed SHA-256 digest"
+        return value[7:]
+
+    def receipt(path, expected):
+        if path.exists() or path.is_symlink():
+            assert path.is_file() and not path.is_symlink(), f"invalid fixture receipt: {path}"
+            assert path.read_text().strip().removeprefix("sha256:") == expected, \
+                f"fixture receipt differs from catalogue: {path}"
+        else:
+            path.write_text(expected + "\n")
+
+    changed = False
+    for name, component in manifest.get("external", {}).items():
+        platforms = component.get("platforms", {})
+        info = platforms.get(platform_key, platforms.get("*"))
+        if info is None:
+            continue
+        relative = info.get("install_path") or component.get("install_path")
+        if not relative:
+            continue
+        parts = Path(relative).parts
+        assert parts and all(part not in ("", ".", "..") for part in parts) \
+            and not Path(relative).is_absolute(), f"invalid fixture install path for {name}"
+        installed = data / relative
+        if not installed.exists() and not installed.is_symlink():
+            continue
+        expected = digest(info.get("checksum"), name)
+        if info.get("extract_path"):
+            if installed.is_dir() and not installed.is_symlink():
+                receipt(installed / ".elastos-artifact-sha256", expected)
+            elif installed.is_file() and not installed.is_symlink():
+                # A release can extract one binary and keep its archive
+                # metadata in a separate capsule (for example, Kubo).
+                metadata = component.get("capsule_metadata", {})
+                metadata_info = metadata.get("platforms", {}).get(
+                    platform_key, metadata.get("platforms", {}).get("*"))
+                if metadata_info:
+                    metadata_root = data / (metadata_info.get("install_path")
+                                            or metadata.get("install_path"))
+                    assert metadata_root.is_dir() and not metadata_root.is_symlink(), \
+                        f"{name} archive metadata is missing"
+                    receipt(metadata_root / ".elastos-artifact-sha256",
+                            digest(metadata_info.get("checksum"), f"{name} metadata"))
+                    prefix = metadata_info.get("extract_path", "") + "/"
+                    extracted = info["extract_path"]
+                    assert extracted.startswith(prefix), f"{name} archive metadata path differs"
+                    executable = metadata_root / extracted[len(prefix):]
+                    assert executable.is_file() and not executable.is_symlink() \
+                        and sha(executable) == sha(installed), \
+                        f"{name} installed executable differs from archive metadata"
+                    receipt(metadata_root / ".elastos-executable-sha256", sha(installed))
+                else:
+                    # A source fixture can stage only an extracted helper.
+                    # Record its installed bytes as a direct asset, using the
+                    # same checksum/size fields as record_direct_asset in
+                    # publish-release.sh, before signing this catalogue.
+                    info["checksum"] = "sha256:" + sha(installed)
+                    info["size"] = installed.stat().st_size
+                    info.pop("extract_path", None)
+                    info.pop("strategy", None)
+                    changed = True
+            else:
+                raise AssertionError(f"{name} requires an installed archive component")
+            if name == "home-cli":
+                executable = installed / "bin/home-cli"
+                assert executable.is_file() and not executable.is_symlink(), \
+                    "Home CLI renderer is missing"
+                executable_digest = sha(executable)
+                signed = info.get("executable_checksum")
+                if signed:
+                    assert digest(signed, "Home CLI executable") == executable_digest, \
+                        "Home CLI renderer differs from catalogue digest"
+                else:
+                    # publish-release.sh records the renderer digest separately
+                    # from the archive digest in the platform catalogue entry.
+                    info["executable_checksum"] = "sha256:" + executable_digest
+                    changed = True
+                receipt(installed / ".elastos-executable-sha256", executable_digest)
+        else:
+            assert installed.is_file() and not installed.is_symlink() and sha(installed) == expected, \
+                f"{name} installed bytes differ from catalogue digest"
+
+    if changed:
+        catalogue.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+
 def sign_install(home, data, runtime, environment, preserve_source=False):
     """Install a release trusted only by this fixture Home; discard its signing key."""
     sources = json.loads((data / "sources.json").read_text()) if preserve_source else None
@@ -70,11 +164,13 @@ def sign_install(home, data, runtime, environment, preserve_source=False):
                                ensure_ascii=False, allow_nan=False).encode()
         reply = subprocess.run([str(runtime), "sign-payload", "--domain", domain, "--key", str(key)],
                                input=canonical, capture_output=True, env=environment(home), cwd=home, timeout=30)
-        assert reply.returncode == 0, "fixture release signing failed"
+        assert reply.returncode == 0, \
+            f"fixture release signing failed: {reply.stderr.decode(errors='replace').strip()}"
         signature = json.loads(reply.stdout)
         return {"payload": payload, "signature": signature["signature"], "signer_did": signature["signer_did"]}
 
     try:
+        prepare_installed_components(data)
         version = subprocess.run([str(runtime), "--version"], capture_output=True, text=True,
                                  env=environment(home), cwd=home, timeout=30, check=True).stdout.strip().removeprefix("elastos ")
         assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", version)

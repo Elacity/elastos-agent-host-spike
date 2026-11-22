@@ -1,7 +1,7 @@
 //! An executable pinned by the caller's verified release metadata.
 use sha2::{Digest, Sha256};
 #[cfg(target_os = "macos")]
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom};
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt as _;
 #[cfg(target_os = "linux")]
@@ -9,8 +9,6 @@ use std::os::{
     fd::{AsRawFd, FromRawFd},
     unix::fs::FileExt as _,
 };
-#[cfg(target_os = "macos")]
-use std::sync::OnceLock;
 use std::{
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
@@ -27,8 +25,8 @@ pub struct PreparedExecutable {
     /// Removing this directory removes the only path to the verified copy.
     /// The provider bridge owns it until the provider process is reaped, so a
     /// provider that resolves `current_exe()` after Init still finds itself.
-    /// A Runtime killed with SIGKILL cannot drop this directory. A marked
-    /// copy is recovered on the next start of the same Home.
+    /// A Runtime killed with SIGKILL cannot drop this directory. The next
+    /// locked start of the same Home recovers its leftover copies.
     #[cfg(target_os = "macos")]
     _private_dir: tempfile::TempDir,
     exec_path: PathBuf,
@@ -37,158 +35,109 @@ pub struct PreparedExecutable {
 #[cfg(target_os = "macos")]
 const COPY_PREFIX: &str = "elastos-provider-";
 #[cfg(target_os = "macos")]
-static RECOVERY_OWNER: OnceLock<RecoveryOwner> = OnceLock::new();
-
-#[cfg(target_os = "macos")]
-struct RecoveryOwner {
-    token: String,
-    temp_dir: PathBuf,
+fn copy_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("provider-copies")
 }
 
 #[cfg(target_os = "macos")]
-impl RecoveryOwner {
-    fn from_home(data_dir: &Path) -> Result<Self, String> {
+fn private_copy_root(data_dir: &Path, create: bool) -> Result<Option<PathBuf>, String> {
+    if create {
         std::fs::create_dir_all(data_dir)
-            .map_err(|e| format!("provider copy owner directory cannot be created: {e}"))?;
-        let key_path = data_dir.join("provider-copy-owner");
-        let token = if key_path.exists() {
-            Self::read_token(&key_path)?
-        } else {
-            let token = uuid::Uuid::new_v4().simple().to_string();
-            let mut file = tempfile::NamedTempFile::new_in(data_dir)
-                .map_err(|e| format!("provider copy owner staging file cannot be created: {e}"))?;
-            file.as_file_mut()
-                .set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("provider copy owner permissions cannot be set: {e}"))?;
-            file.as_file_mut()
-                .write_all(token.as_bytes())
-                .and_then(|_| file.as_file_mut().sync_all())
-                .map_err(|e| format!("provider copy owner cannot be saved: {e}"))?;
-            match file.persist_noclobber(&key_path) {
-                Ok(_) => token,
-                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    Self::read_token(&key_path)?
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "provider copy owner cannot be installed: {}",
-                        error.error
-                    ));
-                }
-            }
-        };
-        let temp_dir = std::env::temp_dir()
-            .canonicalize()
-            .map_err(|e| format!("provider copy temporary directory cannot be resolved: {e}"))?;
-        Ok(Self { token, temp_dir })
+            .map_err(|e| format!("provider copy Home cannot be created: {e}"))?;
     }
-
-    fn read_token(key_path: &Path) -> Result<String, String> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(key_path)
-            .map_err(|e| format!("provider copy owner cannot be opened: {e}"))?;
-        let metadata = file
-            .metadata()
-            .map_err(|e| format!("provider copy owner cannot be inspected: {e}"))?;
-        if !metadata.is_file()
-            || metadata.uid() != unsafe { libc::geteuid() }
-            || metadata.permissions().mode() & 0o077 != 0
-        {
-            return Err("provider copy owner has unsafe permissions".into());
+    let home = std::fs::symlink_metadata(data_dir)
+        .map_err(|e| format!("provider copy Home cannot be inspected: {e}"))?;
+    if !home.is_dir()
+        || home.uid() != unsafe { libc::geteuid() }
+        || home.permissions().mode() & 0o022 != 0
+    {
+        return Err("provider copy Home has unsafe ownership or permissions".into());
+    }
+    let root = copy_root(data_dir);
+    if create {
+        use std::os::unix::fs::DirBuilderExt as _;
+        match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "provider copy directory cannot be created: {error}"
+                ))
+            }
         }
-        let mut token = String::new();
-        file.take(33)
-            .read_to_string(&mut token)
-            .map_err(|e| format!("provider copy owner cannot be read: {e}"))?;
-        if token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("provider copy owner has invalid contents".into());
+    }
+    let metadata = match std::fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if !create && error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "provider copy directory cannot be inspected: {error}"
+            ))
         }
-        Ok(token)
+    };
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err("provider copy directory has unsafe ownership or permissions".into());
     }
-
-    fn copy_prefix(&self) -> String {
-        format!(
-            "{COPY_PREFIX}{}-{}-{}-",
-            self.token,
-            std::process::id(),
-            unsafe { libc::getpgrp() }
-        )
-    }
-
-    fn recover_stale(&self) -> Result<(), String> {
-        let entries = std::fs::read_dir(&self.temp_dir)
-            .map_err(|e| format!("provider copy temporary directory cannot be listed: {e}"))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("provider copy entry cannot be read: {e}"))?;
-            let file_name = entry.file_name();
-            let Some(name) = file_name.to_str() else {
-                continue;
-            };
-            let owner_prefix = format!("{COPY_PREFIX}{}-", self.token);
-            let Some(identifiers) = name.strip_prefix(&owner_prefix) else {
-                continue;
-            };
-            let parts = identifiers.split('-').collect::<Vec<_>>();
-            if parts.len() != 3
-                || parts[2].len() != 6
-                || !parts[2].bytes().all(|b| b.is_ascii_alphanumeric())
-            {
-                continue;
-            }
-            let path = entry.path();
-            let metadata = std::fs::symlink_metadata(&path)
-                .map_err(|e| format!("provider copy entry cannot be inspected: {e}"))?;
-            if !metadata.is_dir()
-                || metadata.uid() != unsafe { libc::geteuid() }
-                || metadata.permissions().mode() & 0o777 != 0o700
-            {
-                continue;
-            }
-            let (Ok(pid), Ok(pgid)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
-                continue;
-            };
-            if pid <= 0 || pgid <= 0 {
-                continue;
-            }
-            if !process_is_gone(pid) || !process_is_gone(-pgid) {
-                continue;
-            }
-            let current = std::fs::symlink_metadata(&path)
-                .map_err(|e| format!("provider copy entry changed before recovery: {e}"))?;
-            if (metadata.dev(), metadata.ino()) != (current.dev(), current.ino()) {
-                continue;
-            }
-            std::fs::remove_dir_all(&path)
-                .map_err(|e| format!("owned stale provider copy cannot be removed: {e}"))?;
-        }
-        Ok(())
-    }
+    Ok(Some(root))
 }
 
-#[cfg(target_os = "macos")]
-fn process_is_gone(pid: i32) -> bool {
-    pid != 0
-        && unsafe { libc::kill(pid, 0) } < 0
-        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-}
-
-/// Recover only copies named with this Home's owner token after the owner and
-/// its process group have both exited. Live providers keep their own copy.
+/// Call only while holding this Home's host process lock. Its exclusive lock
+/// makes every copy left by an earlier Runtime stale.
 #[cfg(target_os = "macos")]
 pub fn recover_verified_copies(data_dir: &Path) -> Result<(), String> {
-    let owner = RecoveryOwner::from_home(data_dir)?;
-    if let Some(existing) = RECOVERY_OWNER.get() {
-        if existing.token != owner.token || existing.temp_dir != owner.temp_dir {
-            return Err("provider copy owner changed during this Runtime".into());
+    let Some(root) = private_copy_root(data_dir, false)? else {
+        return Ok(());
+    };
+    let entries = std::fs::read_dir(&root)
+        .map_err(|e| format!("provider copy directory cannot be listed: {e}"))?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!("provider copy entry cannot be read: {error}");
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(suffix) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(COPY_PREFIX))
+        else {
+            continue;
+        };
+        if suffix.len() != 6 || !suffix.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            continue;
         }
-    } else {
-        RECOVERY_OWNER
-            .set(owner)
-            .map_err(|_| "provider copy owner changed during this Runtime".to_string())?;
+        let path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), "provider copy cannot be inspected: {error}");
+                continue;
+            }
+        };
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o777 != 0o700
+        {
+            continue;
+        }
+        match std::fs::symlink_metadata(&path) {
+            Ok(current) if (metadata.dev(), metadata.ino()) == (current.dev(), current.ino()) => {}
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), "provider copy changed during recovery: {error}");
+                continue;
+            }
+        }
+        if let Err(error) = std::fs::remove_dir_all(&path) {
+            tracing::warn!(path = %path.display(), "provider copy cannot be removed: {error}");
+        }
     }
-    RECOVERY_OWNER.get().unwrap().recover_stale()
+    Ok(())
 }
 
 impl PreparedExecutable {
@@ -230,6 +179,7 @@ pub struct CheckedExecutable {
     digest: [u8; 32],
     refusal: Option<String>,
     siblings: Vec<&'static str>,
+    home_data_dir: Option<PathBuf>,
 }
 
 impl CheckedExecutable {
@@ -245,6 +195,7 @@ impl CheckedExecutable {
             digest,
             refusal: None,
             siblings: Vec::new(),
+            home_data_dir: None,
         })
     }
 
@@ -254,7 +205,14 @@ impl CheckedExecutable {
             digest: [0; 32],
             refusal: Some(reason),
             siblings: Vec::new(),
+            home_data_dir: None,
         }
+    }
+
+    /// Bind the verified provider's private copy to the Home it serves.
+    pub fn with_home_data_dir(mut self, data_dir: &Path) -> Self {
+        self.home_data_dir = Some(data_dir.to_path_buf());
+        self
     }
 
     /// Names a companion file the provider finds beside its own executable.
@@ -325,13 +283,14 @@ impl CheckedExecutable {
         }
         #[cfg(target_os = "macos")]
         {
-            use std::os::unix::fs::PermissionsExt as _;
-            let prefix = RECOVERY_OWNER
-                .get()
-                .map_or_else(|| COPY_PREFIX.to_string(), RecoveryOwner::copy_prefix);
+            let data_dir = self
+                .home_data_dir
+                .as_ref()
+                .ok_or("provider executable copy requires a Home data directory")?;
+            let root = private_copy_root(data_dir, true)?.unwrap();
             let private_dir = tempfile::Builder::new()
-                .prefix(&prefix)
-                .tempdir()
+                .prefix(COPY_PREFIX)
+                .tempdir_in(&root)
                 .map_err(|e| format!("provider executable copy cannot be created: {e}"))?;
             std::fs::set_permissions(private_dir.path(), std::fs::Permissions::from_mode(0o700))
                 .map_err(|e| format!("provider executable copy cannot be made private: {e}"))?;
@@ -400,37 +359,79 @@ mod macos_recovery_tests {
     use super::*;
 
     #[test]
-    fn checked_executable_recovery_removes_only_its_stale_copy() {
-        let temp = tempfile::tempdir().unwrap();
-        let owner = RecoveryOwner {
-            token: uuid::Uuid::new_v4().simple().to_string(),
-            temp_dir: temp.path().to_path_buf(),
-        };
+    fn checked_executable_recovery_removes_only_owned_copies() {
+        let home = tempfile::tempdir().unwrap();
+        let root = private_copy_root(home.path(), true).unwrap().unwrap();
         let stale = tempfile::Builder::new()
-            .prefix(&format!(
-                "{COPY_PREFIX}{}-{}-{}-",
-                owner.token,
-                i32::MAX,
-                i32::MAX
-            ))
-            .tempdir_in(temp.path())
+            .prefix(COPY_PREFIX)
+            .tempdir_in(&root)
             .unwrap();
         let stale_path = stale.path().to_path_buf();
         std::fs::set_permissions(&stale_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = home.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, stale_path.join("external")).unwrap();
         std::mem::forget(stale);
-        let live = tempfile::Builder::new()
-            .prefix(&owner.copy_prefix())
-            .tempdir_in(temp.path())
-            .unwrap();
-        let foreign = tempfile::Builder::new()
-            .prefix(COPY_PREFIX)
-            .tempdir_in(temp.path())
-            .unwrap();
+        let foreign = root.join("other-provider-ABCDEF");
+        std::fs::create_dir(&foreign).unwrap();
+        let link = root.join("elastos-provider-ABCDEF");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        owner.recover_stale().unwrap();
-        assert!(!stale_path.exists());
-        assert!(live.path().exists());
-        assert!(foreign.path().exists());
+        recover_verified_copies(home.path()).unwrap();
+        assert!(!stale_path.exists(), "{}", stale_path.display());
+        assert!(foreign.exists());
+        assert!(link.exists());
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn checked_executable_recovery_refuses_unsafe_root() {
+        let home = tempfile::tempdir().unwrap();
+        let root = private_copy_root(home.path(), true).unwrap().unwrap();
+        let copy = tempfile::Builder::new()
+            .prefix(COPY_PREFIX)
+            .tempdir_in(&root)
+            .unwrap();
+        let copy_path = copy.path().to_path_buf();
+        std::fs::set_permissions(&copy_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::mem::forget(copy);
+        // The caller warns and continues when this root is unsafe.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(recover_verified_copies(home.path()).is_err());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        recover_verified_copies(home.path()).unwrap();
+        assert!(!copy_path.exists(), "{}", copy_path.display());
+    }
+
+    #[test]
+    fn checked_executable_recovery_continues_after_undeletable_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let root = private_copy_root(home.path(), true).unwrap().unwrap();
+        let blocked = tempfile::Builder::new()
+            .prefix(COPY_PREFIX)
+            .tempdir_in(&root)
+            .unwrap();
+        let blocked_path = blocked.path().to_path_buf();
+        std::fs::set_permissions(&blocked_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let inner = blocked_path.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        std::fs::write(inner.join("file"), b"held").unwrap();
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::mem::forget(blocked);
+        let removable = tempfile::Builder::new()
+            .prefix(COPY_PREFIX)
+            .tempdir_in(&root)
+            .unwrap();
+        let removable_path = removable.path().to_path_buf();
+        std::fs::set_permissions(&removable_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::mem::forget(removable);
+
+        recover_verified_copies(home.path()).unwrap();
+        assert!(blocked_path.exists());
+        assert!(!removable_path.exists());
+        std::fs::set_permissions(&inner, std::fs::Permissions::from_mode(0o700)).unwrap();
+        recover_verified_copies(home.path()).unwrap();
+        assert!(!blocked_path.exists());
     }
 }
 
@@ -450,6 +451,7 @@ impl CheckedExecutable {
             digest: Sha256::digest(bytes).into(),
             refusal: None,
             siblings: Vec::new(),
+            home_data_dir: path.parent().map(Path::to_path_buf),
         }
     }
 }

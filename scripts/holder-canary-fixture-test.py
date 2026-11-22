@@ -25,7 +25,7 @@ class HolderFixtureTests(unittest.TestCase):
             data.mkdir(parents=True)
             runtime = home / "elastos"
             runtime.write_bytes(b"fixture runtime")
-            (data / "components.json").write_bytes(b"fixture components")
+            (data / "components.json").write_text('{"external": {}}')
             domains = []
 
             def run(argv, **kwargs):
@@ -81,7 +81,7 @@ class HolderFixtureTests(unittest.TestCase):
             for name in ("release.json", "release-head.json"):
                 (installation / name).write_bytes(b"old release")
                 (installation / name).chmod(0o600)
-            (data / "components.json").write_bytes(b"final components")
+            (data / "components.json").write_text('{"external": {}}')
             original = {"schema": "elastos.trusted-sources/v1", "default_source": "source",
                 "sources": [{"name": "source", "publisher_dids": ["did:key:source"],
                              "channel": "stable", "connect_ticket": "fixture-ticket",
@@ -141,11 +141,107 @@ class HolderFixtureTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 fixture.restrict_components(data, published, ["localhost-provider"])
 
+    def test_sign_install_completes_home_cli_receipts_and_checks_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            data = home / "data"
+            (data / "capsules/home-cli/bin").mkdir(parents=True)
+            (data / "bin").mkdir()
+            renderer = data / "capsules/home-cli/bin/home-cli"
+            renderer.write_bytes(b"renderer")
+            provider = data / "bin/localhost-provider"
+            provider.write_bytes(b"provider")
+            archive = "sha256:" + hashlib.sha256(b"home-cli archive").hexdigest()
+            manifest = {"external": {
+                "home-cli": {"install_path": "capsules/home-cli", "platforms": {
+                    "linux-amd64": {"checksum": archive, "extract_path": "home-cli"}}},
+                "localhost-provider": {"install_path": "bin/localhost-provider", "platforms": {
+                    "linux-amd64": {"checksum": "sha256:" + fixture.sha(provider)}}}}}
+            (data / "components.json").write_text(json.dumps(manifest))
+            runtime = home / "elastos"
+            runtime.write_bytes(b"runtime")
+
+            def run(argv, **kwargs):
+                if argv[1] == "--version":
+                    return subprocess.CompletedProcess(argv, 0, stdout="elastos 2.0.1\n")
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
+                    "signature": "fixture-signature", "signer_did": "did:key:fixture"}).encode())
+
+            with patch.object(fixture.subprocess, "run", side_effect=run), \
+                 patch.object(fixture, "release_platform", return_value="x86_64-linux"), \
+                 patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                fixture.sign_install(home, data, runtime, lambda path: {"HOME": str(path)})
+            actual = json.loads((data / "components.json").read_text())
+            info = actual["external"]["home-cli"]["platforms"]["linux-amd64"]
+            self.assertEqual(info["executable_checksum"], "sha256:" + fixture.sha(renderer))
+            self.assertEqual((data / "capsules/home-cli/.elastos-artifact-sha256").read_text(),
+                             archive[7:] + "\n")
+            self.assertEqual((data / "capsules/home-cli/.elastos-executable-sha256").read_text(),
+                             fixture.sha(renderer) + "\n")
+            release = json.loads((data / "ElastOS/SystemServices/Publisher/release.json").read_text())
+            self.assertEqual(release["payload"]["platforms"]["x86_64-linux"]["components"],
+                             fixture.descriptor(data / "components.json"))
+            with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                provider.write_bytes(b"changed")
+                with self.assertRaisesRegex(AssertionError, "installed bytes differ"):
+                    fixture.prepare_installed_components(data)
+                provider.write_bytes(b"provider")
+                renderer.write_bytes(b"changed")
+                with self.assertRaisesRegex(AssertionError, "differs from catalogue digest"):
+                    fixture.prepare_installed_components(data)
+
+    def test_archive_binary_uses_its_capsule_metadata_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            (data / "bin").mkdir()
+            (data / "capsules/kubo").mkdir(parents=True)
+            (data / "bin/kubo").write_bytes(b"kubo executable")
+            (data / "capsules/kubo/ipfs").write_bytes(b"kubo executable")
+            archive = "sha256:" + hashlib.sha256(b"archive").hexdigest()
+            manifest = {"external": {"kubo": {
+                "platforms": {"linux-amd64": {"checksum": archive, "install_path": "bin/kubo",
+                                               "extract_path": "kubo/ipfs"}},
+                "capsule_metadata": {"install_path": "capsules/kubo", "platforms": {
+                    "linux-amd64": {"checksum": archive, "extract_path": "kubo"}}}}}}
+            (data / "components.json").write_text(json.dumps(manifest))
+            with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                fixture.prepare_installed_components(data)
+                self.assertEqual((data / "capsules/kubo/.elastos-artifact-sha256").read_text(),
+                                 archive[7:] + "\n")
+                self.assertEqual((data / "capsules/kubo/.elastos-executable-sha256").read_text(),
+                                 fixture.sha(data / "bin/kubo") + "\n")
+                (data / "capsules/kubo/ipfs").write_bytes(b"changed")
+                with self.assertRaisesRegex(AssertionError, "differs from archive metadata"):
+                    fixture.prepare_installed_components(data)
+
+    def test_extracted_fixture_helper_gets_a_direct_installed_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            (data / "bin").mkdir()
+            binary = data / "bin/kubo"
+            binary.write_bytes(b"kubo executable")
+            manifest = {"external": {"kubo": {"platforms": {"linux-amd64": {
+                "checksum": "sha256:" + hashlib.sha256(b"archive").hexdigest(),
+                "size": 999, "extract_path": "kubo/ipfs", "install_path": "bin/kubo",
+                "strategy": "source-build"}}}}}
+            (data / "components.json").write_text(json.dumps(manifest))
+            with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                fixture.prepare_installed_components(data)
+                info = json.loads((data / "components.json").read_text())["external"]["kubo"]["platforms"]["linux-amd64"]
+                self.assertEqual(info["checksum"], "sha256:" + fixture.sha(binary))
+                self.assertEqual(info["size"], binary.stat().st_size)
+                self.assertNotIn("extract_path", info)
+                self.assertNotIn("strategy", info)
+                binary.write_bytes(b"changed")
+                with self.assertRaisesRegex(AssertionError, "installed bytes differ"):
+                    fixture.prepare_installed_components(data)
+
     def test_signing_failure_removes_disposable_key(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             data = home / "data"
             data.mkdir()
+            (data / "components.json").write_text('{"external": {}}')
             with patch.object(fixture.subprocess, "run", side_effect=RuntimeError("signing failed")):
                 with self.assertRaisesRegex(RuntimeError, "signing failed"):
                     fixture.sign_install(home, data, home / "elastos", lambda path: {"HOME": str(path)})
@@ -156,6 +252,25 @@ class HolderFixtureTests(unittest.TestCase):
                     fixture.sign_install(home, data, home / "elastos", lambda path: {"HOME": str(path)})
             run.assert_not_called()
             self.assertEqual((data / ".ci-publisher.key").read_text(), "existing")
+
+    def test_signing_failure_keeps_runtime_cause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            data = home / "data"
+            data.mkdir()
+            (data / "components.json").write_text('{"external": {}}')
+            runtime = home / "elastos"
+            runtime.write_bytes(b"runtime")
+
+            def run(argv, **kwargs):
+                if argv[1] == "--version":
+                    return subprocess.CompletedProcess(argv, 0, stdout="elastos 2.0.1\n")
+                return subprocess.CompletedProcess(argv, 1, stderr=b"fixture signing cause")
+
+            with patch.object(fixture.subprocess, "run", side_effect=run):
+                with self.assertRaisesRegex(AssertionError, "fixture signing cause"):
+                    fixture.sign_install(home, data, runtime, lambda path: {"HOME": str(path)})
+            self.assertFalse((data / ".ci-publisher.key").exists())
 
     def test_native_provider_exe_matches_both_generations(self):
         provider = Path("/fixture/bin/ipfs-provider")

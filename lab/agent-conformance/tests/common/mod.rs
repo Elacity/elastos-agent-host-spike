@@ -50,7 +50,11 @@ pub fn write_operator_home(
         .arg(runtime)
         .output()?;
     if !signing.status.success() {
-        return Err("operator fixture release signing failed".into());
+        return Err(format!(
+            "operator fixture release signing failed: {}",
+            String::from_utf8_lossy(&signing.stderr).trim()
+        )
+        .into());
     }
     Ok(installed)
 }

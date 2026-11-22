@@ -19,7 +19,7 @@ pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> Ch
     // Home they run against; an executable inside the Home is always admitted.
     #[cfg(test)]
     if path.is_file() && !path.starts_with(data_dir) {
-        return crate::test_support::fixture_executable(path);
+        return crate::test_support::fixture_executable(path).with_home_data_dir(data_dir);
     }
     let admitted = path
         .file_name()
@@ -30,7 +30,9 @@ pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> Ch
         // digest at spawn and runs the bytes it checked (CheckedExecutable).
         .and_then(|verified| {
             let checksum = verified.signed_checksum()?;
-            CheckedExecutable::pinned(path, checksum).map_err(anyhow::Error::msg)
+            CheckedExecutable::pinned(path, checksum)
+                .map(|checked| checked.with_home_data_dir(data_dir))
+                .map_err(anyhow::Error::msg)
         });
     admitted.unwrap_or_else(|error| {
         CheckedExecutable::refused(

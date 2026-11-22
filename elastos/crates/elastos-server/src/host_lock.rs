@@ -86,7 +86,12 @@ pub fn acquire_host_process_lock(
     if !matches!(role, "update" | "update-recovery") {
         authorize_host_process_start(data_dir)?;
     }
-    acquire_host_process_lock_inner(data_dir, role, addr)
+    let lock = acquire_host_process_lock_inner(data_dir, role, addr)?;
+    #[cfg(target_os = "macos")]
+    if let Err(reason) = elastos_runtime::provider::recover_verified_copies(data_dir) {
+        tracing::warn!("provider copy recovery skipped: {reason}");
+    }
+    Ok(lock)
 }
 
 pub(crate) fn acquire_principal_root_update_lock(
@@ -546,6 +551,59 @@ mod tests {
                 .contains("another ElastOS host already owns"),
             "unexpected error: {err}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn killed_runtime_copy_is_recovered_after_next_host_lock() {
+        use sha2::Digest as _;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        const CHILD_HOME: &str = "ELASTOS_TEST_KILLED_COPY_HOME";
+        if let Some(home) = std::env::var_os(CHILD_HOME) {
+            let home = PathBuf::from(home);
+            let _lock = acquire_host_process_lock(&home, "serve", "fixture").unwrap();
+            let binary = home.join("provider");
+            let checksum = format!(
+                "sha256:{:x}",
+                sha2::Sha256::digest(fs::read(&binary).unwrap())
+            );
+            let _copy = elastos_runtime::provider::CheckedExecutable::pinned(&binary, &checksum)
+                .unwrap()
+                .with_home_data_dir(&home)
+                .verify_at_spawn()
+                .unwrap();
+            unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+            unreachable!("SIGKILL did not stop the fixture Runtime");
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("provider"), b"#!/bin/sh\nexit 0\n").unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host_lock::tests::killed_runtime_copy_is_recovered_after_next_host_lock",
+            ])
+            .env(CHILD_HOME, home.path())
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        let root = home.path().join("provider-copies");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let _lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn provider_copy_recovery_problem_does_not_abort_host_start() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("provider-copies");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o500)).unwrap();
+        let _lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
     }
 
     #[test]

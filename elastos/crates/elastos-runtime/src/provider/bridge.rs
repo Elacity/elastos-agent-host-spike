@@ -2634,57 +2634,32 @@ impl ProviderBridge {
 
     #[cfg(target_os = "macos")]
     fn watch_executable_copy(&self) {
-        let child = Arc::downgrade(&self.child);
-        let copy = Arc::downgrade(&self.executable_copy);
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
-        let mut sigint =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
+        let child = self.child.clone();
+        let copy = self.executable_copy.clone();
         tokio::spawn(async move {
             loop {
-                let (Some(copy_ref), Some(child_ref)) = (copy.upgrade(), child.upgrade()) else {
-                    return;
-                };
-                if copy_ref.lock().await.is_none() {
+                if copy.lock().await.is_none() {
                     return;
                 }
                 let reaped = {
-                    let mut guard = child_ref.lock().await;
+                    let mut guard = child.lock().await;
                     match guard.as_mut() {
-                        Some(process) => matches!(process.try_wait(), Ok(Some(_))),
+                        Some(process) => {
+                            // Dropping a bridge ends its provider. Hold the copy
+                            // until the child is reaped, even across that drop.
+                            if Arc::strong_count(&child) == 1 {
+                                let _ = process.start_kill();
+                            }
+                            matches!(process.try_wait(), Ok(Some(_)))
+                        }
                         None => true,
                     }
                 };
                 if reaped {
-                    copy_ref.lock().await.take();
+                    copy.lock().await.take();
                     return;
                 }
-                // A weak watcher never keeps a dropped bridge or child alive.
-                drop(child_ref);
-                drop(copy_ref);
-                let stopping = tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => false,
-                    _ = async { match &mut sigterm { Some(signal) => { signal.recv().await; }, None => std::future::pending().await } } => true,
-                    _ = async { match &mut sigint { Some(signal) => { signal.recv().await; }, None => std::future::pending().await } } => true,
-                };
-                if stopping {
-                    let (Some(copy_ref), Some(child_ref)) = (copy.upgrade(), child.upgrade())
-                    else {
-                        return;
-                    };
-                    let mut guard = child_ref.lock().await;
-                    if let Some(process) = guard.as_mut() {
-                        let _ = process.start_kill();
-                        if matches!(
-                            tokio::time::timeout(std::time::Duration::from_secs(1), process.wait())
-                                .await,
-                            Ok(Ok(_))
-                        ) {
-                            copy_ref.lock().await.take();
-                        }
-                    }
-                    return;
-                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         });
     }
@@ -4260,6 +4235,7 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
+        assert!(copy_dir.exists(), "a running provider retains its copy");
         let pid = bridge.child.lock().await.as_ref().unwrap().id().unwrap();
         assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -4282,6 +4258,9 @@ mod tests {
             .verify_at_spawn()
             .unwrap();
         let copy_dir = prepared.exec_path().parent().unwrap().to_path_buf();
+        let root = temp.path().join("provider-copies");
+        assert_eq!(copy_dir.parent(), Some(root.as_path()));
+        assert!(copy_dir.exists(), "spawn receives a copy in its Home");
         let command = Command::new(prepared.exec_path());
         let result = ProviderBridge::spawn_command(
             prepared,
