@@ -7388,6 +7388,80 @@ pub(crate) mod tests {
         grants.abort();
     }
 
+    /// The router row above refuses an already-expired token at the gateway
+    /// (`home launch token expired`) and never calls `start_agent_once`. This
+    /// row verifies a grant while that check still accepts it, then calls the
+    /// Runtime gate once the same `expires_at` is in the past.
+    #[tokio::test]
+    async fn agent_launch_grant_past_expiry_is_refused_at_the_runtime_gate() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = &home.agents[0];
+        let issued_at = crate::auth::now_ts();
+        // Inside the 60-second agent cap, and long enough that verification
+        // finishes while the grant is still valid. The gate then waits out
+        // this same lifetime on the wall clock.
+        let expires_at = issued_at + 2;
+        let grant = gateway::issue_home_agent_launch_token_at_for_test(
+            &home.data_dir,
+            agent,
+            PROBE_HOST,
+            &home.context,
+            issued_at,
+            expires_at,
+        )
+        .unwrap();
+        let (launcher, launch_id, verified_exp) =
+            super::agent_launch_grant(&home.data_dir, PROBE_HOST, agent, Some(grant))
+                .expect("the grant is valid when the gateway verifies it");
+        assert_eq!(verified_exp, expires_at);
+        assert!(
+            verified_exp > crate::auth::now_ts(),
+            "verification finished before the grant expired"
+        );
+        let principal = launcher.principal_str().to_string();
+        let walked = crate::agent_admission::walk_launch(&home.capsule_dir).unwrap();
+        let admission = super::admit_agent_launch(
+            Some(&home.data_dir),
+            walked,
+            Some(principal.as_str()),
+            agent,
+        )
+        .expect("the stored agent is admitted");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if verified_exp <= now {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the wall clock did not reach the verified expiry"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let err = home
+            .runtime
+            .start_agent_once(&home.capsule_dir, admission, &launch_id, verified_exp)
+            .await
+            .expect_err("the runtime gate refuses the expired grant");
+        match err {
+            elastos_common::ElastosError::InvalidManifest(message) => {
+                assert_eq!(message, "agent launch grant expired");
+            }
+            other => panic!("expected the runtime expiry refusal, got {other}"),
+        }
+        assert!(
+            home.runtime.list_capsules().await.is_empty(),
+            "an expired grant started a guest"
+        );
+    }
+
     #[tokio::test]
     async fn agent_launch_id_is_one_use_after_the_guest_ends() {
         if crate::agents::require_build().is_err() {
