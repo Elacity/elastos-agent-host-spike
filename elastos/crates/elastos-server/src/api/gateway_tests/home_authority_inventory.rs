@@ -46,6 +46,7 @@ fn gate_decisions() -> BTreeMap<&'static str, (bool, &'static str)> {
             (false, "home-shell actor only"),
         ),
         ("require_internal_shell_launch_grant_principal", (true, "")),
+        ("require_internal_shell_agent_launch_grant", (true, "")),
         ("require_internal_shell_projection_context", (true, "")),
         ("require_launch_bound_token", (true, "")),
         ("require_home_token", (true, "")),
@@ -444,6 +445,13 @@ fn rows() -> Vec<AuthorityRow> {
             "require_internal_shell_launch_grant_principal",
             1,
             "app-grant:walked manifest name binds grant; admits Home only when the walked name is home",
+        ),
+        row(
+            ROUTES,
+            "agent_launch_grant",
+            "require_internal_shell_agent_launch_grant",
+            1,
+            "app-grant:owner's internal-shell grant names one Agent and the walked host actor, lasts at most 60 seconds, and is consumed once by Runtime",
         ),
         row(
             ROUTES,

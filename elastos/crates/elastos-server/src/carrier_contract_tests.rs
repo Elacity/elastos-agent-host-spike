@@ -947,13 +947,7 @@ fn carrier_contract_connect_ticket_construction_inventory() {
         }
     }
     found.sort();
-    let mut expected = vec![
-        "elastos-server/src/api/gateway_model_remote.rs:call_grant",
-        "elastos-server/src/carrier.rs:ensure_content_via_carrier_provider_invocation",
-        "elastos-server/src/carrier.rs:fetch_content_via_carrier_provider_invocation",
-        "elastos-server/src/carrier_engine.rs:call",
-        "elastos-server/src/collaboration_discovery_runtime.rs:invoke_bootstrap",
-    ];
+    let mut expected: Vec<&str> = vec![];
     expected.sort();
     assert_eq!(
         found, expected,

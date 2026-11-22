@@ -2421,15 +2421,36 @@ mod tests {
     struct InventoryInvoker {
         failure: &'static str,
         calls: Mutex<Vec<Value>>,
+        tickets: Mutex<BTreeMap<String, String>>,
     }
     #[async_trait::async_trait]
     impl elastos_runtime::provider::ProviderCarrierInvoker for InventoryInvoker {
+        async fn remember_peer_ticket(
+            &self,
+            peer_did: &str,
+            ticket: &str,
+        ) -> std::result::Result<(), elastos_runtime::provider::ProviderError> {
+            self.tickets
+                .lock()
+                .await
+                .insert(peer_did.into(), ticket.into());
+            Ok(())
+        }
+
         async fn invoke_carrier_provider(
             &self,
-            _: &elastos_runtime::provider::ProviderCarrierRoute,
+            route: &elastos_runtime::provider::ProviderCarrierRoute,
             _: &elastos_runtime::provider::ProviderInvocation,
             request: Value,
         ) -> std::result::Result<Value, elastos_runtime::provider::ProviderError> {
+            if let elastos_runtime::provider::ProviderCarrierRoute::PeerDid { peer_did, .. } = route
+            {
+                if !self.tickets.lock().await.contains_key(peer_did) {
+                    return Err(elastos_runtime::provider::ProviderError::Unavailable(
+                        "Browser inventory peer ticket was not remembered".into(),
+                    ));
+                }
+            }
             self.calls.lock().await.push(request.clone());
             if request["grant_id"] == "unavailable" {
                 match self.failure {
@@ -2461,6 +2482,7 @@ mod tests {
         let invoker = Arc::new(InventoryInvoker {
             failure: "none",
             calls: Mutex::new(Vec::new()),
+            tickets: Mutex::new(BTreeMap::new()),
         });
         registry.set_carrier_invoker(invoker.clone()).await;
         let grant = json!({"grant_id":"healthy","principal_id":"alice","peer_did":peer,
@@ -2578,6 +2600,7 @@ mod tests {
             let invoker = Arc::new(InventoryInvoker {
                 failure,
                 calls: Mutex::new(Vec::new()),
+                tickets: Mutex::new(BTreeMap::new()),
             });
             registry.set_carrier_invoker(invoker.clone()).await;
             let selected = selected_inventory(

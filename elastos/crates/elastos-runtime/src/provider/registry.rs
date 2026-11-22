@@ -590,6 +590,16 @@ pub struct ProviderInvocation {
 /// Runtime plug-in point for Carrier provider-plane transport.
 #[async_trait::async_trait]
 pub trait ProviderCarrierInvoker: Send + Sync {
+    /// Give an adapter a peer's private connection coordinates before DID routing.
+    async fn remember_peer_ticket(
+        &self,
+        _peer_did: &str,
+        _ticket: &str,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Unavailable(
+            "Carrier invoker cannot remember peer tickets".into(),
+        ))
+    }
     /// Send an already Runtime-enveloped provider request to a remote Carrier peer.
     async fn invoke_carrier_provider(
         &self,
@@ -862,6 +872,19 @@ impl ProviderRegistry {
     /// Register the Runtime-owned Carrier provider-plane invoker.
     pub async fn set_carrier_invoker(&self, invoker: Arc<dyn ProviderCarrierInvoker>) {
         *self.carrier_invoker.write().await = Some(invoker);
+    }
+
+    pub async fn remember_carrier_peer_ticket(
+        &self,
+        peer_did: &str,
+        ticket: &str,
+    ) -> Result<(), ProviderError> {
+        let invoker = self.carrier_invoker.read().await.clone().ok_or_else(|| {
+            ProviderError::Unavailable(
+                "Carrier peer routing is not available on this Runtime".into(),
+            )
+        })?;
+        invoker.remember_peer_ticket(peer_did, ticket).await
     }
 
     /// Register a provider for its schemes
@@ -3666,6 +3689,40 @@ mod tests {
                 }
             }))
         }
+    }
+
+    #[tokio::test]
+    async fn invoker_without_ticket_storage_refuses_before_remote_call() {
+        let registry = ProviderRegistry::new();
+        let invoker = Arc::new(MockCarrierInvoker::default());
+        registry.set_carrier_invoker(invoker.clone()).await;
+        let peer_did = "did:key:peer-that-needs-a-ticket";
+        let result: Result<serde_json::Value, ProviderError> = async {
+            registry
+                .remember_carrier_peer_ticket(peer_did, "ticket:private-coordinates")
+                .await?;
+            registry
+                .invoke_provider(ProviderInvocation {
+                    source: "test".into(),
+                    target: "content".into(),
+                    op: "fetch".into(),
+                    request: serde_json::json!({"op":"fetch"}),
+                    transfer: ProviderTransfer::Json,
+                    range: None,
+                    progress: None,
+                    transport: ProviderInvocationTransport::Carrier(
+                        ProviderCarrierRoute::PeerDid {
+                            peer_did: peer_did.into(),
+                            timeout_ms: Some(5_000),
+                            reply_wait_ms: None,
+                        },
+                    ),
+                })
+                .await
+        }
+        .await;
+        assert!(matches!(result, Err(ProviderError::Unavailable(_))));
+        assert!(invoker.requests.lock().await.is_empty());
     }
 
     #[test]

@@ -13,4 +13,11 @@
 # see the growth and decide on it. When the core shrinks more than 50 lines below the
 # budget, lower this number to the new count in the same pull request, so freed room cannot
 # be spent again. Measure with: python3 scripts/core-size.py
-12096
+# +12 lines for the Agent-bound, one-use, short launch grant (A15-R slice 1);
+# main had already grown to 12,120 (+24 over 12,096) without a budget change
+# before this PR, recorded here so the budget matches reality.
+# +173 more after main merged #1750 (B3 S1: the macOS DID helper starts confined under
+# Seatbelt, os_entry.rs macos_start) without a budget change; measured on the merged tree
+# 22 Nov 2026 and recorded so the budget matches reality. This PR adds no core lines beyond
+# its +12.
+12305
