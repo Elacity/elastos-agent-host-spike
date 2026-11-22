@@ -2,7 +2,6 @@
 //! This prepares image bytes; Engine host admission still owns launch readiness.
 
 use super::{replace_directory, ComponentsManifest, PlatformInfo};
-use crate::installed_release::release_cid;
 use anyhow::{bail, ensure, Context};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -115,12 +114,25 @@ pub(super) fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImage
     Ok(Some(entry))
 }
 
+fn signed_image_for_home(data: &Path, info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
+    // A source Home explicitly opted into dev mode can retain an older archive
+    // pin without a signed image entry. An installed release always uses its
+    // signed entry, even if its config still says dev_mode = true.
+    if !info.extra.contains_key("vm_image")
+        && super::source_home_dev_mode(data)
+        && super::installed_release_source(data)?.is_none()
+    {
+        return Ok(None);
+    }
+    signed_image(info)
+}
+
 fn verify_signed_image(
     bundle: &Path,
-    info: &PlatformInfo,
+    entry: Option<&VmImageEntry>,
     digests: &[String; 3],
 ) -> anyhow::Result<()> {
-    if let Some(entry) = signed_image(info)? {
+    if let Some(entry) = entry {
         for (path, size, hash, digest) in [
             (&entry.path, entry.size, &entry.sha256, &digests[0]),
             (
@@ -145,6 +157,27 @@ fn verify_signed_image(
         }
     }
     Ok(())
+}
+
+fn signed_image_receipt(entry: &VmImageEntry) -> Value {
+    json!({
+        "rootfs_sha256": entry.sha256,
+        "kernel_sha256": entry.kernel.sha256,
+        "initrd_sha256": entry.initrd.sha256,
+    })
+}
+
+fn legacy_signed_image_receipt_matches(recorded: &Value, entry: &VmImageEntry) -> bool {
+    // Earlier installations recorded the rootfs CID and release CID. They can
+    // be reused after verify_signed_image has checked all three current signed
+    // digests. New installations record the three digests directly.
+    recorded.as_object().is_some_and(|fields| {
+        fields.len() == 2
+            && fields.get("image_cid").and_then(Value::as_str) == Some(entry.cid.as_str())
+            && fields
+                .get("release_cid")
+                .is_some_and(|cid| cid.is_null() || cid.is_string())
+    })
 }
 
 // Like AuthState's verified-file cache, use inode plus nanosecond change time:
@@ -523,11 +556,13 @@ pub(super) fn component_info<'a>(
         "Browser image package must install to {INSTALL_PATH}"
     );
     validate_info(info)?;
+    if info.extra.contains_key("vm_image") {
+        signed_image(info)?;
+    }
     Ok(info)
 }
 
 fn validate_info(info: &PlatformInfo) -> anyhow::Result<()> {
-    signed_image(info)?;
     ensure!(
         info.install_path.as_deref() == Some(INSTALL_PATH)
             && info.extract_path.as_deref() == Some(NAME)
@@ -613,6 +648,7 @@ pub(super) fn validate_request(
 ) -> anyhow::Result<()> {
     guest_platform(platform)?;
     validate_info(info)?;
+    signed_image_for_home(data, info)?;
     ensure!(
         data.is_absolute() && dest == data.join(INSTALL_PATH),
         "Browser image destination must be the Runtime image-set directory"
@@ -801,10 +837,13 @@ fn verify_installed_with_cancel(
     let dest = data.join(INSTALL_PATH);
     validate_request(data, info, &dest, platform)?;
     check_aliases(data, platform, true)?;
-    ensure!(
-        super::extracted_bundle_cache_stale_reason(&dest, info).is_none(),
-        "Browser image archive identity is stale"
-    );
+    let signed = signed_image_for_home(data, info)?;
+    if signed.is_none() {
+        ensure!(
+            super::extracted_bundle_cache_stale_reason(&dest, info).is_none(),
+            "Browser image archive identity is stale"
+        );
+    }
     ensure!(
         fs::read_to_string(dest.join(RECEIPT_HASH))?.trim()
             == super::compute_sha256_checksum(&dest.join(RECEIPT))?,
@@ -818,25 +857,28 @@ fn verify_installed_with_cancel(
         cancelled,
         || verify_payload_with_cancel(&dest, platform, cancelled),
     )?;
-    verify_signed_image(&dest, info, &digests)?;
-    if let Some(entry) = signed_image(info)? {
-        let recorded: Value = serde_json::from_slice(&fs::read(dest.join(SIGNED_IMAGE))?)?;
-        let release_cid = signed_release_cid(data)?;
+    verify_signed_image(&dest, signed.as_ref(), &digests)?;
+    if let Some(entry) = signed.as_ref() {
+        let receipt = dest.join(SIGNED_IMAGE);
+        let recorded: Value = serde_json::from_slice(
+            &fs::read(&receipt)
+                .with_context(|| {
+                    format!(
+                        "Browser signed image receipt is unavailable: {}",
+                        receipt.display()
+                    )
+                })
+                .map_err(BrowserVmImageInvalid::new)?,
+        )
+        .context("Browser signed image receipt is malformed")
+        .map_err(BrowserVmImageInvalid::new)?;
         ensure!(
-            recorded["image_cid"] == entry.cid
-                && recorded["release_cid"].as_str() == release_cid.as_deref(),
-            "Browser signed image installation receipt differs from release"
+            recorded == signed_image_receipt(entry)
+                || legacy_signed_image_receipt_matches(&recorded, entry),
+            "Browser signed image installation receipt differs from signed image"
         );
     }
     Ok(())
-}
-
-fn signed_release_cid(data: &Path) -> anyhow::Result<Option<String>> {
-    let Some(source) = super::installed_release_source(data)? else {
-        return Ok(None);
-    };
-    let binary = fs::canonicalize(&source.install_path)?;
-    Ok(Some(release_cid(data, &binary, &source)?))
 }
 
 fn check_cancelled(cancelled: Option<&AtomicBool>) -> anyhow::Result<()> {
@@ -1078,13 +1120,12 @@ fn install_archive_reader(
         "Browser image archive is missing a required image-set file"
     );
     let digests = verify_payload_with_cancel(&bundle, platform, Some(cancelled))?;
-    verify_signed_image(&bundle, info, &digests)?;
-    if let Some(entry) = signed_image(info)? {
+    let signed = signed_image_for_home(data, info)?;
+    verify_signed_image(&bundle, signed.as_ref(), &digests)?;
+    if let Some(entry) = signed.as_ref() {
         fs::write(
             bundle.join(SIGNED_IMAGE),
-            serde_json::to_vec(&json!({
-                "release_cid": signed_release_cid(data)?, "image_cid": entry.cid
-            }))?,
+            serde_json::to_vec(&signed_image_receipt(entry))?,
         )?;
     }
     super::write_platform_cache_metadata(info, &bundle)?;
@@ -1205,7 +1246,15 @@ fn image_space(available: u64, archive: u64, unpacked: u64) -> anyhow::Result<()
 /// this release row. `verify_installed` still hashes the files before use.
 pub(super) fn receipts_match(data: &Path, info: &PlatformInfo) -> bool {
     let dest = data.join(INSTALL_PATH);
-    super::extracted_bundle_cache_stale_reason(&dest, info).is_none()
+    let identity_matches = match signed_image_for_home(data, info) {
+        Ok(Some(entry)) => fs::read(dest.join(SIGNED_IMAGE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|receipt| receipt == signed_image_receipt(&entry)),
+        Ok(None) => super::extracted_bundle_cache_stale_reason(&dest, info).is_none(),
+        Err(_) => false,
+    };
+    identity_matches
         && fs::read_to_string(dest.join(RECEIPT_HASH))
             .ok()
             .zip(super::compute_sha256_checksum(&dest.join(RECEIPT)).ok())
@@ -1253,10 +1302,19 @@ pub(super) mod tests {
     }
 
     fn fixture(rootfs: &[u8]) -> Vec<(String, Vec<u8>)> {
+        fixture_for_platform(rootfs, &super::super::detect_platform())
+    }
+
+    fn arm64_fixture(rootfs: &[u8]) -> Vec<(String, Vec<u8>)> {
+        fixture_for_platform(rootfs, "linux-arm64")
+    }
+
+    fn fixture_for_platform(rootfs: &[u8], platform: &str) -> Vec<(String, Vec<u8>)> {
+        let target = guest_platform(platform).unwrap();
         let mut receipt = json!({
-            "schema":"elastos.browser.vm-rootfs-build/v1", "ok":true, "target_platform":"linux-arm64",
+            "schema":"elastos.browser.vm-rootfs-build/v1", "ok":true, "target_platform":target,
             "inputs_sha256":"c".repeat(64),
-            "recipe_options":{"target_platform":"linux-arm64", "rootfs_size":"8192M",
+            "recipe_options":{"target_platform":target, "rootfs_size":"8192M",
                 "debian_suite":"bookworm", "debian_mirror":"https://deb.debian.org/debian",
                 "cdp_timeout_ms":"20000"},
             "size":rootfs.len(), "sha256":sha(rootfs),
@@ -1323,7 +1381,7 @@ pub(super) mod tests {
             "install_path":INSTALL_PATH,"platforms":{(platform.clone()):info}
         });
         fs::write(&manifest_path, serde_json::to_vec(&components).unwrap()).unwrap();
-        crate::protected_content_config::tests::sign_test_install(data);
+        crate::installed_release::tests::sign_test_install(data);
         install_archive(data, &archive, &info, &platform).unwrap();
         verify_installed(data, &info, &platform).unwrap();
     }
@@ -1358,12 +1416,199 @@ pub(super) mod tests {
         super::super::ensure_browser_vm_image_for_local_engine(temp.path())
             .await
             .unwrap();
+        let release_path = elastos_common::localhost::publisher_release_manifest_path(temp.path());
+        let old_release = fs::read(&release_path).unwrap();
+        let paths = FILES.map(|name| temp.path().join(INSTALL_PATH).join(name));
+        let old_image = image_identities(&paths).unwrap();
+        let manifest_path = temp.path().join("components.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["external"][NAME]["description"] = json!("rotated signed release");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        crate::installed_release::tests::sign_test_install(temp.path());
+        assert_ne!(fs::read(&release_path).unwrap(), old_release);
+        super::super::ensure_browser_vm_image_for_local_engine(temp.path())
+            .await
+            .unwrap();
+        assert_eq!(image_identities(&paths).unwrap(), old_image);
+    }
+
+    #[tokio::test]
+    async fn source_home_producer_pin_prepares_on_local_engine_launch_only_in_dev_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("xdg/elastos");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("config.toml"), "dev_mode = true\n").unwrap();
+        let (bytes, mut info) = archive(&arm64_fixture(b"source-image"));
+        info.cid = Some(super::super::catalog_head_cid(&bytes).unwrap());
+        install_archive(&data, &bytes, &info, "linux-arm64").unwrap();
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec(&json!({"external": {NAME: {
+                "install_path": INSTALL_PATH, "platforms": {"linux-arm64": info}
+            }}, "profiles": {}}))
+            .unwrap(),
+        )
+        .unwrap();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let output = std::process::Command::new("python3")
+            .arg(repo.join("scripts/setup-source-home-native-browser-test.py"))
+            .arg("--emit-retained-browser-pin")
+            .arg(&data)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let produced =
+            super::super::load_manifest_from_path(&data.join("components.json")).unwrap();
+        let retained = component_info(&produced, "linux-arm64").unwrap();
+        assert!(retained.cid.is_some() && !retained.extra.contains_key("vm_image"));
+        super::super::ensure_browser_vm_image_in_context_for_platform(
+            &data,
+            super::super::FirstPartyCarrierContext::Runtime,
+            "linux-arm64".into(),
+        )
+        .await
+        .unwrap();
+        let manifest_path = data.join("components.json");
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let mut malformed: Value = serde_json::from_slice(&original_manifest).unwrap();
+        malformed["external"][NAME]["platforms"]["linux-arm64"]["vm_image"] = json!({"bad": true});
+        fs::write(&manifest_path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+        let error = super::super::ensure_browser_vm_image_in_context_for_platform(
+            &data,
+            super::super::FirstPartyCarrierContext::Runtime,
+            "linux-arm64".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.downcast_ref::<BrowserVmImageInvalid>().is_some(),
+            "{error:#}"
+        );
+        fs::write(&manifest_path, original_manifest).unwrap();
+        fs::write(data.join("config.toml"), "dev_mode = false\n").unwrap();
+        assert!(
+            super::super::ensure_browser_vm_image_in_context_for_platform(
+                &data,
+                super::super::FirstPartyCarrierContext::Runtime,
+                "linux-arm64".into(),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn signed_image_receipt_survives_release_rotation_and_refetches_changed_image() {
+        let temp = tempfile::tempdir().unwrap();
+        let (bytes, mut info) = archive(&arm64_fixture(b"signed-image"));
+        info.cid = Some(super::super::catalog_head_cid(&bytes).unwrap());
+        info.extra.insert(
+            "vm_image".into(),
+            json!({"path":"rootfs.ext4", "size":12,
+                "sha256":sha(b"signed-image"),
+                "cid":super::super::catalog_head_cid(b"signed-image").unwrap(),
+                "kernel":{"path":"vmlinux","size":6,"sha256":sha(b"kernel")},
+                "initrd":{"path":"initrd","size":6,"sha256":sha(b"initrd")}}),
+        );
+        install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap();
+        let original = fs::read(temp.path().join(INSTALL_PATH).join("rootfs.ext4")).unwrap();
+        let mut next_release = info.clone();
+        next_release.cid = Some(super::super::catalog_head_cid(b"repacked-archive").unwrap());
+        next_release.checksum = Some(format!("sha256:{}", sha(b"repacked-archive")));
+        verify_installed(temp.path(), &next_release, "darwin-arm64").unwrap();
+        assert!(receipts_match(temp.path(), &next_release));
+        assert_eq!(
+            fs::read(temp.path().join(INSTALL_PATH).join("rootfs.ext4")).unwrap(),
+            original
+        );
+        fs::write(
+            temp.path().join(INSTALL_PATH).join(SIGNED_IMAGE),
+            serde_json::to_vec(&json!({
+                "image_cid": signed_image(&info).unwrap().unwrap().cid,
+                "release_cid": "prior-release"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        verify_installed(temp.path(), &next_release, "darwin-arm64").unwrap();
+
+        let (replacement, mut changed) = archive(&arm64_fixture(b"changed-image"));
+        changed.cid = Some(super::super::catalog_head_cid(&replacement).unwrap());
+        changed.extra = info.extra.clone();
+        let vm_image = changed.extra.get_mut("vm_image").unwrap();
+        vm_image["size"] = json!(b"changed-image".len());
+        vm_image["sha256"] = json!(sha(b"changed-image"));
+        vm_image["cid"] = json!(super::super::catalog_head_cid(b"changed-image").unwrap());
+        assert!(verify_installed(temp.path(), &changed, "darwin-arm64").is_err());
+        assert!(!receipts_match(temp.path(), &changed));
+        install_archive(temp.path(), &replacement, &changed, "darwin-arm64").unwrap();
+        verify_installed(temp.path(), &changed, "darwin-arm64").unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_signed_entry_is_an_invalid_artifact_even_with_dev_mode_config() {
+        let temp = tempfile::tempdir().unwrap();
+        install_signed_browser_vm_image_fixture(temp.path());
+        fs::write(temp.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        let manifest_path = temp.path().join("components.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        let platform = super::super::detect_platform();
+        manifest["external"][NAME]["platforms"][&platform]["vm_image"]["kernel"]["sha256"] =
+            json!("invalid");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        crate::installed_release::tests::sign_test_install(temp.path());
+        let error = super::super::ensure_browser_vm_image_for_local_engine(temp.path())
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<BrowserVmImageInvalid>().is_some(),
+            "{error:#}"
+        );
+        manifest["external"][NAME]["platforms"][&platform]
+            .as_object_mut()
+            .unwrap()
+            .remove("vm_image");
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        crate::installed_release::tests::sign_test_install(temp.path());
+        let missing = super::super::ensure_browser_vm_image_for_local_engine(temp.path())
+            .await
+            .unwrap_err();
+        assert!(
+            missing.downcast_ref::<BrowserVmImageInvalid>().is_some(),
+            "{missing:#}"
+        );
+        assert!(missing.to_string().contains("signed VM image entry"));
+    }
+
+    #[test]
+    fn missing_signed_image_receipt_has_artifact_context() {
+        let temp = tempfile::tempdir().unwrap();
+        install_signed_browser_vm_image_fixture(temp.path());
+        fs::remove_file(temp.path().join(INSTALL_PATH).join(SIGNED_IMAGE)).unwrap();
+        let manifest =
+            super::super::load_manifest_from_path(&temp.path().join("components.json")).unwrap();
+        let info = component_info(&manifest, &super::super::detect_platform()).unwrap();
+        let error =
+            verify_installed(temp.path(), info, &super::super::detect_platform()).unwrap_err();
+        assert!(
+            error.downcast_ref::<BrowserVmImageInvalid>().is_some(),
+            "{error:#}"
+        );
+        assert!(error
+            .to_string()
+            .contains("Browser signed image receipt is unavailable"));
     }
 
     #[test]
     fn signed_image_install_refuses_changed_bytes_and_missing_entry() {
         let temp = tempfile::tempdir().unwrap();
-        let (original, mut info) = archive(&fixture(b"signed-image"));
+        let (original, mut info) = archive(&arm64_fixture(b"signed-image"));
         info.cid = Some(super::super::catalog_head_cid(&original).unwrap());
         assert!(
             install_archive(temp.path(), &original, &info, "darwin-arm64")
@@ -1429,7 +1674,7 @@ pub(super) mod tests {
             .unwrap();
             verify_installed(temp.path(), &info, "darwin-arm64").unwrap();
         }
-        let (changed, mut changed_info) = archive(&fixture(b"changed-image"));
+        let (changed, mut changed_info) = archive(&arm64_fixture(b"changed-image"));
         changed_info.cid = info.cid.clone();
         changed_info.extra = info.extra.clone();
         assert!(
@@ -1443,7 +1688,7 @@ pub(super) mod tests {
             ("vmlinux", b"forged".as_slice()),
             ("initrd", b"forged".as_slice()),
         ] {
-            let mut files = fixture(b"signed-image");
+            let mut files = arm64_fixture(b"signed-image");
             let file = files.iter_mut().find(|(file, _)| file == name).unwrap();
             file.1 = bytes.to_vec();
             let mut receipt: Value = serde_json::from_slice(&files[0].1).unwrap();
@@ -1471,10 +1716,10 @@ pub(super) mod tests {
     fn browser_image_install_update_and_repair_keep_one_complete_set() {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path();
-        let (old, old_info) = archive(&fixture(b"first-image"));
+        let (old, old_info) = archive(&arm64_fixture(b"first-image"));
         install_archive(data, &old, &old_info, "darwin-arm64").unwrap();
         verify_installed(data, &old_info, "darwin-arm64").unwrap();
-        let (next, info) = archive(&fixture(b"next-image"));
+        let (next, info) = archive(&arm64_fixture(b"next-image"));
         install_archive(data, &next, &info, "darwin-arm64").unwrap();
         verify_installed(data, &info, "darwin-arm64").unwrap();
         assert_eq!(
@@ -1499,7 +1744,7 @@ pub(super) mod tests {
         for platform in ["darwin-arm64", "linux-arm64", "linux-amd64"] {
             let temp = tempfile::tempdir().unwrap();
             let data = temp.path();
-            let mut files = fixture(b"original-image");
+            let mut files = arm64_fixture(b"original-image");
             let mut receipt: Value = serde_json::from_slice(&files[0].1).unwrap();
             receipt["target_platform"] = json!(guest_platform(platform).unwrap());
             files[0].1 = serde_json::to_vec(&receipt).unwrap();
@@ -1536,7 +1781,7 @@ pub(super) mod tests {
     fn browser_image_disk_reader_verifies_before_replacing_and_cleans_cancelled_staging() {
         use std::io::Write;
         let temp = tempfile::tempdir().unwrap();
-        let (bytes, info) = archive(&fixture(b"working-image"));
+        let (bytes, info) = archive(&arm64_fixture(b"working-image"));
         let mut file = tempfile::tempfile_in(temp.path()).unwrap();
         file.write_all(&bytes).unwrap();
         assert_eq!(
@@ -1553,7 +1798,7 @@ pub(super) mod tests {
         )
         .unwrap();
         verify_installed(temp.path(), &info, "darwin-arm64").unwrap();
-        let (replacement, next_info) = archive(&fixture(b"replacement"));
+        let (replacement, next_info) = archive(&arm64_fixture(b"replacement"));
         struct CancelAfterVerification<'a> {
             reader: std::io::Cursor<&'a [u8]>,
             cancelled: &'a AtomicBool,
@@ -1602,7 +1847,7 @@ pub(super) mod tests {
 
     #[test]
     fn browser_image_streaming_metadata_accepts_large_exact_size_and_retains_bound() {
-        let (_, mut info) = archive(&fixture(b"image"));
+        let (_, mut info) = archive(&arm64_fixture(b"image"));
         info.size = Some(200 * 1024 * 1024 + 1);
         validate_info(&info).unwrap();
         info.size = Some(MAX_ARCHIVE_SIZE);
@@ -1770,11 +2015,11 @@ pub(super) mod tests {
     fn browser_image_corrupt_missing_and_mixed_files_preserve_installed_set() {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path();
-        let (old, old_info) = archive(&fixture(b"working-image"));
+        let (old, old_info) = archive(&arm64_fixture(b"working-image"));
         install_archive(data, &old, &old_info, "darwin-arm64").unwrap();
         for index in 0..FILES.len() {
             for missing in [false, true] {
-                let mut files = fixture(b"replacement");
+                let mut files = arm64_fixture(b"replacement");
                 if missing {
                     files.remove(index);
                 } else {
@@ -1798,7 +2043,7 @@ pub(super) mod tests {
     #[test]
     fn browser_image_interrupted_download_and_invalid_archive_preserve_working_set() {
         let temp = tempfile::tempdir().unwrap();
-        let (old, info) = archive(&fixture(b"working-image"));
+        let (old, info) = archive(&arm64_fixture(b"working-image"));
         install_archive(temp.path(), &old, &info, "darwin-arm64").unwrap();
         assert!(
             install_archive(temp.path(), &old[..old.len() / 2], &info, "darwin-arm64").is_err()
@@ -1817,12 +2062,13 @@ pub(super) mod tests {
     fn browser_image_architecture_and_contract_fail_before_installation() {
         let temp = tempfile::tempdir().unwrap();
         let data = temp.path().join("fresh");
-        let (bytes, info) = archive(&fixture(b"image"));
+        let (bytes, info) = archive(&arm64_fixture(b"image"));
         assert!(install_archive(&data, &bytes, &info, "darwin-amd64").is_err());
         assert!(!data.exists());
-        assert!(install_archive(&data, &bytes, &info, "linux-amd64").is_err());
+        let error = install_archive(&data, &bytes, &info, "linux-amd64").unwrap_err();
+        assert!(error.to_string().contains("architecture does not match"));
         assert!(!data.join(INSTALL_PATH).exists());
-        let mut files = fixture(b"image");
+        let mut files = arm64_fixture(b"image");
         let mut receipt: Value = serde_json::from_slice(&files[0].1).unwrap();
         receipt["preflight"]["manifest"]["direct_network"] = json!(true);
         files[0].1 = serde_json::to_vec(&receipt).unwrap();
@@ -1835,7 +2081,7 @@ pub(super) mod tests {
     fn browser_image_archive_rejects_duplicates_and_unexpected_members() {
         let temp = tempfile::tempdir().unwrap();
         for name in ["vmlinux", "extra-file"] {
-            let mut files = fixture(b"image");
+            let mut files = arm64_fixture(b"image");
             files.push((name.into(), b"unexpected".to_vec()));
             let (bytes, info) = archive(&files);
             assert!(install_archive(temp.path(), &bytes, &info, "darwin-arm64").is_err());
@@ -1848,7 +2094,7 @@ pub(super) mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("bin")).unwrap();
         fs::write(temp.path().join("bin/vmlinux"), b"capsule kernel").unwrap();
-        let (bytes, info) = archive(&fixture(b"image"));
+        let (bytes, info) = archive(&arm64_fixture(b"image"));
         install_archive(temp.path(), &bytes, &info, "linux-arm64").unwrap();
         verify_installed(temp.path(), &info, "linux-arm64").unwrap();
         assert_eq!(
@@ -1866,7 +2112,7 @@ pub(super) mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join("bin")).unwrap();
         fs::write(temp.path().join("bin/vmlinux"), b"operator-owned").unwrap();
-        let (bytes, info) = archive(&fixture(b"image"));
+        let (bytes, info) = archive(&arm64_fixture(b"image"));
         assert!(install_archive(temp.path(), &bytes, &info, "darwin-arm64")
             .unwrap_err()
             .to_string()
@@ -1913,7 +2159,7 @@ pub(super) mod tests {
         fs::create_dir_all(abandoned.join(NAME)).unwrap();
         fs::write(abandoned.join(NAME).join("rootfs.ext4"), b"partial").unwrap();
         fs::write(temp.path().join("browser-vm/profile-state"), b"user-state").unwrap();
-        let (bytes, info) = archive(&fixture(b"complete-image"));
+        let (bytes, info) = archive(&arm64_fixture(b"complete-image"));
         install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap();
         assert!(!abandoned.exists());
         assert_eq!(
@@ -1925,7 +2171,7 @@ pub(super) mod tests {
 
     #[test]
     fn browser_image_requires_exact_release_metadata_before_fetch() {
-        let (_, info) = archive(&fixture(b"image"));
+        let (_, info) = archive(&arm64_fixture(b"image"));
         let mut manifest = manifest(&info);
         component_info(&manifest, "darwin-arm64").unwrap();
         assert!(component_info(&manifest, "linux-arm64").is_err());
@@ -1956,7 +2202,7 @@ pub(super) mod tests {
     #[test]
     fn browser_image_invalid_published_bundle_metadata_preserves_existing_bytes() {
         let temp = tempfile::tempdir().unwrap();
-        let (bytes, info) = archive(&fixture(b"working-image"));
+        let (bytes, info) = archive(&arm64_fixture(b"working-image"));
         install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap();
         let base = serde_json::to_value(&info).unwrap();
         for (key, value) in [
@@ -1999,7 +2245,7 @@ pub(super) mod tests {
             Ok(target) => target,
             Err(_) => return,
         };
-        let mut files = fixture(b"existing-image");
+        let mut files = arm64_fixture(b"existing-image");
         let mut receipt: Value = serde_json::from_slice(&files[0].1).unwrap();
         receipt["target_platform"] = json!(target);
         files[0].1 = serde_json::to_vec(&receipt).unwrap();
@@ -2072,7 +2318,7 @@ pub(super) mod tests {
             fs::create_dir_all(data.join("browser-vm")).unwrap();
             fs::create_dir_all(data.join("bin")).unwrap();
             fs::create_dir(&source).unwrap();
-            let mut files = fixture(b"manual-image");
+            let mut files = arm64_fixture(b"manual-image");
             let mut receipt: Value = serde_json::from_slice(&files[0].1).unwrap();
             receipt["target_platform"] = json!(guest_platform(platform).unwrap());
             files[0].1 = serde_json::to_vec(&receipt).unwrap();
@@ -2112,13 +2358,13 @@ pub(super) mod tests {
     #[tokio::test]
     async fn browser_image_missing_trusted_source_keeps_working_set() {
         let temp = tempfile::tempdir().unwrap();
-        let (old, info) = archive(&fixture(b"working-image"));
+        let (old, info) = archive(&arm64_fixture(b"working-image"));
         let platform = super::super::detect_platform();
         if platform != "darwin-arm64" && platform != "linux-arm64" {
             return;
         }
         install_archive(temp.path(), &old, &info, &platform).unwrap();
-        let (_, new_info) = archive(&fixture(b"new-image"));
+        let (_, new_info) = archive(&arm64_fixture(b"new-image"));
         assert!(super::super::install_first_party_component_via_carrier(
             temp.path(),
             &crate::capsule_record::AdmittedRow::for_test(NAME, &new_info),
@@ -2135,7 +2381,7 @@ pub(super) mod tests {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
-        for (name, bytes) in fixture(b"fixture-image-never-launched") {
+        for (name, bytes) in arm64_fixture(b"fixture-image-never-launched") {
             fs::write(source.join(name), bytes).unwrap();
         }
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
@@ -2189,7 +2435,7 @@ pub(super) mod tests {
 
     fn cache_fixture(path: &Path) -> [PathBuf; 4] {
         fs::create_dir_all(path).unwrap();
-        for (name, bytes) in fixture(b"working-image") {
+        for (name, bytes) in arm64_fixture(b"working-image") {
             fs::write(path.join(name), bytes).unwrap();
         }
         FILES.map(|name| path.join(name))
@@ -2204,7 +2450,7 @@ pub(super) mod tests {
             fs::write(temp.path().join("config/browser-engine-adapter.json"),
                 br#"{"adapters":[{"kind":"chromium_microvm","supervisor":{"program":"browser-vm-launcher"}}]}"#).unwrap();
             assert!(start_background_verification(temp.path(), platform).is_none());
-            let (bytes, info) = archive(&fixture(b"startup-image"));
+            let (bytes, info) = archive(&arm64_fixture(b"startup-image"));
             install_archive(temp.path(), &bytes, &info, platform).unwrap();
             fs::remove_file(temp.path().join("config/browser-engine-adapter.json")).unwrap();
             assert!(start_background_verification(temp.path(), platform).is_none());
@@ -2340,7 +2586,7 @@ pub(super) mod tests {
             for released in [false, true] {
                 let temp = tempfile::tempdir().unwrap();
                 let data = temp.path();
-                let (bytes, info) = archive(&fixture(b"startup-image"));
+                let (bytes, info) = archive(&arm64_fixture(b"startup-image"));
                 install_archive(data, &bytes, &info, platform).unwrap();
                 fs::create_dir_all(data.join("config")).unwrap();
                 fs::write(data.join("config/browser-engine-adapter.json"),
@@ -2791,7 +3037,7 @@ pub(super) mod tests {
         let mut first = None;
         for index in 0..VERIFIED_SET_CACHE_LIMIT + 1 {
             let paths = FILES.map(|name| temp.path().join(format!("{index}-{name}")));
-            let files = fixture(b"working-image");
+            let files = arm64_fixture(b"working-image");
             assert_eq!(FILES.len(), files.len(), "cache fixture file count changed");
             for (path, (_, bytes)) in paths.iter().zip(files) {
                 fs::write(path, bytes).unwrap();
@@ -2847,7 +3093,7 @@ pub(super) mod tests {
     #[test]
     fn browser_image_receipts_match_only_the_installed_release_row() {
         let temp = tempfile::tempdir().unwrap();
-        let (bytes, info) = archive(&fixture(b"rootfs"));
+        let (bytes, info) = archive(&arm64_fixture(b"rootfs"));
         assert!(!receipts_match(temp.path(), &info));
         install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap();
         assert!(receipts_match(temp.path(), &info));

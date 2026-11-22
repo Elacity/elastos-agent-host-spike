@@ -376,5 +376,38 @@ class NativeSourceHomeTest(unittest.TestCase):
                     child.terminate()
                 child.wait(timeout=5)
 
+def emit_retained_browser_pin(data):
+    """Run the real source Home producer on an image installed by a Rust test."""
+    case = NativeSourceHomeTest(methodName='test_full_setup_installs_native_owner_and_publishes_exact_receipt')
+    case.setUp()
+    try:
+        case.data = data
+        case.env['XDG_DATA_HOME'] = str(data.parent)
+        previous = json.loads((data / 'components.json').read_text())
+        entry = previous['external']['browser-vm-image']
+        info = dict(entry['platforms'][PLATFORM])
+        source_info = {key: value for key, value in info.items() if key not in ('checksum', 'size', 'cid')}
+        case.manifest['external']['browser-vm-image'] = {
+            'version': 'pin', 'install_path': 'browser-vm/image-set',
+            'platforms': {PLATFORM: source_info},
+        }
+        previous['external']['browser-vm-image']['version'] = 'pin'
+        write(data / 'components.json', json.dumps(previous))
+        case.save_manifest()
+        case.assert_ok(case.run_setup())
+        produced = json.loads((data / 'components.json').read_text())
+        retained = produced['external']['browser-vm-image']['platforms'][PLATFORM]
+        for key in ('checksum', 'size', 'cid'):
+            assert retained[key] == info[key], key
+        assert 'vm_image' not in retained
+        assert 'browser-vm-image' in produced['profiles']['source-home']['components']
+        assert 'dev_mode = true' in (data / 'config.toml').read_text()
+    finally:
+        case.doCleanups()
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 3 and sys.argv[1] == '--emit-retained-browser-pin':
+        emit_retained_browser_pin(Path(sys.argv[2]).resolve())
+    else:
+        unittest.main()

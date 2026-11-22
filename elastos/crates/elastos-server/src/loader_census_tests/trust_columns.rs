@@ -723,12 +723,12 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-server/src/setup.rs",
-            function: "ensure_browser_vm_image_in_context",
+            function: "ensure_browser_vm_image_in_context_for_platform",
             call: "component install",
             class: "n/a",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: "admit_installed_components(data_dir, context)".into(),
+            evidence: "admit_installed_components(data_dir, context)?".into(),
             os_path: "",
         },
         TrustColumn {
