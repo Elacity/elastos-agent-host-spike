@@ -331,13 +331,12 @@ fn installed_component_start_refuses_changed_manifest_before_exec() {
     let mut manifest = fs::read(fixture.data.join("components.json")).unwrap();
     manifest.push(b' ');
     fs::write(fixture.data.join("components.json"), manifest).unwrap();
-    let error = start_shell(&fixture, &path, &marker)
-        .unwrap_err()
-        .to_string();
+    let error = format!("{:#}", start_shell(&fixture, &path, &marker).unwrap_err());
     assert!(
         error.contains("Installed component manifest verification failed"),
         "{error}"
     );
+    assert!(error.contains(REPAIR), "{error}");
     assert!(!marker.exists());
 }
 
@@ -356,7 +355,7 @@ fn installed_component_start_refuses_changed_binary_before_exec() {
 }
 
 #[test]
-fn installed_home_cli_executable_uses_signed_archive_receipt() {
+fn installed_home_cli_executable_uses_signed_digest_with_optional_archive_receipt() {
     let mut fixture = Fixture::new();
     let bundle = fixture.data.join("capsules/home-cli");
     let binary = bundle.join("bin/home-cli");
@@ -372,13 +371,13 @@ fn installed_home_cli_executable_uses_signed_archive_receipt() {
         }}, "capsules":{}, "profiles":{}
     })).unwrap()).unwrap();
     crate::setup::write_artifact_sha256_receipt(&bundle, &checksum).unwrap();
-    fs::write(
-        bundle.join(".elastos-executable-sha256"),
-        hex::encode(Sha256::digest(b"signed renderer")),
-    )
-    .unwrap();
+    assert!(!bundle.join(".elastos-executable-sha256").exists());
     fixture.bind_components();
     crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary).unwrap();
+    crate::setup::verify_installed_component(&fixture.data, "home-cli", &binary).unwrap();
+    fs::remove_file(bundle.join(".elastos-artifact-sha256")).unwrap();
+    crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary).unwrap();
+    crate::setup::verify_installed_component(&fixture.data, "home-cli", &binary).unwrap();
     fs::write(&binary, b"changed renderer").unwrap();
     assert!(
         crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary)
