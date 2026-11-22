@@ -100,18 +100,24 @@ these two operations selects `home-launch`; that grant can ask the gateway to
 launch or open content without browser provenance. For content
 open, the gateway gives the Runtime a `home-shell` projection grant bound to
 `home`; the Runtime accepts that grant only on its internal content-open hop.
-`elastos home --cli-launch-token` does not mint a grant from the process
-environment. The command refuses. A terminal may register a bound request with
-`POST /api/home/cli-mint/request`. The signed-in human admin begins that request
-and approves it with a fresh passkey assertion. The gateway keeps that decision
-in its own memory and returns no launch grant. The waiting terminal claims one
-grant with `POST /api/home/cli-mint/claim`. The gateway signs only when that
-memory record is approved and the request, the secret, the owner, the session,
-the proof, the grant, and the operation match. It marks the record delivered in
-that same memory before returning the grant. The grant lasts 5 minutes. A file
-in the data directory is not an approval and cannot deliver a grant. A restart
-drops a request that is still waiting. `Origin: null` cannot register a request
-or claim a grant, including when the caller presents a launch token.
+`elastos home --cli-launch-token` asks the Home on this computer for one
+exported grant. The command creates a fresh secret, registers a bound request,
+and waits. Home shows that waiting request to the signed-in human admin and
+asks for a fresh passkey. Home begins the request and then sends the passkey
+assertion. Home does not approve a request it has not begun. When the admin
+approves, the command prints the grant once. When the admin cancels, the
+request times out, or the request does not match, the command prints no grant
+and stops with a non-zero status. The gateway keeps the approval in its own
+memory. It signs only when that memory record is approved and the request, the
+secret, the owner, the session, the proof, the grant, and the operation match.
+It marks the record delivered in that same memory before returning the grant.
+The grant lasts 5 minutes from the signature. A stolen grant still reaches only
+`POST /api/apps/home/launch` and `POST /api/home/launch/content`, and only until
+that grant expires or the admin session is revoked. A file in the data
+directory is not an approval and cannot deliver a grant. A restart drops a
+request that is still waiting. `Origin: null` cannot register a request or
+claim a grant, including when the caller presents a launch token. The command
+does not mint from the process environment.
 The gateway still gives its `elastos home` TUI
 child the terminal environment. That child uses the environment for an internal
 projection token. The TUI has no host shell and no export-mint action. The
@@ -307,7 +313,10 @@ Home origin.
 
 Only approved first-party targets may ask Home for fresh passkey authority.
 Home binds that proof to the requesting capsule, operation, and request before
-returning a new target-scoped token to the same source and origin.
+returning a new target-scoped token to the same source and origin. Home also
+asks for a fresh passkey when a terminal is waiting for an exported Home CLI
+grant. That prompt begins the waiting request and then approves it. The passkey
+result stays in Home. The waiting command receives the grant.
 
 Both shells can sign out. Browser `home-cli` sign-out is a launch-token-bound
 terminal host intent; `home-gui` uses the same host message contract. Neither

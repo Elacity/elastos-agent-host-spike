@@ -3,6 +3,8 @@ import {
   fetchJson,
   setHomeAuthorityToken,
 } from "./shell-core.js?v=home-wallpaper-20261030b";
+
+export { setHomeAuthorityToken };
 import { ownerRecoveryCommand } from "./owner-recovery-command.js?v=home-update-20261003a";
 
 const unlockPanel = document.querySelector("#home-unlock");
@@ -20,6 +22,11 @@ const unlockSecondary = document.querySelector("#home-unlock-secondary");
 const unlockCreate = document.querySelector("#home-unlock-create");
 const unlockStatus = document.querySelector("#home-unlock-status");
 const unlockFaceStatus = document.querySelector("#home-unlock-face-status");
+const cliMintPrompt = document.querySelector("#home-cli-mint-prompt");
+const cliMintCopy = document.querySelector("#home-cli-mint-copy");
+const cliMintStatus = document.querySelector("#home-cli-mint-status");
+const cliMintApprove = document.querySelector("#home-cli-mint-approve");
+const cliMintCancel = document.querySelector("#home-cli-mint-cancel");
 const unlockName = document.querySelector("#home-unlock-name");
 const ownerToken = document.querySelector("#home-owner-token");
 const ownerTokenLabel = document.querySelector("#home-owner-token-label");
@@ -265,6 +272,7 @@ export function refreshHomeSession({ signal } = {}) {
 }
 
 export async function signOutHome() {
+  stopHomeCliMintWatch();
   try {
     const response = await fetch("/api/auth/sessions/sign-out", {
       method: "POST",
@@ -335,6 +343,185 @@ export async function requestPasskeyStepUp(appToken, operation, request) {
       }).catch(() => {});
     }
     throw error;
+  }
+}
+
+const CLI_MINT_WAITING = "/api/home/cli-mint/waiting";
+const CLI_MINT_BEGIN = "/api/home/cli-mint/begin";
+const CLI_MINT_APPROVE = "/api/home/cli-mint/approve";
+const CLI_MINT_CANCEL = "/api/home/cli-mint/cancel";
+const CLI_MINT_WAITING_SCHEMA = "elastos.home.cli-mint.waiting/v1";
+const CLI_MINT_WAITING_RESULT = "elastos.home.cli-mint.waiting.result/v1";
+const CLI_MINT_BEGIN_SCHEMA = "elastos.home.cli-mint.begin/v1";
+const CLI_MINT_BEGIN_RESULT = "elastos.home.cli-mint.begin.result/v1";
+const CLI_MINT_APPROVE_SCHEMA = "elastos.home.cli-mint.approve/v1";
+const CLI_MINT_APPROVE_RESULT = "elastos.home.cli-mint.approve.result/v1";
+const CLI_MINT_CANCEL_SCHEMA = "elastos.home.cli-mint.cancel/v1";
+let cliMintTimer = 0;
+let cliMintBusy = false;
+let cliMintBound = false;
+
+function bindHomeCliMintPrompt() {
+  if (cliMintBound || !cliMintApprove || !cliMintCancel) return;
+  cliMintBound = true;
+  cliMintApprove.addEventListener("click", () => {
+    approveHomeCliMintRequest().catch((error) => setCliMintStatus(cliMintFailure(error), "error"));
+  });
+  cliMintCancel.addEventListener("click", () => {
+    cancelShownHomeCliMint().catch((error) => setCliMintStatus(cliMintFailure(error), "error"));
+  });
+}
+
+function setCliMintStatus(message, tone) {
+  if (!cliMintStatus) return;
+  cliMintStatus.textContent = message || "";
+  cliMintStatus.hidden = !message;
+  cliMintStatus.dataset.tone = tone || "muted";
+}
+
+function hideHomeCliMintPrompt() {
+  if (!cliMintPrompt) return;
+  cliMintPrompt.hidden = true;
+  cliMintPrompt.setAttribute("aria-hidden", "true");
+  delete cliMintPrompt.dataset.requestId;
+  setCliMintStatus("", "muted");
+}
+
+function showHomeCliMintPrompt(request) {
+  if (!cliMintPrompt) return;
+  bindHomeCliMintPrompt();
+  const requestId = readText(request && request.request_id);
+  cliMintPrompt.dataset.requestId = requestId;
+  if (cliMintCopy) {
+    const tail = requestId.slice(-4);
+    cliMintCopy.textContent = tail
+      ? `Terminal request ${tail} is waiting for permission to launch Home apps. Use your passkey to allow it. This permission lasts 5 minutes.`
+      : "A terminal is waiting for permission to launch Home apps. Use your passkey to allow it. This permission lasts 5 minutes.";
+  }
+  cliMintPrompt.hidden = false;
+  cliMintPrompt.setAttribute("aria-hidden", "false");
+}
+
+export function stopHomeCliMintWatch() {
+  window.clearInterval(cliMintTimer);
+  cliMintTimer = 0;
+  hideHomeCliMintPrompt();
+}
+
+export function startHomeCliMintWatch() {
+  if (cliMintTimer) return;
+  refreshHomeCliMintPrompt().catch(() => {});
+  cliMintTimer = window.setInterval(() => {
+    refreshHomeCliMintPrompt().catch(() => {});
+  }, 2000);
+}
+
+export async function refreshHomeCliMintPrompt() {
+  if (cliMintBusy || !cliMintPrompt) return;
+  let waiting;
+  try {
+    waiting = await fetchJson(CLI_MINT_WAITING, {
+      method: "POST",
+      body: JSON.stringify({ schema: CLI_MINT_WAITING_SCHEMA }),
+    });
+  } catch (error) {
+    if (isHomeAuthError(error)) {
+      stopHomeCliMintWatch();
+    }
+    return;
+  }
+  if (waiting?.schema !== CLI_MINT_WAITING_RESULT || !Array.isArray(waiting.requests)) return;
+  const request = waiting.requests.find((item) => item
+    && item.status === "pending"
+    && readText(item.request_id).length === 32);
+  if (!request) {
+    hideHomeCliMintPrompt();
+    return;
+  }
+  if (cliMintPrompt.dataset.requestId === request.request_id && !cliMintPrompt.hidden) return;
+  showHomeCliMintPrompt(request);
+}
+
+function cliMintFailure(error) {
+  const name = String(error && error.name || "");
+  if (name === "NotAllowedError" || name === "AbortError") {
+    return "No passkey was used. The terminal was not approved.";
+  }
+  if (!Number(error && error.status) && error instanceof TypeError) {
+    return "Home is not responding. Check that ElastOS is running, then try again.";
+  }
+  return "Home did not approve the terminal. Select Use passkey to try again.";
+}
+
+async function cancelCliMintRequest(requestId) {
+  await fetchJson(CLI_MINT_CANCEL, {
+    method: "POST",
+    body: JSON.stringify({
+      schema: CLI_MINT_CANCEL_SCHEMA,
+      request_id: requestId,
+    }),
+  });
+}
+
+export async function cancelShownHomeCliMint() {
+  const requestId = readText(cliMintPrompt && cliMintPrompt.dataset.requestId);
+  if (!requestId || cliMintBusy) return;
+  cliMintBusy = true;
+  try {
+    await cancelCliMintRequest(requestId);
+    hideHomeCliMintPrompt();
+  } finally {
+    cliMintBusy = false;
+  }
+}
+
+// Begin the waiting request, then ask for the passkey, then approve.
+// Approve is not called unless begin returned a challenge.
+export async function approveHomeCliMintRequest() {
+  if (!window.PublicKeyCredential) {
+    throw new Error("Passkeys are not available in this browser.");
+  }
+  const requestId = readText(cliMintPrompt && cliMintPrompt.dataset.requestId);
+  if (!requestId || cliMintBusy) return;
+  cliMintBusy = true;
+  if (cliMintApprove) cliMintApprove.disabled = true;
+  if (cliMintCancel) cliMintCancel.disabled = true;
+  try {
+    const begin = await fetchJson(CLI_MINT_BEGIN, {
+      method: "POST",
+      body: JSON.stringify({
+        schema: CLI_MINT_BEGIN_SCHEMA,
+        request_id: requestId,
+      }),
+    });
+    if (begin?.schema !== CLI_MINT_BEGIN_RESULT || !begin.options || begin.request_id !== requestId) {
+      throw new Error("Home could not start the terminal approval.");
+    }
+    const credential = await navigator.credentials.get(toRequestOptions(begin.options));
+    if (!credential) {
+      await cancelCliMintRequest(requestId).catch(() => {});
+      hideHomeCliMintPrompt();
+      return;
+    }
+    const approved = await fetchJson(CLI_MINT_APPROVE, {
+      method: "POST",
+      body: JSON.stringify({
+        schema: CLI_MINT_APPROVE_SCHEMA,
+        request_id: requestId,
+        response: serializeAssertionCredential(credential),
+      }),
+    });
+    if (approved?.schema !== CLI_MINT_APPROVE_RESULT || approved.status !== "approved" || approved.request_id !== requestId) {
+      throw new Error("Home did not approve the terminal.");
+    }
+    hideHomeCliMintPrompt();
+  } catch (error) {
+    setCliMintStatus(cliMintFailure(error), "error");
+    throw error;
+  } finally {
+    cliMintBusy = false;
+    if (cliMintApprove) cliMintApprove.disabled = false;
+    if (cliMintCancel) cliMintCancel.disabled = false;
   }
 }
 

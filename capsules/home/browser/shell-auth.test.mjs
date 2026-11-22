@@ -65,7 +65,11 @@ Object.defineProperty(globalThis, "navigator", {
 let routes = {};
 const requests = [];
 globalThis.fetch = async (url, init = {}) => {
-  requests.push({ url, body: init.body ? JSON.parse(init.body) : null });
+  requests.push({
+    url,
+    body: init.body ? JSON.parse(init.body) : null,
+    headers: init.headers || {},
+  });
   const route = routes[url];
   if (!route) throw new TypeError("Failed to fetch");
   const { status = 200, body = {} } = await route();
@@ -97,8 +101,11 @@ const settle = async () => {
 
 const {
   addAccountPasskey,
+  approveHomeCliMintRequest,
   bindHomeUnlock,
   recoveryImportIncompleteMessage,
+  refreshHomeCliMintPrompt,
+  setHomeAuthorityToken,
   showHomeUnlock,
 } = await import("./shell-auth.js");
 
@@ -220,4 +227,86 @@ test("recovery says it worked when only the Home's recovery record is missing", 
   }
   assert.match(recoveryImportIncompleteMessage(imported("complete", "absent", "complete")),
     /has no signed Profile or name/);
+});
+
+const CLI_REQUEST = "ab".repeat(16);
+
+function cliMintRoutes() {
+  routes["/api/home/cli-mint/waiting"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.waiting.result/v1",
+      requests: [{
+        request_id: CLI_REQUEST,
+        operation: "home-cli.export-grant",
+        expires_at: 1,
+        status: "pending",
+      }],
+    },
+  });
+  routes["/api/home/cli-mint/begin"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.begin.result/v1",
+      request_id: CLI_REQUEST,
+      options: { publicKey: { challenge: "AA", allowCredentials: [] } },
+      expires_at: 1,
+    },
+  });
+  routes["/api/home/cli-mint/approve"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.approve.result/v1",
+      request_id: CLI_REQUEST,
+      status: "approved",
+    },
+  });
+}
+
+test("a waiting terminal shows the passkey prompt and begin runs before approve", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  cliMintRoutes();
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = true;
+  requests.length = 0;
+  await refreshHomeCliMintPrompt();
+  assert.equal(prompt.hidden, false);
+  assert.match(element("#home-cli-mint-copy").textContent, /passkey/);
+  assert.match(element("#home-cli-mint-copy").textContent, /abab/);
+  requests.length = 0;
+  const calls = [];
+  credentials = {
+    get: async () => {
+      calls.push("get");
+      return fakeCredential();
+    },
+  };
+  element("#home-cli-mint-approve").click();
+  await settle();
+  assert.deepEqual(calls, ["get"]);
+  const urls = requests.map((request) => request.url);
+  assert.deepEqual(urls, ["/api/home/cli-mint/begin", "/api/home/cli-mint/approve"]);
+  assert.ok(urls.indexOf("/api/home/cli-mint/begin") < urls.indexOf("/api/home/cli-mint/approve"));
+  assert.equal(requests[0].body.schema, "elastos.home.cli-mint.begin/v1");
+  assert.equal(requests[0].body.request_id, CLI_REQUEST);
+  assert.equal(requests[0].headers["x-elastos-home-token"], "home-admin-token");
+  assert.equal(requests[1].body.schema, "elastos.home.cli-mint.approve/v1");
+  assert.equal(requests[1].body.request_id, CLI_REQUEST);
+  assert.equal(requests[1].headers["x-elastos-home-token"], "home-admin-token");
+  assert.equal(requests[1].body.response.type, "public-key");
+  assert.equal(prompt.hidden, true);
+});
+
+test("the terminal prompt does not approve when begin fails", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  cliMintRoutes();
+  routes["/api/home/cli-mint/begin"] = () => ({ status: 400, body: "cli mint request is not waiting for approval" });
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = true;
+  prompt.dataset.requestId = CLI_REQUEST;
+  requests.length = 0;
+  credentials = { get: async () => fakeCredential() };
+  await assert.rejects(approveHomeCliMintRequest(), /request failed: 400/);
+  assert.match(
+    element("#home-cli-mint-status").textContent,
+    /did not approve the terminal/,
+  );
+  assert.deepEqual(requests.map((request) => request.url), ["/api/home/cli-mint/begin"]);
 });

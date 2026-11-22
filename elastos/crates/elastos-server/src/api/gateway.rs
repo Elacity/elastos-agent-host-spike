@@ -195,9 +195,10 @@ pub(super) use gateway_home_system_ai_provider::{
     install_venice_validate_double, OpenRouterModelsDouble, VeniceAuthDouble,
 };
 
+pub use gateway_home_cli_mint::run_exported_home_cli_launch_grant;
 use gateway_home_cli_mint::{
     home_cli_mint_approve, home_cli_mint_begin, home_cli_mint_cancel, home_cli_mint_claim,
-    home_cli_mint_request,
+    home_cli_mint_request, home_cli_mint_waiting,
 };
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
@@ -761,6 +762,10 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route(
             "/api/home/cli-mint/cancel",
             post(home_cli_mint_cancel).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/waiting",
+            post(home_cli_mint_waiting).layer(DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
             "/api/browser/session/request",
