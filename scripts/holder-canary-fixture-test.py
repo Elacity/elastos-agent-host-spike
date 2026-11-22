@@ -43,7 +43,8 @@ class HolderFixtureTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
                     "signature": "fixture-signature", "signer_did": "did:key:fixture"}).encode())
 
-            with patch.object(fixture.subprocess, "run", side_effect=run):
+            with patch.object(fixture.subprocess, "run", side_effect=run), \
+                 patch.object(fixture, "release_platform", return_value="x86_64-linux"):
                 fixture.sign_install(home, data, runtime, lambda path: {"HOME": str(path)})
             self.assertEqual(domains, ["elastos.release.v1", "elastos.release.head.v1"])
             self.assertFalse((data / ".ci-publisher.key").exists())
@@ -62,6 +63,43 @@ class HolderFixtureTests(unittest.TestCase):
             self.assertEqual(source["publisher_dids"], [head["signer_did"]])
             self.assertEqual(source["install_path"], str(runtime))
 
+    def test_release_platform_matches_runtime_names(self):
+        for system, machine, expected in (("Linux", "x86_64", "x86_64-linux"),
+                                          ("Linux", "aarch64", "aarch64-linux"),
+                                          ("Darwin", "arm64", "aarch64-darwin")):
+            with self.subTest(system=system, machine=machine), \
+                 patch.object(fixture.platform, "system", return_value=system), \
+                 patch.object(fixture.platform, "machine", return_value=machine):
+                self.assertEqual(fixture.release_platform(), expected)
+
+    def test_restrict_components_keeps_only_installed_native_providers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            (data / "bin").mkdir(parents=True)
+            (data / "bin/localhost-provider").write_bytes(b"provider")
+            (data / "bin/kubo").write_bytes(b"kubo")
+            published = root / "published.json"
+            original = {"schema": "elastos.components/v1", "external": {
+                "localhost-provider": {"install_path": "bin/localhost-provider",
+                    "provider_runtime": {"execution": "native-provider"},
+                    "platforms": {fixture.component_platform(): {"checksum": "sha256:" + hashlib.sha256(b"provider").hexdigest()}}},
+                "kubo": {"platforms": {fixture.component_platform(): {"install_path": "bin/kubo", "extract_path": "kubo/ipfs",
+                                                            "checksum": "sha256:" + hashlib.sha256(b"kubo").hexdigest()}},
+                         "capsule_metadata": {"platforms": {}}},
+                "other": {"install_path": "bin/other", "platforms": {}}},
+                "capsules": {"home": {}}, "profiles": {"home": {"components": ["other"]}}}
+            published.write_text(json.dumps(original))
+            fixture.restrict_components(data, published, ["localhost-provider", "kubo"])
+            launch = json.loads((data / "components.json").read_text())
+            self.assertEqual(set(launch["external"]), {"localhost-provider", "kubo"})
+            self.assertEqual(launch["profiles"], {})
+            self.assertEqual(launch["capsules"], {})
+            self.assertEqual(json.loads(published.read_text()), original)
+            (data / "bin/localhost-provider").write_bytes(b"changed")
+            with self.assertRaises(AssertionError):
+                fixture.restrict_components(data, published, ["localhost-provider"])
+
     def test_signing_failure_removes_disposable_key(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
@@ -71,6 +109,12 @@ class HolderFixtureTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "signing failed"):
                     fixture.sign_install(home, data, home / "elastos", lambda path: {"HOME": str(path)})
             self.assertFalse((data / ".ci-publisher.key").exists())
+            (data / ".ci-publisher.key").write_text("existing")
+            with patch.object(fixture.subprocess, "run") as run:
+                with self.assertRaises(FileExistsError):
+                    fixture.sign_install(home, data, home / "elastos", lambda path: {"HOME": str(path)})
+            run.assert_not_called()
+            self.assertEqual((data / ".ci-publisher.key").read_text(), "existing")
 
     def test_native_provider_exe_matches_both_generations(self):
         provider = Path("/fixture/bin/ipfs-provider")

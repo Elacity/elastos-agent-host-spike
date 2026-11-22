@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Shared signed-install and native-provider checks for the Linux holder canary."""
+"""Disposable signed installs for source Home and holder CI fixtures."""
 
+import argparse
 import base64
 import errno
 import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 from pathlib import Path
@@ -28,11 +30,33 @@ def descriptor(path):
     return {"cid": raw_cid(digest), "sha256": digest.hex(), "size": path.stat().st_size}
 
 
+def release_platform():
+    system = platform.system()
+    machine = platform.machine()
+    names = {
+        ("Linux", "x86_64"): "x86_64-linux",
+        ("Linux", "aarch64"): "aarch64-linux",
+        ("Linux", "arm64"): "aarch64-linux",
+        ("Darwin", "x86_64"): "x86_64-darwin",
+        ("Darwin", "arm64"): "aarch64-darwin",
+    }
+    return names[(system, machine)]
+
+
+def component_platform():
+    return {
+        "x86_64-linux": "linux-amd64",
+        "aarch64-linux": "linux-arm64",
+        "x86_64-darwin": "darwin-amd64",
+        "aarch64-darwin": "darwin-arm64",
+    }[release_platform()]
+
+
 def sign_install(home, data, runtime, environment):
     """Install a release trusted only by this fixture Home; discard its signing key."""
     key = data / ".ci-publisher.key"
-    key.write_text(os.urandom(32).hex())
-    key.chmod(0o600)
+    with os.fdopen(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w") as output:
+        output.write(os.urandom(32).hex())
 
     def sign(payload, domain):
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"),
@@ -48,8 +72,8 @@ def sign_install(home, data, runtime, environment):
                                  env=environment(home), cwd=home, timeout=30, check=True).stdout.strip().removeprefix("elastos ")
         assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", version)
         release = json.dumps(sign({"schema": "elastos.release/v1", "version": version, "channel": "stable",
-            "platforms": {"x86_64-linux": {"binary": descriptor(runtime),
-                                           "components": descriptor(data / "components.json")}}},
+            "platforms": {release_platform(): {"binary": descriptor(runtime),
+                                               "components": descriptor(data / "components.json")}}},
             "elastos.release.v1"), sort_keys=True, separators=(",", ":")).encode()
         head = json.dumps(sign({"schema": "elastos.release.head/v1", "version": version, "channel": "stable",
             "latest_release_cid": raw_cid(hashlib.sha256(release).digest()),
@@ -79,3 +103,44 @@ def runs_provider(row, provider):
             return False
         raise
     return os.path.realpath(executable) == os.path.realpath(str(provider))
+
+
+def restrict_components(data, published, names):
+    """Keep a publisher's full catalogue separate from its installed launch set."""
+    manifest = json.loads(published.read_bytes())
+    selected = {}
+    for name in names:
+        entry = manifest["external"][name]
+        info = entry["platforms"][component_platform()]
+        path = data / (info.get("install_path") or entry["install_path"])
+        assert path.is_file() and not path.is_symlink()
+        assert info["checksum"] == "sha256:" + sha(path)
+        if name == "kubo":
+            assert info["extract_path"] and entry.get("capsule_metadata")
+        else:
+            assert entry["provider_runtime"]["execution"] == "native-provider"
+        selected[name] = entry
+    manifest["external"] = selected
+    manifest["capsules"] = {}
+    manifest["profiles"] = {}
+    (data / "components.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    signing = commands.add_parser("sign-install")
+    signing.add_argument("home", type=Path)
+    signing.add_argument("data", type=Path)
+    signing.add_argument("runtime", type=Path)
+    restricting = commands.add_parser("restrict-components")
+    restricting.add_argument("data", type=Path)
+    restricting.add_argument("published", type=Path)
+    restricting.add_argument("names", nargs="+")
+    args = parser.parse_args()
+    if args.command == "sign-install":
+        def environment(home):
+            return {**os.environ, "HOME": str(home), "XDG_DATA_HOME": str(args.data.parent)}
+        sign_install(args.home.resolve(), args.data.resolve(), args.runtime.resolve(), environment)
+    else:
+        restrict_components(args.data.resolve(), args.published.resolve(), args.names)

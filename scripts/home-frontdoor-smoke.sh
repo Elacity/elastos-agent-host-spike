@@ -303,7 +303,14 @@ components_dest.parent.mkdir(parents=True, exist_ok=True)
 components_dest.write_text(json.dumps(manifest, indent=2) + "\n")
 PY2
 
-HOME="$SOURCE_RUNTIME_HOME" XDG_DATA_HOME="$SOURCE_RUNTIME_XDG" "$ROOT/elastos/target/debug/elastos" serve --addr "127.0.0.1:${SOURCE_API_PORT}"     >"$SOURCE_RUNTIME_LOG" 2>&1 &
+PUBLISHED_COMPONENTS="${HOME_DIR}/published-components.json"
+cp "$SOURCE_RUNTIME_DATA_DIR/components.json" "$PUBLISHED_COMPONENTS"
+python3 "$ROOT/scripts/holder-canary-fixture.py" restrict-components \
+    "$SOURCE_RUNTIME_DATA_DIR" "$PUBLISHED_COMPONENTS" localhost-provider
+install -m 700 "$ROOT/elastos/target/debug/elastos" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos"
+python3 "$ROOT/scripts/holder-canary-fixture.py" sign-install \
+    "$SOURCE_RUNTIME_HOME" "$SOURCE_RUNTIME_DATA_DIR" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos"
+HOME="$SOURCE_RUNTIME_HOME" XDG_DATA_HOME="$SOURCE_RUNTIME_XDG" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos" serve --addr "127.0.0.1:${SOURCE_API_PORT}"     >"$SOURCE_RUNTIME_LOG" 2>&1 &
 SOURCE_RUNTIME_PID=$!
 
 for _ in $(seq 1 60); do
@@ -342,10 +349,10 @@ if [[ ! -f "$SOURCE_COMPONENTS_MANIFEST" ]]; then
 fi
 
 echo "[home-frontdoor] setup home profile"
-cp "$SOURCE_RUNTIME_DATA_DIR/components.json" "$HOME_DIR/xdg-data/elastos/components.json"
+cp "$PUBLISHED_COMPONENTS" "$HOME_DIR/xdg-data/elastos/components.json"
 # A source-manifest setup manages collaboration itself: a pinned release network in
 # components.json is neither required beside the manifest nor joined (live Community).
-HOME="$HOME_DIR" XDG_DATA_HOME="$HOME_DIR/xdg-data" ELASTOS_COLLABORATION_STARTUP_MODE=isolated ELASTOS_COMPONENTS_MANIFEST="$SOURCE_RUNTIME_DATA_DIR/components.json" "$ROOT/elastos/target/debug/elastos" setup --profile home >/tmp/elastos-home-frontdoor-setup.log
+HOME="$HOME_DIR" XDG_DATA_HOME="$HOME_DIR/xdg-data" ELASTOS_COLLABORATION_STARTUP_MODE=isolated ELASTOS_COMPONENTS_MANIFEST="$PUBLISHED_COMPONENTS" "$ROOT/elastos/target/debug/elastos" setup --profile home >/tmp/elastos-home-frontdoor-setup.log
 
 INSTALLED_HOME_CLI_DIR="$HOME_DIR/xdg-data/elastos/capsules/home-cli"
 if [[ ! -d "$INSTALLED_HOME_CLI_DIR" ]]; then
