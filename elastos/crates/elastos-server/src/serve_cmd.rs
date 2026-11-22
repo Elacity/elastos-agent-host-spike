@@ -14,14 +14,24 @@ async fn load_microvm_capsule(
     manifest: elastos_common::CapsuleManifest,
 ) -> anyhow::Result<elastos_compute::CapsuleHandle> {
     check_entrypoint_file(capsule_dir, &manifest.entrypoint).await?;
-    let (image, sha256) = elastos_server::setup::checked_vm_image(
+    let checked_image = elastos_server::setup::checked_vm_image(
         data_dir,
         capsule_dir,
         &manifest.name,
         &manifest.entrypoint,
+        manifest
+            .microvm
+            .as_ref()
+            .and_then(|vm| vm.kernel.as_deref()),
     )?;
     provider
-        .load_verified(capsule_dir, manifest, &image, &sha256)
+        .load_verified(
+            capsule_dir,
+            manifest,
+            &checked_image.rootfs,
+            &checked_image.rootfs_sha256,
+            checked_image.kernel,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load capsule: {}", e))
 }

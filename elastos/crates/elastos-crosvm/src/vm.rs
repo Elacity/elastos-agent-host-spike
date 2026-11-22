@@ -37,6 +37,7 @@ pub struct RunningVm {
     crosvm_bin: Option<PathBuf>,
 
     verified_rootfs: Option<File>,
+    verified_kernel: Option<File>,
 }
 
 impl RunningVm {
@@ -56,7 +57,14 @@ impl RunningVm {
             pid: None,
             crosvm_bin: None,
             verified_rootfs,
+            verified_kernel: None,
         }
+    }
+
+    /// Hold the kernel descriptor that was checked against the signed image entry.
+    pub fn with_verified_kernel(mut self, kernel: File) -> Self {
+        self.verified_kernel = Some(kernel);
+        self
     }
 
     /// Start the VM using crosvm
@@ -69,6 +77,11 @@ impl RunningVm {
             .as_ref()
             .ok_or_else(|| ElastosError::Compute("Unverified VM rootfs refused".into()))?;
         let rootfs_fd = rootfs.as_raw_fd();
+        let kernel = self
+            .verified_kernel
+            .as_ref()
+            .ok_or_else(|| ElastosError::Compute("Unverified VM kernel refused".into()))?;
+        let kernel_fd = kernel.as_raw_fd();
 
         if !cfg!(target_os = "linux") || !std::path::Path::new("/dev/kvm").exists() {
             return Err(ElastosError::Compute(
@@ -116,7 +129,7 @@ impl RunningVm {
         let _ = tokio::fs::remove_file(&self.socket_path).await;
 
         // Build crosvm run command
-        let crosvm_args = verified_crosvm_args(&self.config, rootfs_fd);
+        let crosvm_args = verified_crosvm_args(&self.config, rootfs_fd, kernel_fd);
 
         tracing::info!(
             "Starting crosvm VM '{}': {} run --socket {} {}",
@@ -137,6 +150,9 @@ impl RunningVm {
         unsafe {
             command.as_std_mut().pre_exec(move || {
                 if libc::fcntl(rootfs_fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(kernel_fd, libc::F_SETFD, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())
@@ -332,9 +348,14 @@ impl RunningVm {
     }
 }
 
-fn verified_crosvm_args(config: &VmConfig, rootfs_fd: std::os::fd::RawFd) -> Vec<String> {
+fn verified_crosvm_args(
+    config: &VmConfig,
+    rootfs_fd: std::os::fd::RawFd,
+    kernel_fd: std::os::fd::RawFd,
+) -> Vec<String> {
     let mut checked = config.clone();
     checked.rootfs_path = format!("/proc/self/fd/{rootfs_fd}").into();
+    checked.kernel_path = format!("/proc/self/fd/{kernel_fd}").into();
     checked.to_crosvm_args()
 }
 
@@ -374,8 +395,8 @@ mod tests {
         assert!(!temp.path().join("vm.sock").exists());
     }
 
-    #[test]
-    fn crosvm_command_uses_the_held_rootfs_descriptor() {
+    #[tokio::test]
+    async fn start_without_checked_kernel_refuses_before_kvm() {
         let temp = tempfile::tempdir().unwrap();
         let manifest: CapsuleManifest = serde_json::from_value(serde_json::json!({
             "schema": "elastos.capsule/v1", "version": "0.1.0", "name": "test-vm",
@@ -383,7 +404,25 @@ mod tests {
         }))
         .unwrap();
         let config = VmConfig::from_manifest(&manifest, temp.path(), &temp.path().join("vmlinux"));
-        let args = verified_crosvm_args(&config, 17);
+        let rootfs_path = temp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs_path, b"rootfs").unwrap();
+        let rootfs = File::open(rootfs_path).unwrap();
+        let mut vm = RunningVm::new(config, manifest, temp.path().join("vm.sock"), Some(rootfs));
+        let error = vm.start(&temp.path().join("crosvm")).await.unwrap_err();
+        assert!(error.to_string().contains("Unverified VM kernel refused"));
+    }
+
+    #[test]
+    fn crosvm_command_uses_the_held_rootfs_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest: CapsuleManifest = serde_json::from_value(serde_json::json!({
+            "schema": "elastos.capsule/v1", "version": "0.1.0", "name": "test-vm",
+            "role": "app", "type": "microvm", "entrypoint": "rootfs.ext4",
+            "microvm": {"kernel": "unsigned-vmlinux"}
+        }))
+        .unwrap();
+        let config = VmConfig::from_manifest(&manifest, temp.path(), &temp.path().join("vmlinux"));
+        let args = verified_crosvm_args(&config, 17, 19);
         assert!(
             args.iter().any(|arg| arg.contains("path=/proc/self/fd/17")),
             "{args:?}"
@@ -391,5 +430,7 @@ mod tests {
         assert!(!args
             .iter()
             .any(|arg| arg.contains(&temp.path().join("rootfs.ext4").display().to_string())));
+        assert_eq!(args.last().map(String::as_str), Some("/proc/self/fd/19"));
+        assert!(!args.iter().any(|arg| arg.contains("unsigned-vmlinux")));
     }
 }

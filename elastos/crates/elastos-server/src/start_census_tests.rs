@@ -501,12 +501,20 @@ fn every_capsule_load_spawn_and_registration_is_listed_with_its_gate() {
 #[test]
 fn census_preload_checks_run_before_their_loads() {
     let sources = production_sources();
-    let required_orders = [(
-        "elastos-server/src/serve_cmd.rs",
-        "load_microvm_capsule",
-        "check_entrypoint_file(",
-        "provider.load_verified",
-    )];
+    let required_orders = [
+        (
+            "elastos-server/src/serve_cmd.rs",
+            "load_microvm_capsule",
+            "check_entrypoint_file(",
+            "provider.load_verified",
+        ),
+        (
+            "elastos-server/src/serve_cmd.rs",
+            "load_microvm_capsule",
+            "elastos_server::setup::checked_vm_image(",
+            "provider.load_verified",
+        ),
+    ];
 
     for (file, function, check, load) in required_orders {
         let code = code_only(sources.get(file).expect("listed load source exists"));

@@ -1,18 +1,28 @@
-//! Load admission for the selected VM rootfs.
+//! Load admission for the selected VM rootfs and boot kernel.
 
 use super::{
     browser_vm_image::signed_image, installed_release_source, ComponentsManifest, PlatformInfo,
 };
 use anyhow::{ensure, Context, Result};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::path::Path;
+use std::io::{Read, Seek};
+use std::path::{Component, Path};
+
+#[derive(Debug)]
+pub struct CheckedVmImage {
+    pub rootfs: File,
+    pub rootfs_sha256: String,
+    pub kernel: File,
+}
 
 pub fn checked_vm_image(
     data: &Path,
     dir: &Path,
     name: &str,
     entrypoint: &str,
-) -> Result<(File, String)> {
+    kernel_override: Option<&str>,
+) -> Result<CheckedVmImage> {
     let source =
         installed_release_source(data)?.context("Unsigned VM image refused: no signed release")?;
     let binary = fs::canonicalize(&source.install_path)?;
@@ -21,7 +31,7 @@ pub fn checked_vm_image(
     let platform = super::detect_platform();
     let (component, info) = selected_info(&manifest, name, &platform)?;
     checked_capsule_install_dir(data, dir, component, info)?;
-    open_signed_image(dir, entrypoint, info)
+    open_signed_image(dir, entrypoint, kernel_override, info)
 }
 
 fn checked_capsule_install_dir(
@@ -67,8 +77,15 @@ fn selected_info<'a>(
     Ok((component, info))
 }
 
-fn open_signed_image(dir: &Path, entrypoint: &str, info: &PlatformInfo) -> Result<(File, String)> {
+fn open_signed_image(
+    dir: &Path,
+    entrypoint: &str,
+    kernel_override: Option<&str>,
+    info: &PlatformInfo,
+) -> Result<CheckedVmImage> {
     let entry = signed_image(info)?.context("Unsigned VM image refused: no signed image entry")?;
+    // crosvm boots /init from the rootfs and has no initrd argument. The
+    // signed entry's initrd is release packaging, not a capsule boot input.
     ensure!(
         entrypoint == entry.path,
         "VM image path refused: entrypoint differs from signed image"
@@ -92,7 +109,46 @@ fn open_signed_image(dir: &Path, entrypoint: &str, info: &PlatformInfo) -> Resul
         image.metadata()?.len() == entry.size,
         "Changed VM image refused: size differs from signed entry"
     );
-    Ok((image, entry.sha256))
+    // The manifest may select another file only when its bytes match the
+    // signed kernel. Keep that opened file for the crosvm command.
+    let kernel_name = kernel_override.unwrap_or(&entry.kernel.path);
+    ensure!(
+        Path::new(kernel_name)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_))),
+        "VM kernel path refused: override is not relative"
+    );
+    let kernel_path = dir.join(kernel_name);
+    ensure!(
+        fs::symlink_metadata(&kernel_path)?.file_type().is_file(),
+        "VM kernel path refused: kernel is not a regular file"
+    );
+    let mut kernel = options
+        .open(&kernel_path)
+        .context("VM kernel path refused: open failed")?;
+    ensure!(
+        kernel.metadata()?.len() == entry.kernel.size,
+        "Changed VM kernel refused: size differs from signed entry"
+    );
+    let mut hasher = Sha256::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let count = kernel.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&chunk[..count]);
+    }
+    ensure!(
+        format!("{:x}", hasher.finalize()) == entry.kernel.sha256,
+        "Changed VM kernel refused: digest differs from signed entry"
+    );
+    kernel.rewind()?;
+    Ok(CheckedVmImage {
+        rootfs: image,
+        rootfs_sha256: entry.sha256,
+        kernel,
+    })
 }
 
 #[cfg(test)]
@@ -131,7 +187,9 @@ mod tests {
         let image_path = temp.path().join("rootfs.ext4");
         write_image_set(temp.path(), b"signed image");
         let info = row(b"signed image");
-        let (image, digest) = open_signed_image(temp.path(), "rootfs.ext4", &info).unwrap();
+        let checked = open_signed_image(temp.path(), "rootfs.ext4", None, &info).unwrap();
+        let image = checked.rootfs;
+        let digest = checked.rootfs_sha256;
         let overlays = RootfsManager::new(temp.path().join("cache"));
         overlays.init().await.unwrap();
         let (overlay, mut file) = overlays
@@ -140,9 +198,9 @@ mod tests {
             .unwrap();
         assert!(!overlay.exists());
         file.rewind().unwrap();
-        let mut checked = Vec::new();
-        file.read_to_end(&mut checked).unwrap();
-        assert_eq!(checked, b"signed image");
+        let mut copied_rootfs = Vec::new();
+        file.read_to_end(&mut copied_rootfs).unwrap();
+        assert_eq!(copied_rootfs, b"signed image");
         let kernel = temp.path().join("vmlinux");
         let binary = temp.path().join("crosvm");
         fs::write(&binary, b"test placeholder").unwrap();
@@ -168,7 +226,7 @@ mod tests {
             .to_string()
             .contains("Unsigned VM image refused"));
         let handle = provider
-            .load_verified(temp.path(), manifest, &image, &digest)
+            .load_verified(temp.path(), manifest, &image, &digest, checked.kernel)
             .await
             .unwrap();
         assert_eq!(
@@ -183,12 +241,14 @@ mod tests {
             .to_string()
             .contains("/dev/kvm"));
         fs::write(&image_path, b"short").unwrap();
-        assert!(open_signed_image(temp.path(), "rootfs.ext4", &info)
+        assert!(open_signed_image(temp.path(), "rootfs.ext4", None, &info)
             .unwrap_err()
             .to_string()
             .contains("size differs"));
         fs::write(&image_path, b"other  image").unwrap();
-        let (image, digest) = open_signed_image(temp.path(), "rootfs.ext4", &info).unwrap();
+        let checked = open_signed_image(temp.path(), "rootfs.ext4", None, &info).unwrap();
+        let image = checked.rootfs;
+        let digest = checked.rootfs_sha256;
         let err = overlays
             .create_verified_overlay("changed", &image, &image_path, &digest)
             .await
@@ -206,7 +266,9 @@ mod tests {
         let path = temp.path().join("rootfs.ext4");
         write_image_set(temp.path(), b"signed image");
         let info = row(b"signed image");
-        let (image, digest) = open_signed_image(temp.path(), "rootfs.ext4", &info).unwrap();
+        let checked = open_signed_image(temp.path(), "rootfs.ext4", None, &info).unwrap();
+        let image = checked.rootfs;
+        let digest = checked.rootfs_sha256;
         let overlays = RootfsManager::new(temp.path().join("cache"));
         overlays.init().await.unwrap();
         fs::write(temp.path().join("cache/overlays/stale.ext4"), b"old").unwrap();
@@ -236,25 +298,25 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         write_image_set(temp.path(), b"signed image");
         assert!(
-            checked_vm_image(temp.path(), temp.path(), "vm", "rootfs.ext4")
+            checked_vm_image(temp.path(), temp.path(), "vm", "rootfs.ext4", None)
                 .unwrap_err()
                 .to_string()
                 .contains("Unsigned VM image refused")
         );
         let mut info = row(b"signed image");
-        assert!(open_signed_image(temp.path(), "other.ext4", &info)
+        assert!(open_signed_image(temp.path(), "other.ext4", None, &info)
             .unwrap_err()
             .to_string()
             .contains("path refused"));
         info.extra.remove("vm_image");
-        assert!(open_signed_image(temp.path(), "rootfs.ext4", &info)
+        assert!(open_signed_image(temp.path(), "rootfs.ext4", None, &info)
             .unwrap_err()
             .to_string()
             .contains("Unsigned VM image refused"));
         let mut invalid = row(b"signed image");
         invalid.extra["vm_image"]["cid"] =
             serde_json::json!(super::super::catalog_head_cid(b"changed").unwrap());
-        assert!(open_signed_image(temp.path(), "rootfs.ext4", &invalid).is_err());
+        assert!(open_signed_image(temp.path(), "rootfs.ext4", None, &invalid).is_err());
         let manifest: ComponentsManifest = serde_json::from_value(serde_json::json!({"external":{"vm":{
             "install_path":"bin/vm", "platforms":{"darwin-arm64":{}},
             "capsule_metadata":{"install_path":"capsules/vm","platforms":{"darwin-arm64":row(b"signed image")}}
@@ -269,7 +331,9 @@ mod tests {
         fs::create_dir_all(&capsule).unwrap();
         write_image_set(&capsule, b"signed image");
         checked_capsule_install_dir(temp.path(), &capsule, component, info).unwrap();
-        let (image, digest) = open_signed_image(&capsule, "rootfs.ext4", info).unwrap();
+        let checked = open_signed_image(&capsule, "rootfs.ext4", None, info).unwrap();
+        let image = checked.rootfs;
+        let digest = checked.rootfs_sha256;
         assert_eq!(
             image.metadata().unwrap().len(),
             b"signed image".len() as u64
@@ -282,6 +346,41 @@ mod tests {
             info
         )
         .is_err());
+    }
+
+    #[test]
+    fn changed_kernel_and_unsigned_override_refuse_before_load() {
+        let temp = tempfile::tempdir().unwrap();
+        write_image_set(temp.path(), b"signed image");
+        let info = row(b"signed image");
+        let changed = vec![b'x'; KERNEL.len()];
+        fs::write(temp.path().join("other-vmlinux"), &changed).unwrap();
+        let error = open_signed_image(temp.path(), "rootfs.ext4", Some("other-vmlinux"), &info)
+            .unwrap_err();
+        assert!(error.to_string().contains("digest differs"), "{error}");
+        let error =
+            open_signed_image(temp.path(), "rootfs.ext4", Some("../vmlinux"), &info).unwrap_err();
+        assert!(
+            error.to_string().contains("VM kernel path refused"),
+            "{error}"
+        );
+
+        fs::write(temp.path().join("other-vmlinux"), KERNEL).unwrap();
+        let mut checked =
+            open_signed_image(temp.path(), "rootfs.ext4", Some("other-vmlinux"), &info).unwrap();
+        fs::rename(
+            temp.path().join("other-vmlinux"),
+            temp.path().join("old-vmlinux"),
+        )
+        .unwrap();
+        fs::write(temp.path().join("other-vmlinux"), &changed).unwrap();
+        let mut held = Vec::new();
+        checked.kernel.read_to_end(&mut held).unwrap();
+        assert_eq!(held, KERNEL);
+
+        fs::write(temp.path().join("vmlinux"), &changed).unwrap();
+        let error = open_signed_image(temp.path(), "rootfs.ext4", None, &info).unwrap_err();
+        assert!(error.to_string().contains("digest differs"), "{error}");
     }
 
     #[test]
@@ -308,13 +407,15 @@ mod tests {
         .unwrap();
         crate::installed_release::tests::sign_test_install(data);
 
-        let (mut image, digest) = checked_vm_image(data, &capsule, "shell", "rootfs.ext4").unwrap();
+        let checked = checked_vm_image(data, &capsule, "shell", "rootfs.ext4", None).unwrap();
+        let mut image = checked.rootfs;
+        let digest = checked.rootfs_sha256;
         let mut bytes = Vec::new();
         image.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"signed image");
         assert_eq!(digest, format!("{:x}", Sha256::digest(&bytes)));
-        let error =
-            checked_vm_image(data, &data.join("bin/shell"), "shell", "rootfs.ext4").unwrap_err();
+        let error = checked_vm_image(data, &data.join("bin/shell"), "shell", "rootfs.ext4", None)
+            .unwrap_err();
         assert!(
             error.to_string().contains("selected directory differs"),
             "{error}"

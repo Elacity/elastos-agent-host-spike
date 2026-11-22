@@ -1048,11 +1048,15 @@ impl Supervisor {
         if let Some(reason) = Self::microvm_unavailable(&self.registry, &platform) {
             bail!("{reason}. Cannot launch capsule '{name}'.");
         }
-        let (image, sha256) = crate::setup::checked_vm_image(
+        let checked_image = crate::setup::checked_vm_image(
             &self.data_dir,
             &capsule_dir,
             name,
             &manifest.entrypoint,
+            manifest
+                .microvm
+                .as_ref()
+                .and_then(|vm| vm.kernel.as_deref()),
         )?;
         // VM path — hard require KVM
         if !elastos_crosvm::is_supported() {
@@ -1084,6 +1088,7 @@ impl Supervisor {
         // Create VM config from manifest, override vsock CID
         let mut vm_config =
             VmConfig::from_manifest(&manifest, &capsule_dir, &self.crosvm_config.kernel_path);
+        vm_config.kernel_path = capsule_dir.join("vmlinux");
         vm_config.vsock_cid = cid;
         vm_config.boot_args = format!("{} elastos.data_dir=/opt/elastos", vm_config.boot_args);
         vm_config.interactive_stdio = interactive;
@@ -1195,7 +1200,12 @@ impl Supervisor {
         let overlays = RootfsManager::new(&self.crosvm_config.rootfs_cache_dir);
         overlays.init().await?;
         let (overlay_path, rootfs_file) = overlays
-            .create_verified_overlay(&handle, &image, &rootfs_base, &sha256)
+            .create_verified_overlay(
+                &handle,
+                &checked_image.rootfs,
+                &rootfs_base,
+                &checked_image.rootfs_sha256,
+            )
             .await?;
         vm_config.rootfs_path = overlay_path;
 
@@ -1239,7 +1249,8 @@ impl Supervisor {
         }
 
         // Start the VM (after bridge socket is listening)
-        let mut vm = RunningVm::new(vm_config, manifest, socket_path, Some(rootfs_file));
+        let mut vm = RunningVm::new(vm_config, manifest, socket_path, Some(rootfs_file))
+            .with_verified_kernel(checked_image.kernel);
         vm.start(&self.crosvm_config.crosvm_bin)
             .await
             .map_err(|e| anyhow::anyhow!("VM boot failed for '{}': {}", name, e))?;

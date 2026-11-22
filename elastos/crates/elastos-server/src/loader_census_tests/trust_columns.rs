@@ -638,7 +638,7 @@ fn columns() -> Vec<TrustColumn> {
             class: "n/a",
             trust_root: "release-signature",
             verified_when: "at-overlay-creation",
-            evidence: [".load_verified(capsule_", "dir, manifest, &image, &sha256)"].concat(),
+            evidence: "checked_image.kernel".into(),
             os_path: "",
         },
         TrustColumn {
@@ -1606,7 +1606,7 @@ fn slice_4b2_vm_image_rows_bind_checked_overlay_at_start() {
     let vm_rows: Vec<_> = rows()
         .into_iter()
         .filter(|row| {
-            row.kind == "VM capsule; signed bytes checked at overlay creation, fd-bound at start"
+            row.kind == "VM rootfs and kernel: signed digests checked, descriptors held at start"
         })
         .collect();
     assert_eq!(vm_rows.len(), 4);

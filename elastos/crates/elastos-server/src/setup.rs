@@ -27,7 +27,7 @@ pub mod verified_executable;
 mod vm_image;
 pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
 pub(crate) use browser_vm_image::verified_seed_identity as verified_browser_vm_seed_identity;
-pub use vm_image::checked_vm_image;
+pub use vm_image::{checked_vm_image, CheckedVmImage};
 #[cfg(unix)]
 mod local_model_engine_receipt;
 mod progress;
