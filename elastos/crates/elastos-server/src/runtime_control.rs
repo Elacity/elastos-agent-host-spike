@@ -535,11 +535,10 @@ fn pid_is_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Conservative fallback: assume alive so we don't tear down a live
-        // runtime's coords. Implement a Win32 OpenProcess-based check when
-        // Windows support lands.
+        // No Win32 process identity check exists. A pid that cannot be proved
+        // alive is not admitted, so runtime coordinate validation drops it.
         let _ = pid;
-        true
+        false
     }
 }
 

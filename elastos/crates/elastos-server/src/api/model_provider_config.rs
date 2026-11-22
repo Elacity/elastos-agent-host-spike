@@ -5,7 +5,9 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Read as _, Write as _};
+#[cfg(unix)]
+use std::io::Write as _;
+use std::io::{ErrorKind, Read as _};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -428,8 +430,12 @@ pub async fn model_provider_config(
     }
     #[cfg(not(unix))]
     {
-        let _ = registry;
-        Ok((config, None))
+        let _ = (config, registry);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported on this platform",
+        )
+        .into())
     }
 }
 

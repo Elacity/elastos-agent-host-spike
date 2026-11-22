@@ -629,27 +629,43 @@ pub(super) async fn system_approval_lens_revoke(
             Err(err) => return system_error_response(err),
         };
     #[cfg(not(unix))]
-    let ended_https = 0;
-    let jev_active = crate::jev_approval_lens::approved_connection(&state.data_dir, &req.id);
-    let ended_jev = if jev_active {
-        crate::jev_approval_lens::end_connection_approval(&state.data_dir, &req.id)
-    } else {
-        Ok(())
-    };
-    // Commit the owner's authority change before cancelling admitted sends.
+    {
+        let _ = &req;
+        return system_error_response(
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "unsupported on this platform",
+            )
+            .into(),
+        );
+    }
     #[cfg(unix)]
-    let _end = if ended_https > 0 {
-        Some(crate::api::hosted_egress_admission::begin_hosted_end(&state.data_dir, &req.id).await)
-    } else {
-        None
-    };
-    if let Err(err) = ended_jev {
-        return system_error_response(err);
+    {
+        let jev_active = crate::jev_approval_lens::approved_connection(&state.data_dir, &req.id);
+        let ended_jev = if jev_active {
+            crate::jev_approval_lens::end_connection_approval(&state.data_dir, &req.id)
+        } else {
+            Ok(())
+        };
+        // Commit the owner's authority change before cancelling admitted sends.
+        let _end = if ended_https > 0 {
+            Some(
+                crate::api::hosted_egress_admission::begin_hosted_end(&state.data_dir, &req.id)
+                    .await,
+            )
+        } else {
+            None
+        };
+        if let Err(err) = ended_jev {
+            return system_error_response(err);
+        }
+        if ended_https == 0 && !jev_active {
+            return system_error_response(anyhow::anyhow!(
+                "hosted connection has no active approval"
+            ));
+        }
+        Json(serde_json::json!({ "offer_id": req.id, "approval": "ended" })).into_response()
     }
-    if ended_https == 0 && !jev_active {
-        return system_error_response(anyhow::anyhow!("hosted connection has no active approval"));
-    }
-    Json(serde_json::json!({ "offer_id": req.id, "approval": "ended" })).into_response()
 }
 
 pub(super) async fn system_ai_provider_get(

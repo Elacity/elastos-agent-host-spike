@@ -255,6 +255,7 @@ pub fn save_nickname(data_dir: &Path, nickname: &str) -> anyhow::Result<()> {
 }
 
 /// Persist the local DID nickname using an explicit device key.
+#[cfg(unix)]
 pub fn save_nickname_with_device_key(
     data_dir: &Path,
     device_key: &[u8; 32],
@@ -284,10 +285,21 @@ pub fn save_nickname_with_device_key(
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.write_all(&encrypted)?;
     }
-    #[cfg(not(unix))]
-    std::fs::write(&path, encrypted)?;
 
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn save_nickname_with_device_key(
+    _data_dir: &Path,
+    _device_key: &[u8; 32],
+    _nickname: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unsupported on this platform",
+    )
+    .into())
 }
 
 /// Derive an Ed25519 SigningKey + `did:key` from a 32-byte secret.

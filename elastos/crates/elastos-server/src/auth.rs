@@ -532,6 +532,16 @@ fn auth_state_cache_key(data_dir: &Path) -> PathBuf {
     std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf())
 }
 
+#[cfg(not(unix))]
+fn unsupported_on_this_platform() -> anyhow::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unsupported on this platform",
+    )
+    .into()
+}
+
+#[cfg(unix)]
 fn regular_file_identity_from_metadata(
     metadata: &std::fs::Metadata,
     label: &str,
@@ -552,23 +562,14 @@ fn regular_file_identity_from_metadata(
             len: metadata.len(),
         })
     }
-    #[cfg(not(unix))]
-    {
-        use std::time::{Duration, UNIX_EPOCH};
-        let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-        let duration = modified
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0));
-        Ok(RegularFileIdentity {
-            dev: 0,
-            ino: 0,
-            mtime_secs: duration.as_secs() as i64,
-            mtime_nanos: duration.subsec_nanos() as i64,
-            ctime_secs: 0,
-            ctime_nanos: 0,
-            len: metadata.len(),
-        })
-    }
+}
+
+#[cfg(not(unix))]
+fn regular_file_identity_from_metadata(
+    _metadata: &std::fs::Metadata,
+    _label: &str,
+) -> anyhow::Result<RegularFileIdentity> {
+    Err(unsupported_on_this_platform())
 }
 
 fn observe_optional_regular_file_identity(
@@ -4680,6 +4681,7 @@ fn audit_chain_activation_lock_path(data_dir: &Path) -> anyhow::Result<PathBuf> 
         .map(|path| path.with_file_name(format!("{AUDIT_CHAIN_REQUIRED_FILE}.lock")))
 }
 
+#[cfg(unix)]
 fn open_new_secret_file(path: &Path) -> anyhow::Result<File> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -4690,6 +4692,12 @@ fn open_new_secret_file(path: &Path) -> anyhow::Result<File> {
         .with_context(|| format!("failed to create secret state file {path:?}"))
 }
 
+#[cfg(not(unix))]
+fn open_new_secret_file(_path: &Path) -> anyhow::Result<File> {
+    Err(unsupported_on_this_platform())
+}
+
+#[cfg(unix)]
 pub(crate) fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<()> {
     let relative = parent
         .strip_prefix(data_dir)
@@ -4718,6 +4726,12 @@ pub(crate) fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyh
     Ok(())
 }
 
+#[cfg(not(unix))]
+pub(crate) fn ensure_regular_auth_parent(_data_dir: &Path, _parent: &Path) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
+}
+
+#[cfg(unix)]
 pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
@@ -4731,6 +4745,11 @@ pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result
     }
     set_secret_file_permissions(path)?;
     Ok(file)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn open_regular_lock_file(_path: &Path, _label: &str) -> anyhow::Result<File> {
+    Err(unsupported_on_this_platform())
 }
 
 fn open_auth_state_lock(data_dir: &Path) -> anyhow::Result<File> {
@@ -4752,6 +4771,7 @@ fn open_audit_chain_activation_lock(data_dir: &Path) -> anyhow::Result<File> {
 // Callers first hold the process-local object mutex. This separate file lock
 // fences migration and cleanup across processes without re-entering auth's
 // short state lock while protection or receipts are written.
+#[cfg(unix)]
 fn lock_principal_root_lifecycle(data_dir: &Path) -> anyhow::Result<FileLock> {
     let path = auth_state_path(data_dir)?.with_file_name(PRINCIPAL_ROOT_LIFECYCLE_LOCK_FILE);
     ensure_regular_auth_parent(
@@ -4795,6 +4815,11 @@ fn lock_principal_root_lifecycle(data_dir: &Path) -> anyhow::Result<FileLock> {
         }
     }
     Ok(lock)
+}
+
+#[cfg(not(unix))]
+fn lock_principal_root_lifecycle(_data_dir: &Path) -> anyhow::Result<FileLock> {
+    Err(unsupported_on_this_platform())
 }
 
 fn lock_auth_state_file(file: File) -> anyhow::Result<FileLock> {
@@ -4870,6 +4895,7 @@ fn recovery_archive_key_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
         .join(RECOVERY_ARCHIVE_KEY_FILE))
 }
 
+#[cfg(unix)]
 pub fn load_or_create_recovery_archive_key(data_dir: &Path) -> anyhow::Result<[u8; 32]> {
     let path = recovery_archive_key_path(data_dir)?;
     if path.is_file() {
@@ -4892,6 +4918,12 @@ pub fn load_or_create_recovery_archive_key(data_dir: &Path) -> anyhow::Result<[u
     Ok(key)
 }
 
+#[cfg(not(unix))]
+pub fn load_or_create_recovery_archive_key(_data_dir: &Path) -> anyhow::Result<[u8; 32]> {
+    Err(unsupported_on_this_platform())
+}
+
+#[cfg(unix)]
 fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -4900,11 +4932,12 @@ fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
         std::fs::set_permissions(path, permissions)
             .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
     }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_secret_file_permissions(_path: &Path) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
 }
 
 fn audit_chain_checkpoint(state: &AuthState) -> anyhow::Result<Option<AuditChainCheckpointV1>> {
@@ -5059,7 +5092,7 @@ fn sync_parent_directory(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn sync_parent_directory(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    Err(unsupported_on_this_platform())
 }
 
 fn write_secret_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
@@ -7228,6 +7261,7 @@ fn decrypt_principal_root_object_envelope_bytes(
 /// regular file. Returns the file and its length at open. `O_NONBLOCK` keeps
 /// a FIFO swapped in after the walk from blocking the open while the caller
 /// holds its locks (#450 L8); it does not change reads of a regular file.
+#[cfg(unix)]
 fn open_principal_root_object_file(path: &Path) -> anyhow::Result<(File, u64)> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -7243,6 +7277,11 @@ fn open_principal_root_object_file(path: &Path) -> anyhow::Result<(File, u64)> {
         anyhow::bail!("principal-root object must be a regular file");
     }
     Ok((file, metadata.len()))
+}
+
+#[cfg(not(unix))]
+fn open_principal_root_object_file(_path: &Path) -> anyhow::Result<(File, u64)> {
+    Err(unsupported_on_this_platform())
 }
 
 /// Lazy protection of a legacy plaintext Library file. Only a file of at
@@ -10812,6 +10851,7 @@ pub fn migrate_principal_root_objects_offline(
     }
 }
 
+#[cfg(unix)]
 fn migrate_principal_root_objects_offline_locked(
     data_dir: &Path,
     plan_path: &Path,
@@ -10840,6 +10880,16 @@ fn migrate_principal_root_objects_offline_locked(
     migrate_principal_root_objects_plan_locked(data_dir, &plan, &plan_sha256, backup_dir)
 }
 
+#[cfg(not(unix))]
+fn migrate_principal_root_objects_offline_locked(
+    _data_dir: &Path,
+    _plan_path: &Path,
+    _backup_dir: &Path,
+) -> anyhow::Result<PrincipalRootMigrationReceiptV1> {
+    Err(unsupported_on_this_platform())
+}
+
+#[cfg(unix)]
 fn migrate_principal_root_objects_plan_locked(
     data_dir: &Path,
     plan: &PrincipalRootMigrationPlanV1,
@@ -11066,6 +11116,16 @@ fn migrate_principal_root_objects_plan_locked(
     write_principal_root_migration_cleanup(data_dir, &journal)?;
     cleanup_principal_root_migration_journal(data_dir, &journal)?;
     Ok(receipt)
+}
+
+#[cfg(not(unix))]
+fn migrate_principal_root_objects_plan_locked(
+    _data_dir: &Path,
+    _plan: &PrincipalRootMigrationPlanV1,
+    _plan_sha256: &str,
+    _backup_dir: &Path,
+) -> anyhow::Result<PrincipalRootMigrationReceiptV1> {
+    Err(unsupported_on_this_platform())
 }
 
 /// Start and update readiness: no interrupted migration, no unencrypted
@@ -11322,6 +11382,7 @@ fn require_no_principal_root_migration_journal(data_dir: &Path) -> anyhow::Resul
     }
 }
 
+#[cfg(unix)]
 fn ensure_safe_backup_parent(path: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -11335,6 +11396,11 @@ fn ensure_safe_backup_parent(path: &Path) -> anyhow::Result<()> {
         Err(error) if error.kind() == ErrorKind::NotFound => create_owner_only_dir(path),
         Err(error) => Err(error).context("failed to inspect principal-root upgrade backup parent"),
     }
+}
+
+#[cfg(not(unix))]
+fn ensure_safe_backup_parent(_path: &Path) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
 }
 
 fn validate_principal_root_migration_plan(
@@ -12623,6 +12689,7 @@ fn unlink_migration_cleanup_file(
     }
 }
 
+#[cfg(unix)]
 fn create_owner_only_dir(path: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -12631,9 +12698,12 @@ fn create_owner_only_dir(path: &Path) -> anyhow::Result<()> {
         builder.mode(0o700);
         builder.create(path)?;
     }
-    #[cfg(not(unix))]
-    std::fs::create_dir(path)?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_owner_only_dir(_path: &Path) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
 }
 
 /// Create a principal-root directory and every missing parent owner-only.
@@ -12644,6 +12714,7 @@ fn create_owner_only_dir(path: &Path) -> anyhow::Result<()> {
 /// the process umask, so a Home whose shell saved its state before any
 /// protection existed left a world-readable root behind and locked the person
 /// out of ever saving a Profile.
+#[cfg(unix)]
 pub(crate) fn create_owner_only_dir_all(data_dir: &Path, path: &Path) -> anyhow::Result<()> {
     // Only ever create or narrow inside this Home's own data directory. The
     // path above it belongs to the person's machine, not to us.
@@ -12686,6 +12757,12 @@ pub(crate) fn create_owner_only_dir_all(data_dir: &Path, path: &Path) -> anyhow:
     Ok(())
 }
 
+#[cfg(not(unix))]
+pub(crate) fn create_owner_only_dir_all(_data_dir: &Path, _path: &Path) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
+}
+
+#[cfg(unix)]
 fn durable_atomic_replace(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -12710,16 +12787,17 @@ fn durable_atomic_replace(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Resul
     sync_parent_directory(path)
 }
 
+#[cfg(not(unix))]
+fn durable_atomic_replace(_path: &Path, _bytes: &[u8], _mode: u32) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
+}
+
+#[cfg(unix)]
 fn principal_root_file_mode(metadata: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         metadata.permissions().mode() & 0o777
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        0
     }
 }
 
@@ -12781,6 +12859,7 @@ fn auth_owner_only_directory_matches_uid(
 /// differs from the generic unprotected-object writer: it creates each missing
 /// component with 0700 and rejects an existing symlink, non-directory, foreign
 /// owner, or group/world-accessible directory before any object write.
+#[cfg(unix)]
 fn ensure_auth_owner_only_directory(path: &Path) -> anyhow::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => {}
@@ -12832,6 +12911,12 @@ fn ensure_auth_owner_only_directory(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn ensure_auth_owner_only_directory(_path: &Path) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
+}
+
+#[cfg(unix)]
 fn write_owner_only_new_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true);
@@ -12841,6 +12926,11 @@ fn write_owner_only_new_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_owner_only_new_file(_path: &Path, _bytes: &[u8]) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
 }
 
 fn sha256_label(bytes: &[u8]) -> String {
@@ -12856,6 +12946,7 @@ fn is_sha256_label(value: &str) -> bool {
     })
 }
 
+#[cfg(unix)]
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -12888,6 +12979,11 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     }
     sync_parent_directory(path)?;
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn atomic_write(_path: &Path, _bytes: &[u8]) -> anyhow::Result<()> {
+    Err(unsupported_on_this_platform())
 }
 
 fn prune_auth_state(state: &mut AuthState, now: u64) {
@@ -21426,5 +21522,39 @@ pub(crate) mod tests {
                     .unwrap_or_else(|error| panic!("{label}: {error:#}"));
             assert_eq!(read_back, b"plain", "{label} reads back its plaintext");
         }
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+mod windows_unprotected_secret_refusal {
+    use super::{
+        atomic_write, create_owner_only_dir, durable_atomic_replace, open_new_secret_file,
+        open_regular_lock_file, write_owner_only_new_file,
+    };
+    use std::io::ErrorKind;
+
+    fn assert_unsupported(err: anyhow::Error) {
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(ErrorKind::Unsupported)
+        );
+        assert!(
+            err.to_string().contains("unsupported on this platform"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn secret_writers_refuse_before_creating_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret");
+        assert_unsupported(open_new_secret_file(&path).unwrap_err());
+        assert_unsupported(open_regular_lock_file(&path, "auth state").unwrap_err());
+        assert_unsupported(write_owner_only_new_file(&path, b"secret").unwrap_err());
+        assert_unsupported(atomic_write(&path, b"secret").unwrap_err());
+        assert_unsupported(durable_atomic_replace(&path, b"secret", 0o600).unwrap_err());
+        assert_unsupported(create_owner_only_dir(&path).unwrap_err());
+        assert!(dir.path().read_dir().unwrap().next().is_none());
     }
 }

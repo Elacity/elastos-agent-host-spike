@@ -1785,8 +1785,14 @@ fn browser_local_exit_socket_ready(path: &Path) -> anyhow::Result<bool> {
     #[cfg(not(unix))]
     {
         let _ = metadata;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported on this platform",
+        )
+        .into());
     }
 
+    #[cfg(unix)]
     Ok(true)
 }
 
@@ -3900,7 +3906,16 @@ mod tests {
         }
         #[cfg(not(unix))]
         {
-            assert!(browser_local_exit_socket_ready(&relay_path).unwrap());
+            let err = browser_local_exit_socket_ready(&relay_path).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
+                Some(std::io::ErrorKind::Unsupported)
+            );
+            assert!(
+                err.to_string().contains("unsupported on this platform"),
+                "{err}"
+            );
         }
     }
 
