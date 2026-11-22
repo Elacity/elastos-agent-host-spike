@@ -804,9 +804,8 @@ fn decode(value: &str, label: &str) -> anyhow::Result<Vec<u8>> {
         .with_context(|| format!("invalid base64 {label}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #![cfg(unix)]
     use super::*;
     use crate::collaboration_discovery_runtime::tests::signed_profile;
     use crate::collaboration_profile_authority::signed_profile_document_for_test;

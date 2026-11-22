@@ -2079,9 +2079,8 @@ pub(crate) async fn retry_text_file_busy_async<T>(
 #[path = "install_transaction/restart_tests.rs"]
 mod restart_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
-    #![cfg(unix)]
     use super::*;
     use std::os::unix::fs::symlink;
 

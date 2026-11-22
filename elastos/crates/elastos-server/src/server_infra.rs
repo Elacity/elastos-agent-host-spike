@@ -2146,9 +2146,8 @@ fn provider_config_from_env_or_file(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #![cfg(unix)]
     #[test]
     fn configured_carrier_listener_is_optional_and_strict() {
         let dir = tempfile::tempdir().unwrap();

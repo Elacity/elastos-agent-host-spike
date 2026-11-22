@@ -1338,9 +1338,8 @@ fn canonical_state_bytes(state: &PresenceState) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&serde_json::to_value(state)?)?)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #![cfg(unix)]
     use super::*;
 
     use std::os::unix::fs::{symlink, PermissionsExt};

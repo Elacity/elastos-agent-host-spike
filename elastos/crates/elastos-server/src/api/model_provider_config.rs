@@ -1821,9 +1821,8 @@ fn read_model_provider_private_file(
     Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod hosted_decision_write_fault_tests {
-    #![cfg(unix)]
     #[tokio::test]
     async fn decision_writer_reports_post_rename_durability_failure() {
         const CHILD: &str = "ELASTOS_TEST_HOSTED_POST_RENAME_FAULT";
@@ -2287,9 +2286,8 @@ mod hosted_hint_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod validate_fixture_tests {
-    #![cfg(unix)]
     use super::{load_hosted_validate_fixtures, parse_loopback_http_url};
 
     fn write_validate_fixtures(data_dir: &std::path::Path, body: &str) {

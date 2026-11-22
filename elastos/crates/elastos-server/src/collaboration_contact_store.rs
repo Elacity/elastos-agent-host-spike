@@ -4318,9 +4318,8 @@ fn retain_removed_records_without(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #![cfg(unix)]
     use super::*;
 
     use std::os::unix::fs::{symlink, PermissionsExt};

@@ -408,9 +408,8 @@ impl BinarySnapshotReader for RealBinarySnapshotReader {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod test_support {
-    #![cfg(unix)]
     use std::os::fd::{FromRawFd as _, RawFd};
     use std::os::unix::fs::MetadataExt as _;
     use std::os::unix::process::CommandExt as _;

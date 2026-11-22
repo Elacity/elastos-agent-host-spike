@@ -5288,9 +5288,8 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
-    #![cfg(unix)]
     use super::*;
     use crate::sources::{save_trusted_sources, TrustedSource, TrustedSourcesConfig};
     use elastos_common::{CapsuleManifest, CapsuleRole};

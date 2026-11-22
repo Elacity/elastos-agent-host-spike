@@ -742,9 +742,8 @@ fn generate_with_migration(
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #![cfg(unix)]
     use super::*;
     use serde_json::Value;
     use sha2::Digest;

@@ -4461,9 +4461,8 @@ fn require_discovery_provider_success(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests {
-    #![cfg(unix)]
     use super::*;
 
     use async_trait::async_trait;
