@@ -49,8 +49,8 @@ are separate B3-R checks.
 One generator covers `did-provider`, `wallet-provider` and `model-provider`,
 parameterized by the provider's approved declared rights and its storage root,
 so the Runtime has one path for a provider's profile (P10). Runtime source
-renders the profile, then its macOS provider entry refuses start because the
-Seatbelt profile has no spawn path yet. Installed acceptance remains a B3-R
+renders the profile, then its macOS provider entry starts the provider under that profile
+through `/usr/bin/sandbox-exec`. Installed acceptance remains a B3-R
 gate. The tests launch this provider
 under its oracle with `/usr/bin/sandbox-exec -f confine.sb`, and
 `startup_is_refused_when_the_profile_cannot_be_applied` proves that a start is
@@ -91,8 +91,8 @@ holds these three names and the two storage layouts to the one derivation the
 launch uses, and it does not check a path for `PROVIDER_EXECUTABLE`.
 
 The tests pass a temporary base and bind all three parameters before launch.
-The Runtime macOS entry renders a profile, then refuses start because its
-Seatbelt profile has no spawn path yet. Installed behavior is B3-R.
+The Runtime macOS entry renders a profile, then starts the provider under that profile
+through `/usr/bin/sandbox-exec`. Installed behavior is B3-R.
 
 ## The model provider's inline profile
 
