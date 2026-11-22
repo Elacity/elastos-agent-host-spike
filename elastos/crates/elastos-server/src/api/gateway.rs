@@ -163,6 +163,10 @@ pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
 #[cfg(test)]
+pub(super) use gateway_home_token::issue_home_agent_launch_token_at_for_test;
+#[cfg(test)]
+pub(super) use gateway_home_token::issue_home_agent_launch_token_with_context;
+#[cfg(test)]
 pub(super) use gateway_home_token::issue_home_launch_token_with_context;
 #[cfg(test)]
 pub(super) use gateway_home_token::launch_principal_root;
@@ -178,11 +182,11 @@ pub(super) use gateway_home_token::{
     require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
     require_home_page_or_cli_launch_context, require_home_projection_launch_token_context,
     require_home_runtime_wallet_authority, require_home_token, require_home_token_context,
-    require_home_viewer_launch_token_context, require_internal_shell_content_open_context,
-    require_internal_shell_launch_grant_principal, require_internal_shell_projection_context,
-    require_internal_shell_runtime_wallet_authority, require_launch_bound_token,
-    require_runtime_wallet_authority, runtime_wallet_authority, HomeLaunchContext,
-    RequiredHomeLaunchToken,
+    require_home_viewer_launch_token_context, require_internal_shell_agent_launch_grant,
+    require_internal_shell_content_open_context, require_internal_shell_launch_grant_principal,
+    require_internal_shell_projection_context, require_internal_shell_runtime_wallet_authority,
+    require_launch_bound_token, require_runtime_wallet_authority, runtime_wallet_authority,
+    HomeLaunchContext, RequiredHomeLaunchToken,
 };
 use gateway_home_update::*;
 
