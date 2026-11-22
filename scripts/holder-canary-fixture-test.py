@@ -30,6 +30,87 @@ class HolderFixtureTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, "site-provider has a blank catalogue checksum"):
                     fixture.prepare_installed_components(data)
 
+    def _source_services(self, data, platform_info, capsules=None, platform="linux-amd64"):
+        (data / "capsules/services").mkdir(parents=True)
+        (data / "capsules/services/capsule.json").write_text(json.dumps({
+            "name": "services", "entrypoint": "browser/index.html"}))
+        manifest = {"external": {"services": {
+            "install_path": "capsules/services", "platforms": {platform: platform_info}}}}
+        if capsules is not None:
+            manifest["capsules"] = capsules
+        (data / "components.json").write_text(json.dumps(manifest))
+
+    def test_blank_source_capsule_checksum_skips_receipt(self):
+        unpublished = {
+            "checksum": "", "cid": "", "size": 0, "release_path": "services.tar.gz",
+            "extract_path": "services", "install_path": "capsules/services"}
+        stamped = {**unpublished, "checksum": None, "cid": None, "strategy": "source-build"}
+        omitted = {key: value for key, value in stamped.items() if key not in ("checksum", "cid")}
+        cases = (("empty", unpublished, "linux-amd64"), ("null", stamped, "linux-amd64"),
+                 ("omitted", omitted, "linux-amd64"), ("wildcard", unpublished, "*"))
+        for label, platform_info, platform in cases:
+            with self.subTest(checksum=label):
+                with tempfile.TemporaryDirectory() as directory:
+                    data = Path(directory)
+                    (data / "bin").mkdir()
+                    self._source_services(data, platform_info, capsules={
+                        "services": {"cid": "", "sha256": "", "install_path": "capsules/services"}},
+                        platform=platform)
+                    provider = data / "bin/localhost-provider"
+                    provider.write_bytes(b"provider")
+                    provider_checksum = "sha256:" + fixture.sha(provider)
+                    manifest = json.loads((data / "components.json").read_text())
+                    manifest["external"]["localhost-provider"] = {
+                        "install_path": "bin/localhost-provider",
+                        "platforms": {"linux-amd64": {"checksum": provider_checksum}}}
+                    (data / "components.json").write_text(json.dumps(manifest))
+                    catalogue = (data / "components.json").read_bytes()
+                    with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                        fixture.prepare_installed_components(data)
+                    self.assertEqual((data / "components.json").read_bytes(), catalogue)
+                    self.assertFalse((data / "capsules/services/.elastos-artifact-sha256").exists())
+                    self.assertTrue(fixture.blank_catalogue_checksum(
+                        json.loads(catalogue)["external"]["services"]["platforms"][platform].get("checksum")))
+                    provider.write_bytes(b"changed")
+                    with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                        with self.assertRaisesRegex(AssertionError, "installed bytes differ"):
+                            fixture.prepare_installed_components(data)
+                    self.assertFalse((data / "capsules/services/.elastos-artifact-sha256").exists())
+
+    def test_malformed_catalogue_checksum_still_fails(self):
+        digests = (
+            "sha256:abcd",
+            "sha256:" + "A" * 64,
+            "sha256:" + "a" * 64 + "\n",
+            12,
+            True,
+            ["sha256:" + "ab" * 32],
+        )
+        for checksum in digests:
+            with self.subTest(checksum=checksum):
+                with tempfile.TemporaryDirectory() as directory:
+                    data = Path(directory)
+                    self._source_services(data, {
+                        "checksum": checksum, "strategy": "source-build",
+                        "extract_path": "services", "install_path": "capsules/services"})
+                    with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                        with self.assertRaisesRegex(
+                            AssertionError, "services requires a signed SHA-256 digest"
+                        ):
+                            fixture.prepare_installed_components(data)
+                    self.assertFalse((data / "capsules/services/.elastos-artifact-sha256").exists())
+
+    def test_registry_checksum_still_requires_a_catalogue_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            self._source_services(data, {
+                "checksum": "", "cid": "", "extract_path": "services",
+                "install_path": "capsules/services", "strategy": "source-build"}, capsules={
+                    "services": {"cid": "", "sha256": "a" * 64}})
+            with patch.object(fixture, "component_platform", return_value="linux-amd64"):
+                with self.assertRaisesRegex(AssertionError, "services has a blank catalogue checksum"):
+                    fixture.prepare_installed_components(data)
+
     def test_sign_install_binds_installed_files_and_removes_key(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

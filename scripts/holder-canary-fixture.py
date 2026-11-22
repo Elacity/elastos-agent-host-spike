@@ -53,6 +53,58 @@ def component_platform():
     }[release_platform()]
 
 
+def blank_catalogue_checksum(value):
+    """A missing, JSON-null, or empty checksum. The Runtime stores those as no digest."""
+    return value is None or value == ""
+
+
+def source_capsule_without_release_checksum(name, component, info, installed, capsules):
+    """An installed source capsule whose catalogue names no release digest.
+
+    Source setup copies the capsule tree and clears the release checksum
+    (`strategy` `source-build`, or the unpublished `*` entry). The Runtime
+    does not read `.elastos-artifact-sha256` unless that checksum or the
+    capsule registry sha256 is non-empty, so the fixture must not invent one.
+    """
+    if not isinstance(component, dict) or not isinstance(info, dict):
+        return False
+    if not blank_catalogue_checksum(info.get("checksum")):
+        return False
+    if info.get("strategy") not in (None, "source-build"):
+        return False
+    if component.get("capsule_metadata") is not None:
+        return False
+    platform_cid = info.get("cid")
+    if not isinstance(platform_cid, (str, type(None))) or platform_cid not in (None, ""):
+        return False
+    if installed.is_symlink() or not installed.is_dir():
+        return False
+    relative = info.get("install_path") or component.get("install_path")
+    if not isinstance(relative, str) or Path(relative).as_posix() != f"capsules/{name}":
+        return False
+    capsule_manifest = installed / "capsule.json"
+    if capsule_manifest.is_symlink() or not capsule_manifest.is_file():
+        return False
+    try:
+        declared = json.loads(capsule_manifest.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    if not isinstance(declared, dict) or declared.get("name") != name:
+        return False
+    if not isinstance(capsules, dict):
+        return False
+    entry = capsules.get(name)
+    if entry is None:
+        return True
+    if not isinstance(entry, dict):
+        return False
+    for field in ("sha256", "cid"):
+        value = entry.get(field)
+        if not isinstance(value, (str, type(None))) or value not in (None, ""):
+            return False
+    return True
+
+
 def prepare_installed_components(data):
     """Give installed fixture components the receipts written by release setup."""
     catalogue = data / "components.json"
@@ -60,7 +112,8 @@ def prepare_installed_components(data):
     platform_key = component_platform()
 
     def digest(value, name):
-        assert value, f"{name} has a blank catalogue checksum"
+        if blank_catalogue_checksum(value):
+            raise AssertionError(f"{name} has a blank catalogue checksum")
         assert isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value), \
             f"{name} requires a signed SHA-256 digest"
         return value[7:]
@@ -87,6 +140,10 @@ def prepare_installed_components(data):
             and not Path(relative).is_absolute(), f"invalid fixture install path for {name}"
         installed = data / relative
         if not installed.exists() and not installed.is_symlink():
+            continue
+        if source_capsule_without_release_checksum(
+            name, component, info, installed, manifest.get("capsules", {})
+        ):
             continue
         expected = digest(info.get("checksum"), name)
         if info.get("extract_path"):
