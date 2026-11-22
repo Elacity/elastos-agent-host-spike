@@ -682,16 +682,16 @@ pub(crate) fn require_internal_shell_projection_context(
     selected_resource: &str,
     executable_actor: &str,
 ) -> anyhow::Result<HomeLaunchTokenContext> {
-    let (id, content_name, _token, context) =
+    let (id, content_name, binding, _token, context) =
         require_launch_bound_token(data_dir, headers, executable_actor, true)?;
-    if format!("{LAUNCH_BOUND}{id}/{content_name}") != selected_resource {
+    if format!("{LAUNCH_BOUND}{id}/{content_name}/{binding}") != selected_resource {
         anyhow::bail!("kept_launch_grant_mismatch");
     }
     Ok(context)
 }
 
 /// A page's own token for a kept content launch, in the one header: bound to
-/// `elastos://launch/<id>`, with `page` as its executable, under the browser
+/// `elastos://launch/<id>/<content>/<binding>`, with `page` as its executable, under the browser
 /// policy (the page's frame) or the internal-shell one (the gateway asking
 /// the Runtime). Gives the launch id, the token as carried, and its context.
 /// The only check that takes a launch-bound token.
@@ -700,7 +700,7 @@ pub(crate) fn require_launch_bound_token(
     headers: &HeaderMap,
     page: &str,
     internal_shell: bool,
-) -> anyhow::Result<(String, String, String, HomeLaunchTokenContext)> {
+) -> anyhow::Result<(String, String, String, String, HomeLaunchTokenContext)> {
     let token = single_home_launch_token_header(headers)?
         .ok_or_else(|| anyhow::anyhow!("missing home launch token"))?;
     let expected_did = load_existing_gateway_runtime_did(data_dir)
@@ -719,18 +719,27 @@ pub(crate) fn require_launch_bound_token(
         false => require_capsule_browser_origin(headers)?,
     }
     let bound = &required.launch_context.selected_resource;
-    let (id, content_name) = bound
+    let (id, rest) = bound
         .strip_prefix(LAUNCH_BOUND)
         .and_then(|value| value.split_once('/'))
-        .filter(|(_, name)| !name.is_empty() && !name.contains('/'))
+        .ok_or_else(|| anyhow::anyhow!("home launch token is not bound to a content launch"))?;
+    let (content_name, binding) = rest
+        .split_once('/')
+        .filter(|(name, binding)| {
+            !name.is_empty() && !name.contains("..") && !binding.contains('/')
+        })
         .ok_or_else(|| anyhow::anyhow!("home launch token is not bound to a content launch"))?;
     if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("home launch token is not bound to a content launch");
+    }
+    if binding.len() != 32 || !binding.bytes().all(|b| b.is_ascii_hexdigit()) {
         anyhow::bail!("home launch token is not bound to a content launch");
     }
     refuse_agent_principal(&required.context)?;
     Ok((
         id.to_string(),
         content_name.to_string(),
+        binding.to_string(),
         token.trim().to_string(),
         required.context,
     ))
@@ -1241,14 +1250,14 @@ pub(in crate::api) fn require_home_launch_token_value_from_expected_did_for_test
 }
 
 /// The bound resource of a page's token for a kept content launch:
-/// `elastos://launch/<launch id>`.
+/// `elastos://launch/<launch id>/<content>/<binding>`.
 pub(crate) const LAUNCH_BOUND: &str = "elastos://launch/";
 
 /// How long a page's token for a kept launch lives: the life of the kept
 /// launch (`page_launch.rs`, `KEPT_FOR`).
 pub(crate) const LAUNCH_PAGE_TOKEN_TTL_SECS: u64 = 15 * 60;
 
-/// A page's token for a kept launch: bound to `elastos://launch/<id>`, with
+/// A page's token for a kept launch: bound to its id, content name and per-open binding, with
 /// the page as its executable, for the person `context` names; it expires at
 /// the earlier of 15 minutes and the person's session grant.
 pub(in crate::api) fn issue_launch_page_token(
@@ -1256,12 +1265,13 @@ pub(in crate::api) fn issue_launch_page_token(
     id: &str,
     page: &str,
     content_name: &str,
+    binding: &str,
     context: &HomeLaunchTokenContext,
 ) -> anyhow::Result<String> {
     let issued_at = now_ts();
     let ttl = LAUNCH_PAGE_TOKEN_TTL_SECS;
     let expires_at = grant_bound_token_expiry(data_dir, context, issued_at, ttl)?;
-    let bound = format!("{LAUNCH_BOUND}{id}/{content_name}");
+    let bound = format!("{LAUNCH_BOUND}{id}/{content_name}/{binding}");
     let launch_context = HomeLaunchContext::projection(&bound, page);
     issue_home_launch_token_at(
         data_dir,
@@ -3289,6 +3299,7 @@ mod tests {
             "abababababababababababababababab",
             "image-viewer",
             "photo-set",
+            "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
             &context,
         )
         .unwrap();
