@@ -116,6 +116,25 @@ fn public_read(path: &str) -> bool {
         || !path.starts_with("/api/") && !path.starts_with("/.well-known/")
 }
 
+/// A terminal may register a bound mint request before it holds a launch grant.
+/// `Origin: null` is a sandboxed frame. A missing Origin, as from a terminal,
+/// may register. Any other Origin must name this gateway. The request handler
+/// applies this same rule, so a launch token cannot skip it. Begin and approve
+/// stay behind the launch gate.
+pub(super) fn cli_mint_request_origin_allowed(headers: &HeaderMap) -> bool {
+    match single_header(headers, "origin") {
+        None => !headers.contains_key("origin"),
+        Some("null") => false,
+        Some(_) => same_gateway_origin(headers),
+    }
+}
+
+fn cli_mint_request(path: &str, method: &Method, headers: &HeaderMap) -> bool {
+    method == Method::POST
+        && path == "/api/home/cli-mint/request"
+        && cli_mint_request_origin_allowed(headers)
+}
+
 /// Only the Home sign-in journey can begin without an existing launch.
 fn sign_in_route(path: &str, method: &Method) -> bool {
     matches!(
@@ -272,9 +291,11 @@ pub(super) async fn gateway_admission(
     }
     // Home reopens Browser only for a signed Browser launch token that expired
     // or lost its session. Another app's token stays the generic refusal, and
-    // so does every other route.
+    // so does every other route. A terminal may register a bound mint request
+    // without a launch grant. Begin and approve stay on the launch gate.
     let mut browser_launch_renewal = None;
-    if !public && !sign_in && !ticket && !runtime_session {
+    let cli_mint_request = cli_mint_request(path, method, headers);
+    if !public && !sign_in && !ticket && !runtime_session && !cli_mint_request {
         match gateway_home_token::require_gateway_launch_for(&state.data_dir, headers, path) {
             Ok(()) => {}
             Err(err) if matches!(path, "/api/apps/home/launch" | "/api/home/launch/content") => {

@@ -100,19 +100,17 @@ these two operations selects `home-launch`; that grant can ask the gateway to
 launch or open content without browser provenance. For content
 open, the gateway gives the Runtime a `home-shell` projection grant bound to
 `home`; the Runtime accepts that grant only on its internal content-open hop.
-Today, `home_cmd::run` calls the CLI grant issuer only when an
-`elastos home --cli-launch-token` process has the gateway-owned terminal
-auth environment.
-The gateway supplies that environment to its `elastos home` TUI child; the TUI
-does not offer a host shell or a grant-mint action. The owner therefore has no
-reachable product action to mint this grant. This is a known gap for the CTO.
-An isolated harness can run the command with that environment; the issuer then
-checks the live session grant and admin passkey binding before signing. The
-public journey smoke attempts this command when `ELASTOS_CLI_LAUNCH_TOKEN` is
-absent, so that auto-mint path needs such a harness. The issuer trusts the
-process environment and the local auth store as a same-user authority boundary:
-a same-user process with those values and auth-store access can mint the bearer
-grant, and its holder can replay it on the two headless launch operations.
+`elastos home --cli-launch-token` does not mint a grant from the process
+environment. The command refuses. A terminal may register a bound request with
+`POST /api/home/cli-mint/request`. The signed-in human admin begins that request
+and approves it with a fresh passkey assertion. The gateway keeps that decision
+in its own memory and returns no launch grant. A file in the data directory is
+not an approval. A restart drops a request that is still waiting. `Origin: null`
+cannot register a request, including when the caller presents a launch token.
+The gateway still gives its `elastos home` TUI
+child the terminal environment. That child uses the environment for an internal
+projection token. The TUI has no host shell and no export-mint action. The
+public journey smoke requires `ELASTOS_CLI_LAUNCH_TOKEN` from the operator.
 
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers

@@ -7,9 +7,8 @@ bash "$SCRIPT_DIR/public-root-site-smoke.sh"
 bash "$SCRIPT_DIR/system-camofox-smoke.sh"
 bash "$SCRIPT_DIR/home-camofox-smoke.sh"
 if [[ -z "${ELASTOS_CLI_LAUNCH_TOKEN:-}" ]]; then
-  ELASTOS_CLI_LAUNCH_TOKEN="$("${ELASTOS_CLI_BIN:-elastos}" home --cli-launch-token)"
-  [[ -n "$ELASTOS_CLI_LAUNCH_TOKEN" ]] || { echo "Home CLI returned no launch grant" >&2; exit 1; }
-  export ELASTOS_CLI_LAUNCH_TOKEN
+  echo "Home CLI launch grant is passkey-gated; set ELASTOS_CLI_LAUNCH_TOKEN" >&2
+  exit 1
 fi
 bash "$SCRIPT_DIR/chat-room-runtime-activity-smoke.sh"
 bash "$SCRIPT_DIR/chat-room-session-reuse-camofox-smoke.sh"
