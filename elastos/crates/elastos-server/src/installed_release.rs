@@ -220,6 +220,7 @@ pub(crate) fn read_signed_release(
         &hex::encode(Sha256::digest(&components)),
         components.len() as u64,
     )
+    .context(REPAIR)
     .context("Installed component manifest verification failed")?;
     Ok((installed.release, components))
 }

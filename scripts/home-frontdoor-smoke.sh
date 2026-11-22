@@ -190,6 +190,7 @@ SOURCE_API_PORT="$(free_port)"
 SETUP_PLATFORM="$(host_platform)"
 mkdir -p "$SOURCE_RUNTIME_DATA_DIR/bin"
 install -m 755     "$ROOT/elastos/target/release/localhost-provider"     "$SOURCE_RUNTIME_DATA_DIR/bin/localhost-provider"
+install -m 755 "$ROOT/elastos/target/release/shell" "$SOURCE_RUNTIME_DATA_DIR/bin/shell"
 
 COMPONENTS_SRC="$SOURCE_COMPONENTS_MANIFEST" COMPONENTS_DEST="$SOURCE_RUNTIME_DATA_DIR/components.json" DATA_DIR="$SOURCE_RUNTIME_DATA_DIR" PUBLISHER_ROOT="$SOURCE_RUNTIME_DATA_DIR/ElastOS/SystemServices/Publisher" SETUP_PLATFORM="$SETUP_PLATFORM" SHELL_BIN="$ROOT/elastos/target/release/shell" LOCALHOST_PROVIDER_BIN="$ROOT/elastos/target/release/localhost-provider" DID_PROVIDER_BIN="$ROOT/capsules/did-provider/target/release/did-provider" CHAIN_PROVIDER_BIN="$ROOT/capsules/chain-provider/target/release/chain-provider" NET_PROVIDER_BIN="$ROOT/capsules/net-provider/target/release/net-provider" EXIT_PROVIDER_BIN="$ROOT/capsules/exit-provider/target/release/exit-provider" BROWSER_ENGINE_ADAPTER_BIN="$ROOT/capsules/browser-engine-adapter/target/release/browser-engine-adapter" BROWSER_LOCAL_EXIT_BIN="$ROOT/elastos/tools/browser-local-exit/target/release/browser-local-exit" WEBSPACE_PROVIDER_BIN="$ROOT/capsules/webspace-provider/target/release/webspace-provider" WALLET_PROVIDER_BIN="$ROOT/capsules/wallet-provider/target/release/wallet-provider" OBJECT_PROVIDER_BIN="$ROOT/capsules/object-provider/target/release/object-provider" CONTENT_BLOCK_GRAPH_PROVIDER_BIN="$ROOT/capsules/content-block-graph-provider/target/release/content-block-graph-provider" HOME_CLI_DIR="$SOURCE_HOME_CLI_DIR" HOME_CAPSULE_DIR="$SOURCE_HOME_DIR" HOME_GUI_CAPSULE_DIR="$SOURCE_HOME_GUI_DIR" SYSTEM_CAPSULE_DIR="$SOURCE_SYSTEM_DIR" SERVICES_CAPSULE_DIR="$SOURCE_SERVICES_DIR" PEOPLE_CAPSULE_DIR="$SOURCE_PEOPLE_DIR" BROWSER_CAPSULE_DIR="$SOURCE_BROWSER_DIR" DOCUMENTS_CAPSULE_DIR="$SOURCE_DOCUMENTS_DIR" LIBRARY_CAPSULE_DIR="$SOURCE_LIBRARY_DIR" MARKETPLACE_CAPSULE_DIR="$SOURCE_MARKETPLACE_DIR" ARCHIVE_MANAGER_CAPSULE_DIR="$SOURCE_ARCHIVE_MANAGER_DIR" INBOX_CAPSULE_DIR="$SOURCE_INBOX_DIR" WALLET_CAPSULE_DIR="$SOURCE_WALLET_DIR" WALLET_METAMASK_CAPSULE_DIR="$SOURCE_WALLET_METAMASK_DIR" WALLET_UNISAT_CAPSULE_DIR="$SOURCE_WALLET_UNISAT_DIR" WALLET_WALLETCONNECT_CAPSULE_DIR="$SOURCE_WALLET_WALLETCONNECT_DIR" python3 - <<'PY2'
 import hashlib
@@ -303,6 +304,7 @@ components_dest.parent.mkdir(parents=True, exist_ok=True)
 components_dest.write_text(json.dumps(manifest, indent=2) + "\n")
 PY2
 
+printf 'dev_mode = true\n' > "$SOURCE_RUNTIME_DATA_DIR/config.toml"
 HOME="$SOURCE_RUNTIME_HOME" XDG_DATA_HOME="$SOURCE_RUNTIME_XDG" "$ROOT/elastos/target/debug/elastos" serve --addr "127.0.0.1:${SOURCE_API_PORT}"     >"$SOURCE_RUNTIME_LOG" 2>&1 &
 SOURCE_RUNTIME_PID=$!
 
@@ -323,6 +325,14 @@ for _ in $(seq 1 60); do
 done
 if ! curl -fsS --max-time 2 "http://127.0.0.1:${SOURCE_API_PORT}/api/health" >/dev/null 2>&1; then
     echo "[home-frontdoor] source runtime never became healthy. See $SOURCE_RUNTIME_LOG" >&2
+    exit 1
+fi
+for _ in $(seq 1 60); do
+    grep -Fq 'Spawned shell capsule' "$SOURCE_RUNTIME_LOG" && break
+    sleep 0.5
+done
+if ! grep -Fq 'Spawned shell capsule' "$SOURCE_RUNTIME_LOG"; then
+    echo "[home-frontdoor] source shell capsule did not start. See $SOURCE_RUNTIME_LOG" >&2
     exit 1
 fi
 
