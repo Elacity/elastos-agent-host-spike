@@ -13902,6 +13902,55 @@ pub(crate) mod tests {
         }
     }
 
+    /// Waits until `endpoint` has a verified direct route to `addr` and the
+    /// invoker holds a live client for it.
+    ///
+    /// A bounded PeerDid fetch that starts before that registration fails
+    /// closed with "no verified Carrier route" instead of the answer deadline.
+    /// This wait has its own bound. It does not change the route budget the
+    /// caller is measuring.
+    async fn wait_for_verified_peer_route(
+        invoker: &CarrierProviderInvoker,
+        endpoint: &Endpoint,
+        addr: &iroh::EndpointAddr,
+    ) {
+        const BOUND: Duration = Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + BOUND;
+        let mut last_error = String::from("the peer has no verified Carrier route");
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                panic!(
+                    "verified Carrier route to {} was not registered within {BOUND:?}: {last_error}",
+                    addr.id
+                );
+            }
+            let attempt = remaining.min(Duration::from_secs(3));
+            let timeout_secs = attempt.as_secs().max(1);
+            match tokio::time::timeout(
+                attempt,
+                invoker.connected_client(endpoint, addr.clone(), timeout_secs),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
+                    let registered = endpoint.remote_info(addr.id).await.is_some_and(|info| {
+                        info.addrs()
+                            .any(|item| matches!(item.addr(), iroh::TransportAddr::Ip(_)))
+                    });
+                    if registered {
+                        return;
+                    }
+                    last_error = "dial succeeded before the endpoint registered a direct address"
+                        .to_string();
+                }
+                Ok(Err(err)) => last_error = err.to_string(),
+                Err(_) => last_error = format!("dial exceeded {attempt:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     #[tokio::test]
     async fn test_response_deadline_applies_only_to_bounded_content_fetch() {
         let local_dir = tempfile::tempdir().unwrap();
@@ -13915,13 +13964,12 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        let local_invoker = Arc::new(CarrierProviderInvoker::with_carrier_endpoint_and_registry(
+            local_node.endpoint.clone(),
+            Arc::downgrade(&local_registry),
+        ));
         local_registry
-            .set_carrier_invoker(Arc::new(
-                CarrierProviderInvoker::with_carrier_endpoint_and_registry(
-                    local_node.endpoint.clone(),
-                    Arc::downgrade(&local_registry),
-                ),
-            ))
+            .set_carrier_invoker(local_invoker.clone())
             .await;
         let slow = start_holder_runtime(
             88,
@@ -14004,6 +14052,9 @@ pub(crate) mod tests {
                 });
             invocation
         };
+        // The ticket fetch's answer deadline dropped the live client. PeerDid
+        // resolves the peer id, so these calls start once that route is back.
+        wait_for_verified_peer_route(&local_invoker, &local_node.endpoint, &slow.addr).await;
         let response = local_registry
             .invoke_provider(by_did(
                 "import_exact",
@@ -14052,6 +14103,9 @@ pub(crate) mod tests {
         {
             *reply_wait_ms = Some(1_500);
         }
+        // The peer-DID fetch above drops the client when its answer deadline
+        // fires. Remembering the ticket does not open the route.
+        wait_for_verified_peer_route(&local_invoker, &local_node.endpoint, &slow.addr).await;
         let err = local_registry
             .invoke_provider(bounded_with_longer_reply_wait)
             .await
