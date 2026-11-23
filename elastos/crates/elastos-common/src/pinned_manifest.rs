@@ -591,7 +591,9 @@ mod tests {
     /// nothing, and no public function or conversion hands the manifest out.
     #[test]
     fn nothing_hands_the_ordinary_manifest_out_of_a_pinned_one() {
-        let source = include_str!("pinned_manifest.rs");
+        // A Windows checkout materialises this file with CRLF line endings;
+        // normalise so the text pins below hold on every platform.
+        let source = include_str!("pinned_manifest.rs").replace("\r\n", "\n");
         let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap();
         let declared = "/// A manifest and the CIDs it pins. See the module text.\n\
                         pub struct PinnedManifest {\n    manifest: CapsuleManifest,\n";

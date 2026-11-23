@@ -580,6 +580,7 @@ mod tests {
             assert!(parse_meminfo(text).is_err());
         }
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn cgroup_v2_ancestor_limit_lowers_available() {
         let mut files = memory_files();
@@ -638,6 +639,7 @@ mod tests {
         files.insert("/proc/self/cgroup".into(), "4:memory:/home\n".into());
         assert!(observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err());
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn cgroup_v2_page_cache_is_not_counted_as_used() {
         let mut files = memory_files();
@@ -715,6 +717,7 @@ mod tests {
             assert_eq!(macos_pressure(level), MemoryPressure::Critical);
         }
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn live_host_memory_is_readable() {
         // Fixed OS input covers the observation without depending on the test host.
@@ -778,6 +781,7 @@ mod tests {
             ModelMemoryFit::Insufficient
         );
     }
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_memory_requires_a_proven_global_v2_root() {
         for (path, replacement) in [
@@ -896,6 +900,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn cgroup_overmounts_refuse_hidden_memory_files() {
         for mount in [
@@ -945,6 +950,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn cgroup_membership_is_unique_bounded_and_stable() {
         for membership in [
@@ -1031,6 +1037,7 @@ mod tests {
         assert!(observe_host_memory_with_reader("linux", |p| read_fixture(&files, p)).is_err());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn malformed_or_unreadable_page_cache_gives_zero_credit() {
         let mut files = memory_files();

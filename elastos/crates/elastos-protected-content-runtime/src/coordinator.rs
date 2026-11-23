@@ -871,32 +871,42 @@ mod tests {
     use elastos_protected_content_contracts::{
         ContentAccessIdV1, CustodyApprovedSuitesV1, CustodyCommitteeAuthorizationIdentityV1,
         CustodyEnvelopeManifestV1, CustodyEnvelopeV1, CustodyEpochIssuerKeyV1,
-        CustodyEpochStatementV1, CustodyNodeIdentityV1, CustodyNodeProvisioningRecordIdentityV1,
-        CustodyPoolFailureDomainIdV1, CustodyPoolOperatorIdV1, EncryptedContentIdentityV1,
-        EvmContractAddressV1, EvmFunctionSelectorV1, EvmRightsMethodAbiV1, KeyReleaseOutcomeV1,
-        KeyReleaseRequestV1, NodeContributionRefV1, NodeContributionStatementV1,
+        CustodyEpochStatementV1, CustodyNodeIdentityV1, EncryptedContentIdentityV1,
+        EvmContractAddressV1, EvmFunctionSelectorV1, EvmRightsMethodAbiV1, KeyReleaseRequestV1,
         NodeCustodyPublicKeyV1, PqHybridSealedShareV1, ProfileIdentityV1,
         ProtectedContentBindingV1, RecipientKeyAuthorizationStatementV1, RecipientKeyIdentityV1,
-        RecipientPublicKeyBytesV1, RecipientSealedContributionV1, ReplayNonce16, RightsActionV1,
+        RecipientPublicKeyBytesV1, ReplayNonce16, RightsActionV1,
         RightsEvaluationEvidenceRequestV1, RightsObservationFinalityV1, RightsPolicyBodyV1,
-        RightsRequestV1, RightsSubjectSourceV1, RuntimeCustodyProvisioningIdV1,
-        RuntimeReleaseAuditIdV1, RuntimeReleaseOperationStatementV1, RuntimeSessionBindingV1,
-        ShareCoordinateV1, SignedCustodyEpochV1, SignedNodeRightsDecisionV1,
-        SignedRecipientKeyAuthorizationV1, SignedTerminalReceiptV1, TerminalReceiptIssuerKey,
-        TerminalReceiptStatementV1, ThresholdV1, WalletAddress,
-        CUSTODY_X_WING_AES256GCM_SUITE_ID_V1, PQ_HYBRID_SEALED_SHARE_ENVELOPE_BYTES,
-        X_WING_DRAFT06_CIPHERTEXT_BYTES,
+        RightsRequestV1, RightsSubjectSourceV1, RuntimeReleaseAuditIdV1,
+        RuntimeReleaseOperationStatementV1, RuntimeSessionBindingV1, ShareCoordinateV1,
+        SignedCustodyEpochV1, SignedNodeRightsDecisionV1, SignedRecipientKeyAuthorizationV1,
+        ThresholdV1, WalletAddress, CUSTODY_X_WING_AES256GCM_SUITE_ID_V1,
+        PQ_HYBRID_SEALED_SHARE_ENVELOPE_BYTES, X_WING_DRAFT06_CIPHERTEXT_BYTES,
     };
+    #[cfg(unix)]
+    use elastos_protected_content_contracts::{
+        CustodyNodeProvisioningRecordIdentityV1, CustodyPoolFailureDomainIdV1,
+        CustodyPoolOperatorIdV1, KeyReleaseOutcomeV1, NodeContributionRefV1,
+        NodeContributionStatementV1, RecipientSealedContributionV1, RuntimeCustodyProvisioningIdV1,
+        SignedTerminalReceiptV1, TerminalReceiptIssuerKey, TerminalReceiptStatementV1,
+    };
+    #[cfg(unix)]
+    use elastos_protected_content_provider_contracts::ViewerMediaPartSelectorV1;
     use elastos_protected_content_provider_contracts::{
-        CustodyProviderResponseStatusV1, DecryptProviderRequestV1, DecryptProviderResponseV1,
-        ProviderFailureCodeV1, ValidatedCustodyProviderRequestV1,
-        ValidatedDecryptProviderRequestV1, ValidatedRightsProviderRequestV1,
-        ViewerMediaPartSelectorV1, MAX_PROVIDER_OPAQUE_HANDLE_BYTES_V1,
+        CustodyProviderResponseStatusV1, ProviderFailureCodeV1, ValidatedCustodyProviderRequestV1,
+        ValidatedRightsProviderRequestV1,
     };
+    #[cfg(unix)]
+    use elastos_protected_content_provider_contracts::{
+        DecryptProviderRequestV1, DecryptProviderResponseV1, ValidatedDecryptProviderRequestV1,
+        MAX_PROVIDER_OPAQUE_HANDLE_BYTES_V1,
+    };
+    #[cfg(unix)]
+    use elastos_wallet_contract::ValidatedChainOutcomeBindingV1;
     use elastos_wallet_contract::{
-        ProtectedContentRightsSignatureResultV1, ValidatedChainOutcomeBindingV1,
-        VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
-        WalletProviderResponseV2, WalletResultV2,
+        ProtectedContentRightsSignatureResultV1, VerifiedWalletInvocationContext,
+        WalletProviderOperationV2, WalletProviderRequestV2, WalletProviderResponseV2,
+        WalletResultV2,
     };
     use k256::ecdsa::SigningKey as WalletSigningKey;
     use sha3::{Digest as _, Keccak256};
@@ -908,12 +918,16 @@ mod tests {
 
     use super::*;
     use crate::test_media;
+    #[cfg(unix)]
     use crate::{
         bind_buy, close_viewer_session, open_viewer_session, prepare_recipient,
-        read_viewer_media_part, RuntimeContentAvailabilityRequirement, RuntimeDecryptProvider,
-        RuntimeMintCoordinator, RuntimeMintCoordinatorOutcome, RuntimeMintDraft,
-        RuntimeMintJournal, RuntimeMintNodeBinding, RuntimeMintNodeReceipt,
-        RuntimeMintSelectedNode, RuntimeOpenError, RuntimeOpenViewerSessionInput,
+        read_viewer_media_part, RuntimeOpenError, RuntimeOpenViewerSessionInput,
+    };
+    #[cfg(unix)]
+    use crate::{
+        RuntimeContentAvailabilityRequirement, RuntimeDecryptProvider, RuntimeMintCoordinator,
+        RuntimeMintCoordinatorOutcome, RuntimeMintDraft, RuntimeMintJournal,
+        RuntimeMintNodeBinding, RuntimeMintNodeReceipt, RuntimeMintSelectedNode,
         RuntimeProtectedContentPurchaseIntent, RuntimePurchaseEffectAuthority,
         RuntimeVerifiedContentAvailability, RuntimeVerifiedPurchaseEffect,
     };
@@ -929,6 +943,7 @@ mod tests {
     }
 
     impl FakeRightsProvider {
+        #[cfg(unix)]
         fn new(responses: Vec<Result<RightsProviderResponseV1, RuntimeProviderCallError>>) -> Self {
             Self {
                 responses: Mutex::new(responses),
@@ -963,6 +978,7 @@ mod tests {
     }
 
     impl FakeCustodyProvider {
+        #[cfg(unix)]
         fn new(
             responses: Vec<Result<CustodyProviderResponseV1, RuntimeProviderCallError>>,
         ) -> Self {
@@ -999,6 +1015,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct InspectingCustodyProvider {
         journal_root: PathBuf,
         operation_hash: Digest32,
@@ -1007,6 +1024,7 @@ mod tests {
         requests: Mutex<Vec<CustodyProviderRequestV1>>,
     }
 
+    #[cfg(unix)]
     impl InspectingCustodyProvider {
         fn new(
             journal_root: PathBuf,
@@ -1034,6 +1052,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl RuntimeCustodyProvider for InspectingCustodyProvider {
         async fn release_contribution(
@@ -1158,6 +1177,7 @@ mod tests {
         test_media::media_identity(seed).encrypted_content().clone()
     }
 
+    #[cfg(unix)]
     fn content_access_id(seed: u8) -> ContentAccessIdV1 {
         ContentAccessIdV1::new([seed; 16]).unwrap()
     }
@@ -1394,6 +1414,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn signed_node_contribution(
         operation: &SignedRuntimeReleaseOperationV1,
         node_seed: u8,
@@ -1564,6 +1585,7 @@ mod tests {
         RuntimeSelectedProvider::new(node_public_key(node_seed), rights, custody)
     }
 
+    #[cfg(unix)]
     fn provider_triplet(
         operation: &SignedRuntimeReleaseOperationV1,
     ) -> (
@@ -1602,6 +1624,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_allows_and_collects_threshold_contributions() {
         let temp = tempdir().unwrap();
@@ -1637,6 +1660,7 @@ mod tests {
         assert_eq!(c3.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_denial_is_terminal_and_skips_custody() {
         let temp = tempdir().unwrap();
@@ -1672,6 +1696,7 @@ mod tests {
         assert_eq!(c2.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_replays_terminal_without_dispatch() {
         let temp = tempdir().unwrap();
@@ -1719,6 +1744,7 @@ mod tests {
         assert_eq!(c2_replay.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_nonterminal_replay_does_not_redispatch() {
         let temp = tempdir().unwrap();
@@ -1780,6 +1806,7 @@ mod tests {
         assert_eq!(c2_replay.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_resume_exact_settles_uncertain_effect_without_new_operation() {
         let temp = tempdir().unwrap();
@@ -1874,6 +1901,7 @@ mod tests {
         assert_eq!(c3.request_count(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_persists_replayable_rights_before_contribution_dispatch() {
         let temp = tempdir().unwrap();
@@ -1976,6 +2004,7 @@ mod tests {
         assert_eq!(c2_resume.request_count(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_resume_exact_reloads_same_unresolved_operation_hash() {
         let temp = tempdir().unwrap();
@@ -2047,6 +2076,7 @@ mod tests {
         assert_eq!(c2_resume.request_count(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_resume_exact_rejects_mismatched_replay_and_keeps_obligation() {
         let temp = tempdir().unwrap();
@@ -2165,6 +2195,7 @@ mod tests {
         assert_eq!(c1.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_rejects_wrong_node_set_and_threshold_selection() {
         let temp = tempdir().unwrap();
@@ -2198,6 +2229,7 @@ mod tests {
         assert_eq!(c1.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn release_completes_on_exact_resume_with_one_unreachable_node() {
         let temp = tempdir().unwrap();
@@ -2301,6 +2333,7 @@ mod tests {
         assert_eq!(c1.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_wrong_provider_result_stays_nonterminal() {
         let temp = tempdir().unwrap();
@@ -2337,6 +2370,7 @@ mod tests {
         assert_eq!(c2.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_coordination_rejects_mismatched_contribution_identity() {
         let temp = tempdir().unwrap();
@@ -2505,6 +2539,7 @@ mod tests {
         assert_eq!(c1.request_count(), 0);
     }
 
+    #[cfg(unix)]
     fn persist_effect_started(
         root: &Path,
         operation: &SignedRuntimeReleaseOperationV1,
@@ -2523,6 +2558,7 @@ mod tests {
         draft.operation_hash().unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_reconcile_settles_exact_contributions_without_redispatch() {
         let temp = tempdir().unwrap();
@@ -2619,6 +2655,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_reconcile_settles_rights_denial_without_custody() {
         let temp = tempdir().unwrap();
@@ -2652,6 +2689,7 @@ mod tests {
         assert_eq!(c1.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_reconcile_fails_closed_without_effect_and_on_wrong_identity() {
         let temp = tempdir().unwrap();
@@ -2826,6 +2864,7 @@ mod tests {
         assert_eq!(c1.request_count(), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_reconcile_rejects_conflicting_terminal_offer() {
         let temp = tempdir().unwrap();
@@ -2866,6 +2905,7 @@ mod tests {
             Err(RuntimeReleaseCoordinatorError::Reconciliation)
         );
     }
+    #[cfg(unix)]
     fn mint_nodes() -> Vec<RuntimeMintNodeBinding> {
         [1u8, 2, 3]
             .into_iter()
@@ -2881,6 +2921,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     fn custody_provisioned_mint_matching(
         operation: &SignedRuntimeReleaseOperationV1,
     ) -> (tempfile::TempDir, crate::PersistedRuntimeMint) {
@@ -2930,6 +2971,7 @@ mod tests {
         (temp, provisioned)
     }
 
+    #[cfg(unix)]
     fn purchase_effect_for_wallet(
         mint: &crate::PersistedRuntimeMint,
         operation: &SignedRuntimeReleaseOperationV1,
@@ -2944,6 +2986,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn purchase_effect_for_account(
         mint: &crate::PersistedRuntimeMint,
         operation: &SignedRuntimeReleaseOperationV1,
@@ -2987,6 +3030,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn custody_provisioned_mint_rejects_buy_pending_content_availability_receipt() {
         let operation = signed_runtime_release_operation(0x42);
@@ -3002,6 +3046,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     struct FakeMintCustody {
         expected_issuer: RuntimeOperationIssuerKeyV1,
         node: NodePublicKey,
@@ -3011,6 +3056,7 @@ mod tests {
         requests: Mutex<Vec<CustodyProviderRequestV1>>,
     }
 
+    #[cfg(unix)]
     impl FakeMintCustody {
         fn new(node: NodePublicKey, journal_root: PathBuf, mint_id: Digest32) -> Self {
             Self {
@@ -3028,6 +3074,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl RuntimeCustodyProvider for FakeMintCustody {
         async fn release_contribution(
@@ -3064,10 +3111,12 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn sign_mint_statement(bytes: &[u8]) -> [u8; 64] {
         runtime_key(0x42).sign(bytes).to_bytes()
     }
 
+    #[cfg(unix)]
     async fn provision_custody_provisioned_mint(
         operation: &SignedRuntimeReleaseOperationV1,
         envelope: &CustodyEnvelopeV1,
@@ -3126,6 +3175,7 @@ mod tests {
         (temp, provisioned, root)
     }
 
+    #[cfg(unix)]
     fn content_availability_requirement() -> RuntimeContentAvailabilityRequirement {
         RuntimeContentAvailabilityRequirement::new(
             "did:elastos:content-provider-alpha",
@@ -3139,6 +3189,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn verified_content_availability(
         mint: &crate::PersistedRuntimeMint,
     ) -> RuntimeVerifiedContentAvailability {
@@ -3156,6 +3207,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn opaque_handle(seed: u8) -> [u8; MAX_PROVIDER_OPAQUE_HANDLE_BYTES_V1] {
         let mut handle = [0u8; MAX_PROVIDER_OPAQUE_HANDLE_BYTES_V1];
         handle[0] = seed.max(1);
@@ -3163,6 +3215,7 @@ mod tests {
         handle
     }
 
+    #[cfg(unix)]
     fn signed_terminal_receipt(
         operation: &SignedRuntimeReleaseOperationV1,
         contributions: &[SignedNodeContributionV1],
@@ -3205,6 +3258,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     struct FakeCompositeDecryptProvider {
         expected_issuer: RuntimeOperationIssuerKeyV1,
         recipient_public_key: RecipientPublicKeyBytesV1,
@@ -3215,6 +3269,7 @@ mod tests {
         requests: Mutex<Vec<DecryptProviderRequestV1>>,
     }
 
+    #[cfg(unix)]
     impl FakeCompositeDecryptProvider {
         fn new(operation: &SignedRuntimeReleaseOperationV1) -> Self {
             Self {
@@ -3255,6 +3310,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl RuntimeDecryptProvider for FakeCompositeDecryptProvider {
         async fn prepare_recipient(
@@ -3355,6 +3411,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn inactive_two_principals_mint_verified_availability_buy_open_play_and_close() {
         let envelope = custody_envelope(0x11);

@@ -1151,6 +1151,31 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_store_refuses_node_contribution_claims_with_unsupported_on_windows() {
+    use crate::test_support::{
+        authenticated_runtime_release_operation_for_envelope_and_recipient_seed, node_public_key,
+        provisioned_envelope, NOW,
+    };
+
+    let envelope = provisioned_envelope();
+    let operation =
+        authenticated_runtime_release_operation_for_envelope_and_recipient_seed(&envelope, 0xaa);
+    let node = node_public_key(0x11);
+    let node_share = NodeLocalStoredShareV1::extract_from_envelope(&envelope, node).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let mut store = DurableReplayClaimStoreV1::new(node, temp.path().join("replay"));
+    let error = store
+        .claim_node_release_operation(operation, &node_share, node, NOW + 3)
+        .err()
+        .expect("the windows store must refuse the claim");
+    assert!(matches!(
+        error,
+        CustodyError::Replay(ReplayClaimError::UnsupportedOnWindows)
+    ));
+}
+
 #[cfg(unix)]
 #[cfg(test)]
 mod tests {

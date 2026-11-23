@@ -2495,7 +2495,10 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/src/providers/component.rs"
         ))
-        .expect("the compute source");
+        .expect("the compute source")
+        // A Windows checkout materialises this file with CRLF line endings;
+        // normalise so the `#[cfg(test)]` cut and the pins below hold there.
+        .replace("\r\n", "\n");
         // The rows themselves name the setting, and a `#[cfg(test)]` item sits
         // inside the production engine code, so cut at the test module's own
         // header rather than at the first `#[cfg(test)]`.

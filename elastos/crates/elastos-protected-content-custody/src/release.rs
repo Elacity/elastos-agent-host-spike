@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signer as _, SigningKey};
 use hpke::rand_core::{CryptoRng as HpkeCryptoRng, RngCore as HpkeRngCore};
+#[cfg(unix)]
 #[cfg(test)]
 use rand09::{rngs::StdRng, SeedableRng as _};
 
@@ -17,6 +18,7 @@ use crate::{
 };
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn produce_node_contribution(
     operation: ClaimedNodeReleaseOperationV1,
@@ -137,18 +139,24 @@ pub(crate) fn produce_node_contribution_with_rng<R: HpkeCryptoRng + HpkeRngCore>
 
 #[cfg(test)]
 mod tests {
-    use rand09::{rngs::StdRng, SeedableRng as _};
-
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::share_wrap::{open_share, seal_share};
+    #[cfg(unix)]
     use crate::test_support::{
         claimed_runtime_release_operation_for_envelope_and_node_seed, node_custody_secret,
-        node_signing_key, provisioned_envelope, recipient_public_key, signed_node_decision,
-        verified_release_request, verified_release_request_for_envelope,
+        recipient_public_key, signed_node_decision, verified_release_request,
+        verified_release_request_for_envelope,
     };
+    use crate::test_support::{node_signing_key, provisioned_envelope};
+    use elastos_protected_content_contracts::{ContractError, CustodyEnvelopeV1};
+    #[cfg(unix)]
     use elastos_protected_content_contracts::{
-        ContractError, CustodyEnvelopeV1, KeyReleaseError, RightsError, RIGHTS_CLOCK_SKEW_SECS,
+        KeyReleaseError, RightsError, RIGHTS_CLOCK_SKEW_SECS,
     };
+    #[cfg(unix)]
+    use rand09::rngs::StdRng;
 
     fn node_share_index(envelope: &CustodyEnvelopeV1, seed: u8) -> usize {
         let node_public_key = elastos_protected_content_contracts::NodePublicKey::new(
@@ -157,7 +165,7 @@ mod tests {
         .unwrap();
         envelope.manifest().node_index(node_public_key).unwrap()
     }
-
+    #[cfg(unix)]
     fn claimed_operation(
         envelope: &CustodyEnvelopeV1,
         node_seed: u8,
@@ -165,6 +173,7 @@ mod tests {
         claimed_runtime_release_operation_for_envelope_and_node_seed(envelope, node_seed, 0x30)
     }
 
+    #[cfg(unix)]
     fn local_share(envelope: &CustodyEnvelopeV1, node_seed: u8) -> NodeLocalStoredShareV1 {
         NodeLocalStoredShareV1::extract_from_envelope(
             envelope,
@@ -176,6 +185,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_produces_a_verified_node_contribution() {
         let request = verified_release_request();
@@ -208,6 +218,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_rejects_wrong_signing_key() {
         let request = verified_release_request();
@@ -230,6 +241,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_rejects_claimed_operation_for_a_different_node() {
         let request = verified_release_request();
@@ -252,6 +264,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_rejects_wrong_custody_secret() {
         let request = verified_release_request();
@@ -274,6 +287,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_rejects_wrong_recipient_public_key() {
         let envelope = provisioned_envelope();
@@ -296,6 +310,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_rejects_denied_decision() {
         let request = verified_release_request();
@@ -320,6 +335,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_rejects_post_binding_envelope_mutation_before_decrypt() {
         let request = verified_release_request();
@@ -344,6 +360,7 @@ mod tests {
         assert!(matches!(err, CustodyError::BindingMismatch("key_envelope")));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_reaches_hpke_failure_for_request_bound_to_invalid_ciphertext() {
         let envelope = provisioned_envelope();
@@ -368,6 +385,7 @@ mod tests {
         assert!(matches!(err, CustodyError::PqHybrid(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_reaches_hpke_failure_for_request_bound_to_wrong_node_aad_stored_share() {
         let envelope = provisioned_envelope();
@@ -428,6 +446,7 @@ mod tests {
         assert!(matches!(err, CustodyError::PqHybrid(_)));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_checks_active_window_before_opening_bound_invalid_ciphertext() {
         let envelope = provisioned_envelope();
@@ -471,6 +490,7 @@ mod tests {
         assert_eq!(err, ContractError::InvalidField("pq_hybrid_eph_x25519"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_accepts_the_contract_clock_skew_boundary() {
         let request = verified_release_request();
@@ -489,6 +509,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn release_rejects_expires_at_equal_to_now() {
         let request = verified_release_request();

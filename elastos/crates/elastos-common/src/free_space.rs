@@ -81,7 +81,9 @@ mod tests {
 
     #[test]
     fn installer_keeps_the_same_free_space_reserve() {
-        let installer = include_str!("../../../../scripts/install.sh");
+        // A Windows checkout materialises the script with CRLF line endings;
+        // compare against normalised text so the pin holds on every platform.
+        let installer = include_str!("../../../../scripts/install.sh").replace("\r\n", "\n");
         let line = format!("FREE_SPACE_RESERVE_BYTES={FREE_SPACE_RESERVE_BYTES}\n");
         assert!(
             installer.contains(&line),

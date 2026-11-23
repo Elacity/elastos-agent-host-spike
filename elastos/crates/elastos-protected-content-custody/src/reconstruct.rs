@@ -10,6 +10,7 @@ use elastos_protected_content_contracts::{
     VerifiedNodeContributionV1,
 };
 
+#[cfg(unix)]
 #[cfg(test)]
 use elastos_protected_content_contracts::CustodyEnvelopeV1;
 
@@ -26,6 +27,7 @@ use crate::{
     CustodyError, CONTENT_KEY_BYTES,
 };
 
+#[cfg(unix)]
 #[cfg(test)]
 fn reconstruct_content_key(
     request: &elastos_protected_content_contracts::VerifiedKeyReleaseRequestV1,
@@ -293,6 +295,7 @@ fn open_released_share(
     Ok(plaintext_share)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer as _, SigningKey};

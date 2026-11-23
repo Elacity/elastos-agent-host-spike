@@ -15,25 +15,29 @@ use elastos_protected_content_contracts::{
     CustodyPoolStatementV1, Digest32, EncryptedContentIdentityV1, EvmContractAddressV1,
     EvmFunctionSelectorV1, EvmRightsMethodAbiV1, KeyReleaseRequestV1, NodeCustodyPublicKeyV1,
     NodePublicKey, ProtectedContentBindingV1, RecipientKeyIdentityV1, RecipientPublicKeyBytesV1,
-    ReplayClaimError, ReplayClaimKeyV1, ReplayNonce16, RightsActionV1, RightsDecisionV1,
+    ReplayClaimError, ReplayClaimKeyV1, ReplayNonce16, RightsActionV1,
     RightsEvaluationEvidenceRequestV1, RightsObservationFinalityV1, RightsPolicyBodyV1,
     RightsRequestV1, RightsSubjectSourceV1, RightsVerificationContextV1,
     RuntimeOperationIssuerKeyV1, RuntimeReleaseAuditIdV1, RuntimeReleaseOperationStatementV1,
     RuntimeSessionBindingV1, SignedCustodyCommitteeAuthorizationV1, SignedCustodyEpochV1,
-    SignedCustodyPoolV1, SignedNodeRightsDecisionV1, SignedRecipientKeyAuthorizationV1,
-    SignedRuntimeReleaseOperationV1, ThresholdV1, ValidatedCustodyCommitteeV1,
-    VerifiedKeyReleaseRequestV1, WalletAddress, WalletSignedRightsRequestV1,
-    CUSTODY_X_WING_AES256GCM_SUITE_ID_V1,
+    SignedCustodyPoolV1, SignedRecipientKeyAuthorizationV1, SignedRuntimeReleaseOperationV1,
+    ThresholdV1, ValidatedCustodyCommitteeV1, VerifiedKeyReleaseRequestV1, WalletAddress,
+    WalletSignedRightsRequestV1, CUSTODY_X_WING_AES256GCM_SUITE_ID_V1,
 };
 
+#[cfg(unix)]
+use elastos_protected_content_contracts::{RightsDecisionV1, SignedNodeRightsDecisionV1};
+
 use crate::{
-    provision::provision_custody_envelope_with_rng, replay_store::ClaimedNodeReleaseOperationV1,
-    ContentEncryptionKeyV1, DurableReplayClaimStoreV1, NodeCustodySecretKeyV1,
-    NodeLocalStoredShareV1, RecipientPublicKeyV1, RecipientSecretKeyV1,
+    provision::provision_custody_envelope_with_rng, ContentEncryptionKeyV1, NodeCustodySecretKeyV1,
+    RecipientPublicKeyV1, RecipientSecretKeyV1,
 };
 
 pub(crate) const NOW: u64 = 2_000_000_000;
-
+#[cfg(unix)]
+use crate::{
+    replay_store::ClaimedNodeReleaseOperationV1, DurableReplayClaimStoreV1, NodeLocalStoredShareV1,
+};
 #[derive(Debug, Default)]
 struct TestReplayClaims(std::collections::HashMap<ReplayClaimKeyV1, u64>);
 
@@ -299,6 +303,7 @@ fn policy_body() -> RightsPolicyBodyV1 {
     .unwrap()
 }
 
+#[cfg(unix)]
 pub(crate) fn verified_release_request() -> VerifiedKeyReleaseRequestV1 {
     verified_release_request_for_envelope_with_suite_and_recipient_seed(
         &provisioned_envelope(),
@@ -307,6 +312,7 @@ pub(crate) fn verified_release_request() -> VerifiedKeyReleaseRequestV1 {
     )
 }
 
+#[cfg(unix)]
 pub(crate) fn verified_release_request_for_envelope(
     envelope: &CustodyEnvelopeV1,
 ) -> VerifiedKeyReleaseRequestV1 {
@@ -457,6 +463,7 @@ pub(crate) fn authenticated_runtime_release_operation_for_envelope_and_recipient
     .unwrap()
 }
 
+#[cfg(unix)]
 pub(crate) fn claimed_runtime_release_operation_for_envelope_and_node_seed(
     envelope: &CustodyEnvelopeV1,
     node_seed: u8,
@@ -487,6 +494,7 @@ pub(crate) fn claimed_runtime_release_operation_for_envelope_and_node_seed(
         .unwrap()
 }
 
+#[cfg(unix)]
 pub(crate) fn signed_node_decision(
     request: &VerifiedKeyReleaseRequestV1,
     node_seed: u8,

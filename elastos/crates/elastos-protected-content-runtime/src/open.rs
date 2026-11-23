@@ -1139,41 +1139,55 @@ fn parse_wallet_address(value: &str) -> Result<WalletAddress, RuntimeOpenError> 
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::SigningKey;
+    #[cfg(unix)]
     use elastos_protected_content_contracts::{
         ContentAccessIdV1, CustodyCommitteeAuthorizationIdentityV1, CustodyEpochIdentityV1,
         CustodyNodeProvisioningRecordIdentityV1, CustodyPoolFailureDomainIdV1,
         CustodyPoolIdentityV1, CustodyPoolOperatorIdV1, KeyEnvelopeIdentityV1, NodeSetV1,
-        ProfileIdentityV1, RecipientKeyIdentityV1, RecipientPublicKeyBytesV1, RightsActionV1,
-        RightsPolicyIdentityV1, RuntimeCustodyProvisioningIdV1, RuntimeOperationIssuerKeyV1,
-        RuntimeReleaseAuditIdV1, RuntimeSessionBindingV1, ThresholdV1, WalletAddress,
-        CUSTODY_X_WING_AES256GCM_SUITE_ID_V1,
+        ProfileIdentityV1, RecipientKeyIdentityV1, RecipientPublicKeyBytesV1,
+        RightsPolicyIdentityV1, RuntimeCustodyProvisioningIdV1, RuntimeSessionBindingV1,
+        ThresholdV1, WalletAddress, CUSTODY_X_WING_AES256GCM_SUITE_ID_V1,
     };
+    use elastos_protected_content_contracts::{
+        RightsActionV1, RuntimeOperationIssuerKeyV1, RuntimeReleaseAuditIdV1,
+    };
+    #[cfg(unix)]
     use elastos_wallet_contract::ValidatedChainOutcomeBindingV1;
+    #[cfg(unix)]
     use k256::ecdsa::SigningKey as WalletSigningKey;
+    #[cfg(unix)]
     use serde_json::json;
+    #[cfg(unix)]
     use sha3::{Digest as _, Keccak256};
+    #[cfg(unix)]
     use tempfile::tempdir;
+    #[cfg(unix)]
     use x_wing::kem::{Decapsulator as _, KeyExport as _};
 
     use super::*;
+    #[cfg(unix)]
     use crate::coordinator::wallet_address_hex;
     use crate::test_media;
+    #[cfg(unix)]
     use crate::{
         RuntimeContentAvailabilityRequirement, RuntimeMintDraft, RuntimeMintJournal,
         RuntimeMintNodeBinding, RuntimeMintNodeReceipt, RuntimeVerifiedContentAvailability,
     };
 
     const NOW: u64 = 2_000_000_000;
+    #[cfg(unix)]
     const WALLET_ACCOUNT: &str = "wallet-account-alpha";
 
     fn digest(byte: u8) -> Digest32 {
         Digest32::new([byte; 32])
     }
 
+    #[cfg(unix)]
     fn content_access_id(seed: u8) -> ContentAccessIdV1 {
         ContentAccessIdV1::new([seed; 16]).unwrap()
     }
 
+    #[cfg(unix)]
     fn node_public_key(seed: u8) -> elastos_protected_content_contracts::NodePublicKey {
         elastos_protected_content_contracts::NodePublicKey::new(
             SigningKey::from_bytes(&[seed; 32])
@@ -1183,16 +1197,19 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn wallet_key(seed: u8) -> WalletSigningKey {
         WalletSigningKey::from_slice(&[seed; 32]).unwrap()
     }
 
+    #[cfg(unix)]
     fn wallet(seed: u8) -> WalletAddress {
         let encoded = wallet_key(seed).verifying_key().to_encoded_point(false);
         let digest = Keccak256::digest(&encoded.as_bytes()[1..]);
         WalletAddress::new(digest[12..].try_into().unwrap())
     }
 
+    #[cfg(unix)]
     fn profile_identity(seed: u8) -> ProfileIdentityV1 {
         ProfileIdentityV1::from_public_key_bytes(
             SigningKey::from_bytes(&[seed; 32])
@@ -1202,10 +1219,12 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn session_binding(seed: u8) -> RuntimeSessionBindingV1 {
         RuntimeSessionBindingV1::new(digest(seed)).unwrap()
     }
 
+    #[cfg(unix)]
     fn recipient_identity(seed: u8) -> RecipientKeyIdentityV1 {
         RecipientPublicKeyBytesV1::new(xwing_public_key_bytes(seed.max(9)))
             .unwrap()
@@ -1213,6 +1232,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn xwing_public_key_bytes(
         seed: u8,
     ) -> [u8; elastos_protected_content_contracts::PQ_HYBRID_WRAP_PUBLIC_KEY_BYTES] {
@@ -1220,6 +1240,7 @@ mod tests {
         secret.encapsulation_key().to_bytes().into()
     }
 
+    #[cfg(unix)]
     fn mint_binding(seed: u8) -> RuntimeMintNodeBinding {
         RuntimeMintNodeBinding::new(
             node_public_key(seed),
@@ -1230,6 +1251,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn mint_draft_with_access_seed(access_seed: u8) -> RuntimeMintDraft {
         let nodes = vec![mint_binding(1), mint_binding(2), mint_binding(3)];
         let threshold = ThresholdV1::new(2, 3).unwrap();
@@ -1267,10 +1289,12 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn mint_draft() -> RuntimeMintDraft {
         mint_draft_with_access_seed(0x41)
     }
 
+    #[cfg(unix)]
     fn mint_receipt(node: &RuntimeMintNodeBinding, seed: u8) -> RuntimeMintNodeReceipt {
         RuntimeMintNodeReceipt::new(
             node.node_public_key(),
@@ -1281,6 +1305,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn create_owner_only_directory(path: &std::path::Path) {
         std::fs::create_dir_all(path).unwrap();
         #[cfg(unix)]
@@ -1290,6 +1315,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn persist_mint(custody_provisioned: bool) -> (tempfile::TempDir, PersistedRuntimeMint) {
         let temp = tempdir().unwrap();
         let parent = temp.path().join("owner-only-parent");
@@ -1314,6 +1340,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn persist_mint_with_access_seed(
         custody_provisioned: bool,
         access_seed: u8,
@@ -1341,6 +1368,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn availability_requirement() -> RuntimeContentAvailabilityRequirement {
         RuntimeContentAvailabilityRequirement::new(
             "did:key:z6Mkhq7f4c4QAEgwRByrEsmGu3RJRYvpP5UGcWvqBjGW4YRe",
@@ -1354,6 +1382,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn persist_content_availability(
         temp: &tempfile::TempDir,
         provisioned: &PersistedRuntimeMint,
@@ -1376,6 +1405,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn purchase_intent(mint: &PersistedRuntimeMint) -> RuntimeProtectedContentPurchaseIntent {
         RuntimeProtectedContentPurchaseIntent::new(
             mint.draft().mint_id(),
@@ -1392,6 +1422,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn purchase_effect(
         mint: &PersistedRuntimeMint,
         account_id: &str,
@@ -1400,6 +1431,7 @@ mod tests {
         purchase_effect_for_principal(mint, "profile:alpha", account_id, tx_byte)
     }
 
+    #[cfg(unix)]
     fn buy_receipt_for_open_tests(mint: &PersistedRuntimeMint) -> RuntimeBuyReceipt {
         RuntimeBuyReceipt {
             mint_id: mint.draft().mint_id(),
@@ -1413,6 +1445,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn purchase_effect_for_principal(
         mint: &PersistedRuntimeMint,
         principal_id: &str,
@@ -1515,6 +1548,7 @@ mod tests {
     }
 
     impl FakeDecryptProvider {
+        #[cfg(unix)]
         fn with_prepare_response(
             expected_issuer: RuntimeOperationIssuerKeyV1,
             now: u64,
@@ -1551,6 +1585,7 @@ mod tests {
             }
         }
 
+        #[cfg(unix)]
         fn with_cancel_response(response: DecryptProviderResponseV1) -> Self {
             Self {
                 expected_issuer: runtime_operation_issuer(0x42),
@@ -1657,6 +1692,7 @@ mod tests {
         reject_bearer_playback(br#"{"viewer_session_handle":"aa","schema":"ok"}"#).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn bind_buy_rejects_custody_provisioned_mint_pending_availability_receipt() {
         let (_temp, provisioned) = persist_mint(true);
@@ -1672,6 +1708,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn bind_buy_accepts_exact_verified_content_availability() {
         let (temp, provisioned) = persist_mint(true);
@@ -1688,6 +1725,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn bind_verified_buy_rejects_mismatched_availability_identity() {
         let (temp, provisioned) = persist_mint(true);
@@ -1729,6 +1767,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn bind_buy_is_session_independent_and_derives_fresh_binding_per_session() {
         let (temp, provisioned) = persist_mint(true);
@@ -1747,6 +1786,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn bind_buy_fails_closed_without_content_availability_and_on_wrong_inputs() {
         let (_bound_temp, bound) = persist_mint(false);
@@ -1769,6 +1809,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn bind_buy_fails_closed_on_invalid_chain_and_authority() {
         let (temp, custody_provisioned) = persist_mint(true);
@@ -1810,6 +1851,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn prepare_recipient_returns_exact_typed_result_and_replays() {
         let (_temp, custody_provisioned_mint) = persist_mint(true);
@@ -1862,6 +1904,7 @@ mod tests {
         assert!(!format!("{first:?}").contains(&hex::encode(opaque_handle(0x21))));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn prepare_recipient_rejects_conflicting_response_binding() {
         let (_temp, custody_provisioned_mint) = persist_mint(true);
@@ -1973,6 +2016,7 @@ mod tests {
         assert_eq!(provider.read_requests.lock().unwrap().len(), 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_prepared_recipient_accepts_exact_replay_and_already_absent() {
         let (_temp, custody_provisioned_mint) = persist_mint(true);
@@ -2025,6 +2069,7 @@ mod tests {
         cancel_prepared_recipient(&absent, &prepared).await.unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_prepared_recipient_rejects_conflicting_response_binding() {
         let (_temp, custody_provisioned_mint) = persist_mint(true);

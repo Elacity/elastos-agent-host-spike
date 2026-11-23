@@ -763,29 +763,41 @@ fn seal_payload_to_vec_with_test_material(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     use ed25519_dalek::{Signer as _, SigningKey};
+    #[cfg(unix)]
     use elastos_protected_content_contracts::{
-        AtomicReplayClaimer, CanonicalContract, ContentAccessIdV1, CustodyPoolError,
-        CustodyPoolIdentityV1, CustodyPoolMemberStateV1, Digest32, EncryptedContentIdentityV1,
-        EvmContractAddressV1, EvmFunctionSelectorV1, EvmRightsMethodAbiV1, KeyReleaseOutcomeV1,
-        KeyReleaseRequestV1, NodeContributionRefV1, ProtectedContentBindingV1,
-        RecipientKeyIdentityV1, RecipientPublicKeyBytesV1, ReplayClaimError, ReplayClaimKeyV1,
-        ReplayNonce16, RightsActionV1, RightsObservationFinalityV1, RightsPolicyBodyV1,
-        RightsRequestV1, RightsSubjectSourceV1, RightsVerificationContextV1,
-        RuntimeOperationIssuerKeyV1, RuntimeReleaseAuditIdV1, RuntimeReleaseOperationStatementV1,
-        RuntimeSessionBindingV1, SignedNodeContributionV1, SignedRecipientKeyAuthorizationV1,
-        SignedRuntimeReleaseOperationV1, SignedTerminalReceiptV1, TerminalReceiptIssuerKey,
-        TerminalReceiptStatementV1, VerifiedKeyReleaseRequestV1, WalletAddress,
-        WalletSignedRightsRequestV1, CUSTODY_X_WING_AES256GCM_SUITE_ID_V1,
+        AtomicReplayClaimer, ContentAccessIdV1, EvmContractAddressV1, EvmFunctionSelectorV1,
+        EvmRightsMethodAbiV1, KeyReleaseOutcomeV1, KeyReleaseRequestV1, NodeContributionRefV1,
+        ProtectedContentBindingV1, RecipientKeyIdentityV1, RecipientPublicKeyBytesV1,
+        ReplayClaimError, ReplayClaimKeyV1, ReplayNonce16, RightsActionV1,
+        RightsObservationFinalityV1, RightsPolicyBodyV1, RightsRequestV1, RightsSubjectSourceV1,
+        RightsVerificationContextV1, RuntimeOperationIssuerKeyV1, RuntimeReleaseAuditIdV1,
+        RuntimeReleaseOperationStatementV1, RuntimeSessionBindingV1, SignedNodeContributionV1,
+        SignedRecipientKeyAuthorizationV1, SignedRuntimeReleaseOperationV1,
+        SignedTerminalReceiptV1, TerminalReceiptIssuerKey, TerminalReceiptStatementV1,
+        VerifiedKeyReleaseRequestV1, WalletAddress, WalletSignedRightsRequestV1,
+        CUSTODY_X_WING_AES256GCM_SUITE_ID_V1,
     };
+    use elastos_protected_content_contracts::{
+        CanonicalContract, CustodyPoolError, CustodyPoolIdentityV1, CustodyPoolMemberStateV1,
+        Digest32, EncryptedContentIdentityV1,
+    };
+    #[cfg(unix)]
     use k256::ecdsa::SigningKey as WalletSigningKey;
+    #[cfg(unix)]
     use rand09::rngs::StdRng;
+    #[cfg(unix)]
     use sha3::Keccak256;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::BTreeSet;
+    #[cfg(unix)]
+    use std::collections::HashMap;
 
+    #[cfg(unix)]
     #[derive(Default)]
     struct ReplayClaimsForTests(HashMap<ReplayClaimKeyV1, u64>);
 
+    #[cfg(unix)]
     impl AtomicReplayClaimer for ReplayClaimsForTests {
         fn claim(
             &mut self,
@@ -816,13 +828,14 @@ mod tests {
         usize::try_from(prefix_end).unwrap()
     }
 
+    #[cfg(unix)]
     fn wallet_for_tests(seed: u8) -> WalletAddress {
         let key = WalletSigningKey::from_slice(&[seed; 32]).unwrap();
         let encoded = key.verifying_key().to_encoded_point(false);
         let digest = Keccak256::digest(&encoded.as_bytes()[1..]);
         WalletAddress::new(digest[12..].try_into().unwrap())
     }
-
+    #[cfg(unix)]
     fn policy_body_for_tests() -> RightsPolicyBodyV1 {
         RightsPolicyBodyV1::new(
             EncryptedContentIdentityV1::new(Digest32::new([0x41; 32]), 4096).unwrap(),
@@ -837,7 +850,7 @@ mod tests {
         )
         .unwrap()
     }
-
+    #[cfg(unix)]
     fn recipient_identity_for_tests(seed: u8) -> RecipientKeyIdentityV1 {
         let recipient_public_key = crate::test_support::recipient_public_key(seed);
         RecipientKeyIdentityV1::new(
@@ -846,7 +859,7 @@ mod tests {
         )
         .unwrap()
     }
-
+    #[cfg(unix)]
     fn binding_for_sealed_envelope_for_tests(
         encrypted_content_identity: EncryptedContentIdentityV1,
         envelope: &CustodyEnvelopeV1,
@@ -868,7 +881,7 @@ mod tests {
         )
         .unwrap()
     }
-
+    #[cfg(unix)]
     fn signed_rights_request_for_sealed_envelope_for_tests(
         encrypted_content_identity: EncryptedContentIdentityV1,
         envelope: &CustodyEnvelopeV1,
@@ -894,7 +907,7 @@ mod tests {
         signature_bytes.push(recovery_id.to_byte());
         WalletSignedRightsRequestV1::new(request, signature_bytes).unwrap()
     }
-
+    #[cfg(unix)]
     fn verified_release_request_for_sealed_envelope_for_tests(
         encrypted_content_identity: EncryptedContentIdentityV1,
         envelope: &CustodyEnvelopeV1,
@@ -931,7 +944,7 @@ mod tests {
         )
         .unwrap()
     }
-
+    #[cfg(unix)]
     fn authenticated_runtime_release_operation_for_sealed_envelope_for_tests(
         encrypted_content_identity: EncryptedContentIdentityV1,
         envelope: &CustodyEnvelopeV1,
@@ -1010,7 +1023,7 @@ mod tests {
         )
         .unwrap()
     }
-
+    #[cfg(unix)]
     fn released_contribution(
         request: &VerifiedKeyReleaseRequestV1,
         envelope: &CustodyEnvelopeV1,
@@ -1046,7 +1059,7 @@ mod tests {
         )
         .unwrap()
     }
-
+    #[cfg(unix)]
     fn claimed_runtime_release_operation_for_sealed_envelope_and_node_seed(
         encrypted_content_identity: EncryptedContentIdentityV1,
         envelope: &CustodyEnvelopeV1,
@@ -1081,7 +1094,7 @@ mod tests {
             )
             .unwrap()
     }
-
+    #[cfg(unix)]
     fn terminal_receipt(
         request: &VerifiedKeyReleaseRequestV1,
         envelope: &CustodyEnvelopeV1,
@@ -1128,7 +1141,7 @@ mod tests {
         )
         .unwrap()
     }
-
+    #[cfg(unix)]
     struct AuthenticatedDecryptFixture {
         framed: Vec<u8>,
         sealed: SealedPayloadMetadataV1,
@@ -1139,7 +1152,7 @@ mod tests {
         terminal_issuer: TerminalReceiptIssuerKey,
         plaintext: Vec<u8>,
     }
-
+    #[cfg(unix)]
     fn authenticated_decrypt_fixture(plaintext: Vec<u8>) -> AuthenticatedDecryptFixture {
         let recipient_seed = 0x30;
         let mut plaintext_reader = std::io::Cursor::new(plaintext.clone());
@@ -1466,6 +1479,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn decrypt_output_round_trips_through_sealing_reconstruction_and_authenticated_output() {
         let fixture =
@@ -1507,6 +1521,7 @@ mod tests {
         assert_eq!(plaintext, fixture.plaintext);
     }
 
+    #[cfg(unix)]
     #[test]
     fn decrypt_output_rejects_wrong_ciphertext_before_any_plaintext_write() {
         let fixture = authenticated_decrypt_fixture(b"identity mismatch".to_vec());
@@ -1537,6 +1552,7 @@ mod tests {
         assert!(plaintext.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn decrypt_output_rejects_wrong_operation_binding_and_invalid_contribution_sets() {
         let fixture = authenticated_decrypt_fixture(b"binding checks".to_vec());

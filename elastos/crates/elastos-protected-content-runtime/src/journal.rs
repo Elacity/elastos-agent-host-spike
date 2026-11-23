@@ -1436,6 +1436,17 @@ fn windows_refuses_secure_store_before_creating_files() {
     assert!(!path.exists());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_journal_refuses_operations_with_unsupported_on_windows() {
+    let temp = tempfile::tempdir().unwrap();
+    let journal = RuntimeReleaseJournal::new(temp.path().join("journal"));
+    assert_eq!(
+        journal.list_unresolved(),
+        Err(RuntimeReleaseJournalError::UnsupportedOnWindows)
+    );
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
