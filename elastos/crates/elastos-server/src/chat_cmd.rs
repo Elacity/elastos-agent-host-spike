@@ -278,6 +278,7 @@ async fn run_native_chat_with_runtime(
     let client = reqwest::Client::new();
     let api = &coords.api_url;
     let client_token = &tokens.client_token;
+    let shell_token = tokens.shell_token.clone();
     let identity = load_attached_chat_identity(&client, api, client_token).await;
     let local_nickname = load_local_chat_nickname(&default_data_dir())?;
     let self_did = identity.did;
@@ -315,20 +316,14 @@ async fn run_native_chat_with_runtime(
     };
 
     if let Some(ref bootstrap) = connect {
-        let (op, ticket) = match bootstrap {
-            ChatBootstrap::ExplicitConnect(ticket) => ("connect", ticket.as_str()),
-            ChatBootstrap::TrustedSourceSeed(ticket) => ("connect", ticket.as_str()),
+        let ticket = match bootstrap {
+            ChatBootstrap::ExplicitConnect(ticket) | ChatBootstrap::TrustedSourceSeed(ticket) => {
+                ticket.as_str()
+            }
         };
-        peer_provider_request(
-            &client,
-            api,
-            client_token,
-            &peer_cap,
-            op,
-            serde_json::json!({"ticket": ticket}),
-        )
-        .await
-        .map_err(|err| anyhow::anyhow!("Chat could not connect through Carrier: {}", err))?;
+        connect_chat_bootstrap(&client, api, &shell_token, ticket)
+            .await
+            .map_err(|err| anyhow::anyhow!("Chat could not connect through Carrier: {}", err))?;
     }
 
     match peer_provider_request(
@@ -477,6 +472,7 @@ async fn run_native_chat_with_runtime(
         let discover_client = client.clone();
         let discover_api = api.clone();
         let discover_token = client_token.clone();
+        let discover_shell = shell_token.clone();
         let discover_cap = peer_cap.clone();
         let discover_did_cap = did_cap.clone();
         let discover_did = self_did.clone();
@@ -485,7 +481,7 @@ async fn run_native_chat_with_runtime(
         let discover_nick = nick.clone();
         let discover_topic = discovery_topic.clone();
         let discover_ui = tty_ui.clone();
-        let discover_ticket = fetch_local_peer_ticket(&client, api, client_token, &peer_cap)
+        let discover_ticket = fetch_local_peer_ticket(&client, api, &shell_token)
             .await
             .unwrap_or_default();
         let attach_retry_after =
@@ -523,6 +519,7 @@ async fn run_native_chat_with_runtime(
                             &discover_client,
                             &discover_api,
                             &discover_token,
+                            &discover_shell,
                             &discover_cap,
                             &discover_did_cap,
                             &discover_did,
@@ -626,14 +623,12 @@ async fn leave_chat_topic(
 async fn fetch_local_peer_ticket(
     client: &reqwest::Client,
     api: &str,
-    client_token: &str,
-    peer_cap: &str,
+    shell_token: &str,
 ) -> anyhow::Result<String> {
-    let body = peer_provider_request(
+    let body = private_carrier_request(
         client,
         api,
-        client_token,
-        peer_cap,
+        shell_token,
         "get_ticket",
         serde_json::json!({}),
     )
@@ -704,6 +699,7 @@ async fn process_presence_messages(
     client: &reqwest::Client,
     api: &str,
     client_token: &str,
+    shell_token: &str,
     peer_cap: &str,
     did_cap: &str,
     self_did: &str,
@@ -791,16 +787,7 @@ async fn process_presence_messages(
             }
         }
 
-        match peer_provider_request(
-            client,
-            api,
-            client_token,
-            peer_cap,
-            "remember_peer",
-            serde_json::json!({"ticket": presence.ticket}),
-        )
-        .await
-        {
+        match remember_chat_peer(client, api, shell_token, &presence.ticket).await {
             Ok(remember_body) => {
                 let peer_ids: Vec<String> = remember_body
                     .get("data")
@@ -1667,6 +1654,72 @@ fn redraw_chat_input(output: &mut dyn Write, current: &str) {
     let _ = output.flush();
 }
 
+async fn connect_chat_bootstrap(
+    client: &reqwest::Client,
+    api: &str,
+    shell_token: &str,
+    ticket: &str,
+) -> anyhow::Result<()> {
+    private_carrier_request(
+        client,
+        api,
+        shell_token,
+        "connect",
+        serde_json::json!({"ticket": ticket}),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn remember_chat_peer(
+    client: &reqwest::Client,
+    api: &str,
+    shell_token: &str,
+    ticket: &str,
+) -> anyhow::Result<serde_json::Value> {
+    private_carrier_request(
+        client,
+        api,
+        shell_token,
+        "remember_peer",
+        serde_json::json!({"ticket": ticket}),
+    )
+    .await
+}
+
+async fn private_carrier_request(
+    client: &reqwest::Client,
+    api: &str,
+    shell_token: &str,
+    op: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let resp = client
+        .post(format!("{api}/api/provider/peer/{op}"))
+        .header("Authorization", format!("Bearer {shell_token}"))
+        .json(&body)
+        .send()
+        .await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    let body: serde_json::Value = serde_json::from_str(&text).map_err(|err| {
+        anyhow::anyhow!(
+            "peer provider {op} returned non-JSON HTTP {status}: {} ({err})",
+            short_provider_response_body(&text)
+        )
+    })?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "peer provider {op} returned HTTP {status}: {}",
+            provider_response_message(&body)
+        );
+    }
+    if body.get("status").and_then(|s| s.as_str()) == Some("error") {
+        anyhow::bail!("{}", provider_response_message(&body));
+    }
+    Ok(body)
+}
+
 async fn peer_provider_request(
     client: &reqwest::Client,
     api: &str,
@@ -1858,6 +1911,54 @@ pub(crate) async fn request_attached_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ChatCarrier {
+        requests: std::sync::Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl elastos_runtime::provider::Provider for ChatCarrier {
+        async fn handle(
+            &self,
+            _request: elastos_runtime::provider::ResourceRequest,
+        ) -> Result<
+            elastos_runtime::provider::ResourceResponse,
+            elastos_runtime::provider::ProviderError,
+        > {
+            Err(elastos_runtime::provider::ProviderError::Provider(
+                "chat test carrier accepts raw requests only".into(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["peer"]
+        }
+
+        fn name(&self) -> &'static str {
+            "chat-test-carrier"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, elastos_runtime::provider::ProviderError> {
+            self.requests.lock().await.push(request.clone());
+            if request.get("op").and_then(|op| op.as_str()) == Some("get_ticket") {
+                return Ok(serde_json::json!({
+                    "status": "ok",
+                    "data": {
+                        "ticket": "chat-private-ticket",
+                        "node_id": "chat-node"
+                    }
+                }));
+            }
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": { "added": ["chat-node"] }
+            }))
+        }
+    }
+
     use elastos_server::carrier::{
         verified_source_bootstrap_ticket, SourceCarrierBootstrapDocument,
     };
@@ -2508,5 +2609,77 @@ mod tests {
             "did:key:self",
             "session-native"
         ));
+    }
+
+    #[tokio::test]
+    async fn chat_bootstrap_connects_without_an_app_grant() {
+        use elastos_runtime::provider::ProviderRegistry;
+        use elastos_runtime::session::{Session, SessionType};
+        use elastos_server::api::handlers::provider::{provider_proxy, ProviderProxyState};
+
+        let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let registry = std::sync::Arc::new(ProviderRegistry::new());
+        registry
+            .register_sub_provider(
+                "peer",
+                std::sync::Arc::new(ChatCarrier {
+                    requests: requests.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/api/provider/:scheme/:op",
+                axum::routing::post(provider_proxy),
+            )
+            .layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let shell = request
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer shell-chat");
+                    let kind = if shell {
+                        SessionType::Shell
+                    } else {
+                        SessionType::Capsule
+                    };
+                    request.extensions_mut().insert(Session::new(kind, None));
+                    next.run(request).await
+                },
+            ))
+            .with_state(ProviderProxyState {
+                registry,
+                capability_manager: None,
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let client = reqwest::Client::new();
+
+        connect_chat_bootstrap(&client, &api, "shell-chat", "chat-bootstrap-ticket")
+            .await
+            .unwrap();
+        assert_eq!(
+            fetch_local_peer_ticket(&client, &api, "shell-chat")
+                .await
+                .unwrap(),
+            "chat-private-ticket"
+        );
+        let remembered = remember_chat_peer(&client, &api, "shell-chat", "chat-bootstrap-ticket")
+            .await
+            .unwrap();
+        assert_eq!(remembered["data"]["added"][0], "chat-node");
+        let seen = requests.lock().await.clone();
+        server.abort();
+        assert_eq!(
+            seen,
+            vec![
+                serde_json::json!({"op": "connect", "ticket": "chat-bootstrap-ticket"}),
+                serde_json::json!({"op": "get_ticket"}),
+                serde_json::json!({"op": "remember_peer", "ticket": "chat-bootstrap-ticket"}),
+            ]
+        );
     }
 }
