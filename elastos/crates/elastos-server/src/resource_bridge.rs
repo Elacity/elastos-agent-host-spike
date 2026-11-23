@@ -351,7 +351,7 @@ type AgentPlanOneUseTokens = Mutex<HashMap<String, (Arc<CapabilityManager>, Capa
 #[cfg(test)]
 static AGENT_PLAN_ONE_USE_TOKENS: OnceLock<AgentPlanOneUseTokens> = OnceLock::new();
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) async fn own_root_token_replay_refused_for_test(request_id: &str) -> bool {
     let token = AGENT_PLAN_ONE_USE_TOKENS
         .get()
@@ -405,7 +405,7 @@ pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) async fn grant_agent_plan_capability_for_test(
     request_id: &str,
     step: &serde_json::Value,
@@ -456,7 +456,7 @@ pub(crate) async fn grant_agent_plan_capability_for_test(
         .unwrap();
 }
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) fn narrow_agent_plan_manifest_for_test(request_id: &str) {
     let mut authorities = plan_authorities().lock().unwrap();
     authorities
@@ -1596,7 +1596,7 @@ fn principal_root_read_write_uri(operation: &str, request: &serde_json::Value) -
 /// The protected path's answer for one request, for a test that drives this
 /// entry directly with a context it builds. The bridge's own callers reach it
 /// through `handle_request`; no production caller needs this name.
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) fn protected_principal_root_resource_response_for_test(
     bridge_ctx: &BridgeContext,
     operation: &str,
@@ -1810,6 +1810,7 @@ fn request_too_large_envelope() -> serde_json::Value {
     )
 }
 
+#[cfg(unix)]
 fn response_too_large_envelope(id: u64) -> serde_json::Value {
     bridge_error_envelope(
         id,
@@ -1818,6 +1819,7 @@ fn response_too_large_envelope(id: u64) -> serde_json::Value {
     )
 }
 
+#[cfg(unix)]
 fn serialize_bridge_response(response: serde_json::Value) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(&response).unwrap_or_default();
     if bytes.len() > MAX_RESOURCE_FRAME_BYTES {
@@ -4678,6 +4680,7 @@ pub(crate) mod tests {
     }
 
     /// A temp data dir holding a stored Human record for `principal_id`.
+    #[cfg(unix)]
     fn stored_human_dir(principal_id: &str) -> tempfile::TempDir {
         let temp = tempfile::tempdir().unwrap();
         crate::auth::store_test_human_principal(temp.path(), principal_id);
@@ -4981,6 +4984,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn b4r_documents(principal_id: &str) -> (tempfile::TempDir, BridgeContext, String) {
         let temp = tempfile::tempdir().expect("temp dir");
         let protection =
@@ -4995,6 +4999,7 @@ pub(crate) mod tests {
         (temp, ctx, protection.localhost_root)
     }
 
+    #[cfg(unix)]
     fn b4r_names(root: &str, name: &str) -> (String, String) {
         (
             format!("localhost://Users/self/Documents/{name}"),
@@ -5002,12 +5007,14 @@ pub(crate) mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn b4r_path(temp: &tempfile::TempDir, scoped: &str) -> std::path::PathBuf {
         let path = rooted_localhost_fs_path(temp.path(), scoped).expect("file-backed path");
         std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
         path
     }
 
+    #[cfg(unix)]
     async fn b4r_invoke(
         ctx: &BridgeContext,
         operation: &str,
@@ -5972,6 +5979,7 @@ pub(crate) mod tests {
         assert_eq!(response["response"]["code"], "request_too_large");
     }
 
+    #[cfg(unix)]
     #[test]
     fn serialize_bridge_response_replaces_oversized_response() {
         let response = serde_json::json!({
@@ -6329,9 +6337,11 @@ pub(crate) mod tests {
 
     // S3 (spike): the Agent Host task journal lives under the launching
     // person's root at .AppData/Agents/<agent-id>/tasks/<task-id>/journal.
+    #[cfg(unix)]
     const JOURNAL_SELF_URI: &str =
         "localhost://Users/self/.AppData/Agents/demo-agent/tasks/task-1/journal";
 
+    #[cfg(unix)]
     fn journal_context(principal_id: &str) -> (tempfile::TempDir, BridgeContext, String) {
         let temp = tempfile::tempdir().unwrap();
         let protection =
@@ -6351,6 +6361,7 @@ pub(crate) mod tests {
         (temp, ctx, object_uri)
     }
 
+    #[cfg(unix)]
     fn journal_write_line(
         id: u64,
         uri: &str,
@@ -6376,6 +6387,7 @@ pub(crate) mod tests {
         serde_json::json!({ "id": id, "request": request }).to_string()
     }
 
+    #[cfg(unix)]
     fn journal_path(temp: &tempfile::TempDir, object_uri: &str) -> std::path::PathBuf {
         rooted_localhost_fs_path(temp.path(), object_uri).unwrap()
     }
@@ -6556,6 +6568,7 @@ pub(crate) mod tests {
         assert!(!journal_path(&temp, &object_uri).exists());
     }
 
+    #[cfg(unix)]
     fn journal_read_line(id: u64, uri: &str, token: String) -> String {
         serde_json::json!({
             "id": id,
@@ -6570,6 +6583,7 @@ pub(crate) mod tests {
         .to_string()
     }
 
+    #[cfg(unix)]
     async fn journal_write(
         ctx: &BridgeContext,
         object_uri: &str,
@@ -6670,6 +6684,7 @@ pub(crate) mod tests {
 
     /// Paths that reach the journal file but are not its canonical URI. The file
     /// path and token matching drop empty and `.` segments.
+    #[cfg(unix)]
     const ODD_JOURNAL_URIS: [&str; 4] = [
         "localhost://Users/self//.AppData/Agents/demo-agent/tasks/task-1/journal",
         "localhost://Users/self/./.AppData/Agents/demo-agent/tasks/task-1/journal",
@@ -6880,6 +6895,7 @@ pub(crate) mod tests {
 
     /// The alias path is absent (Linux ext4 keeps the names apart), or it is the
     /// journal itself (APFS folds case and Unicode): the same device and inode.
+    #[cfg(unix)]
     fn absent_or_same_file(alias: &std::path::Path, journal: &std::path::Path) -> bool {
         let Ok(alias) = std::fs::metadata(alias) else {
             return true;
@@ -7106,6 +7122,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn remote_invoke_audit(data_dir: &Path) -> Vec<(String, String, String, String)> {
         crate::auth::load_auth_state(data_dir)
             .unwrap()
@@ -7123,6 +7140,7 @@ pub(crate) mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     fn remote_invoke_line(id: u64, operation: &str, uri: &str, token: &str) -> String {
         serde_json::json!({
             "id": id,
@@ -7783,6 +7801,7 @@ pub(crate) mod tests {
     /// Bytes cross the bridge as a JSON number array: up to four characters per
     /// byte ("255,"). The guest journal cap (USERSAI-JOURNAL.md) must fit inside
     /// MAX_RESOURCE_FRAME_BYTES even when every byte is 0xFF.
+    #[cfg(unix)]
     const JOURNAL_CAP_BYTES: usize = 192 * 1024;
 
     #[cfg(unix)]
@@ -8251,6 +8270,7 @@ pub(crate) mod tests {
     // A15-R slice 3: an admitted agent submits a plan through the existing Bus
     // v1 invoke. The Runtime writes one pending record bound to its own
     // identity and runs nothing.
+    #[cfg(unix)]
     fn submit_record_files(data_dir: &Path) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(data_dir.join("inspect-actions")) else {
             return Vec::new();
@@ -8268,6 +8288,7 @@ pub(crate) mod tests {
         names
     }
 
+    #[cfg(unix)]
     fn read_submit_record(data_dir: &Path, request_id: &str) -> serde_json::Value {
         let path = data_dir
             .join("inspect-actions")
@@ -8277,6 +8298,7 @@ pub(crate) mod tests {
 
     /// The shipped Agent Host manifest as it is on disk; the bridge checks
     /// its exact resource ceiling.
+    #[cfg(unix)]
     fn submit_plan_host_manifest() -> elastos_common::CapsuleManifest {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host/capsule.json");
@@ -8284,6 +8306,7 @@ pub(crate) mod tests {
     }
 
     /// The submitted plan: one exact typed step plus whatever the row adds.
+    #[cfg(unix)]
     fn submitted_plan(extra: serde_json::Value) -> serde_json::Value {
         let mut request = serde_json::json!({
             "path": "localhost://UsersAI/self/Documents/plan.md",
@@ -8303,6 +8326,7 @@ pub(crate) mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn submit_agent_plan_line(id: u64, token: Option<&str>, plan: &serde_json::Value) -> String {
         serde_json::json!({
             "id": id,
@@ -8318,6 +8342,7 @@ pub(crate) mod tests {
     }
 
     /// The Agent Host bridge over `data_dir`, acting as `principal`.
+    #[cfg(unix)]
     async fn submit_plan_bridge(
         data_dir: &Path,
         principal: &str,
@@ -8355,6 +8380,7 @@ pub(crate) mod tests {
     }
 
     /// A granted submission of `plan` by the bridge's principal.
+    #[cfg(unix)]
     async fn submit_with_write(
         ctx: &BridgeContext,
         id: u64,
@@ -8371,6 +8397,7 @@ pub(crate) mod tests {
 
     /// The stored Agent guest writes and reads its own task journal before it
     /// submits the planner's exact one-step plan through the same bridge.
+    #[cfg(unix)]
     pub(crate) async fn a15r_guest_journal_and_submit(
         data_dir: &Path,
         agent: &str,
@@ -8417,6 +8444,7 @@ pub(crate) mod tests {
 
     /// The submission is refused for `reason`; no record is written and no
     /// provider is reached.
+    #[cfg(unix)]
     async fn assert_submit_refused(
         response: &serde_json::Value,
         ctx: &BridgeContext,
@@ -8441,6 +8469,7 @@ pub(crate) mod tests {
 
     /// A build without agents admits no agent, so an agent record in the
     /// sign-in file is refused and nothing is stored.
+    #[cfg(unix)]
     async fn assert_refused_without_agents_built() {
         let temp = tempfile::tempdir().unwrap();
         let agent = crate::auth::valid_agent::plant(temp.path());
@@ -8887,6 +8916,7 @@ pub(crate) mod tests {
     /// created from the contract's create binding under the contract's run
     /// id, and reached only by the principal and capsule that created it:
     /// `assert_run_owner` in capsules/model-provider/src/state.rs.
+    #[cfg(unix)]
     #[derive(Default)]
     struct OwnedRunsModelProvider {
         requests: Mutex<Vec<serde_json::Value>>,
@@ -8947,8 +8977,10 @@ pub(crate) mod tests {
     }
 
     const ALICE: &str = "person:local:alice";
+    #[cfg(unix)]
     const BOB: &str = "person:local:bob";
 
+    #[cfg(unix)]
     async fn model_bus(
         principal: Option<&str>,
         capsule: &str,
@@ -8975,6 +9007,7 @@ pub(crate) mod tests {
         (ctx, provider, temp)
     }
 
+    #[cfg(unix)]
     async fn model_invoke(
         ctx: &BridgeContext,
         op: &str,
@@ -8989,6 +9022,7 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn model_create(offer_id: &str) -> serde_json::Value {
         serde_json::json!({"offer_id": offer_id, "operation": "text.generate",
             "input": {"prompt": "hi"}, "request_id": "model-v1:1700000000000:n1",
