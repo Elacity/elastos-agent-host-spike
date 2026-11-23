@@ -161,18 +161,25 @@ impl CurrentCarrier {
             .await
     }
 
-    async fn new(row: ContractRow) -> Self {
+    async fn new() -> Self {
         let sender_dir = tempfile::tempdir().unwrap();
         let receiver_dir = tempfile::tempdir().unwrap();
         let sender_registry = Arc::new(ProviderRegistry::new());
         let receiver_registry = Arc::new(ProviderRegistry::new());
         crate::library::publish_cid_for_test(receiver_dir.path(), &content_cid(FILE_BYTES));
-        // Parallel row tests run in one process. Identical keys would let mDNS
-        // LAN discovery land one row's peer dial on another row's endpoint, so
-        // every row derives its own key pair from a fresh seed range.
-        let index = row as u8;
-        let (sender_key, sender_did) = elastos_identity::derive_did(&[0x90 + 2 * index; 32]);
-        let (receiver_key, receiver_did) = elastos_identity::derive_did(&[0x91 + 2 * index; 32]);
+        // Parallel row tests run in one process. Fixed seeds would repeat
+        // derive_did keys that other elastos-server tests bind as live Carrier
+        // endpoints, so mDNS LAN discovery could land one row's peer dial on
+        // another row's node. Draw a fresh OS-random key pair per carrier; the
+        // derived DIDs stay on the struct for the row's assertions.
+        let mut sender_seed = [0u8; 32];
+        getrandom::getrandom(&mut sender_seed)
+            .expect("OS entropy source unavailable for contract carrier keys");
+        let mut receiver_seed = [0u8; 32];
+        getrandom::getrandom(&mut receiver_seed)
+            .expect("OS entropy source unavailable for contract carrier keys");
+        let (sender_key, sender_did) = elastos_identity::derive_did(&sender_seed);
+        let (receiver_key, receiver_did) = elastos_identity::derive_did(&receiver_seed);
         let sender_node = start_carrier_node_with_registry(
             &sender_key,
             &sender_did,
@@ -862,7 +869,7 @@ async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>)
 
 #[cfg(unix)]
 async fn run_current_row(row: ContractRow) {
-    let carrier = CurrentCarrier::new(row).await;
+    let carrier = CurrentCarrier::new().await;
     use ContractRow::*;
     if matches!(row, M1 | M2 | M3 | M4) {
         carrier.join_topic(MESSAGE_TOPIC).await;
