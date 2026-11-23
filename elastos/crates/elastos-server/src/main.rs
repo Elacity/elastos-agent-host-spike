@@ -2388,6 +2388,68 @@ pub(crate) fn open_browser(url: &str) {
             .stderr(std::process::Stdio::null())
             .spawn();
     }
+    if cfg!(windows) {
+        if let Some(argv) = windows_browser_argv(url) {
+            let _ = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
+    }
+}
+
+/// Pure seam for the Windows branch of [`open_browser`]: the argv that starts
+/// the default browser, or `None` when the URL is refused. `cmd /C start ""
+/// <url>` makes cmd.exe re-parse the URL, so after the loopback host check
+/// the whole URL must match a strict allow-list: `http://`, host `127.0.0.1`
+/// or `localhost`, an optional `:` + 1-5 digit port, then a path made only
+/// of `[A-Za-z0-9/._~-]` — no query, no fragment, no percent signs, and none
+/// of the cmd.exe metacharacters (`& | ^ < > % ! "`, space). Compiled on
+/// every OS so the seam test runs everywhere.
+fn windows_browser_argv(url: &str) -> Option<Vec<String>> {
+    let rest = url.strip_prefix("http://")?;
+    let host_end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
+    if !matches!(&rest[..host_end], "127.0.0.1" | "localhost") {
+        return None;
+    }
+    let after_host = &rest[host_end..];
+    // Optional ":" + 1-5 digit port. After the digits the URL must end or
+    // continue with the path's leading '/', so ":8080abc" is refused instead
+    // of being read as port 8080 plus a path.
+    let path = match after_host.strip_prefix(':') {
+        Some(port_and_rest) => {
+            let digits = port_and_rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .count();
+            if digits == 0 || digits > 5 {
+                return None;
+            }
+            let after_port = &port_and_rest[digits..];
+            if !(after_port.is_empty() || after_port.starts_with('/')) {
+                return None;
+            }
+            after_port
+        }
+        None => after_host,
+    };
+    // The path (empty for a bare host URL) may use only these characters;
+    // anything else — cmd.exe metacharacters, query, fragment, percent
+    // escapes — is refused.
+    if !path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '~' | '-'))
+    {
+        return None;
+    }
+    Some(vec![
+        "cmd".to_string(),
+        "/C".to_string(),
+        "start".to_string(),
+        String::new(),
+        url.to_string(),
+    ])
 }
 
 pub(crate) async fn create_runtime(
@@ -2445,6 +2507,64 @@ pub(crate) async fn create_runtime(
 #[cfg(test)]
 mod tests {
     use super::verify_component_binary_with_data_dir;
+    /// Seam test for the Windows branch of [`crate::open_browser`]: the argv
+    /// it would run for a loopback URL, checked on every OS.
+    #[test]
+    fn open_browser_windows_argv_starts_the_default_browser() {
+        let argv = super::windows_browser_argv("http://127.0.0.1:8080/home/").unwrap();
+        assert_eq!(
+            argv,
+            ["cmd", "/C", "start", "", "http://127.0.0.1:8080/home/"]
+        );
+        assert_eq!(
+            super::windows_browser_argv("http://localhost:4173/home/").unwrap(),
+            ["cmd", "/C", "start", "", "http://localhost:4173/home/"]
+        );
+    }
+
+    /// The Windows branch refuses to launch anything whose URL is not a
+    /// loopback HTTP URL.
+    #[test]
+    fn open_browser_windows_refuses_a_non_local_url() {
+        for refused in [
+            "http://example.com/",
+            "http://127.0.0.1.evil.example/",
+            "https://127.0.0.1/",
+            "file:///C:/Windows/System32/calc.exe",
+            "http://[::1]/",
+            "not a url",
+        ] {
+            assert!(
+                super::windows_browser_argv(refused).is_none(),
+                "{refused} must be refused"
+            );
+        }
+    }
+    /// The Windows branch refuses URLs that cmd.exe could re-parse after
+    /// `cmd /C start ""`: cmd metacharacters, a double quote, a space, a
+    /// query string, a fragment, or a port followed by letters.
+    #[test]
+    fn open_browser_windows_refuses_cmd_metacharacters() {
+        for refused in [
+            "http://127.0.0.1:8090/home/?a=1&calc.exe",
+            "http://127.0.0.1:8090/home/|calc.exe",
+            "http://127.0.0.1:8090/home/^calc.exe",
+            "http://127.0.0.1:8090/home/a%20b",
+            "http://127.0.0.1:8090/home/!calc.exe",
+            "http://127.0.0.1:8090/home/<calc.exe",
+            "http://127.0.0.1:8090/home/>calc.exe",
+            "http://127.0.0.1:8090/home/\"calc.exe\"",
+            "http://127.0.0.1:8090/home/with space",
+            "http://127.0.0.1:8090/home/?a=1",
+            "http://127.0.0.1:8090/home/#frag",
+            "http://127.0.0.1:8080abc/",
+        ] {
+            assert!(
+                super::windows_browser_argv(refused).is_none(),
+                "{refused} must be refused"
+            );
+        }
+    }
 
     /// `run --bundle <cid>` is its own path: it takes the CID and nothing
     /// else, and cannot be combined with the fetch by `--cid`, with a
