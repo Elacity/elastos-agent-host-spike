@@ -980,6 +980,7 @@ pub(crate) mod tests {
     }
 
     impl CapturingLocalhostProvider {
+        #[cfg(unix)]
         pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
             self.requests.lock().unwrap().clone()
         }
@@ -1025,6 +1026,7 @@ pub(crate) mod tests {
     /// When `watch` is set, each call also records the ceilings the Runtime
     /// map holds at that moment.
     #[derive(Default)]
+    #[cfg(unix)]
     struct CapturingModelProvider {
         requests: std::sync::Mutex<Vec<serde_json::Value>>,
         ceilings_at_call: std::sync::Mutex<Vec<Vec<(String, u64)>>>,
@@ -1033,6 +1035,7 @@ pub(crate) mod tests {
         reject_next_valid_create: std::sync::Mutex<bool>,
     }
 
+    #[cfg(unix)]
     impl CapturingModelProvider {
         fn requests(&self) -> Vec<serde_json::Value> {
             self.requests.lock().unwrap().clone()
@@ -1052,6 +1055,7 @@ pub(crate) mod tests {
     }
 
     #[async_trait::async_trait]
+    #[cfg(unix)]
     impl elastos_runtime::provider::Provider for CapturingModelProvider {
         async fn handle(
             &self,
@@ -1153,6 +1157,7 @@ pub(crate) mod tests {
 
     /// The probe's token plane: an unsaved store under a fresh key, or `store`
     /// under the fixed key a restarted plane is made with again.
+    #[cfg(unix)]
     fn probe_token_manager(
         store: Option<elastos_runtime::capability::CapabilityStore>,
         audit_log: Arc<AuditLog>,
@@ -1195,6 +1200,7 @@ pub(crate) mod tests {
     /// The resource of the requests a row seeds in an instance's session:
     /// one granted, one pending. A grant loop holds it, so the pending one
     /// stays pending until the instance's end.
+    #[cfg(unix)]
     const SEEDED_REQUEST_RESOURCE: &str = "elastos://content/publish";
     /// The package CID the install records; the launch compares the Runtime's own walk.
     const PROBE_REGISTRY_CID: &str = "bafkreia5probe";
@@ -1202,6 +1208,7 @@ pub(crate) mod tests {
     /// An Agent Host of the probe's world that asks the bridge for nothing and
     /// spins in `run`. The mid-compute stop row needs a guest in guest code,
     /// where only the epoch callback can end it.
+    #[cfg(unix)]
     const SPIN_COMPONENT: &str = r#"(component
       (import "elastos:bus/types@1.0.0" (instance $types
         (type $error (variant
@@ -1231,6 +1238,7 @@ pub(crate) mod tests {
     /// in guest code while the registry still says `starting`. Each turn asks
     /// the runtime for the memory's size, which makes its fuel last about a
     /// second: left alone, the start ends on its own fuel, `failed`.
+    #[cfg(unix)]
     const SPIN_START_COMPONENT: &str = r#"(component
       (import "elastos:bus/types@1.0.0" (instance $types
         (type $error (variant
@@ -1293,6 +1301,7 @@ pub(crate) mod tests {
         /// whose tokens are signed with a fixed key, so
         /// [`Self::restarted_tokens`] is this Home's token plane after a
         /// restart.
+        #[cfg(unix)]
         pub(crate) async fn with_saved_revokes(names: &[&str]) -> Self {
             use crate::api::handlers::settle;
             let temp = tempfile::tempdir().unwrap();
@@ -1303,12 +1312,14 @@ pub(crate) mod tests {
             probe
         }
 
+        #[cfg(unix)]
         pub(crate) fn tokens_dir(&self) -> std::path::PathBuf {
             self.tokens.clone().expect("a probe with saved revokes")
         }
 
         /// A new token plane over this Home's capability store, opened as
         /// its start opens it, and the same key.
+        #[cfg(unix)]
         pub(crate) async fn restarted_tokens(
             &self,
         ) -> elastos_runtime::capability::CapabilityManager {
@@ -1320,6 +1331,7 @@ pub(crate) mod tests {
 
         /// A new token plane over the saved store alone, without the pending
         /// revocation list, and the same key.
+        #[cfg(unix)]
         pub(crate) async fn saved_store_tokens(
             &self,
         ) -> elastos_runtime::capability::CapabilityManager {
@@ -1509,6 +1521,7 @@ pub(crate) mod tests {
         /// written, and returns the folder and the CID the Runtime's walk
         /// gives it. The extra claims name another agent's root; admission
         /// still binds the agent the request names.
+        #[cfg(unix)]
         fn host_with_claims(&self, name: &str, claims: &[String]) -> (std::path::PathBuf, String) {
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
 
@@ -1536,6 +1549,7 @@ pub(crate) mod tests {
 
         /// A signed copy of the probe whose manifest asks for `tokens` model
         /// tokens (`None` asks for none) and may call the model.
+        #[cfg(unix)]
         fn model_host(&self, name: &str, tokens: Option<u64>) -> (std::path::PathBuf, String) {
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
             let key = SigningKey::from_bytes(&[0x44; 32]);
@@ -1563,6 +1577,7 @@ pub(crate) mod tests {
 
         /// Creates one more agent of this Home's owner, bound to `host_dir`
         /// and to `host_cid` as its stored Agent Host.
+        #[cfg(unix)]
         fn create_agent_for_host(&self, name: &str, host_cid: &str) -> String {
             use crate::agents;
             let record = crate::auth::stored_principal_record(&self.data_dir, &self.owner)
@@ -1603,11 +1618,13 @@ pub(crate) mod tests {
         /// name (the launch grant names it) and the agent kind; only the
         /// entrypoint and its bytes differ. Returns the folder and the CID the
         /// Runtime's walk gives it.
+        #[cfg(unix)]
         fn spin_host(&self) -> (std::path::PathBuf, String) {
             self.host_of("a5-spin-host", SPIN_COMPONENT)
         }
 
         /// [`Self::spin_host`] for the guest `wat`, in the folder `name`.
+        #[cfg(unix)]
         fn host_of(&self, name: &str, wat: &str) -> (std::path::PathBuf, String) {
             use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
 
@@ -1687,6 +1704,7 @@ pub(crate) mod tests {
         }
 
         /// Wait for the watcher's state change after the guest's first call.
+        #[cfg(unix)]
         pub(crate) async fn wait_running(&self, id: &str) -> crate::runtime::RunningCapsuleInfo {
             tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 loop {
@@ -1728,6 +1746,7 @@ pub(crate) mod tests {
         }
 
         /// The list route's own answer for this Home's Runtime.
+        #[cfg(unix)]
         pub(crate) async fn listed(&self) -> Vec<serde_json::Value> {
             let Json(list) = list_capsules(Extension(self.runtime.clone())).await;
             serde_json::to_value(&list).unwrap()["capsules"]
@@ -1738,6 +1757,7 @@ pub(crate) mod tests {
 
         /// The shell's capability state over this Home's stores: the views
         /// below read the same store and manager the bridge does.
+        #[cfg(unix)]
         fn capability_state(&self) -> crate::api::handlers::CapabilityState {
             use crate::api::handlers::CapabilityState;
             use elastos_runtime::capability::evaluator::ShellPassthroughVerifier;
@@ -1755,6 +1775,7 @@ pub(crate) mod tests {
 
         /// `GET /api/capability/list?scope=all_sessions_live` as the shell: the
         /// live grants of every session.
+        #[cfg(unix)]
         pub(crate) async fn live_view(&self) -> Vec<serde_json::Value> {
             use crate::api::handlers::capability::list_capabilities;
             use axum::extract::{Query, State};
@@ -1774,6 +1795,7 @@ pub(crate) mod tests {
 
         /// `GET /api/capability/pending` as the shell: every request still
         /// waiting for an answer.
+        #[cfg(unix)]
         pub(crate) async fn pending_view(&self) -> Vec<serde_json::Value> {
             use crate::api::handlers::capability::list_pending;
             use axum::extract::State;
@@ -1789,6 +1811,7 @@ pub(crate) mod tests {
 
         /// `GET /api/capability/requests?session=` as the shell: every record
         /// the store still holds for one session, with its settler.
+        #[cfg(unix)]
         pub(crate) async fn request_view(&self, session: &str) -> Vec<serde_json::Value> {
             use crate::api::handlers::capability::{session_requests, SessionRequestsQuery};
             use axum::extract::{Query, State};
@@ -1811,6 +1834,7 @@ pub(crate) mod tests {
         /// a bridge leaves them: the ask it already spent, and the one it is
         /// still waiting on. Both name [`SEEDED_REQUEST_RESOURCE`], which a
         /// grant loop holds so the pending one stays pending.
+        #[cfg(unix)]
         async fn seed_session_requests(&self, session: &str) -> (String, String) {
             use elastos_runtime::capability::pending::GrantDuration;
             use elastos_runtime::capability::{Action, ResourceId, TokenConstraints};
@@ -1879,6 +1903,7 @@ pub(crate) mod tests {
 
         /// Every bridge call the persisted audit holds under `agent_id`, in
         /// order: the session it ran in, its outcome, and what it asked for.
+        #[cfg(unix)]
         fn invoked(&self, agent_id: &str) -> Vec<(Option<String>, String, String)> {
             crate::auth::load_auth_state(&self.data_dir)
                 .unwrap()
@@ -1898,6 +1923,7 @@ pub(crate) mod tests {
 
         /// Every raw request the bridge routed to the capturing localhost
         /// double, in order.
+        #[cfg(unix)]
         pub(crate) fn requests(&self) -> Vec<serde_json::Value> {
             self.provider.requests()
         }
@@ -1905,6 +1931,7 @@ pub(crate) mod tests {
         /// Every `CapabilityRequested` event's resource, in order. A request
         /// the bridge refuses before creating a record never appears here, so
         /// a refused spelling's absence is evidence it reached no store.
+        #[cfg(unix)]
         pub(crate) fn capability_requested(&self) -> Vec<String> {
             self.audit_log
                 .recent_events(usize::MAX)
@@ -1920,6 +1947,7 @@ pub(crate) mod tests {
         }
 
         /// Writes the plan the guest reads under its own root and issues.
+        #[cfg(unix)]
         pub(crate) fn plan(&self, agent_id: &str, lines: &[String]) {
             let root = self.root(agent_id);
             let uri = format!("{root}/memory/plan");
@@ -1937,6 +1965,7 @@ pub(crate) mod tests {
         }
 
         /// The result line the guest wrote for each plan entry, in order.
+        #[cfg(unix)]
         pub(crate) fn results(&self, agent_id: &str) -> Vec<String> {
             let root = self.root(agent_id);
             let uri = format!("{root}/memory/results");
@@ -1965,6 +1994,7 @@ pub(crate) mod tests {
     /// about the whole tree. A root that does not exist yet is an empty tree
     /// (callers snapshot a root before anything is written there); every
     /// error inside an existing tree still fails.
+    #[cfg(unix)]
     pub(crate) fn tree_hashes(dir: &std::path::Path) -> Vec<(String, String)> {
         use sha2::{Digest, Sha256};
         match std::fs::symlink_metadata(dir) {
@@ -2008,6 +2038,7 @@ pub(crate) mod tests {
 
     /// What the code at the base commit answers one planned bridge call.
     #[derive(Clone, Copy, PartialEq, Eq)]
+    #[cfg(unix)]
     enum PlanExpect {
         /// `principal_context_required` with the UsersAI scope sentence.
         Scope,
@@ -2031,6 +2062,7 @@ pub(crate) mod tests {
     }
 
     /// The outcome column of the guest's result line for plan entry `index`.
+    #[cfg(unix)]
     fn plan_outcome(results: &[String], index: usize) -> String {
         results
             .get(index)
@@ -2072,6 +2104,7 @@ pub(crate) mod tests {
     /// would, and keeps doing it until the test stops the task. A request for
     /// a resource in `held` is left pending. Every grant the store accepts is
     /// pushed to `made`, so a row can check a token it made afterwards.
+    #[cfg(unix)]
     pub(crate) fn grant_requests_of(
         store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         manager: Arc<elastos_runtime::capability::CapabilityManager>,
@@ -2503,6 +2536,7 @@ pub(crate) mod tests {
 
     /// An admin passkey owner on `data_dir`, with storage protection and a
     /// System launch token the create route accepts.
+    #[cfg(unix)]
     fn route_owner(
         data_dir: &std::path::Path,
     ) -> (String, String, gateway::HomeLaunchTokenContext) {
@@ -2570,6 +2604,7 @@ pub(crate) mod tests {
         (principal.principal_id, token, context)
     }
 
+    #[cfg(unix)]
     async fn post_system(
         app: &axum::Router,
         path: &str,
@@ -2598,6 +2633,7 @@ pub(crate) mod tests {
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
+    #[cfg(unix)]
     async fn launch_installed(
         home: Arc<ProbeLaunch>,
         dir: std::path::PathBuf,
@@ -3355,6 +3391,7 @@ pub(crate) mod tests {
     /// Writes the pointer `agent`'s guest reads under its own root: it names
     /// `peer`'s notes, which the bridge refuses at the principal scope, so
     /// the guest traps with that refusal. Returns the peer's file.
+    #[cfg(unix)]
     fn point_at_peer(home: &ProbeLaunch, agent: &str, peer: &str) -> String {
         let (root, peer_root) = (home.root(agent), home.root(peer));
         let peer_file = format!("{peer_root}/memory/notes.md");
@@ -3375,6 +3412,7 @@ pub(crate) mod tests {
     }
 
     /// Every `capsule_stop` the Home audited for instance `id`, in order.
+    #[cfg(unix)]
     fn stops_of(
         home: &ProbeLaunch,
         id: &str,
@@ -3393,6 +3431,7 @@ pub(crate) mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     const SCOPE_REFUSAL: &str =
         "localhost://UsersAI roots must use UsersAI/self or the active principal root";
 
@@ -3595,6 +3634,7 @@ pub(crate) mod tests {
     }
 
     /// The stop route as the API exposes it: `None` is the bodyless request.
+    #[cfg(unix)]
     pub(crate) async fn stop_route(
         home: &ProbeLaunch,
         id: &str,
@@ -3607,6 +3647,7 @@ pub(crate) mod tests {
     }
 
     /// The stop route with these exact body bytes.
+    #[cfg(unix)]
     async fn stop_route_with(home: &ProbeLaunch, id: &str, body: Vec<u8>) -> (StatusCode, String) {
         let response = stop_capsule(
             Extension(home.runtime.clone()),
@@ -3618,6 +3659,7 @@ pub(crate) mod tests {
     }
 
     /// A response's status and body text.
+    #[cfg(unix)]
     async fn answer_of(response: axum::response::Response) -> (StatusCode, String) {
         use axum::body::to_bytes;
         let status = response.status();
@@ -3627,6 +3669,7 @@ pub(crate) mod tests {
 
     /// The stop route's answer for an activation that has ended: its status
     /// and cause, as the list names them.
+    #[cfg(unix)]
     fn stop_answer(body: &str) -> (String, Option<String>) {
         let answer: serde_json::Value = serde_json::from_str(body).expect("a JSON answer");
         (
@@ -4181,6 +4224,7 @@ pub(crate) mod tests {
     /// compute provider's activation entry and the principal it runs for. The
     /// principal is read here as well as after the end, so the after-row is not
     /// green because the start never bound one.
+    #[cfg(unix)]
     async fn assert_context_filled(home: &ProbeLaunch, instance: &str, principal: &str) {
         let mut left = home.runtime.context_left_for_test(instance).await;
         left.sort_unstable();
@@ -4215,6 +4259,7 @@ pub(crate) mod tests {
     /// record of its session is denied by the Runtime; the provider holds no
     /// entry for it; and its entry leaves the list once its 60 s have passed,
     /// read at an instant rather than waited for.
+    #[cfg(unix)]
     async fn assert_nothing_remains(
         home: &ProbeLaunch,
         instance: &str,
@@ -5438,12 +5483,14 @@ pub(crate) mod tests {
 
     /// The sentence the bridge uses when a rooted URI names anything but the
     /// caller's own stored root, on both the request and the invoke path.
+    #[cfg(unix)]
     const A9R_SCOPE: &str =
         "localhost://UsersAI roots must use UsersAI/self or the active principal root";
 
     /// The three files A keeps under its own `UsersAI` root in the A9-R rows:
     /// the agent's format-2 journal, its `memory/notes.md`, and one ordinary
     /// file that is neither journal nor memory.
+    #[cfg(unix)]
     fn a9r_own_uris(root: &str) -> (String, String, String) {
         (
             format!("{root}/.AppData/Agents/agent-host/tasks/t1/journal"),
@@ -5454,6 +5501,7 @@ pub(crate) mod tests {
 
     /// Writes A's three files the way production writes a principal-root
     /// object, so each has real bytes before either agent launches.
+    #[cfg(unix)]
     fn a9r_place_own(home: &ProbeLaunch, agent: &str, root: &str, own: &(String, String, String)) {
         let mut journal = b"EAHJ".to_vec();
         journal.extend_from_slice(&2u16.to_le_bytes());
@@ -5482,6 +5530,7 @@ pub(crate) mod tests {
     /// A9-R's fixture: one Home, two stored agents of its owner, each with its
     /// own `UsersAI` root, and the three files A keeps under its own root
     /// before either agent launches.
+    #[cfg(unix)]
     struct A9rRow {
         home: ProbeLaunch,
         a: String,
@@ -5491,6 +5540,7 @@ pub(crate) mod tests {
         own: (String, String, String),
     }
 
+    #[cfg(unix)]
     impl A9rRow {
         async fn new() -> Self {
             let home = ProbeLaunch::new(&["a"]).await;
@@ -5520,6 +5570,7 @@ pub(crate) mod tests {
 
     /// Grants B's requests under either agent root as the shell would. A's
     /// first request stays pending so A remains live throughout B's launch.
+    #[cfg(unix)]
     fn grant_requests_under(
         store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         manager: Arc<elastos_runtime::capability::CapabilityManager>,
@@ -5578,6 +5629,7 @@ pub(crate) mod tests {
     /// B asks for `target` by the request path and the invoke path, for A's
     /// root as a listing, and once for its own alias as the control that the
     /// alias resolves to B's own root.
+    #[cfg(unix)]
     async fn two_resident_agents_hold_a_while_b_is_refused(
         home: &ProbeLaunch,
         a: &str,
@@ -5732,6 +5784,7 @@ pub(crate) mod tests {
     /// stored bytes are A's, nothing named A's root became a pending record,
     /// the provider was never called, and the two agents ran in two different
     /// sessions.
+    #[cfg(unix)]
     async fn assert_a9r_denial(
         row: &A9rRow,
         a_end: &crate::runtime::RunningCapsuleInfo,
@@ -6784,6 +6837,7 @@ pub(crate) mod tests {
         grants.abort();
     }
 
+    #[cfg(unix)]
     async fn admitted_model_agent(
         tokens: Option<u64>,
     ) -> (
@@ -6811,6 +6865,7 @@ pub(crate) mod tests {
         (home, dir, agent, model)
     }
 
+    #[cfg(unix)]
     async fn ask_model(
         home: &ProbeLaunch,
         dir: &std::path::Path,
@@ -6837,6 +6892,7 @@ pub(crate) mod tests {
         home.results(agent).join("\n")
     }
 
+    #[cfg(unix)]
     fn model_create_line(home: &ProbeLaunch, agent: &str, request_id: &str, extra: &str) -> String {
         model_create_line_for(
             home,
@@ -6848,6 +6904,7 @@ pub(crate) mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn model_create_line_for(
         home: &ProbeLaunch,
         agent: &str,
@@ -6882,6 +6939,7 @@ pub(crate) mod tests {
         format!("send\t{resource}\t{resource}\truns_create\texecute\t{body_uri}")
     }
 
+    #[cfg(unix)]
     async fn run_model_plan(
         home: &ProbeLaunch,
         dir: &std::path::Path,
@@ -6900,6 +6958,7 @@ pub(crate) mod tests {
         run_model_lines(home, dir, agent, &lines).await
     }
 
+    #[cfg(unix)]
     async fn run_model_lines(
         home: &ProbeLaunch,
         dir: &std::path::Path,
@@ -6917,6 +6976,7 @@ pub(crate) mod tests {
         home.results(agent).join("\n")
     }
 
+    #[cfg(unix)]
     fn create_calls(model: &CapturingModelProvider) -> Vec<serde_json::Value> {
         model
             .requests()
@@ -8174,6 +8234,7 @@ pub async fn kept_launch_page_file(
 #[cfg(test)]
 pub(crate) mod kept_launch_test_tokens {
     /// The person's own Home token.
+    #[cfg(unix)]
     pub(crate) fn home(data_dir: &std::path::Path) -> String {
         let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
         super::super::gateway::issue_home_launch_token_with_context(data_dir, "home", &context)
@@ -8193,6 +8254,7 @@ pub(crate) mod kept_launch_test_tokens {
     }
 
     /// A page's token bound to `resource`, with `page` as its executable.
+    #[cfg(unix)]
     pub(crate) fn page(data_dir: &std::path::Path, resource: &str, page: &str) -> String {
         let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
         super::super::gateway::issue_home_projection_launch_token_with_context(
@@ -8202,6 +8264,7 @@ pub(crate) mod kept_launch_test_tokens {
     }
 
     /// The person these tokens are for.
+    #[cfg(unix)]
     pub(crate) fn person(data_dir: &std::path::Path) -> String {
         let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
         context.principal_id().to_string()

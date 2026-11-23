@@ -119,7 +119,9 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
+    #[cfg(unix)]
     use axum::http::{HeaderMap, HeaderValue};
+    #[cfg(unix)]
     use base64::Engine as _;
     use elastos_runtime::provider::{
         Provider, ProviderCarrierInvoker, ProviderCarrierRoute, ProviderError, ResourceRequest,
@@ -132,6 +134,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::*;
+    #[cfg(unix)]
     use crate::api::gateway::gateway_home_token::{
         bind_device_session_grant, issue_home_launch_token_with_context,
         require_runtime_wallet_authority,

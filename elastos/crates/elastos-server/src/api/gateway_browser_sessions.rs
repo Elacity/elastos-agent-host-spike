@@ -57,6 +57,7 @@ static BROWSER_SESSION_REGISTRY: OnceLock<tokio::sync::Mutex<BrowserSessionRegis
     OnceLock::new();
 static BROWSER_OPEN_JOB_REGISTRY: OnceLock<tokio::sync::Mutex<BrowserOpenJobRegistry>> =
     OnceLock::new();
+#[cfg(unix)]
 static BROWSER_DURABLE_TEMP_SERIAL: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static BROWSER_DURABLE_DELETE_FAILURES: OnceLock<std::sync::Mutex<BTreeSet<PathBuf>>> =
@@ -1472,6 +1473,7 @@ pub(in crate::api::gateway) async fn forget_browser_launch_reconciliation_obliga
     Ok(())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) async fn browser_launch_reconciliation_obligation_count(
     data_dir: &Path,
@@ -1898,6 +1900,7 @@ pub(in crate::api::gateway) async fn browser_engine_cleanup_obligation_count(
         .count()
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) async fn browser_page_session_count(data_dir: &Path) -> usize {
     let scope = browser_session_scope(data_dir);
@@ -2652,6 +2655,7 @@ pub(in crate::api::gateway) async fn release_browser_stream_cleanup_claim(
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) async fn browser_stream_cleanup_obligation_count(
     data_dir: &Path,
@@ -3290,6 +3294,7 @@ pub(super) fn remove_browser_durable_file(data_dir: &Path, path: PathBuf) -> Res
     })
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) fn set_browser_durable_delete_failure(path: &Path, fail: bool) {
     let failures = BROWSER_DURABLE_DELETE_FAILURES.get_or_init(Default::default);
@@ -3301,6 +3306,7 @@ pub(in crate::api::gateway) fn set_browser_durable_delete_failure(path: &Path, f
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) fn set_browser_engine_cleanup_delete_failure(
     data_dir: &Path,
@@ -3310,6 +3316,7 @@ pub(in crate::api::gateway) fn set_browser_engine_cleanup_delete_failure(
     set_browser_durable_delete_failure(&browser_ownership_path(data_dir, cleanup_id), fail);
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) async fn clear_browser_lifecycle_memory_for_restart(data_dir: &Path) {
     let scope = browser_session_scope(data_dir);
@@ -4231,6 +4238,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn test_lifecycle(owner_launch_id: &str) -> BrowserLaunchLifecycle {
         BrowserLaunchLifecycle {
             owner_launch_id: owner_launch_id.to_string(),
@@ -4487,6 +4495,7 @@ mod tests {
         assert!(!selection.is_valid());
     }
 
+    #[cfg(unix)]
     fn test_durable_launch_effect(
         reservation: &BrowserLaunchReservation,
         page_id: &str,
@@ -4516,6 +4525,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn write_viewer_turn_test_config(root: &Path) {
         let config_dir = root.join("config");
         std::fs::create_dir_all(&config_dir).unwrap();

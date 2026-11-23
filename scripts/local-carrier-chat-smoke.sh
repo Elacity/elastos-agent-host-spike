@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 # Disposable test Homes never join the Community network a release pins (setup and update skip it).
 export ELASTOS_COLLABORATION_STARTUP_MODE=isolated
 
@@ -236,6 +237,12 @@ start_runtime() {
     mkdir -p "${DATA_DIR[$name]}/bin"
     cp "${HOST_DATA_DIR}/components.json" "${DATA_DIR[$name]}/components.json"
     cp -a "${HOST_DATA_DIR}/bin/." "${DATA_DIR[$name]}/bin/"
+    python3 "${ROOT}/scripts/holder-canary-fixture.py" restrict-components \
+        "${DATA_DIR[$name]}" "${HOST_DATA_DIR}/components.json" localhost-provider did-provider
+    rm -f "${DATA_DIR[$name]}/bin/elastos"
+    install -m 700 "${ELASTOS_BIN}" "${DATA_DIR[$name]}/bin/elastos"
+    python3 "${ROOT}/scripts/holder-canary-fixture.py" sign-install \
+        "${HOME_DIR[$name]}" "${DATA_DIR[$name]}" "${DATA_DIR[$name]}/bin/elastos"
 
     # The runtime's shell grants only what this policy file allows.
     printf '{"allow":["elastos://peer/*"]}\n' >"${HOME_DIR[$name]}/policy.json"
@@ -244,7 +251,7 @@ start_runtime() {
     XDG_DATA_HOME="${XDG_DIR[$name]}" \
     ELASTOS_DATA_DIR="${DATA_DIR[$name]}" \
     ELASTOS_POLICY_FILE="${HOME_DIR[$name]}/policy.json" \
-    "${ELASTOS_BIN}" serve --addr "127.0.0.1:${port}" >"${LOG_PATH[$name]}" 2>&1 &
+    "${DATA_DIR[$name]}/bin/elastos" serve --addr "127.0.0.1:${port}" >"${LOG_PATH[$name]}" 2>&1 &
     PID["$name"]=$!
 
     wait_for_file "${COORDS_PATH[$name]}" || {

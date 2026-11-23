@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+#[cfg(unix)]
+use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

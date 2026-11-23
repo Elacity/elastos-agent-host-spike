@@ -92,6 +92,7 @@ mod gateway_home_update;
 mod gateway_home_wallet_connector;
 #[path = "gateway_inbox.rs"]
 mod gateway_inbox;
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) use gateway_inbox::inbox_request_entries_for_test;
 #[path = "gateway_inspect_actions.rs"]
@@ -127,6 +128,7 @@ mod gateway_wallet;
 #[path = "gateway_wallet_adapter.rs"]
 mod gateway_wallet_adapter;
 use gateway_agents::*;
+#[cfg(unix)]
 #[cfg(test)]
 use gateway_browser::browser_runtime_stream_socket_path;
 use gateway_capsule_catalog::*;
@@ -158,7 +160,7 @@ pub(in crate::api) use gateway_home_system::profile_readiness_for_principal;
 use gateway_home_system::*;
 pub(crate) use gateway_home_system::{
     authorize_home_engine_preparation_cancellation, authorize_home_service_engine,
-    authorize_home_service_exit, carrier_source_is_contact_of, sync_runtime_services_mailboxes,
+    authorize_home_service_exit, carrier_sender_did_is_contact_of, sync_runtime_services_mailboxes,
 };
 use gateway_home_terminal::*;
 #[cfg(test)]
@@ -174,6 +176,7 @@ pub(super) use gateway_home_token::issue_home_agent_launch_token_at_for_test;
 pub(super) use gateway_home_token::issue_home_agent_launch_token_with_context;
 #[cfg(test)]
 pub(super) use gateway_home_token::issue_home_launch_token_with_context;
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) use gateway_home_token::launch_principal_root;
 pub(super) use gateway_home_token::HomeLaunchTokenContext;
@@ -208,10 +211,13 @@ use gateway_home_cli_mint::{
     home_cli_mint_approve, home_cli_mint_begin, home_cli_mint_cancel, home_cli_mint_claim,
     home_cli_mint_request, home_cli_mint_waiting,
 };
+#[cfg(unix)]
+#[cfg(test)]
+pub(in crate::api) use gateway_home_token::issue_expired_home_launch_token_with_context;
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
-    issue_expired_home_launch_token_with_context, issue_home_launch_token,
-    local_home_launch_token_context, set_test_home_launch_auth_data_dir, uuid_like_token,
+    issue_home_launch_token, local_home_launch_token_context, set_test_home_launch_auth_data_dir,
+    uuid_like_token,
 };
 use gateway_home_wallet_connector::*;
 use gateway_inbox::*;
@@ -227,6 +233,7 @@ pub(super) use gateway_passkey_step_up::{
     consume_or_recover_passkey_step_up_effect, consume_passkey_step_up_token,
     require_hosted_step_up_launch,
 };
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) use gateway_provider_proxy::runtime_custody_publish_creator_tail_for_test;
 use gateway_provider_proxy::*;

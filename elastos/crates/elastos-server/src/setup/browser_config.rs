@@ -5,7 +5,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
 const GENERATOR: &str = include_str!("../../../../../scripts/browser-source-home-config.mjs");
+#[cfg(unix)]
 const CONFIG_FILES: [&str; 4] = [
     "exit-provider.json",
     "browser-local-exit.json",
@@ -247,6 +249,7 @@ pub(crate) fn linux_host_setup_message_with_kvm(
         .then_some(super::browser_linux::SETUP_MESSAGE)
 }
 
+#[cfg(unix)]
 pub(super) fn require_linux_host(data: &Path) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     require_kvm(Path::new("/dev/kvm"))?;
@@ -675,6 +678,7 @@ pub(super) fn configure(data: &Path, platform: &str, release_image: bool) -> any
     )
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn generate(
     data: &Path,

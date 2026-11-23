@@ -179,6 +179,7 @@ async fn peer_get_ticket(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
     use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
     use std::sync::Mutex;

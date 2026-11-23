@@ -1,6 +1,7 @@
 //! Windows provider bridge boundary. Windows has no confined provider launcher.
 //! Keep protocol types available to callers and refuse every provider start.
 
+use super::checked_executable::CheckedExecutable;
 use super::registry::{Provider, ProviderError, ResourceRequest, ResourceResponse};
 use elastos_common::ProviderAuthority;
 use std::path::Path;
@@ -8,6 +9,16 @@ use std::sync::Arc;
 
 const WINDOWS_PROVIDER_REFUSAL: &str =
     "provider start is refused: no confined provider launcher on Windows";
+
+fn refuse_checked(binary_path: &CheckedExecutable) -> BridgeError {
+    match binary_path.verify_at_spawn() {
+        Err(reason) => BridgeError::Refused(reason),
+        Ok(prepared) => {
+            let _ = prepared.exec_path();
+            BridgeError::Refused(super::checked_executable::WINDOWS_CHECKED_PROVIDER.into())
+        }
+    }
+}
 
 /// Keep registry request deadlines available when the Windows bridge refuses a start.
 pub(super) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -29,25 +40,28 @@ impl Confined {
 pub struct ProviderBridge;
 
 impl ProviderBridge {
-    pub async fn spawn(_binary_path: &Path, _config: ProviderConfig) -> Result<Self, BridgeError> {
-        Err(BridgeError::Refused(WINDOWS_PROVIDER_REFUSAL.into()))
+    pub async fn spawn(
+        binary_path: &CheckedExecutable,
+        _config: ProviderConfig,
+    ) -> Result<Self, BridgeError> {
+        Err(refuse_checked(binary_path))
     }
 
     pub async fn spawn_with_owned_helpers(
-        _binary_path: &Path,
+        binary_path: &CheckedExecutable,
         _config: ProviderConfig,
     ) -> Result<Self, BridgeError> {
-        Err(BridgeError::Refused(WINDOWS_PROVIDER_REFUSAL.into()))
+        Err(refuse_checked(binary_path))
     }
 
     pub async fn spawn_confined(
         _component_key: &str,
         _authority: &ProviderAuthority,
-        _binary_path: &Path,
+        binary_path: &CheckedExecutable,
         _storage_root: &Path,
         _config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
-        Err(BridgeError::Refused(WINDOWS_PROVIDER_REFUSAL.into()))
+        Err(refuse_checked(binary_path))
     }
 
     /// A test transport still has no provider execution path on Windows.
@@ -129,11 +143,19 @@ mod tests {
 
     #[tokio::test]
     async fn windows_provider_start_refuses_before_spawn() {
-        let error =
-            ProviderBridge::spawn(Path::new("missing-provider.exe"), ProviderConfig::default())
-                .await
-                .err()
-                .expect("Windows must refuse provider start");
-        assert!(matches!(error, BridgeError::Refused(_)));
+        let checked = CheckedExecutable::pinned(
+            Path::new("missing-provider.exe"),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect("pin");
+        let error = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .err()
+            .expect("Windows must refuse provider start");
+        assert!(matches!(
+            error,
+            BridgeError::Refused(reason)
+                if reason == super::super::checked_executable::WINDOWS_CHECKED_PROVIDER
+        ));
     }
 }

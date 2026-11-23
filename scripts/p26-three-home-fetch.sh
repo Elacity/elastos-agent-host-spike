@@ -211,6 +211,9 @@ manifest = {
 with open(f"{data_dir}/components.json", "w", encoding="utf-8") as handle:
     json.dump(manifest, handle, indent=2, sort_keys=True)
 PY
+    install -m 700 "${ELASTOS_BIN}" "${DATA_DIR[$name]}/bin/elastos"
+    python3 "${ROOT}/scripts/holder-canary-fixture.py" sign-install \
+        "${HOME_DIR[$name]}" "${DATA_DIR[$name]}" "${DATA_DIR[$name]}/bin/elastos"
     printf '{"allow":["elastos://peer/*","elastos://content/publish","elastos://content/ensure","elastos://content/fetch"]}\n' \
         >"${HOME_DIR[$name]}/policy.json"
 
@@ -220,7 +223,7 @@ PY
     XDG_DATA_HOME="${XDG_DIR[$name]}" \
     ELASTOS_DATA_DIR="${DATA_DIR[$name]}" \
     ELASTOS_POLICY_FILE="${HOME_DIR[$name]}/policy.json" \
-    "${ELASTOS_BIN}" serve --addr "${host}:${port}" >"${LOG_PATH[$name]}" 2>&1 &
+    "${DATA_DIR[$name]}/bin/elastos" serve --addr "${host}:${port}" >"${LOG_PATH[$name]}" 2>&1 &
     PID["$name"]=$!
 
     wait_for_file "${COORDS_PATH[$name]}" || fail "runtime-coords.json missing for ${name}"

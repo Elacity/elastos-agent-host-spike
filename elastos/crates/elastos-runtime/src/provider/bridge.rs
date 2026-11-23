@@ -6,6 +6,8 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::collections::BTreeMap;
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicBool;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -23,10 +25,30 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 
+use super::checked_executable::PreparedExecutable;
 use super::registry::{
     EntryType, Provider, ProviderError, ResourceAction, ResourceEntry, ResourceRequest,
     ResourceResponse,
 };
+use super::CheckedExecutable;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_VERIFY_SWAP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn swap_after_verify() {
+    AFTER_VERIFY_SWAP.with(|slot| {
+        if let Some(swap) = slot.borrow_mut().take() {
+            swap();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn swap_after_verify() {}
 
 /// Timeout for provider requests (30 seconds)
 pub(super) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -228,6 +250,7 @@ fn model_file_policy(
         .map(Path::to_path_buf)
         .collect::<std::collections::BTreeSet<_>>();
     files.insert(binary_path.to_path_buf());
+    metadata_paths.extend(binary_path.ancestors().map(Path::to_path_buf));
     for offer in config.extra["offers"]
         .as_array()
         .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?
@@ -413,10 +436,15 @@ struct ProviderIo {
 /// them one at a time).
 pub struct ProviderBridge {
     io: Arc<Mutex<ProviderIo>>,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     /// A forked provider whose pid this process owns. At most one of `child`
     /// and `fork` is set. The blocking `waitpid` task is the only reaper.
     fork: Mutex<Option<ForkChild>>,
+    /// The private verified copy the provider was started from. The bridge's
+    /// exit watcher takes it as soon as the child is reaped, even if a Runtime
+    /// registry still holds the bridge.
+    #[cfg(target_os = "macos")]
+    executable_copy: Arc<Mutex<Option<PreparedExecutable>>>,
     #[cfg(unix)]
     helper_owner: Mutex<Option<elastos_common::process_lifetime::ParentLifetime>>,
     /// True once a shutdown attempt has completed (child reaped, or the
@@ -477,6 +505,10 @@ struct ForkChild {
     /// True once the status was received; the waitpid task has reaped the pid,
     /// so `Drop` must not signal it again.
     reaped: bool,
+    /// Set by the waitpid task once it has reaped this child. The confined
+    /// macOS copy watcher reads it while the bridge is still held.
+    #[cfg(target_os = "macos")]
+    exited: Arc<AtomicBool>,
 }
 
 #[cfg(target_os = "linux")]
@@ -860,12 +892,20 @@ impl ForkChild {
             Err(_) => return Err(refuse_child_without_process_handle(pid)),
         };
         let (sender, status) = oneshot::channel();
+        #[cfg(target_os = "macos")]
+        let exited = Arc::new(AtomicBool::new(false));
+        #[cfg(target_os = "macos")]
+        let exited_flag = Arc::clone(&exited);
         tokio::task::spawn_blocking(move || {
             pause_before_reap(pid);
             let mut word = 0;
             loop {
                 let waited = unsafe { libc::waitpid(pid, &mut word, 0) };
                 if waited == pid {
+                    // The child has exited and this task has reaped it. The
+                    // macOS copy watcher observes this before shutdown runs.
+                    #[cfg(target_os = "macos")]
+                    exited_flag.store(true, Ordering::Release);
                     break;
                 }
                 if waited < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
@@ -881,6 +921,8 @@ impl ForkChild {
             pidfd,
             status,
             reaped: false,
+            #[cfg(target_os = "macos")]
+            exited,
         })
     }
 
@@ -1632,7 +1674,10 @@ impl ProviderBridge {
     ///
     /// Starts the binary, sends Init with the given config, and waits
     /// for the init response.
-    pub async fn spawn(binary_path: &Path, config: ProviderConfig) -> Result<Self, BridgeError> {
+    pub async fn spawn(
+        binary_path: &CheckedExecutable,
+        config: ProviderConfig,
+    ) -> Result<Self, BridgeError> {
         Self::spawn_with_timeouts(binary_path, config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT).await
     }
 
@@ -1650,7 +1695,7 @@ impl ProviderBridge {
     pub async fn spawn_confined(
         component_key: &str,
         authority: &ProviderAuthority,
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         storage_root: &Path,
         config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
@@ -1689,6 +1734,17 @@ impl ProviderBridge {
         drop(stdin_read);
         drop(stdout_write);
 
+        #[cfg(target_os = "macos")]
+        let executable_copy = {
+            #[cfg(not(elastos_unsupported_os_check))]
+            {
+                Some(launched.prepared)
+            }
+            #[cfg(elastos_unsupported_os_check)]
+            {
+                None
+            }
+        };
         let fork = ForkChild::start(launched.pid)?;
         let mut to_child = std::fs::File::from(launched.to_child);
         if let Some(line) = launched_pid_line(launched.pid) {
@@ -1706,8 +1762,10 @@ impl ProviderBridge {
                     from_child,
                 ))),
             })),
-            child: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
             fork: Mutex::new(Some(fork)),
+            #[cfg(target_os = "macos")]
+            executable_copy: Arc::new(Mutex::new(executable_copy)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -1723,6 +1781,8 @@ impl ProviderBridge {
             #[cfg(target_os = "macos")]
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         };
+        #[cfg(target_os = "macos")]
+        bridge.watch_confined_executable_copy();
         let mut start = ConfinedStart {
             bridge: Some(bridge),
             root: created_root,
@@ -1747,7 +1807,7 @@ impl ProviderBridge {
     /// Admit only Runtime-selected private engine sockets for the native model provider.
     #[cfg(target_os = "macos")]
     pub async fn spawn_confined_model(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         config: ProviderConfig,
     ) -> Result<
         (
@@ -1766,7 +1826,7 @@ impl ProviderBridge {
     /// Runtime retains verification and offer authority through every Init.
     #[cfg(target_os = "macos")]
     pub async fn spawn_confined_model_with_engine_bundle(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         mut config: ProviderConfig,
         pinned_engine_bundle: Option<&Path>,
     ) -> Result<
@@ -1796,7 +1856,15 @@ impl ProviderBridge {
         // Seatbelt resolves /var to /private/var before comparing literal paths.
         let ipc_path = std::fs::canonicalize(ipc_dir.path()).map_err(BridgeError::Spawn)?;
         let journal = model_journal_for_sandbox(&config)?;
-        let mut policy = model_file_policy(binary_path, &config, &journal, pinned_engine_bundle)?;
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
+        let mut policy = model_file_policy(
+            prepared.exec_path(),
+            &config,
+            &journal,
+            pinned_engine_bundle,
+        )?;
         let local_ids = offers
             .iter()
             .filter(|offer| {
@@ -1882,8 +1950,9 @@ impl ProviderBridge {
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
         config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
         let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.arg("-p").arg(policy).arg(binary_path);
+        command.arg("-p").arg(policy).arg(prepared.exec_path());
         let mut bridge = Self::spawn_command(
+            prepared,
             command,
             config.clone(),
             INIT_TIMEOUT,
@@ -1921,7 +1990,7 @@ impl ProviderBridge {
     /// kernel socket filter inherited by its guard and llama.cpp descendants.
     #[cfg(target_os = "linux")]
     pub async fn spawn_confined_model_linux(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         mut config: ProviderConfig,
     ) -> Result<(Self, BTreeMap<String, String>, Vec<String>, ProviderConfig), BridgeError> {
         let offers = config
@@ -1987,9 +2056,13 @@ impl ProviderBridge {
             );
         }
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
-        let mut command = Command::new(binary_path);
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
+        let mut command = Command::new(prepared.exec_path());
         super::linux_model_seccomp::install_on_command(&mut command).map_err(BridgeError::Spawn)?;
         let mut bridge = Self::spawn_command(
+            prepared,
             command,
             config.clone(),
             INIT_TIMEOUT,
@@ -2317,13 +2390,18 @@ impl ProviderBridge {
     }
 
     async fn spawn_with_timeouts(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         config: ProviderConfig,
         init_timeout: std::time::Duration,
         shutdown_timeout: std::time::Duration,
     ) -> Result<Self, BridgeError> {
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
+        let command = Command::new(prepared.exec_path());
         Self::spawn_command(
-            Command::new(binary_path),
+            prepared,
+            command,
             config,
             init_timeout,
             shutdown_timeout,
@@ -2335,11 +2413,16 @@ impl ProviderBridge {
 
     /// Runtime owns helper lifetime even while the provider is busy launching.
     pub async fn spawn_with_owned_helpers(
-        binary_path: &Path,
+        binary_path: &CheckedExecutable,
         config: ProviderConfig,
     ) -> Result<Self, BridgeError> {
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
+        let command = Command::new(prepared.exec_path());
         Self::spawn_command(
-            Command::new(binary_path),
+            prepared,
+            command,
             config,
             INIT_TIMEOUT,
             SHUTDOWN_TIMEOUT,
@@ -2350,6 +2433,7 @@ impl ProviderBridge {
     }
 
     async fn spawn_command(
+        prepared: PreparedExecutable,
         mut command: Command,
         config: ProviderConfig,
         init_timeout: std::time::Duration,
@@ -2370,6 +2454,9 @@ impl ProviderBridge {
         };
         #[cfg(not(unix))]
         let _ = own_helpers;
+        #[cfg(target_os = "linux")]
+        prepared.configure_command(&mut command);
+        swap_after_verify();
         let mut child = command
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -2377,6 +2464,10 @@ impl ProviderBridge {
             .kill_on_drop(true)
             .spawn()
             .map_err(BridgeError::Spawn)?;
+        // Linux has exec'd the held descriptor; the child keeps its own copy
+        // when a script needs one. macOS keeps the private copy in the bridge.
+        #[cfg(not(target_os = "macos"))]
+        drop(prepared);
 
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
@@ -2404,8 +2495,10 @@ impl ProviderBridge {
                 writer: Box::new(stdin),
                 reader: Box::new(tokio::io::BufReader::new(stdout)),
             })),
-            child: Mutex::new(Some(child)),
+            child: Arc::new(Mutex::new(Some(child))),
             fork: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            executable_copy: Arc::new(Mutex::new(Some(prepared))),
             #[cfg(unix)]
             helper_owner: Mutex::new(helper_owner),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -2422,8 +2515,69 @@ impl ProviderBridge {
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         };
 
+        #[cfg(target_os = "macos")]
+        bridge.watch_executable_copy();
         bridge.init_provider(config, init_timeout).await?;
         Ok(bridge)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn watch_executable_copy(&self) {
+        let child = self.child.clone();
+        let copy = self.executable_copy.clone();
+        tokio::spawn(async move {
+            loop {
+                if copy.lock().await.is_none() {
+                    return;
+                }
+                let reaped = {
+                    let mut guard = child.lock().await;
+                    match guard.as_mut() {
+                        Some(process) => {
+                            // Dropping a bridge ends its provider. Hold the copy
+                            // until the child is reaped, even across that drop.
+                            if Arc::strong_count(&child) == 1 {
+                                let _ = process.start_kill();
+                            }
+                            matches!(process.try_wait(), Ok(Some(_)))
+                        }
+                        None => true,
+                    }
+                };
+                if reaped {
+                    copy.lock().await.take();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        });
+    }
+
+    /// Remove the confined provider's verified copy once its fork child has
+    /// been reaped, including when the bridge stays held after the exit.
+    #[cfg(target_os = "macos")]
+    fn watch_confined_executable_copy(&self) {
+        let Some(exited) = self
+            .fork
+            .try_lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|fork| Arc::clone(&fork.exited)))
+        else {
+            return;
+        };
+        let copy = Arc::clone(&self.executable_copy);
+        tokio::spawn(async move {
+            loop {
+                if copy.lock().await.is_none() {
+                    return;
+                }
+                if exited.load(Ordering::Acquire) {
+                    copy.lock().await.take();
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        });
     }
 
     /// The one Init implementation: send `Init`, bound by `init_timeout`, and
@@ -2485,8 +2639,10 @@ impl ProviderBridge {
                 writer: Box::new(writer),
                 reader: Box::new(reader),
             })),
-            child: Mutex::new(None),
+            child: Arc::new(Mutex::new(None)),
             fork: Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            executable_copy: Arc::new(Mutex::new(None)),
             #[cfg(unix)]
             helper_owner: Mutex::new(None),
             shutdown_completed: std::sync::atomic::AtomicBool::new(false),
@@ -2729,6 +2885,10 @@ impl ProviderBridge {
             drop(fork);
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             self.stop_local_brokers().await;
+            // The fork is reaped. The verified copy the confined start held
+            // goes here, including when the child was already found exited.
+            #[cfg(target_os = "macos")]
+            self.executable_copy.lock().await.take();
             return match (protocol_error, status_error) {
                 (Some(error), _) => Err(error),
                 (None, Some(error)) => Err(error),
@@ -2816,6 +2976,9 @@ impl ProviderBridge {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         if child_guard.is_none() {
             self.stop_local_brokers().await;
+            // The provider has exited and been reaped: its path may go.
+            #[cfg(target_os = "macos")]
+            self.executable_copy.lock().await.take();
         }
         result
     }
@@ -3754,7 +3917,7 @@ mod tests {
         let mut attempts = 0u32;
         loop {
             match ProviderBridge::spawn_with_timeouts(
-                binary,
+                &CheckedExecutable::for_test(binary),
                 config.clone(),
                 init_timeout,
                 shutdown_timeout,
@@ -3779,6 +3942,410 @@ mod tests {
                 result => return result,
             }
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn checked_provider_starts_and_refuses_changed_bytes_and_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let (binary, pid_file) = write_mock_provider_script(
+            temp.path(),
+            r#"{"status":"ok"}"#,
+            Some(r#"{"status":"ok"}"#),
+            0,
+        );
+        let checked = CheckedExecutable::for_test(&binary);
+        let bridge = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .unwrap();
+        assert!(pid_file.exists(), "the checked provider starts");
+        bridge.shutdown().await.unwrap();
+
+        let marker = temp.path().join("refused.marker");
+        let replacement = format!("#!/bin/sh\nprintf bad > '{}'\n", marker.display());
+        std::fs::write(&binary, &replacement).unwrap();
+        let error = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, BridgeError::Refused(reason) if reason == "provider executable differs from verified release checksum")
+        );
+        assert!(!marker.exists(), "changed bytes did not exec");
+
+        std::fs::remove_file(&binary).unwrap();
+        let alternate = temp.path().join("alternate-provider");
+        std::fs::write(&alternate, replacement).unwrap();
+        std::os::unix::fs::symlink(&alternate, &binary).unwrap();
+        let error = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, BridgeError::Refused(reason) if reason == "provider executable symlink is refused")
+        );
+        assert!(!marker.exists(), "symlink target did not exec");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    async fn checked_provider_survives_after_verify_swap(symlink: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let (binary, pid_file) = write_mock_provider_script(
+            temp.path(),
+            r#"{"status":"ok"}"#,
+            Some(r#"{"status":"ok"}"#),
+            0,
+        );
+        let checked = CheckedExecutable::for_test(&binary);
+        let marker = temp.path().join("substituted-ran");
+        let replacement = temp.path().join("substitute");
+        std::fs::write(
+            &replacement,
+            format!("#!/bin/sh\nprintf bad > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let original = temp.path().join("verified-original");
+        AFTER_VERIFY_SWAP.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new({
+                let binary = binary.clone();
+                let replacement = replacement.clone();
+                move || {
+                    std::fs::rename(&binary, &original).unwrap();
+                    if symlink {
+                        std::os::unix::fs::symlink(&replacement, &binary).unwrap();
+                    } else {
+                        std::fs::rename(&replacement, &binary).unwrap();
+                    }
+                }
+            }));
+        });
+        let bridge = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .expect("the verified bytes still start after a path swap");
+        assert!(pid_file.exists(), "the verified provider ran");
+        assert!(!marker.exists(), "the substituted provider did not run");
+        bridge.shutdown().await.unwrap();
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn checked_provider_runs_verified_bytes_after_file_swap() {
+        checked_provider_survives_after_verify_swap(false).await;
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn checked_provider_runs_verified_bytes_after_symlink_swap() {
+        checked_provider_survives_after_verify_swap(true).await;
+    }
+
+    /// A provider that resolves its own path after Init (model-provider's
+    /// guard re-exec, tunnel-provider's cloudflared lookup) still finds the
+    /// verified copy and its named sibling; both go only after the exit.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_verified_copy_and_sibling_outlive_init_until_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("self-resolving-provider");
+        let report = temp.path().join("self-report");
+        std::fs::write(temp.path().join("cloudflared"), b"installed companion").unwrap();
+        let script = format!(
+            "#!/bin/sh\nIFS= read -r _init || exit 1\nprintf '%s\\n' '{{\"status\":\"ok\"}}'\nIFS= read -r _probe || exit 1\nself=missing\n[ -f \"$0\" ] && self=present\nsibling=missing\n[ -f \"$(dirname \"$0\")/cloudflared\" ] && sibling=present\nprintf '%s\\n%s\\n%s\\n' \"$0\" \"$self\" \"$sibling\" > '{}'\nprintf '%s\\n' '{{\"status\":\"ok\"}}'\nIFS= read -r _shutdown || exit 0\nprintf '%s\\n' '{{\"status\":\"ok\"}}'\nexit 0\n",
+            report.display()
+        );
+        std::fs::write(&binary, script).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let checked = CheckedExecutable::for_test(&binary).with_sibling("cloudflared");
+        let bridge = ProviderBridge::spawn(&checked, ProviderConfig::default())
+            .await
+            .unwrap();
+        let response = bridge
+            .request(ProviderRequest::Exists {
+                path: "self".into(),
+                token: String::new(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(response, ProviderResponse::Ok { .. }));
+        let seen = std::fs::read_to_string(&report).unwrap();
+        let lines = seen.lines().collect::<Vec<_>>();
+        let own_path = Path::new(lines[0]);
+        assert_ne!(own_path, binary, "the provider ran from the private copy");
+        assert_eq!(lines[1], "present", "own path exists after Init");
+        assert_eq!(lines[2], "present", "named sibling resolves beside it");
+        bridge.shutdown().await.unwrap();
+        assert!(!own_path.exists(), "the copy goes after the provider exits");
+        assert!(!own_path.parent().unwrap().exists());
+        assert!(
+            temp.path().join("cloudflared").exists(),
+            "only the link went"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn checked_executable_copy_goes_when_provider_exits_without_bridge_shutdown() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("short-provider");
+        std::fs::write(
+            &binary,
+            b"#!/bin/sh\nIFS= read -r _init || exit 1\nprintf '%s\\n' '{\"status\":\"ok\"}'\nIFS= read -r _request || exit 1\nprintf '%s\\n' '{\"status\":\"ok\"}'\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bridge = ProviderBridge::spawn(
+            &CheckedExecutable::for_test(&binary),
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap();
+        let copy_dir = bridge
+            .executable_copy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .exec_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(copy_dir.exists(), "the bridge initially owns its copy");
+        bridge
+            .request(ProviderRequest::Exists {
+                path: "exit".into(),
+                token: String::new(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while copy_dir.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the copy must go while the bridge remains live");
+        drop(bridge);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn checked_executable_copy_goes_after_provider_is_killed() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("waiting-provider");
+        std::fs::write(
+            &binary,
+            b"#!/bin/sh\nIFS= read -r _init || exit 1\nprintf '%s\\n' '{\"status\":\"ok\"}'\nwhile IFS= read -r _request; do :; done\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bridge = ProviderBridge::spawn(
+            &CheckedExecutable::for_test(&binary),
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap();
+        let copy_dir = bridge
+            .executable_copy
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .exec_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(copy_dir.exists(), "a running provider retains its copy");
+        let pid = bridge.child.lock().await.as_ref().unwrap().id().unwrap();
+        assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGKILL) }, 0);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while copy_dir.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the killed provider's copy must go while the bridge remains live");
+    }
+
+    /// A confined provider that answers Init. `exit_on_second_line` makes it
+    /// answer the next request and exit; otherwise it answers until shutdown.
+    #[cfg(target_os = "macos")]
+    fn write_confined_stdio_provider(dir: &Path, exit_on_second_line: bool) -> PathBuf {
+        let source = dir.join("confined-stdio.c");
+        let binary = dir.join("did-provider");
+        let body = if exit_on_second_line {
+            r#"
+#include <stdio.h>
+int main(void) {
+    char line[65536];
+    int n = 0;
+    while (fgets(line, sizeof line, stdin)) {
+        fputs("{\"status\":\"ok\"}\n", stdout);
+        fflush(stdout);
+        if (++n == 2) return 0;
+    }
+    return 0;
+}
+"#
+        } else {
+            r#"
+#include <stdio.h>
+#include <string.h>
+int main(void) {
+    char line[65536];
+    while (fgets(line, sizeof line, stdin)) {
+        fputs("{\"status\":\"ok\"}\n", stdout);
+        fflush(stdout);
+        if (strstr(line, "\"op\":\"shutdown\"")) return 0;
+    }
+    return 0;
+}
+"#
+        };
+        std::fs::write(&source, body).unwrap();
+        let status = std::process::Command::new("/usr/bin/clang")
+            .args(["-O2", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .expect("clang is available");
+        assert!(
+            status.success(),
+            "clang failed to build the confined provider"
+        );
+        binary
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn start_confined_stdio(
+        exit_on_second_line: bool,
+    ) -> (tempfile::TempDir, PathBuf, Confined) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let binary = write_confined_stdio_provider(temp.path(), exit_on_second_line);
+        let root = temp.path().join("storage");
+        let confined = ProviderBridge::spawn_confined(
+            "did-provider",
+            &committed_authority("did"),
+            &CheckedExecutable::for_test(&binary),
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("confined start: {error}"));
+        let copy_dir = confined
+            .bridge()
+            .executable_copy
+            .lock()
+            .await
+            .as_ref()
+            .expect("the confined start keeps its verified copy")
+            .exec_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(
+            copy_dir.starts_with(temp.path().join("provider-copies")),
+            "copy {} is under the Home provider-copies",
+            copy_dir.display()
+        );
+        let name = copy_dir.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("elastos-provider-"),
+            "copy directory {name}"
+        );
+        assert!(
+            copy_dir.exists(),
+            "the verified copy exists while the provider runs"
+        );
+        (temp, copy_dir, confined)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_macos_copy_goes_after_shutdown() {
+        let (_temp, copy_dir, confined) = start_confined_stdio(false).await;
+        confined.bridge().shutdown().await.unwrap();
+        assert!(
+            !copy_dir.exists(),
+            "the verified copy under provider-copies goes after the confined provider shuts down"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn confined_macos_copy_goes_when_fork_child_exits() {
+        let (_temp, copy_dir, confined) = start_confined_stdio(true).await;
+        let response = confined
+            .bridge()
+            .request(ProviderRequest::Exists {
+                path: "exit".into(),
+                token: String::new(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(response, ProviderResponse::Ok { .. }));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while copy_dir.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the verified copy goes after the confined fork child exits");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn checked_executable_spawn_failure_removes_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("unstartable-provider");
+        std::fs::write(&binary, b"#!/no/such/provider/interpreter\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let prepared = CheckedExecutable::for_test(&binary)
+            .verify_at_spawn()
+            .unwrap();
+        let copy_dir = prepared.exec_path().parent().unwrap().to_path_buf();
+        let root = temp.path().join("provider-copies");
+        assert_eq!(copy_dir.parent(), Some(root.as_path()));
+        assert!(copy_dir.exists(), "spawn receives a copy in its Home");
+        let command = Command::new(prepared.exec_path());
+        let result = ProviderBridge::spawn_command(
+            prepared,
+            command,
+            ProviderConfig::default(),
+            INIT_TIMEOUT,
+            SHUTDOWN_TIMEOUT,
+            std::process::Stdio::null(),
+            false,
+        )
+        .await;
+        assert!(matches!(result, Err(BridgeError::Spawn(_))));
+        assert!(!copy_dir.exists(), "a failed spawn drops its verified copy");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn linux_model_spawn_refuses_substituted_provider_before_exec() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let binary = temp.path().join("model-provider");
+        let marker = temp.path().join("ran");
+        std::fs::write(&binary, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let checked = CheckedExecutable::for_test(&binary);
+        std::fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf ran > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        let config = ProviderConfig {
+            extra: serde_json::json!({"offers":[]}),
+            ..Default::default()
+        };
+        let result = ProviderBridge::spawn_confined_model_linux(&checked, config).await;
+        assert!(matches!(result, Err(BridgeError::Refused(reason))
+            if reason == "provider executable differs from verified release checksum"));
+        assert!(!marker.exists(), "the changed model provider did not exec");
     }
 
     #[cfg(unix)]
@@ -4208,7 +4775,7 @@ mod tests {
             .unwrap();
         assert!(canonicalized.success());
         let (bridge, sockets, vacant, confined_config, _hosted_listener) =
-            ProviderBridge::spawn_confined_model(&script, config)
+            ProviderBridge::spawn_confined_model(&CheckedExecutable::for_test(&script), config)
                 .await
                 .unwrap();
         assert_eq!(
@@ -4265,6 +4832,7 @@ mod tests {
         assert_eq!(data["journal_alias_write_errno"], libc::EPERM);
         assert_eq!(data["journal_write_errno"], 0);
         assert_eq!(data["base_canonical_errno"], 0);
+        assert_eq!(data["inherited_regular_fds"], 0);
         assert_eq!(data["inherited_writable_regular_fds"], 0);
         bridge.shutdown().await.unwrap();
         assert!(!Path::new(&sockets["fixture-local"]).exists());
@@ -4281,7 +4849,7 @@ mod tests {
         };
         let (empty_bridge, _, vacant, _, _hosted_listener) =
             ProviderBridge::spawn_confined_model_with_engine_bundle(
-                &script,
+                &CheckedExecutable::for_test(&script),
                 empty_config,
                 Some(&engine_dir),
             )
@@ -4374,13 +4942,16 @@ mod tests {
         let offer_id = fixture["offer_id"].as_str().unwrap();
         #[cfg(target_os = "macos")]
         let (bridge, sockets, _, _, _hosted_listener) =
-            ProviderBridge::spawn_confined_model(binary, config)
+            ProviderBridge::spawn_confined_model(&CheckedExecutable::for_test(binary), config)
                 .await
                 .unwrap();
         #[cfg(target_os = "linux")]
-        let (bridge, sockets, _, _) = ProviderBridge::spawn_confined_model_linux(binary, config)
-            .await
-            .unwrap();
+        let (bridge, sockets, _, _) = ProviderBridge::spawn_confined_model_linux(
+            &CheckedExecutable::for_test(binary),
+            config,
+        )
+        .await
+        .unwrap();
         let socket = sockets[offer_id].clone();
         let input = serde_json::json!({
             "schema": "elastos.model.input.text/v1",
@@ -4569,7 +5140,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        let spawned = ProviderBridge::spawn_confined_model_linux(&probe, config).await;
+        let spawned = ProviderBridge::spawn_confined_model_linux(
+            &CheckedExecutable::for_test(&probe),
+            config,
+        )
+        .await;
         let (bridge, sockets, vacant, _) = spawned.unwrap();
         let pid = bridge
             .child
@@ -4682,7 +5257,7 @@ mod tests {
         let confined = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -4748,7 +5323,7 @@ mod tests {
         let error = match ProviderBridge::spawn_confined(
             "did-provider",
             &authority,
-            &temp.path().join("never-runs"),
+            &CheckedExecutable::for_test(&temp.path().join("never-runs")),
             &widened,
             ProviderConfig::default(),
         )
@@ -4768,7 +5343,7 @@ mod tests {
         let confined = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -4802,7 +5377,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &authority,
-            &program,
+            &CheckedExecutable::for_test(&program),
             &temp.path().join("root"),
             ProviderConfig::default(),
         )
@@ -4848,7 +5423,7 @@ mod tests {
         let error = match ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &program,
+            &CheckedExecutable::for_test(&program),
             &root,
             ProviderConfig::default(),
         )
@@ -4904,7 +5479,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -4937,7 +5512,7 @@ mod tests {
             let confined = ProviderBridge::spawn_confined(
                 "did-provider",
                 &committed_authority("did"),
-                &binary,
+                &CheckedExecutable::for_test(&binary),
                 root,
                 ProviderConfig::default(),
             )
@@ -4996,7 +5571,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -5031,7 +5606,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &binary,
+            &CheckedExecutable::for_test(&binary),
             &root,
             ProviderConfig::default(),
         )
@@ -5537,7 +6112,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "ipfs-provider",
             &committed_authority("did"),
-            &temp.path().join("never-runs"),
+            &CheckedExecutable::for_test(&temp.path().join("never-runs")),
             &root,
             ProviderConfig::default(),
         )
@@ -5633,7 +6208,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &authority,
-            &program,
+            &CheckedExecutable::for_test(&program),
             &root,
             ProviderConfig::default(),
         )
@@ -5662,7 +6237,7 @@ mod tests {
         let error = ProviderBridge::spawn_confined(
             "did-provider",
             &committed_authority("did"),
-            &program,
+            &CheckedExecutable::for_test(&program),
             &root,
             ProviderConfig::default(),
         )
