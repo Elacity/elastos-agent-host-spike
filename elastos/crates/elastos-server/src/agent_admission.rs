@@ -248,6 +248,7 @@ pub(crate) const UNADMITTED_AGENT_PRINCIPAL: &str =
 /// The refusal a VM launch gives for a manifest that declares an agent. The
 /// component admission is the only entrance that binds an agent, and a VM
 /// launch has no such binding, so it starts nothing under the launcher.
+#[cfg(unix)]
 pub(crate) const NO_VM_AGENT: &str =
     "an agent-declaring manifest runs only a component launch that admitted it";
 

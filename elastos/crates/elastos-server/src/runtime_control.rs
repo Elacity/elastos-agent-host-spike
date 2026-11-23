@@ -1,3 +1,4 @@
+#[cfg(any(unix, test))]
 use std::future::Future;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
@@ -45,14 +46,18 @@ pub const RUNTIME_KIND_MANAGED_HOME: &str = "managed-home";
 pub const OPERATOR_RUNTIME_REQUIRED_MESSAGE: &str =
     "This command requires a running runtime.\n\n  elastos serve\n\nThen run this command again.";
 pub const GATEWAY_OWNED_HOME_TERMINAL_ENV: &str = "ELASTOS_GATEWAY_OWNED_HOME_TERMINAL";
+#[cfg(any(unix, test))]
 const MANAGED_RUNTIME_REQUIRED_NATIVE_PROVIDERS: &[&str] = &["localhost-provider", "did-provider"];
+#[cfg(any(unix, test))]
 const MANAGED_RUNTIME_REQUIRED_COMPONENTS: &[&str] = &["shell"];
 
+#[cfg(any(unix, test))]
 enum ManagedRuntimeStart {
     Owner(ManagedRuntimeStartGuard),
     Waiter,
 }
 
+#[cfg(any(unix, test))]
 struct ManagedRuntimeStartGuard {
     path: PathBuf,
     _file: std::fs::File,
@@ -62,10 +67,12 @@ fn default_runtime_kind() -> String {
     RUNTIME_KIND_OPERATOR.to_string()
 }
 
+#[cfg(any(unix, test))]
 fn managed_runtime_start_lock_path(data_dir: &Path) -> PathBuf {
     data_dir.join("managed-runtime-start.lock")
 }
 
+#[cfg(any(unix, test))]
 fn acquire_managed_runtime_start_lock(data_dir: &Path) -> anyhow::Result<ManagedRuntimeStart> {
     std::fs::create_dir_all(data_dir)?;
     let path = managed_runtime_start_lock_path(data_dir);
@@ -99,6 +106,7 @@ fn acquire_managed_runtime_start_lock(data_dir: &Path) -> anyhow::Result<Managed
     }
 }
 
+#[cfg(any(unix, test))]
 fn create_managed_runtime_start_marker(path: &Path) -> std::io::Result<std::fs::File> {
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
@@ -119,9 +127,11 @@ fn create_managed_runtime_start_marker(path: &Path) -> std::io::Result<std::fs::
 
 // The owner holds the start lock through setup and the whole readiness wait, so a
 // marker counts as abandoned only after that budget plus time for setup.
+#[cfg(any(unix, test))]
 const MANAGED_RUNTIME_START_LOCK_LIFETIME: Duration =
     Duration::from_secs(RUNTIME_READY_TIMEOUT.as_secs() + 30);
 
+#[cfg(any(unix, test))]
 fn managed_runtime_start_marker_is_stale(path: &Path) -> bool {
     path.metadata()
         .and_then(|metadata| metadata.modified())
@@ -130,6 +140,7 @@ fn managed_runtime_start_marker_is_stale(path: &Path) -> bool {
         .is_some_and(|elapsed| elapsed > MANAGED_RUNTIME_START_LOCK_LIFETIME)
 }
 
+#[cfg(any(unix, test))]
 impl Drop for ManagedRuntimeStartGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
@@ -141,12 +152,14 @@ impl Drop for ManagedRuntimeStartGuard {
 /// fail a start for being slow.
 pub(crate) const RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[cfg(any(unix, test))]
 enum StartWait<T, E> {
     Ready(T),
     Exited(E),
     TimedOut,
 }
 
+#[cfg(any(unix, test))]
 /// Polls `probe` every 200 ms until it returns a value, `exited` reports an exit,
 /// or `budget` has passed.
 async fn poll_until_ready<T, E, Fut>(
@@ -321,6 +334,7 @@ fn terminate_sibling_managed_runtime_children(
     Ok(())
 }
 
+#[cfg(unix)]
 fn is_managed_user_runtime_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -328,6 +342,7 @@ fn is_managed_user_runtime_kind(kind: &str) -> bool {
     )
 }
 
+#[cfg(any(unix, test))]
 fn managed_runtime_kind_label(kind: &str) -> &str {
     match kind {
         RUNTIME_KIND_MANAGED_IDENTITY => "identity",
@@ -347,6 +362,7 @@ impl RuntimeCoords {
     }
 }
 
+#[cfg(any(unix, test))]
 fn managed_runtime_lane_conflict_message(
     surface_name: &str,
     owner: &crate::host_lock::HostProcessInfo,
@@ -372,6 +388,7 @@ fn managed_runtime_lane_conflict_message(
     )
 }
 
+#[cfg(any(unix, test))]
 fn gateway_owner_allows_subordinate_managed_runtime(
     owner: &crate::host_lock::HostProcessInfo,
 ) -> bool {
@@ -385,6 +402,7 @@ fn gateway_owner_allows_subordinate_managed_runtime(
         && parent_process_id() == Some(owner.pid)
 }
 
+#[cfg(any(unix, test))]
 fn parent_process_id() -> Option<u32> {
     #[cfg(unix)]
     {
@@ -542,6 +560,7 @@ fn pid_is_alive(pid: u32) -> bool {
     }
 }
 
+#[cfg(any(unix, test))]
 fn managed_runtime_coord_path(data_dir: &Path, runtime_kind: &str) -> PathBuf {
     if runtime_kind == RUNTIME_KIND_MANAGED_HOME {
         return home_runtime_coord_path(data_dir);
@@ -553,6 +572,7 @@ pub fn home_runtime_coord_path(data_dir: &Path) -> PathBuf {
     data_dir.join("home-runtime-coords.json")
 }
 
+#[cfg(any(unix, test))]
 fn managed_runtime_child_home_dir(data_dir: &Path, runtime_kind: &str) -> PathBuf {
     data_dir
         .join("managed-runtimes")
@@ -560,10 +580,12 @@ fn managed_runtime_child_home_dir(data_dir: &Path, runtime_kind: &str) -> PathBu
         .join("home")
 }
 
+#[cfg(any(unix, test))]
 fn managed_runtime_child_xdg_data_home(child_home: &Path) -> PathBuf {
     child_home.join(".local").join("share")
 }
 
+#[cfg(any(unix, test))]
 fn managed_runtime_child_data_dir_for_os(child_home: &Path, os: &str) -> PathBuf {
     match os {
         "macos" => child_home
@@ -574,10 +596,12 @@ fn managed_runtime_child_data_dir_for_os(child_home: &Path, os: &str) -> PathBuf
     }
 }
 
+#[cfg(any(unix, test))]
 fn managed_runtime_child_data_dir(child_home: &Path) -> PathBuf {
     managed_runtime_child_data_dir_for_os(child_home, std::env::consts::OS)
 }
 
+#[cfg(any(unix, test))]
 fn sync_managed_runtime_child_components_manifest(
     parent_data_dir: &Path,
     child_home: &Path,
@@ -2100,6 +2124,8 @@ mod tests {
         assert!(gateway_owner_allows_subordinate_managed_runtime(&owner));
     }
 
+    #[cfg(unix)]
+    #[cfg(test)]
     fn write_managed_runtime_parent_support_artifacts(data_dir: &Path) -> Vec<u8> {
         let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64") => "linux-amd64",
@@ -2162,6 +2188,8 @@ mod tests {
         manifest_bytes
     }
 
+    #[cfg(unix)]
+    #[cfg(test)]
     fn pin_parent_model_catalog_head(data_dir: &Path, head_cid: &str) {
         let path = data_dir.join("components.json");
         let mut manifest: serde_json::Value =
@@ -2173,6 +2201,8 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
+    #[cfg(test)]
     fn write_parent_signed_model_catalog(data_dir: &Path, catalog: &[u8]) {
         std::fs::write(data_dir.join("model-catalog.json"), catalog).unwrap();
         pin_parent_model_catalog_head(data_dir, &crate::setup::catalog_head_cid(catalog).unwrap());
@@ -2215,11 +2245,15 @@ mod tests {
         assert!(!gateway_owner_allows_subordinate_managed_runtime(&owner));
     }
 
+    #[cfg(unix)]
+    #[cfg(test)]
     struct EnvRestore {
         key: &'static str,
         value: Option<std::ffi::OsString>,
     }
 
+    #[cfg(unix)]
+    #[cfg(test)]
     impl EnvRestore {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
@@ -2240,6 +2274,8 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[cfg(test)]
     impl Drop for EnvRestore {
         fn drop(&mut self) {
             match &self.value {

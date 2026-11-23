@@ -363,9 +363,11 @@ pub(super) fn preserve_legacy_home_agent(
 
 #[cfg(test)]
 mod r3_tests {
+    #[cfg(unix)]
     use super::super::r3_stored_root_tests::{
         fixture, seed, verified_parent_device_context, AGENT_ID, AGENT_ROOT, NEEDS_PROTECTION,
     };
+    #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
     #[test]
@@ -559,7 +561,9 @@ mod r3_tests {
 /// R8d evidence row: the v2 Assistant workspace save through a child Runtime.
 #[cfg(test)]
 mod r8d_rows {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::api::gateway::gateway_tests::r8d_passkey_rows::{passkey_person, KEPT_ELSEWHERE};
 
     /// Entry: the v2 workspace PUT route with the current migration identity.

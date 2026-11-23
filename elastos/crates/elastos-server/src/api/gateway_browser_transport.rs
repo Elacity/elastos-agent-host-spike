@@ -30,6 +30,7 @@ pub(in crate::api::gateway) const BROWSER_VZ_VIEWER_TURN_POLICY: &str = "runtime
 const BROWSER_VZ_TRANSPORT_CONFIG_SCHEMA: &str = "elastos.browser.vz-transport-config/v1";
 const BROWSER_VZ_TRANSPORT_STREAM_SCHEMA: &str = "elastos.browser.vz-transport-stream/v1";
 const BROWSER_VZ_TURN_AUTHORITY_SCHEMA: &str = "elastos.browser.vz-turn-authority/v1";
+#[cfg(unix)]
 const MAX_BROWSER_VZ_TRANSPORT_CONFIG_BYTES: u64 = 32 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -1979,6 +1980,10 @@ mod tests {
             .path()
             .join("config")
             .join("browser-vz-vsock-transport.json");
+        #[cfg(windows)]
+        {
+            let _ = &path;
+        }
         #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         #[cfg(unix)]

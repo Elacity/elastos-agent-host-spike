@@ -2,25 +2,36 @@
 //! listed ticket constructions is a later P2-9 slice.
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use async_trait::async_trait;
+#[cfg(unix)]
 use base64::Engine as _;
+#[cfg(unix)]
 use elastos_runtime::provider::{
     Provider, ProviderCarrierRoute, ProviderError, ProviderInvocation, ProviderInvocationTransport,
     ProviderRegistry, ProviderTransfer, ResourceRequest, ResourceResponse,
 };
+#[cfg(unix)]
 use iroh::Watcher as _;
+#[cfg(unix)]
 use serde_json::{json, Value};
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
 
+#[cfg(unix)]
 use crate::carrier::{
     start_carrier_node_with_registry, CarrierGossipProvider, CarrierNode, CarrierProviderInvoker,
 };
 
+#[cfg(unix)]
 const FILE_BYTES: &[u8] = b"carrier contract file bytes";
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct Observation {
     bytes: Vec<u8>,
@@ -28,6 +39,7 @@ struct Observation {
     answer: Value,
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct FileObservation {
     bytes: Vec<u8>,
@@ -37,6 +49,7 @@ struct FileObservation {
 
 // The four verbs are addressed by DID or topic. Backend coordinates stay inside
 // the implementation. A second real backend later adds one impl and one call.
+#[cfg(unix)]
 #[async_trait]
 trait CarrierUnderTest: Send + Sync {
     async fn request_reply(
@@ -73,10 +86,12 @@ trait CarrierUnderTest: Send + Sync {
     fn remote_calls(&self) -> usize;
 }
 
+#[cfg(unix)]
 struct ContractPlane {
     requests: Arc<Mutex<Vec<Value>>>,
 }
 
+#[cfg(unix)]
 #[async_trait]
 impl Provider for ContractPlane {
     async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
@@ -113,6 +128,7 @@ impl Provider for ContractPlane {
     }
 }
 
+#[cfg(unix)]
 struct CurrentCarrier {
     sender_node: CarrierNode,
     receiver_node: CarrierNode,
@@ -127,6 +143,7 @@ struct CurrentCarrier {
     _receiver_dir: tempfile::TempDir,
 }
 
+#[cfg(unix)]
 impl CurrentCarrier {
     async fn gossip(registry: &ProviderRegistry, request: Value) -> Result<Value, ProviderError> {
         let op = request["op"].as_str().unwrap_or_default().to_string();
@@ -318,6 +335,7 @@ impl CurrentCarrier {
     }
 }
 
+#[cfg(unix)]
 #[async_trait]
 impl CarrierUnderTest for CurrentCarrier {
     async fn request_reply(
@@ -470,16 +488,19 @@ impl CarrierUnderTest for CurrentCarrier {
     }
 }
 
+#[cfg(unix)]
 fn content_cid(bytes: &[u8]) -> String {
     let hash = cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap();
     cid::Cid::new_v1(0x55, hash).to_string()
 }
 
+#[cfg(unix)]
 fn assert_no_topology(answer: &Value, carrier: &dyn CarrierUnderTest) {
     carrier.assert_private_answer(answer);
 }
 
 // Remote key-service traffic is planned over Carrier (PRINCIPLES 15). This verb carries opaque bytes.
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContractRow {
     R1,
@@ -504,17 +525,22 @@ enum ContractRow {
     V1,
 }
 
+#[cfg(unix)]
 const MESSAGE_TOPIC: &str = "__test/p29-message";
+#[cfg(unix)]
 const NOTICE_TOPIC: &str = "__test/p29-notice";
 
+#[cfg(unix)]
 fn claimed_did_body() -> String {
     format!("claimed_did={}", elastos_identity::derive_did(&[213; 32]).1)
 }
 
+#[cfg(unix)]
 fn unknown_did() -> String {
     elastos_identity::derive_did(&[214; 32]).1
 }
 
+#[cfg(unix)]
 async fn gossip_roundtrip(
     carrier: &dyn CarrierUnderTest,
     topic: &str,
@@ -540,6 +566,7 @@ async fn gossip_roundtrip(
     (answer, received.expect("gossip receiver got no bytes"))
 }
 
+#[cfg(unix)]
 async fn send_gossip(
     carrier: &dyn CarrierUnderTest,
     topic: &str,
@@ -554,6 +581,7 @@ async fn send_gossip(
     }
 }
 
+#[cfg(unix)]
 async fn r1_request_reply_responder_bytes(carrier: &dyn CarrierUnderTest) {
     let body = claimed_did_body();
     let reply = carrier
@@ -563,6 +591,7 @@ async fn r1_request_reply_responder_bytes(carrier: &dyn CarrierUnderTest) {
     assert_eq!(reply.bytes, body.as_bytes());
 }
 
+#[cfg(unix)]
 async fn r2_request_reply_responder_authenticated_did(carrier: &dyn CarrierUnderTest) {
     let body = claimed_did_body();
     let reply = carrier
@@ -573,6 +602,7 @@ async fn r2_request_reply_responder_authenticated_did(carrier: &dyn CarrierUnder
     assert_ne!(reply.sender_did, body.trim_start_matches("claimed_did="));
 }
 
+#[cfg(unix)]
 async fn r3_request_reply_responder_unknown_did(carrier: &dyn CarrierUnderTest) {
     let calls = carrier.remote_calls();
     let refused = carrier
@@ -583,6 +613,7 @@ async fn r3_request_reply_responder_unknown_did(carrier: &dyn CarrierUnderTest) 
     assert_eq!(carrier.remote_calls(), calls);
 }
 
+#[cfg(unix)]
 async fn r4_request_reply_responder_private_answer(carrier: &dyn CarrierUnderTest) {
     let reply = carrier
         .request_reply(carrier.peer_did(), b"privacy")
@@ -591,6 +622,7 @@ async fn r4_request_reply_responder_private_answer(carrier: &dyn CarrierUnderTes
     assert_no_topology(&reply.answer, carrier);
 }
 
+#[cfg(unix)]
 async fn r5_request_reply_responder_without_grant(carrier: &dyn CarrierUnderTest) {
     let calls = carrier.remote_calls();
     let reply = carrier
@@ -601,6 +633,7 @@ async fn r5_request_reply_responder_without_grant(carrier: &dyn CarrierUnderTest
     assert_eq!(carrier.remote_calls(), calls + 1);
 }
 
+#[cfg(unix)]
 async fn r6_request_reply_responder_opaque_body(carrier: &dyn CarrierUnderTest) {
     let opaque = vec![0xa5; 64 * 1024];
     let reply = carrier
@@ -610,6 +643,7 @@ async fn r6_request_reply_responder_opaque_body(carrier: &dyn CarrierUnderTest) 
     assert_eq!(reply.bytes, opaque);
 }
 
+#[cfg(unix)]
 async fn m1_message_bytes(carrier: &dyn CarrierUnderTest) {
     let sent = b"message:contract bytes";
     let (_, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, None).await;
@@ -617,6 +651,7 @@ async fn m1_message_bytes(carrier: &dyn CarrierUnderTest) {
 }
 
 // open: sender identity is not supplied by the backend at this layer; signed message types bind the signer above it
+#[cfg(unix)]
 async fn m2_message_sender_identity(carrier: &dyn CarrierUnderTest) {
     let claimed = elastos_identity::derive_did(&[213; 32]).1;
     let (_, received) = gossip_roundtrip(
@@ -631,6 +666,7 @@ async fn m2_message_sender_identity(carrier: &dyn CarrierUnderTest) {
     assert_eq!(received.sender_did, claimed);
 }
 
+#[cfg(unix)]
 async fn m3_message_topic_address(carrier: &dyn CarrierUnderTest) {
     let sent = b"message:topic address";
     let (answer, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, None).await;
@@ -645,6 +681,7 @@ async fn m3_message_topic_address(carrier: &dyn CarrierUnderTest) {
     assert_eq!(refused["code"], "not_joined");
 }
 
+#[cfg(unix)]
 async fn m4_message_private_answer(carrier: &dyn CarrierUnderTest) {
     let answer = carrier
         .send_message(MESSAGE_TOPIC, b"message:privacy", None)
@@ -654,6 +691,7 @@ async fn m4_message_private_answer(carrier: &dyn CarrierUnderTest) {
     assert_no_topology(&answer, carrier);
 }
 
+#[cfg(unix)]
 async fn n1_notification_bytes_no_reply(carrier: &dyn CarrierUnderTest) {
     let sent = b"notice:contract bytes";
     let (_, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
@@ -672,6 +710,7 @@ async fn n1_notification_bytes_no_reply(carrier: &dyn CarrierUnderTest) {
 }
 
 // open: sender identity is not supplied by the backend at this layer; signed message types bind the signer above it
+#[cfg(unix)]
 async fn n2_notification_sender_identity(carrier: &dyn CarrierUnderTest) {
     let claimed = elastos_identity::derive_did(&[213; 32]).1;
     let (_, received) = gossip_roundtrip(
@@ -686,6 +725,7 @@ async fn n2_notification_sender_identity(carrier: &dyn CarrierUnderTest) {
     assert_eq!(received.sender_did, claimed);
 }
 
+#[cfg(unix)]
 async fn n3_notification_topic_address(carrier: &dyn CarrierUnderTest) {
     let sent = b"notice:topic address";
     let (answer, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
@@ -700,6 +740,7 @@ async fn n3_notification_topic_address(carrier: &dyn CarrierUnderTest) {
     assert_eq!(refused["code"], "not_joined");
 }
 
+#[cfg(unix)]
 async fn n4_notification_private_answer(carrier: &dyn CarrierUnderTest) {
     let answer = carrier
         .notify(NOTICE_TOPIC, b"notice:privacy", None)
@@ -709,6 +750,7 @@ async fn n4_notification_private_answer(carrier: &dyn CarrierUnderTest) {
     assert_no_topology(&answer, carrier);
 }
 
+#[cfg(unix)]
 async fn f1_file_request_responder_bytes(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
@@ -718,6 +760,7 @@ async fn f1_file_request_responder_bytes(carrier: &dyn CarrierUnderTest) {
     assert_eq!(file.bytes, FILE_BYTES);
 }
 
+#[cfg(unix)]
 async fn f2_file_request_responder_authenticated_did(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
@@ -727,6 +770,7 @@ async fn f2_file_request_responder_authenticated_did(carrier: &dyn CarrierUnderT
     assert_eq!(file.sender_did, carrier.sender_did());
 }
 
+#[cfg(unix)]
 async fn f3_file_request_responder_unknown_did(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let calls = carrier.remote_calls();
@@ -738,6 +782,7 @@ async fn f3_file_request_responder_unknown_did(carrier: &dyn CarrierUnderTest) {
     assert_eq!(carrier.remote_calls(), calls);
 }
 
+#[cfg(unix)]
 async fn f4_file_request_responder_private_answer(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
@@ -748,6 +793,7 @@ async fn f4_file_request_responder_private_answer(carrier: &dyn CarrierUnderTest
 }
 
 // open: the file-request receipt comes from the product fetch path (distinct-holder fetch), which this suite does not drive yet
+#[cfg(unix)]
 async fn f5_file_request_responder_receipt_open_today(carrier: &dyn CarrierUnderTest) {
     let cid = content_cid(FILE_BYTES);
     let file = carrier
@@ -758,6 +804,7 @@ async fn f5_file_request_responder_receipt_open_today(carrier: &dyn CarrierUnder
 }
 
 // open: waits for Rong (verb or WebSpace files)
+#[cfg(unix)]
 async fn v1_voice_open(carrier: &dyn CarrierUnderTest) {
     let answer = carrier.voice_probe().await.unwrap();
     assert_eq!(answer["status"], "error");
@@ -765,6 +812,7 @@ async fn v1_voice_open(carrier: &dyn CarrierUnderTest) {
 }
 
 // This list is the complete contract that a second backend runs.
+#[cfg(unix)]
 async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>) {
     use ContractRow::*;
     for row in [
@@ -798,6 +846,7 @@ async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>)
     }
 }
 
+#[cfg(unix)]
 async fn run_current_row(row: ContractRow) {
     let carrier = CurrentCarrier::new().await;
     use ContractRow::*;

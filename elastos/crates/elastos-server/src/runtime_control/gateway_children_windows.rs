@@ -1,7 +1,6 @@
 //! Managed gateway children wait for Windows process-tree ownership.
 
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus};
 
 use anyhow::Result;
 
@@ -32,38 +31,6 @@ impl Owner {
         _update_generation: &str,
     ) -> Result<Option<Self>> {
         Err(unsupported().into())
-    }
-
-    pub(crate) fn configure(&self, _command: &mut Command) -> Result<()> {
-        Err(unsupported().into())
-    }
-
-    pub(crate) fn lock_start(&self) -> Result<crate::host_lock::FileLock> {
-        Err(unsupported().into())
-    }
-}
-
-pub(crate) struct StartingChild {
-    pub child: Child,
-}
-
-impl StartingChild {
-    pub(crate) fn new(
-        mut child: Child,
-        _owner: Option<&Owner>,
-        _coords_path: &Path,
-    ) -> Result<Self> {
-        let _ = child.kill();
-        let _ = child.wait();
-        Err(unsupported().into())
-    }
-
-    pub(crate) fn ready(&mut self) {
-        unreachable!("Windows cannot construct a managed gateway child")
-    }
-
-    pub(crate) fn observed_exit(&self) -> std::io::Result<Option<ExitStatus>> {
-        Err(unsupported())
     }
 }
 

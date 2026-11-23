@@ -45,7 +45,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 #[cfg(unix)]
 use tokio::io;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
+#[cfg(any(unix, test))]
+use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -2771,6 +2773,7 @@ async fn browser_carrier_exit_relay_path(
     Ok((PathBuf::from(path), stream_id.to_string()))
 }
 
+#[cfg(any(unix, test))]
 fn browser_carrier_relay_header(
     line: &[u8],
     stream_id: &str,
@@ -9214,6 +9217,7 @@ impl CarrierClient {
     /// discovery-isolated endpoint. The accepted connection must present the
     /// requested endpoint identity; a substituted peer is rejected before any
     /// provider request is written.
+    #[cfg(unix)]
     pub(crate) async fn connect_resolved_peer(
         endpoint: &Endpoint,
         peer: iroh::PublicKey,

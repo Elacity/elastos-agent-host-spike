@@ -68,6 +68,7 @@ const OWNER_ROOT_KDF: &str = "hkdf-sha256";
 const OWNER_ROOT_ENVELOPE_SALT: &str = "unsalted";
 
 const NOT_REGULAR: &str = "agent file path is not a regular file";
+#[cfg(unix)]
 const MODE_TOO_WIDE: &str = "agent file mode is wider than 0600";
 const CANNOT_READ: &str = "agent file cannot be read";
 const DOES_NOT_PARSE: &str = "agent file does not parse";

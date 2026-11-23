@@ -1666,6 +1666,7 @@ static FULL_RECOVERY_SCAN_DELAY_HOOKS: std::sync::LazyLock<
 
 /// Test hook: the next export scan for `data_dir` takes longer than the
 /// approval's lifetime (the step-up validation clock moves 200 s on).
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api) fn delay_next_full_recovery_scan_for_test(data_dir: &std::path::Path) {
     FULL_RECOVERY_SCAN_DELAY_HOOKS
@@ -4734,6 +4735,7 @@ fn required_string_array(data: &Value, field: &str) -> anyhow::Result<Vec<String
         .collect()
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn issue_passkey_session_grant(
     state: &GatewayState,
@@ -4980,7 +4982,9 @@ fn random_hex(bytes_len: usize) -> String {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    #[cfg(unix)]
     use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
+    #[cfg(unix)]
     use std::sync::Arc;
 
     #[test]
@@ -5023,6 +5027,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn test_gateway_state(data_dir: &std::path::Path) -> GatewayState {
         GatewayState {
             provider_registry: None,
@@ -5273,6 +5278,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     async fn did_recovery_test_gateway_state(
         data_dir: &std::path::Path,
         did_provider_valid: bool,
@@ -5300,11 +5306,13 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct MockDidRecoveryProvider {
         valid: bool,
     }
 
     #[async_trait::async_trait]
+    #[cfg(unix)]
     impl Provider for MockDidRecoveryProvider {
         async fn handle(
             &self,
@@ -5349,6 +5357,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn test_credential() -> StoredCredential {
         StoredCredential {
             credential_id: "credential-1".to_string(),
@@ -5358,6 +5367,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn test_credential_2() -> StoredCredential {
         StoredCredential {
             credential_id: "credential-2".to_string(),
@@ -5367,6 +5377,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn store_test_credential(data_dir: &std::path::Path, credential: StoredCredential) {
         let mut store = elastos_identity::IdentityStore::new(data_dir).unwrap();
         store.load().unwrap();
@@ -5374,6 +5385,7 @@ mod tests {
         store.save().unwrap();
     }
 
+    #[cfg(unix)]
     fn seed_test_passkey_principal(
         state: &GatewayState,
         credential: &StoredCredential,
@@ -5713,6 +5725,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     async fn assert_guest_registration_rejects_missing_admin(direct: bool, after_begin: bool) {
         use super::super::handlers::identity::{self, IdentityState};
         use axum::{
@@ -5870,6 +5883,7 @@ mod tests {
         assert_guest_registration_rejects_missing_admin(true, true).await;
     }
 
+    #[cfg(unix)]
     fn copy_test_auth_root(source: &std::path::Path, destination: &std::path::Path) {
         let state = crate::auth::load_auth_state(source).unwrap();
         std::fs::create_dir_all(destination.join("identity")).unwrap();
@@ -5881,6 +5895,7 @@ mod tests {
         crate::auth::save_auth_state(destination, &state, None).unwrap();
     }
 
+    #[cfg(unix)]
     fn home_token_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -5908,6 +5923,7 @@ mod tests {
         headers
     }
 
+    #[cfg(unix)]
     fn home_session_cookie_headers(token: &str) -> HeaderMap {
         let mut headers = home_token_headers(token);
         headers.remove("x-elastos-home-token");
@@ -5951,6 +5967,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn guided_owner_test_router(state: GatewayState) -> axum::Router {
         axum::Router::new()
             .route("/begin", axum::routing::post(passkey_register_begin))
@@ -5958,6 +5975,7 @@ mod tests {
             .with_state(state)
     }
 
+    #[cfg(unix)]
     async fn guided_owner_http(
         app: &axum::Router,
         path: &str,
@@ -7504,6 +7522,7 @@ mod tests {
         assert!(err.contains("home launch token"));
     }
 
+    #[cfg(unix)]
     fn root_protection_for(
         principal_id: &str,
         localhost_root: &str,
@@ -7536,6 +7555,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn recovery_kit_for(
         principal_id: &str,
         localhost_root: &str,
@@ -7561,10 +7581,12 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn did_recovery_subject() -> &'static str {
         "did:key:z6Mkh11111111111111111111111111111111111111111"
     }
 
+    #[cfg(unix)]
     fn did_recovery_proof_for(
         kit: &elastos_runtime::auth::RecoveryKitV1,
     ) -> elastos_runtime::auth::DidRecoveryProofV1 {
@@ -7582,6 +7604,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn did_root_protection_for(
         kit: &elastos_runtime::auth::RecoveryKitV1,
     ) -> elastos_runtime::auth::PrincipalRootProtectionV1 {
@@ -9080,8 +9103,10 @@ mod tests {
     // themselves. The Kit may only name a person id this Runtime mints; any
     // other id is refused before anything is read or written. Without that
     // rule the import renames the Guest's record to the named principal.
+    #[cfg(unix)]
     const SEC_KIT_REFUSAL: &str = "principal is not a person id this Runtime mints";
 
+    #[cfg(unix)]
     struct SecKitHome {
         temp: tempfile::TempDir,
         guest: PasskeyVerifyResponse,
@@ -9090,6 +9115,7 @@ mod tests {
     }
 
     /// An Admin, a signed-in Guest (the importer) and this Runtime's own DID.
+    #[cfg(unix)]
     fn sec_kit_home() -> SecKitHome {
         let temp = tempfile::tempdir().unwrap();
         let state = test_gateway_state(temp.path());
@@ -9127,6 +9153,7 @@ mod tests {
     }
 
     /// Every file under the data dir with its bytes.
+    #[cfg(unix)]
     fn sec_kit_snapshot(
         root: &std::path::Path,
     ) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
@@ -9148,6 +9175,7 @@ mod tests {
 
     /// The production HTTP handler, called with the Guest's own session and a
     /// plain bundle that asks for reassignment.
+    #[cfg(unix)]
     async fn sec_kit_import_over_http(
         home: &SecKitHome,
         kit: &RecoveryKitV1,
@@ -9185,6 +9213,7 @@ mod tests {
     /// name on the HTTP route and on the Kit import it calls. No file under
     /// the data dir changes (auth state, key material, the named root), and
     /// nothing at the named root is scanned, opened or read.
+    #[cfg(unix)]
     async fn sec_kit_assert_refused(home: &SecKitHome, principal_id: &str, decoy: bool) {
         let data_dir = home.temp.path();
         let root = crate::auth::principal_localhost_root(principal_id);
@@ -9488,6 +9517,7 @@ mod tests {
             .is_empty());
     }
 
+    #[cfg(unix)]
     fn local_profile_fixture_root() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -9498,6 +9528,7 @@ mod tests {
         root
     }
 
+    #[cfg(unix)]
     fn local_profile_owner_grant(
         data_dir: &std::path::Path,
     ) -> (StoredCredential, AuthSessionGrantV1) {
@@ -9558,6 +9589,7 @@ mod tests {
         (identity.credentials()[0].clone(), grant)
     }
 
+    #[cfg(unix)]
     fn local_profile_sign_in(
         data_dir: &std::path::Path,
         credential: &StoredCredential,
@@ -11097,6 +11129,7 @@ mod tests {
         assert!(err.contains("revoked"));
     }
 
+    #[cfg(unix)]
     struct PasskeyAddAccount {
         principal_id: String,
         localhost_root: String,
@@ -11106,6 +11139,7 @@ mod tests {
 
     /// A signed-in account on `localhost` with a Home session and the System
     /// launch Home hosts for it, as the real Add passkey journey has.
+    #[cfg(unix)]
     fn passkey_add_account(
         data_dir: &std::path::Path,
         credential_id: &str,
@@ -11188,6 +11222,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn passkey_add_approval(data_dir: &std::path::Path, account: &PasskeyAddAccount) -> String {
         super::super::gateway::issue_passkey_step_up_token_for_test(
             data_dir,
@@ -11199,6 +11234,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     async fn begin_passkey_add_for(
         state: &GatewayState,
         account: &PasskeyAddAccount,
@@ -11216,6 +11252,7 @@ mod tests {
         .await
     }
 
+    #[cfg(unix)]
     async fn complete_passkey_add_for(
         state: &GatewayState,
         account: &PasskeyAddAccount,
@@ -11241,6 +11278,7 @@ mod tests {
         .await
     }
 
+    #[cfg(unix)]
     fn records_for(
         data_dir: &std::path::Path,
         principal_id: &str,
@@ -11367,10 +11405,12 @@ mod tests {
     }
 
     /// Every credential in this Home's identity store.
+    #[cfg(unix)]
     async fn stored_credentials(state: &GatewayState) -> Vec<StoredCredential> {
         state.identity_manager().unwrap().lock().await.credentials()
     }
 
+    #[cfg(unix)]
     fn sign_in_with(
         data_dir: &std::path::Path,
         credential: &StoredCredential,

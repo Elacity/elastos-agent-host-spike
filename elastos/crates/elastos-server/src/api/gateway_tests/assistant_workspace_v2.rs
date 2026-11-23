@@ -2,6 +2,7 @@ use super::*;
 
 // Large preserved workspaces should fail with bounded diagnostics, not a dump
 // of every conversation. Equality remains exact for the original values.
+#[cfg(unix)]
 macro_rules! assert_bounded_eq {
     ($left:expr, $right:expr $(,)?) => {{
         let (left, right) = (&$left, &$right);
