@@ -18,6 +18,9 @@
 //! A DID message is not gossip. [`send_did_message`] names a peer DID and
 //! opaque bytes, and rides the PeerDid connection. The receiver records the
 //! sender from that connection's key. A `sender_id` in the body is not the sender.
+//! One Home keeps at most `DID_MESSAGE_INBOX_MAX_MESSAGES` messages, and each
+//! message is at most `DID_MESSAGE_MAX_BYTES` decoded bytes. A message past
+//! either cap is refused. Messages already stored stay.
 //!
 //! See `docs/CARRIER_TRUST_DECISION.md` for the rationale.
 
@@ -400,6 +403,20 @@ const GOSSIP_CURSOR_MAX_CONSUMER_ID_BYTES: usize = 128;
 const GOSSIP_PEEK_MAX_MESSAGES: usize = 256;
 // Maximum complete encoded provider response returned by one gossip_peek.
 const GOSSIP_PEEK_MAX_BATCH_BYTES: usize = GOSSIP_TOPIC_BUFFER_MAX_BYTES;
+/// How many DID messages one Home keeps. A full inbox refuses the new message.
+const DID_MESSAGE_INBOX_MAX_MESSAGES: usize = 256;
+/// Largest DID message, in decoded bytes. A larger body is refused.
+const DID_MESSAGE_MAX_BYTES: usize = 48 * 1024;
+/// The peer's fixed token when the inbox is already at the length cap.
+const DID_MESSAGE_INBOX_FULL: &str = "did_message_inbox_full";
+/// The peer's fixed token when one message is past the byte cap.
+const DID_MESSAGE_TOO_LARGE: &str = "did_message_too_large";
+/// The peer's fixed token when the named DID is this Home.
+const DID_MESSAGE_SELF: &str = "did_message_self";
+const _: () = assert!(DID_MESSAGE_INBOX_MAX_MESSAGES == GOSSIP_PEEK_MAX_MESSAGES);
+const _: () = assert!(
+    DID_MESSAGE_INBOX_MAX_MESSAGES * DID_MESSAGE_MAX_BYTES == GOSSIP_TOPIC_BUFFER_MAX_BYTES
+);
 
 /// Well-known secret for topic discovery. Any Carrier node with this secret
 /// can discover peers on the same topic via DHT.
@@ -811,7 +828,8 @@ pub struct GossipState {
     peers: Arc<Mutex<Vec<String>>>,
     topic_peers: Arc<Mutex<HashMap<String, HashSet<String>>>>,
     /// Messages this Home recorded from a PeerDid send. The sender is the
-    /// connection key, never a `sender_id` in the body.
+    /// connection key, never a `sender_id` in the body. The vec stops at
+    /// `DID_MESSAGE_INBOX_MAX_MESSAGES`. A further message is refused.
     pub(crate) did_messages: Arc<std::sync::Mutex<Vec<DidMessageRecord>>>,
     did: Option<String>,
     direct_only: bool,
@@ -3288,10 +3306,12 @@ fn carrier_provider_target_allowed(target: &str) -> bool {
         )
 }
 
-/// The sender is the connection key. A `sender_id` in the body is not the sender.
-fn did_message_sender(request: &serde_json::Value, bytes: &[u8], transport_did: &str) -> String {
-    let _ = (request.get("sender_id"), bytes);
-    transport_did.to_string()
+fn did_message_refused(code: &'static str, error: &'static str) -> Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "ok": false,
+        "code": code,
+        "error": error,
+    }))
 }
 
 fn deliver_did_message(
@@ -3299,11 +3319,10 @@ fn deliver_did_message(
     request: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     if request.get("op").and_then(|value| value.as_str()) != Some("deliver") {
-        return Ok(serde_json::json!({
-            "ok": false,
-            "code": "invalid_provider_invocation",
-            "error": "DID message operation is deliver",
-        }));
+        return did_message_refused(
+            "invalid_provider_invocation",
+            "DID message operation is deliver",
+        );
     }
     let body = request
         .get("body")
@@ -3312,27 +3331,33 @@ fn deliver_did_message(
     let bytes = match base64::engine::general_purpose::STANDARD.decode(body) {
         Ok(bytes) => bytes,
         Err(_) => {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "code": "invalid_provider_invocation",
-                "error": "DID message body is not base64",
-            }));
+            return did_message_refused(
+                "invalid_provider_invocation",
+                "DID message body is not base64",
+            );
         }
     };
+    // A loopback observation has no inbox. That send names this Home.
     let Some(inbox) = transport.did_messages.as_ref() else {
-        return Ok(serde_json::json!({
-            "ok": false,
-            "code": "invalid_provider_invocation",
-            "error": "DID message has no receive record",
-        }));
+        return did_message_refused(DID_MESSAGE_SELF, "DID message to this Home is refused");
     };
-    let source_endpoint_did = did_message_sender(request, &bytes, &transport.sending_runtime_did);
-    let record = DidMessageRecord {
+    if bytes.len() > DID_MESSAGE_MAX_BYTES {
+        return did_message_refused(
+            DID_MESSAGE_TOO_LARGE,
+            "DID message is larger than the byte cap",
+        );
+    }
+    // The recorded sender is the connection key. The body is not read for it.
+    let source_endpoint_did = transport.sending_runtime_did.clone();
+    let mut inbox = inbox.lock().expect("DID message inbox");
+    // Keep every message already stored. Refuse the new one.
+    if inbox.len() >= DID_MESSAGE_INBOX_MAX_MESSAGES {
+        return did_message_refused(DID_MESSAGE_INBOX_FULL, "DID message inbox is full");
+    }
+    inbox.push(DidMessageRecord {
         bytes,
         source_endpoint_did,
-    };
-    let mut inbox = inbox.lock().expect("DID message inbox");
-    inbox.push(record);
+    });
     let stored = inbox.last().expect("DID message just recorded");
     Ok(serde_json::json!({
         "ok": true,
@@ -8736,11 +8761,7 @@ impl CarrierProviderInvoker {
                 "Carrier loopback provider invocation failed: {err}"
             ))
         })?;
-        carrier_provider_invoke_result(response).map_err(|err| {
-            ProviderError::Provider(format!(
-                "Carrier loopback provider invocation failed: {err}"
-            ))
-        })
+        carrier_provider_invoke_result(response).map_err(carrier_loopback_provider_error)
     }
 }
 
@@ -9297,7 +9318,7 @@ pub(crate) const CARRIER_CONTENT_TOO_LARGE: &str = "content_too_large";
 /// A peer-DID call whose stream broke in transit, after the connect.
 pub(crate) const PEER_ROUTE_IN_TRANSIT: &str = "in_transit";
 
-const CARRIER_PROVIDER_DECISION_CODES: [&str; 10] = [
+const CARRIER_PROVIDER_DECISION_CODES: [&str; 13] = [
     "denied",
     "rate_limited",
     "offer_unavailable",
@@ -9308,6 +9329,9 @@ const CARRIER_PROVIDER_DECISION_CODES: [&str; 10] = [
     "provider_registry_unavailable",
     CARRIER_CONTENT_TOO_LARGE,
     crate::api::gateway::MODEL_AUTHORITY_TIMEOUT_CODE,
+    DID_MESSAGE_INBOX_FULL,
+    DID_MESSAGE_TOO_LARGE,
+    DID_MESSAGE_SELF,
 ];
 
 impl CarrierProviderDecision {
@@ -9360,6 +9384,24 @@ fn carrier_answer_read_error(error: std::io::Error) -> anyhow::Error {
 }
 
 impl std::error::Error for CarrierProviderDecision {}
+
+/// A loopback self-send shows its decision token. Other loopback failures
+/// keep their existing text. A remote peer already receives only the token.
+fn carrier_loopback_provider_error(err: anyhow::Error) -> ProviderError {
+    let detail = if err
+        .downcast_ref::<CarrierProviderDecision>()
+        .is_some_and(|decision| decision.code == DID_MESSAGE_SELF)
+    {
+        DID_MESSAGE_SELF
+    } else {
+        return ProviderError::Provider(format!(
+            "Carrier loopback provider invocation failed: {err}"
+        ));
+    };
+    ProviderError::Provider(format!(
+        "Carrier loopback provider invocation failed: {detail}"
+    ))
+}
 
 fn carrier_provider_invoke_result(response: serde_json::Value) -> Result<serde_json::Value> {
     if response.get("ok").and_then(|value| value.as_bool()) == Some(true) {
@@ -23814,7 +23856,7 @@ mod two_home_did_message_test {
     };
     use super::{
         public_key_to_did, send_did_message, start_isolated_carrier_node_with_registry,
-        CarrierProviderInvoker,
+        CarrierProviderInvoker, DID_MESSAGE_SELF,
     };
 
     #[tokio::test]
@@ -23901,6 +23943,24 @@ mod two_home_did_message_test {
         assert!(
             matches!(mismatch, ProviderError::Provider(ref message) if message.contains("does not match")),
             "{mismatch}"
+        );
+        assert_eq!(inbox.lock().expect("DID message inbox").len(), 1);
+
+        // A send to this Home is a typed refusal and is not stored.
+        let self_refused = send_did_message(&local_registry, &local_did, b"self")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                self_refused,
+                ProviderError::Provider(ref message) if message.contains(DID_MESSAGE_SELF)
+            ),
+            "{self_refused}"
+        );
+        let local_inbox = local_node.gossip_state.lock().await.did_messages.clone();
+        assert!(
+            local_inbox.lock().expect("DID message inbox").is_empty(),
+            "a message to this Home is not stored"
         );
         assert_eq!(inbox.lock().expect("DID message inbox").len(), 1);
 
@@ -24058,5 +24118,111 @@ mod gossip_visible_sender {
             .all(|message| message["content"] != "direct-frame"));
 
         shutdown_test_carrier_node(node).await;
+    }
+}
+
+#[cfg(test)]
+mod did_message_bounds {
+    use base64::Engine as _;
+
+    use super::{
+        carrier_provider_invoke_result, deliver_did_message, CarrierProviderDecision,
+        CarrierTransportObservation, DidMessageRecord, DID_MESSAGE_INBOX_FULL,
+        DID_MESSAGE_INBOX_MAX_MESSAGES, DID_MESSAGE_MAX_BYTES, DID_MESSAGE_SELF,
+        DID_MESSAGE_TOO_LARGE,
+    };
+
+    fn request(bytes: &[u8]) -> serde_json::Value {
+        serde_json::json!({
+            "op": "deliver",
+            "body": base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    fn connected_inbox() -> (
+        std::sync::Arc<std::sync::Mutex<Vec<DidMessageRecord>>>,
+        CarrierTransportObservation,
+    ) {
+        let inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let transport = CarrierTransportObservation {
+            sending_runtime_did: "did:key:zSender".into(),
+            did_messages: Some(inbox.clone()),
+        };
+        (inbox, transport)
+    }
+
+    fn assert_sender_hears(answer: &serde_json::Value, code: &str, error: &str) {
+        assert_eq!(answer["ok"], false, "{answer}");
+        assert_eq!(answer["code"], code, "{answer}");
+        assert_eq!(answer["error"], error, "{answer}");
+        let err = carrier_provider_invoke_result(answer.clone()).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<CarrierProviderDecision>()
+                .expect("refusal is a Carrier decision")
+                .code,
+            code
+        );
+    }
+
+    #[test]
+    fn did_message_inbox_refuses_past_did_message_inbox_max_messages() {
+        let (inbox, transport) = connected_inbox();
+        let first = b"first-kept".to_vec();
+        for index in 0..DID_MESSAGE_INBOX_MAX_MESSAGES {
+            let bytes = if index == 0 {
+                first.clone()
+            } else {
+                format!("kept-{index}").into_bytes()
+            };
+            let answer = deliver_did_message(&transport, &request(&bytes)).unwrap();
+            assert_eq!(answer["ok"], true, "{answer}");
+        }
+        let refused = deliver_did_message(&transport, &request(b"refused-when-full")).unwrap();
+        assert_sender_hears(
+            &refused,
+            DID_MESSAGE_INBOX_FULL,
+            "DID message inbox is full",
+        );
+        let stored = inbox.lock().expect("DID message inbox");
+        assert_eq!(stored.len(), DID_MESSAGE_INBOX_MAX_MESSAGES);
+        assert_eq!(stored[0].bytes, first);
+        assert_eq!(
+            stored.last().expect("inbox holds the cap").bytes,
+            format!("kept-{}", DID_MESSAGE_INBOX_MAX_MESSAGES - 1).into_bytes()
+        );
+        assert!(stored
+            .iter()
+            .all(|record| record.bytes != b"refused-when-full"));
+    }
+
+    #[test]
+    fn did_message_inbox_refuses_past_did_message_max_bytes() {
+        let (inbox, transport) = connected_inbox();
+        let fits = vec![0xABu8; DID_MESSAGE_MAX_BYTES];
+        let accepted = deliver_did_message(&transport, &request(&fits)).unwrap();
+        assert_eq!(accepted["ok"], true, "{accepted}");
+        let over = vec![0xCDu8; DID_MESSAGE_MAX_BYTES + 1];
+        let refused = deliver_did_message(&transport, &request(&over)).unwrap();
+        assert_sender_hears(
+            &refused,
+            DID_MESSAGE_TOO_LARGE,
+            "DID message is larger than the byte cap",
+        );
+        let stored = inbox.lock().expect("DID message inbox");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].bytes, fits);
+    }
+
+    #[test]
+    fn did_message_self_send_is_a_typed_refusal() {
+        let (_key, did) = elastos_identity::derive_did(&[0xE1; 32]);
+        let transport = CarrierTransportObservation::checked_sender_runtime_did(did).unwrap();
+        assert!(transport.did_messages.is_none());
+        let refused = deliver_did_message(&transport, &request(b"self")).unwrap();
+        assert_sender_hears(
+            &refused,
+            DID_MESSAGE_SELF,
+            "DID message to this Home is refused",
+        );
     }
 }
