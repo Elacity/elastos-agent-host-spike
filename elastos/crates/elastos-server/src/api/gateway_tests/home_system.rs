@@ -3906,6 +3906,208 @@ async fn test_services_remote_exit_request_delivers_provider_inbox_notification(
 }
 
 #[cfg(unix)]
+fn text_has_socket_address(text: &str) -> bool {
+    text.split(|ch: char| {
+        ch.is_ascii_whitespace() || matches!(ch, '"' | ',' | '{' | '}' | '[' | ']' | '\\')
+    })
+    .any(token_is_socket_address)
+}
+
+#[cfg(unix)]
+fn token_is_socket_address(token: &str) -> bool {
+    if let Some(ip) = token.strip_prefix('[') {
+        let Some((addr, port)) = ip.rsplit_once("]:") else {
+            return false;
+        };
+        return !addr.is_empty()
+            && addr.contains(':')
+            && (1..=5).contains(&port.len())
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port
+                .parse::<u32>()
+                .ok()
+                .is_some_and(|port| port > 0 && port <= 65535);
+    }
+    let Some((addr, port)) = token.rsplit_once(':') else {
+        return false;
+    };
+    let octets = addr.split('.').collect::<Vec<_>>();
+    octets.len() == 4
+        && octets.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.len() <= 3
+                && octet.bytes().all(|byte| byte.is_ascii_digit())
+                && octet.parse::<u16>().ok().is_some_and(|n| n <= 255)
+        })
+        && (1..=5).contains(&port.len())
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|port| port > 0 && port <= 65535)
+}
+
+#[cfg(unix)]
+fn ticket_has_socket_address(text: &str) -> bool {
+    crate::carrier::decode_ticket_endpoints(text)
+        .into_iter()
+        .any(|endpoint| {
+            endpoint
+                .addrs
+                .iter()
+                .any(|addr| matches!(addr, iroh::TransportAddr::Ip(_)))
+        })
+}
+
+#[cfg(unix)]
+fn json_reveals_socket_address(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, child)| key == "connect_ticket" || json_reveals_socket_address(child)),
+        serde_json::Value::Array(items) => items.iter().any(json_reveals_socket_address),
+        serde_json::Value::String(text) => {
+            text_has_socket_address(text) || ticket_has_socket_address(text)
+        }
+        _ => false,
+    }
+}
+
+/// A service-decision body reveals a socket address when it names
+/// `connect_ticket`, contains an ip:port, or carries a Carrier ticket whose
+/// endpoints hold one.
+#[cfg(unix)]
+fn service_decision_body_reveals_socket_address(body: &str) -> bool {
+    if body.contains("connect_ticket") || text_has_socket_address(body) {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|value| json_reveals_socket_address(&value))
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+#[tokio::test]
+async fn service_decision_gossip_recv_does_not_reveal_a_socket_address() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+    let ticket = services_direct_route_ticket(&bob.peer_id);
+    assert!(
+        ticket_has_socket_address(&ticket),
+        "the fixture ticket must decode to a socket address"
+    );
+    bus.lock()
+        .await
+        .ticket_by_peer
+        .insert(bob.peer_id.clone(), ticket.clone());
+
+    let action = services_contact_pending_request(left.path(), right.path(), &alice, &bob).await;
+    let inbox_token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &inbox_token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let engine_action =
+        services_contact_pending_engine_request(left.path(), right.path(), &alice, &bob).await;
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &inbox_token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": engine_action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let recv = alice
+        .peer_provider
+        .send_raw(&json!({
+            "op": "gossip_recv",
+            "topic": super::super::gateway_home_system::HOME_SERVICES_REQUESTS_TOPIC,
+            "consumer_id": "service-decision-socket-scan",
+            "limit": 64,
+        }))
+        .await
+        .unwrap();
+    let messages = recv["data"]["messages"].as_array().unwrap();
+    let mut decisions = Vec::new();
+    for message in messages {
+        let content = message["content"].as_str().unwrap_or("");
+        assert!(
+            !service_decision_body_reveals_socket_address(content),
+            "gossip body reveals a socket address: {content}"
+        );
+        let payload: serde_json::Value = serde_json::from_str(content).unwrap();
+        if payload["kind"] == "service_access_decision" && payload["decision"] == "approved" {
+            let verified = crate::carrier::verify_service_message(message, "provider_peer_id")
+                .expect("step 2 signature check still accepts the decision");
+            assert_eq!(verified["provider_peer_id"], bob.peer_id);
+            assert!(verified["signer_did"].as_str().is_some());
+            assert!(verified.get("connect_ticket").is_none());
+            decisions.push(verified);
+        }
+    }
+    let exit_decision = decisions
+        .iter()
+        .find(|payload| payload.get("remote_exit_grant").is_some())
+        .expect("exit decision");
+    let engine_decision = decisions
+        .iter()
+        .find(|payload| payload.get("remote_engine_grant").is_some())
+        .expect("engine decision");
+    assert_eq!(exit_decision["remote_exit_grant"]["peer_did"], bob.peer_id);
+    assert!(exit_decision["remote_exit_grant"]
+        .get("connect_ticket")
+        .is_none());
+    assert_eq!(
+        engine_decision["remote_engine_grant"]["peer_did"],
+        bob.peer_id
+    );
+    assert!(engine_decision["remote_engine_grant"]
+        .get("connect_ticket")
+        .is_none());
+
+    let services_token =
+        app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &alice.authority);
+    let (_, summary) = home_test_get_json(
+        &alice.app,
+        "/api/apps/services/summary",
+        &services_token,
+        "null",
+    )
+    .await;
+    let summary_text = summary.to_string();
+    assert!(!summary_text.contains(&ticket));
+    assert!(!summary_text.contains("203.0.113.8"));
+    assert!(!summary_text.contains("connect_ticket"));
+    let exit_config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(left.path().join("config/exit-provider.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(exit_config["remote_carrier_exits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|exit| exit["connect_ticket"] == ticket && exit["peer_did"] == bob.peer_id));
+    let saved = services_contact_saved_state(left.path(), &alice.authority, "services-state.json");
+    let engine_grant =
+        &saved["remote_offer_requests"][services_engine_offer(&bob)]["remote_engine_grant"];
+    assert_eq!(engine_grant["peer_did"], bob.peer_id);
+    assert_eq!(engine_grant["connect_ticket"], ticket);
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn test_services_remote_exit_request_local_only_does_not_save_requested_state() {
     let left = tempfile::tempdir().unwrap();
@@ -11366,19 +11568,16 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
             crate::carrier::CarrierProviderInvoker::with_carrier_endpoint(endpoint.clone()),
         ))
         .await;
-    // The fake gossip bus retains the actual serving endpoint in its signed decision.
-    // The consumer still validates that first decision through normal Services.
+    // The serving endpoint stays in the private route store. The signed
+    // decision names the peer and does not carry the ticket.
+    super::super::gateway_home_system::remember_private_service_route(&bob.peer_id, &ticket)
+        .unwrap();
     {
-        let mut mailbox = bus.lock().await;
-        for message in mailbox.topic_messages.values_mut().flatten() {
-            let mut payload: Value =
-                serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
-            if payload["kind"] == "service_access_decision" && payload["decision"] == "approved" {
-                payload["remote_engine_grant"]["connect_ticket"] = json!(ticket);
-                crate::carrier::sign_service_message(right.path(), &mut payload).unwrap();
-                message["content"] = json!(payload.to_string());
-            }
-        }
+        let mailbox = bus.lock().await;
+        assert!(mailbox.topic_messages.values().flatten().all(|message| {
+            let content = message["content"].as_str().unwrap_or("");
+            !content.contains(&ticket) && !content.contains("connect_ticket")
+        }));
     }
     let token = app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &alice.authority);
     let (_, summary) =

@@ -29,11 +29,12 @@ const HOME_SERVICES_STATE_SCHEMA: &str = "elastos.services.state/v1";
 const HOME_SERVICES_STATE_MAX_BYTES: usize = 32 * 1024;
 const HOME_SERVICES_REQUESTS_SCHEMA: &str = "elastos.services.requests/v1";
 const HOME_SERVICES_REQUESTS_MAX_BYTES: usize = 64 * 1024;
-const HOME_SERVICES_REQUESTS_TOPIC: &str = "__elastos_internal/service-requests-v1";
+pub(crate) const HOME_SERVICES_REQUESTS_TOPIC: &str = "__elastos_internal/service-requests-v1";
 const HOME_MODEL_CATALOG_TTL_SECS: u64 = 120;
 const HOME_MODEL_CATALOG_MAX_OFFERS: usize = 16;
 const HOME_MODEL_CATALOG_RESPONSE_COOLDOWN_SECS: u64 = 5;
 const HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES: usize = 8192;
+const PRIVATE_SERVICE_ROUTE_CAP: usize = 1024;
 const HOME_BROWSER_EXIT_LOCAL_OFFER_ID: &str = "local:provider:browser-exit";
 const HOME_BROWSER_EXIT_PEER_SERVICE_URI: &str = "elastos://peer/browser-exit";
 const HOME_REMOTE_EXIT_SERVICE_KIND: &str = "remote_exit";
@@ -3567,6 +3568,18 @@ fn home_services_send_access_decision(
         "decision": decision,
         "created_at": created_at,
     });
+    let grants_a_route = decision == "approved"
+        && ((request.service_uri == HOME_BROWSER_EXIT_PEER_SERVICE_URI
+            && request.service_kind == HOME_REMOTE_EXIT_SERVICE_KIND)
+            || (request.service_kind == crate::carrier::ENGINE_SERVICE_KIND
+                && request.service_uri == crate::carrier::ENGINE_SERVICE_URI)
+            || (request.service_kind == super::MODEL_SERVICE_KIND
+                && request.service_uri == super::MODEL_SERVICE_URI));
+    if grants_a_route {
+        // The gossip body names the peer. The ticket stays in the private
+        // store and is remembered again before a later invoke.
+        remember_private_service_route(&runtime.peer_id, &runtime.connect_ticket)?;
+    }
     if decision == "approved"
         && request.service_uri == HOME_BROWSER_EXIT_PEER_SERVICE_URI
         && request.service_kind == HOME_REMOTE_EXIT_SERVICE_KIND
@@ -3577,7 +3590,6 @@ fn home_services_send_access_decision(
             "grant_id": home_services_remote_exit_grant_id(&request.request_id),
             "peer_did": &runtime.peer_id,
             "carrier_service": "elastos://exit/open_stream",
-            "connect_ticket": &runtime.connect_ticket,
             "allowed_schemes": ["tcp", "tls"],
             "allowed_ports": [80, 443],
             "expires_at": request.grant_expires_at,
@@ -3592,7 +3604,7 @@ fn home_services_send_access_decision(
         payload["remote_engine_grant"] = serde_json::json!({
             "schema":"elastos.service.remote-engine-grant/v1",
             "grant_id":crate::carrier::engine_grant_id(&request.request_id),
-            "peer_did":runtime.peer_id, "connect_ticket":runtime.connect_ticket,
+            "peer_did":runtime.peer_id,
             "operations":crate::carrier::browser_engine_binding::operations(request.grant_scope.as_deref()),
             "expires_at":request.grant_expires_at,
         });
@@ -3605,7 +3617,6 @@ fn home_services_send_access_decision(
             "schema": super::MODEL_GRANT_SCHEMA,
             "grant_id": super::model_grant_id(&request.request_id),
             "peer_did": runtime.peer_id,
-            "connect_ticket": runtime.connect_ticket,
             "offer_ids": &request.approved_offer_ids,
             "offer_revision": &request.approved_offer_revision,
             "operations": super::MODEL_OPERATIONS,
@@ -3743,7 +3754,13 @@ fn home_services_sync_access_decisions(
         {
             continue;
         }
-        match home_services_merge_access_decision(context, &mut state, &payload, &runtime.peer_id) {
+        match home_services_merge_access_decision(
+            data_dir,
+            context,
+            &mut state,
+            &payload,
+            &runtime.peer_id,
+        ) {
             Ok(merged) => changed |= merged,
             Err(err) => tracing::warn!("service access decision ignored: {err}"),
         }
@@ -3830,6 +3847,7 @@ fn home_services_merge_model_catalog(
 }
 
 fn home_services_merge_access_decision(
+    data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
     state: &mut HomeServicesSelectionState,
     payload: &serde_json::Value,
@@ -3905,20 +3923,26 @@ fn home_services_merge_access_decision(
         remote_engine: if decision == "approved"
             && record.service_kind == crate::carrier::ENGINE_SERVICE_KIND
         {
-            Some(home_services_remote_engine_grant(context, record, payload)?)
+            Some(home_services_remote_engine_grant(
+                data_dir, context, record, payload,
+            )?)
         } else {
             None
         },
         remote_model: if decision == "approved" && record.service_kind == super::MODEL_SERVICE_KIND
         {
-            Some(home_services_remote_model_grant(context, record, payload)?)
+            Some(home_services_remote_model_grant(
+                data_dir, context, record, payload,
+            )?)
         } else {
             None
         },
         remote_exit: if decision == "approved"
             && record.service_kind == HOME_REMOTE_EXIT_SERVICE_KIND
         {
-            Some(home_services_remote_exit_grant(context, record, payload)?)
+            Some(home_services_remote_exit_grant(
+                data_dir, context, record, payload,
+            )?)
         } else {
             None
         },
@@ -4497,11 +4521,111 @@ fn home_services_remote_exit_grant_id(request_id: &str) -> String {
     format!("services-remote-exit-grant-{}", hex::encode(&digest[..8]))
 }
 
+struct PrivateServiceRoute {
+    ticket: String,
+    remembered_at: std::time::Instant,
+}
+
+fn private_service_routes() -> &'static Mutex<BTreeMap<String, PrivateServiceRoute>> {
+    static ROUTES: OnceLock<Mutex<BTreeMap<String, PrivateServiceRoute>>> = OnceLock::new();
+    ROUTES.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn accepted_service_route_ticket(ticket: &str) -> Option<String> {
+    let ticket = ticket.trim();
+    if ticket.is_empty()
+        || ticket.len() > HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES
+        || ticket
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+    {
+        None
+    } else {
+        Some(ticket.to_string())
+    }
+}
+
+/// Remember a provider ticket outside the gossip decision. The invoking Home
+/// reads it back when it installs the grant, then remembers it again on the
+/// Carrier address book before the invoke.
+pub(crate) fn remember_private_service_route(peer_id: &str, ticket: &str) -> anyhow::Result<()> {
+    let peer_id = peer_id.trim();
+    anyhow::ensure!(
+        !peer_id.is_empty()
+            && peer_id.len() <= 256
+            && !peer_id
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0),
+        "service peer route identity is invalid"
+    );
+    let ticket = accepted_service_route_ticket(ticket)
+        .ok_or_else(|| anyhow::anyhow!("service peer route ticket is invalid"))?;
+    let mut routes = private_service_routes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !routes.contains_key(peer_id) && routes.len() >= PRIVATE_SERVICE_ROUTE_CAP {
+        if let Some(oldest) = routes
+            .iter()
+            .min_by_key(|(_, route)| route.remembered_at)
+            .map(|(id, _)| id.clone())
+        {
+            routes.remove(&oldest);
+        }
+    }
+    routes.insert(
+        peer_id.to_string(),
+        PrivateServiceRoute {
+            ticket,
+            remembered_at: std::time::Instant::now(),
+        },
+    );
+    Ok(())
+}
+
+fn private_service_route(peer_id: &str) -> Option<String> {
+    private_service_routes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(peer_id.trim())
+        .map(|route| route.ticket.clone())
+}
+
+fn operator_service_route(data_dir: &std::path::Path, peer_id: &str) -> Option<String> {
+    let config = crate::operator_control::load_operator_control(data_dir).ok()?;
+    let did = peer_id
+        .parse::<iroh::PublicKey>()
+        .ok()
+        .and_then(|key| crate::carrier::public_key_to_did(&key).ok());
+    let ticket = config
+        .peers
+        .into_iter()
+        .find(|peer| peer.did == peer_id || did.as_deref() == Some(peer.did.as_str()))?
+        .connect_ticket;
+    accepted_service_route_ticket(&ticket)
+}
+
+fn service_route_ticket(data_dir: &std::path::Path, peer_id: &str) -> Option<String> {
+    private_service_route(peer_id).or_else(|| operator_service_route(data_dir, peer_id))
+}
+
+fn decision_grant_route_ticket(
+    data_dir: &std::path::Path,
+    grant: &serde_json::Value,
+    peer_id: &str,
+    missing: &'static str,
+) -> anyhow::Result<String> {
+    if grant.get("connect_ticket").is_some() {
+        anyhow::bail!("approved service decision must not carry a Carrier ticket");
+    }
+    service_route_ticket(data_dir, peer_id).ok_or_else(|| anyhow::anyhow!(missing))
+}
+
 fn home_services_exit_provider_config_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("config/exit-provider.json")
 }
 
 fn home_services_remote_exit_grant(
+    data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
     record: &HomeServicesRemoteOfferRequestRecord,
     payload: &serde_json::Value,
@@ -4515,12 +4639,12 @@ fn home_services_remote_exit_grant(
         .ok_or_else(|| {
             anyhow::anyhow!("approved Browser Exit decision did not include a remote Exit grant")
         })?;
-    let connect_ticket = home_services_payload_text(
+    let connect_ticket = decision_grant_route_ticket(
+        data_dir,
         grant,
-        "connect_ticket",
-        HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES,
-    )
-    .ok_or_else(|| anyhow::anyhow!("approved Browser Exit grant is missing a Carrier ticket"))?;
+        &record.target_peer_id,
+        "approved Browser Exit grant has no private Carrier route",
+    )?;
     let provider_peer_id = home_services_payload_text(grant, "peer_did", 256)
         .or_else(|| home_services_payload_text(payload, "provider_peer_id", 256))
         .ok_or_else(|| anyhow::anyhow!("approved Browser Exit grant is missing a provider peer"))?;
@@ -4575,6 +4699,7 @@ fn home_services_remote_exit_grant(
 }
 
 fn home_services_remote_engine_grant(
+    data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
     record: &HomeServicesRemoteOfferRequestRecord,
     payload: &serde_json::Value,
@@ -4586,12 +4711,12 @@ fn home_services_remote_engine_grant(
     let expiry = grant["expires_at"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("Engine grant expiry required"))?;
-    let ticket = home_services_payload_text(
+    let ticket = decision_grant_route_ticket(
+        data_dir,
         grant,
-        "connect_ticket",
-        HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES,
-    )
-    .ok_or_else(|| anyhow::anyhow!("Engine Carrier ticket required"))?;
+        &record.target_peer_id,
+        "Engine grant has no private Carrier route",
+    )?;
     anyhow::ensure!(
         grant["schema"] == "elastos.service.remote-engine-grant/v1"
             && grant["grant_id"].as_str()
@@ -4616,6 +4741,7 @@ fn home_services_remote_engine_grant(
 }
 
 fn home_services_remote_model_grant(
+    data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
     record: &HomeServicesRemoteOfferRequestRecord,
     payload: &serde_json::Value,
@@ -4627,12 +4753,12 @@ fn home_services_remote_model_grant(
     let expiry = grant["expires_at"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("model grant expiry required"))?;
-    let ticket = home_services_payload_text(
+    let ticket = decision_grant_route_ticket(
+        data_dir,
         grant,
-        "connect_ticket",
-        HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES,
-    )
-    .ok_or_else(|| anyhow::anyhow!("model Carrier ticket required"))?;
+        &record.target_peer_id,
+        "model grant has no private Carrier route",
+    )?;
     anyhow::ensure!(
         grant["schema"] == super::MODEL_GRANT_SCHEMA
             && grant["grant_id"].as_str()
