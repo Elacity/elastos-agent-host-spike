@@ -3509,11 +3509,10 @@ mod tests {
                 fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
             }
             let registry = provider::ProviderRegistry::new();
-            let error =
-                start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
-                    .await
-                    .err()
-                    .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the wallet provider"));
+            let error = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the wallet provider"));
             let message = error.to_string();
             if dev_mode {
                 assert!(
