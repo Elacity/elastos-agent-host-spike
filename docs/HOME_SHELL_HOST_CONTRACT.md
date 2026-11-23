@@ -137,6 +137,8 @@ child the terminal environment. That child uses the environment for an internal
 projection token. The TUI has no host shell and no export-mint action. The
 public journey smoke requires `ELASTOS_CLI_LAUNCH_TOKEN` from the operator.
 
+The device key issues a launch token for two shells: `home` and `home-cli`. A standalone summary read for one of those shells uses that token. A standalone command that acts for another app uses the Home passkey mint. The gateway-owned grant serves every app that the grant names. When that grant is absent, the command stops and reports that device launch authority is limited to home and home-cli. This closed result for a standalone write on behalf of another app is the boundary recorded in #1817.
+
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers
 appropriate to their document or asset role.

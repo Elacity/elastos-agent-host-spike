@@ -72,21 +72,6 @@ fn row(
 /// so a new open site cannot land by editing only the row's status.
 const OPEN_ROWS: &[(&str, &str, &str)] = &[
     (
-        "elastos-server/src/api/gateway.rs",
-        "issue_local_runtime_home_launch_token",
-        "issue_local_runtime_home_launch_token",
-    ),
-    (
-        "elastos-server/src/api/gateway_home_token.rs",
-        "issue_local_runtime_home_launch_token",
-        "issue_home_launch_token_with_context",
-    ),
-    (
-        "elastos-server/src/api/gateway_home_token.rs",
-        "issue_local_runtime_home_launch_token",
-        "local_home_launch_token_context",
-    ),
-    (
         "elastos-server/src/api/gateway_home_token.rs",
         "local_home_launch_token_context",
         "HomeLaunchTokenContext::resolved",
@@ -95,11 +80,6 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "elastos-server/src/api/gateway_home_token.rs",
         "local_home_launch_token_context",
         "load_or_create_did",
-    ),
-    (
-        "elastos-server/src/home_cmd.rs",
-        "issue_capsule_launch_token",
-        "issue_local_runtime_home_launch_token",
     ),
     (
         "elastos-server/src/provider_host.rs",
@@ -282,7 +262,7 @@ fn rows() -> Vec<HeldRow> {
         "issue_local_runtime_home_launch_token",
         "issue_local_runtime_home_launch_token",
         1,
-        mark("open", "public device mint", "any app", "The public wrapper mints with the device key for a caller-named app"),
+        mark("narrowed", "public device mint", "home and home-cli", "The public wrapper forwards to the device mint, which accepts only home and home-cli"),
     ),
     row(
         "elastos-server/src/api/gateway_agents.rs",
@@ -597,7 +577,7 @@ fn rows() -> Vec<HeldRow> {
         "issue_home_launch_token_with_context",
         "issue_home_launch_token_at",
         1,
-        mark("open-latent", "caller-named app token", "caller-named app", "This issuer has no grant.apps check; its only production caller is the device mint"),
+        mark("open-latent", "caller-named app token", "caller-named app", "This issuer has no grant.apps check; its only production caller restricts the app to home and home-cli"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",
@@ -618,14 +598,14 @@ fn rows() -> Vec<HeldRow> {
         "issue_local_runtime_home_launch_token",
         "issue_home_launch_token_with_context",
         1,
-        mark("open", "caller-named app token", "device", "The device mint signs a token for whatever app the caller names"),
+        mark("narrowed", "home and home-cli token", "device", "The device mint signs a token only for home and home-cli"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",
         "issue_local_runtime_home_launch_token",
         "local_home_launch_token_context",
         1,
-        mark("open", "device launch context", "device", "The device mint loads a device context with no grant"),
+        mark("narrowed", "device launch context", "home and home-cli", "The device mint loads a device context only after the app is home or home-cli"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",
@@ -1115,7 +1095,7 @@ fn rows() -> Vec<HeldRow> {
         "issue_capsule_launch_token",
         "issue_local_runtime_home_launch_token",
         1,
-        mark("open", "standalone device fallback", "any app", "Without the gateway-owned grant the CLI mints with the device key"),
+        mark("narrowed", "standalone device fallback", "home and home-cli", "Without the gateway-owned grant the CLI mints a device token only for home and home-cli"),
     ),
     row(
         "elastos-server/src/home_cmd.rs",
