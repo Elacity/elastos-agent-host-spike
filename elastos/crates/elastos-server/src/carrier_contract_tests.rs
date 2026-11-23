@@ -379,6 +379,8 @@ impl CarrierUnderTest for CurrentCarrier {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(message["content"].as_str().unwrap_or_default())
             .map_err(|_| ProviderError::Provider("invalid message body".into()))?;
+        // The shown sender is the transport Home, or empty. A payload
+        // sender_id is not that Home.
         Ok(Some(Observation {
             bytes,
             sender_did: message["sender_id"].as_str().unwrap_or_default().into(),
@@ -623,10 +625,31 @@ async fn r6_request_reply_responder_opaque_body(carrier: &dyn CarrierUnderTest) 
     assert_eq!(reply.bytes, opaque);
 }
 
+fn assert_visible_gossip_home(
+    received: &Observation,
+    carrier: &dyn CarrierUnderTest,
+    forged: &str,
+) {
+    assert_ne!(
+        received.sender_did, forged,
+        "a caller sender_id is not the sending Home"
+    );
+    assert!(
+        received.sender_did.is_empty() || received.sender_did == carrier.sender_did(),
+        "gossip shows the transport Home or no sender, got {}",
+        received.sender_did
+    );
+}
+
+// A topic delivers the bytes. The visible sender is the transport Home, or
+// none. A caller sender_id is not that Home.
 async fn m1_message_bytes(carrier: &dyn CarrierUnderTest) {
     let sent = b"message:contract bytes";
-    let (_, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, None).await;
+    let forged = elastos_identity::derive_did(&[215; 32]).1;
+    assert_ne!(forged, carrier.sender_did());
+    let (_, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, Some(&forged)).await;
     assert_eq!(received.bytes, sent);
+    assert_visible_gossip_home(&received, carrier, &forged);
 }
 
 // The recorded sender is the transport DID. A sender_id in the body is not the sender.
@@ -658,10 +681,15 @@ async fn m4_message_private_answer(carrier: &dyn CarrierUnderTest) {
     assert_no_topology(&answer, carrier);
 }
 
+// A notice delivers the bytes and does not take a caller sender. The visible
+// sender is the transport Home, or none.
 async fn n1_notification_bytes_no_reply(carrier: &dyn CarrierUnderTest) {
     let sent = b"notice:contract bytes";
-    let (_, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
+    let forged = elastos_identity::derive_did(&[215; 32]).1;
+    assert_ne!(forged, carrier.sender_did());
+    let (_, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, Some(&forged)).await;
     assert_eq!(received.bytes, sent);
+    assert_visible_gossip_home(&received, carrier, &forged);
     // After the round trip the neighbour link is up, so this acknowledgement
     // is the complete send answer: status, data.remote_peer_count and the
     // runtime's transfer metadata, no reply body and no further keys.

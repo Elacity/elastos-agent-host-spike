@@ -8,13 +8,12 @@
 //!
 //! ## Trust boundary
 //!
-//! Carrier is a **transport-only** layer. It delivers gossip messages without
-//! authenticating sender identity or verifying message signatures. The
-//! `sender_id` and `signature` fields in GossipMessage are caller-controlled
-//! and NOT validated by Carrier — they are the application layer's
-//! responsibility. Capsules that need authenticated messages must implement
-//! their own signing and verification (the chat capsule does this via
-//! `signing_payload_hex` in app.rs).
+//! Carrier delivers gossip frames. A `sender_id` or `signature` in the frame
+//! is not the sending Home. `gossip_send` does not take a caller `sender_id`.
+//! `gossip_recv` shows a sending Home only when that frame was delivered
+//! directly by the Home's Carrier key. A forwarded frame shows no sender.
+//! A signed collaboration envelope keeps its own signature check above this
+//! layer. That check reads the envelope, not the gossip `sender_id`.
 //!
 //! A DID message is not gossip. [`send_did_message`] names a peer DID and
 //! opaque bytes, and rides the PeerDid connection. The receiver records the
@@ -466,6 +465,10 @@ fn requested_gossip_nonce(request: &serde_json::Value) -> u64 {
 #[derive(Default)]
 struct TopicBuffer {
     messages: VecDeque<GossipMessage>,
+    /// Sending Home for each retained frame, one entry per message. `None`
+    /// means `gossip_recv` shows no sender. The frame's `sender_id` is not
+    /// this value.
+    checked_senders: VecDeque<Option<String>>,
     base_index: u64,
     retained_bytes: usize,
     /// Gossip frames received from peers on this topic, kept across a rejoin
@@ -589,7 +592,9 @@ fn gossip_message_encoded_len(message: &GossipMessage) -> usize {
 }
 
 fn pop_gossip_buffer_front(buffer: &mut TopicBuffer) -> Option<GossipMessage> {
+    debug_assert_eq!(buffer.messages.len(), buffer.checked_senders.len());
     let message = buffer.messages.pop_front()?;
+    let _ = buffer.checked_senders.pop_front();
     buffer.retained_bytes = buffer
         .retained_bytes
         .checked_sub(gossip_message_encoded_len(&message))
@@ -599,6 +604,14 @@ fn pop_gossip_buffer_front(buffer: &mut TopicBuffer) -> Option<GossipMessage> {
 }
 
 fn push_gossip_buffer_message(buffer: &mut TopicBuffer, message: GossipMessage) -> bool {
+    push_gossip_buffer_frame(buffer, message, None)
+}
+
+fn push_gossip_buffer_frame(
+    buffer: &mut TopicBuffer,
+    message: GossipMessage,
+    checked_sender: Option<String>,
+) -> bool {
     if buffer
         .messages
         .iter()
@@ -621,7 +634,45 @@ fn push_gossip_buffer_message(buffer: &mut TopicBuffer, message: GossipMessage) 
     }
     buffer.retained_bytes += encoded_len;
     buffer.messages.push_back(message);
+    buffer
+        .checked_senders
+        .push_back(checked_sender.filter(|sender| !sender.is_empty()));
+    debug_assert_eq!(buffer.messages.len(), buffer.checked_senders.len());
     true
+}
+
+/// A caller `sender_id` is not the sending Home. A local insert has no
+/// Carrier delivery to check, so `gossip_recv` shows no sender.
+fn gossip_send_checked_sender(_request: &serde_json::Value) -> Option<String> {
+    None
+}
+
+/// The sending Home is the Carrier key that delivered the frame, and only
+/// when that delivery was direct. A forwarded frame has no sending Home.
+fn gossip_checked_sender(
+    scope: iroh_gossip::proto::DeliveryScope,
+    delivered_from: &iroh::EndpointId,
+) -> Option<String> {
+    if !scope.is_direct() {
+        return None;
+    }
+    public_key_to_did(delivered_from).ok()
+}
+
+fn gossip_recv_message(message: &GossipMessage, checked_sender: Option<&str>) -> serde_json::Value {
+    let mut value =
+        serde_json::to_value(message).expect("GossipMessage JSON serialization cannot fail");
+    let object = value
+        .as_object_mut()
+        .expect("GossipMessage JSON is an object");
+    object.remove("sender_id");
+    if let Some(sender) = checked_sender.filter(|sender| !sender.is_empty()) {
+        object.insert(
+            "sender_id".to_string(),
+            serde_json::Value::String(sender.to_string()),
+        );
+    }
+    value
 }
 
 /// Active neighbours a Community bootstrap node keeps. Homes behind NAT reach
@@ -7733,16 +7784,8 @@ impl Provider for CarrierGossipProvider {
                     }
                 };
 
-                let default_id = state
-                    .did
-                    .clone()
-                    .unwrap_or_else(|| state.endpoint.id().to_string());
                 let msg = GossipMessage {
-                    sender_id: request
-                        .get("sender_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&default_id)
-                        .to_string(),
+                    sender_id: String::new(),
                     sender_nick: sender_nick.to_string(),
                     content: message.to_string(),
                     ts: requested_gossip_ts(request),
@@ -7772,7 +7815,11 @@ impl Provider for CarrierGossipProvider {
                 {
                     let mut bufs = state.buffers.lock().await;
                     if let Some(buf) = bufs.get_mut(topic_name) {
-                        push_gossip_buffer_message(buf, msg.clone());
+                        push_gossip_buffer_frame(
+                            buf,
+                            msg.clone(),
+                            gossip_send_checked_sender(request),
+                        );
                     }
                 }
 
@@ -8026,7 +8073,7 @@ impl Provider for CarrierGossipProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("default")
                     .to_string();
-                // Skip messages from this sender (prevents local loopback echo)
+                // Skip the transport-checked Home. A payload sender_id does not match.
                 let skip_sender_id = request
                     .get("skip_sender_id")
                     .and_then(|v| v.as_str())
@@ -8067,16 +8114,29 @@ impl Provider for CarrierGossipProvider {
                     0
                 };
 
-                let all: Vec<&GossipMessage> =
-                    buf.messages.iter().skip(start).take(limit).collect();
-                let count = all.len();
-                let messages: Vec<&GossipMessage> = if skip_sender_id.is_empty() {
-                    all
-                } else {
-                    all.into_iter()
-                        .filter(|m| m.sender_id != skip_sender_id)
-                        .collect()
-                };
+                let window: Vec<_> = buf
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .skip(start)
+                    .take(limit)
+                    .map(|(index, message)| {
+                        let checked = buf
+                            .checked_senders
+                            .get(index)
+                            .and_then(|sender| sender.as_deref())
+                            .filter(|sender| !sender.is_empty());
+                        (message, checked)
+                    })
+                    .collect();
+                let count = window.len();
+                let messages: Vec<serde_json::Value> = window
+                    .into_iter()
+                    .filter(|(_, checked)| {
+                        skip_sender_id.is_empty() || *checked != Some(skip_sender_id.as_str())
+                    })
+                    .map(|(message, checked)| gossip_recv_message(message, checked))
+                    .collect();
 
                 let next_cursor = buf.base_index + start as u64 + count as u64;
                 cursor.position = next_cursor;
@@ -8401,7 +8461,8 @@ async fn handle_gossip_event(
             if let Some(buf) = bufs.get_mut(topic) {
                 buf.remote_frames = buf.remote_frames.wrapping_add(1);
                 if let Some(gossip_msg) = gossip_msg {
-                    push_gossip_buffer_message(buf, gossip_msg);
+                    let checked = gossip_checked_sender(msg.scope, &msg.delivered_from);
+                    push_gossip_buffer_frame(buf, gossip_msg, checked);
                 }
             }
         }
@@ -10246,8 +10307,10 @@ pub(crate) mod tests {
             })
             .sum();
         assert!(retained_bytes <= GOSSIP_TOPIC_BUFFER_MAX_BYTES);
+        let checked_senders = std::iter::repeat_n(None, messages.len()).collect();
         TopicBuffer {
             messages,
+            checked_senders,
             base_index,
             retained_bytes,
             remote_frames: 0,
@@ -10260,8 +10323,10 @@ pub(crate) mod tests {
     ) -> TopicBuffer {
         let messages: VecDeque<_> = messages.into_iter().collect();
         let retained_bytes = messages.iter().map(gossip_message_encoded_len).sum();
+        let checked_senders = std::iter::repeat_n(None, messages.len()).collect();
         TopicBuffer {
             messages,
+            checked_senders,
             base_index,
             retained_bytes,
             remote_frames: 0,
@@ -22370,17 +22435,28 @@ pub(crate) mod tests {
         let oversized = gossip_test_message_with_encoded_len(1, GOSSIP_WIRE_MESSAGE_MAX_BYTES + 1);
         let oversized_bytes = serde_json::to_vec(&oversized).unwrap();
         assert_eq!(oversized_bytes.len(), GOSSIP_WIRE_MESSAGE_MAX_BYTES + 1);
+        // The send path does not copy a caller sender_id, so the bound is the
+        // frame it actually builds.
+        let mut send_bound = cursor_test_message(1);
+        send_bound.sender_id.clear();
+        send_bound.content.clear();
+        let send_base = gossip_message_encoded_len(&send_bound);
+        send_bound.content = "x".repeat(GOSSIP_WIRE_MESSAGE_MAX_BYTES + 1 - send_base);
+        assert_eq!(
+            gossip_message_encoded_len(&send_bound),
+            GOSSIP_WIRE_MESSAGE_MAX_BYTES + 1
+        );
         let rejected_send = provider
             .send_raw(&serde_json::json!({
                 "op":"gossip_send",
                 "topic":topic,
-                "message":oversized.content.clone(),
-                "sender":oversized.sender_nick.clone(),
-                "sender_id":oversized.sender_id.clone(),
-                "ts":oversized.ts,
-                "nonce":oversized.nonce,
-                "signature":oversized.signature.clone(),
-                "sender_session_id":oversized.sender_session_id.clone(),
+                "message":send_bound.content.clone(),
+                "sender":send_bound.sender_nick.clone(),
+                "sender_id":"did:key:forged-sender",
+                "ts":send_bound.ts,
+                "nonce":send_bound.nonce,
+                "signature":send_bound.signature.clone(),
+                "sender_session_id":send_bound.sender_session_id.clone(),
             }))
             .await
             .unwrap();
@@ -23830,5 +23906,157 @@ mod two_home_did_message_test {
 
         shutdown_test_carrier_node(remote_node).await;
         shutdown_test_carrier_node(local_node).await;
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod gossip_visible_sender {
+    use elastos_runtime::provider::Provider;
+
+    use super::tests::shutdown_test_carrier_node;
+    use super::{
+        gossip_checked_sender, handle_gossip_event, public_key_to_did, start_carrier_node,
+        CarrierGossipProvider, GossipMessage,
+    };
+
+    fn forged_frame(forged: &str, content: &str) -> GossipMessage {
+        GossipMessage {
+            sender_id: forged.to_string(),
+            sender_nick: "claimed".to_string(),
+            content: content.to_string(),
+            ts: 1_700_000_000,
+            nonce: 7,
+            signature: None,
+            sender_session_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn gossip_visible_sender_is_transport_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, did) = elastos_identity::derive_did(&[0x61; 32]);
+        let node = start_carrier_node(&signing_key, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/gossip-visible-sender";
+        assert_eq!(
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_join",
+                    "topic": topic,
+                    "mode": "direct"
+                }))
+                .await
+                .unwrap()["status"],
+            "ok"
+        );
+
+        let forged = elastos_identity::derive_did(&[0x62; 32]).1;
+        let (transport_key, transport_did) = elastos_identity::derive_did(&[0x63; 32]);
+        let delivered_from = iroh::SecretKey::from_bytes(&transport_key.to_bytes()).public();
+        assert_eq!(public_key_to_did(&delivered_from).unwrap(), transport_did);
+        assert_ne!(forged, transport_did);
+
+        let local = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_send",
+                "topic": topic,
+                "message": "local-frame",
+                "sender_id": forged,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(local["status"], "ok", "{local}");
+
+        let (buffers, peers, topic_peers) = {
+            let state = node.gossip_state.lock().await;
+            (
+                state.buffers.clone(),
+                state.peers.clone(),
+                state.topic_peers.clone(),
+            )
+        };
+        let direct = forged_frame(&forged, "direct-frame");
+        handle_gossip_event(
+            iroh_gossip::api::Event::Received(iroh_gossip::api::Message {
+                content: serde_json::to_vec(&direct).unwrap().into(),
+                scope: iroh_gossip::proto::DeliveryScope::Neighbors,
+                delivered_from,
+            }),
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+        )
+        .await;
+        let forwarded_scope: iroh_gossip::proto::DeliveryScope =
+            serde_json::from_str(r#"{"Swarm":1}"#).unwrap();
+        assert!(!forwarded_scope.is_direct());
+        assert!(gossip_checked_sender(forwarded_scope, &delivered_from).is_none());
+        let forwarded = forged_frame(&forged, "forwarded-frame");
+        handle_gossip_event(
+            iroh_gossip::api::Event::Received(iroh_gossip::api::Message {
+                content: serde_json::to_vec(&forwarded).unwrap().into(),
+                scope: forwarded_scope,
+                delivered_from,
+            }),
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+        )
+        .await;
+
+        let recv = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "visible-sender",
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let messages = recv["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3, "{recv}");
+        assert_eq!(messages[0]["content"], "local-frame");
+        assert!(messages[0].get("sender_id").is_none(), "{}", messages[0]);
+        assert!(!messages[0].to_string().contains(&forged));
+        assert_eq!(messages[1]["content"], "direct-frame");
+        assert_eq!(messages[1]["sender_id"], transport_did);
+        assert_ne!(messages[1]["sender_id"], forged);
+        assert_eq!(messages[2]["content"], "forwarded-frame");
+        assert!(messages[2].get("sender_id").is_none(), "{}", messages[2]);
+        assert!(!messages[2].to_string().contains(&forged));
+
+        let skipped = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "skip-forged",
+                "skip_sender_id": forged,
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(skipped["data"]["messages"].as_array().unwrap().len(), 3);
+        let skipped_home = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "skip-home",
+                "skip_sender_id": transport_did,
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let kept = skipped_home["data"]["messages"].as_array().unwrap();
+        assert_eq!(kept.len(), 2, "{skipped_home}");
+        assert!(kept
+            .iter()
+            .all(|message| message["content"] != "direct-frame"));
+
+        shutdown_test_carrier_node(node).await;
     }
 }
