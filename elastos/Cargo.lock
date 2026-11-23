@@ -1819,6 +1819,7 @@ dependencies = [
  "elastos-storage",
  "elastos-tls",
  "elastos-wallet-contract",
+ "elastos-win-custody",
  "flate2",
  "futures-lite",
  "getrandom 0.2.17",

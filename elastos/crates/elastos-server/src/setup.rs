@@ -5173,11 +5173,336 @@ fn atomic_write_file(dest: &Path, data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Publish `data` at `dest` through the owner-only helper.
+///
+/// The temporary file is created in `dest`'s directory, flushed, and renamed
+/// onto `dest`. The helper refuses a reparse point at `dest` and keeps the
+/// owner-only DACL from the create. The directory must already be owner-only.
+/// Any error before the rename removes the temporary file.
 #[cfg(windows)]
-fn atomic_write_file(_dest: &Path, _data: &[u8]) -> anyhow::Result<()> {
-    Err(windows_unsupported(
-        "setup file publication without owner-only staging",
-    ))
+fn atomic_write_file(dest: &Path, data: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let parent = dest
+        .parent()
+        .filter(|path| path.parent().is_some())
+        .ok_or_else(|| anyhow::anyhow!("Destination has no parent: {}", dest.display()))?;
+    let name = dest
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Destination has no file name: {}", dest.display()))?;
+    if !elastos_win_custody::one_component_name(name) {
+        anyhow::bail!(
+            "Destination file name is not one component: {}",
+            dest.display()
+        );
+    }
+    let temp_name = sibling_owner_temp_name(name)?;
+    let temp_path = parent.join(&temp_name);
+    let mut file = elastos_win_custody::open_owner_file(
+        &temp_path,
+        elastos_win_custody::READ_WRITE,
+        elastos_win_custody::Disp::CreateNew,
+    )?;
+    let mut renamed = false;
+    let result = (|| -> anyhow::Result<()> {
+        // The failed-write test arms this. Production builds omit the branch.
+        #[cfg(test)]
+        if take_atomic_write_failure() {
+            let prefix = if data.is_empty() { data } else { &data[..1] };
+            file.write_all(prefix)?;
+            anyhow::bail!("injected write failure");
+        }
+        file.write_all(data)?;
+        file.sync_all()?;
+        elastos_win_custody::rename_owner_file(parent, &file, &temp_path, name, true)?;
+        renamed = true;
+        flush_owner_directory(parent)
+    })();
+    let cleanup = if result.is_err() && !renamed {
+        elastos_win_custody::discard_owner_file(&file, &temp_path).err()
+    } else {
+        None
+    };
+    // Close the handle so a successful delete removes the name before return.
+    drop(file);
+    match (result, cleanup) {
+        (Err(error), Some(cleanup)) => {
+            Err(error.context(format!("temporary file cleanup failed: {cleanup}")))
+        }
+        (result, _) => result,
+    }
+}
+
+#[cfg(windows)]
+fn sibling_owner_temp_name(name: &std::ffi::OsStr) -> anyhow::Result<std::ffi::OsString> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let mut temp = std::ffi::OsString::from(".");
+    temp.push(name);
+    temp.push(format!(".tmp-{}-{nanos}-{seq}", std::process::id()));
+    if !elastos_win_custody::one_component_name(&temp) || temp.encode_wide().count() > 255 {
+        anyhow::bail!("temporary file name is not one component");
+    }
+    Ok(temp)
+}
+
+/// Flush `directory` so the replaced file's directory entry survives power loss
+/// on NTFS.
+///
+/// Win32 opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`. With write
+/// access, `File::sync_all` is `FlushFileBuffers` and NTFS commits the directory
+/// entry. On ReFS, FAT, exFAT, or a network share the flush can return success
+/// without that guarantee.
+#[cfg(windows)]
+fn flush_owner_directory(directory: &Path) -> anyhow::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Win32 CreateFile flags. `FILE_FLAG_BACKUP_SEMANTICS` is not the access
+    // mask `MAXIMUM_ALLOWED`, even though the number matches.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    // Refuse a junction before the flush. The reparse flag on the flush open
+    // stops a junction planted between the check and this open.
+    drop(elastos_win_custody::open_owner_dir(directory)?);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(directory)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| anyhow::anyhow!("setup file replacement durability indeterminate"))
+}
+
+#[cfg(all(windows, test))]
+thread_local! {
+    static FAIL_NEXT_ATOMIC_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(all(windows, test))]
+fn fail_next_atomic_write() {
+    FAIL_NEXT_ATOMIC_WRITE.with(|flag| flag.set(true));
+}
+
+#[cfg(all(windows, test))]
+fn take_atomic_write_failure() -> bool {
+    FAIL_NEXT_ATOMIC_WRITE.with(|flag| flag.replace(false))
+}
+
+#[cfg(all(windows, test))]
+fn clear_atomic_write_failure() {
+    FAIL_NEXT_ATOMIC_WRITE.with(|flag| flag.set(false));
+}
+
+#[cfg(all(test, windows))]
+mod windows_atomic_write {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use super::{atomic_write_file, clear_atomic_write_failure, fail_next_atomic_write};
+
+    const MARKER: &[u8] = b"target-bytes-stay";
+
+    struct ClearWriteFailure;
+
+    impl Drop for ClearWriteFailure {
+        fn drop(&mut self) {
+            clear_atomic_write_failure();
+        }
+    }
+
+    fn owner_dir() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owned");
+        let created = elastos_win_custody::create_owner_dir(&path).unwrap();
+        created.sync_all().unwrap();
+        drop(created);
+        (root, path)
+    }
+
+    fn dir_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn icacls(args: &[&OsStr]) {
+        let output = Command::new("icacls").args(args).output().expect("icacls");
+        assert!(
+            output.status.success(),
+            "icacls {args:?}\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        let status = Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.display().to_string(),
+                &target.display().to_string(),
+            ])
+            .status()
+            .expect("mklink");
+        assert!(status.success(), "mklink /J");
+    }
+
+    fn current_user_ace() -> String {
+        let output = Command::new("whoami")
+            .args(["/user", "/fo", "csv", "/nh"])
+            .output()
+            .expect("whoami");
+        assert!(
+            output.status.success(),
+            "whoami /user\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        let sid = text
+            .lines()
+            .next()
+            .and_then(|line| line.split(',').nth(1))
+            .unwrap_or("")
+            .trim()
+            .trim_matches('"');
+        assert!(
+            sid.starts_with("S-1-"),
+            "whoami did not print a SID: {text}"
+        );
+        format!("*{sid}:(OI)(CI)(F)")
+    }
+
+    /// User, SYSTEM, and Administrators full control, with inherited ACEs removed.
+    /// That is the data-root shape the device-key open accepts.
+    fn grant_accepted_data_root(dir: &Path) {
+        let path = dir.as_os_str();
+        for ace in [
+            current_user_ace(),
+            "*S-1-5-18:(OI)(CI)(F)".to_string(),
+            "*S-1-5-32-544:(OI)(CI)(F)".to_string(),
+        ] {
+            icacls(&[path, OsStr::new("/grant"), ace.as_ref()]);
+        }
+        icacls(&[path, OsStr::new("/inheritance:r")]);
+    }
+
+    fn saved_dacl(path: &Path) -> String {
+        let save = std::env::temp_dir().join(format!(
+            "elastos-w5-acl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = Command::new("icacls")
+            .arg(path)
+            .arg("/save")
+            .arg(&save)
+            .output()
+            .expect("icacls");
+        assert!(
+            output.status.success(),
+            "icacls /save {}\n{}{}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bytes = std::fs::read(&save).unwrap();
+        let _ = std::fs::remove_file(&save);
+        let encoded = match bytes.strip_prefix(&[0xFF, 0xFE]) {
+            Some(rest) => rest,
+            None => bytes.as_slice(),
+        };
+        let units: Vec<u16> = encoded
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        let sddl = text
+            .split(['\n', '\r', '\0'])
+            .map(str::trim)
+            .find(|line| line.starts_with("D:"))
+            .unwrap_or("")
+            .to_string();
+        assert!(!sddl.is_empty(), "icacls /save has no DACL line:\n{text}");
+        sddl
+    }
+
+    #[test]
+    fn junction_at_atomic_write_destination_is_refused_and_leaves_no_temp_file() {
+        let (root, owned) = owner_dir();
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        let marker = target.join("kept.bin");
+        std::fs::write(&marker, MARKER).unwrap();
+        let dest = owned.join("note");
+        junction(&dest, &target);
+        let error = atomic_write_file(&dest, b"new-bytes").unwrap_err();
+        assert!(
+            error.to_string().contains("reparse point refused"),
+            "{error}"
+        );
+        assert_eq!(dir_names(&owned), vec!["note".to_string()]);
+        assert_eq!(std::fs::read(&marker).unwrap(), MARKER);
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_atomic_write_leaves_no_temp_file_and_keeps_old_content() {
+        let (_root, owned) = owner_dir();
+        let dest = owned.join("note");
+        atomic_write_file(&dest, b"old-content").unwrap();
+        let _clear = ClearWriteFailure;
+        fail_next_atomic_write();
+        let error = atomic_write_file(&dest, b"new-content").unwrap_err();
+        assert!(
+            error.to_string().contains("injected write failure"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old-content");
+        assert_eq!(dir_names(&owned), vec!["note".to_string()]);
+    }
+
+    #[test]
+    fn atomic_write_file_dacl_equals_device_key_dacl() {
+        let data_root = tempfile::tempdir().unwrap();
+        let data = data_root.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        grant_accepted_data_root(&data);
+        let key = elastos_identity::load_or_create_device_key(&data).unwrap();
+        let device_key = elastos_identity::device_key_path(&data);
+        let (_root, owned) = owner_dir();
+        let note = owned.join("setup-note");
+        atomic_write_file(&note, b"first").unwrap();
+        atomic_write_file(&note, b"second").unwrap();
+        assert_eq!(std::fs::read(&note).unwrap(), b"second");
+        assert_eq!(std::fs::read(&device_key).unwrap(), key.as_slice());
+        assert_eq!(saved_dacl(&note), saved_dacl(&device_key));
+        elastos_win_custody::open_owner_file(
+            &note,
+            elastos_win_custody::READ_EXISTING,
+            elastos_win_custody::Disp::OpenExisting,
+        )
+        .unwrap();
+        assert!(
+            dir_names(&owned).iter().all(|name| !name.contains(".tmp-")),
+            "a temporary file remains"
+        );
+    }
 }
 
 #[cfg(unix)]
