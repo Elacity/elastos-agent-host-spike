@@ -2729,6 +2729,29 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn operator_matching_ticket_dial_connects() {
+        // The positive side of the dial check: a ticket whose endpoint is the
+        // key of the peer's DID connects, so a too-strict check cannot pass the
+        // suite while locking out every real operator dial.
+        let dir = tempfile::tempdir().unwrap();
+        let key = [25u8; 32];
+        let (sk, did) = elastos_identity::derive_did(&key);
+        let node = start_carrier_node(&sk, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let ticket = local_endpoint_ticket(&node.endpoint).unwrap();
+        let peer = OperatorPeer {
+            did,
+            label: "peer".to_string(),
+            connect_ticket: ticket,
+            allow: Vec::new(),
+        };
+        if let Err(err) = OperatorClient::connect(&peer, 10).await {
+            panic!("a ticket naming the peer's own key must connect: {err}");
+        }
+    }
+
+    #[tokio::test]
     async fn operator_mismatched_ticket_dial_is_refused_before_any_write() {
         // A ticket that names another node must be refused before any
         // connection, so a request is never written to a key other than
