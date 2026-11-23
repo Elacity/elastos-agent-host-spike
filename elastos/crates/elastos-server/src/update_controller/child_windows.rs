@@ -45,6 +45,34 @@ pub(crate) fn generation_gone(_pid: u32, _start: &str) -> Result<bool> {
     Err(unsupported().into())
 }
 
+/// Same name as `elastos_common::process_lifetime::PARENT_PIPE_ENV`, which is Unix-only.
+const PARENT_PIPE_ENV: &str = "ELASTOS_UPDATE_PARENT_PIPE";
+
+/// As on Unix, only an update child started with the parent-pipe marker has a parent to watch;
+/// every other command runs. An update child still refuses, because Windows has no owned
+/// parent pipe yet.
 pub(crate) fn watch_parent() -> Result<()> {
+    if std::env::var_os(PARENT_PIPE_ENV).is_none() {
+        return Ok(());
+    }
     Err(unsupported().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commands_start_without_the_update_child_marker_and_an_update_child_still_refuses() {
+        // One test so the process environment is changed in one place only.
+        std::env::remove_var(PARENT_PIPE_ENV);
+        assert!(watch_parent().is_ok());
+        std::env::set_var(PARENT_PIPE_ENV, "1:2:3");
+        let error = watch_parent().unwrap_err();
+        std::env::remove_var(PARENT_PIPE_ENV);
+        assert_eq!(
+            error.to_string(),
+            "update child process ownership is unsupported on Windows"
+        );
+    }
 }
