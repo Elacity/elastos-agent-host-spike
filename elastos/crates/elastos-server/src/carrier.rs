@@ -16,6 +16,10 @@
 //! their own signing and verification (the chat capsule does this via
 //! `signing_payload_hex` in app.rs).
 //!
+//! A DID message is not gossip. [`send_did_message`] names a peer DID and
+//! opaque bytes, and rides the PeerDid connection. The receiver records the
+//! sender from that connection's key. A `sender_id` in the body is not the sender.
+//!
 //! See `docs/CARRIER_TRUST_DECISION.md` for the rationale.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -73,6 +77,8 @@ use crate::sources::{
 };
 
 const CARRIER_ALPN: &[u8] = b"elastos/carrier/1";
+/// Runtime target for one opaque message addressed by peer DID.
+const DID_MESSAGE_TARGET: &str = "did-message";
 #[path = "carrier_file.rs"]
 mod file_transfer;
 pub(crate) use file_transfer::fetch_file_from_trusted_source_to_bound;
@@ -753,6 +759,9 @@ pub struct GossipState {
     cursors: Arc<Mutex<HashMap<(String, String), GossipConsumerCursor>>>,
     peers: Arc<Mutex<Vec<String>>>,
     topic_peers: Arc<Mutex<HashMap<String, HashSet<String>>>>,
+    /// Messages this Home recorded from a PeerDid send. The sender is the
+    /// connection key, never a `sender_id` in the body.
+    pub(crate) did_messages: Arc<std::sync::Mutex<Vec<DidMessageRecord>>>,
     did: Option<String>,
     direct_only: bool,
     /// Set on a Community bootstrap node; every gossip actor it spawns is a hub.
@@ -791,6 +800,7 @@ impl GossipState {
             cursors: Arc::new(Mutex::new(HashMap::new())),
             peers: Arc::new(Mutex::new(Vec::new())),
             topic_peers: Arc::new(Mutex::new(HashMap::new())),
+            did_messages: Arc::new(std::sync::Mutex::new(Vec::new())),
             did,
             direct_only: false,
             community_hub: false,
@@ -2219,7 +2229,8 @@ async fn handle_file_connection(
     gossip_state: Arc<Mutex<GossipState>>,
 ) -> Result<()> {
     let source_endpoint_id = conn.remote_id();
-    let transport = iroh_transport_observation(&source_endpoint_id)?;
+    let mut transport = iroh_transport_observation(&source_endpoint_id)?;
+    transport.did_messages = Some(gossip_state.lock().await.did_messages.clone());
     loop {
         let (mut send, recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
@@ -2851,11 +2862,20 @@ async fn bridge_browser_carrier_stream_to_relay(
     anyhow::bail!("Browser Carrier exit stream requires a Unix relay host")
 }
 
+/// One message a Home recorded from a PeerDid send.
+#[derive(Clone, Debug)]
+pub(crate) struct DidMessageRecord {
+    pub bytes: Vec<u8>,
+    pub source_endpoint_did: String,
+}
+
 /// Authenticated transport fact about the sending Runtime/device. This does
 /// not identify the author of a message carried in the request body.
 #[derive(Clone)]
 pub(crate) struct CarrierTransportObservation {
     sending_runtime_did: String,
+    /// Inbox of the receiving Home. Set on a live Carrier connection.
+    did_messages: Option<Arc<std::sync::Mutex<Vec<DidMessageRecord>>>>,
 }
 
 impl CarrierTransportObservation {
@@ -2867,6 +2887,7 @@ impl CarrierTransportObservation {
         );
         Ok(Self {
             sending_runtime_did: did,
+            did_messages: None,
         })
     }
 }
@@ -3082,6 +3103,9 @@ async fn carrier_provider_invoke_registry(
     }
 
     let source_endpoint_did = &transport.sending_runtime_did;
+    if target == DID_MESSAGE_TARGET {
+        return deliver_did_message(transport, &request);
+    }
     let runtime = request
         .get_mut("_runtime_invocation")
         .and_then(serde_json::Value::as_object_mut)
@@ -3195,21 +3219,109 @@ async fn carrier_provider_invoke_registry(
 }
 
 fn carrier_provider_target_allowed(target: &str) -> bool {
-    matches!(
-        target,
-        "content"
-            | "model"
-            | "custody"
-            | "rights"
-            | "key"
-            | "decrypt"
-            | "drm"
-            | "collaboration"
-            | "collaboration-direct"
-            | "collaboration-profile"
-            | "collaboration.history"
-            | "collaboration.shared"
-    )
+    target == DID_MESSAGE_TARGET
+        || matches!(
+            target,
+            "content"
+                | "model"
+                | "custody"
+                | "rights"
+                | "key"
+                | "decrypt"
+                | "drm"
+                | "collaboration"
+                | "collaboration-direct"
+                | "collaboration-profile"
+                | "collaboration.history"
+                | "collaboration.shared"
+        )
+}
+
+/// The sender is the connection key. A `sender_id` in the body is not the sender.
+fn did_message_sender(request: &serde_json::Value, bytes: &[u8], transport_did: &str) -> String {
+    let _ = (request.get("sender_id"), bytes);
+    transport_did.to_string()
+}
+
+fn deliver_did_message(
+    transport: &CarrierTransportObservation,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    if request.get("op").and_then(|value| value.as_str()) != Some("deliver") {
+        return Ok(serde_json::json!({
+            "ok": false,
+            "code": "invalid_provider_invocation",
+            "error": "DID message operation is deliver",
+        }));
+    }
+    let body = request
+        .get("body")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(body) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "code": "invalid_provider_invocation",
+                "error": "DID message body is not base64",
+            }));
+        }
+    };
+    let Some(inbox) = transport.did_messages.as_ref() else {
+        return Ok(serde_json::json!({
+            "ok": false,
+            "code": "invalid_provider_invocation",
+            "error": "DID message has no receive record",
+        }));
+    };
+    let source_endpoint_did = did_message_sender(request, &bytes, &transport.sending_runtime_did);
+    let record = DidMessageRecord {
+        bytes,
+        source_endpoint_did,
+    };
+    let mut inbox = inbox.lock().expect("DID message inbox");
+    inbox.push(record);
+    let stored = inbox.last().expect("DID message just recorded");
+    Ok(serde_json::json!({
+        "ok": true,
+        "result": {
+            "status": "ok",
+            "data": {
+                "body": base64::engine::general_purpose::STANDARD.encode(&stored.bytes),
+                "sender_did": &stored.source_endpoint_did,
+            }
+        }
+    }))
+}
+
+/// Send opaque bytes to one peer DID over the existing PeerDid connection.
+/// The call names no ticket, host, or port. An unknown DID is refused by that
+/// route and the peer records nothing.
+pub async fn send_did_message(
+    registry: &ProviderRegistry,
+    peer_did: &str,
+    bytes: &[u8],
+) -> std::result::Result<serde_json::Value, ProviderError> {
+    registry
+        .invoke_provider(ProviderInvocation {
+            source: "runtime".into(),
+            target: DID_MESSAGE_TARGET.into(),
+            op: "deliver".into(),
+            request: serde_json::json!({
+                "op": "deliver",
+                "body": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+            transfer: ProviderTransfer::Json,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did: peer_did.to_string(),
+                timeout_ms: Some(2_000),
+                reply_wait_ms: Some(5_000),
+            }),
+        })
+        .await
 }
 
 fn validate_carrier_provider_invocation(
@@ -23611,5 +23723,112 @@ pub(crate) mod tests {
             let network = community(true, &[(1, 2), (3, 4), (6, 7)]);
             assert_every_home_keeps_the_hub(&network);
         }
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod two_home_did_message_test {
+    use std::sync::Arc;
+
+    use elastos_runtime::provider::{ProviderCarrierInvoker, ProviderError, ProviderRegistry};
+
+    use super::tests::{
+        encode_ticket_for, shutdown_test_carrier_node, wait_for_direct_endpoint_addr,
+    };
+    use super::{
+        public_key_to_did, send_did_message, start_isolated_carrier_node_with_registry,
+        CarrierProviderInvoker,
+    };
+
+    #[tokio::test]
+    async fn two_home_did_message() {
+        let remote_requests_dir = tempfile::tempdir().unwrap();
+        let remote_registry = Arc::new(ProviderRegistry::new());
+        let (remote_key, remote_did) = elastos_identity::derive_did(&[0xD1; 32]);
+        let remote_node = start_isolated_carrier_node_with_registry(
+            &remote_key,
+            &remote_did,
+            remote_requests_dir.path().to_path_buf(),
+            Some(Arc::downgrade(&remote_registry)),
+        )
+        .await
+        .unwrap();
+        let remote_addr = wait_for_direct_endpoint_addr(&remote_node.endpoint).await;
+
+        // A learns B only through the operator peer store, the same write as
+        // `elastos node peer add --did ... --ticket ...`.
+        let local_dir = tempfile::tempdir().unwrap();
+        crate::operator_control::upsert_peer(
+            local_dir.path(),
+            crate::operator_control::OperatorPeer {
+                did: remote_did.clone(),
+                label: String::new(),
+                connect_ticket: encode_ticket_for(remote_addr),
+                allow: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let local_registry = Arc::new(ProviderRegistry::new());
+        let (local_key, local_did) = elastos_identity::derive_did(&[0xD2; 32]);
+        let local_node = start_isolated_carrier_node_with_registry(
+            &local_key,
+            &local_did,
+            local_dir.path().to_path_buf(),
+            Some(Arc::downgrade(&local_registry)),
+        )
+        .await
+        .unwrap();
+        let invoker = Arc::new(CarrierProviderInvoker::with_carrier_endpoint_and_registry(
+            local_node.endpoint.clone(),
+            Arc::downgrade(&local_registry),
+        ));
+        local_registry.set_carrier_invoker(invoker.clone()).await;
+        let transport_did = public_key_to_did(&local_node.endpoint.id()).unwrap();
+        assert_eq!(transport_did, local_did);
+
+        let forged = elastos_identity::derive_did(&[0xD3; 32]).1;
+        let bytes = format!("sender_id={forged}").into_bytes();
+        let answer = send_did_message(&local_registry, &remote_did, &bytes)
+            .await
+            .unwrap();
+        let inbox = remote_node.gossip_state.lock().await.did_messages.clone();
+        let recorded = inbox.lock().expect("DID message inbox").clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].bytes, bytes);
+        assert_eq!(recorded[0].source_endpoint_did, transport_did);
+        assert_ne!(recorded[0].source_endpoint_did, forged);
+        assert_eq!(
+            answer["data"]["sender_did"],
+            recorded[0].source_endpoint_did
+        );
+
+        let unknown = elastos_identity::derive_did(&[0xD4; 32]).1;
+        let refused = send_did_message(&local_registry, &unknown, b"no-delivery")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(refused, ProviderError::Unavailable(_)),
+            "{refused}"
+        );
+        assert_eq!(inbox.lock().expect("DID message inbox").len(), 1);
+
+        // A ticket whose endpoint id is not B, offered under B's DID, is
+        // refused before a provider request is written.
+        let foreign = iroh::SecretKey::from_bytes(&[0xD5; 32]);
+        let ticket = encode_ticket_for(iroh::EndpointAddr::from(foreign.public()));
+        let mismatch = invoker
+            .remember_peer_ticket(&remote_did, &ticket)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(mismatch, ProviderError::Provider(ref message) if message.contains("does not match")),
+            "{mismatch}"
+        );
+        assert_eq!(inbox.lock().expect("DID message inbox").len(), 1);
+
+        shutdown_test_carrier_node(remote_node).await;
+        shutdown_test_carrier_node(local_node).await;
     }
 }

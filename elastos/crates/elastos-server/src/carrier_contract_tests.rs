@@ -57,10 +57,9 @@ trait CarrierUnderTest: Send + Sync {
         bytes: &[u8],
         sender_id: Option<&str>,
     ) -> Result<Value, ProviderError>;
-    // Not a verb: a probe for today's refusal of a send that is not
-    // topic-addressed.
-    async fn send_to_peer_only(&self, peer_did: &str, bytes: &[u8])
-        -> Result<Value, ProviderError>;
+    /// One DID send: peer DID and opaque bytes. The record's sender is the
+    /// transport DID.
+    async fn deliver_did(&self, bytes: &[u8]) -> Result<Observation, ProviderError>;
     async fn request_file(
         &self,
         cid: &str,
@@ -396,17 +395,31 @@ impl CarrierUnderTest for CurrentCarrier {
         self.send_message(topic, bytes, sender_id).await
     }
 
-    async fn send_to_peer_only(
-        &self,
-        peer_did: &str,
-        bytes: &[u8],
-    ) -> Result<Value, ProviderError> {
-        Self::gossip(
-            &self.sender_registry,
-            json!({"op":"gossip_send", "peer_did":peer_did,
-                "message":base64::engine::general_purpose::STANDARD.encode(bytes)}),
-        )
-        .await
+    async fn deliver_did(&self, bytes: &[u8]) -> Result<Observation, ProviderError> {
+        let inbox = self
+            .receiver_node
+            .gossip_state
+            .lock()
+            .await
+            .did_messages
+            .clone();
+        let before = inbox.lock().expect("DID message inbox").len();
+        let answer =
+            crate::carrier::send_did_message(&self.sender_registry, &self.receiver_did, bytes)
+                .await?;
+        let recorded = inbox.lock().expect("DID message inbox");
+        assert_eq!(recorded.len(), before + 1, "DID message was not recorded");
+        let message = recorded.last().expect("DID message");
+        assert_eq!(message.bytes, bytes);
+        assert_eq!(
+            answer["data"]["sender_did"].as_str().unwrap_or(""),
+            message.source_endpoint_did
+        );
+        Ok(Observation {
+            bytes: message.bytes.clone(),
+            sender_did: message.source_endpoint_did.clone(),
+            answer,
+        })
     }
 
     async fn request_file(
@@ -616,33 +629,24 @@ async fn m1_message_bytes(carrier: &dyn CarrierUnderTest) {
     assert_eq!(received.bytes, sent);
 }
 
-// open: sender identity is not supplied by the backend at this layer; signed message types bind the signer above it
+// The recorded sender is the transport DID. A sender_id in the body is not the sender.
 async fn m2_message_sender_identity(carrier: &dyn CarrierUnderTest) {
     let claimed = elastos_identity::derive_did(&[213; 32]).1;
-    let (_, received) = gossip_roundtrip(
-        carrier,
-        MESSAGE_TOPIC,
-        b"message:identity",
-        false,
-        Some(&claimed),
-    )
-    .await;
     assert_ne!(claimed, carrier.sender_did());
-    assert_eq!(received.sender_did, claimed);
-}
-
-async fn m3_message_topic_address(carrier: &dyn CarrierUnderTest) {
-    let sent = b"message:topic address";
-    let (answer, received) = gossip_roundtrip(carrier, MESSAGE_TOPIC, sent, false, None).await;
-    assert_eq!(answer["status"], "ok");
-    assert_eq!(received.bytes, sent);
-    // a send carrying only a peer DID and no topic is refused today
-    let refused = carrier
-        .send_to_peer_only(carrier.peer_did(), sent)
+    let received = carrier
+        .deliver_did(format!("sender_id={claimed}").as_bytes())
         .await
         .unwrap();
-    assert_eq!(refused["status"], "error");
-    assert_eq!(refused["code"], "not_joined");
+    assert_eq!(received.sender_did, carrier.sender_did());
+    assert_ne!(received.sender_did, claimed);
+}
+
+// A message that names a peer DID and bytes is delivered. It does not need a topic.
+async fn m3_message_did_send(carrier: &dyn CarrierUnderTest) {
+    let sent = b"message:did address";
+    let received = carrier.deliver_did(sent).await.unwrap();
+    assert_eq!(received.bytes, sent);
+    assert_eq!(received.sender_did, carrier.sender_did());
 }
 
 async fn m4_message_private_answer(carrier: &dyn CarrierUnderTest) {
@@ -671,33 +675,24 @@ async fn n1_notification_bytes_no_reply(carrier: &dyn CarrierUnderTest) {
     );
 }
 
-// open: sender identity is not supplied by the backend at this layer; signed message types bind the signer above it
+// A notice uses the same DID send. The recorded sender is the transport DID.
 async fn n2_notification_sender_identity(carrier: &dyn CarrierUnderTest) {
     let claimed = elastos_identity::derive_did(&[213; 32]).1;
-    let (_, received) = gossip_roundtrip(
-        carrier,
-        NOTICE_TOPIC,
-        b"notice:identity",
-        true,
-        Some(&claimed),
-    )
-    .await;
     assert_ne!(claimed, carrier.sender_did());
-    assert_eq!(received.sender_did, claimed);
-}
-
-async fn n3_notification_topic_address(carrier: &dyn CarrierUnderTest) {
-    let sent = b"notice:topic address";
-    let (answer, received) = gossip_roundtrip(carrier, NOTICE_TOPIC, sent, true, None).await;
-    assert_eq!(answer["status"], "ok");
-    assert_eq!(received.bytes, sent);
-    // a send carrying only a peer DID and no topic is refused today
-    let refused = carrier
-        .send_to_peer_only(carrier.peer_did(), sent)
+    let received = carrier
+        .deliver_did(format!("sender_id={claimed}").as_bytes())
         .await
         .unwrap();
-    assert_eq!(refused["status"], "error");
-    assert_eq!(refused["code"], "not_joined");
+    assert_eq!(received.sender_did, carrier.sender_did());
+    assert_ne!(received.sender_did, claimed);
+}
+
+// A notice that names a peer DID and bytes is delivered. It does not need a topic.
+async fn n3_notification_did_send(carrier: &dyn CarrierUnderTest) {
+    let sent = b"notice:did address";
+    let received = carrier.deliver_did(sent).await.unwrap();
+    assert_eq!(received.bytes, sent);
+    assert_eq!(received.sender_did, carrier.sender_did());
 }
 
 async fn n4_notification_private_answer(carrier: &dyn CarrierUnderTest) {
@@ -782,11 +777,11 @@ async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>)
             R6 => r6_request_reply_responder_opaque_body(carrier).await,
             M1 => m1_message_bytes(carrier).await,
             M2 => m2_message_sender_identity(carrier).await,
-            M3 => m3_message_topic_address(carrier).await,
+            M3 => m3_message_did_send(carrier).await,
             M4 => m4_message_private_answer(carrier).await,
             N1 => n1_notification_bytes_no_reply(carrier).await,
             N2 => n2_notification_sender_identity(carrier).await,
-            N3 => n3_notification_topic_address(carrier).await,
+            N3 => n3_notification_did_send(carrier).await,
             N4 => n4_notification_private_answer(carrier).await,
             F1 => f1_file_request_responder_bytes(carrier).await,
             F2 => f2_file_request_responder_authenticated_did(carrier).await,
@@ -801,10 +796,10 @@ async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>)
 async fn run_current_row(row: ContractRow) {
     let carrier = CurrentCarrier::new().await;
     use ContractRow::*;
-    if matches!(row, M1 | M2 | M3 | M4) {
+    if matches!(row, M1 | M4) {
         carrier.join_topic(MESSAGE_TOPIC).await;
     }
-    if matches!(row, N1 | N2 | N3 | N4) {
+    if matches!(row, N1 | N4) {
         carrier.join_topic(NOTICE_TOPIC).await;
     }
     run_contract(&carrier, Some(row)).await;
@@ -843,18 +838,12 @@ current_row_test!(
     R6
 );
 current_row_test!(carrier_contract_m1_message_bytes_holds, M1);
-current_row_test!(carrier_contract_m2_message_sender_identity_open_today, M2);
-current_row_test!(carrier_contract_m3_message_topic_address_open_today, M3);
+current_row_test!(carrier_contract_m2_message_sender_identity_holds, M2);
+current_row_test!(carrier_contract_m3_message_did_send_holds, M3);
 current_row_test!(carrier_contract_m4_message_private_answer_holds, M4);
 current_row_test!(carrier_contract_n1_notification_bytes_no_reply_holds, N1);
-current_row_test!(
-    carrier_contract_n2_notification_sender_identity_open_today,
-    N2
-);
-current_row_test!(
-    carrier_contract_n3_notification_topic_address_open_today,
-    N3
-);
+current_row_test!(carrier_contract_n2_notification_sender_identity_holds, N2);
+current_row_test!(carrier_contract_n3_notification_did_send_holds, N3);
 current_row_test!(carrier_contract_n4_notification_private_answer_holds, N4);
 current_row_test!(carrier_contract_f1_file_request_responder_bytes_holds, F1);
 current_row_test!(
