@@ -3305,11 +3305,12 @@ mod tests {
         assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
     }
 
-    /// Every release platform update.rs can select is a registered setup
-    /// pairing, so setup's component ids and the release ids stay one map
-    /// (scripts/release-platforms.json, embedded by setup.rs too).
+    /// Every publishable release platform update.rs can select is a registered
+    /// setup pairing (scripts/release-platforms.json, embedded by setup.rs and
+    /// used as the publish allowlist); x86_64-windows is named for a clear
+    /// refusal but stays unpublishable until the Windows signing decision.
     #[test]
-    fn every_release_platform_row_is_a_registered_setup_pair() {
+    fn publishable_release_rows_are_registered_and_windows_is_not_yet() {
         let pairs: std::collections::BTreeMap<String, String> =
             serde_json::from_str(include_str!("../../../../scripts/release-platforms.json"))
                 .expect("scripts/release-platforms.json is a string map");

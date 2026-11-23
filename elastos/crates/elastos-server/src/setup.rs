@@ -1069,8 +1069,9 @@ fn set_local_copy_permissions(_source: &Path, _dest: &Path) -> anyhow::Result<()
 
 /// Spelling record (owner unanswered): the release id is `x86_64-windows`
 /// (update.rs release table) and the component id is `windows-amd64` (here);
-/// the signer and packaging scripts stay unchanged, and
-/// scripts/release-platforms.json registers the pair as a pure name alias.
+/// the signer and packaging scripts stay unchanged, and the pair is NOT in
+/// scripts/release-platforms.json, which is also the publish allowlist, until
+/// the owner decides Windows signing.
 /// A manifest without a `windows-amd64` row still fails closed: the
 /// `#[cfg(windows)]` install stub refuses before any fetch or file write.
 pub fn detect_platform() -> String {
