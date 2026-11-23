@@ -461,7 +461,8 @@ impl InstallTransaction {
     /// earlier custody refusal, so the candidate-custody test cannot obtain a
     /// transaction that way. The Windows candidate refusal returns before it
     /// reads this value.
-    #[cfg(all(test, windows))]
+    #[cfg(windows)]
+    #[cfg(test)]
     pub(crate) fn at_path_for_windows_refusal_test(path: &Path) -> Self {
         Self {
             _guard: InstallationGuard {
@@ -2062,7 +2063,8 @@ thread_local! {
     pub(crate) static TEXT_FILE_BUSY_SEEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(all(test, windows))]
+#[cfg(windows)]
+#[cfg(test)]
 #[test]
 fn windows_refuses_installation_writer_before_file_creation() {
     let root = tempfile::tempdir().unwrap();
