@@ -218,7 +218,7 @@ mod tests {
             }))
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_coordinate_is_exact_private_narrow_and_cleaned_up() {
         let temp = tempfile::tempdir().unwrap();
@@ -335,7 +335,7 @@ mod tests {
         control.shutdown().await.unwrap();
         assert!(!coordinate_path.exists());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn shutdown_does_not_remove_a_foreign_start_coordinate() {
         let temp = tempfile::tempdir().unwrap();
@@ -357,7 +357,7 @@ mod tests {
             replacement
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn stale_and_substituted_gateway_coordinates_fail_closed() {
         let temp = tempfile::tempdir().unwrap();

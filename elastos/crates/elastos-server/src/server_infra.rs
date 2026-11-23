@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs;
 #[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt as _;
@@ -58,13 +58,13 @@ const BROWSER_ENGINE_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const MODEL_PROVIDER_ID: &str = "model-provider";
 const MODEL_PROVIDER_PROTOCOL_VERSION: &str = "elastos.model-provider/v1";
 const MODEL_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MODEL_PROVIDER_CONFIG_FILE_NAME: &str = "config.json";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MODEL_PROVIDER_CONFIG_MAX_BYTES: usize = 256 * 1024;
 const MEDIA_PROVIDER_ID: &str = "media-provider";
 const MEDIA_PROVIDER_ROUTE: &str = "media";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MEDIA_PROVIDER_PROTOCOL_VERSION: &str = "elastos.media-provider/v1";
 const MEDIA_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const WALLET_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -88,20 +88,20 @@ fn report_missing_home_provider(data_dir: &Path, name: &str, consequence: &str) 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use api::model_provider_bridge_config;
 use api::model_provider_config as model_provider_startup_config;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_root_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("providers").join(MODEL_PROVIDER_ID)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_config_path(data_dir: &Path) -> PathBuf {
     model_provider_root_dir(data_dir).join(MODEL_PROVIDER_CONFIG_FILE_NAME)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_journal_dir(data_dir: &Path) -> PathBuf {
     model_provider_root_dir(data_dir).join("journal")
 }
@@ -155,12 +155,12 @@ fn chain_provider_protected_startup_config(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn media_provider_root_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("protected-content").join(MEDIA_PROVIDER_ID)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn media_provider_config_path(data_dir: &Path) -> PathBuf {
     media_provider_root_dir(data_dir).join("config.json")
 }
@@ -372,6 +372,7 @@ fn wallet_confinement_refusal() -> Option<&'static str> {
 /// a missing level at 0700 and removes group and other write bits from an
 /// existing one. Inspect and tighten the same opened directory, after checking
 /// its owner. The confined entry checks the storage root again at launch.
+#[cfg(unix)]
 fn tighten_wallet_parent(directory: &std::fs::File, effective_uid: u32) -> anyhow::Result<()> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
@@ -386,6 +387,14 @@ fn tighten_wallet_parent(directory: &std::fs::File, effective_uid: u32) -> anyho
     Ok(())
 }
 
+/// Windows has no owner-checked, no-follow wallet storage parent yet; the wallet
+/// start refuses there before this point, and this refuses as well.
+#[cfg(windows)]
+fn prepare_wallet_storage_parent(_wallet_root: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("wallet storage is unsupported on Windows")
+}
+
+#[cfg(unix)]
 fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
@@ -2006,8 +2015,14 @@ fn browser_local_exit_socket_ready(path: &Path) -> anyhow::Result<bool> {
     #[cfg(not(unix))]
     {
         let _ = metadata;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported on this platform",
+        )
+        .into());
     }
 
+    #[cfg(unix)]
     Ok(true)
 }
 
@@ -2367,6 +2382,7 @@ fn provider_config_from_env_or_file(
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     #[test]
@@ -4965,7 +4981,16 @@ mod tests {
         }
         #[cfg(not(unix))]
         {
-            assert!(browser_local_exit_socket_ready(&relay_path).unwrap());
+            let err = browser_local_exit_socket_ready(&relay_path).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
+                Some(std::io::ErrorKind::Unsupported)
+            );
+            assert!(
+                err.to_string().contains("unsupported on this platform"),
+                "{err}"
+            );
         }
     }
 

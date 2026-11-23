@@ -24,6 +24,7 @@ fn card_steps(steps: &mut Steps, dir: &std::path::Path, ctx: &HomeLaunchTokenCon
     );
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
 fn r8c_child_room_card_and_authority_read_the_parent_roots_profile() {
@@ -52,6 +53,7 @@ fn r8c_child_room_card_and_authority_read_the_parent_roots_profile() {
     steps.finish();
 }
 
+#[cfg(unix)]
 #[test]
 fn r8c_control_room_card_and_authority_read_the_stored_persons_profile() {
     let control = control(CHAT_ROOM_CAPSULE_ID);

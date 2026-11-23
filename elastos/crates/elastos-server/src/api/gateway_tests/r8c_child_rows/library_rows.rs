@@ -64,7 +64,7 @@ fn r8c_child_library_lists_writes_and_reads_under_the_parent_root() {
     library_steps(&mut steps, child.dir.path(), &child.ctx);
     steps.finish();
 }
-
+#[cfg(unix)]
 #[test]
 fn r8c_control_library_lists_writes_and_reads_under_the_stored_persons_root() {
     let control = control(LIBRARY_CAPSULE_ID);

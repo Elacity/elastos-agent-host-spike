@@ -804,6 +804,7 @@ fn decode(value: &str, label: &str) -> anyhow::Result<Vec<u8>> {
         .with_context(|| format!("invalid base64 {label}"))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;

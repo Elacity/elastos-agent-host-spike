@@ -8,7 +8,9 @@ use elastos_protected_content_contracts::{
     RuntimeReleaseAuditIdV1, SignedNodeContributionV1, SignedNodeRightsDecisionV1,
     SignedRuntimeReleaseOperationV1,
 };
+#[cfg(unix)]
 use nix::fcntl::{Flock, FlockArg};
+#[cfg(unix)]
 use nix::unistd::geteuid;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -37,6 +39,9 @@ const MAX_RUNTIME_RELEASE_RECORDS: usize = 4096;
 pub enum RuntimeReleaseJournalError {
     #[error("runtime release journal is unavailable")]
     Unavailable,
+    #[cfg(windows)]
+    #[error("runtime release journal is unsupported on Windows")]
+    UnsupportedOnWindows,
     #[error("runtime release journal record is corrupt")]
     Corrupt,
     #[error("runtime release journal record conflicts with existing authority")]
@@ -484,6 +489,9 @@ impl RuntimeReleaseJournal {
     pub fn list_unresolved(
         &self,
     ) -> Result<Vec<PersistedRuntimeReleaseOperation>, RuntimeReleaseJournalError> {
+        #[cfg(windows)]
+        require_supported_store()?;
+
         match fs::symlink_metadata(&self.root_dir) {
             Ok(metadata) => validate_owner_only_directory_metadata(&metadata)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -595,6 +603,9 @@ impl RuntimeReleaseJournal {
     }
 
     fn ensure_root_dir(&self) -> Result<(), RuntimeReleaseJournalError> {
+        #[cfg(windows)]
+        require_supported_store()?;
+
         let parent = self
             .root_dir
             .parent()
@@ -1158,6 +1169,7 @@ fn read_entry_from_path_for_slot_with_link_count(
     decode_entry_for_slot(&bytes, expected_slot_hash)
 }
 
+#[cfg(unix)]
 fn create_owner_only_directory(path: &Path) -> Result<(), RuntimeReleaseJournalError> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -1171,6 +1183,16 @@ fn create_owner_only_directory(path: &Path) -> Result<(), RuntimeReleaseJournalE
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(_) => Err(RuntimeReleaseJournalError::Unavailable),
     }
+}
+
+#[cfg(windows)]
+fn create_owner_only_directory(_path: &Path) -> Result<(), RuntimeReleaseJournalError> {
+    Err(RuntimeReleaseJournalError::UnsupportedOnWindows)
+}
+
+#[cfg(windows)]
+fn require_supported_store() -> Result<(), RuntimeReleaseJournalError> {
+    Err(RuntimeReleaseJournalError::UnsupportedOnWindows)
 }
 
 fn validate_owner_only_directory(path: &Path) -> Result<(), RuntimeReleaseJournalError> {
@@ -1198,6 +1220,8 @@ fn validate_owner_only_regular_file_metadata_with_link_count(
     metadata: &fs::Metadata,
     expected_link_count: u64,
 ) -> Result<(), RuntimeReleaseJournalError> {
+    #[cfg(windows)]
+    let _ = expected_link_count;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(RuntimeReleaseJournalError::Unavailable);
     }
@@ -1213,6 +1237,7 @@ fn validate_owner_only_regular_file_metadata_with_link_count(
     Ok(())
 }
 
+#[cfg(unix)]
 fn validate_owner_and_mode(
     metadata: &fs::Metadata,
     exact_mode: u32,
@@ -1228,6 +1253,15 @@ fn validate_owner_and_mode(
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_owner_and_mode(
+    _metadata: &fs::Metadata,
+    _exact_mode: u32,
+) -> Result<(), RuntimeReleaseJournalError> {
+    Err(RuntimeReleaseJournalError::UnsupportedOnWindows)
+}
+
+#[cfg(unix)]
 fn require_same_file(
     pre_metadata: &fs::Metadata,
     open_metadata: &fs::Metadata,
@@ -1246,7 +1280,18 @@ fn require_same_file(
     Ok(())
 }
 
+#[cfg(windows)]
+fn require_same_file(
+    _pre_metadata: &fs::Metadata,
+    _open_metadata: &fs::Metadata,
+) -> Result<(), RuntimeReleaseJournalError> {
+    Err(RuntimeReleaseJournalError::UnsupportedOnWindows)
+}
+
 fn open_owner_only_file_for_read(path: &Path) -> Result<File, RuntimeReleaseJournalError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1260,6 +1305,9 @@ fn open_owner_only_file_for_read(path: &Path) -> Result<File, RuntimeReleaseJour
 }
 
 fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, RuntimeReleaseJournalError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1274,6 +1322,9 @@ fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, RuntimeRelea
 }
 
 fn sync_directory(path: &Path) -> Result<(), RuntimeReleaseJournalError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let dir = File::open(path).map_err(|_| RuntimeReleaseJournalError::Unavailable)?;
     dir.sync_all()
         .map_err(|_| RuntimeReleaseJournalError::Unavailable)
@@ -1326,10 +1377,12 @@ fn lower_hex_digest(digest: Digest32) -> String {
     hex::encode(digest.as_bytes())
 }
 
+#[cfg(unix)]
 struct ExclusiveFileLock {
     _lock: Flock<File>,
 }
 
+#[cfg(unix)]
 impl ExclusiveFileLock {
     fn acquire(path: &Path) -> Result<Self, RuntimeReleaseJournalError> {
         if let Some(parent) = path.parent() {
@@ -1357,7 +1410,33 @@ impl ExclusiveFileLock {
     }
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+struct ExclusiveFileLock;
+
+#[cfg(windows)]
+impl ExclusiveFileLock {
+    fn acquire(_path: &Path) -> Result<Self, RuntimeReleaseJournalError> {
+        Err(RuntimeReleaseJournalError::UnsupportedOnWindows)
+    }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_secure_store_before_creating_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("journal");
+    assert_eq!(
+        create_owner_only_directory(&path),
+        Err(RuntimeReleaseJournalError::UnsupportedOnWindows)
+    );
+    assert!(matches!(
+        ExclusiveFileLock::acquire(&path),
+        Err(RuntimeReleaseJournalError::UnsupportedOnWindows)
+    ));
+    assert!(!path.exists());
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

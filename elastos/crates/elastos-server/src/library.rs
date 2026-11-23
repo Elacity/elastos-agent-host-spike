@@ -9024,7 +9024,7 @@ mod tests {
         let parsed = serde_json::from_value::<super::ObjectProviderRequest>(named);
         assert!(parsed.is_err(), "{parsed:?}");
     }
-
+    #[cfg(unix)]
     /// A5-S3c-0a: the Roots handler returns this stored Agent's UsersAI root.
     #[test]
     fn a_stored_agents_library_roots_are_under_its_usersai_root() {
@@ -9135,6 +9135,7 @@ mod tests {
 
     /// #449: a folder added to a copy or move source after the tree check
     /// is refused by the writer itself.
+    #[cfg(unix)]
     #[test]
     fn copy_and_move_writers_refuse_a_folder_added_after_the_tree_check() {
         let dir = tempfile::tempdir().unwrap();
@@ -9332,6 +9333,7 @@ mod tests {
 
     /// #449: a PAX sparse entry (a regular file header with `GNU.sparse.*`
     /// attributes) is refused by every tar reader, as a GNU sparse one is.
+    #[cfg(unix)]
     #[test]
     fn tar_readers_refuse_a_pax_sparse_entry() {
         let pax_record = |key: &str, value: &str| {
@@ -9493,6 +9495,7 @@ mod tests {
     /// #449: a folder made at the extraction's destination by another
     /// request after the check refuses the extraction; nothing is written
     /// and the other request's file stays.
+    #[cfg(unix)]
     #[test]
     fn whole_extraction_refuses_a_destination_made_after_the_check() {
         use std::io::Write as _;
@@ -9875,6 +9878,7 @@ mod tests {
     /// Agent journals live under `.AppData/Agents/` and are written only by the
     /// Runtime's protected storage with a revision precondition. No Library
     /// operation may read, write, move, copy, rename into, or trash them.
+    #[cfg(unix)]
     #[tokio::test]
     async fn agent_journals_are_not_library_objects() {
         let dir = tempfile::tempdir().unwrap();
@@ -9955,6 +9959,7 @@ mod tests {
 
     /// The path resolver trims surrounding whitespace, so "Agents \t/" names
     /// the real Agents folder. Library checks the string it resolves.
+    #[cfg(unix)]
     #[tokio::test]
     async fn whitespace_after_agents_does_not_reach_the_agents_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -9995,6 +10000,7 @@ mod tests {
         assert_eq!(std::fs::read(&journal).unwrap(), b"planted");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn create_only_write_preserves_existing_file_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -10065,6 +10071,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn create_only_write_is_atomic_for_concurrent_new_file_requests() {
         let dir = tempfile::tempdir().unwrap();
@@ -10164,6 +10171,7 @@ mod tests {
         assert_eq!(bytes, winning_bytes);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn create_only_write_rejects_if_revision() {
         let dir = tempfile::tempdir().unwrap();
@@ -10205,6 +10213,7 @@ mod tests {
             .exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn revisioned_write_still_replaces_existing_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -10414,6 +10423,7 @@ mod publish_tests {
         assert_eq!(response["code"], code, "{response}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn publish_and_repair_pin_on_this_home_only() {
         let home = home("did:key:z6MkPublishLocalPin").await;
@@ -10479,6 +10489,7 @@ mod publish_tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn protected_publications_keep_their_repair_and_unpublish_requests() {
         let home = home("did:key:z6MkPublishProtectedKept").await;
@@ -10534,6 +10545,7 @@ mod publish_tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn publish_refuses_empty_oversized_stale_folder_and_missing_in_plain_words() {
         let home = home("did:key:z6MkPublishRefusals").await;
@@ -10594,6 +10606,7 @@ mod publish_tests {
         assert!(home.stat("Documents/stale.txt").await["publication"].is_null());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn publish_refuses_traversal_other_roots_and_links() {
         let home = home("did:key:z6MkPublishPaths").await;
@@ -10643,6 +10656,7 @@ mod publish_tests {
         assert!(home.requests("publish").is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn publish_allows_only_the_visible_library_places() {
         let home = home("did:key:z6MkPublishPlaces").await;
@@ -10685,6 +10699,7 @@ mod publish_tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_publishes_of_one_file_make_one_publication() {
         let home = home("did:key:z6MkPublishConcurrent").await;
@@ -10702,6 +10717,7 @@ mod publish_tests {
         assert_eq!(home.requests("publish").len(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn withdrawing_one_of_two_publications_of_the_same_bytes_keeps_the_other_served() {
         let home = home("did:key:z6MkPublishSameBytes").await;
@@ -10733,6 +10749,7 @@ mod publish_tests {
         assert!(home.requests("unpublish").is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn another_persons_unpublish_never_affects_a_publication_it_cannot_see_or_read() {
         // Neither person is in the passkey list, and Alma's record is
@@ -10791,6 +10808,7 @@ mod publish_tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_interrupted_publish_serves_nothing_even_for_bytes_shared_before() {
         let home = home("did:key:z6MkPublishCrashes").await;
@@ -10825,6 +10843,7 @@ mod publish_tests {
         assert!(cid_is_published_here(home.dir.path(), &cid));
     }
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_rename_racing_a_publish_keeps_the_record_with_the_file() {
         let home = home("did:key:z6MkPublishRenameRace").await;
@@ -10849,6 +10868,7 @@ mod publish_tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_chat_attach_interrupted_after_its_record_posts_it_or_answers_withdrawn() {
         let home = home("did:key:z6MkAttachInterrupted").await;
@@ -10917,6 +10937,7 @@ mod publish_tests {
         assert_eq!(home.requests("publish").len(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn changed_bytes_need_unpublish_before_a_new_publication() {
         let home = home("did:key:z6MkPublishChanged").await;
@@ -10947,6 +10968,7 @@ mod publish_tests {
         assert_eq!(home.requests("publish").len(), 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn rename_and_move_carry_the_publication_and_trash_waits_for_unpublish() {
         let home = home("did:key:z6MkPublishMoves").await;
@@ -11098,6 +11120,7 @@ mod r5a_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn list_uses_the_stored_agent_root_end_to_end() {
         let agent = home(PrincipalKind::Agent);
@@ -11146,6 +11169,7 @@ mod r5a_tests {
         decoy.untouched();
     }
 
+    #[cfg(unix)]
     #[test]
     fn empty_trash_uses_the_stored_agent_root_end_to_end() {
         let agent = home(PrincipalKind::Agent);
@@ -11215,6 +11239,7 @@ mod r5a_tests {
         decoy.untouched();
     }
 
+    #[cfg(unix)]
     #[test]
     fn empty_trash_refuses_a_published_item_and_removes_the_stored_trash_record() {
         let kept_uri = "localhost://UsersAI/ba287e12925d9408db0f24e3/.Trash/kept.txt";
@@ -11319,6 +11344,7 @@ mod r5a_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_json_write_uses_the_stored_root() {
         for (kind, root) in [
@@ -11350,6 +11376,7 @@ mod r5a_tests {
         decoy.untouched();
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_json_read_uses_the_stored_root() {
         for (kind, root) in [
@@ -11406,6 +11433,7 @@ mod r5a_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_records_uses_stored_root_and_skips_unresolved_principals() {
         for (kind, root) in [
@@ -11478,6 +11506,7 @@ mod r5a_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn trash_record_write_uses_stored_root() {
         for (kind, root) in [
@@ -11518,6 +11547,7 @@ mod r5a_tests {
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn trash_record_read_uses_stored_root() {
         for (kind, root) in [
@@ -11556,6 +11586,7 @@ mod r5a_tests {
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn trash_record_remove_uses_stored_root() {
         for (kind, root) in [
@@ -11603,6 +11634,7 @@ mod r5a_tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_record_read_uses_stored_root() {
         for (kind, root) in [
@@ -11642,6 +11674,7 @@ mod r5a_tests {
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_record_write_uses_stored_root() {
         for (kind, root) in [
@@ -11678,7 +11711,7 @@ mod r5a_tests {
         assert!(!principal_object_io::reads(dir.path()).contains(&id_path));
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
-
+    #[cfg(unix)]
     #[test]
     fn publish_record_write_leaves_an_unstored_principals_index_byte_identical() {
         let dir = tempfile::tempdir().unwrap();
@@ -11702,6 +11735,7 @@ mod r5a_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn publish_record_remove_uses_stored_root() {
         for (kind, root) in [
@@ -11751,6 +11785,7 @@ mod r5a_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn library_event_filter_uses_stored_root() {
         for (kind, root) in [
@@ -11802,6 +11837,7 @@ mod r5a_tests {
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn append_library_event_uses_the_stored_agent_root() {
         let agent = home(PrincipalKind::Agent);
@@ -11858,6 +11894,7 @@ mod r5a_tests {
         assert!(!principal_object_io::writes(absent.path()).contains(&id_path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn library_object_uses_the_stored_agent_root() {
         let agent = home(PrincipalKind::Agent);
@@ -11923,6 +11960,7 @@ mod r5a_tests {
         assert!(!principal_object_io::writes(absent.path()).contains(&id_path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn chat_attach_binding_uses_stored_root() {
         for (kind, root) in [
@@ -11955,6 +11993,7 @@ mod r5a_tests {
         decoy.untouched();
     }
 
+    #[cfg(unix)]
     #[test]
     fn localhost_spaces_pointer_uses_stored_root() {
         for (kind, root) in [
@@ -11980,6 +12019,7 @@ mod r5a_tests {
         decoy.untouched();
     }
 
+    #[cfg(unix)]
     #[test]
     fn library_target_uses_stored_root() {
         for (kind, root) in [
@@ -12179,52 +12219,75 @@ mod r5a_tests {
     fn unstored_publish_row(op: &'static str) {
         unstored_index_stays(op, |dir| unstored_publish_op(op, dir));
     }
-
+    #[cfg(unix)]
     #[test]
     fn publish_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("publish");
     }
-
+    #[cfg(unix)]
     #[test]
     fn unpublish_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("unpublish");
     }
-
+    #[cfg(unix)]
     #[test]
     fn repair_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("repair");
     }
-
+    #[cfg(unix)]
     #[test]
     fn share_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("share");
     }
+    #[cfg(unix)]
     #[test]
     fn chat_attach_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("chat_attach");
     }
+    #[cfg(unix)]
     #[test]
     fn rename_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("rename");
     }
+    #[cfg(unix)]
     #[test]
     fn move_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("move");
     }
+    #[cfg(unix)]
     #[test]
     fn trash_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("trash");
     }
+    #[cfg(unix)]
     #[test]
     fn restore_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("restore");
     }
+    #[cfg(unix)]
     #[test]
     fn delete_permanently_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("delete_permanently");
     }
+    #[cfg(unix)]
     #[test]
     fn empty_trash_of_an_unstored_principal_keeps_the_shared_index() {
         unstored_publish_row("empty_trash");
+    }
+}
+
+/// Windows refuses the published index (the published-index writer is
+/// Unix-only in P2-11 step 6): the write fails and leaves the data folder empty.
+#[cfg(all(test, not(unix)))]
+mod windows_published_index_refusal {
+    #[test]
+    fn published_index_write_refuses_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = super::update_published_index(temp.path(), |_| {}).unwrap_err();
+        assert!(
+            format!("{error:#}").to_lowercase().contains("unsupported"),
+            "{error:#}"
+        );
+        assert!(std::fs::read_dir(temp.path()).unwrap().next().is_none());
     }
 }

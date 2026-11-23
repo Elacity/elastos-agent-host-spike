@@ -1085,7 +1085,7 @@ pub(crate) mod tests {
         // The assertion itself cannot be run as a test: with the feature on
         // this crate does not compile. This holds that it is still here, in
         // the code and not under a test cfg.
-        let code = production();
+        let code = production().replace("\r\n", "\n");
         assert!(
             code.contains("const _: () = assert!(\n    !elastos_bundle_identity::LAB_REFUSALS,")
         );

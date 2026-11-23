@@ -44,6 +44,9 @@ pub enum RuntimeMintCoordinatorError {
     OperationAuthority,
     #[error("runtime mint journal failed")]
     Journal,
+    #[cfg(windows)]
+    #[error("runtime mint is unsupported on Windows")]
+    UnsupportedOnWindows,
     #[error("runtime mint record conflicts with existing authority")]
     Conflict,
 }
@@ -53,11 +56,22 @@ impl From<RuntimeMintJournalError> for RuntimeMintCoordinatorError {
         match error {
             RuntimeMintJournalError::InvalidSelection => Self::ProviderSelection,
             RuntimeMintJournalError::Conflict => Self::Conflict,
+            #[cfg(windows)]
+            RuntimeMintJournalError::UnsupportedOnWindows => Self::UnsupportedOnWindows,
             RuntimeMintJournalError::Unavailable
             | RuntimeMintJournalError::Corrupt
             | RuntimeMintJournalError::NotFound => Self::Journal,
         }
     }
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn mint_journal_windows_refusal_stays_typed() {
+    assert_eq!(
+        RuntimeMintCoordinatorError::from(RuntimeMintJournalError::UnsupportedOnWindows),
+        RuntimeMintCoordinatorError::UnsupportedOnWindows
+    );
 }
 
 impl From<ContractError> for RuntimeMintCoordinatorError {
@@ -546,7 +560,7 @@ fn mint_node_provisioning_id(
         .map_err(|_| RuntimeMintCoordinatorError::OperationAuthority)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::path::PathBuf;

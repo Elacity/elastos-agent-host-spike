@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;

@@ -348,6 +348,7 @@ pub(crate) fn verify_agent_host(
     })
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

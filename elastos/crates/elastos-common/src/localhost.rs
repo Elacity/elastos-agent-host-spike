@@ -117,8 +117,25 @@ pub fn file_backed_prefixes() -> Vec<String> {
 /// anyone else can read, so these must be owner-only from the moment they
 /// exist — and healed if an earlier boot created them with the process umask,
 /// or no one on that Home can ever save protected state.
+#[cfg(unix)]
 const OWNER_ONLY_ROOTS: &[&str] = &["Users", "UsersAI"];
 
+#[cfg(windows)]
+pub fn ensure_file_backed_roots(_base_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "protected localhost roots require owner-only Windows ACL support",
+    ))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_roots_without_owner_only_acl() {
+    let error = ensure_file_backed_roots(Path::new("unused-windows-root")).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+#[cfg(unix)]
 pub fn ensure_file_backed_roots(base_dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut created = Vec::new();
     for root in FILE_BACKED_ROOTS {

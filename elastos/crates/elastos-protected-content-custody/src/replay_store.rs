@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
 use hpke::rand_core::{CryptoRng as HpkeCryptoRng, RngCore as HpkeRngCore};
+#[cfg(unix)]
 use nix::fcntl::{Flock, FlockArg};
+#[cfg(unix)]
 use nix::unistd::geteuid;
 use rand09::SeedableRng as _;
 use sha2::{Digest as _, Sha256};
@@ -423,7 +425,7 @@ impl DurableReplayClaimStoreV1 {
         Ok(contribution)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn claim_pair_inner(
         &self,
         mut claims: [ReplayClaimEntryV1; 2],
@@ -444,7 +446,18 @@ impl DurableReplayClaimStoreV1 {
         )
     }
 
-    #[cfg(test)]
+    /// Windows has no supported durable replay store; the test helper refuses
+    /// with the same typed error as every other store operation there.
+    #[cfg(all(test, windows))]
+    fn claim_claim_only_record(
+        &self,
+        _record: StoredNodeReleaseRecordV1,
+        _now: u64,
+    ) -> Result<(), ReplayClaimError> {
+        require_supported_store()
+    }
+
+    #[cfg(all(test, unix))]
     fn claim_claim_only_record(
         &self,
         record: StoredNodeReleaseRecordV1,
@@ -474,6 +487,9 @@ impl DurableReplayClaimStoreV1 {
     }
 
     fn ensure_state_dir(&self) -> Result<(), ReplayClaimError> {
+        #[cfg(windows)]
+        require_supported_store()?;
+
         let parent = self
             .state_dir
             .parent()
@@ -548,10 +564,12 @@ impl DurableReplayClaimStoreV1 {
 }
 
 #[derive(Debug)]
+#[cfg(unix)]
 struct ExclusiveFileLock {
     file: Option<Flock<File>>,
 }
 
+#[cfg(unix)]
 impl ExclusiveFileLock {
     fn acquire(path: &Path) -> Result<Self, ReplayClaimError> {
         let file = open_or_create_owner_only_lock_file(path)?;
@@ -565,6 +583,7 @@ impl ExclusiveFileLock {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ExclusiveFileLock {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
@@ -573,6 +592,17 @@ impl Drop for ExclusiveFileLock {
     }
 }
 
+#[cfg(windows)]
+struct ExclusiveFileLock;
+
+#[cfg(windows)]
+impl ExclusiveFileLock {
+    fn acquire(_path: &Path) -> Result<Self, ReplayClaimError> {
+        Err(ReplayClaimError::UnsupportedOnWindows)
+    }
+}
+
+#[cfg(unix)]
 fn create_owner_only_directory(path: &Path) -> Result<(), ReplayClaimError> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -587,7 +617,20 @@ fn create_owner_only_directory(path: &Path) -> Result<(), ReplayClaimError> {
     }
 }
 
+#[cfg(windows)]
+fn create_owner_only_directory(_path: &Path) -> Result<(), ReplayClaimError> {
+    Err(ReplayClaimError::UnsupportedOnWindows)
+}
+
+#[cfg(windows)]
+fn require_supported_store() -> Result<(), ReplayClaimError> {
+    Err(ReplayClaimError::UnsupportedOnWindows)
+}
+
 fn open_owner_only_file(path: &Path, write: bool) -> Result<File, ReplayClaimError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let mut options = OpenOptions::new();
     options.read(true).write(write);
     #[cfg(unix)]
@@ -605,6 +648,7 @@ fn open_owner_only_file(path: &Path, write: bool) -> Result<File, ReplayClaimErr
     Ok(file)
 }
 
+#[cfg(unix)]
 fn open_or_create_owner_only_lock_file(path: &Path) -> Result<File, ReplayClaimError> {
     let parent = path.parent().ok_or(ReplayClaimError::Unavailable)?;
     validate_owner_only_directory(parent)?;
@@ -633,6 +677,9 @@ fn open_or_create_owner_only_lock_file(path: &Path) -> Result<File, ReplayClaimE
 }
 
 fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, ReplayClaimError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let parent = path.parent().ok_or(ReplayClaimError::Unavailable)?;
     validate_owner_only_directory(parent)?;
 
@@ -655,6 +702,9 @@ fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, ReplayClaimE
 }
 
 fn sync_directory(path: &Path) -> Result<(), ReplayClaimError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|_| ReplayClaimError::Unavailable)
@@ -694,6 +744,7 @@ fn validate_owner_only_regular_file_metadata(
     Ok(())
 }
 
+#[cfg(unix)]
 fn validate_owner_and_mode(
     metadata: &fs::Metadata,
     exact_mode: u32,
@@ -709,7 +760,15 @@ fn validate_owner_and_mode(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn validate_owner_and_mode(
+    _metadata: &fs::Metadata,
+    _exact_mode: u32,
+) -> Result<(), ReplayClaimError> {
+    Err(ReplayClaimError::UnsupportedOnWindows)
+}
+
+#[cfg(all(test, unix))]
 fn sort_claims(claims: &mut [ReplayClaimEntryV1; 2]) {
     if replay_claim_sort_key(claims[1].key()) < replay_claim_sort_key(claims[0].key()) {
         claims.swap(0, 1);
@@ -1000,7 +1059,7 @@ fn replay_exact_contribution(
     Ok(contribution)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn synthetic_runtime_release_audit_id(claims: &[ReplayClaimEntryV1; 2]) -> RuntimeReleaseAuditIdV1 {
     let mut hasher = Sha256::new();
     hasher.update(b"elastos/protected-content/node-replay-claims/test-audit-id/v1");
@@ -1012,7 +1071,7 @@ fn synthetic_runtime_release_audit_id(claims: &[ReplayClaimEntryV1; 2]) -> Runti
     RuntimeReleaseAuditIdV1::new(Digest32::new(hasher.finalize().into())).unwrap()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn synthetic_operation_hash(claims: &[ReplayClaimEntryV1; 2]) -> Digest32 {
     let mut hasher = Sha256::new();
     hasher.update(b"elastos/protected-content/node-replay-claims/test-operation-hash/v1");
@@ -1031,21 +1090,21 @@ fn state_integrity_digest(payload: &[u8]) -> [u8; STATE_DIGEST_BYTES] {
     hasher.finalize().into()
 }
 
-#[cfg(not(test))]
+#[cfg(any(not(test), windows))]
 fn maybe_inject_test_fault(_state_dir: &Path) -> Result<(), ReplayClaimError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestFault {
     RenameStateDirBeforeRename,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static TEST_FAULT: std::sync::Mutex<Option<(TestFault, PathBuf)>> = std::sync::Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn maybe_inject_test_fault(state_dir: &Path) -> Result<(), ReplayClaimError> {
     let fault = {
         let mut guard = TEST_FAULT
@@ -1076,6 +1135,23 @@ fn maybe_inject_test_fault(state_dir: &Path) -> Result<(), ReplayClaimError> {
     }
 }
 
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_secure_store_before_creating_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("store");
+    assert_eq!(
+        create_owner_only_directory(&path),
+        Err(ReplayClaimError::UnsupportedOnWindows)
+    );
+    assert!(matches!(
+        ExclusiveFileLock::acquire(&path),
+        Err(ReplayClaimError::UnsupportedOnWindows)
+    ));
+    assert!(!path.exists());
+}
+
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use std::io::{BufRead as _, BufReader, Write as _};
@@ -1556,6 +1632,8 @@ mod tests {
                 Ok(()) => 10,
                 Err(ReplayClaimError::AlreadyClaimed) => 11,
                 Err(ReplayClaimError::Unavailable) => 12,
+                #[cfg(windows)]
+                Err(ReplayClaimError::UnsupportedOnWindows) => 13,
             };
             std::process::exit(code);
         }

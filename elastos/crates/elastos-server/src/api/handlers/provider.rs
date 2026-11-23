@@ -513,6 +513,7 @@ mod tests {
         (provider, result)
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn s5_p5_object_proxy_refuses_x_and_y_objects() {
         if crate::agents::require_build().is_err() {
@@ -568,6 +569,7 @@ mod tests {
         s5_y_file_unchanged(&home, &y_root);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn s5_p6_localhost_proxy_refuses_x_and_y_roots() {
         if crate::agents::require_build().is_err() {
@@ -608,6 +610,7 @@ mod tests {
         s5_y_file_unchanged(&home, &y_root);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn s5_p8_ipfs_proxy_refuses_x_and_y_files() {
         if crate::agents::require_build().is_err() {

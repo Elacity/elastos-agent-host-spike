@@ -949,6 +949,7 @@ pub(super) fn cli_mint_record_json_for_test(request_id: &str) -> Option<String> 
 }
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) fn cli_mint_expire_for_test(request_id: &str) {
     let mut table = mint_table().expect("cli mint state lock");
     let record = table.records.get_mut(request_id).expect("cli mint request");

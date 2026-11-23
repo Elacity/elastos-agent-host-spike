@@ -682,7 +682,7 @@ async fn test_missing_file_404() {
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_signed_release_metadata_and_artifacts_200_exact_bytes() {
     let fixture = SignedGatewayPublication::new();
@@ -718,7 +718,7 @@ async fn test_signed_release_metadata_and_artifacts_200_exact_bytes() {
     }
     assert!(!fixture.root.join("candidate-executed").exists());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_missing_release_publication_404() {
     let temporary = tempfile::tempdir().unwrap();
@@ -753,7 +753,7 @@ async fn test_unsigned_release_publication_503() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_install_script_frozen_across_host_and_forwarded_headers() {
     let fixture = SignedGatewayPublication::new();
@@ -802,7 +802,7 @@ fn publication_test_router(
         .layer(Extension(gate))
         .with_state(test_state(&fixture.base))
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_oversized_http_artifact_retains_admitted_publication() {
     use super::super::gateway_site::ReleaseReadGate;
@@ -861,7 +861,7 @@ async fn test_oversized_http_artifact_retains_admitted_publication() {
         1
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_concurrent_release_reads_wait_health_works_and_scan_once() {
     use super::super::gateway_site::ReleaseReadGate;
@@ -939,7 +939,7 @@ async fn test_concurrent_release_reads_wait_health_works_and_scan_once() {
         1
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_cached_publication_tamper_refused_until_new_receipt_commit() {
     use super::super::gateway_site::ReleaseReadGate;
@@ -1007,7 +1007,7 @@ async fn test_cached_publication_tamper_refused_until_new_receipt_commit() {
         );
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_restored_publication_reactivates_after_backup_cleanup_and_head_commit() {
     use super::super::gateway_site::ReleaseReadGate;
@@ -1061,7 +1061,7 @@ async fn test_restored_publication_reactivates_after_backup_cleanup_and_head_com
         2
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_receipt_before_head_refusal_recovers_on_final_head_commit() {
     use super::super::gateway_site::ReleaseReadGate;
@@ -1113,7 +1113,7 @@ async fn test_receipt_before_head_refusal_recovers_on_final_head_commit() {
         3
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_refused_publication_is_not_rescanned_for_same_receipt() {
     use super::super::gateway_site::ReleaseReadGate;
@@ -1187,7 +1187,7 @@ async fn test_wrong_public_pin_receipt_cid_version_and_mixed_receipt_503() {
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_invalid_signature_metadata_and_artifact_tamper_503() {
     for name in [
@@ -1230,7 +1230,7 @@ async fn test_invalid_signature_metadata_and_artifact_tamper_503() {
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_unadvertised_and_stale_artifacts_404_and_nested_paths_400() {
     let fixture = SignedGatewayPublication::new();
@@ -1259,6 +1259,7 @@ async fn test_unadvertised_and_stale_artifacts_404_and_nested_paths_400() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_linked_receipt_metadata_and_artifacts_503() {
     use std::os::unix::fs::symlink;
@@ -1307,6 +1308,7 @@ async fn test_linked_receipt_metadata_and_artifacts_503() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_unsafe_or_oversized_receipt_503() {
     use std::os::unix::fs::PermissionsExt;
@@ -1512,7 +1514,7 @@ async fn test_active_site_head_prefers_bundle_cid() {
         .unwrap();
     assert_eq!(&body[..], b"<html>published bundle</html>");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn an_ordinary_home_serves_its_local_store_over_http_only_to_its_own_sessions() {
     let dir = tempfile::tempdir().unwrap();

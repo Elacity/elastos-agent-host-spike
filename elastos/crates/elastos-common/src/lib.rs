@@ -3,6 +3,16 @@
 pub mod browser_protocol;
 #[cfg(unix)]
 pub mod browser_vm_seed;
+#[cfg(windows)]
+pub mod browser_vm_seed {
+    /// Windows has no admitted local Browser VM image. Keep the wire type
+    /// available so callers can refuse image preparation before launch.
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct BrowserVmSeedIdentity {
+        _unsupported: (),
+    }
+}
 pub mod capsule_manifest_file;
 pub mod chat_protocol;
 mod cid_form;

@@ -43,7 +43,9 @@ use futures_lite::StreamExt;
 use iroh_gossip::net::Gossip;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
-use tokio::io::{self, AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::io;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -9674,6 +9676,9 @@ pub async fn try_p2p_discovery(
     release["head_cid"].as_str().map(|s| s.to_string())
 }
 
+// P2-11 step 6: tests that publish through state Windows refuses are cfg(unix);
+// the fixtures only they use are unused in the Windows test build.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -10031,7 +10036,7 @@ pub(crate) mod tests {
         let started = std::time::Instant::now();
         let err = relay_until_idle(&activity, async {
             let mut sink = tokio::io::sink();
-            io::copy(&mut reader, &mut sink).await
+            tokio::io::copy(&mut reader, &mut sink).await
         })
         .await
         .unwrap_err();
@@ -10053,7 +10058,7 @@ pub(crate) mod tests {
         });
         let copied = relay_until_idle(&activity, async {
             let mut sink = tokio::io::sink();
-            io::copy(&mut reader, &mut sink).await
+            tokio::io::copy(&mut reader, &mut sink).await
         })
         .await
         .unwrap();
@@ -11891,7 +11896,7 @@ pub(crate) mod tests {
         serving.await.unwrap();
         server.close().await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn carrier_terminal_install_fetches_signed_cid_before_release_name() {
         use sha2::Digest;
@@ -11978,7 +11983,7 @@ pub(crate) mod tests {
         }
         server.close().await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn carrier_runtime_download_preserves_configured_listener_and_hash_gate() {
         let server = bind_carrier_endpoint(
@@ -13303,6 +13308,7 @@ pub(crate) mod tests {
     }
 
     /// As `start_content_holder_runtime`, answering reads as `behavior` says.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) async fn start_slow_content_holder_runtime(
         seed: u8,
         files: std::collections::BTreeMap<String, Vec<u8>>,
@@ -13314,6 +13320,7 @@ pub(crate) mod tests {
     }
 
     /// As `start_slow_content_holder_runtime`, under the device key `sk`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) async fn start_content_holder_runtime_as(
         sk: ed25519_dalek::SigningKey,
         did: String,
@@ -13423,7 +13430,7 @@ pub(crate) mod tests {
             _dir: dir,
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_bounded_content_transfer_between_runtimes_fails_over_holders_and_stays_bounded() {
         let cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
@@ -13951,6 +13958,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_response_deadline_applies_only_to_bounded_content_fetch() {
         let local_dir = tempfile::tempdir().unwrap();
@@ -14126,10 +14134,12 @@ pub(crate) mod tests {
     /// book makes resolution in-process, so a routed invocation does not depend
     /// on public discovery timing. Nothing here is visible to apps: the route
     /// stays a peer DID and the address never leaves Runtime.
+    #[cfg_attr(not(unix), allow(dead_code))]
     async fn peer_did_route_fixture(local_seed: u8, remote_seed: u8) -> PeerDidRouteFixture {
         peer_did_route_fixture_with_address(local_seed, remote_seed, true).await
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     async fn peer_did_route_fixture_with_address(
         local_seed: u8,
         remote_seed: u8,
@@ -14249,6 +14259,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     async fn assert_private_carrier_reply_bound(target: &str, operation: &str, limit: usize) {
         let fixture = peer_did_route_fixture(181, 182).await;
         let payload_size = 32 * 1024;
@@ -14320,7 +14331,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn private_history_carrier_read_authenticates_source_and_bounds_the_wire_reply() {
         assert_private_carrier_reply_bound(
@@ -14330,7 +14341,7 @@ pub(crate) mod tests {
         )
         .await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn private_shared_carrier_delivery_authenticates_source_and_bounds_the_wire_reply() {
         assert_private_carrier_reply_bound(
@@ -14375,6 +14386,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn connect_ticket_invocation(
         remote_addr: iroh::EndpointAddr,
         remote_did: &str,
@@ -14421,6 +14433,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_registered_ticket_peer_did_reaches_only_matching_peer() {
         let fixture = peer_did_route_fixture_with_address(109, 110, false).await;
@@ -14479,6 +14492,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn expired_remembered_ticket_uses_plain_peer_resolution() {
         let fixture = peer_did_route_fixture(233, 234).await;
@@ -14654,6 +14668,7 @@ pub(crate) mod tests {
         assert_eq!(lookup_addr, fresh);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_peer_did_route_reaches_resolved_provider_without_exposing_topology() {
         let fixture = peer_did_route_fixture(60, 61).await;
@@ -14697,7 +14712,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_peer_did_route_reaches_runtime_only_custody_target() {
         let fixture = peer_did_route_fixture(62, 63).await;
@@ -14740,6 +14755,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn peer_did_content_invocation(
         peer_did: &str,
         request: serde_json::Value,
@@ -14760,6 +14776,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn recorded_content_ops(requests: &StdMutex<Vec<serde_json::Value>>) -> Vec<String> {
         requests
             .lock()
@@ -14780,7 +14797,7 @@ pub(crate) mod tests {
         )
         .unwrap();
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn carrier_peer_cannot_publish_unpublish_or_repair_home_content() {
         let fixture = peer_did_route_fixture(150, 151).await;
@@ -14808,7 +14825,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn carrier_content_replica_ops_need_an_owner_granted_peer() {
         let fixture = peer_did_route_fixture(152, 153).await;
@@ -14891,7 +14908,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn carrier_seed_accepts_no_replicas_from_any_peer() {
         let fixture = peer_did_route_fixture(154, 155).await;
@@ -14969,7 +14986,7 @@ pub(crate) mod tests {
             })
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn carrier_granted_peer_pins_a_large_file_only_from_its_own_repo() {
         let cid = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
@@ -15157,7 +15174,7 @@ pub(crate) mod tests {
             Ok(serde_json::json!({ "status": "ok", "data": { "data": "c2VjcmV0" } }))
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn carrier_peer_fetch_withdrawn_during_its_read_sends_no_bytes() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15202,7 +15219,7 @@ pub(crate) mod tests {
         assert_eq!(answer["code"], CARRIER_PEER_REFUSED);
         assert!(!answer.to_string().contains("c2VjcmV0"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn holder_signs_the_bytes_it_served() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -15282,7 +15299,7 @@ pub(crate) mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn carrier_peer_fetch_serves_only_cids_an_active_publication_lists() {
         let fixture = peer_did_route_fixture(156, 157).await;
@@ -15379,6 +15396,7 @@ pub(crate) mod tests {
     }
 
     /// Makes `registry` a receiving Home: real Content over [`ReceiverIpfs`].
+    #[cfg(unix)]
     pub(crate) async fn register_shared_content_receiver(
         registry: &Arc<ProviderRegistry>,
         data_dir: &std::path::Path,
@@ -15402,6 +15420,7 @@ pub(crate) mod tests {
     }
 
     /// A sender's Home holding one file, reachable from `fixture`'s local node.
+    #[cfg(unix)]
     async fn shared_file_holder(
         seed: u8,
         fixture: &PeerDidRouteFixture,
@@ -15411,6 +15430,7 @@ pub(crate) mod tests {
         shared_file_holder_with_address(seed, fixture, bytes, behavior, true).await
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     async fn shared_file_holder_with_address(
         seed: u8,
         fixture: &PeerDidRouteFixture,
@@ -15434,7 +15454,7 @@ pub(crate) mod tests {
         }
         (holder, requests)
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_round_trips_one_mib_and_pins_its_exact_cid() {
         let fixture = peer_did_route_fixture(190, 191).await;
@@ -15477,7 +15497,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_pins_nothing_when_the_bytes_miss_the_cid() {
         let fixture = peer_did_route_fixture(193, 194).await;
@@ -15512,7 +15532,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_reports_an_offline_sender_within_its_connect_budget() {
         let fixture = peer_did_route_fixture(196, 197).await;
@@ -15543,7 +15563,7 @@ pub(crate) mod tests {
         assert!(receiver.added.lock().unwrap().is_empty());
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_reports_remembered_ticket_sender_offline() {
         let fixture = peer_did_route_fixture(219, 220).await;
@@ -15572,6 +15592,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_times_out_at_its_reply_wait() {
         let fixture = peer_did_route_fixture(198, 199).await;
@@ -15614,7 +15635,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_uses_remembered_ticket_for_slow_sender_within_reply_wait() {
         let fixture = peer_did_route_fixture(213, 214).await;
@@ -15666,6 +15687,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_ticket_route_stops_at_reply_wait() {
         let fixture = peer_did_route_fixture(216, 217).await;
@@ -15716,6 +15738,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.local_node).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_get_shared_content_is_not_shared_once_the_sender_unpins() {
         let fixture = peer_did_route_fixture(201, 202).await;
@@ -15989,7 +16012,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(remote_node).await;
         shutdown_test_carrier_node(local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_peer_did_self_route_uses_carrier_admission_without_network_connect() {
         let fixture = peer_did_route_fixture(90, 91).await;
@@ -16041,7 +16064,7 @@ pub(crate) mod tests {
             local_did
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_connect_ticket_self_route_uses_carrier_admission_without_network_connect() {
         let fixture = peer_did_route_fixture(93, 94).await;
@@ -16083,7 +16106,7 @@ pub(crate) mod tests {
             local_did
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_connect_ticket_self_route_rejects_mismatched_peer_before_provider_effect() {
         let fixture = peer_did_route_fixture(95, 96).await;
@@ -16178,7 +16201,7 @@ pub(crate) mod tests {
 
         shutdown_test_carrier_node(node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_connect_ticket_route_reuses_runtime_endpoint_identity() {
         let fixture = peer_did_route_fixture(72, 73).await;
@@ -16207,7 +16230,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_connect_ticket_route_retains_one_peer_connection_across_invokes() {
         let fixture = peer_did_route_fixture(80, 81).await;
@@ -16237,7 +16260,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_connect_ticket_route_without_runtime_endpoint_fails_before_provider_effect() {
         let fixture = peer_did_route_fixture(74, 75).await;
@@ -16264,7 +16287,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_peer_did_route_without_runtime_endpoint_is_unavailable_before_provider_effect() {
         let fixture = peer_did_route_fixture(76, 77).await;
@@ -16294,7 +16317,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_peer_did_route_rejects_substituted_identity_before_provider_effect() {
         let fixture = peer_did_route_fixture(64, 65).await;
@@ -16343,7 +16366,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_peer_did_route_executes_each_invocation_exactly_once() {
         let fixture = peer_did_route_fixture(68, 69).await;
@@ -16360,7 +16383,7 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_peer_did_route_serves_concurrent_invocations_exactly_once_each() {
         let fixture = peer_did_route_fixture(70, 71).await;
@@ -16529,6 +16552,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_remote_carrier_browser_exit_rejects_unissued_request_on_authenticated_connection()
     {
@@ -19357,7 +19381,7 @@ pub(crate) mod tests {
             "{requests:?}"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_carrier_availability_fetch_walks_a_dead_trusted_source_then_a_later_independent_holder(
     ) {
@@ -20277,7 +20301,7 @@ pub(crate) mod tests {
             ]
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_taken_ipv6_carrier_port_keeps_a_random_ipv6_listener() {
         // Another service holds the Carrier port on IPv6. On a busy host the
@@ -20799,6 +20823,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bounded_availability_read_keeps_undialable_holder_in_transit() {
         let holder = peer_did_route_fixture(230, 231).await;

@@ -2301,7 +2301,7 @@ mod tests {
         )
         .is_err());
     }
-
+    #[cfg(unix)]
     #[test]
     fn remote_engine_consumer_dispatch_and_retirement_reject_stale_writes() {
         let root = tempfile::tempdir().unwrap();
@@ -2340,7 +2340,7 @@ mod tests {
             .unwrap();
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn remote_engine_terminal_retirement_exceeds_128_lifetimes_and_preserves_profile_owner() {
         let root = tempfile::tempdir().unwrap();
@@ -2377,7 +2377,7 @@ mod tests {
         require_profile_placement(root.path(), "alice", Some("runtime-b")).unwrap();
         require_profile_placement(root.path(), "bob", None).unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn remote_engine_pending_capacity_rejects_before_write_and_keeps_exact_cleanup_available() {
         let root = tempfile::tempdir().unwrap();
@@ -2474,7 +2474,7 @@ mod tests {
             )
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn remote_engine_launch_admission_rejects_fresh_and_stale_retiring_records() {
         let peer = iroh::SecretKey::from_bytes(&[43; 32]).public().to_string();
@@ -2661,7 +2661,7 @@ mod tests {
         assert_eq!(profile["storage_posture"], BROWSER_PROFILE_STORAGE_POSTURE);
         assert_eq!(profile["recovery"], BROWSER_PROFILE_RECOVERY);
     }
-
+    #[cfg(unix)]
     #[test]
     fn remote_engine_profile_placement_does_not_silently_fork_or_reset() {
         let root = tempfile::tempdir().unwrap();

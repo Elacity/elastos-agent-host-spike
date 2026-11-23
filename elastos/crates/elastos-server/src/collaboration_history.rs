@@ -619,6 +619,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn history_service_catches_up_canonical_expired_live_messages_once() {
         let now = now_secs();
@@ -692,6 +693,7 @@ mod tests {
             .is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn history_refuses_foreign_scope_source_expired_presence_and_untrusted_payloads() {
         let now = now_secs();
@@ -851,6 +853,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn history_target_stays_private_and_requires_authenticated_carrier_invocation() {
         let now = now_secs();
@@ -907,6 +910,7 @@ mod tests {
         assert!(provider.send_raw(&authenticated).await.is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn history_without_own_presence_asks_for_show_me_only_when_nobody_chose_it() {
         // Nobody here chose Show me: this Home publishes no presence of its
@@ -962,6 +966,7 @@ mod tests {
         assert_eq!(detail().0, "searching");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn unavailable_history_keeps_live_transport_available_and_rotates_past_four_peers() {
         let now = now_secs();
@@ -1052,6 +1057,7 @@ mod tests {
             .is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_history_request_carries_no_presence_after_hidden() {
         let now = now_secs();
@@ -1061,6 +1067,7 @@ mod tests {
         assert_not_shown_and_nothing_sent(&a, &plane, now);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_history_request_carries_no_presence_after_an_epoch_bump() {
         let now = now_secs();
@@ -1070,6 +1077,7 @@ mod tests {
         assert_not_shown_and_nothing_sent(&a, &plane, now);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn history_revalidates_profile_and_retires_own_projection() {
         let now = now_secs();
@@ -1112,6 +1120,7 @@ mod tests {
             .all(|record| record.sender_profile_did() != a.profile_did));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn history_without_a_manager_fails_closed_after_restart() {
         let now = now_secs();
@@ -1139,6 +1148,7 @@ mod tests {
             .all(|record| record.sender_profile_did() != a.profile_did));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn revoked_presence_cannot_return_through_startup_projection_or_polling() {
         let now = now_secs();
@@ -1253,6 +1263,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn each_history_peer_revalidates_after_hidden_or_epoch() {
         let now = now_secs();
@@ -1298,6 +1309,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn stalled_history_has_a_per_peer_deadline() {
         let now = now_secs();

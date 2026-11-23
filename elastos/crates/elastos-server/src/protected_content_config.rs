@@ -955,6 +955,9 @@ async fn provision_custody_node_with_installed_provider(
     inactive_root: &Path,
     issuer: RuntimeOperationIssuerKeyV1,
 ) -> anyhow::Result<ProvisionedCustodyProviderPublicKeys> {
+    #[cfg(windows)]
+    crate::protected_content_runtime::require_isolated_provider("custody")?;
+
     anyhow::ensure!(
         data_dir.join("bin/custody-provider").is_file(),
         "verified custody provider binary is unavailable"
@@ -1100,7 +1103,7 @@ mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn create_policy_authority_key_creates_owner_only_key_and_receipt() {
         let dir = tempfile::tempdir().unwrap();

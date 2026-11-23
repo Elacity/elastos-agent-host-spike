@@ -238,6 +238,7 @@ pub(crate) use gateway_room::{
 };
 pub(crate) use gateway_server::advertised_gateway_urls;
 pub use gateway_server::start_gateway_server;
+#[cfg(unix)]
 pub(crate) use gateway_server::start_gateway_server_with_collaboration_context;
 pub(crate) use gateway_server::start_gateway_server_with_ready;
 pub use gateway_server::GatewayCollaborationContext;
@@ -1677,4 +1678,7 @@ fn home_error_response(err: anyhow::Error) -> Response {
 mod gateway_browser_tests;
 #[cfg(test)]
 #[path = "gateway_tests/mod.rs"]
+// P2-11 step 6: tests that write state Windows refuses are cfg(unix); the
+// fixtures only they use are unused in the Windows test build.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub(in crate::api) mod gateway_tests;

@@ -1986,10 +1986,50 @@ impl Runtime {
         left: &mut Budget,
         after_walk: &mut impl FnMut(&LabCid),
     ) -> std::result::Result<(VerifiedBundle, AcceptedSignature), BundleRefusal> {
+        // Windows only: Unix already reports ENOTDIR (store IO) for a file where a
+        // store directory must be, so its "missing" answer must not change.
+        #[cfg(windows)]
+        fn bundle_store_ancestor_blocks_lookup(data_dir: &Path, slot: &Path) -> Option<String> {
+            let mut cursor = slot.parent();
+            while let Some(path) = cursor {
+                if !path.starts_with(data_dir) {
+                    break;
+                }
+                match std::fs::symlink_metadata(path) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => {
+                        return Some(format!(
+                            "could not look into the bundle store at {}: not a directory",
+                            path.display()
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Some(format!(
+                            "could not look into the bundle store at {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+                if path == data_dir {
+                    break;
+                }
+                cursor = path.parent();
+            }
+            None
+        }
+
         let slot = bundle_admission::bundle_slot(data_dir, asked);
         match std::fs::symlink_metadata(&slot) {
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A missing slot is "no such bundle" only when the store can be
+                // looked into. On Windows, a file where a store directory must
+                // be reports NotFound for the child path. That is still store IO.
+                #[cfg(windows)]
+                if let Some(why) = bundle_store_ancestor_blocks_lookup(data_dir, &slot) {
+                    return Err(BundleRefusal::Store(why));
+                }
                 return Err(BundleRefusal::Missing(asked.to_string()));
             }
             Err(error) => {
@@ -3644,6 +3684,7 @@ pub(crate) mod tests {
     /// An installed Home whose config.toml still says `dev_mode = true` (the
     /// earlier default) admits only its signed release's capsules and capsules
     /// signed by the release publisher.
+    #[cfg(unix)]
     #[tokio::test]
     async fn installed_release_refuses_unsigned_and_foreign_signed_local_capsules() {
         let mut home = crate::installed_release::tests::Fixture::new();
@@ -3928,7 +3969,7 @@ pub(crate) mod tests {
         std::fs::write(dir.join("app.component.wasm"), &component).unwrap();
         component
     }
-
+    #[cfg(unix)]
     /// A component folder outside dev mode is walked once by the folder gate,
     /// and the bytes that walk read are the bytes that run. The test changes
     /// the entrypoint right after the walk: a second read would meet the new
@@ -4043,7 +4084,7 @@ pub(crate) mod tests {
         assert!(!error.contains("'probe-manifest'"), "{error}");
         assert!(runtime.list_capsules().await.is_empty(), "nothing started");
     }
-
+    #[cfg(unix)]
     /// An installed folder starts from both entrances: the CLI's bounded
     /// start and the launch route's detached start.
     #[tokio::test]
@@ -4639,6 +4680,7 @@ pub(crate) mod tests {
 
     /// A Runtime with the component provider, the real resource bridge, and a
     /// stored Agent whose root has principal-root protection, as on a Home.
+    #[cfg(unix)]
     struct AgentHostRuntime {
         runtime: Arc<Runtime>,
         capability_manager: Arc<CapabilityManager>,
@@ -4651,6 +4693,7 @@ pub(crate) mod tests {
         _temp: tempfile::TempDir,
     }
 
+    #[cfg(unix)]
     async fn agent_host_runtime() -> AgentHostRuntime {
         use crate::bundle_admission::tests::key;
         use crate::stage_cmd::bundle_cid;
@@ -4732,6 +4775,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn agent_host_journal(fx: &AgentHostRuntime) -> (String, String) {
         let root =
             crate::auth::principal_stored_localhost_root(Some(&fx.data_dir), &fx.agent_id).unwrap();
@@ -4739,6 +4783,7 @@ pub(crate) mod tests {
         (root, journal)
     }
 
+    #[cfg(unix)]
     fn launch_agent_host(
         fx: &AgentHostRuntime,
     ) -> tokio::task::JoinHandle<elastos_common::Result<elastos_compute::CapsuleHandle>> {
@@ -4809,6 +4854,7 @@ pub(crate) mod tests {
     }
 
     /// The guest journals its activation before asking to submit a plan.
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_writes_and_reads_its_journal_through_the_real_bridge() {
@@ -4903,6 +4949,7 @@ pub(crate) mod tests {
 
     /// A task whose stored journal is format 1: the guest's run fails with
     /// exactly the text the person sees, and the stored object is not touched.
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_refuses_a_format_1_journal_with_its_reason() {
@@ -4975,6 +5022,7 @@ pub(crate) mod tests {
 
     /// The shell denies both journal requests: the guest finishes before a
     /// submit ask, sends no resource call, and stores nothing.
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_stores_nothing_when_its_journal_grants_are_denied() {
@@ -5156,6 +5204,7 @@ pub(crate) mod tests {
     /// before the provider is reached; the audit names B as the caller of the
     /// failed use and `wrong_capsule` as the reason. A's own invoke is the
     /// control: the provider is called exactly once, for A.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sibling_token_refused() {
         if !crate::agents::build_allows() {
@@ -5834,7 +5883,7 @@ pub(crate) mod tests {
             own.to_string()
         )));
     }
-
+    #[cfg(unix)]
     /// A3-R S3 fix 1. A guard dropped with its end owed hands the end to a
     /// task, and the runtime shuts down before it runs that task, as a
     /// runtime does with the tasks it has not run. The end still happens

@@ -62,6 +62,7 @@ fn approval_callers_use_wallet_bus_v2_while_deferred_paths_remain_explicit() {
     assert!(!wallet_app_source.contains(r#""op": "import_managed_secret""#));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn approval_routes_reject_caller_supplied_authority_before_wallet_dispatch() {
     let dir = tempfile::tempdir().unwrap();
@@ -88,6 +89,7 @@ async fn approval_routes_reject_caller_supplied_authority_before_wallet_dispatch
     assert!(wallet_provider.requests.lock().await.is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_summary_queries_wallet_only_with_verified_home_authority() {
     let dir = tempfile::tempdir().unwrap();

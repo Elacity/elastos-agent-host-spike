@@ -1530,6 +1530,7 @@ mod tests {
     use super::*;
 
     /// A5-S3c-0b: Documents resolves the Agent root from the stored record.
+    #[cfg(unix)]
     #[test]
     fn a_stored_agents_documents_root_is_under_its_usersai_root() {
         use crate::auth::r4_fixture::{AGENT_ID, AGENT_ROOT};
@@ -1559,6 +1560,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     #[test]
     fn r6_documents_root_uses_stored_kind() {
         use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
@@ -1585,6 +1587,7 @@ mod tests {
             .contains("has no stored record"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn r6_documents_write_body_uses_stored_kind() {
         use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
@@ -1611,6 +1614,7 @@ mod tests {
             .contains("has no stored record"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn r6_documents_load_body_uses_stored_kind() {
         use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
@@ -1670,6 +1674,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn documents_save_requires_revision_before_any_write() {
         let dir = test_home();
@@ -1702,6 +1707,7 @@ mod tests {
         assert_eq!(loaded.body, document.body);
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_save_revision_covers_title_and_body_changes() {
         let dir = test_home();
@@ -1745,6 +1751,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_save_revision_binds_principal_document_and_path() {
         let dir = test_home();
@@ -1767,6 +1774,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_save_rejects_wrong_principal_without_changes() {
         let dir = test_home();
@@ -1790,6 +1798,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_save_concurrent_revision_has_one_complete_winner() {
         let dir = test_home();
@@ -1839,6 +1848,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_save_detects_other_principal_root_body_writer() {
         let dir = test_home();
@@ -1870,6 +1880,7 @@ mod tests {
         assert_ne!(loaded.revision, document.revision);
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_save_metadata_failure_reports_partial_outcome_until_read() {
         let dir = test_home();
@@ -2008,6 +2019,7 @@ mod tests {
         assert!(!viewer_dir.join("index.html").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_summary_is_read_only_on_empty_store() {
         let dir = test_home();
@@ -2019,6 +2031,7 @@ mod tests {
         assert!(!documents_metadata_root(dir.path()).unwrap().exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_summary_lists_plain_folder_files_without_importing() {
         let dir = test_home();
@@ -2054,6 +2067,7 @@ mod tests {
         assert!(docs_root.join("Legacy.md").is_file());
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_summary_folder_files_stay_within_depth_and_count() {
         let dir = test_home();
@@ -2081,6 +2095,7 @@ mod tests {
         assert_eq!(summary.files.len(), DOCUMENTS_FOLDER_FILES_LIMIT);
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_summary_folder_scan_reads_a_bounded_number_of_entries() {
         let dir = test_home();
@@ -2148,6 +2163,7 @@ mod tests {
         assert_eq!(paths, ["Own.md"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_create_explicitly_adds_summary_object() {
         let dir = test_home();
@@ -2169,6 +2185,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_import_chat_attachment_is_idempotent_local_object() {
         let dir = test_home();
@@ -2226,6 +2243,7 @@ mod tests {
         assert_eq!(summary.documents.len(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_working_copy_is_encrypted_for_protected_principal_root() {
         let dir = test_home();
@@ -2252,6 +2270,7 @@ mod tests {
         assert_eq!(loaded.body, "# Secret\n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_publish_export_and_finish_records_revision() {
         let dir = test_home();
@@ -2347,6 +2366,7 @@ mod tests {
         assert!(documents_unpublish_local(dir.path(), TEST_PRINCIPAL, &document.doc_did).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_reject_cross_principal_document_access() {
         let dir = test_home();
@@ -2372,6 +2392,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_rejects_unsupported_metadata_schema() {
         let dir = test_home();
@@ -2388,6 +2409,7 @@ mod tests {
         assert_eq!(err.to_string(), "unsupported document schema");
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_summary_skips_incompatible_metadata_entries() {
         let dir = test_home();
@@ -2443,6 +2465,7 @@ mod tests {
         assert!(documents_existing_publish_response(&export, "sha256:changed").is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_rejects_doc_did_path_traversal() {
         let dir = test_home();
@@ -2461,6 +2484,7 @@ mod tests {
         assert!(valid.ends_with("did:key:z6Mkdoc/document.json"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn documents_publish_and_unpublish_use_provider_plane() {
         let dir = test_home();
@@ -2556,6 +2580,7 @@ mod tests {
         assert_eq!(loaded.latest_published_cid, None);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires ELASTOS_LIVE_IPFS_PROVIDER_BIN and ELASTOS_LIVE_IPFS_DATA_DIR"]
     async fn documents_live_ipfs_publish_provider_route_smoke() {
@@ -2647,6 +2672,7 @@ mod tests {
         println!("documents live IPFS provider route cid={}", published.cid);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn documents_publish_requires_content_provider() {
         let dir = test_home();
@@ -2665,6 +2691,7 @@ mod tests {
         assert_eq!(err.to_string(), "Publishing is unavailable on this device.");
     }
 
+    #[cfg(unix)]
     #[test]
     fn documents_delete_removes_object_and_working_copy() {
         let dir = test_home();

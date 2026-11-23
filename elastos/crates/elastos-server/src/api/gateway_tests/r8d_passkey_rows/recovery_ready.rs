@@ -8,6 +8,7 @@ fn readiness(dir: &std::path::Path, ctx: &HomeLaunchTokenContext) -> Value {
     serde_json::to_value(recovery_readiness_for_context(dir, ctx)).unwrap()
 }
 
+#[cfg(unix)]
 #[test]
 fn r8d_child_recovery_readiness_is_answered_for_the_passkey_person() {
     let person = passkey_person(PEOPLE_CAPSULE_ID);
