@@ -55,13 +55,22 @@ fn child(app: &str) -> Child {
     }
     let (_, child_did) = elastos_identity::load_or_create_did(dir.path()).unwrap();
     let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+    // A proofless device token verifies only for home and home-cli. The parent
+    // device root does not depend on the app. A proof-bound token cannot
+    // resolve here: the child holds no stored record, and its device DID is
+    // not the parent's. Verify the shell the device mint still signs.
+    let shell = if app == HOME_CAPSULE_ID || app == HOME_CLI_SHELL_ID {
+        app
+    } else {
+        HOME_CAPSULE_ID
+    };
     let on_parent = home_token::local_home_launch_token_context(parent.path()).unwrap();
     let token =
-        home_token::issue_home_launch_token_with_context(parent.path(), app, &on_parent).unwrap();
+        home_token::issue_home_launch_token_with_context(parent.path(), shell, &on_parent).unwrap();
     let ctx = home_token::require_home_launch_token_value_from_expected_did_for_test(
         dir.path(),
         &token,
-        &[app],
+        &[shell],
         parent_did.clone(),
         parent.path(),
     )

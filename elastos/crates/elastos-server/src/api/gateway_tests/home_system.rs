@@ -1469,6 +1469,63 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
 
 #[cfg(unix)]
 #[tokio::test]
+async fn gateway_owned_home_cli_issuer_refuses_a_grant_that_does_not_name_home() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let now = now_ts();
+    let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    store_home_cli_principal(dir.path());
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
+    );
+    crate::auth::store_session_grant(
+        dir.path(),
+        AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: context.grant_id.clone(),
+            session_id: context.session_id.clone(),
+            principal_id: context.principal_id().to_string(),
+            proof_binding_id: context.proof_binding_id.clone().unwrap(),
+            issued_at: now,
+            expires_at: now + 300,
+            apps: vec!["library".to_string()],
+        },
+    )
+    .unwrap();
+
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        context.principal_id().to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        context.session_id.clone(),
+    );
+    let _proof = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
+        context.proof_binding_id.clone().unwrap(),
+    );
+    let _grant = EnvRestore::set(HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV, context.grant_id.clone());
+
+    let refused = issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("auth session grant is not authorized for app"),
+        "{refused}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn gateway_owned_env_without_a_proof_binding_mints_no_device_token_for_people() {
     let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();

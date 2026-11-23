@@ -381,7 +381,13 @@ fn granted_home_app_token(data_dir: &std::path::Path) -> String {
 
 #[allow(dead_code)] // used when prototype-agents is off
 fn system_app_token(data_dir: &std::path::Path) -> String {
-    issue_home_launch_token(data_dir, SYSTEM_CAPSULE_ID).unwrap()
+    passkey_authority_with_name_role_credential(
+        data_dir,
+        Some("unproved-guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+        "gateway-test-system-guest-passkey",
+    )
+    .system_token
 }
 
 fn people_app_token(data_dir: &std::path::Path) -> String {

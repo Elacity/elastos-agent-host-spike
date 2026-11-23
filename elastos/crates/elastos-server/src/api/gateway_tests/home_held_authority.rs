@@ -265,7 +265,7 @@ fn rows() -> Vec<HeldRow> {
         "issue_gateway_owned_home_cli_launch_token",
         "issue_home_projection_launch_token_with_context",
         1,
-        mark("delegated", "projection under the checked grant", "the grant's person", "This mints the named app only after the env context's live grant has been checked"),
+        mark("delegated", "projection under the checked grant", "the grant's person", "This mints the named app only after the env context's live grant has been checked, and that grant names home"),
     ),
     row(
         "elastos-server/src/api/gateway.rs",
@@ -657,7 +657,7 @@ fn rows() -> Vec<HeldRow> {
         "local_home_launch_token_context",
         "load_or_create_did",
         1,
-        mark("open", "device DID root", "Home device", "The device DID becomes the principal root for any app"),
+        mark("open", "device DID root", "Home device", "The device DID is the principal root of the device context; its only production caller uses that context for home and home-cli"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",
@@ -944,7 +944,7 @@ fn rows() -> Vec<HeldRow> {
         "open_at_runtime",
         "issue_home_projection_launch_token_with_context",
         1,
-        mark("delegated", "home and home-shell grant", "Home page", "Content open asks the Runtime with a home-shell projection"),
+        mark("delegated", "home and home-shell grant", "Home page", "Content open asks the Runtime with a home-shell projection of a proof-bound context"),
     ),
     row(
         "elastos-server/src/auth.rs",
