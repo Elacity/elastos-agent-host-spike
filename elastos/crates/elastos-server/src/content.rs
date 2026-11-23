@@ -104,6 +104,11 @@ pub(crate) const LOCAL_PIN_AVAILABILITY_POLICY: &str = "local_pin";
 const AVAILABILITY_DASHBOARD_REMOTE_ROW_LIMIT: usize = 10;
 const OBJECT_MANIFEST_SCHEMA: &str = "elastos.content.object.manifest/v1";
 const OBJECT_MANIFEST_PATH: &str = "_elastos_object.json";
+/// Startup restore found complete local objects and did not re-import them.
+/// The default log filter shows errors. A debug skip used to look like success.
+#[cfg(windows)]
+const LOCAL_OBJECT_RESTORE_UNSUPPORTED_ON_WINDOWS: &str =
+    "local object restore is unsupported on Windows";
 const SEALED_OBJECT_PATH: &str = "sealed.json";
 
 pub const CONTENT_OBJECT_MANIFEST_PATH: &str = OBJECT_MANIFEST_PATH;
@@ -4774,6 +4779,9 @@ impl ContentProvider {
                 return;
             }
         };
+        // One named refusal for the whole restore. Further objects hit the same gate.
+        #[cfg(windows)]
+        let mut named_windows_refusal = false;
         for dir in complete_local_object_dirs(&self.data_dir) {
             match self.import_local_object_dir(&registry, &dir).await {
                 Ok(cid) if !held.contains(&cid) => tracing::warn!(
@@ -4802,11 +4810,24 @@ impl ContentProvider {
                         "content: restore local object replica failed"
                     ),
                 },
-                Err(err) => tracing::debug!(
-                    dir = %dir.display(),
-                    error = %err,
-                    "content: restore local object import skipped"
-                ),
+                Err(err) => {
+                    // checked_local_root requires a leading '/'. A Windows path
+                    // never reaches the provider. The owner-only, no-reparse
+                    // open that would replace that check is not on this branch.
+                    #[cfg(windows)]
+                    if local_object_preparation_unavailable(&err) {
+                        if !named_windows_refusal {
+                            named_windows_refusal = true;
+                            tracing::error!("{LOCAL_OBJECT_RESTORE_UNSUPPORTED_ON_WINDOWS}");
+                        }
+                        continue;
+                    }
+                    tracing::debug!(
+                        dir = %dir.display(),
+                        error = %err,
+                        "content: restore local object import skipped"
+                    );
+                }
             }
         }
     }
@@ -9973,6 +9994,17 @@ fn validate_content_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `add_local_ipfs_object` returns this when the root is not a slash path,
+/// and again when the host is not Linux or macOS. On Windows the slash check
+/// is the one that runs.
+#[cfg(windows)]
+fn local_object_preparation_unavailable(err: &ProviderError) -> bool {
+    matches!(
+        err,
+        ProviderError::Provider(message) if message == "local content preparation unavailable"
+    )
+}
+
 fn complete_local_object_dirs(data_dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     walk_local_object_dirs(data_dir, 0, &mut found);
@@ -15065,6 +15097,91 @@ mod tests {
         content.restore_complete_local_objects().await;
         assert!(ipfs.pinned.lock().await.is_empty());
     }
+
+    /// The import contract stays in
+    /// `restore_and_repair_stream_large_objects_and_skip_model_packages`.
+    /// That test is not gated: Windows still fails it until object files open
+    /// under the owner-only, no-reparse rule. This test pins the refusal.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn windows_local_object_restore_names_its_refusal() {
+        use std::io::Write;
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+        #[derive(Clone)]
+        struct LogWriter(StdArc<StdMutex<Vec<u8>>>);
+        impl Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let log = StdArc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer({
+                let log = log.clone();
+                move || LogWriter(log.clone())
+            })
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        content.restore_complete_local_objects().await;
+        let quiet = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            !quiet.contains(LOCAL_OBJECT_RESTORE_UNSUPPORTED_ON_WINDOWS),
+            "{quiet}"
+        );
+        assert!(ipfs.added_directories.lock().await.is_empty());
+
+        for name in ["held-object", "media-object"] {
+            let body = format!("hello {name}").into_bytes();
+            let digest = format!("{:x}", sha2::Sha256::digest(&body));
+            let object_dir = data_dir.path().join(name);
+            std::fs::create_dir_all(&object_dir).unwrap();
+            std::fs::write(object_dir.join("index.md"), &body).unwrap();
+            std::fs::write(
+                object_dir.join(OBJECT_MANIFEST_PATH),
+                serde_json::to_vec(&json!({
+                    "schema": OBJECT_MANIFEST_SCHEMA,
+                    "kind": "directory",
+                    "content_digest": format!("sha256:{digest}"),
+                    "files": [{
+                        "path": "index.md",
+                        "sha256": digest,
+                        "size": body.len() as u64
+                    }],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        log.lock().unwrap().clear();
+        content.restore_complete_local_objects().await;
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            output
+                .matches(LOCAL_OBJECT_RESTORE_UNSUPPORTED_ON_WINDOWS)
+                .count(),
+            1,
+            "{output}"
+        );
+        assert!(ipfs.added_directories.lock().await.is_empty());
+        assert!(ipfs
+            .requests
+            .lock()
+            .await
+            .iter()
+            .all(|request| request["op"] != "runtime_add_local_object"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_file_wraps_ipfs_bytes_with_receipt() {
