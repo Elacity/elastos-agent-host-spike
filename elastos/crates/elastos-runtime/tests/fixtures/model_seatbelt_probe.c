@@ -37,12 +37,15 @@ static int unix_result(const char *path) {
 }
 
 int main(void) {
+    int inherited_regular_fds = 0;
     int inherited_writable_regular_fds = 0;
     for (int fd = 3; fd < 256; fd++) {
         struct stat metadata;
         int flags = fcntl(fd, F_GETFL);
-        if (flags >= 0 && fstat(fd, &metadata) == 0 && S_ISREG(metadata.st_mode) &&
-            (flags & O_ACCMODE) != O_RDONLY) inherited_writable_regular_fds++;
+        if (flags >= 0 && fstat(fd, &metadata) == 0 && S_ISREG(metadata.st_mode)) {
+            inherited_regular_fds++;
+            if ((flags & O_ACCMODE) != O_RDONLY) inherited_writable_regular_fds++;
+        }
     }
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
@@ -170,7 +173,7 @@ int main(void) {
                "\"late_engine_write_errno\":%d,\"admitted_alias_read_errno\":%d,"
                "\"short_admission_read_errno\":%d,\"suffixed_admission_read_errno\":%d,"
                "\"data_alias_read_errno\":%d,"
-               "\"inherited_writable_regular_fds\":%d}}\n",
+               "\"inherited_regular_fds\":%d,\"inherited_writable_regular_fds\":%d}}\n",
                external, descendant[0], unrelated, descendant[1], other_socket,
                descendant[2], selected_socket, descendant[3], system_read,
                descendant[4], canary_read, descendant[5], model_read, model_write,
@@ -182,6 +185,7 @@ int main(void) {
                late_engine_write, admitted_alias_read,
                short_admission_read, suffixed_admission_read,
                data_alias_read,
+               inherited_regular_fds,
                inherited_writable_regular_fds);
         fflush(stdout);
     }

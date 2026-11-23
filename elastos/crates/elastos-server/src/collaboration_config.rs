@@ -544,9 +544,10 @@ pub(crate) fn write_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elastos_runtime::provider::{
-        Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
-    };
+    #[cfg(unix)]
+    use elastos_runtime::provider::ProviderRegistry;
+    use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
+    #[cfg(unix)]
     use std::sync::Arc;
 
     struct BootstrapTicketProvider(CollaborationBootstrapPeer);

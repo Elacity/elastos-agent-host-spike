@@ -1106,10 +1106,12 @@ mod tests {
 
     /// The named refusal the row uses instead of an early return: a run
     /// without its host prerequisites is red with F3.5's id, never silently ok.
+    #[cfg(unix)]
     fn f35_refuse(what: impl std::fmt::Display) -> ! {
         panic!("F3.5 BLOCKED: {what}")
     }
 
+    #[cfg(unix)]
     fn f35_host_file(key: &str) -> PathBuf {
         let value = match std::env::var(key) {
             Ok(value) => value,
@@ -1122,6 +1124,7 @@ mod tests {
         path
     }
 
+    #[cfg(unix)]
     fn f35_sha256(path: &Path) -> String {
         use sha2::Digest as _;
         use std::io::Read as _;
@@ -1155,6 +1158,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn f35_write_components_manifest(
         data_dir: &Path,
         crosvm: serde_json::Value,
@@ -1179,12 +1183,14 @@ mod tests {
 
     /// The in-memory manifest entry the release's microVM gate resolves for
     /// this platform. The artifacts themselves are pinned on disk above.
+    #[cfg(unix)]
     fn f35_in_memory_component(platform: &str) -> crate::setup::Component {
         let mut platforms = serde_json::Map::new();
         platforms.insert(platform.to_string(), serde_json::json!({}));
         serde_json::from_value(serde_json::json!({"platforms": platforms})).unwrap()
     }
 
+    #[cfg(unix)]
     fn f35_person_grant(data_dir: &Path, person: &str, capsule: &str) -> String {
         use elastos_runtime::auth::AuthSessionGrantV1;
         let now = crate::auth::now_ts();
@@ -1211,6 +1217,7 @@ mod tests {
     /// Declared before `dir` on purpose: fields drop in declaration order, so
     /// the supervisor (and its `RunningVm` drop) runs while the temp dir that
     /// holds its data and capsule tree still exists.
+    #[cfg(unix)]
     struct F35Fixture {
         state: SupervisorState,
         dir: tempfile::TempDir,
@@ -1223,10 +1230,12 @@ mod tests {
     /// pivot root at `$HOME/.local/share/elastos/crosvm-empty`
     /// (`elastos-crosvm/src/config.rs:278`) and nothing on the launch path
     /// overrides that field, so `HOME` is the only test-reachable lever.
+    #[cfg(unix)]
     struct F35HomeGuard {
         previous: Option<std::ffi::OsString>,
     }
 
+    #[cfg(unix)]
     impl F35HomeGuard {
         fn inside(path: impl Into<std::path::PathBuf>) -> Self {
             let previous = std::env::var_os("HOME");
@@ -1235,6 +1244,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for F35HomeGuard {
         fn drop(&mut self) {
             match self.previous.take() {
@@ -1337,6 +1347,7 @@ mod tests {
     /// Poll the persisted audit until both frames' `requested` records exist or
     /// the deadline passes. A read error is retried; the 250 ms interval is a
     /// poll cadence, not the condition.
+    #[cfg(unix)]
     async fn f35_requested_records(
         data_dir: &Path,
     ) -> Vec<elastos_runtime::auth::RuntimeAuditEventV1> {

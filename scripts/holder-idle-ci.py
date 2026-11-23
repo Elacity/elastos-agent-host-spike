@@ -44,6 +44,9 @@ def main():
     spec = importlib.util.spec_from_file_location("observer", Path(__file__).with_name("update-hop-compare.py"))
     observer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(observer)
+    fixture_spec = importlib.util.spec_from_file_location("holder_fixture", Path(__file__).with_name("holder-canary-fixture.py"))
+    holder_fixture = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(holder_fixture)
     processes = observer.CliProcesses(output)
     root = Path.home() / ".local/share/elastos-issue89-always-on"
     assert not root.exists() and not root.is_symlink()
@@ -142,6 +145,7 @@ def main():
             (data / "config.toml").write_text('carrier_bind_addr = "127.0.0.1:' + str(port(socket.SOCK_DGRAM))
                 + '"\ngateway_public_publisher_bootstrap = true\ngateway_allowed_hosts = ["127.0.0.1"]\n')
             (data / "config.toml").chmod(0o600)
+            holder_fixture.sign_install(home, data, runtime, environment)
             command(home, [str(runtime), "node", "info", "--json"], role + "-identity")
             installed[role] = home, data, runtime, port()
         home, data, runtime, gateway_port = installed["holder"]
@@ -198,8 +202,8 @@ def main():
         assert "Runtime host role Gateway; idle stop disabled" in processes.text("always-on-holder", "stderr")
         holder_identity, consumer_identity = identity(holder.pid), identity(consumer.pid)
         matches = [row for row in observer.cli_census() if row["group"] == holder.pid
-                   and row["command"].split(" ", 1)[0] == str(data / "bin/ipfs-provider")]
-        assert len(matches) == 1
+                   and holder_fixture.runs_provider(row, data / "bin/ipfs-provider")]
+        assert len(matches) == 1, "exact single native provider generation required"
         provider_identity = identity(matches[0]["pid"])
         coord_path = data / "ipfs-coords.json"
         before = json.loads(coord_path.read_bytes())

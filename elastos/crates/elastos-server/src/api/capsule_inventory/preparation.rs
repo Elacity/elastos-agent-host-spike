@@ -7214,9 +7214,12 @@ mod tests {
                 std::env::var_os("ELASTOS_TEST_MODEL_PROVIDER_PATH").unwrap(),
             );
             assert!(binary.is_absolute());
-            let bridge = elastos_runtime::provider::ProviderBridge::spawn(&binary, config.clone())
-                .await
-                .unwrap();
+            let bridge = elastos_runtime::provider::ProviderBridge::spawn(
+                &crate::test_support::fixture_executable(&binary),
+                config.clone(),
+            )
+            .await
+            .unwrap();
             let settled =
                 settle_pending_model_startup(f.root.path(), &bridge, &config, worker.as_ref())
                     .await;
@@ -8044,7 +8047,11 @@ mod tests {
                 std::path::Path::new(&initial.base_path),
                 root.path().canonicalize().unwrap()
             );
-            let bridge = Arc::new(ProviderBridge::spawn(&binary, initial).await.unwrap());
+            let bridge = Arc::new(
+                ProviderBridge::spawn(&crate::test_support::fixture_executable(&binary), initial)
+                    .await
+                    .unwrap(),
+            );
             registry
                 .register_sub_provider(
                     "model",
@@ -9123,7 +9130,10 @@ mod tests {
                 .await
                 .unwrap();
             let id = actual.extra["offers"][0]["id"].clone();
-            let bridge = ProviderBridge::spawn(&binary, actual).await.unwrap();
+            let bridge =
+                ProviderBridge::spawn(&crate::test_support::fixture_executable(&binary), actual)
+                    .await
+                    .unwrap();
             drop(worker);
             let response = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 let status = bridge.send_raw(&serde_json::json!({"op":"status"})).await?;
@@ -9215,9 +9225,12 @@ server.serve_forever()
             let policy = actual.extra["offers"][0]["policy"].clone();
             assert_eq!(policy["inline_output_bytes_limit"], 65536);
             let bridge = Arc::new(
-                ProviderBridge::spawn(&binary, actual.clone())
-                    .await
-                    .unwrap(),
+                ProviderBridge::spawn(
+                    &crate::test_support::fixture_executable(&binary),
+                    actual.clone(),
+                )
+                .await
+                .unwrap(),
             );
             drop(worker);
             let active = bridge.clone();
@@ -9356,9 +9369,12 @@ server.serve_forever()
                     .unwrap();
             assert_eq!(restarted_config.extra, actual.extra);
             let restarted = Arc::new(
-                ProviderBridge::spawn(&binary, restarted_config)
-                    .await
-                    .unwrap(),
+                ProviderBridge::spawn(
+                    &crate::test_support::fixture_executable(&binary),
+                    restarted_config,
+                )
+                .await
+                .unwrap(),
             );
             drop(worker);
             let mut results = Vec::new();
@@ -9421,9 +9437,12 @@ server.serve_forever()
             )
             .await
             .unwrap();
-            let recovering = ProviderBridge::spawn(&binary, recovery_config.clone())
-                .await
-                .unwrap();
+            let recovering = ProviderBridge::spawn(
+                &crate::test_support::fixture_executable(&binary),
+                recovery_config.clone(),
+            )
+            .await
+            .unwrap();
             let withdrawal = settle_pending_model_startup(
                 root.path(),
                 &recovering,
@@ -10797,7 +10816,7 @@ server.serve_forever()
             })).unwrap()).unwrap();
             let bridge = Arc::new(
                 ProviderBridge::spawn(
-                    &native,
+                    &crate::test_support::fixture_executable(&native),
                     BridgeProviderConfig {
                         base_path: data.to_string_lossy().into_owned(),
                         ..Default::default()

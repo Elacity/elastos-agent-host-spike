@@ -493,6 +493,7 @@ fn require_import_cid(actual: &str, expected: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 async fn import_publication_file(provider: &Path, file: &Path) -> anyhow::Result<String> {
     let response = publication_provider_request(
@@ -507,6 +508,7 @@ async fn import_publication_file(provider: &Path, file: &Path) -> anyhow::Result
     Ok(cid.to_owned())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 async fn import_publication_raw_block(
     provider: &Path,
@@ -566,6 +568,7 @@ async fn publication_raw_block_put(
         .to_owned())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 async fn publication_provider_request(
     provider: &Path,
@@ -1993,7 +1996,9 @@ mod tests {
         CapsuleManifest, CapsuleType, MicroVmConfig, Permissions, RequirementKind, ResourceLimits,
     };
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     fn platform_input_options() -> PublishReleaseOptions {
         PublishReleaseOptions {
