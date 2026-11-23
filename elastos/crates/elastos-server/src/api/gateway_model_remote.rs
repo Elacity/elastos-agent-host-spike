@@ -5,7 +5,8 @@
 //! beside the local ones under a `remote:` prefixed id. A run created on such
 //! an offer is executed by the granting Runtime; this Runtime only routes the
 //! typed operations over Carrier and remembers which grant each run belongs
-//! to. A failed Carrier call is reported as `transport_interrupted`, never as
+//! to. An unreachable peer is reported as `service_provider_unreachable`. Any
+//! other failed Carrier call is reported as `transport_interrupted`, never as
 //! a run outcome.
 
 use std::collections::BTreeMap;
@@ -67,7 +68,7 @@ impl RemoteRunRoute {
     /// The grant facts needed to settle this run, independent of the grant's
     /// current status on this Home. Authority to start new runs is not implied.
     fn settlement_grant(&self) -> Option<ConsumerModelGrant> {
-        (!self.connect_ticket.is_empty()).then(|| ConsumerModelGrant {
+        Some(ConsumerModelGrant {
             grant_id: self.grant_id.clone(),
             peer_did: self.peer_did.clone(),
             connect_ticket: self.connect_ticket.clone(),
@@ -216,8 +217,8 @@ pub(crate) struct ConsumerModelGrant {
 
 impl ConsumerModelGrant {
     /// The services layer stores the granting Runtime's Carrier peer id under
-    /// `peer_did` (shared wire shape with Engine grants). The Carrier route
-    /// pins the ticket to a `did:key`, so the id is converted once here.
+    /// `peer_did` (shared wire shape with Engine grants). A missing ticket
+    /// dials that DID. A present ticket is remembered before the dial.
     pub(crate) fn from_record(grant: &Value) -> Option<Self> {
         if grant["schema"] != super::MODEL_GRANT_SCHEMA {
             return None;
@@ -239,10 +240,22 @@ impl ConsumerModelGrant {
             .as_str()?
             .parse::<iroh::PublicKey>()
             .ok()?;
+        let connect_ticket = match grant.get("connect_ticket") {
+            None => String::new(),
+            Some(Value::String(ticket)) if ticket.is_empty() => String::new(),
+            Some(Value::String(ticket))
+                if !ticket
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || byte == 0) =>
+            {
+                ticket.clone()
+            }
+            Some(_) => return None,
+        };
         Some(Self {
             grant_id: grant["grant_id"].as_str()?.to_string(),
             peer_did: crate::carrier::public_key_to_did(&peer_id).ok()?,
-            connect_ticket: grant["connect_ticket"].as_str()?.to_string(),
+            connect_ticket,
             display_name: grant["service_display_name"]
                 .as_str()
                 .unwrap_or("a contact's AI model")
@@ -359,10 +372,12 @@ async fn call_grant(
     request: Value,
 ) -> Result<Value, RemoteRouteError> {
     let expected_refusal = super::gateway_model_service::invocation_refusal_binding(&request);
-    registry
-        .remember_carrier_peer_ticket(&grant.peer_did, &grant.connect_ticket)
-        .await
-        .map_err(|err| classify_carrier_error(&err.to_string()))?;
+    if !grant.connect_ticket.is_empty() {
+        registry
+            .remember_carrier_peer_ticket(&grant.peer_did, &grant.connect_ticket)
+            .await
+            .map_err(|err| classify_carrier_error(&err.to_string()))?;
+    }
     let response = registry
         .invoke_provider(ProviderInvocation {
             source: "model-consumer".to_string(),
@@ -422,6 +437,13 @@ fn accepted_pre_dispatch_refusal(reason: &str, dispatch: &Value) -> bool {
 /// The Carrier client surfaces a destination denial as the bounded class text
 /// and a transport failure as anything else. Only the first is a decision.
 fn classify_carrier_error(message: &str) -> RemoteRouteError {
+    if message.contains("no verified Carrier route")
+        || message.contains(crate::carrier::SERVICE_PROVIDER_UNREACHABLE)
+    {
+        return RemoteRouteError::Transport(
+            crate::carrier::SERVICE_PROVIDER_UNREACHABLE.to_string(),
+        );
+    }
     for code in [
         super::gateway_model_service::MODEL_AUTHORITY_TIMEOUT_CODE,
         "denied",
@@ -613,8 +635,14 @@ pub(crate) async fn append_remote_offers(
             }
             Err(RemoteRouteError::Rejected { code }) => services
                 .push(json!({ "grant_id": grant.grant_id, "status": "rejected", "code": code })),
-            Err(RemoteRouteError::Transport(_)) => services
-                .push(json!({ "grant_id": grant.grant_id, "status": TRANSPORT_INTERRUPTED })),
+            Err(RemoteRouteError::Transport(message)) => {
+                let status = if message == crate::carrier::SERVICE_PROVIDER_UNREACHABLE {
+                    message.as_str()
+                } else {
+                    TRANSPORT_INTERRUPTED
+                };
+                services.push(json!({ "grant_id": grant.grant_id, "status": status }));
+            }
             Err(RemoteRouteError::Invalid(message)) => services.push(
                 json!({ "grant_id": grant.grant_id, "status": "invalid", "message": message }),
             ),
@@ -825,6 +853,23 @@ mod tests {
             );
         }
 
+        let without_ticket = ConsumerModelGrant::from_record(&json!({
+            "schema": crate::api::gateway::gateway_model_service::MODEL_GRANT_SCHEMA,
+            "offer_ids": ["qwen-local"],
+            "offer_revision": format!("sha256:{}", "a".repeat(64)),
+            "grant_id": "g",
+            "peer_did": key.to_string(),
+            "service_display_name": "Mac",
+            "expires_at": 1,
+        }))
+        .expect("a grant with only the peer DID");
+        assert!(without_ticket.connect_ticket.is_empty());
+        assert_eq!(without_ticket.peer_did, grant.peer_did);
+        assert!(ConsumerModelGrant::from_record(&json!({
+            "schema": crate::api::gateway::gateway_model_service::MODEL_GRANT_SCHEMA, "offer_ids": ["qwen-local"], "offer_revision": format!("sha256:{}", "a".repeat(64)),
+            "grant_id": "g", "peer_did": key.to_string(), "connect_ticket": " ticket", "expires_at": 1,
+        }))
+        .is_none());
         assert!(ConsumerModelGrant::from_record(&json!({
             "schema": crate::api::gateway::gateway_model_service::MODEL_GRANT_SCHEMA, "offer_ids": ["qwen-local"], "offer_revision": format!("sha256:{}", "a".repeat(64)),
             "grant_id": "g", "peer_did": "not-a-peer-id", "connect_ticket": "t", "expires_at": 1,
@@ -971,13 +1016,16 @@ mod tests {
         .expect("legacy index parses");
         assert_eq!(legacy.runs["run:sha256:old"].connect_ticket, "");
         assert_eq!(legacy.runs["run:sha256:old"].display_name, "");
-        // A route written before tickets were stored cannot settle by itself.
-        assert!(RemoteRunRoute {
+        // A route that stores only the peer DID still settles. The invoke dials by DID.
+        let settled = RemoteRunRoute {
             connect_ticket: String::new(),
             ..route.clone()
         }
         .settlement_grant()
-        .is_none());
+        .expect("peer DID is enough to settle");
+        assert!(settled.connect_ticket.is_empty());
+        assert_eq!(settled.peer_did, route.peer_did);
+        assert_eq!(settled.grant_id, "g");
         assert_eq!(
             route.settlement_grant().map(|grant| grant.grant_id),
             Some("g".to_string())

@@ -1367,13 +1367,9 @@ fn validate_remote_carrier_exit(exit: &RemoteCarrierExitConfig) -> Result<(), St
             exit.id
         ));
     }
-    let Some(connect_ticket) = &exit.connect_ticket else {
-        return Err(format!(
-            "remote Carrier Exit '{}' must declare connect_ticket for Browser Carrier stream dial",
-            exit.id
-        ));
-    };
-    validate_carrier_connect_ticket(connect_ticket)?;
+    if let Some(connect_ticket) = &exit.connect_ticket {
+        validate_carrier_connect_ticket(connect_ticket)?;
+    }
     Ok(())
 }
 
@@ -1717,6 +1713,19 @@ mod tests {
             "allowed_hosts":["*"], "allowed_schemes":["tcp","tls"], "allowed_ports":[80,443],
             "max_active_streams":1, "max_active_streams_per_principal":1
         }]})
+    }
+
+    #[test]
+    fn remote_carrier_exit_without_a_ticket_is_a_peer_did_grant() {
+        let mut config = services_exit_config_for_test();
+        config["remote_carrier_exits"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("connect_ticket");
+        assert!(parse_config(config).is_ok());
+        let mut config = services_exit_config_for_test();
+        config["remote_carrier_exits"][0]["connect_ticket"] = json!("");
+        assert!(parse_config(config).is_err());
     }
 
     #[test]

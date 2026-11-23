@@ -823,6 +823,16 @@ impl CarrierRuntimeService {
         self.node.as_ref().map(|node| node.endpoint.clone())
     }
 
+    #[cfg(unix)]
+    #[cfg(test)]
+    pub(crate) fn gossip_state(&self) -> Arc<Mutex<GossipState>> {
+        self.node
+            .as_ref()
+            .expect("carrier node")
+            .gossip_state
+            .clone()
+    }
+
     pub(crate) async fn configure_browser_exit_network(
         &self,
         network: crate::collaboration_network::VerifiedCollaborationNetworkProfile,
@@ -9255,6 +9265,9 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
     }
 }
 
+/// App-facing name when a service peer cannot be dialed.
+pub(crate) const SERVICE_PROVIDER_UNREACHABLE: &str = "service_provider_unreachable";
+
 pub async fn open_browser_carrier_stream(
     _request: &BrowserCarrierStreamRequest,
 ) -> Result<BrowserCarrierStream> {
@@ -9277,14 +9290,19 @@ pub async fn open_browser_carrier_stream_on_endpoint(
                 .filter(|key| key.to_string() == peer)
         })
         .context("Browser Exit provider identity is invalid")?;
-    let endpoints = decode_ticket_endpoints(&request.connect_ticket)
-        .into_iter()
-        .filter(|address| address.id == peer_key)
-        .collect::<Vec<_>>();
-    anyhow::ensure!(
-        !endpoints.is_empty(),
-        "Browser Exit ticket does not match provider identity"
-    );
+    let endpoints = if request.connect_ticket.is_empty() {
+        vec![iroh::EndpointAddr::from(peer_key)]
+    } else {
+        let endpoints = decode_ticket_endpoints(&request.connect_ticket)
+            .into_iter()
+            .filter(|address| address.id == peer_key)
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            !endpoints.is_empty(),
+            "Browser Exit ticket does not match provider identity"
+        );
+        endpoints
+    };
     tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
         for address in endpoints {
             let Ok(client) =
@@ -9304,7 +9322,7 @@ pub async fn open_browser_carrier_stream_on_endpoint(
                 _client: client,
             });
         }
-        anyhow::bail!("Runtime Exit provider is unavailable")
+        anyhow::bail!("{SERVICE_PROVIDER_UNREACHABLE}: Runtime Exit provider is unavailable")
     })
     .await
     .context("Browser Carrier stream deadline")?

@@ -3891,11 +3891,8 @@ async fn test_services_remote_exit_request_delivers_provider_inbox_notification(
         .as_array()
         .unwrap()
         .iter()
-        .find(|exit| {
-            exit["connect_ticket"] == format!("fake-ticket-{right_peer_id}")
-                && exit["peer_did"] == right_peer_id
-        })
-        .expect("approval should install a private remote Carrier Exit grant");
+        .find(|exit| exit.get("connect_ticket").is_none() && exit["peer_did"] == right_peer_id)
+        .expect("approval should install a remote Carrier Exit grant for the peer DID");
     assert_eq!(
         installed_exit["allowed_principals"][0],
         left_authority.principal_id
@@ -4030,6 +4027,17 @@ async fn service_decision_gossip_recv_does_not_reveal_a_socket_address() {
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 
+    let model_action =
+        services_contact_pending_model_request(left.path(), right.path(), &alice, &bob).await;
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &inbox_token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": model_action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
     let recv = alice
         .peer_provider
         .send_raw(&json!({
@@ -4077,6 +4085,23 @@ async fn service_decision_gossip_recv_does_not_reveal_a_socket_address() {
     assert!(engine_decision["remote_engine_grant"]
         .get("connect_ticket")
         .is_none());
+    let model_decision = decisions
+        .iter()
+        .find(|payload| payload.get("remote_model_grant").is_some())
+        .expect("model decision");
+    assert_eq!(
+        model_decision["remote_model_grant"]["peer_did"],
+        bob.peer_id
+    );
+    assert!(model_decision["remote_model_grant"]
+        .get("connect_ticket")
+        .is_none());
+    for decision in [&exit_decision, &engine_decision, &model_decision] {
+        assert!(
+            !service_decision_body_reveals_socket_address(&decision.to_string()),
+            "decision reveals a socket address: {decision}"
+        );
+    }
 
     let services_token =
         app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &alice.authority);
@@ -4095,16 +4120,21 @@ async fn service_decision_gossip_recv_does_not_reveal_a_socket_address() {
         &std::fs::read(left.path().join("config/exit-provider.json")).unwrap(),
     )
     .unwrap();
+    assert!(!left.path().join("operator-control.json").exists());
     assert!(exit_config["remote_carrier_exits"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|exit| exit["connect_ticket"] == ticket && exit["peer_did"] == bob.peer_id));
+        .any(|exit| exit.get("connect_ticket").is_none() && exit["peer_did"] == bob.peer_id));
     let saved = services_contact_saved_state(left.path(), &alice.authority, "services-state.json");
     let engine_grant =
         &saved["remote_offer_requests"][services_engine_offer(&bob)]["remote_engine_grant"];
     assert_eq!(engine_grant["peer_did"], bob.peer_id);
-    assert_eq!(engine_grant["connect_ticket"], ticket);
+    assert!(engine_grant.get("connect_ticket").is_none());
+    let model_grant =
+        &saved["remote_offer_requests"][services_model_offer(&bob)]["remote_model_grant"];
+    assert_eq!(model_grant["peer_did"], bob.peer_id);
+    assert!(model_grant.get("connect_ticket").is_none());
 }
 
 #[cfg(unix)]
@@ -4187,7 +4217,12 @@ async fn test_services_remote_exit_request_local_only_does_not_save_requested_st
         "{}",
         String::from_utf8_lossy(&body)
     );
-    assert!(String::from_utf8_lossy(&body).contains("not delivered"));
+    let failure = String::from_utf8_lossy(&body);
+    assert!(failure.contains("not delivered"), "{failure}");
+    assert!(
+        failure.contains(crate::carrier::SERVICE_PROVIDER_UNREACHABLE),
+        "{failure}"
+    );
 
     let left_services_after = left_app
         .oneshot(
@@ -10782,6 +10817,13 @@ async fn test_home_appearance_preferences_fail_closed_and_signed_out_defaults_st
     );
 }
 
+fn services_model_offer(fixture: &ServicesContactFixture) -> String {
+    format!(
+        "offer:{}:model",
+        home_people_contact_id(&fixture.profile.document().profile_did)
+    )
+}
+
 fn services_engine_offer(fixture: &ServicesContactFixture) -> String {
     format!(
         "offer:{}:browser-engine",
@@ -11465,6 +11507,283 @@ async fn services_contact_pending_engine_request(
         .to_string()
 }
 
+async fn services_contact_pending_model_request(
+    left: &std::path::Path,
+    right: &std::path::Path,
+    alice: &ServicesContactFixture,
+    bob: &ServicesContactFixture,
+) -> String {
+    let model_id = "model:local-0123456789abcdef0123456789abcdef";
+    std::fs::create_dir_all(right.join("bin")).unwrap();
+    std::fs::write(right.join("bin/model-provider"), b"fixture").unwrap();
+    let token = app_token_for_authority(right, SERVICES_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({"offer_id": MODEL_LOCAL_OFFER, "section": "mine", "selected": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revision = Arc::new(std::sync::Mutex::new(format!("sha256:{}", "a".repeat(64))));
+    bob.registry
+        .register_sub_provider(
+            "model",
+            Arc::new(ServicesCatalogModelProvider {
+                offer: json!({"id": model_id, "title": "SmolLM2", "operation": "text.generate"}),
+                revision: revision.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let offer = services_model_offer(bob);
+    let token = app_token_for_authority(left, SERVICES_CAPSULE_ID, &alice.authority);
+    let (status, body) = services_contact_post(
+        &alice.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({"offer_id": offer, "section": "catalog", "selected": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bob.discovery_service
+        .sync_services_mailboxes_once(right, 0)
+        .await;
+    let (status, summary) =
+        home_test_get_json(&alice.app, "/api/apps/services/summary", &token, "null").await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let (status, body) = services_contact_post(
+        &alice.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({
+            "offer_id": offer,
+            "section": "others",
+            "selected": true,
+            "model_offer_id": model_id,
+            "model_offer_revision": format!("sha256:{}", "a".repeat(64)),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bob.discovery_service
+        .sync_services_mailboxes_once(right, 0)
+        .await;
+    let (status, _) = home_test_post_json(
+        &bob.app,
+        "/api/apps/home/launch",
+        &bob.authority.home_token,
+        "http://localhost:61180",
+        json!({"target": INBOX_CAPSULE_ID}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = app_token_for_authority(right, INBOX_CAPSULE_ID, &bob.authority);
+    let (_, inbox) = home_test_get_json(&bob.app, "/api/apps/inbox/summary", &token, "null").await;
+    inbox["notifications"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "service_access_request")
+        .unwrap()["action_ref"]["action_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+#[tokio::test]
+async fn service_grants_install_on_the_consumer_without_a_ticket() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+    approve_exit_engine_and_model(left.path(), right.path(), &alice, &bob).await;
+    assert!(!left.path().join("operator-control.json").exists());
+    assert!(!right.path().join("operator-control.json").exists());
+    assert_installed_service_grants_have_no_ticket(left.path(), &alice, &bob);
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+#[tokio::test]
+async fn second_principal_on_the_same_home_gets_none_of_the_service_grants() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+    approve_exit_engine_and_model(left.path(), right.path(), &alice, &bob).await;
+    assert_installed_service_grants_have_no_ticket(left.path(), &alice, &bob);
+
+    let guest = passkey_authority_with_name_role(
+        left.path(),
+        Some("guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    let guest_root = crate::auth::principal_localhost_root(&guest.principal_id);
+    let guest_state_uri = format!("{guest_root}/.AppData/ElastOS/Home/services-state.json");
+    let guest_state_path =
+        elastos_common::localhost::rooted_localhost_fs_path(left.path(), &guest_state_uri).unwrap();
+    assert!(
+        !guest_state_path.exists(),
+        "the second principal must not receive the first principal's services state"
+    );
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(
+        left.path(),
+        &crate::api::gateway::gateway_home_token::home_launch_auth_data_dir(left.path()),
+        &guest.principal_id,
+    )
+    .unwrap();
+    let guest_context = HomeLaunchTokenContext::resolved(
+        root,
+        guest.session_id.clone(),
+        Some(guest.proof_binding_id.clone()),
+        guest.grant_id.clone(),
+    );
+    let model_grants = super::super::gateway_home_system::home_services_remote_model_grants(
+        left.path(),
+        &guest_context,
+        None,
+    )
+    .unwrap();
+    let engine_grants = super::super::gateway_home_system::home_services_remote_engine_grants(
+        left.path(),
+        &guest_context,
+        None,
+    )
+    .unwrap();
+    assert!(model_grants.is_empty(), "{model_grants:?}");
+    assert!(engine_grants.is_empty(), "{engine_grants:?}");
+    let exit_config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(left.path().join("config/exit-provider.json")).unwrap(),
+    )
+    .unwrap();
+    let allowed = &exit_config["remote_carrier_exits"][0]["allowed_principals"];
+    assert_eq!(allowed, &json!([alice.authority.principal_id]));
+    assert!(!allowed.to_string().contains(&guest.principal_id));
+
+    let guest_token = app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &guest);
+    let (status, summary) = home_test_get_json(
+        &alice.app,
+        "/api/apps/services/summary",
+        &guest_token,
+        "null",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let offers = summary["remote_offers"].as_array().unwrap();
+    assert!(
+        offers.iter().all(|offer| {
+            offer["offer_id"] != services_contact_offer(&bob)
+                && offer["offer_id"] != services_engine_offer(&bob)
+                && offer["offer_id"] != services_model_offer(&bob)
+                && offer["service_kind"] != "browser_engine"
+                && offer["service_kind"] != MODEL_SERVICE_KIND
+        }),
+        "{summary}"
+    );
+    let saved = services_contact_saved_state(left.path(), &alice.authority, "services-state.json");
+    let grant_ids = [
+        exit_config["remote_carrier_exits"][0]["grant_id"]
+            .as_str()
+            .unwrap(),
+        saved["remote_offer_requests"][services_engine_offer(&bob)]["remote_engine_grant"]
+            ["grant_id"]
+            .as_str()
+            .unwrap(),
+        saved["remote_offer_requests"][services_model_offer(&bob)]["remote_model_grant"]
+            ["grant_id"]
+            .as_str()
+            .unwrap(),
+    ];
+    let summary_text = summary.to_string();
+    for grant_id in grant_ids {
+        assert!(
+            !summary_text.contains(grant_id),
+            "second principal summary contains {grant_id}: {summary_text}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+async fn approve_inbox_action(app: &Router, token: &str, action: &str) {
+    let (status, body) = services_contact_post(
+        app,
+        token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+async fn approve_exit_engine_and_model(
+    left: &std::path::Path,
+    right: &std::path::Path,
+    alice: &ServicesContactFixture,
+    bob: &ServicesContactFixture,
+) {
+    let inbox_token = app_token_for_authority(right, INBOX_CAPSULE_ID, &bob.authority);
+    // Approve each request before the next one is created. The inbox returns
+    // the first open service request, so collecting every action first would
+    // approve the Exit three times and leave Engine and model pending.
+    let exit_action = services_contact_pending_request(left, right, alice, bob).await;
+    approve_inbox_action(&bob.app, &inbox_token, &exit_action).await;
+    let engine_action = services_contact_pending_engine_request(left, right, alice, bob).await;
+    approve_inbox_action(&bob.app, &inbox_token, &engine_action).await;
+    let model_action = services_contact_pending_model_request(left, right, alice, bob).await;
+    approve_inbox_action(&bob.app, &inbox_token, &model_action).await;
+    let services_token = app_token_for_authority(left, SERVICES_CAPSULE_ID, &alice.authority);
+    let (status, summary) = home_test_get_json(
+        &alice.app,
+        "/api/apps/services/summary",
+        &services_token,
+        "null",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+fn assert_installed_service_grants_have_no_ticket(
+    data_dir: &std::path::Path,
+    alice: &ServicesContactFixture,
+    bob: &ServicesContactFixture,
+) {
+    let exit_config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(data_dir.join("config/exit-provider.json")).unwrap())
+            .unwrap();
+    let exits = exit_config["remote_carrier_exits"].as_array().unwrap();
+    assert!(exits.iter().any(|exit| {
+        exit.get("connect_ticket").is_none()
+            && exit["peer_did"] == bob.peer_id
+            && exit["allowed_principals"] == json!([alice.authority.principal_id])
+    }));
+    let saved = services_contact_saved_state(data_dir, &alice.authority, "services-state.json");
+    for (offer, field) in [
+        (services_engine_offer(bob), "remote_engine_grant"),
+        (services_model_offer(bob), "remote_model_grant"),
+    ] {
+        let grant = &saved["remote_offer_requests"][&offer][field];
+        assert_eq!(grant["peer_did"], bob.peer_id, "{offer}: {grant}");
+        assert!(grant.get("connect_ticket").is_none(), "{grant}");
+        assert_eq!(grant["principal_id"], alice.authority.principal_id);
+    }
+}
+
 #[cfg(unix)]
 #[derive(Default)]
 struct ServicesEngineProbeProvider {
@@ -11550,13 +11869,9 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     )
     .await
     .unwrap();
+    let provider_addr = remote_node.endpoint.watch_addr().get();
     let ticket = data_encoding::BASE32_NOPAD
-        .encode(
-            &serde_json::to_vec(
-                &json!({"topic":null,"endpoints":[remote_node.endpoint.watch_addr().get()]}),
-            )
-            .unwrap(),
-        )
+        .encode(&serde_json::to_vec(&json!({"topic":null,"endpoints":[provider_addr]})).unwrap())
         .to_lowercase();
     let mut local = crate::carrier::CarrierRuntimeService::new(local_node);
     let mut remote = crate::carrier::CarrierRuntimeService::new(remote_node);
@@ -11568,10 +11883,9 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
             crate::carrier::CarrierProviderInvoker::with_carrier_endpoint(endpoint.clone()),
         ))
         .await;
-    // The serving endpoint stays in the private route store. The signed
-    // decision names the peer and does not carry the ticket.
-    super::super::gateway_home_system::remember_private_service_route(&bob.peer_id, &ticket)
-        .unwrap();
+    let address_book = iroh::address_lookup::memory::MemoryLookup::new();
+    address_book.add_endpoint_info(provider_addr);
+    endpoint.address_lookup().unwrap().add(address_book);
     {
         let mailbox = bus.lock().await;
         assert!(mailbox.topic_messages.values().flatten().all(|message| {
@@ -11597,6 +11911,7 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     let grant = &saved["remote_offer_requests"][services_engine_offer(&bob)]["remote_engine_grant"];
     assert_eq!(grant["schema"], "elastos.service.remote-engine-grant/v1");
     assert_eq!(grant["peer_did"], bob.peer_id);
+    assert!(grant.get("connect_ticket").is_none());
     assert_eq!(grant["principal_id"], alice.authority.principal_id);
     assert_eq!(
         grant["operations"],
