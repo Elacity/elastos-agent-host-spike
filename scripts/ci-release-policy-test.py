@@ -34,15 +34,22 @@ CACHE_ACTION = WORKFLOW.parents[1] / "actions/rust-compile-cache/action.yml"
 LOCAL_CACHE_ACTION = "./.github/actions/rust-compile-cache"
 UNIT_CACHE_JOBS = {"lint", "test-elastos", "test-capsules"}
 SOURCE_HOME_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
+# Jobs that share the nightly-managed Swatinem compile-cache namespace (the action's
+# own platform suffix keeps the ARM entry separate); macOS keeps a lockfile-hashed key.
+JOURNEY_CACHE_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux"}
+# Jobs that carry only the journey release profile (the per-arch musl release checks).
+MUSL_CHECK_JOBS = {"musl-check-linux", "musl-check-linux-arm64"}
 # Jobs whose guard skips a spark/* pull request. Quick checks are the rest.
 FULL_PROOF_JOBS = {
     "engine-llama-amd64", "engine-llama-arm64", "test-elastos", "test-capsules",
     "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
     "installed-app-paths", "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
+    "musl-check-linux", "musl-check-linux-arm64",
 }
 # Jobs that build and drive the whole installed app. A pull request that changes only
 # notes and lab files skips them: installed-app-paths decides, and answers run otherwise.
-INSTALLED_APP_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux"}
+INSTALLED_APP_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux",
+                      "musl-check-linux", "musl-check-linux-arm64"}
 SPARK_SKIP = "!(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))"
 # Jobs that run only after merge (pushes and the nightly schedule), never on a PR, batch or baseline run.
 POST_MERGE_JOBS = {"source-home-macos"}
@@ -54,7 +61,7 @@ REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", 
                   "engine-llama-arm64",
                   "lint", "lab-gates", "lab-standin", "lab-operator-effects-macos", "lab-wasm-capsule", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
                   "release-upstream-assets", "installed-app-paths", "source-home-linux", "source-home-linux-arm64",
-                  "source-home-macos", "update-hop-linux")
+                  "source-home-macos", "update-hop-linux", "musl-check-linux", "musl-check-linux-arm64")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
 def jobs(source):
     return dict(re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
@@ -223,6 +230,8 @@ CACHE_WRITERS = {("push", "refs/heads/spike/agent-host"), ("push", "refs/heads/d
 TRUSTED_WRITER = ("(github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || "
                   "github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && "
                   "github.ref == 'refs/heads/spike/agent-host')")
+# The journey compile caches narrow the writer condition to the nightly alone.
+NIGHTLY_WRITER = "github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host'"
 # Shapes no writer guard may admit: other pushes, queues, dispatches and every pull request.
 NON_WRITER_CASES = [
     ("push", "refs/heads/feature", "branch", "", True),
@@ -234,8 +243,12 @@ NON_WRITER_CASES = [
 ]
 # Linux journey jobs build the PR profile on the nightly too, so its caches match PR runs;
 # macOS, which no PR runs, keeps the shipped profile on every push and nightly.
-NIGHTLY_PR_PROFILE_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux"}
+NIGHTLY_PR_PROFILE_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux",
+                           "musl-check-linux", "musl-check-linux-arm64"}
 RUST_CACHE_KEY = "-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}"
+# The shared-key input both x64 journey Swatinem caches set, replacing the action's
+# automatic job-id key so they resolve one cache entry.
+JOURNEY_SHARED_KEY = "journey"
 # rustsec/rustsec release cargo-audit/v0.22.2, x86_64-unknown-linux-musl archive.
 AUDIT_ARCHIVE_SHA256 = "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
 # A restored non-Rust input and the step that checks it against its pinned hash.
@@ -540,7 +553,8 @@ def validate_cache_credential_scope(source, action):
 
 
 def save_sites(source):
-    """Every step that can write the Actions cache, with the guard that decides it."""
+    """Every step that can write the Actions cache, with the guard that decides it
+    and whether the step is a Swatinem journey compile cache."""
     workflow_jobs = jobs(source)
     sites = []
     for job in workflow_jobs:
@@ -549,7 +563,8 @@ def save_sites(source):
                 raise AssertionError(f"{job} uses actions/cache, which saves on every run")
             if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step:
                 guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
-                sites.append((job, guard.removeprefix("${{").removesuffix("}}").strip()))
+                sites.append((job, guard.removeprefix("${{").removesuffix("}}").strip(),
+                              "Swatinem/rust-cache@" in step))
     if not sites:
         raise AssertionError("missing cache writers")
     return sites
@@ -563,22 +578,43 @@ def adversarial_contexts(guard, context):
 
 
 def validate_cache_writers(source):
-    """Only CACHE_WRITERS runs write any shared cache, decided by github context alone."""
+    """Only CACHE_WRITERS runs write any shared cache, decided by github context alone.
+    The journey compile caches narrow this further: only their Swatinem sites save on
+    the nightly alone, a guard naming another job leaves an aliased site restore-only,
+    and every other save site keeps the trusted writer condition."""
     if re.search(r"type=gha|cache-to", source):
         raise AssertionError("BuildKit layers bypass pinned-hash checks; no remote layer cache")
-    for job, guard in save_sites(source):
+    nightly_guard = re.compile(r"^\((?P<guard>" + re.escape(NIGHTLY_WRITER) + r")\) && github\.job == '(?P<job>[\w-]+)'$")
+    for job, guard, rust_cache in save_sites(source):
         # A step can set env through GITHUB_ENV; only github context is fixed for the run.
         if re.search(r"\b(?:env|inputs|vars|needs|matrix)\.", guard):
             raise AssertionError(f"save guard in {job} reads context a step or input can change: {guard}")
-        # Step outputs may only narrow the writer condition, never widen it.
+        if (guard == NIGHTLY_WRITER or nightly_guard.fullmatch(guard)) \
+                and not (rust_cache and job in JOURNEY_CACHE_JOBS):
+            raise AssertionError(
+                f"nightly-only save guard outside the journey compile caches in {job}: {guard}")
         if guard != TRUSTED_WRITER and not (guard.startswith(f"({TRUSTED_WRITER}) && ")
-                                            and "||" not in guard[len(TRUSTED_WRITER) + 2:]):
-            raise AssertionError(f"save guard in {job} is not the trusted writer condition: {guard}")
+                                            and "||" not in guard[len(TRUSTED_WRITER) + 2:]) \
+                and guard != NIGHTLY_WRITER and not nightly_guard.fullmatch(guard):
+            raise AssertionError(f"save guard in {job} is not a trusted or nightly writer condition: {guard}")
         for event, ref, ref_type, override, _ in [*CASES, *NON_WRITER_CASES]:
             context = event_context(event, ref, ref_type, override)
+            context["github.job"] = job
             if (event, ref) not in CACHE_WRITERS:
                 if any(evaluate(guard, values) for values in adversarial_contexts(guard, context)):
                     raise AssertionError(f"{job} saves a cache on {event} {ref}")
+            elif guard == NIGHTLY_WRITER or nightly_guard.fullmatch(guard):
+                # Nightly-only guards skip the trusted push runs by design; the
+                # nightly must still save where the guard's own job allows it.
+                if (event, ref) != ("schedule", "refs/heads/spike/agent-host"):
+                    continue
+                match = nightly_guard.fullmatch(guard)
+                if match and match["job"] != job:
+                    # A guard naming another job leaves this aliased site restore-only.
+                    if evaluate(guard, {**context, **NO_CACHE_HIT}):
+                        raise AssertionError(f"{job} saves the journey cache on the nightly {ref}")
+                elif not evaluate(guard, {**context, **NO_CACHE_HIT}):
+                    raise AssertionError(f"{job} never saves on the nightly {ref}")
             elif not evaluate(guard, {**context, **NO_CACHE_HIT}):
                 raise AssertionError(f"{job} never saves on {event} {ref}")
 
@@ -588,7 +624,8 @@ def validate_pull_requests_restore_only(source):
     its own steps write to GITHUB_ENV or their outputs."""
     for head_ref in ("feature", "spark/lane", "batch/20261108"):
         context = event_context("pull_request", "refs/pull/7/merge", "branch", "", head_ref)
-        for job, guard in save_sites(source):
+        for job, guard, _ in save_sites(source):
+            context["github.job"] = job
             if any(evaluate(guard, values) for values in adversarial_contexts(guard, context)):
                 raise AssertionError(f"a pull_request run saves a cache: {job} ({head_ref})")
 
@@ -650,12 +687,26 @@ def validate_rust_cache_keys(source):
     if not caches:
         raise AssertionError("missing Rust caches")
     for job, step in caches:
-        # rust-cache's fallback restore key is prefix-key, job, OS and the rustc
-        # environment hash; its lockfile hash covers only the named workspace.
-        if not field(step, "prefix-key").endswith(RUST_CACHE_KEY):
+        if job in JOURNEY_CACHE_JOBS:
+            # The journey compile caches share one nightly-managed namespace; the
+            # action's own platform suffix keeps the ARM entry separate.
+            if field(step, "prefix-key") != "source-home-registry":
+                raise AssertionError(f"{job} Rust cache must share the journey namespace")
+            # The shared key replaces the action's automatic job-id key, so the x64
+            # journeys resolve one cache entry.
+            shared = re.search(r"(?m)^\s+shared-key: (\S+)$", step)
+            if not shared or shared[1] != JOURNEY_SHARED_KEY:
+                raise AssertionError(f"{job} Rust cache must pin the shared journey key")
+        # rust-cache's fallback restore key is prefix-key, the shared or job key, the
+        # runner OS and CPU architecture, and the rustc environment hash; its lockfile
+        # hash covers only the named workspace.
+        elif not field(step, "prefix-key").endswith(RUST_CACHE_KEY):
             raise AssertionError(f"{job} Rust cache prefix lacks every lockfile and the toolchain")
-        if re.search(r"(?m)^\s+(?:add-rust-environment-hash-key|add-job-id-key|key|shared-key):", step):
-            raise AssertionError(f"{job} Rust cache key must keep its compiler and job parts")
+        allowed = {"shared-key": JOURNEY_SHARED_KEY} if job in JOURNEY_CACHE_JOBS else {}
+        for name in ("add-rust-environment-hash-key", "add-job-id-key", "key", "shared-key"):
+            match = re.search(rf"(?m)^\s+{re.escape(name)}:(?:\s+(\S+))?\s*$", step)
+            if match and allowed.get(name) != (match[1] or ""):
+                raise AssertionError(f"{job} Rust cache key must keep its compiler and job parts")
 
 
 def validate_restores_are_verified(source):
@@ -779,17 +830,28 @@ def validate_journey_builds(source, release_source):
         if key in release_source or key in source.split("\njobs:\n", 1)[0]:
             raise AssertionError("journey profiles belong only to CI journey jobs")
     for job, block in jobs(source).items():
-        if job not in SOURCE_HOME_CACHE_JOBS:
+        if job not in SOURCE_HOME_CACHE_JOBS | MUSL_CHECK_JOBS:
             if any(key in block for key in overrides):
                 raise AssertionError(f"journey profile override in {job}")
+            continue
+        job_steps = steps(job, jobs(source))
+        profile, = [step for step in job_steps if step.startswith("name: use CI journey release profile\n")]
+        for event, ref, ref_type, override, _ in CASES:
+            context = event_context(event, ref, ref_type, override)
+            expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop") \
+                or (event == "schedule" and job in NIGHTLY_PR_PROFILE_JOBS)
+            if evaluate(field(profile, "if"), context) != expected:
+                raise AssertionError(f"journey profile changes shipped build: {job} {event} {ref}")
+        if job in MUSL_CHECK_JOBS:
+            # The musl check carries only the journey release profile; the build
+            # directory, cache and freshness rules stay source-home specific.
             continue
         # Runner paths are available in steps, not in job-level env expressions.
         environment = re.search(r"(?ms)^    env:\n(.*?)(?=^    \S|\Z)", block)
         if environment and re.search(r"CARGO_(?:TARGET_DIR|BUILD_BUILD_DIR):|runner\.temp", environment[1]):
             raise AssertionError(f"runner build paths belong in the first step: {job}")
-        job_steps = steps(job, jobs(source))
         step_source = "\n".join(job_steps)
-        directory_job = "source-home-linux" if job == "source-home-linux-arm64" else job
+        directory_job = "source-home-linux" if job in ("source-home-linux-arm64", "update-hop-linux") else job
         paths, = [step for step in job_steps if step.startswith("name: set job build directories\n")]
         if paths != job_steps[0] or re.search(r"(?m)^        if:", paths):
             raise AssertionError(f"build paths must be set by the first unconditional step: {job}")
@@ -797,16 +859,9 @@ def validate_journey_builds(source, release_source):
                            "CARGO_BUILD_BUILD_DIR": "$RUNNER_TEMP/" + directory_job + "-build"}.items():
             if f'echo "{key}={value}" >> "$GITHUB_ENV"' not in paths or step_source.count(key + "=") != 1:
                 raise AssertionError(f"one shared job build setting required: {job} {key}")
-        profile, = [step for step in job_steps if step.startswith("name: use CI journey release profile\n")]
         for key, value in overrides.items():
             if f'echo "{key}={value}" >> "$GITHUB_ENV"' not in profile or step_source.count(key) != 1:
                 raise AssertionError(f"missing journey profile setting: {job} {key}")
-        for event, ref, ref_type, override, _ in CASES:
-            context = event_context(event, ref, ref_type, override)
-            expected = event in ("pull_request", "merge_group") or (event == "push" and ref == "refs/heads/develop") \
-                or (event == "schedule" and job in NIGHTLY_PR_PROFILE_JOBS)
-            if evaluate(field(profile, "if"), context) != expected:
-                raise AssertionError(f"journey profile changes shipped build: {job} {event} {ref}")
         cache, = [step for step in job_steps if "Swatinem/rust-cache@" in step]
         # Only the action's content-addressed sccache objects join Cargo inputs.
         if field(cache, "cache-targets") != "false" or "source-home-registry" not in cache or \
@@ -852,11 +907,10 @@ def validate_release_builds_are_hermetic(source):
 class ReleasePolicyTests(unittest.TestCase):
     def test_musl_gate_covers_both_native_linux_release_sets(self):
         root = WORKFLOW.parents[2]
-        for job in ("source-home-linux", "source-home-linux-arm64"):
+        for job, target in (("musl-check-linux", "x86_64-unknown-linux-musl"),
+                            ("musl-check-linux-arm64", "aarch64-unknown-linux-musl")):
             gate, = [step for step in steps(job) if "name: check native musl release crates" in step]
-            self.assertIn("X64) target=x86_64-unknown-linux-musl", gate)
-            self.assertIn("ARM64) target=aarch64-unknown-linux-musl", gate)
-            self.assertIn('bash scripts/check-release-musl.sh "$target"', gate)
+            self.assertIn(f"bash scripts/check-release-musl.sh {target}", gate)
             self.assertIn("timeout-minutes: 30", gate)
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory)
@@ -1483,7 +1537,7 @@ class ReleasePolicyTests(unittest.TestCase):
                     subprocess.run(["bash", "-e", "-c", exports], env=env, check=True)
                     env.update(dict(line.split("=", 1) for line in (root / "env").read_text().splitlines()))
                     target, build = Path(env["CARGO_TARGET_DIR"]), Path(env["CARGO_BUILD_BUILD_DIR"])
-                    directory_job = "source-home-linux" if job == "source-home-linux-arm64" else job
+                    directory_job = "source-home-linux" if job in ("source-home-linux-arm64", "update-hop-linux") else job
                     self.assertEqual(target, root / (directory_job + "-target"))
                     self.assertEqual(build, root / (directory_job + "-build"))
                     self.assertFalse(target.exists())
@@ -1842,11 +1896,17 @@ class ReleasePolicyTests(unittest.TestCase):
             self.assertNotEqual(changed, SOURCE, name)
             with self.subTest(mutation=name), self.assertRaisesRegex(AssertionError, "a pull_request run"):
                 validate_pull_requests_restore_only(changed)
+        journey_guards = {
+            "source-home-linux": "${{ (" + NIGHTLY_WRITER + ") && github.job == 'source-home-linux' }}",
+            "source-home-linux-arm64": "${{ (" + NIGHTLY_WRITER + ") && github.job == 'source-home-linux' }}",
+            "update-hop-linux": "${{ " + NIGHTLY_WRITER + " }}",
+        }
         for job in JOBS:
             for step in steps(job):
                 if "Swatinem/rust-cache@" in step:
-                    self.assertEqual(field(step, "save-if"), "${{ " + TRUSTED_WRITER + " }}",
-                                     f"rust-cache in {job} must use the trusted writer guard")
+                    self.assertEqual(field(step, "save-if"),
+                                     journey_guards.get(job, "${{ " + TRUSTED_WRITER + " }}"),
+                                     f"rust-cache in {job} must use its pinned writer guard")
                 if "actions/cache@" in step:
                     self.fail(f"{job} uses actions/cache, which also saves from PR runs")
 
@@ -1986,6 +2046,12 @@ class ReleasePolicyTests(unittest.TestCase):
                 f"if: ({TRUSTED_WRITER}) || steps.kubo-cache.outputs.cache-hit != 'true'", 1),
             "BuildKit restores remote layers": SOURCE.replace(
                 "            --load \\\n", "            --cache-from type=gha \\\n            --load \\\n", 1),
+            "the Kubo save goes nightly-only": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.kubo-cache.outputs.cache-hit != 'true'",
+                f"if: {NIGHTLY_WRITER}", 1),
+            "an engine apt save goes nightly-only": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.apt-prerequisites.outputs.changed == 'true'",
+                f"if: {NIGHTLY_WRITER}", 1),
         }
         for name, changed in mutations.items():
             self.assertNotEqual(changed, SOURCE, name)
@@ -2024,6 +2090,10 @@ class ReleasePolicyTests(unittest.TestCase):
                                                            "hashFiles('elastos/Cargo.lock', 'rust-toolchain.toml')", 1),
             "the compiler leaves the key": SOURCE.replace(
                 "          cache-bin: false\n", "          cache-bin: false\n          add-rust-environment-hash-key: false\n", 1),
+            "a journey cache drops the shared key": SOURCE.replace("          shared-key: journey\n", "", 1),
+            "another job joins the shared key": SOURCE.replace(
+                "prefix-key: ${{ runner.os }}-elastos-bd" + RUST_CACHE_KEY,
+                "prefix-key: ${{ runner.os }}-elastos-bd" + RUST_CACHE_KEY + "\n          shared-key: journey", 1),
         }
         for name, changed in mutations.items():
             self.assertNotEqual(changed, SOURCE, name)
@@ -2082,6 +2152,8 @@ class ReleasePolicyTests(unittest.TestCase):
             "cancel-on-failure": ("cancel-on-failure", "ubuntu-24.04"),
             # Anders decides whether this becomes a required check (#320).
             "update-hop-linux": ("update-hop-linux", "ubuntu-24.04"),
+            "musl-check-linux": ("musl-check-linux", "ubuntu-24.04"),
+            "musl-check-linux-arm64": ("musl-check-linux-arm64", "ubuntu-22.04-arm"),
             # Anders decides whether this becomes a required check (#311 D2).
             "cargo-audit": ("cargo-audit", "ubuntu-24.04"),
             "lab-gates": ("lab-gates", "macos-15"),
@@ -2147,11 +2219,13 @@ class ReleasePolicyTests(unittest.TestCase):
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
             "installed-app-paths": None, "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
             "source-home-linux-arm64": "[installed-app-paths, engine-llama-arm64]",
-            "source-home-macos": "source-gate", "update-hop-linux": "[installed-app-paths, fork-gate]", "cancel-on-failure": None,
+            "source-home-macos": "source-gate", "update-hop-linux": "[installed-app-paths, fork-gate]",
+            "musl-check-linux": "[installed-app-paths, fork-gate]", "musl-check-linux-arm64": "[installed-app-paths, fork-gate]",
+            "cancel-on-failure": None,
             "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, "
                         "lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
                         "release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, "
-                        "update-hop-linux]",
+                        "update-hop-linux, musl-check-linux, musl-check-linux-arm64]",
         }
         graph = {job: (re.search(r"(?m)^    needs: (.+)$", block) or [None, None])[1] for job, block in JOBS.items()}
         self.assertEqual(graph, expected)
@@ -2421,8 +2495,14 @@ class ReleasePolicyTests(unittest.TestCase):
         spec.loader.exec_module(rule)
         for job in sorted(INSTALLED_APP_JOBS):
             inputs = job_inputs(WORKFLOW, SOURCE, job)
-            self.assertIn("scripts/setup-source-home.sh", inputs, job)
-            self.assertIn("capsules/model-provider/Cargo.toml", inputs, job)
+            if job in MUSL_CHECK_JOBS:
+                # The musl check reads the release crates and packaging scripts,
+                # not the source-home installer.
+                self.assertIn("scripts/check-release-musl.sh", inputs, job)
+                self.assertNotIn("scripts/setup-source-home.sh", inputs, job)
+            else:
+                self.assertIn("scripts/setup-source-home.sh", inputs, job)
+                self.assertIn("capsules/model-provider/Cargo.toml", inputs, job)
             if job.startswith("source-home-"):
                 self.assertIn("lab/agent-conformance/Cargo.toml", inputs, job)
             self.assertNotIn("lab/agent-conformance/standin-runtime/provider_launcher.rs", inputs, job)
@@ -2436,7 +2516,7 @@ class ReleasePolicyTests(unittest.TestCase):
                               ('cat "${REPO_ROOT}/PRINCIPLES.md"', "PRINCIPLES.md")):
             changed = SOURCE.replace(call, f"          {planted}\n{call}")
             self.assertNotEqual(changed, SOURCE)
-            for job in sorted(INSTALLED_APP_JOBS):
+            for job in sorted(INSTALLED_APP_JOBS - MUSL_CHECK_JOBS):
                 found = {name for name in job_inputs(WORKFLOW, changed, job) if rule.is_notes_or_lab(name)}
                 self.assertIn(path, found, (job, planted))
         # Line by line: the jobs' steps and every script they reach name no notes path but in two
