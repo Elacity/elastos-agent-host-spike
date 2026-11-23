@@ -1093,8 +1093,10 @@ def runs_installed_provider(pid, command, installed):
     try:
         executable = os.readlink(Path("/proc") / str(pid) / "exe")
     except OSError as error:
-        # A missing /proc entry is ENOENT or ESRCH. macOS has no /proc.
-        if error.errno in (errno.ENOENT, errno.ESRCH):
+        # A missing /proc entry is ENOENT or ESRCH (macOS has no /proc). EACCES/EPERM is
+        # another user's process (e.g. root on a CI runner): the installed provider runs
+        # as this job's user, so a process we may not inspect is never it.
+        if error.errno in (errno.ENOENT, errno.ESRCH, errno.EACCES, errno.EPERM):
             return False
         raise
     return os.path.realpath(executable) == os.path.realpath(installed)

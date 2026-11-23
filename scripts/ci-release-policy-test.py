@@ -3521,6 +3521,29 @@ class InstalledJourneyTests(unittest.TestCase):
                 self.assertEqual(prior[106]["role"], "model_provider")
                 self.assertIn(101, seen)
 
+    def test_census_unreadable_proc_is_not_the_provider(self):
+        # Other users' processes (root on a CI runner) answer EACCES/EPERM; they are never ours.
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        data = Path("/isolated/census/data")
+        provider = str(data / "bin/model-provider")
+
+        def row(parent, command):
+            return {"ppid": parent, "command": command, "start": "original"}
+
+        rows = {100: row(1, str(data / "bin/elastos") + " gateway"),
+                101: row(100, "/proc/self/fd/9 --model"),
+                106: row(100, provider + " --serve"),
+                300: row(1, "/usr/sbin/rootd")}
+        for number in (errno.EACCES, errno.EPERM):
+            with self.subTest(errno=number):
+                denied = OSError(number, "denied")
+                executables = {100: denied, 101: denied, 300: denied}
+                owned = self.owned_with_proc_exe(journey, data, rows, executables, 100)
+                self.assertEqual(owned[101]["role"], "other")
+                self.assertEqual(owned[106]["role"], "model_provider")
+                self.assertNotIn(300, owned)
+                self.assertEqual(journey["process_counts"](owned)["model_provider"], 1)
+
     def test_census_other_proc_oserror_is_raised(self):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
         data = Path("/isolated/census/data")
@@ -3530,11 +3553,11 @@ class InstalledJourneyTests(unittest.TestCase):
 
         rows = {100: row(1, str(data / "bin/elastos") + " gateway"),
                 101: row(100, "/proc/self/fd/9 --model")}
-        for number in (errno.EACCES, errno.EPERM):
+        for number in (errno.EIO, errno.ELOOP):
             with self.subTest(errno=number):
-                denied = OSError(number, "denied")
+                failed = OSError(number, "failed")
                 with self.assertRaises(OSError) as raised:
-                    self.owned_with_proc_exe(journey, data, rows, {100: denied, 101: denied}, 100)
+                    self.owned_with_proc_exe(journey, data, rows, {100: failed, 101: failed}, 100)
                 self.assertEqual(raised.exception.errno, number)
 
     def test_early_exit_reports_its_status_and_evidence_path(self):
