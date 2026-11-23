@@ -86,6 +86,11 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "elastos-server/src/server_infra.rs",
+        "register_chain_provider_plane",
+        "load_or_create_device_key",
+    ),
+    (
+        "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
     ),
@@ -1377,7 +1382,7 @@ fn rows() -> Vec<HeldRow> {
         "register_chain_provider_plane",
         "load_or_create_device_key",
         1,
-        mark("narrowed", "runtime issuer", "chain provider", "the child config carries the Ed25519 verifying key of `derive_did(device_key)`, which `RuntimeOperationIssuerKeyV1` accepts only as a public key. The private key is not in the config. The child is an unconfined same-user process."),
+        mark("open", "device private key", "chain provider", "The child config now carries only the Ed25519 verifying key of `derive_did(device_key)`, which `RuntimeOperationIssuerKeyV1` accepts only as a public key. The row stays open: the child is an unconfined same-user process and the data directory is a fixed default, so it can still open `identity/device.key`, as the object provider can. It closes when slice C confines it."),
     ),
     row(
         "elastos-server/src/server_infra.rs",
