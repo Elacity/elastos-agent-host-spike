@@ -1616,6 +1616,7 @@ pub(super) fn arm_cli_mint_overlap_for_test(request_id: &str) -> CliMintOverlapG
 #[cfg(test)]
 pub(super) struct CliMintSignerFailGuard;
 
+#[cfg(unix)]
 #[cfg(test)]
 impl Drop for CliMintSignerFailGuard {
     fn drop(&mut self) {
@@ -1623,6 +1624,7 @@ impl Drop for CliMintSignerFailGuard {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn fail_next_cli_mint_signature_for_test() -> CliMintSignerFailGuard {
     FAIL_SIGNER.store(true, Ordering::SeqCst);
