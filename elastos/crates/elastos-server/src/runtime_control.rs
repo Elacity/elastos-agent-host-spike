@@ -2124,7 +2124,8 @@ mod tests {
         assert!(gateway_owner_allows_subordinate_managed_runtime(&owner));
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     fn write_managed_runtime_parent_support_artifacts(data_dir: &Path) -> Vec<u8> {
         let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64") => "linux-amd64",
@@ -2187,7 +2188,8 @@ mod tests {
         manifest_bytes
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     fn pin_parent_model_catalog_head(data_dir: &Path, head_cid: &str) {
         let path = data_dir.join("components.json");
         let mut manifest: serde_json::Value =
@@ -2199,7 +2201,8 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     fn write_parent_signed_model_catalog(data_dir: &Path, catalog: &[u8]) {
         std::fs::write(data_dir.join("model-catalog.json"), catalog).unwrap();
         pin_parent_model_catalog_head(data_dir, &crate::setup::catalog_head_cid(catalog).unwrap());
@@ -2242,13 +2245,15 @@ mod tests {
         assert!(!gateway_owner_allows_subordinate_managed_runtime(&owner));
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     struct EnvRestore {
         key: &'static str,
         value: Option<std::ffi::OsString>,
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     impl EnvRestore {
         fn set(key: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(key);
@@ -2269,7 +2274,8 @@ mod tests {
         }
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     impl Drop for EnvRestore {
         fn drop(&mut self) {
             match &self.value {

@@ -558,7 +558,8 @@ fn append_agent_plan_dispatch_audit(
     )
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) fn rebind_agent_plan_for_test(
     data_dir: &FsPath,
     request_id: &str,

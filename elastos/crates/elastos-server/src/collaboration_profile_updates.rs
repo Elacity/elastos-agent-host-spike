@@ -252,7 +252,8 @@ impl CollaborationProfileUpdateService {
         Ok(())
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) fn register_verified_context_for_test(
         &self,
         contact_store: Arc<CollaborationContactStore>,
@@ -281,7 +282,8 @@ impl CollaborationProfileUpdateService {
     /// Announcement is a pure function of the local head and the accepted
     /// contacts, so the only correct behaviour afterwards is a re-announce the
     /// receiver treats as an idempotent replay — which tests prove.
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) fn forget_acknowledgements_for_test(&self) {
         if let Ok(mut acknowledged) = self.inner.acknowledged.lock() {
             acknowledged.clear();

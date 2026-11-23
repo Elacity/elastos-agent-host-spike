@@ -2693,7 +2693,8 @@ fn save_transaction_effect_store(
     })
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) fn transaction_effect_store_for_test(
     state: &GatewayState,
     principal_id: &str,
@@ -4619,7 +4620,8 @@ mod approved_request_resume_tests {
 /// `complete_runtime_transaction_effect` (line 984). The store is then loaded
 /// and saved by the private functions the wallet routes call, with the id the
 /// verified authority carries, as lines 601-603 and 699 do.
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod r8c_child_rows {
     #[cfg(unix)]
     use super::super::gateway_home_token::{

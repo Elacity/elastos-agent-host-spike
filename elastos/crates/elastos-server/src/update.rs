@@ -9,7 +9,8 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 use elastos_common::localhost::{
     installation_release_head_path, installation_release_manifest_path,
 };

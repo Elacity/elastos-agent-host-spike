@@ -318,7 +318,8 @@ pub(crate) struct ProviderHost {
 }
 
 impl ProviderHost {
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) fn registry(&self) -> &Arc<ProviderRegistry> {
         &self._registry
     }

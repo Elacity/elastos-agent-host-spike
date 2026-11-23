@@ -1552,7 +1552,8 @@ async fn home_terminal_session(session_id: &str) -> Option<Arc<HomeTerminalSessi
         .cloned()
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(super) async fn home_terminal_process_id(session_id: &str) -> Option<u32> {
     home_terminal_session(session_id).await?.child_pid
 }

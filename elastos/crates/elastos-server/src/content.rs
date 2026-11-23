@@ -9788,7 +9788,8 @@ fn file_cid_from_leaves(mut level: Vec<FileCidNode>, version: cid::Version) -> c
     level.pop().expect("file has one root").cid
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
     let level: Vec<FileCidNode> = if bytes.is_empty() {
         vec![file_leaf(bytes, version, raw)]

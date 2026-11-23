@@ -318,13 +318,15 @@ impl CollaborationProfileChainLoader {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     fn directory_sync_count(&self) -> u8 {
         self.directory_sync_count
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     fn inject_write_fault(&self, fault: WriteFault) {
         self.write_fault
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);

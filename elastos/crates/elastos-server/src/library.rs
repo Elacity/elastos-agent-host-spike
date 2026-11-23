@@ -8509,7 +8509,8 @@ pub(crate) fn published_cid_audience(data_dir: &Path, cid: &str) -> Option<Publi
     (!audience.principals.is_empty()).then_some(audience)
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn cid_is_published_here(data_dir: &Path, cid: &str) -> bool {
     published_cid_audience(data_dir, cid).is_some()
 }
@@ -8517,7 +8518,8 @@ pub(crate) fn cid_is_published_here(data_dir: &Path, cid: &str) -> bool {
 /// Rewrites `object_uri`'s publish record as alpha.25 withdrew it after an
 /// Undo: withdrawn, without the publication id it never knew, and with the
 /// index left as it was.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn withdraw_as_alpha25_for_test(data_dir: &Path, principal_id: &str, object_uri: &str) {
     let mut record = read_publish_record(data_dir, principal_id, object_uri).unwrap();
     record.publication_id = None;
@@ -8579,7 +8581,8 @@ pub(crate) fn publish_cid_for_test(data_dir: &Path, cid: &str) {
 }
 
 /// Lists `cid` as `principal_id`'s Library publication, for their contacts.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn publish_cid_for_contacts_for_test(data_dir: &Path, principal_id: &str, cid: &str) {
     update_published_index(data_dir, |index| {
         index.publications.insert(

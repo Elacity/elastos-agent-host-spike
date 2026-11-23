@@ -189,7 +189,8 @@ impl PresenceAuthority {
         }
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) fn manager(&self) -> &Arc<CapabilityManager> {
         &self.manager
     }
@@ -650,7 +651,8 @@ pub(crate) async fn set_presence_grant(
 
 /// Store an isolated fixture's actual signed Profile through the protected
 /// principal-root path used by the production reader.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn store_test_profile(
     data_dir: &std::path::Path,
     principal_id: &str,

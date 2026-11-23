@@ -493,7 +493,8 @@ impl CollaborationCore {
 
     /// Seed the signed, receipt-bound legacy shape that lifecycle readers
     /// repair. Product admission deliberately refuses these malformed payloads.
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) fn test_store_legacy_product_handoffs(
         &self,
         remote: &Self,
@@ -768,7 +769,8 @@ impl CollaborationCore {
 
     /// Return only newly retained originals in the same age/count/byte window.
     /// An older peer cache cannot repeatedly reinsert rows the product evicted.
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) fn history_projection_candidates(
         &self,
         envelopes: &[Vec<u8>],
@@ -2997,7 +2999,8 @@ impl CollaborationCore {
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) fn inject_history_write_fault(&self, fault: WriteFault) {
         self.history_write_fault
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);

@@ -1666,7 +1666,8 @@ static FULL_RECOVERY_SCAN_DELAY_HOOKS: std::sync::LazyLock<
 
 /// Test hook: the next export scan for `data_dir` takes longer than the
 /// approval's lifetime (the step-up validation clock moves 200 s on).
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api) fn delay_next_full_recovery_scan_for_test(data_dir: &std::path::Path) {
     FULL_RECOVERY_SCAN_DELAY_HOOKS
         .lock()
@@ -4734,7 +4735,8 @@ fn required_string_array(data: &Value, field: &str) -> anyhow::Result<Vec<String
         .collect()
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 fn issue_passkey_session_grant(
     state: &GatewayState,
     user_id: &str,

@@ -36,7 +36,8 @@ pub(crate) use model_provider_config::{
     save_hosted_offer, set_hosted_offer_share, HostedAiProvider, HostedModelOfferHint,
 };
 pub use model_provider_config::{model_provider_bridge_config, model_provider_config};
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) use model_provider_config::{
     remove_hosted_offer, seed_model_provider_operator_offers_for_test,
 };

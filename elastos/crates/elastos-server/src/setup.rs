@@ -891,7 +891,8 @@ async fn admit_installed_setup_metadata(
     Ok(Some(metadata))
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 fn load_manifest() -> anyhow::Result<ComponentsManifest> {
     Ok(load_manifest_with_path()?.1)
 }
@@ -4248,7 +4249,8 @@ fn plan_update_support<'a>(
 /// Install and refresh support after the updater installs the verified manifest
 /// bytes, from standalone setup. The publisher owns that manifest; setup's local
 /// stamping stays separate.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) async fn refresh_installed_components_for_update(
     data_dir: &Path,
     old_components: Option<&[u8]>,

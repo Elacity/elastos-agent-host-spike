@@ -678,7 +678,8 @@ pub(super) fn configure(data: &Path, platform: &str, release_image: bool) -> any
     )
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 fn generate(
     data: &Path,
     platform: &str,

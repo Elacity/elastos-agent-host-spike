@@ -441,7 +441,8 @@ fn write_stored_profile_authority(
 /// passkey-binding check. Production `update_profile_authority` still requires
 /// `proof:passkey:`. A stored agent fixture has an admission binding, so the
 /// rows that need a real bundle under that agent's root call this.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn test_plant_profile_authority(
     data_dir: &Path,
     principal_id: &str,

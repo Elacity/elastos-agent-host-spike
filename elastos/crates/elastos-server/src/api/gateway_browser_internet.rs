@@ -183,7 +183,8 @@ pub(in crate::api::gateway) fn granted_fixture(
     Arc::new(BrowserInternetService::new(Some(manager)))
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) fn transport_fixture() -> BrowserInternetEffect {
     let (keepalive, cancelled) = watch::channel(false);
     BrowserInternetEffect {

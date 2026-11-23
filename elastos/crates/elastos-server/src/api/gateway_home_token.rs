@@ -174,7 +174,8 @@ impl VerifiedLaunchGrant {
     }
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 impl VerifiedLaunchGrant {
     /// Test-only: the one test literal of `RequiredHomeLaunchToken` builds
     /// this instead of minting a second production literal.
@@ -498,7 +499,8 @@ pub(in crate::api) fn issue_home_agent_launch_token_at_for_test(
 /// Test seam: the same projection issuer with the issue time supplied, so a
 /// test can issue two tokens from one clock reading instead of racing the
 /// wall clock between them.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn issue_home_projection_launch_token_with_context_at(
     data_dir: &std::path::Path,
     selected_resource: &str,
@@ -643,7 +645,8 @@ pub(super) fn grant_bound_expiry(
     Ok(expires_at.min(grant.expires_at))
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn issue_expired_home_launch_token_with_context(
     data_dir: &std::path::Path,
     app: &str,

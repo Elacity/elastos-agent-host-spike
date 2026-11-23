@@ -351,7 +351,8 @@ type AgentPlanOneUseTokens = Mutex<HashMap<String, (Arc<CapabilityManager>, Capa
 #[cfg(test)]
 static AGENT_PLAN_ONE_USE_TOKENS: OnceLock<AgentPlanOneUseTokens> = OnceLock::new();
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) async fn own_root_token_replay_refused_for_test(request_id: &str) -> bool {
     let token = AGENT_PLAN_ONE_USE_TOKENS
         .get()
@@ -405,7 +406,8 @@ pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
     }
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) async fn grant_agent_plan_capability_for_test(
     request_id: &str,
     step: &serde_json::Value,
@@ -456,7 +458,8 @@ pub(crate) async fn grant_agent_plan_capability_for_test(
         .unwrap();
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn narrow_agent_plan_manifest_for_test(request_id: &str) {
     let mut authorities = plan_authorities().lock().unwrap();
     authorities
@@ -1596,7 +1599,8 @@ fn principal_root_read_write_uri(operation: &str, request: &serde_json::Value) -
 /// The protected path's answer for one request, for a test that drives this
 /// entry directly with a context it builds. The bridge's own callers reach it
 /// through `handle_request`; no production caller needs this name.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn protected_principal_root_resource_response_for_test(
     bridge_ctx: &BridgeContext,
     operation: &str,

@@ -112,9 +112,11 @@ pub struct CollaborationRuntimeService {
     product_port: Option<CollaborationChatProductPort>,
     presence_port: Option<CollaborationPresenceProductPort>,
     discovery_service: Option<CollaborationDiscoveryService>,
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     worker_product_port: Option<CollaborationChatProductPort>,
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     worker_presence_port: Option<CollaborationPresenceProductPort>,
 }
 
@@ -341,9 +343,11 @@ pub async fn start_collaboration_runtime_service(
         product_port: Some(product_port.clone()),
         presence_port: Some(presence_port.clone()),
         discovery_service: Some(discovery_service),
-        #[cfg(all(unix, test))]
+        #[cfg(unix)]
+        #[cfg(test)]
         worker_product_port: Some(product_port),
-        #[cfg(all(unix, test))]
+        #[cfg(unix)]
+        #[cfg(test)]
         worker_presence_port: Some(presence_port),
     }))
 }
@@ -390,7 +394,8 @@ impl CollaborationRuntimeService {
         }
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(unix)]
+    #[cfg(test)]
     fn test_worker_shares_product_core(&self) -> bool {
         let port = self.product_port.as_ref().unwrap();
         let worker = self.worker_product_port.as_ref().unwrap();
@@ -435,9 +440,11 @@ impl CollaborationRuntimeService {
             product_port: None,
             presence_port: None,
             discovery_service: None,
-            #[cfg(all(unix, test))]
+            #[cfg(unix)]
+            #[cfg(test)]
             worker_product_port: None,
-            #[cfg(all(unix, test))]
+            #[cfg(unix)]
+            #[cfg(test)]
             worker_presence_port: None,
         }
     }
@@ -906,7 +913,8 @@ async fn project_collaboration_handoffs(
     }
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 async fn run_collaboration_worker_cycle_with_presence(
     driver: &CollaborationTransportDriver,
     product_port: &CollaborationChatProductPort,
@@ -924,7 +932,8 @@ async fn run_collaboration_worker_cycle_with_presence(
     project_collaboration_handoffs(product_port, presence_port, data_root, now).await;
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 async fn run_collaboration_worker_cycle(
     driver: &CollaborationTransportDriver,
     product_port: &CollaborationChatProductPort,

@@ -1473,7 +1473,8 @@ pub(in crate::api::gateway) async fn forget_browser_launch_reconciliation_obliga
     Ok(())
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) async fn browser_launch_reconciliation_obligation_count(
     data_dir: &Path,
 ) -> usize {
@@ -1899,7 +1900,8 @@ pub(in crate::api::gateway) async fn browser_engine_cleanup_obligation_count(
         .count()
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) async fn browser_page_session_count(data_dir: &Path) -> usize {
     let scope = browser_session_scope(data_dir);
     let registry = BROWSER_SESSION_REGISTRY.get_or_init(Default::default);
@@ -2653,7 +2655,8 @@ pub(in crate::api::gateway) async fn release_browser_stream_cleanup_claim(
     }
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) async fn browser_stream_cleanup_obligation_count(
     data_dir: &Path,
 ) -> usize {
@@ -3291,7 +3294,8 @@ pub(super) fn remove_browser_durable_file(data_dir: &Path, path: PathBuf) -> Res
     })
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) fn set_browser_durable_delete_failure(path: &Path, fail: bool) {
     let failures = BROWSER_DURABLE_DELETE_FAILURES.get_or_init(Default::default);
     let mut failures = failures.lock().expect("Browser durable delete test lock");
@@ -3302,7 +3306,8 @@ pub(in crate::api::gateway) fn set_browser_durable_delete_failure(path: &Path, f
     }
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) fn set_browser_engine_cleanup_delete_failure(
     data_dir: &Path,
     cleanup_id: &str,
@@ -3311,7 +3316,8 @@ pub(in crate::api::gateway) fn set_browser_engine_cleanup_delete_failure(
     set_browser_durable_delete_failure(&browser_ownership_path(data_dir, cleanup_id), fail);
 }
 
-#[cfg(all(unix, test))]
+#[cfg(unix)]
+#[cfg(test)]
 pub(in crate::api::gateway) async fn clear_browser_lifecycle_memory_for_restart(data_dir: &Path) {
     let scope = browser_session_scope(data_dir);
     let mut registry = BROWSER_SESSION_REGISTRY

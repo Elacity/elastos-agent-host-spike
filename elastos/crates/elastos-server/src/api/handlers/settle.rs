@@ -216,7 +216,8 @@ pub async fn settle_and_revoke(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::api::handlers::CapabilityState;
