@@ -1,7 +1,7 @@
 //! The owner's agent routes: turn agents on or off for this Home, create,
-//! list, rename, retire, turn one agent on or off, and start one agent.
-//! Start is the only route here that runs an agent. It asks the Home Runtime
-//! to start the host; this route does not admit the guest itself.
+//! list, rename, retire, turn one agent on or off, and start or stop one agent.
+//! Start and Stop ask the Home Runtime to run or end the host. This route
+//! does not admit the guest itself.
 //!
 //! Every route makes the same owner check as the System guest-registration
 //! route: a Home launch token for System, on a proof binding that is stored,
@@ -182,8 +182,11 @@ pub(super) async fn agents_activate(
 /// The passkey step-up operation for one Start. The ceremony and the route
 /// both name it, so a token minted for another action cannot start an agent.
 const AGENT_START_OPERATION: &str = "agent.start";
-/// The step-up token's own lifetime. A caller cannot ask for a longer one.
-const AGENT_START_STEP_UP_MAX_AGE_SECS: u64 = 180;
+/// How recently the passkey step must have finished. The token itself can
+/// live 180 seconds, and wallet and other callers still allow that. Begin
+/// and complete run immediately before Start, and this route has no caller
+/// that needs the extra minute, so a Start older than two minutes is refused.
+const AGENT_START_STEP_UP_MAX_AGE_SECS: u64 = 120;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -253,5 +256,85 @@ async fn start_agent(
         capsule_id: started.capsule_id,
         session_id: started.session_id,
         status: started.status,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentStopRequest {
+    agent_id: String,
+}
+
+#[derive(Serialize)]
+struct AgentStoppedSession {
+    session_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct AgentStopResponse {
+    agent_id: String,
+    stopped: Vec<AgentStoppedSession>,
+}
+
+pub(super) async fn agents_stop(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    agents_response(stop_agent(&state, &headers, &body).await)
+}
+
+/// The owner gate. With no agent id this is the admin check, and it runs
+/// before the body is read. With an agent id it is that check plus "this
+/// owner owns this agent". The agent may be off or retired, and the Home may
+/// have turned agents off. A guest fails the admin check. Another owner fails
+/// the ownership check. Either refusal happens before the Runtime is asked
+/// to stop anything.
+fn owner_may_stop(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    agent_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let owner = agents_owner(state, headers)?;
+    if let Some(agent_id) = agent_id {
+        crate::agents::stored_agent_for_stop(
+            &state.data_dir,
+            &owner.principal.principal_id,
+            agent_id,
+        )?;
+    }
+    Ok(())
+}
+
+/// Owner check, then ask the Runtime to stop the live row whose principal is
+/// this agent. The request carries the agent id and no capsule name.
+async fn stop_agent(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> anyhow::Result<AgentStopResponse> {
+    owner_may_stop(state, headers, None)?;
+    let request: AgentStopRequest = agents_request(body)?;
+    owner_may_stop(state, headers, Some(&request.agent_id))?;
+    let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
+    if outcome.stopped.is_empty() {
+        let message = match outcome.already.as_deref() {
+            Some("stopping") => "this agent is already stopping",
+            Some("stopped") => "this agent is already stopped",
+            _ => "this agent has no running session",
+        };
+        return Err(Refused(message.to_string()).into());
+    }
+    Ok(AgentStopResponse {
+        agent_id: request.agent_id,
+        stopped: outcome
+            .stopped
+            .into_iter()
+            .map(|session| AgentStoppedSession {
+                session_id: session.session_id,
+                status: session.status,
+            })
+            .collect(),
     })
 }
