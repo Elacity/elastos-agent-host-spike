@@ -332,7 +332,9 @@ static NEXT_PROVIDER_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 /// Carrier route for Runtime-mediated provider-to-provider invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderCarrierRoute {
-    /// Internal Carrier connect ticket. Receipts intentionally do not expose it.
+    /// Retired Carrier connect ticket. The Runtime refuses this route before
+    /// any dial; the peer-DID route below is the one dialling route. Receipts
+    /// intentionally do not expose it.
     ConnectTicket {
         connect_ticket: String,
         /// Optional expected remote peer DID/node identity for audit and policy.
