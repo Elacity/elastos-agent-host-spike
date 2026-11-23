@@ -11,4 +11,7 @@ mod win;
 pub use error::CustodyError;
 pub use name::one_component_name;
 #[cfg(windows)]
-pub use win::{create_owner_dir, open_owner_file, verify_owner_only, Disp};
+pub use win::{
+    create_owner_dir, open_owner_dir, open_owner_file, refuse_other_writers, verify_owner_only,
+    Disp, READ_EXISTING, READ_WRITE,
+};

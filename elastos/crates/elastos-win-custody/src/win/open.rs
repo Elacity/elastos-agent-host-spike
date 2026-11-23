@@ -29,7 +29,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC, WRITE_OWNER,
 };
 
-use super::sd::{build_sd, current_user_sid, verify_owner_only};
+use super::sd::{build_sd, current_user_sid, verify_not_writable_by_others, verify_owner_only};
 use super::{invalid, io_at, reparse_at};
 use crate::name::absolute_local_disk;
 use crate::CustodyError;
@@ -45,10 +45,15 @@ pub enum Disp {
 const READ_DIR: u32 = FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
 const SHARE_DIR: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 
+/// Read an existing owner-only file.
+pub const READ_EXISTING: u32 = FILE_GENERIC_READ;
+/// Read and write an owner-only file.
+pub const READ_WRITE: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+
 /// Open or create `path` as a file. The returned handle has `access` plus the
 /// rights used to read the DACL. A missing parent is an error.
 pub fn open_owner_file(path: &Path, access: u32, disp: Disp) -> Result<File, CustodyError> {
-    open_at(path, access, disp, false)
+    open_at(path, access, disp, false, true)
 }
 
 /// Create `path` as a directory with the owner-only DACL. The parent must exist.
@@ -58,10 +63,32 @@ pub fn create_owner_dir(path: &Path) -> Result<File, CustodyError> {
         FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
         Disp::CreateNew,
         true,
+        true,
     )
 }
 
-fn open_at(path: &Path, access: u32, disp: Disp, directory: bool) -> Result<File, CustodyError> {
+/// Open an existing directory and require the owner-only DACL.
+pub fn open_owner_dir(path: &Path) -> Result<File, CustodyError> {
+    open_at(path, FILE_GENERIC_READ, Disp::OpenExisting, true, true)
+}
+
+/// The directory is not a reparse point. The current user owns it. No ACE grants
+/// write to anyone except that user, SYSTEM, and Administrators.
+///
+/// A directory Home creates still uses [`create_owner_dir`]. This check is only
+/// for a directory that already existed, such as the operator data root.
+pub fn refuse_other_writers(path: &Path) -> Result<(), CustodyError> {
+    let file = open_at(path, FILE_GENERIC_READ, Disp::OpenExisting, true, false)?;
+    verify_not_writable_by_others(&file, path)
+}
+
+fn open_at(
+    path: &Path,
+    access: u32,
+    disp: Disp,
+    directory: bool,
+    owner_only: bool,
+) -> Result<File, CustodyError> {
     let (drive, names) = local_names(path)?;
     let (leaf, parents) = names
         .split_last()
@@ -90,7 +117,7 @@ fn open_at(path: &Path, access: u32, disp: Disp, directory: bool) -> Result<File
         let child = open_parent(&current, name, parent_add, &walked)?;
         kept.push(std::mem::replace(&mut current, child));
     }
-    let file = open_leaf(&current, leaf, path, access, disp, directory)?;
+    let file = open_leaf(&current, leaf, path, access, disp, directory, owner_only)?;
     drop(kept);
     Ok(file)
 }
@@ -102,6 +129,7 @@ fn open_leaf(
     access: u32,
     disp: Disp,
     directory: bool,
+    owner_only: bool,
 ) -> Result<File, CustodyError> {
     match open_any(parent, name) {
         Ok(found) => {
@@ -129,7 +157,9 @@ fn open_leaf(
             if is_reparse(&file).map_err(|error| io_at(path, error))? {
                 return Err(reparse_at(path));
             }
-            verify_owner_only(&file, path)?;
+            if owner_only {
+                verify_owner_only(&file, path)?;
+            }
             Ok(file)
         }
         Err(error) if missing(&error) => {

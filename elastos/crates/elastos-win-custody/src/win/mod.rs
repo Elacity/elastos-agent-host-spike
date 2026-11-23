@@ -10,7 +10,10 @@ mod tests;
 use std::io;
 use std::path::Path;
 
-pub use open::{create_owner_dir, open_owner_file, Disp};
+pub use open::{
+    create_owner_dir, open_owner_dir, open_owner_file, refuse_other_writers, Disp, READ_EXISTING,
+    READ_WRITE,
+};
 pub use sd::verify_owner_only;
 
 use crate::CustodyError;
