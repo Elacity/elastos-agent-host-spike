@@ -1262,6 +1262,7 @@ fn lock_owner_tracking_stays_out_of_production() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_reads_the_principal_root_once() {
     let _mint = mint_test_guard().await;
@@ -1279,6 +1280,7 @@ async fn claim_reads_the_principal_root_once() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refused_cancel_keeps_another_claims_hold() {
     let _mint = mint_test_guard().await;
@@ -1335,6 +1337,7 @@ async fn refused_cancel_keeps_another_claims_hold() {
     assert_eq!(signature_calls(dir.path()), before + 1);
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_during_commit_still_delivers_when_the_signer_succeeds() {
     let _mint = mint_test_guard().await;
@@ -1371,6 +1374,7 @@ async fn cancel_during_commit_still_delivers_when_the_signer_succeeds() {
     assert_eq!(record["state"], "delivered");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_during_commit_is_kept_when_the_signer_fails() {
     let _mint = mint_test_guard().await;
@@ -1413,6 +1417,7 @@ async fn cancel_during_commit_is_kept_when_the_signer_fails() {
     assert_eq!(signature_calls(dir.path()), before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn waiting_list_names_a_pending_request_without_the_secret() {
     let _mint = mint_test_guard().await;
@@ -1479,6 +1484,7 @@ async fn waiting_list_names_a_pending_request_without_the_secret() {
     assert!(parsed["requests"].as_array().unwrap().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn command_prints_one_grant_after_approval() {
     let _mint = mint_test_guard().await;
@@ -1534,6 +1540,7 @@ async fn command_prints_one_grant_after_approval() {
     assert!(records.iter().all(|record| !record.contains(&grant)));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn command_timeout_prints_no_grant() {
     let _mint = mint_test_guard().await;
@@ -1556,6 +1563,7 @@ async fn command_timeout_prints_no_grant() {
     assert!(!stderr.contains(LAUNCH_TOKEN));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn command_cancel_prints_no_grant() {
     let _mint = mint_test_guard().await;
@@ -1585,6 +1593,7 @@ async fn command_cancel_prints_no_grant() {
     assert!(!stderr.contains(LAUNCH_TOKEN));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn command_mismatch_prints_no_grant() {
     let _mint = mint_test_guard().await;
@@ -1614,6 +1623,7 @@ async fn command_mismatch_prints_no_grant() {
     assert!(!stderr.contains(LAUNCH_TOKEN));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn short_grant_reaches_only_the_two_headless_routes() {
     let _mint = mint_test_guard().await;
@@ -1691,6 +1701,7 @@ async fn short_grant_reaches_only_the_two_headless_routes() {
     assert!(body.contains("home_page_only"), "{body}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn short_grant_is_refused_by_a_headless_route_after_five_minutes() {
     let _mint = mint_test_guard().await;
@@ -1797,6 +1808,7 @@ process.stdout.write(mod.terminalRequestCode(process.env.REQUEST_ID));
     String::from_utf8(output.stdout).unwrap()
 }
 
+#[cfg(unix)]
 #[test]
 fn terminal_request_code_matches_home() {
     let request_id = "0123456789abcdef0123456789abcdef";
@@ -1885,6 +1897,7 @@ async fn wait_until_accepts(addr: std::net::SocketAddr) {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn command_refusal_reaches_the_terminal() {
     let _mint = mint_test_guard().await;
@@ -1916,6 +1929,7 @@ async fn command_refusal_reaches_the_terminal() {
     assert!(!stderr.contains("timed out"), "{stderr}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_after_a_bad_passkey_is_refused() {
     let _mint = mint_test_guard().await;
@@ -2052,6 +2066,7 @@ async fn command_rejects_a_claim_for_a_different_request() {
     assert_eq!(code, 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn command_names_home_when_nothing_is_listening() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
