@@ -296,11 +296,15 @@ fn print_json_field(label: &str, value: Option<&serde_json::Value>) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use crate::home_cmd::{tests::HOME_CMD_ENV_LOCK, ScopedEnvVar};
 
     /// `elastos open` must fetch the capsule through ipfs-provider first, so
     /// this enters at the step that opens storage, with HOME in a temp dir and
-    /// a file where the Home storage directory belongs.
+    /// a file where the Home storage directory belongs. The storage step is
+    /// reachable only after the Home opens its owner identity, which has no
+    /// Windows path yet; `open_storage_refuses_on_windows` pins the refusal.
+    #[cfg(unix)]
     #[tokio::test]
     async fn open_defaults_storage_to_home() {
         // As `main` does, so a planted default reaches the assertion, not a
@@ -324,5 +328,26 @@ mod tests {
         let expected = format!("cannot open storage {}", storage.display());
         let refused = matches!(&outcome, Ok(Ok(Err(e))) if e.to_string().contains(&expected));
         assert!(refused, "want {expected:?}; got {outcome:?}");
+    }
+
+    /// `open` opens the Home it serves: the first step reads the local session
+    /// owner through the owner-only identity store. That store has no Windows
+    /// path yet, so the open refuses there instead of serving without an owner.
+    #[cfg(windows)]
+    #[test]
+    fn open_storage_refuses_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = elastos_server::sources::local_session_owner(temp.path())
+            .expect_err("a Home cannot open its owner identity on Windows");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Unsupported)
+        );
+        assert!(
+            error.to_string().contains("unsupported on this platform"),
+            "{error}"
+        );
     }
 }
