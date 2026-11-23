@@ -705,7 +705,7 @@ fn not_dispatchable(
 /// provider_resource.rs, and prints the count next to layer 2's total so the
 /// headline number is not over-read.
 ///
-/// Today's 40: `drm` 7, `key` 7, `decrypt` 6 and `rights` 4 share the
+/// Today's 43: `drm` 7, `key` 7, `decrypt` 6 and `rights` 4 share the
 /// nine-operation `read_only_provider_action` helper, but each scheme's
 /// builder accepts fewer (provider_resource.rs:808-846) — 24 pairs. `did` 6
 /// are operations in `execute_op_required_action` that `did_resource` does
@@ -716,7 +716,10 @@ fn not_dispatchable(
 /// `webspace` 9 has no builder arm at all: WebSpace requests are addressed
 /// as `localhost://WebSpaces/` URIs and dispatched under the `localhost`
 /// scheme, and provider_resource.rs pins the bare-scheme refusal in its own
-/// tests.
+/// tests. `peer` 3 are `connect`, `get_ticket`, and `remember_peer`: the
+/// action map still names them, and the Message grant list does not, so an
+/// app grant cannot build a resource that carries a Carrier socket address.
+/// `list_peers` stays on that list.
 #[test]
 fn mapped_but_not_dispatchable_today() {
     let table = mapped_pairs();
@@ -790,6 +793,10 @@ fn mapped_but_not_dispatchable_today() {
             .as_slice(),
         ),
         (
+            "peer",
+            ["connect", "get_ticket", "remember_peer"].as_slice(),
+        ),
+        (
             "rights",
             ["open", "open_session", "release", "render"].as_slice(),
         ),
@@ -810,6 +817,6 @@ fn mapped_but_not_dispatchable_today() {
     })
     .collect();
     assert_eq!(pairs(&table).len(), 193);
-    assert_eq!(total, 40);
+    assert_eq!(total, 43);
     assert_eq!(gap, expected);
 }

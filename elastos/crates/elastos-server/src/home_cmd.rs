@@ -3023,9 +3023,6 @@ fn write_home_state_probe(
     writeln!(out, "  Delivery:  {}", delivery)?;
     writeln!(out, "  Roots:     localhost://Users, localhost://UsersAI")?;
     writeln!(out, "  Profile:   elastos identity nickname set")?;
-    if let Some(ticket) = &snapshot.runtime.ticket {
-        writeln!(out, "  Ticket:    {}", ticket)?;
-    }
     writeln!(out)?;
 
     writeln!(out, "Spaces")?;
@@ -3571,6 +3568,30 @@ pub(crate) mod tests {
         assert!(none.contains("  Carrier:   0 reachable\n"), "{none}");
         assert!(none.contains("  Delivery:  local only until another Home joins Chat\n"));
         assert!(render(Some(2)).contains("  Carrier:   2 reachable\n"));
+    }
+
+    /// Printing `Ticket:` again fails this assertion. The snapshot may still
+    /// hold a ticket for the network line; the status text does not show it.
+    #[test]
+    fn home_status_text_omits_the_carrier_ticket() {
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.runtime.peer_count = Some(0);
+        snapshot.runtime.ticket = Some("addr-ticket-should-stay-off-the-page".to_string());
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("Carrier bootstrap ready; waiting for another Home"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("Ticket:"),
+            "status text prints a Carrier ticket:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("addr-ticket-should-stay-off-the-page"),
+            "status text prints the ticket value:\n{rendered}"
+        );
     }
 
     #[cfg(unix)]
