@@ -183,14 +183,17 @@ pub(crate) struct DurableIncomingAcceptance {
     )
 )]
 impl DurableIncomingAcceptance {
+    #[cfg(any(unix, not(test)))]
     pub(crate) fn authorized_message(&self) -> &AuthorizedDefaultConversationMessage {
         &self.authorized
     }
 
+    #[cfg(any(unix, not(test)))]
     pub(crate) fn acceptance_receipt_bytes(&self) -> &[u8] {
         &self.acceptance_receipt_bytes
     }
 
+    #[cfg(any(unix, not(test)))]
     pub(crate) fn product_handoff_pending(&self) -> bool {
         self.product_handoff_pending
     }
@@ -207,6 +210,7 @@ impl CollaborationTransportIncomingAcceptance {
         &self.acceptance_receipt_bytes
     }
 
+    #[cfg(any(unix, not(test)))]
     #[cfg_attr(
         not(test),
         expect(
@@ -489,7 +493,7 @@ impl CollaborationCore {
 
     /// Seed the signed, receipt-bound legacy shape that lifecycle readers
     /// repair. Product admission deliberately refuses these malformed payloads.
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn test_store_legacy_product_handoffs(
         &self,
         remote: &Self,
@@ -764,7 +768,7 @@ impl CollaborationCore {
 
     /// Return only newly retained originals in the same age/count/byte window.
     /// An older peer cache cannot repeatedly reinsert rows the product evicted.
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn history_projection_candidates(
         &self,
         envelopes: &[Vec<u8>],
@@ -2993,7 +2997,7 @@ impl CollaborationCore {
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
     }
 
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn inject_history_write_fault(&self, fault: WriteFault) {
         self.history_write_fault
             .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
@@ -3469,7 +3473,10 @@ pub(crate) fn ensure_owner_only_directory(path: &Path) -> anyhow::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => validate_owner_only_directory(path, &metadata),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(unix)]
             let mut builder = fs::DirBuilder::new();
+            #[cfg(not(unix))]
+            let builder = fs::DirBuilder::new();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
@@ -3518,6 +3525,10 @@ fn validate_owner_and_mode(
     metadata: &fs::Metadata,
     forbidden_mode: u32,
 ) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, metadata, forbidden_mode);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -3971,6 +3982,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn complete_projection(core: &CollaborationCore, outgoing: &DurableOutgoingMessage) {
         core.acknowledge_outgoing_product_projection(outgoing.envelope_sha256())
             .unwrap();
@@ -3990,6 +4002,7 @@ mod tests {
         (key, prepared.envelope_bytes().to_vec())
     }
 
+    #[cfg(unix)]
     fn message_source_endpoint_did(envelope_bytes: &[u8]) -> String {
         serde_json::from_slice::<SignedCollaborationMessage>(envelope_bytes)
             .unwrap()
@@ -4025,6 +4038,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn shared_test_profile(
         authority: &DefaultConversationDeviceAuthority,
         device_key: &SigningKey,
@@ -4045,6 +4059,7 @@ mod tests {
         crate::collaboration_profile_authority::verify_signed_profile_document(&signed).unwrap()
     }
 
+    #[cfg(unix)]
     fn resign_test_profile(
         device_key: &SigningKey,
         document: &crate::collaboration_profile_authority::CollaborationProfileDocument,
@@ -4064,6 +4079,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn profile_operation(
         request_id: &str,
         profile: &crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
@@ -4087,6 +4103,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn remote_receipt(
         fixture: &Fixture,
         outgoing: &DurableOutgoingMessage,
@@ -4116,6 +4133,7 @@ mod tests {
         (key, frame)
     }
 
+    #[cfg(unix)]
     fn remote_transport_receipt(
         fixture: &Fixture,
         outgoing: &DurableOutgoingMessage,
@@ -4126,6 +4144,7 @@ mod tests {
         wrap_transport_frame(fixture, &key, &receipt)
     }
 
+    #[cfg(unix)]
     fn sign_acceptance_receipt(
         key: &SigningKey,
         payload: CollaborationAcceptanceReceipt,
@@ -6061,6 +6080,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn transport_incoming(
         core: &CollaborationCore,
         frame: &[u8],
@@ -6208,6 +6228,7 @@ mod tests {
         accept(&over, NOW + COMMUNITY_RATE_WINDOW_SECS);
     }
 
+    #[cfg(unix)]
     fn remote_presence_frame(fixture: &Fixture, key: &SigningKey, now: u64, ttl: u64) -> Vec<u8> {
         let prepared = fixture
             .authority(key.clone())
@@ -6222,6 +6243,7 @@ mod tests {
         wrap_transport_frame(fixture, key, prepared.envelope_bytes())
     }
 
+    #[cfg(unix)]
     fn acknowledge_all_handoffs(core: &CollaborationCore) {
         for handoff in core.pending_product_handoffs().unwrap() {
             core.acknowledge_product_handoff(

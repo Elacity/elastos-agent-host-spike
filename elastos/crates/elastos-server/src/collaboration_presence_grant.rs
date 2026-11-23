@@ -189,7 +189,7 @@ impl PresenceAuthority {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn manager(&self) -> &Arc<CapabilityManager> {
         &self.manager
     }
@@ -650,7 +650,7 @@ pub(crate) async fn set_presence_grant(
 
 /// Store an isolated fixture's actual signed Profile through the protected
 /// principal-root path used by the production reader.
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) fn store_test_profile(
     data_dir: &std::path::Path,
     principal_id: &str,
@@ -706,6 +706,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn r6_grant_home(kind: crate::auth::PrincipalKind, existing: bool) -> tempfile::TempDir {
         use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT};
         let dir = tempfile::tempdir().unwrap();
@@ -853,8 +854,10 @@ mod tests {
             .contains("has no stored record"));
     }
 
+    #[cfg(unix)]
     const ME: &str = "did:key:zMe";
 
+    #[cfg(unix)]
     fn home() -> (tempfile::TempDir, String) {
         let temp = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -870,9 +873,12 @@ mod tests {
         (temp, principal)
     }
 
+    #[cfg(unix)]
     const SECOND: &str = "person:local:presence-grant-second";
+    #[cfg(unix)]
     const OTHER: &str = "person:local:someone-else";
 
+    #[cfg(unix)]
     fn files(root: &std::path::Path) -> std::collections::BTreeSet<std::path::PathBuf> {
         let mut written = std::collections::BTreeSet::new();
         let mut stack = vec![root.to_path_buf()];
@@ -889,6 +895,7 @@ mod tests {
         written
     }
 
+    #[cfg(unix)]
     fn scope() -> PresenceScope {
         PresenceScope {
             network_id: "elastos.community".to_string(),
@@ -896,6 +903,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn successes(authority: &PresenceAuthority) -> usize {
         authority
             .manager()
@@ -906,6 +914,7 @@ mod tests {
             .count()
     }
 
+    #[cfg(unix)]
     async fn gate(
         authority: &PresenceAuthority,
         data: &std::path::Path,
@@ -927,6 +936,7 @@ mod tests {
         .map(|grant| grant.mode)
     }
 
+    #[cfg(unix)]
     fn held_token(data: &std::path::Path, principal: &str) -> CapabilityToken {
         let file = load_file(data, principal).unwrap();
         CapabilityToken::from_base64(&file.grants[0].token).unwrap()
