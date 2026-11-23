@@ -2066,7 +2066,6 @@ async fn command_rejects_a_claim_for_a_different_request() {
     assert_eq!(code, 1);
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn command_names_home_when_nothing_is_listening() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2089,6 +2088,51 @@ async fn command_names_home_when_nothing_is_listening() {
         "Home is not running. Start Home, then request the terminal grant again.\n"
     );
     assert_eq!(code, 1);
+}
+
+/// Stand-in for the transport error chain: the refused `std::io::Error` sits
+/// under a non-io error, as it does under the hyper connect error.
+#[derive(Debug)]
+struct ChainWithRefusedSource(std::io::Error);
+
+impl std::fmt::Display for ChainWithRefusedSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "connect failed")
+    }
+}
+
+impl std::error::Error for ChainWithRefusedSource {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+#[test]
+fn cli_mint_windows_refused_error_names_home() {
+    // Unix reports a closed loopback endpoint with the refused errno that
+    // reqwest::Error::is_connect already recognises. Windows reports the same
+    // endpoint with the WSA raw error WSAECONNREFUSED (10061), so the
+    // classifier has to accept that raw error wherever the transport chain
+    // buries it. The unreachable class is the nothing-is-listening outcome,
+    // and that outcome names Home.
+    let refused = std::io::Error::from_raw_os_error(10061);
+    assert!(
+        super::super::gateway_home_cli_mint::source_chain_reports_closed_local_endpoint(&refused)
+    );
+    let buried = ChainWithRefusedSource(std::io::Error::from_raw_os_error(10061));
+    assert!(
+        super::super::gateway_home_cli_mint::source_chain_reports_closed_local_endpoint(&buried)
+    );
+    let timed_out = std::io::Error::from_raw_os_error(10060);
+    assert!(
+        !super::super::gateway_home_cli_mint::source_chain_reports_closed_local_endpoint(
+            &timed_out
+        )
+    );
+    assert_eq!(
+        super::super::gateway_home_cli_mint::deadline_without_grant(false, false, true).to_string(),
+        "Home is not running. Start Home, then request the terminal grant again."
+    );
 }
 
 #[tokio::test]
