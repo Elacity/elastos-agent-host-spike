@@ -596,7 +596,9 @@ fn lock_owner_only_file(path: &Path) -> anyhow::Result<FileLock> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     use std::sync::{mpsc, Arc};
+    #[cfg(unix)]
     use std::time::Duration;
 
     use elastos_runtime::signature::{generate_keypair, SigningKey};

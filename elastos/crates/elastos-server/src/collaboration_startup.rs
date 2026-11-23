@@ -1065,17 +1065,20 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::Write;
     use std::sync::Mutex;
+    #[cfg(unix)]
     use std::time::Instant;
 
     use elastos_common::collaboration_protocol::collaboration_message_envelope_sha256;
-    use elastos_runtime::provider::{
-        ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
-    };
+    #[cfg(unix)]
+    use elastos_runtime::provider::ProviderRegistry;
+    use elastos_runtime::provider::{ProviderError, ResourceRequest, ResourceResponse};
     use elastos_runtime::signature::{generate_keypair, SigningKey};
     use sha2::{Digest, Sha256};
 
     use crate::collaboration_carrier::CommunityLinkHealth;
-    use crate::collaboration_core::{CollaborationCore, WriteFault};
+    use crate::collaboration_core::CollaborationCore;
+    #[cfg(unix)]
+    use crate::collaboration_core::WriteFault;
     use crate::collaboration_default_conversation::{
         canonical_default_conversation_grant_bytes, DefaultConversationAdmissionPolicy,
         DefaultConversationGrant, DEFAULT_CONVERSATION_GRANT_SCHEMA_V1,
@@ -1086,9 +1089,13 @@ mod tests {
         DefaultConversationGrantDescriptor, SignedCollaborationNetworkProfile,
         COLLABORATION_NETWORK_PROFILE_SCHEMA, COLLABORATION_NETWORK_PROFILE_SIGNATURE_DOMAIN,
     };
+    #[cfg(unix)]
     use crate::collaboration_presence::presence_request_binding;
+    #[cfg(unix)]
     use crate::collaboration_product::chat_message_request_binding;
+    #[cfg(unix)]
     use crate::collaboration_transport::CollaborationTransportDriver;
+    #[cfg(unix)]
     use crate::esp_binding::esp_request_binding;
 
     const NETWORK: &str = "collaboration-startup-test";

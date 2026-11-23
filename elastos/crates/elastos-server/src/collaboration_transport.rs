@@ -603,6 +603,7 @@ impl CollaborationTransportDriver {
 mod tests {
     use super::*;
     use crate::collaboration_carrier::join_collaboration_network;
+    #[cfg(unix)]
     use crate::collaboration_core::WriteFault;
     use crate::collaboration_default_conversation::{
         canonical_default_conversation_grant_bytes, verify_default_conversation_grant,
@@ -620,10 +621,11 @@ mod tests {
     use crate::collaboration_presence_grant::PresenceDecision;
     use crate::collaboration_protocol::sign_collaboration_transport_frame;
     use crate::esp_binding::{esp_request_binding, EspRequestBinding};
+    use elastos_common::collaboration_protocol::SignedCollaborationMessage;
+    #[cfg(unix)]
     use elastos_common::collaboration_protocol::{
         canonical_collaboration_message_bytes, canonical_signed_collaboration_message_bytes,
-        collaboration_message_envelope_sha256, SignedCollaborationMessage,
-        COLLABORATION_MESSAGE_SIGNATURE_DOMAIN_V1,
+        collaboration_message_envelope_sha256, COLLABORATION_MESSAGE_SIGNATURE_DOMAIN_V1,
     };
     use elastos_runtime::provider::ProviderCarrierInvoker;
     use elastos_runtime::signature::{generate_keypair, SigningKey};
