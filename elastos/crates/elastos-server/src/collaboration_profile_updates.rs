@@ -99,7 +99,7 @@ enum ProfileUpdateContextAuthority {
     /// Carries its proof binding so this authority stays revocable: it
     /// outlives every session, so nothing else would ever end it.
     RuntimeOwned { proof_binding_id: String },
-    #[cfg(all(unix, test))]
+    #[cfg(test)]
     VerifiedForTest,
 }
 
@@ -509,7 +509,7 @@ impl CollaborationProfileUpdateService {
                 }
                 Ok(())
             }
-            #[cfg(all(unix, test))]
+            #[cfg(test)]
             ProfileUpdateContextAuthority::VerifiedForTest => Ok(()),
         }
     }
@@ -547,7 +547,7 @@ impl CollaborationProfileUpdateService {
                         return Ok(());
                     }
                 }
-                #[cfg(all(unix, test))]
+                #[cfg(test)]
                 ProfileUpdateContextAuthority::VerifiedForTest => {
                     if ordering == std::cmp::Ordering::Greater {
                         existing.contact_store = contact_store;
