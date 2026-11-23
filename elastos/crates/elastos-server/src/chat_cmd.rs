@@ -427,39 +427,43 @@ async fn run_native_chat_with_runtime(
                                 continue;
                             }
 
-                            // Verify message signature — same contract as capsule chat
-                            let sender_id = msg["sender_id"].as_str().unwrap_or("");
+                            // The signed author decides. A direct frame's transport
+                            // sender must be that author. A forwarded frame has
+                            // no transport sender and is still delivered.
                             let sender_nick = msg["sender_nick"].as_str().unwrap_or("?");
                             let content = msg["content"].as_str().unwrap_or("");
                             let ts = msg["ts"].as_u64().unwrap_or(0);
                             let signature = msg["signature"].as_str().unwrap_or("");
-
-                            let verified = verify_via_did_provider(
-                                &recv_client,
-                                &recv_api,
-                                &recv_token,
-                                &recv_did_cap,
-                                sender_id,
-                                ts,
-                                content,
-                                signature,
-                            )
-                            .await;
-
-                            if !verified {
+                            let author =
+                                elastos_common::chat_protocol::chat_line_author(msg).unwrap_or("");
+                            let verified = if author.is_empty() {
+                                false
+                            } else {
+                                verify_via_did_provider(
+                                    &recv_client,
+                                    &recv_api,
+                                    &recv_token,
+                                    &recv_did_cap,
+                                    author,
+                                    ts,
+                                    content,
+                                    signature,
+                                )
+                                .await
+                            };
+                            let Some(delivery) =
+                                elastos_common::chat_protocol::chat_delivery(msg, verified)
+                            else {
                                 continue;
-                            }
+                            };
 
-                            if let Some(sid) = msg
-                                .get("sender_id")
-                                .and_then(|v| v.as_str())
-                                .filter(|s| !s.is_empty())
-                            {
-                                recv_attached_dids
-                                    .lock()
-                                    .await
-                                    .insert(attached_identity_key(sid, sender_session_id(msg)));
-                            }
+                            recv_attached_dids
+                                .lock()
+                                .await
+                                .insert(attached_identity_key(
+                                    delivery.author,
+                                    sender_session_id(msg),
+                                ));
 
                             render_chat_message(recv_ui.as_ref(), sender_nick, content);
                         }
@@ -752,7 +756,10 @@ async fn process_presence_messages(
         {
             continue;
         }
-        let sender_id = msg.get("sender_id").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(author) = elastos_common::chat_protocol::presence_author(msg, &presence.did)
+        else {
+            continue;
+        };
         let ts = msg.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
         let signature = msg.get("signature").and_then(|v| v.as_str()).unwrap_or("");
         let verified = verify_via_did_provider(
@@ -760,7 +767,7 @@ async fn process_presence_messages(
             api,
             client_token,
             did_cap,
-            sender_id,
+            author,
             ts,
             content,
             signature,
@@ -1158,6 +1165,12 @@ fn should_render_incoming_message(
     }
     msg.get("sender_id")
         .and_then(|v| v.as_str())
+        .filter(|sender| !sender.is_empty())
+        .or_else(|| {
+            msg.get("signed_author")
+                .and_then(|v| v.as_str())
+                .filter(|author| !author.is_empty())
+        })
         .map(|sender_id| {
             !is_same_chat_instance(self_did, self_session_id, sender_id, sender_session_id(msg))
         })

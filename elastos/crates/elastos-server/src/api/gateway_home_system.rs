@@ -3707,7 +3707,7 @@ fn home_services_sync_access_decisions(
         serde_json::json!({
             "topic": HOME_SERVICES_REQUESTS_TOPIC,
             "consumer_id": format!("home-services-decisions:{}", context.principal_id()),
-            "skip_sender_id": runtime.peer_id,
+            "skip_sender_id": home_services_local_device_did(data_dir)?,
             "limit": 64,
         }),
     )?;
@@ -4926,7 +4926,7 @@ pub(super) fn home_services_sync_access_requests(
         serde_json::json!({
             "topic": HOME_SERVICES_REQUESTS_TOPIC,
             "consumer_id": format!("home-services-requests:{}", context.principal_id()),
-            "skip_sender_id": runtime.peer_id,
+            "skip_sender_id": home_services_local_device_did(data_dir)?,
             "limit": 64,
         }),
     )?;
