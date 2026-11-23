@@ -1318,6 +1318,10 @@ fn main() -> anyhow::Result<()> {
     let nofile = raise_nofile_soft_limit();
     #[cfg(unix)]
     NOFILE_RAISE.set(nofile).ok();
+    // An update child's parent watch must start, and Linux's PR_SET_PDEATHSIG must be cleared, on
+    // the process's own main thread: the loader armed it there (Grok review of S0b). Do it before
+    // handing the rest of start-up to the elastos-main thread.
+    elastos_server::update_controller::watch_parent()?;
     // Debug builds still need a deep stack while polling the start-up future: boxing
     // run() was not enough (seen on the Windows machine, 23 Nov 2026), and the linker
     // /STACK flag only sizes the main thread. Poll it from a thread with the same 8 MB
@@ -1385,7 +1389,7 @@ async fn run() -> anyhow::Result<()> {
         }
     }
 
-    elastos_server::update_controller::watch_parent()?;
+    // The update parent watcher runs in main() on the process's own main thread (see there).
 
     // Install rustls crypto provider (ring)
     let _ = rustls::crypto::ring::default_provider().install_default();
