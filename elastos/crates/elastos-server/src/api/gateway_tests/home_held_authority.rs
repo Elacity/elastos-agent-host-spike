@@ -86,20 +86,14 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "elastos-server/src/server_infra.rs",
-        "register_chain_provider_plane",
-        "load_or_create_device_key",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
-        "setup_server_infrastructure_impl",
-        "encryption_key: device_key_hex",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
         "start_did_provider",
         "encryption_key: device_key_hex",
     ),
 ];
+
+/// Localhost, object, and chain. The same sentence is the census reason for
+/// both narrowed rows. Object has no row of its own.
+const HELPER_FENCE_REASON: &str = "localhost holds the file HKDF key only; object holds no device key; chain holds only the public verifying key; none of the three processes can open identity/device.key";
 
 fn rows() -> Vec<HeldRow> {
     vec![
@@ -1382,7 +1376,7 @@ fn rows() -> Vec<HeldRow> {
         "register_chain_provider_plane",
         "load_or_create_device_key",
         1,
-        mark("open", "device private key", "chain provider", "The child config now carries only the Ed25519 verifying key of `derive_did(device_key)`, which `RuntimeOperationIssuerKeyV1` accepts only as a public key. The row stays open: the child is an unconfined same-user process and the data directory is a fixed default, so it can still open `identity/device.key`, as the object provider can. It closes when slice C confines it."),
+        mark("narrowed", "device private key", "chain provider", HELPER_FENCE_REASON),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1396,7 +1390,7 @@ fn rows() -> Vec<HeldRow> {
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "localhost provider", "Home hands the device private key to the localhost provider. The object config no longer carries the device key; the process is an unconfined child and `base_path` is the data directory, so it can open `identity/device.key`."),
+        mark("narrowed", "device private key", "localhost provider", HELPER_FENCE_REASON),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -2029,6 +2023,95 @@ fn open_rows_are_an_explicit_list() {
     }
     let listed: BTreeSet<_> = OPEN_ROWS.iter().copied().collect();
     assert_eq!(from_rows, listed, "open rows drifted from OPEN_ROWS");
+}
+
+/// Localhost, object, and chain start through the path allow-list. A plain
+/// `ProviderBridge::spawn` of any of the three fails this test.
+#[test]
+fn localhost_object_and_chain_are_not_spawned_unconfined() {
+    let raw = sources()
+        .get("elastos-server/src/server_infra.rs")
+        .expect("server_infra")
+        .as_str();
+    let helpers = function_raw_bodies(raw, "spawn_allow_listed_provider");
+    assert_eq!(helpers.len(), 2, "unix and windows helpers");
+    let unix = helpers
+        .iter()
+        .copied()
+        .find(|body| body.contains("spawn_path_allow"))
+        .expect("unix helper");
+    assert!(unix.contains("ProviderBridge::spawn_path_allow("));
+    assert!(
+        !unix.contains("ProviderBridge::spawn("),
+        "the unix helper has an unconfined spawn"
+    );
+    let windows = helpers
+        .iter()
+        .copied()
+        .find(|body| body.contains("ProviderBridge::spawn("))
+        .expect("windows helper");
+    assert!(!windows.contains("spawn_path_allow"));
+    let setup = function_raw_bodies(raw, "setup_server_infrastructure_impl");
+    assert_eq!(setup.len(), 1);
+    let plane = function_raw_bodies(raw, "register_chain_provider_plane");
+    assert_eq!(plane.len(), 1);
+    let mut keys = helper_component_keys(setup[0]);
+    keys.extend(helper_component_keys(plane[0]));
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "chain-provider",
+            "chain-provider",
+            "localhost-provider",
+            "object-provider",
+        ]
+    );
+    let spawn = "ProviderBridge::spawn(";
+    let mut from = 0;
+    while let Some(at) = raw[from..].find(spawn) {
+        let pos = from + at;
+        let window = &raw[pos..raw.len().min(pos + 180)];
+        for key in ["localhost-provider", "object-provider", "chain-provider"] {
+            assert!(
+                !window.contains(key),
+                "{key} is spawned unconfined: {window}"
+            );
+        }
+        from = pos + spawn.len();
+    }
+    for row in rows() {
+        if matches!(
+            (row.function, row.mechanism),
+            ("register_chain_provider_plane", "load_or_create_device_key")
+                | (
+                    "setup_server_infrastructure_impl",
+                    "encryption_key: device_key_hex"
+                )
+        ) {
+            assert_eq!(row.status, "narrowed");
+            assert_eq!(row.reason, HELPER_FENCE_REASON);
+        }
+    }
+}
+
+fn helper_component_keys(body: &str) -> Vec<&str> {
+    let mut keys = Vec::new();
+    let mut rest = body;
+    let needle = "spawn_allow_listed_provider(";
+    while let Some(at) = rest.find(needle) {
+        let after = &rest[at + needle.len()..];
+        let end = after.find(')').unwrap_or(after.len());
+        let args = &after[..end];
+        if let Some(start) = args.find('"') {
+            let tail = &args[start + 1..];
+            if let Some(stop) = tail.find('"') {
+                keys.push(&tail[..stop]);
+            }
+        }
+        rest = &after[end..];
+    }
+    keys
 }
 
 #[test]

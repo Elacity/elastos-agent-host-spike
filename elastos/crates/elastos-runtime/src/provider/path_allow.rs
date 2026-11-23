@@ -3,7 +3,8 @@
 //! A single `STORAGE_ROOT` of the data directory would include
 //! `identity/device.key`. Each helper gets its own child directories instead.
 //! Each of those directories must already exist, be owned by the current user,
-//! and must not be a symlink. `spawn_confined` does not admit these providers yet.
+//! and must not be a symlink. `spawn_path_allow` starts them. The single-root
+//! `spawn_confined` does not.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -219,7 +220,10 @@ pub(super) fn render_with_plan(
         );
     }
     let names: Vec<&str> = roots.iter().map(|root| root.name).collect();
-    let seatbelt = super::macos_profile::render_path_allow_profile(&names)?;
+    let seatbelt = super::macos_profile::render_path_allow_profile(
+        &names,
+        matches!(provider, HelperId::Chain),
+    )?;
     if seatbelt.contains("STORAGE_ROOT")
         || seatbelt.contains("STORAGE_PARENT")
         || seatbelt.contains("identity")
@@ -375,7 +379,7 @@ mod tests {
             assert!(
                 super::super::rights_table::RuntimeProviderId::from_component_key(component_key)
                     .is_none(),
-                "{component_key} must stay outside spawn_confined until slice C2"
+                "{component_key} stays outside single-root spawn_confined"
             );
             let rendered = super::super::os_entry::render_helper_confinement(
                 component_key,
@@ -387,7 +391,17 @@ mod tests {
             assert!(rendered
                 .seatbelt
                 .starts_with("(version 1)\n(deny default)\n(deny network*)\n"));
-            assert!(!rendered.seatbelt.contains("(allow network"));
+            if *component_key == "chain-provider" {
+                assert!(rendered.seatbelt.contains("(allow network-outbound)\n"));
+                assert!(rendered
+                    .seatbelt
+                    .contains("(allow mach-lookup (global-name \"com.apple.mDNSResponder\"))"));
+                assert!(!rendered.seatbelt.contains("(allow network*)"));
+                assert!(!rendered.seatbelt.contains("(allow network-inbound"));
+                assert!(!rendered.seatbelt.contains("(allow network-bind"));
+            } else {
+                assert!(!rendered.seatbelt.contains("(allow network"));
+            }
             assert!(!rendered
                 .seatbelt
                 .contains(data_dir.to_str().expect("data directory path")));

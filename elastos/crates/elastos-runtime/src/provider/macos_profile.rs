@@ -61,7 +61,11 @@ pub(super) fn render_macos_profile(
     }
     forms.push(match provider {
         RuntimeProviderId::Model => "(allow file-read-data (literal \"/\"))",
-        RuntimeProviderId::Did | RuntimeProviderId::Wallet => "(allow file-read* (literal \"/\"))",
+        RuntimeProviderId::Did
+        | RuntimeProviderId::Wallet
+        | RuntimeProviderId::Localhost
+        | RuntimeProviderId::Object
+        | RuntimeProviderId::Chain => "(allow file-read* (literal \"/\"))",
     });
     forms.push("(allow sysctl-read)");
     for row in admitted
@@ -83,7 +87,7 @@ pub(super) fn render_macos_profile(
 /// Seatbelt text for a helper allow-list. Parameters are the file-root names.
 /// There is no `STORAGE_ROOT` and no `STORAGE_PARENT`: those parents would be
 /// the data directory, which contains `identity/device.key`.
-pub(super) fn render_path_allow_profile(roots: &[&str]) -> Result<String, String> {
+pub(super) fn render_path_allow_profile(roots: &[&str], outbound: bool) -> Result<String, String> {
     if roots.is_empty() {
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
     }
@@ -107,6 +111,13 @@ pub(super) fn render_path_allow_profile(roots: &[&str]) -> Result<String, String
         lines.push(format!(
             "(allow file-read* file-write* (subpath (param \"{name}\")))"
         ));
+    }
+    // Chain places outbound HTTPS. `(deny network*)` stays, so inbound and
+    // bind remain refused. mDNSResponder is the macOS name lookup for that
+    // outbound call. The file roots are unchanged.
+    if outbound {
+        lines.push("(allow network-outbound)".to_string());
+        lines.push("(allow mach-lookup (global-name \"com.apple.mDNSResponder\"))".to_string());
     }
     let mut rendered = lines.join("\n");
     rendered.push('\n');

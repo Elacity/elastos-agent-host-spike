@@ -323,7 +323,10 @@ pub(super) unsafe fn install(
     result
 }
 
-fn prepare_path_allow(plan: landlock_plan::PathAllowPlan) -> Result<Prepared, String> {
+pub(super) fn prepare_path_allow(
+    provider: RuntimeProviderId,
+    plan: landlock_plan::PathAllowPlan,
+) -> Result<Prepared, String> {
     if plan.root_dev.len() != plan.root_ino.len() || plan.root_dev.is_empty() {
         return Err("provider start is refused: a path root has no identity".into());
     }
@@ -357,13 +360,20 @@ fn prepare_path_allow(plan: landlock_plan::PathAllowPlan) -> Result<Prepared, St
                 .map_err(|_| format!("Landlock path contains NUL: {}", rule.0))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    // Step::Seccomp always runs, and a zero-length sock_fprog is EINVAL.
-    // Helpers install the Did Runtime grant: the single-root storage and
-    // exec filter, and the loader set this plan already pins to Did.
-    // The model filter allows more calls, so it is not the helper filter.
+    // Each helper's filter comes from its own grant. Did's list is not reused.
+    if !matches!(
+        provider,
+        RuntimeProviderId::Localhost | RuntimeProviderId::Object | RuntimeProviderId::Chain
+    ) {
+        return Err(
+            "provider start is refused: the path allow-list filter is only for localhost, object, and chain"
+                .into(),
+        );
+    }
+    let admitted = super::super::rights::runtime_grant(provider);
     let filters = to_sock_filters(seccomp_program::program(
-        RuntimeProviderId::Did,
-        &super::super::rights::runtime_grant(RuntimeProviderId::Did),
+        provider,
+        &admitted,
         host_audit_arch(),
     ))?;
     let first = root_pins[0];
@@ -602,7 +612,7 @@ mod tests {
             .iter()
             .position(|rule| rule.0 == "chain-provider")
             .expect("chain root");
-        let prepared = prepare_path_allow(plan).unwrap();
+        let prepared = prepare_path_allow(RuntimeProviderId::Chain, plan).unwrap();
         let root = data.join("chain-provider");
         std::fs::remove_dir(&root).unwrap();
         std::os::unix::fs::symlink(data.join("identity"), &root).unwrap();
@@ -650,30 +660,44 @@ mod tests {
         let (_confinement, plan) =
             path_allow::render_with_plan("chain-provider", data, executable, 5)
                 .unwrap_or_else(|err| panic!("clean render: {err}"));
-        let prepared = prepare_path_allow(plan).unwrap();
-        let single = prepare(
+        let prepared = prepare_path_allow(RuntimeProviderId::Chain, plan).unwrap();
+        let chain_filter = super::to_sock_filters(super::super::super::seccomp_program::program(
+            RuntimeProviderId::Chain,
+            &super::super::super::rights::runtime_grant(RuntimeProviderId::Chain),
+            super::host_audit_arch(),
+        ))
+        .unwrap();
+        let did_filter = super::to_sock_filters(super::super::super::seccomp_program::program(
             RuntimeProviderId::Did,
-            &super::super::super::rights::admit_runtime_grant(RuntimeProviderId::Did),
-            &bindings_for(data, executable),
-        )
-        .unwrap_or_else(|err| panic!("single-root filter: {err}"));
-        assert!(
-            !prepared.filters.is_empty(),
-            "a clean plan installs a seccomp filter"
+            &super::super::super::rights::runtime_grant(RuntimeProviderId::Did),
+            super::host_audit_arch(),
+        ))
+        .unwrap();
+        assert_eq!(
+            prepared.filters, chain_filter,
+            "the chain allow-list filter is chain's own grant"
         );
-        assert_eq!(prepared.filters.len(), single.filters.len());
-        for (index, (left, right)) in prepared
-            .filters
-            .iter()
-            .zip(single.filters.iter())
-            .enumerate()
-        {
-            assert_eq!(
-                (left.code, left.jt, left.jf, left.k),
-                (right.code, right.jt, right.jf, right.k),
-                "allow-list instruction {index} must match the Did single-root filter"
-            );
+        assert_ne!(
+            prepared.filters, did_filter,
+            "the chain allow-list filter must not be the Did list"
+        );
+        for name in elastos_common::localhost::FILE_BACKED_ROOTS {
+            let path = data.join(name);
+            if !path.exists() {
+                std::fs::create_dir(&path).unwrap();
+            }
         }
+        let (_local, local_plan) =
+            path_allow::render_with_plan("localhost-provider", data, executable, 5).unwrap();
+        let local = prepare_path_allow(RuntimeProviderId::Localhost, local_plan).unwrap();
+        let local_filter = super::to_sock_filters(super::super::super::seccomp_program::program(
+            RuntimeProviderId::Localhost,
+            &super::super::super::rights::runtime_grant(RuntimeProviderId::Localhost),
+            super::host_audit_arch(),
+        ))
+        .unwrap();
+        assert_eq!(local.filters, local_filter);
+        assert_ne!(local.filters, prepared.filters);
         assert!(prepared
             .plan
             .rules

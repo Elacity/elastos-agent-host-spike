@@ -41,7 +41,13 @@ pub(super) fn linux_seccomp_list(
         .chain(BASELINE.split_whitespace())
         .collect();
     match provider {
-        RuntimeProviderId::Did => {}
+        RuntimeProviderId::Did | RuntimeProviderId::Localhost | RuntimeProviderId::Object => {}
+        // Chain's reqwest client places outbound TCP. `read` and `write` are
+        // already in the baseline. Inbound calls stay out. The file grant is
+        // still only the chain-provider directory.
+        RuntimeProviderId::Chain => {
+            names.extend(["connect", "getsockopt", "recvfrom", "sendto", "socket"])
+        }
         RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
         RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
     }
@@ -153,7 +159,7 @@ mod tests {
     ];
 
     fn slug(provider: RuntimeProviderId) -> &'static str {
-        match provider { RuntimeProviderId::Did => "did", RuntimeProviderId::Wallet => "wallet", RuntimeProviderId::Model => "model" }
+        match provider { RuntimeProviderId::Did => "did", RuntimeProviderId::Wallet => "wallet", RuntimeProviderId::Model => "model", RuntimeProviderId::Localhost => "localhost", RuntimeProviderId::Object => "object", RuntimeProviderId::Chain => "chain" }
     }
     fn same_arch(left: AuditArch, right: AuditArch) -> bool {
         matches!((left, right), (AuditArch::X86_64, AuditArch::X86_64) | (AuditArch::Aarch64, AuditArch::Aarch64))

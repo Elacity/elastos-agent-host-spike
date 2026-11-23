@@ -43,15 +43,21 @@ pub(super) static RIGHTS: &[RightRow] = &[
 const DID_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const WALLET_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable", "model-gpu"];
+/// Localhost, object, and chain use the same file and exec rows. Chain's
+/// outbound calls are added in `linux_seccomp_list`, not as a second storage root.
+const HELPER_RIGHT_IDS: &[&str] = DID_RIGHT_IDS;
 
-/// The later caller derives this id from the Runtime's `components.json` key,
+/// The caller derives this id from the Runtime's `components.json` key,
 /// never from the package manifest's `name`.
-#[allow(dead_code)] // The spawn caller is added in a later slice.
+#[allow(dead_code)] // Windows does not construct the Unix spawn ids.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum RuntimeProviderId {
     Did,
     Wallet,
     Model,
+    Localhost,
+    Object,
+    Chain,
 }
 
 impl RuntimeProviderId {
@@ -62,6 +68,18 @@ impl RuntimeProviderId {
             "did-provider" => Some(Self::Did),
             "wallet-provider" => Some(Self::Wallet),
             "model-provider" => Some(Self::Model),
+            // These three use the path allow-list, not the single storage root.
+            _ => None,
+        }
+    }
+
+    /// Localhost, object, and chain. `from_component_key` stays empty for them
+    /// so `spawn_confined` cannot start them on one storage root.
+    pub(super) fn path_allow(key: &str) -> Option<Self> {
+        match key {
+            "localhost-provider" => Some(Self::Localhost),
+            "object-provider" => Some(Self::Object),
+            "chain-provider" => Some(Self::Chain),
             _ => None,
         }
     }
@@ -71,6 +89,7 @@ impl RuntimeProviderId {
             Self::Did => DID_RIGHT_IDS,
             Self::Wallet => WALLET_RIGHT_IDS,
             Self::Model => MODEL_RIGHT_IDS,
+            Self::Localhost | Self::Object | Self::Chain => HELPER_RIGHT_IDS,
         }
     }
 }
@@ -151,6 +170,9 @@ mod tests {
             RuntimeProviderId::Did,
             RuntimeProviderId::Wallet,
             RuntimeProviderId::Model,
+            RuntimeProviderId::Localhost,
+            RuntimeProviderId::Object,
+            RuntimeProviderId::Chain,
         ] {
             assert_eq!(
                 resolve(provider, &expanded)

@@ -125,6 +125,9 @@ fn refuse_single_root_on_helper_allow_list(
         RuntimeProviderId::Did => "did-provider",
         RuntimeProviderId::Wallet => "wallet-provider",
         RuntimeProviderId::Model => "model-provider",
+        RuntimeProviderId::Localhost => "localhost-provider",
+        RuntimeProviderId::Object => "object-provider",
+        RuntimeProviderId::Chain => "chain-provider",
     };
     let absent = format!(
         "provider start is refused: component key \"{component_key}\" has no path allow-list"
@@ -147,6 +150,192 @@ fn refuse_single_root_on_helper_allow_list(
         }
         Err(error) => Err(error),
     }
+}
+
+/// Start localhost, object, or chain under that provider's path allow-list.
+///
+/// The data directory is not a storage root. `identity/device.key` stays
+/// outside the Seatbelt parameters and the Landlock rules.
+pub(crate) fn start_path_allow(
+    component_key: &str,
+    executable: &super::CheckedExecutable,
+    data_dir: &Path,
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
+    if super::rights_table::RuntimeProviderId::path_allow(component_key).is_none() {
+        return Err(format!(
+            "provider start is refused: component key \"{component_key}\" has no path allow-list"
+        ));
+    }
+    start_path_allow_os(component_key, executable, data_dir, stdio)
+}
+
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn start_path_allow_os(
+    component_key: &str,
+    executable: &super::CheckedExecutable,
+    data_dir: &Path,
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
+    let provider = super::rights_table::RuntimeProviderId::path_allow(component_key)
+        .ok_or_else(|| {
+            format!(
+                "provider start is refused: component key \"{component_key}\" has no path allow-list"
+            )
+        })?;
+    let abi = super::landlock_plan::kernel_abi()?;
+    let (_confinement, plan) =
+        super::path_allow::render_with_plan(component_key, data_dir, executable.path(), abi)?;
+    let prepared = preexec_installer::prepare_path_allow(provider, plan)?;
+    let data = data_dir
+        .to_str()
+        .ok_or("provider start is refused: the data directory path is not Unicode")?;
+    let env = std::ffi::CString::new(format!("ELASTOS_DATA_DIR={data}")).map_err(|_| {
+        "provider start is refused: the data directory path contains NUL".to_string()
+    })?;
+    let pid = failure_record::start_prepared(
+        &prepared,
+        executable,
+        Some(stdio.stdin),
+        Some(stdio.stdout),
+        Some(&env),
+    )
+    .map_err(|error| match error {
+        failure_record::LaunchError::BeforeFork(reason) => reason,
+        failure_record::LaunchError::ChildFailed { reason, .. } => reason,
+    })?;
+    Ok(Launched {
+        pid,
+        to_child: stdio.to_child,
+        from_child: stdio.from_child,
+    })
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+fn start_path_allow_os(
+    component_key: &str,
+    executable: &super::CheckedExecutable,
+    data_dir: &Path,
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let confinement = super::path_allow::render(component_key, data_dir, executable.path(), 5)?;
+    let prepared = executable.verify_at_spawn()?;
+    let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
+        format!("provider start is refused: cannot resolve provider executable: {error}")
+    })?;
+    let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
+    command.env_clear();
+    command.env("ELASTOS_DATA_DIR", data_dir);
+    command.arg("-p").arg(&confinement.seatbelt);
+    for rule in &confinement.landlock {
+        if matches!(rule.name, "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS") {
+            continue;
+        }
+        command
+            .arg("-D")
+            .arg(format!("{}={}", rule.name, rule.path.display()));
+    }
+    command
+        .arg("-D")
+        .arg(format!("PROVIDER_EXECUTABLE={}", binary.display()));
+    command.arg(&binary);
+    let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
+    if arg_max <= 0 {
+        return Err("provider start is refused: cannot inspect argument limit".into());
+    }
+    use std::os::unix::ffi::OsStrExt as _;
+    let args: Vec<_> = command.get_args().collect();
+    let argv_bytes = "/usr/bin/sandbox-exec".len()
+        + 1
+        + args
+            .iter()
+            .map(|arg| arg.as_bytes().len() + 1)
+            .sum::<usize>()
+        + (args.len() + 2) * std::mem::size_of::<*const libc::c_char>();
+    if argv_bytes > (arg_max as usize) / 2 {
+        return Err(
+            "provider start is refused: sandbox-exec arguments exceed argument limit".into(),
+        );
+    }
+    let duplicate = |fd| {
+        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+        if copy < 0 {
+            Err(format!(
+                "provider start is refused: cannot duplicate child pipe: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+        }
+    };
+    let input = duplicate(stdio.stdin)?;
+    let output = duplicate(stdio.stdout)?;
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "provider start is refused: cannot inspect descriptor limit: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let max_fd = macos_fd_sweep_limit(
+        unsafe { limit.assume_init() }.rlim_cur,
+        macos_maxfilesperproc(),
+    )?;
+    unsafe {
+        command.pre_exec(move || {
+            for fd in 3..max_fd {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let child = command
+        .stdin(Stdio::from(input))
+        .stdout(Stdio::from(output))
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            format!("provider start is refused: cannot start sandbox-exec: {error}")
+        })?;
+    let pid = child.id() as libc::pid_t;
+    drop(child);
+    Ok(Launched {
+        pid,
+        to_child: stdio.to_child,
+        from_child: stdio.from_child,
+        prepared,
+    })
+}
+
+#[cfg(any(
+    elastos_unsupported_os_check,
+    not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))
+))]
+fn start_path_allow_os(
+    component_key: &str,
+    executable: &super::CheckedExecutable,
+    data_dir: &Path,
+    stdio: ChildStdio,
+) -> Result<Launched, String> {
+    let _ = (component_key, executable, data_dir, stdio);
+    Err(UNSUPPORTED_OS.to_string())
 }
 
 fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
@@ -471,7 +660,7 @@ fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
@@ -1000,5 +1189,181 @@ mod tests {
             "provider start is refused: the reopened storage root is not the checked directory"
         );
         assert!(!marker.exists(), "the provider binary never runs");
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    #[test]
+    fn localhost_object_and_chain_cannot_open_device_key() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let data = std::fs::canonicalize(&data).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for name in elastos_common::localhost::FILE_BACKED_ROOTS {
+            let root = data.join(name);
+            std::fs::create_dir(&root).unwrap();
+            std::fs::write(root.join("own.txt"), b"own").unwrap();
+        }
+        let chain = data.join("chain-provider");
+        std::fs::create_dir(&chain).unwrap();
+        std::fs::write(chain.join("own.txt"), b"chain").unwrap();
+        let identity = data.join("identity");
+        std::fs::create_dir(&identity).unwrap();
+        let device_key = identity.join("device.key");
+        std::fs::write(&device_key, b"secret").unwrap();
+        let cases = [
+            (
+                "localhost-provider",
+                data.join("AppCapsules/own.txt"),
+                chain.join("own.txt"),
+                data.join("AppCapsules/result.txt"),
+            ),
+            (
+                "object-provider",
+                data.join("ElastOS/own.txt"),
+                data.join("AppCapsules/own.txt"),
+                data.join("ElastOS/result.txt"),
+            ),
+            (
+                "chain-provider",
+                chain.join("own.txt"),
+                data.join("AppCapsules/own.txt"),
+                chain.join("result.txt"),
+            ),
+        ];
+        for (key, own, foreign, result) in cases {
+            let source = temp.path().join(format!("{key}.rs"));
+            let binary = temp.path().join(key);
+            let device_lit = format!("{:?}", device_key.display().to_string());
+            let own_lit = format!("{:?}", own.display().to_string());
+            let foreign_lit = format!("{:?}", foreign.display().to_string());
+            let result_lit = format!("{:?}", result.display().to_string());
+            let mut probe = String::from(
+                "fn main() {\n    let mut report = String::new();\n    let checks: &[(&str, &str)] = &[\n        (\"device\", ",
+            );
+            probe.push_str(&device_lit);
+            probe.push_str("),\n        (\"own\", ");
+            probe.push_str(&own_lit);
+            probe.push_str("),\n        (\"foreign\", ");
+            probe.push_str(&foreign_lit);
+            probe.push_str(
+                "),\n    ];\n    for (name, path) in checks {\n        let code = match std::fs::File::open(path) {\n            Ok(_) => \"open\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        report.push_str(name);\n        report.push('=');\n        report.push_str(&code);\n        report.push('\\n');\n    }\n    if std::fs::write(",
+            );
+            probe.push_str(&result_lit);
+            probe.push_str(", report).is_err() {\n        std::process::exit(91);\n    }\n}\n");
+            std::fs::write(&source, probe).unwrap();
+            let compiled = std::process::Command::new("rustc")
+                .arg("--edition=2021")
+                .arg("-o")
+                .arg(&binary)
+                .arg(&source)
+                .status()
+                .unwrap_or_else(|err| panic!("rustc: {err}"));
+            assert!(compiled.success(), "{key} probe did not compile");
+            let (pipes, child_in, child_out) = probe_stdio();
+            let started = start_path_allow(
+                key,
+                &super::super::CheckedExecutable::for_test(&binary),
+                &data,
+                pipes,
+            );
+            unsafe {
+                libc::close(child_in);
+                libc::close(child_out);
+            }
+            let launched = started.unwrap_or_else(|err| panic!("{key} did not start: {err}"));
+            let status = reap_probe(launched.pid, &launched.from_child);
+            drop(launched);
+            let report = std::fs::read_to_string(&result).unwrap_or_else(|err| {
+                panic!("{key} wrote no report ({}): {err}", wait_text(status))
+            });
+            let line = |name: &str| {
+                report
+                    .lines()
+                    .find_map(|line| line.strip_prefix(&format!("{name}=")))
+                    .unwrap_or_else(|| panic!("{key} report missing {name}: {report}"))
+            };
+            assert!(
+                matches!(line("device"), "1" | "13"),
+                "{key} opened identity/device.key or failed another way: {report} ({})",
+                wait_text(status)
+            );
+            assert_eq!(
+                line("own"),
+                "open",
+                "{key} could not open its own root: {report}"
+            );
+            assert!(
+                matches!(line("foreign"), "1" | "13"),
+                "{key} opened a path outside its roots: {report}"
+            );
+        }
+    }
+
+    fn probe_stdio() -> (ChildStdio, i32, i32) {
+        let (input_read, input_write) = pipe_pair();
+        let (output_read, output_write) = pipe_pair();
+        let stdio = unsafe {
+            ChildStdio {
+                stdin: input_read,
+                stdout: output_write,
+                to_child: OwnedFd::from_raw_fd(input_write),
+                from_child: OwnedFd::from_raw_fd(output_read),
+            }
+        };
+        (stdio, input_read, output_write)
+    }
+
+    fn wait_text(status: i32) -> String {
+        if libc::WIFEXITED(status) {
+            format!("exit {}", libc::WEXITSTATUS(status))
+        } else if libc::WIFSIGNALED(status) {
+            format!("signal {}", libc::WTERMSIG(status))
+        } else {
+            format!("status {status}")
+        }
+    }
+
+    fn reap_probe(pid: libc::pid_t, from_child: &OwnedFd) -> i32 {
+        let fd = from_child.as_raw_fd();
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+        let start = std::time::Instant::now();
+        let mut status = 0;
+        loop {
+            let mut buf = [0u8; 256];
+            unsafe {
+                libc::read(fd, buf.as_mut_ptr().cast(), buf.len());
+            }
+            let got = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if got == pid {
+                return status;
+            }
+            if got < 0 {
+                panic!("waitpid: {}", std::io::Error::last_os_error());
+            }
+            if start.elapsed() > std::time::Duration::from_secs(20) {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                    libc::waitpid(pid, &mut status, 0);
+                }
+                panic!("path-allow probe {pid} did not exit");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }

@@ -452,8 +452,8 @@ fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
 /// Object-provider init config. The encryption field is empty.
 ///
 /// `init` reads `base_path` only. Existing object bytes are not encrypted
-/// under Home's device key. The child is still unconfined, and `base_path`
-/// is the data directory, so it can open `identity/device.key`.
+/// under Home's device key. The child is confined to its file roots, so it
+/// cannot open `identity/device.key`.
 fn object_provider_bridge_config(data_dir: &Path) -> provider::BridgeProviderConfig {
     provider::BridgeProviderConfig {
         base_path: data_dir.to_string_lossy().to_string(),
@@ -531,6 +531,44 @@ async fn request_model_provider_status(
     .await
     .map_err(|_| anyhow::anyhow!("model-provider status request timed out"))?
     .map_err(|err| anyhow::anyhow!("model-provider status request failed: {err}"))
+}
+
+/// Start localhost, object, or chain on that provider's path allow-list.
+///
+/// Chain keeps its state under `data_dir/chain-provider`. That directory is
+/// created here when it is absent. A symlink is left for the launcher to refuse.
+#[cfg(unix)]
+async fn spawn_allow_listed_provider(
+    component_key: &str,
+    binary: &provider::CheckedExecutable,
+    data_dir: &Path,
+    config: provider::BridgeProviderConfig,
+) -> Result<Arc<provider::ProviderBridge>, provider::bridge::BridgeError> {
+    if component_key == "chain-provider" {
+        let root = data_dir.join("chain-provider");
+        if std::fs::symlink_metadata(&root).is_err() {
+            std::fs::create_dir(&root).map_err(|err| {
+                provider::bridge::BridgeError::Refused(format!(
+                    "provider start is refused: chain-provider cannot be created: {err}"
+                ))
+            })?;
+        }
+    }
+    let confined =
+        provider::ProviderBridge::spawn_path_allow(component_key, binary, data_dir, config).await?;
+    Ok(Arc::clone(confined.bridge()))
+}
+
+#[cfg(not(unix))]
+async fn spawn_allow_listed_provider(
+    _component_key: &str,
+    binary: &provider::CheckedExecutable,
+    _data_dir: &Path,
+    config: provider::BridgeProviderConfig,
+) -> Result<Arc<provider::ProviderBridge>, provider::bridge::BridgeError> {
+    Ok(Arc::new(
+        provider::ProviderBridge::spawn(binary, config).await?,
+    ))
 }
 
 async fn start_model_provider(
@@ -837,8 +875,10 @@ pub(crate) async fn register_chain_provider_plane(
     }
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
     // Admit against the signed release of the Home this chain plane serves.
-    let bridge = provider::ProviderBridge::spawn(
+    let bridge = spawn_allow_listed_provider(
+        "chain-provider",
         &checked_native_provider_with_data_dir(data_dir, binary_path),
+        data_dir,
         generic_config,
     )
     .await
@@ -859,9 +899,8 @@ pub(crate) async fn register_chain_provider_plane(
             anyhow::bail!("chain-provider transport failed while applying configuration: {err}");
         }
     }
-    let chain_provider: Arc<dyn provider::Provider> = Arc::new(
-        provider::CapsuleProvider::with_scheme(Arc::new(bridge), "chain"),
-    );
+    let chain_provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::with_scheme(bridge, "chain"));
     provider_registry
         .register_sub_provider("chain", chain_provider)
         .await
@@ -1111,23 +1150,24 @@ async fn setup_server_infrastructure_impl(
             encryption_key: device_key_hex.clone(),
             ..Default::default()
         };
-        let bridge = provider::ProviderBridge::spawn(&binary_path, config)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to spawn localhost-provider capsule: {}.\n  \
+        let bridge =
+            spawn_allow_listed_provider("localhost-provider", &binary_path, &data_dir, config)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to spawn localhost-provider capsule: {}.\n  \
                      Reinstall with:\n  \
                        elastos setup --with localhost-provider",
-                    e
-                )
-            })?;
+                        e
+                    )
+                })?;
         tracing::info!(
             "localhost-provider capsule {} from {}",
             provider_cid,
             binary_path.display()
         );
         let provider: Arc<dyn provider::Provider> =
-            Arc::new(provider::CapsuleProvider::new(Arc::new(bridge)));
+            Arc::new(provider::CapsuleProvider::new(bridge));
         provider_registry.register(provider).await;
 
         if let Some(availability_config) = availability_provider_config_from_env() {
@@ -1207,9 +1247,10 @@ async fn setup_server_infrastructure_impl(
     match binaries::resolve_verified_native_provider_binary("object-provider") {
         Ok(Some(path)) => {
             let object_config = object_provider_bridge_config(&data_dir);
-            match provider::ProviderBridge::spawn(&path, object_config).await {
+            match spawn_allow_listed_provider("object-provider", &path, &data_dir, object_config)
+                .await
+            {
                 Ok(bridge) => {
-                    let bridge = Arc::new(bridge);
                     let object_provider: Arc<dyn provider::Provider> = Arc::new(
                         provider::CapsuleProvider::with_scheme(bridge.clone(), "object"),
                     );
@@ -1475,9 +1516,15 @@ async fn setup_server_infrastructure_impl(
             let generic_chain_config = chain_provider_bridge_config_without_protected_network(
                 &protected_content_runtime_issuer,
             );
-            match provider::ProviderBridge::spawn(&path, generic_chain_config).await {
+            match spawn_allow_listed_provider(
+                "chain-provider",
+                &path,
+                &data_dir,
+                generic_chain_config,
+            )
+            .await
+            {
                 Ok(bridge) => {
-                    let bridge = Arc::new(bridge);
                     let mut transport_ready = true;
                     if let Some(config) = protected_chain_config {
                         match bridge

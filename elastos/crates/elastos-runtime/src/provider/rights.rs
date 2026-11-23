@@ -58,6 +58,9 @@ fn provider_label(provider: RuntimeProviderId) -> &'static str {
         RuntimeProviderId::Did => "did-provider",
         RuntimeProviderId::Wallet => "wallet-provider",
         RuntimeProviderId::Model => "model-provider",
+        RuntimeProviderId::Localhost => "localhost-provider",
+        RuntimeProviderId::Object => "object-provider",
+        RuntimeProviderId::Chain => "chain-provider",
     }
 }
 
@@ -79,11 +82,8 @@ impl AdmittedRights {
     }
 }
 
-/// The full Runtime grant for `provider`: every row the single-root launcher
+/// The full Runtime grant for `provider`: every row that provider's filter
 /// installs when the manifest does not narrow the list.
-///
-/// Helper allow-lists install the Did grant. That filter is the storage and
-/// exec limits of the single-root path. The model grant allows more calls.
 #[cfg(all(
     not(elastos_unsupported_os_check),
     target_os = "linux",
@@ -118,7 +118,7 @@ pub(super) fn git_show(spec: &str) -> std::process::Output {
 #[cfg(test)]
 #[rustfmt::skip]
 pub(super) fn admit_committed(provider: RuntimeProviderId) -> AdmittedRights {
-    let name = match provider { RuntimeProviderId::Did => "did-provider", RuntimeProviderId::Wallet => "wallet-provider", RuntimeProviderId::Model => "model-provider" };
+    let name = match provider { RuntimeProviderId::Did => "did-provider", RuntimeProviderId::Wallet => "wallet-provider", RuntimeProviderId::Model => "model-provider", RuntimeProviderId::Localhost => "localhost-provider", RuntimeProviderId::Object => "object-provider", RuntimeProviderId::Chain => "chain-provider" };
     let path = format!("{}/../../../capsules/{name}/capsule.json", env!("CARGO_MANIFEST_DIR"));
     let json = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{path}: {err}"));
     let manifest: elastos_common::CapsuleManifest = serde_json::from_str(&json).unwrap_or_else(|err| panic!("{path}: {err}"));

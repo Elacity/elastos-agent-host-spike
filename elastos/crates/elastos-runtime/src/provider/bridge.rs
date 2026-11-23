@@ -1804,6 +1804,89 @@ impl ProviderBridge {
         })
     }
 
+    /// Start localhost, object, or chain on that provider's path allow-list.
+    ///
+    /// There is no single storage root. A refusal starts nothing, and there is
+    /// no fallback to plain `spawn`.
+    pub async fn spawn_path_allow(
+        component_key: &str,
+        binary_path: &CheckedExecutable,
+        data_dir: &Path,
+        config: ProviderConfig,
+    ) -> Result<Confined, BridgeError> {
+        if super::rights_table::RuntimeProviderId::path_allow(component_key).is_none() {
+            return Err(BridgeError::Refused(format!(
+                "provider start is refused: component key \"{component_key}\" has no path allow-list"
+            )));
+        }
+        let (stdin_read, to_child) = pipe_pair()?;
+        let (from_child, stdout_write) = pipe_pair()?;
+        let stdio = super::os_entry::ChildStdio {
+            stdin: stdin_read.as_raw_fd(),
+            stdout: stdout_write.as_raw_fd(),
+            to_child,
+            from_child,
+        };
+        let launched =
+            super::os_entry::start_path_allow(component_key, binary_path, data_dir, stdio)
+                .map_err(BridgeError::Refused)?;
+        drop(stdin_read);
+        drop(stdout_write);
+        #[cfg(target_os = "macos")]
+        let executable_copy = {
+            #[cfg(not(elastos_unsupported_os_check))]
+            {
+                Some(launched.prepared)
+            }
+            #[cfg(elastos_unsupported_os_check)]
+            {
+                None
+            }
+        };
+        let fork = ForkChild::start(launched.pid)?;
+        let mut to_child = std::fs::File::from(launched.to_child);
+        if let Some(line) = launched_pid_line(launched.pid) {
+            use std::io::Write as _;
+            if let Err(error) = to_child.write_all(line.as_bytes()) {
+                drop(fork);
+                return Err(BridgeError::Io(error));
+            }
+        }
+        let from_child = std::fs::File::from(launched.from_child);
+        let bridge = Self {
+            io: Arc::new(Mutex::new(ProviderIo {
+                writer: Box::new(tokio::fs::File::from_std(to_child)),
+                reader: Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
+                    from_child,
+                ))),
+            })),
+            child: Arc::new(Mutex::new(None)),
+            fork: Mutex::new(Some(fork)),
+            #[cfg(target_os = "macos")]
+            executable_copy: Arc::new(Mutex::new(executable_copy)),
+            #[cfg(unix)]
+            helper_owner: Mutex::new(None),
+            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
+            shutdown_timeout: SHUTDOWN_TIMEOUT,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_ipc_dir: Mutex::new(None),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_brokers: Mutex::new(BrokerTasks::default()),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_provider_pid: Arc::new(AtomicU32::new(0)),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_provider_birth: Arc::new(AtomicU64::new(0)),
+            #[cfg(target_os = "macos")]
+            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+        };
+        #[cfg(target_os = "macos")]
+        bridge.watch_confined_executable_copy();
+        bridge.init_provider(config, INIT_TIMEOUT).await?;
+        Ok(Confined {
+            bridge: Arc::new(bridge),
+        })
+    }
+
     /// Admit only Runtime-selected private engine sockets for the native model provider.
     #[cfg(target_os = "macos")]
     pub async fn spawn_confined_model(

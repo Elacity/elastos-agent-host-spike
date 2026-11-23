@@ -117,6 +117,28 @@ pub(super) fn start(
         NORMAL_TEST_HOOK,
         stdin_read,
         stdout_write,
+        None,
+    )
+}
+
+/// Start a child whose Landlock plan and seccomp filter are already prepared.
+/// `data_dir` is one `ELASTOS_DATA_DIR=...` entry. The single-root launcher
+/// passes none.
+pub(super) fn start_prepared(
+    prepared: &preexec_installer::Prepared,
+    executable: &CheckedExecutable,
+    stdin_read: Option<i32>,
+    stdout_write: Option<i32>,
+    data_dir: Option<&CStr>,
+) -> Result<libc::pid_t, LaunchError> {
+    launch(
+        prepared,
+        executable,
+        &[],
+        NORMAL_TEST_HOOK,
+        stdin_read,
+        stdout_write,
+        data_dir,
     )
 }
 
@@ -173,6 +195,7 @@ fn launch(
     test_hook: TestHook,
     stdin_read: Option<i32>,
     stdout_write: Option<i32>,
+    data_dir: Option<&CStr>,
 ) -> Result<libc::pid_t, LaunchError> {
     let verified = executable
         .verify_at_spawn()
@@ -184,7 +207,13 @@ fn launch(
     argv.push(path.as_ptr());
     argv.extend(args.iter().map(|arg| arg.as_ptr()));
     argv.push(std::ptr::null());
-    let envp = [std::ptr::null()];
+    let mut env_words = [std::ptr::null(), std::ptr::null()];
+    let envp: &[*const libc::c_char] = if let Some(value) = data_dir {
+        env_words[0] = value.as_ptr();
+        &env_words
+    } else {
+        &env_words[1..]
+    };
     // A zero-byte pipe only proves that the writer closed. Compare the live
     // child's executable with the requested file before handing out its PID.
     // Self-exec is ambiguous before exec, so fail closed in that case.
@@ -541,6 +570,7 @@ mod tests {
             TestReport::Normal,
             None,
             None,
+            None,
         ) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
             Ok(pid) => {
@@ -579,6 +609,7 @@ mod tests {
             opened_directory(root.path()),
             &CheckedExecutable::for_test(&executable),
             &[],
+            None,
             None,
             None,
         ) {
@@ -622,7 +653,15 @@ mod tests {
             &format!("sha256:{}", "0".repeat(64)),
         )
         .unwrap();
-        let result = launch(&prepared, &checked, &[], TestReport::Normal, None, None);
+        let result = launch(
+            &prepared,
+            &checked,
+            &[],
+            TestReport::Normal,
+            None,
+            None,
+            None,
+        );
         assert!(matches!(result, Err(LaunchError::BeforeFork(reason))
             if reason == "provider executable differs from verified release checksum"));
     }
@@ -642,6 +681,7 @@ mod tests {
             &CheckedExecutable::for_test(Path::new("/bin/true")),
             &[],
             TestReport::NoRecordAfterDelay,
+            None,
             None,
             None,
         ) {
@@ -684,6 +724,7 @@ mod tests {
             &CheckedExecutable::for_test(Path::new("/bin/true")),
             &[],
             TestReport::ShortRecord,
+            None,
             None,
             None,
         ) {
@@ -737,6 +778,7 @@ mod tests {
             TestReport::Normal,
             Some(input[0]),
             Some(output[1]),
+            None,
         )
         .unwrap_or_else(|err| panic!("exec must succeed: {err:?}"));
         unsafe {

@@ -335,6 +335,9 @@ mod tests {
             Did => "DID_PROVIDER",
             Wallet => "WALLET_PROVIDER",
             Model => "MODEL_PROVIDER",
+            Localhost => "LOCALHOST_PROVIDER",
+            Object => "OBJECT_PROVIDER",
+            Chain => "CHAIN_PROVIDER",
         };
         if users.contains(name) {
             result.extend(paths(lab_section(
@@ -401,6 +404,9 @@ mod tests {
                 Did => "did-provider",
                 Wallet => "wallet-provider",
                 Model => "model-provider",
+                Localhost => "localhost-provider",
+                Object => "object-provider",
+                Chain => "chain-provider",
             };
             let fixture = format!(
                 "{}/../../../capsules/{name}/tests/fixtures/confine/declared-rights.json",
