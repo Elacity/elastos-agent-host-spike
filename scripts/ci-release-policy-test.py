@@ -3729,7 +3729,7 @@ class ModelRepairJourneyTests(unittest.TestCase):
                 102: {"role": "guard", "ppid": 101}, 101: {"role": "model_provider", "ppid": 100}}
         with mock.patch.dict(owner.engine_running.__globals__, {"process_rows": lambda: [],
                 "owned_processes": lambda *_: rows, "linux_process_identity": mock.Mock(side_effect=identities),
-                "pidfd_exited": lambda _: False}), \
+                "pidfd_exited": lambda _, timeout=0: False}), \
                 mock.patch.object(os, "pidfd_open", return_value=77, create=True), \
                 mock.patch.object(os, "close") as closed:
             with self.assertRaisesRegex(RuntimeError, "changed during pidfd binding"):
@@ -3857,7 +3857,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                             if Path(path).name == "cmdline" else " ".join(map(str, rows)),
             "linux_process_identity": lambda pid, **_: dict(rows[pid]),
             "cgroup_membership": lambda pid, *_: "/outside" if pid in owner.outside else owner.binding["ControlGroup"],
-            "pidfd_exited": lambda _: False,
+            "pidfd_exited": lambda _, timeout=0: False,
         })
 
     def test_finite_readers_bound_control_data_and_preserve_unsafe_paths(self):
@@ -4034,7 +4034,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     else:
                         rows.pop(103)
                         if fault == "omitted_exited":
-                            self.globals["pidfd_exited"] = lambda fd: fd == owner.fds[103]
+                            self.globals["pidfd_exited"] = lambda fd, timeout=0: fd == owner.fds[103]
                             self.assertNotIn(103, owner.observe_once())
                             self.assertIn(103, owner.fds)
                             continue
@@ -4094,13 +4094,55 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     rows[99] = owner.known[99]
                     owner.metric_fds = {name: index + 2000 for index, name in enumerate(values)}
                     self.journey["private_json"](owner.control / "runtime-stopped.json", {"reaped": True})
-                    self.globals["pidfd_exited"] = lambda descriptor: descriptor not in (1099, fd)
+                    self.globals["pidfd_exited"] = lambda descriptor, timeout=0: descriptor not in (1099, fd)
                     with mock.patch.object(os, "close"):
                         receipt = owner.finish()
                     self.assertEqual(receipt["status"], "failed")
                     self.assertEqual(receipt["failure_phase"], "native_cleanup")
                     self.assertIsNone(owner.census_gap)
                     owner.command.assert_called_once_with("systemctl", "stop", owner.unit)
+
+    def test_finite_census_waits_for_a_dying_child_before_calling_it_a_gap(self):
+        # CI 24 Nov: llama-server had left cgroup.procs while /proc still
+        # showed state R. Only an exit inside the bounded pidfd wait excuses
+        # it; a child whose pidfd stays quiet is still a census gap.
+        for exits in (True, False):
+            with self.subTest(exits=exits), tempfile.TemporaryDirectory() as temp:
+                owner, _ = self.finite_owner(Path(temp))
+                rows = self.process_rows(owner)
+                for row in rows.values():
+                    row["uid"] = os.getuid()
+                proc = Path(temp) / "proc"
+                child = self.proc_process(proc, pid=103, ticks=803, state="R", parent=102)
+                (child / "cmdline").write_text("")
+                (child / "cgroup").write_text("0::" + owner.binding["ControlGroup"] + "\n")
+                read = self.journey["bounded_text"]
+                with self.observations(owner, rows), \
+                        mock.patch.object(os, "pidfd_open", side_effect=lambda pid, flags: pid + 1000, create=True):
+                    owner.observe_once()
+                    fd = owner.fds[103]
+                    rows.pop(103)
+                    observe = self.globals["bounded_text"]
+                    self.globals["bounded_text"] = lambda path, limit: (
+                        read(child / Path(path).name, limit) if Path(path).parent == Path("/proc/103")
+                        else observe(path, limit))
+                    waits = []
+
+                    def exited(descriptor, timeout=0):
+                        if descriptor == fd and timeout:
+                            waits.append(timeout)
+                            return exits
+                        return False
+
+                    self.globals["pidfd_exited"] = exited
+                    if exits:
+                        self.assertNotIn(103, owner.observe_once())
+                        self.assertIsNone(owner.census_gap)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "live child left its unit census"):
+                            owner.observe_once()
+                        self.assertIsNotNone(owner.census_gap)
+                    self.assertEqual(waits, [250])
 
     def test_finite_census_accepts_same_birth_exec_and_never_rebinds_an_exited_pidfd(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -4114,7 +4156,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 rows[103] = engine
                 self.assertEqual(owner.engines(owner.observe_once()), [103])
                 self.assertEqual(opened.call_count, len(rows))
-                self.globals["pidfd_exited"] = lambda fd: fd == owner.fds[103]
+                self.globals["pidfd_exited"] = lambda fd, timeout=0: fd == owner.fds[103]
                 self.assertNotIn(103, owner.observe_once())
                 self.assertEqual(opened.call_count, len(rows))
 
@@ -4221,8 +4263,10 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                         mock.patch.object(os, "pidfd_open", side_effect=lambda pid, flags: pid + 1000, create=True):
                     owner.observe_once()
                     rows.pop(103)
-                    polls = iter((False, True))
-                    def exited(fd):
+                    # The census check polls once, then waits once (250 ms) for an exit
+                    # before it records a gap; the gap diagnostics poll last.
+                    polls = iter((False, False, True))
+                    def exited(fd, timeout=0):
                         if fd != 1103:
                             return False
                         value = next(polls)
@@ -4312,7 +4356,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                         if pid == 102 and len(reads) == 2 and fault in ("parent_gone", "parent_denied"):
                             raise (FileNotFoundError if fault == "parent_gone" else PermissionError)("private parent")
                         return "/outside" if pid == 900 else owner.binding["ControlGroup"]
-                    def exited(fd):
+                    def exited(fd, timeout=0):
                         if len(reads) != 2:
                             return False
                         if fd == 1102 and fault in ("parent_gone", "parent_denied"):
@@ -4370,7 +4414,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 self.journey["private_json"](root / "launch.json", payload)
                 observed = dict(identity, start_ticks=72) if fault == "owner" else identity
                 with mock.patch.dict(self.globals, {"linux_process_identity": lambda *_: observed,
-                                                    "pidfd_exited": lambda _: False}), \
+                                                    "pidfd_exited": lambda _, timeout=0: False}), \
                         mock.patch.object(os, "pidfd_open", return_value=77, create=True) as opened, \
                         mock.patch.object(os, "close") as closed, \
                         mock.patch.object(signal, "signal"), \
@@ -4452,7 +4496,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
             owner.known = rows
             owner.fds = {pid: pid + 1000 for pid in rows}
             owner.observe_once = mock.Mock(return_value=rows)
-            with mock.patch.dict(self.globals, {"pidfd_exited": lambda _: False}), \
+            with mock.patch.dict(self.globals, {"pidfd_exited": lambda _, timeout=0: False}), \
                     mock.patch.object(signal, "pidfd_send_signal", create=True) as kill, \
                     mock.patch.object(os, "kill") as numeric_kill:
                 owner.action({"id": 1, "action": "engine_running"})
@@ -4467,7 +4511,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                         self.assertRaisesRegex(RuntimeError, "group exit is unconfirmed"):
                     owner.action({"id": 3, "action": "engine_stopped"})
                 self.assertEqual(owner.last_action, 2)
-            with mock.patch.dict(self.globals, {"pidfd_exited": lambda _: True}):
+            with mock.patch.dict(self.globals, {"pidfd_exited": lambda _, timeout=0: True}):
                 owner.action({"id": 3, "action": "engine_stopped"})
             self.assertEqual([row["action"] for row in owner.actions], ["engine_running", "crash_engine", "engine_stopped"])
 
@@ -4500,7 +4544,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 owner.observe_once.side_effect = observe
                 owner.stop.wait.side_effect = wait
                 with mock.patch.dict(self.globals, {"time": clock,
-                        "pidfd_exited": lambda fd: fd != owner.fds[102] or len(samples) >= 2}):
+                        "pidfd_exited": lambda fd, timeout=0: fd != owner.fds[102] or len(samples) >= 2}):
                     owner.action({"id": 2, "action": action})
                 self.assertEqual(samples, [1, 2])
                 owner.stop.wait.assert_called_once_with(.1)
@@ -4529,7 +4573,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     removed = 103 if engine_exited_early else 102
                     return {pid: row for pid, row in rows.items() if pid != removed}
 
-                def exited(fd):
+                def exited(fd, timeout=0):
                     if len(samples) >= 2:
                         return True
                     return fd == owner.fds[103 if engine_exited_early else 102]
@@ -4557,7 +4601,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 now, clock = [0], mock.Mock()
                 clock.monotonic.side_effect = lambda: now[0]
                 owner.stop.wait.side_effect = lambda _: now.__setitem__(0, limit)
-                with mock.patch.dict(self.globals, {"time": clock, "pidfd_exited": lambda _: False}), \
+                with mock.patch.dict(self.globals, {"time": clock, "pidfd_exited": lambda _, timeout=0: False}), \
                         self.assertRaisesRegex(RuntimeError, "group exit is unconfirmed"):
                     owner.action({"id": 1, "action": action})
                 owner.stop.wait.assert_called_once_with(.1)
@@ -4578,7 +4622,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 if fault == "interrupted":
                     owner.stop.wait.side_effect = lambda _: setattr(owner.stop.is_set, "return_value", True)
                 expected = "child escaped" if fault == "census" else "stage interrupted"
-                with mock.patch.dict(self.globals, {"time": clock, "pidfd_exited": lambda _: False}), \
+                with mock.patch.dict(self.globals, {"time": clock, "pidfd_exited": lambda _, timeout=0: False}), \
                         self.assertRaisesRegex(RuntimeError, expected):
                     owner.action({"id": 1, "action": "engine_stopped"})
                 owner.stop.wait.assert_called_once_with(.1)
@@ -4715,7 +4759,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 if phase.startswith("stage"):
                     self.journey["private_json"](owner.control / "request.json", {"id": 1, "action": "engine_running"})
                 self.journey["private_json"](owner.control / "runtime-stopped.json", {"reaped": True})
-                with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd: exited and fd == 1100}), \
+                with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd, timeout=0: exited and fd == 1100}), \
                         mock.patch.object(os, "close"):
                     owner.observe()
                     expected = {"phase": phase, "type": "RuntimeError", "message": str(error), "runtime_exited": exited}
@@ -4733,14 +4777,14 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             owner, _ = self.finite_owner(Path(temp))
             owner.started, owner.fds = time.monotonic(), {100: 1100}
-            with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd: False}), mock.patch.object(os, "close"):
+            with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd, timeout=0: False}), mock.patch.object(os, "close"):
                 self.assertIsNone(owner.poll())
                 owner.error = "finite_resource_observation_failed"
                 self.assertIs(owner.poll(), self.journey["EXIT_STATUS_UNKNOWN"])
                 self.assertFalse(isinstance(owner.poll(), int))
                 owner.error = None
                 self.assertIsNone(owner.poll())
-            with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd: fd == 1100}), mock.patch.object(os, "close"):
+            with mock.patch.dict(self.globals, {"pidfd_exited": lambda fd, timeout=0: fd == 1100}), mock.patch.object(os, "close"):
                 self.assertIs(owner.poll(), self.journey["EXIT_STATUS_UNKNOWN"])
                 self.assertFalse(isinstance(owner.poll(), int))
 
@@ -5017,7 +5061,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                     return result
 
                 patches = {"private_json": control,
-                           "pidfd_exited": lambda fd: (fd != owner.fds[99] or released)
+                           "pidfd_exited": lambda fd, timeout=0: (fd != owner.fds[99] or released)
                                            and (fault != "live_sibling" or fd != owner.fds[103])}
                 if fault in ("reap_timeout", "helper_release_timeout"):
                     if fault == "helper_release_timeout":
@@ -5081,7 +5125,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
             with self.observations(owner, rows), mock.patch.dict(self.globals, {
                     "private_json": control,
                     "bounded_text": lambda path, *_: "fixture\0" if Path(path).name == "cmdline" else " ".join(map(str, live)),
-                    "pidfd_exited": lambda fd: fd - 1000 not in live,
+                    "pidfd_exited": lambda fd, timeout=0: fd - 1000 not in live,
                     "linux_process_identity": lambda pid, **_: dict(owner.known[pid])}), \
                     mock.patch.object(os, "close"), \
                     mock.patch.object(signal, "pidfd_send_signal", side_effect=lambda fd, _: live.discard(fd - 1000), create=True) as kill:
@@ -5121,7 +5165,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
                 clock = mock.Mock()
                 clock.monotonic.side_effect = [0, 1, 2, 3] if exit_during_signal else [0, 1, 17, 18, 19, 20]
                 with mock.patch.dict(self.globals, {"private_json": control, "time": clock,
-                                                   "pidfd_exited": lambda fd: fd - 1000 not in live}), \
+                                                   "pidfd_exited": lambda fd, timeout=0: fd - 1000 not in live}), \
                         mock.patch.object(os, "close"), \
                         mock.patch.object(signal, "pidfd_send_signal", side_effect=terminate, create=True) as kill:
                     receipt = owner.finish()
@@ -5152,7 +5196,7 @@ class FiniteInstalledJourneyTests(unittest.TestCase):
 
             releasing.wait.side_effect = release
             with mock.patch.dict(self.globals, {"linux_process_identity": lambda pid: identity,
-                                               "pidfd_exited": lambda _: False}), \
+                                               "pidfd_exited": lambda _, timeout=0: False}), \
                     mock.patch.object(os, "pidfd_open", return_value=77, create=True), \
                     mock.patch.object(os, "close") as closed, mock.patch.object(signal, "signal"), \
                     mock.patch.object(self.globals["threading"], "Event", side_effect=[stopping, releasing]), \
