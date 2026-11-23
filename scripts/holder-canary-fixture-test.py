@@ -17,6 +17,9 @@ spec = importlib.util.spec_from_file_location("holder_fixture", Path(__file__).w
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
+CANONICAL_SOURCE_DID = "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe"
+CANONICAL_SIGNER_DID = "did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"
+
 
 class HolderFixtureTests(unittest.TestCase):
     def test_blank_installed_checksum_names_component(self):
@@ -293,7 +296,7 @@ class HolderFixtureTests(unittest.TestCase):
                                             separators=(",", ":")).encode(), kwargs["input"])
                 domains.append(argv[3])
                 return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
-                    "signature": "fixture-signature", "signer_did": "did:key:fixture"}).encode())
+                    "signature": "fixture-signature", "signer_did": CANONICAL_SIGNER_DID}).encode())
 
             with patch.object(fixture.subprocess, "run", side_effect=run), \
                  patch.object(fixture, "release_platform", return_value="x86_64-linux"):
@@ -335,7 +338,8 @@ class HolderFixtureTests(unittest.TestCase):
                 (installation / name).chmod(0o600)
             (data / "components.json").write_text('{"external": {}}')
             original = {"schema": "elastos.trusted-sources/v1", "default_source": "source",
-                "sources": [{"name": "source", "publisher_dids": ["did:key:source"],
+                "sources": [{"name": "source", "publisher_dids": [
+                                 CANONICAL_SOURCE_DID, "did:key:local-carrier-test"],
                              "channel": "stable", "connect_ticket": "fixture-ticket",
                              "install_path": "", "installed_version": "", "head_cid": ""}]}
             (data / "sources.json").write_text(json.dumps(original))
@@ -346,7 +350,7 @@ class HolderFixtureTests(unittest.TestCase):
                 if argv[1] == "--version":
                     return subprocess.CompletedProcess(argv, 0, stdout="elastos 2.0.1\n")
                 return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
-                    "signature": "fixture-signature", "signer_did": "did:key:fixture"}).encode())
+                    "signature": "fixture-signature", "signer_did": CANONICAL_SIGNER_DID}).encode())
 
             with patch.object(fixture.subprocess, "run", side_effect=run), \
                  patch.object(fixture, "release_platform", return_value="x86_64-linux"):
@@ -358,12 +362,34 @@ class HolderFixtureTests(unittest.TestCase):
                 self.assertEqual((installation / name).read_bytes(), (publisher / name).read_bytes())
                 self.assertEqual((installation / name).stat().st_mode & 0o777, 0o600)
             source = json.loads((data / "sources.json").read_text())["sources"][0]
-            self.assertEqual(source["publisher_dids"], ["did:key:source", "did:key:fixture"])
+            self.assertEqual(source["publisher_dids"], [CANONICAL_SOURCE_DID, CANONICAL_SIGNER_DID])
+            self.assertNotIn("did:key:local-carrier-test", source["publisher_dids"])
             self.assertEqual(source["connect_ticket"], "fixture-ticket")
             self.assertEqual(json.loads((installation / "release.json").read_bytes())["payload"]["channel"],
                              source["channel"])
             self.assertEqual(source["install_path"], str(runtime))
             self.assertFalse((data / ".ci-publisher.key").exists())
+
+    def test_sign_install_rejects_a_noncanonical_signer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            data = home / "data"
+            data.mkdir()
+            (data / "components.json").write_text('{"external": {}}')
+            runtime = home / "elastos"
+            runtime.write_bytes(b"runtime")
+
+            def run(argv, **kwargs):
+                if argv[1] == "--version":
+                    return subprocess.CompletedProcess(argv, 0, stdout="elastos 2.0.1\n")
+                return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
+                    "signature": "fixture-signature", "signer_did": "did:key:local-carrier-test"}).encode())
+
+            with patch.object(fixture.subprocess, "run", side_effect=run), \
+                 patch.object(fixture, "release_platform", return_value="x86_64-linux"), \
+                 self.assertRaisesRegex(AssertionError, "canonical Ed25519"):
+                fixture.sign_install(home, data, runtime, lambda path: {"HOME": str(path)})
+            self.assertFalse((data / "sources.json").exists())
 
     def test_restrict_components_keeps_only_installed_native_providers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -417,7 +443,7 @@ class HolderFixtureTests(unittest.TestCase):
                 if argv[1] == "--version":
                     return subprocess.CompletedProcess(argv, 0, stdout="elastos 2.0.1\n")
                 return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({
-                    "signature": "fixture-signature", "signer_did": "did:key:fixture"}).encode())
+                    "signature": "fixture-signature", "signer_did": CANONICAL_SIGNER_DID}).encode())
 
             with patch.object(fixture.subprocess, "run", side_effect=run), \
                  patch.object(fixture, "release_platform", return_value="x86_64-linux"), \

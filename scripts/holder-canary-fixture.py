@@ -287,6 +287,16 @@ def prepare_installed_components(data):
         catalogue.write_text(json.dumps(manifest, sort_keys=True) + "\n")
 
 
+def canonical_publisher_did(value):
+    """True for the one Ed25519 did:key shape decode_did_key admits.
+
+    The length and z6Mk prefix are the check that bails
+    "DID must be one canonical Ed25519 did:key". The Runtime still checks the
+    point; this filter only drops spellings that cannot be that key.
+    """
+    return isinstance(value, str) and re.fullmatch(r"did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}", value) is not None
+
+
 def sign_install(home, data, runtime, environment, preserve_source=False):
     """Install a release trusted only by this fixture Home; discard its signing key."""
     sources = json.loads((data / "sources.json").read_text()) if preserve_source else None
@@ -336,6 +346,7 @@ def sign_install(home, data, runtime, environment, preserve_source=False):
                 assert metadata.st_mode & 0o077 == 0
                 path.write_bytes(contents)
         signer_did = json.loads(head)["signer_did"]
+        assert canonical_publisher_did(signer_did), "fixture signer is not a canonical Ed25519 did:key"
         head_cid = raw_cid(hashlib.sha256(head).digest())
         if sources is None:
             sources = {"schema": "elastos.trusted-sources/v1",
@@ -343,7 +354,13 @@ def sign_install(home, data, runtime, environment, preserve_source=False):
                 "publisher_dids": [signer_did], "channel": "stable"}]}
             selected = sources["sources"][0]
         else:
-            selected["publisher_dids"] = list(dict.fromkeys([*selected["publisher_dids"], signer_did]))
+            # install_path below makes this an installed release, and the Runtime
+            # decodes every publisher DID. A setup label such as
+            # did:key:local-carrier-test is not a key. Keep real anchors.
+            prior = selected["publisher_dids"]
+            assert isinstance(prior, list), "preserved publisher DIDs must be a list"
+            kept = [did for did in prior if canonical_publisher_did(did)]
+            selected["publisher_dids"] = list(dict.fromkeys([*kept, signer_did]))
         selected.update(installed_version=version, install_path=str(runtime), head_cid=head_cid)
         (data / "sources.json").write_text(json.dumps(sources))
     finally:
