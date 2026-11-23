@@ -131,6 +131,7 @@ fn create_managed_runtime_start_marker(path: &Path) -> std::io::Result<std::fs::
 const MANAGED_RUNTIME_START_LOCK_LIFETIME: Duration =
     Duration::from_secs(RUNTIME_READY_TIMEOUT.as_secs() + 30);
 
+#[cfg(any(unix, test))]
 fn managed_runtime_start_marker_is_stale(path: &Path) -> bool {
     path.metadata()
         .and_then(|metadata| metadata.modified())
