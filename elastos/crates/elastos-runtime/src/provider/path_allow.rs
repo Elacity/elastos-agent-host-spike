@@ -2,13 +2,17 @@
 //!
 //! A single `STORAGE_ROOT` of the data directory would include
 //! `identity/device.key`. Each helper gets its own child directories instead.
-//! `spawn_confined` does not admit these providers yet.
+//! Each of those directories must already exist, be owned by the current user,
+//! and must not be a symlink. `spawn_confined` does not admit these providers yet.
 
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 /// One rendered helper confinement. `landlock` is the path-beneath plan.
 #[derive(Debug, PartialEq, Eq)]
-pub struct HelperConfinement {
+pub(crate) struct HelperConfinement {
     pub seatbelt: String,
     pub landlock_abi: u32,
     pub landlock_handled: u64,
@@ -17,7 +21,7 @@ pub struct HelperConfinement {
 
 /// One Landlock path rule. `mask` is the ABI-5 access bits.
 #[derive(Debug, PartialEq, Eq)]
-pub struct HelperLandlockRule {
+pub(crate) struct HelperLandlockRule {
     pub name: &'static str,
     pub path: PathBuf,
     pub mask: u64,
@@ -85,10 +89,69 @@ fn reaches_device_key(data_dir: &Path, granted: &Path) -> bool {
     identity.starts_with(granted) || key.starts_with(granted)
 }
 
+/// The effective user is the current user. The single-root storage check uses
+/// the same id.
+fn current_user() -> u32 {
+    unsafe { libc::geteuid() as u32 }
+}
+
+/// `path` is one allow-list root. It must be a real directory this user owns,
+/// and its resolved path must stay a child of `data_dir` that does not reach
+/// `identity/` or `identity/device.key`.
+fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u64), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| format!("provider start is refused: {name} is not an existing directory"))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!("provider start is refused: {name} is a symlink"));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "provider start is refused: {name} is not a directory"
+        ));
+    }
+    if metadata.uid() != current_user() {
+        return Err(format!(
+            "provider start is refused: {name} is not owned by the current user"
+        ));
+    }
+    let resolved = std::fs::canonicalize(path)
+        .map_err(|_| format!("provider start is refused: {name} could not be resolved"))?;
+    let data_resolved = std::fs::canonicalize(data_dir).map_err(|_| {
+        "provider start is refused: the data directory could not be resolved".to_string()
+    })?;
+    if reaches_device_key(&data_resolved, &resolved) {
+        return Err(format!(
+            "provider start is refused: {name} reaches identity/device.key"
+        ));
+    }
+    if resolved.parent() != Some(data_resolved.as_path()) {
+        return Err(format!(
+            "provider start is refused: {name} resolves outside the data directory"
+        ));
+    }
+    let (dev, ino) = (metadata.dev(), metadata.ino());
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| format!("provider start is refused: {name} contains NUL"))?;
+    // The same open the installer repeats at launch. Dropping the descriptor
+    // closes it; render only needed the identity check.
+    let _held = super::root_pin::open_pinned_directory(
+        &c_path,
+        super::root_pin::DIRECTORY_OPEN_FLAGS,
+        dev,
+        ino,
+    )
+    .map_err(|errno| {
+        format!(
+            "provider start is refused: {name} is not the directory that was checked: errno {errno}"
+        )
+    })?;
+    Ok((dev, ino))
+}
+
 fn resolve_roots(
     provider: HelperId,
     data_dir: &Path,
-) -> Result<Vec<(&'static str, PathBuf)>, String> {
+) -> Result<Vec<super::landlock_plan::AllowRoot>, String> {
     if !data_dir.is_absolute() {
         return Err(
             "provider start is refused: the data directory path is not absolute".to_string(),
@@ -98,7 +161,7 @@ fn resolve_roots(
     if names.is_empty() {
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
     }
-    let mut resolved = Vec::with_capacity(names.len());
+    let mut resolved: Vec<super::landlock_plan::AllowRoot> = Vec::with_capacity(names.len());
     for name in names {
         if !valid_root_name(name) {
             return Err(format!(
@@ -118,10 +181,16 @@ fn resolve_roots(
                 "provider start is refused: {name} reaches identity/device.key"
             ));
         }
-        if resolved.iter().any(|(seen, _)| *seen == *name) {
+        if resolved.iter().any(|seen| seen.name == *name) {
             return Err(format!("provider start is refused: {name} is listed twice"));
         }
-        resolved.push((*name, path));
+        let (dev, ino) = require_real_root(data_dir, name, &path)?;
+        resolved.push(super::landlock_plan::AllowRoot {
+            name,
+            path,
+            dev,
+            ino,
+        });
     }
     Ok(resolved)
 }
@@ -132,6 +201,15 @@ pub(super) fn render(
     executable: &Path,
     landlock_abi: u32,
 ) -> Result<HelperConfinement, String> {
+    Ok(render_with_plan(component_key, data_dir, executable, landlock_abi)?.0)
+}
+
+pub(super) fn render_with_plan(
+    component_key: &str,
+    data_dir: &Path,
+    executable: &Path,
+    landlock_abi: u32,
+) -> Result<(HelperConfinement, super::landlock_plan::PathAllowPlan), String> {
     let provider = helper_id(component_key)?;
     let roots = resolve_roots(provider, data_dir)?;
     if reaches_device_key(data_dir, executable) {
@@ -140,7 +218,7 @@ pub(super) fn render(
                 .to_string(),
         );
     }
-    let names: Vec<&str> = roots.iter().map(|(name, _)| *name).collect();
+    let names: Vec<&str> = roots.iter().map(|root| root.name).collect();
     let seatbelt = super::macos_profile::render_path_allow_profile(&names)?;
     if seatbelt.contains("STORAGE_ROOT")
         || seatbelt.contains("STORAGE_PARENT")
@@ -151,6 +229,18 @@ pub(super) fn render(
         );
     }
     let plan = super::landlock_plan::build_path_allow_plan(&roots, executable, landlock_abi)?;
+    if plan.root_dev.len() != roots.len() || plan.root_ino.len() != roots.len() {
+        return Err(
+            "provider start is refused: the Landlock plan has no identity for a root".to_string(),
+        );
+    }
+    for (index, root) in roots.iter().enumerate() {
+        if plan.root_dev[index] != root.dev || plan.root_ino[index] != root.ino {
+            return Err(
+                "provider start is refused: the Landlock plan lost a root identity".to_string(),
+            );
+        }
+    }
     let landlock = plan
         .rules
         .iter()
@@ -168,12 +258,15 @@ pub(super) fn render(
             "provider start is refused: the Landlock plan reaches identity/device.key".to_string(),
         );
     }
-    Ok(HelperConfinement {
-        seatbelt,
-        landlock_abi: plan.abi,
-        landlock_handled: plan.handled,
-        landlock,
-    })
+    Ok((
+        HelperConfinement {
+            seatbelt,
+            landlock_abi: plan.abi,
+            landlock_handled: plan.handled,
+            landlock,
+        },
+        plan,
+    ))
 }
 
 #[cfg(unix)]
@@ -181,8 +274,17 @@ pub(super) fn render(
 mod tests {
     use std::path::Path;
 
-    const DATA: &str = "/srv/home-data";
     const EXE: &str = "/opt/elastos/helper-provider";
+
+    fn real_data_dir() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("data directory");
+        for name in elastos_common::localhost::FILE_BACKED_ROOTS {
+            std::fs::create_dir(tmp.path().join(name))
+                .unwrap_or_else(|err| panic!("{name}: {err}"));
+        }
+        std::fs::create_dir(tmp.path().join("chain-provider")).expect("chain-provider");
+        tmp
+    }
     const WALLET_PROFILE: &str = "\
 (version 1)
 (deny default)
@@ -205,7 +307,8 @@ mod tests {
 
     #[test]
     fn localhost_object_and_chain_profiles_omit_device_key() {
-        let data_dir = Path::new(DATA);
+        let held = real_data_dir();
+        let data_dir = held.path();
         let executable = Path::new(EXE);
         let identity = data_dir.join("identity");
         let key = identity.join("device.key");
@@ -285,7 +388,9 @@ mod tests {
                 .seatbelt
                 .starts_with("(version 1)\n(deny default)\n(deny network*)\n"));
             assert!(!rendered.seatbelt.contains("(allow network"));
-            assert!(!rendered.seatbelt.contains(DATA));
+            assert!(!rendered
+                .seatbelt
+                .contains(data_dir.to_str().expect("data directory path")));
             assert!(!rendered.seatbelt.contains("identity"));
             assert!(!rendered.seatbelt.contains("STORAGE_ROOT"));
             assert!(!rendered.seatbelt.contains("STORAGE_PARENT"));
@@ -389,5 +494,40 @@ mod tests {
             5,
         );
         assert!(refused.is_err(), "wallet stays on its single-root profile");
+    }
+
+    #[test]
+    fn a_root_that_is_a_symlink_to_data_dir_or_to_data_dir_identity_is_refused_at_render() {
+        let providers: &[(&str, &str)] = &[
+            ("localhost-provider", "ElastOS"),
+            ("object-provider", "Users"),
+            ("chain-provider", "chain-provider"),
+        ];
+        for (component, root_name) in providers {
+            for to_identity in [false, true] {
+                let held = real_data_dir();
+                let data = held.path();
+                std::fs::create_dir(data.join("identity")).expect("identity");
+                let root = data.join(root_name);
+                std::fs::remove_dir(&root).expect(root_name);
+                let target = if to_identity {
+                    data.join("identity")
+                } else {
+                    data.to_path_buf()
+                };
+                std::os::unix::fs::symlink(&target, &root).expect("symlink");
+                let error = super::super::os_entry::render_helper_confinement(
+                    component,
+                    data,
+                    Path::new(EXE),
+                    5,
+                )
+                .expect_err("a symlinked root must be refused at render");
+                assert!(
+                    error.contains(root_name) && error.contains("is a symlink"),
+                    "{component} to_identity={to_identity}: {error}"
+                );
+            }
+        }
     }
 }

@@ -5,6 +5,7 @@ use super::super::{
     landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId,
     seccomp_list::AuditArch, seccomp_program,
 };
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::{ffi::CString, fmt};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,14 +89,20 @@ struct PathAttr {
     parent_fd: i32,
 }
 
+#[derive(Clone, Copy)]
+struct RootPin {
+    index: usize,
+    dev: u64,
+    ino: u64,
+}
+
 pub(super) struct Prepared {
     plan: landlock_plan::Plan,
     paths: Vec<CString>,
     filters: Vec<libc::sock_filter>,
-    /// Index of the storage-root rule. The child compares this index only.
-    storage_rule: Option<usize>,
-    storage_dev: u64,
-    storage_ino: u64,
+    /// Every directory root. The child opens each one with no-follow and
+    /// compares its device and inode before adding that Landlock rule.
+    root_pins: Vec<RootPin>,
 }
 
 pub(super) fn prepare(
@@ -129,16 +136,24 @@ pub(super) fn prepare(
     if filters.len() > 256 {
         return Err("seccomp install refused: the filter is too long".into());
     }
-    let storage_dev = plan.storage_dev;
-    let storage_ino = plan.storage_ino;
-    let storage_rule = plan.rules.iter().position(|rule| rule.0 == "STORAGE_ROOT");
+    // The single-root plan has one directory root, named STORAGE_ROOT.
+    // Allow-list plans pin every root in `prepare_path_allow`.
+    let root_pins = plan
+        .rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| rule.0 == "STORAGE_ROOT")
+        .map(|(index, _)| RootPin {
+            index,
+            dev: plan.storage_dev,
+            ino: plan.storage_ino,
+        })
+        .collect();
     Ok(Prepared {
         plan,
         paths,
         filters,
-        storage_rule,
-        storage_dev,
-        storage_ino,
+        root_pins,
     })
 }
 
@@ -226,40 +241,43 @@ pub(super) unsafe fn install(
                 let Some(rule) = prepared.plan.rules.get(index) else {
                     return Err(libc::EINVAL);
                 };
-                // The storage directory was opened before fork. Open it again
-                // without following a symlink and require the same device and inode.
-                let storage_root = prepared.storage_rule == Some(index);
-                let flags = if storage_root {
-                    libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY
+                let allowed = rule.2;
+                // Every directory root was opened before fork. Open it again
+                // without following a symlink and require the same device and
+                // inode. DIRECTORY_OPEN_FLAGS is
+                // O_PATH|O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY on Linux.
+                let pinned = prepared
+                    .root_pins
+                    .iter()
+                    .find(|pin| pin.index == index)
+                    .copied();
+                let directory = if let Some(pin) = pinned {
+                    match super::super::root_pin::open_pinned_directory(
+                        path,
+                        super::super::root_pin::DIRECTORY_OPEN_FLAGS,
+                        pin.dev,
+                        pin.ino,
+                    ) {
+                        Ok(directory) => directory,
+                        Err(errno) => return Err(errno),
+                    }
                 } else {
-                    libc::O_PATH | libc::O_CLOEXEC
+                    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+                    if fd < 0 {
+                        return Err(unsafe { *libc::__errno_location() });
+                    }
+                    // The descriptor was just opened and is not owned elsewhere.
+                    unsafe { OwnedFd::from_raw_fd(fd) }
                 };
-                let fd = unsafe { libc::open(path.as_ptr(), flags) };
-                if fd < 0 {
-                    return Err(unsafe { *libc::__errno_location() });
-                }
-                if storage_root {
-                    let mut info = std::mem::MaybeUninit::<libc::stat>::uninit();
-                    if unsafe { libc::fstat(fd, info.as_mut_ptr()) } < 0 {
-                        let errno = unsafe { *libc::__errno_location() };
-                        unsafe { libc::close(fd) };
-                        return Err(errno);
-                    }
-                    let info = unsafe { info.assume_init() };
-                    if info.st_dev != prepared.storage_dev || info.st_ino != prepared.storage_ino {
-                        unsafe { libc::close(fd) };
-                        return Err(libc::ESTALE);
-                    }
-                }
                 let attr = PathAttr {
-                    allowed_access: rule.2,
-                    parent_fd: fd,
+                    allowed_access: allowed,
+                    parent_fd: directory.as_raw_fd(),
                 };
                 let answer = unsafe {
                     libc::syscall(libc::SYS_landlock_add_rule, ruleset, 1u32, &attr, 0u32)
                 };
                 let errno = unsafe { *libc::__errno_location() };
-                unsafe { libc::close(fd) };
+                drop(directory);
                 if answer < 0 {
                     return Err(errno);
                 }
@@ -291,8 +309,58 @@ pub(super) unsafe fn install(
     result
 }
 
+fn prepare_path_allow(plan: landlock_plan::PathAllowPlan) -> Result<Prepared, String> {
+    if plan.root_dev.len() != plan.root_ino.len() || plan.root_dev.is_empty() {
+        return Err("provider start is refused: a path root has no identity".into());
+    }
+    let mut root_pins = Vec::with_capacity(plan.root_dev.len());
+    for (index, (dev, ino)) in plan
+        .root_dev
+        .iter()
+        .copied()
+        .zip(plan.root_ino.iter().copied())
+        .enumerate()
+    {
+        let Some(rule) = plan.rules.get(index) else {
+            return Err("provider start is refused: a path root has no Landlock rule".into());
+        };
+        if matches!(
+            rule.0,
+            "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "STORAGE_ROOT" | "STORAGE_PARENT"
+        ) {
+            return Err(format!(
+                "provider start is refused: {} is not a path allow-list root",
+                rule.0
+            ));
+        }
+        root_pins.push(RootPin { index, dev, ino });
+    }
+    let paths = plan
+        .rules
+        .iter()
+        .map(|rule| {
+            CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rule.1.as_os_str()))
+                .map_err(|_| format!("Landlock path contains NUL: {}", rule.0))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let first = root_pins[0];
+    Ok(Prepared {
+        plan: landlock_plan::Plan {
+            abi: plan.abi,
+            handled: plan.handled,
+            rules: plan.rules,
+            storage_dev: first.dev,
+            storage_ino: first.ino,
+        },
+        paths,
+        filters: Vec::new(),
+        root_pins,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::super::{path_allow, root_pin};
     use super::*;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
@@ -486,6 +554,57 @@ mod tests {
         refusal(
             Step::Seccomp,
             "seccomp install refused: the filter install failed with errno 22",
+        );
+    }
+
+    #[test]
+    fn a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer() {
+        landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
+        assert_eq!(
+            root_pin::DIRECTORY_OPEN_FLAGS,
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+            "Linux pinned roots are opened with O_PATH|O_NOFOLLOW|O_DIRECTORY"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        std::fs::create_dir(data.join("identity")).unwrap();
+        std::fs::create_dir(data.join("chain-provider")).unwrap();
+        let executable = Path::new("/opt/elastos/helper-provider");
+        let (_confinement, plan) =
+            path_allow::render_with_plan("chain-provider", data, executable, 5)
+                .unwrap_or_else(|err| panic!("render before the swap: {err}"));
+        let root_index = plan
+            .rules
+            .iter()
+            .position(|rule| rule.0 == "chain-provider")
+            .expect("chain root");
+        let prepared = prepare_path_allow(plan).unwrap();
+        let root = data.join("chain-provider");
+        std::fs::remove_dir(&root).unwrap();
+        std::os::unix::fs::symlink(data.join("identity"), &root).unwrap();
+        let report = std::fs::File::open("/dev/null").unwrap();
+        assert!(report.as_raw_fd() >= 3);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = match unsafe { install(&prepared, report.as_raw_fd(), -1) } {
+                Err(Failure(Step::Add(index), errno))
+                    if index == root_index && errno == libc::ESTALE =>
+                {
+                    0
+                }
+                Err(Failure(Step::Add(index), errno)) if index == root_index => errno,
+                Err(_) => 91,
+                Ok(()) => 92,
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(
+            status, 0,
+            "a root swapped for a symlink must be refused by dev/ino mismatch (wait status {status}, exit {})",
+            libc::WEXITSTATUS(status)
         );
     }
 }

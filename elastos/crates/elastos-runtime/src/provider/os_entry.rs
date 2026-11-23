@@ -89,6 +89,9 @@ pub(super) fn start_provider(
     checked: CheckedDirectory<'_>,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
+    // Did, wallet, and model have no helper allow-list. The lookup returns
+    // before it opens a directory. A key that renders a plan is refused.
+    refuse_single_root_on_helper_allow_list(provider, checked.path, executable.path())?;
     let admitted = super::rights::check_rights_against_runtime_templates(
         provider,
         authority,
@@ -99,16 +102,51 @@ pub(super) fn start_provider(
 
 /// Seatbelt text and Landlock plan for localhost, object, or chain.
 ///
-/// Each provider gets its own file roots. The data directory is not a root:
-/// that directory contains `identity/device.key`. `start_provider` does not
-/// call this. `spawn_confined` still admits only the single-root providers.
-pub fn render_helper_confinement(
+/// Each provider gets its own file roots. The data directory contains
+/// `identity/device.key`, so that directory stays out of the allow-list.
+/// `spawn_confined` admits did, wallet, and model. `start_provider` calls
+/// this to refuse those ids when they also have an allow-list. The call
+/// does not install the plan.
+pub(crate) fn render_helper_confinement(
     component_key: &str,
     data_dir: &Path,
     executable: &Path,
     landlock_abi: u32,
 ) -> Result<super::path_allow::HelperConfinement, String> {
     super::path_allow::render(component_key, data_dir, executable, landlock_abi)
+}
+
+fn refuse_single_root_on_helper_allow_list(
+    provider: RuntimeProviderId,
+    data_dir: &Path,
+    executable: &Path,
+) -> Result<(), String> {
+    let component_key = match provider {
+        RuntimeProviderId::Did => "did-provider",
+        RuntimeProviderId::Wallet => "wallet-provider",
+        RuntimeProviderId::Model => "model-provider",
+    };
+    let absent = format!(
+        "provider start is refused: component key \"{component_key}\" has no path allow-list"
+    );
+    match render_helper_confinement(component_key, data_dir, executable, 0) {
+        Err(error) if error == absent => Ok(()),
+        Ok(confinement) => {
+            let rules = confinement
+                .landlock
+                .iter()
+                .map(|rule| format!("{} {} {:#x}", rule.name, rule.path.display(), rule.mask))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "provider start is refused: a single-root provider has a path allow-list (abi {}, handled {:#x}, seatbelt {} bytes, {rules})",
+                confinement.landlock_abi,
+                confinement.landlock_handled,
+                confinement.seatbelt.len(),
+            ))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
@@ -681,6 +719,22 @@ mod tests {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn single_root_providers_stay_off_the_helper_allow_list() {
+        // These paths must stay unread. A single-root id returns before render
+        // opens a directory, including when the path is missing.
+        let missing = Path::new("/no/such/elastos-helper-root");
+        let binary = Path::new("/no/such/elastos-helper-binary");
+        for provider in [
+            RuntimeProviderId::Did,
+            RuntimeProviderId::Wallet,
+            RuntimeProviderId::Model,
+        ] {
+            refuse_single_root_on_helper_allow_list(provider, missing, binary)
+                .unwrap_or_else(|err| panic!("{provider:?} touched the helper allow-list: {err}"));
+        }
     }
 
     #[test]

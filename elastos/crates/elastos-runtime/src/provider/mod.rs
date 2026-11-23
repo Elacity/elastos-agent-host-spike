@@ -36,6 +36,8 @@ mod rights;
 #[cfg(unix)]
 mod rights_table;
 #[cfg(unix)]
+mod root_pin;
+#[cfg(unix)]
 mod seccomp_list;
 #[cfg(unix)]
 mod seccomp_program;
@@ -46,10 +48,6 @@ pub use bridge::{
 #[cfg(any(windows, target_os = "macos"))]
 pub use checked_executable::recover_verified_copies;
 pub use checked_executable::CheckedExecutable;
-#[cfg(unix)]
-pub use os_entry::render_helper_confinement;
-#[cfg(unix)]
-pub use path_allow::{HelperConfinement, HelperLandlockRule};
 pub use registry::{
     decode_provider_stream_payload, EntryType, LocalIpfsCapacityObservation, Provider,
     ProviderByteRange, ProviderCarrierInvoker, ProviderCarrierRoute, ProviderError,

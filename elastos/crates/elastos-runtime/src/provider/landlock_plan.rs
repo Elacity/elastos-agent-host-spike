@@ -168,15 +168,26 @@ fn build_for_arch(
     })
 }
 
+/// One helper directory, with the device and inode of that directory.
+pub(super) struct AllowRoot {
+    pub name: &'static str,
+    pub path: PathBuf,
+    pub dev: u64,
+    pub ino: u64,
+}
+
 /// Landlock rules for a helper allow-list. There is no single storage root.
+/// `root_dev` and `root_ino` are the identity of each allow-list root, in rule order.
 pub(super) struct PathAllowPlan {
     pub abi: u32,
     pub handled: u64,
     pub rules: Vec<PathRule>,
+    pub root_dev: Vec<u64>,
+    pub root_ino: Vec<u64>,
 }
 
 pub(super) fn build_path_allow_plan(
-    roots: &[(&'static str, PathBuf)],
+    roots: &[AllowRoot],
     executable: &Path,
     abi: u32,
 ) -> Result<PathAllowPlan, String> {
@@ -185,13 +196,19 @@ pub(super) fn build_path_allow_plan(
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
     }
     let mut rules = Vec::with_capacity(roots.len() + 4);
-    for (name, path) in roots {
-        if !path.is_absolute() || *name == "STORAGE_ROOT" || *name == "STORAGE_PARENT" {
+    let mut root_dev = Vec::with_capacity(roots.len());
+    let mut root_ino = Vec::with_capacity(roots.len());
+    for root in roots {
+        if !root.path.is_absolute() || root.name == "STORAGE_ROOT" || root.name == "STORAGE_PARENT"
+        {
             return Err(format!(
-                "provider start is refused: {name} cannot be a Landlock allow-list root"
+                "provider start is refused: {} cannot be a Landlock allow-list root",
+                root.name
             ));
         }
-        rules.push(PathRule(name, path.clone(), STORAGE));
+        rules.push(PathRule(root.name, root.path.clone(), STORAGE));
+        root_dev.push(root.dev);
+        root_ino.push(root.ino);
     }
     if !executable.is_absolute() {
         return Err(
@@ -210,6 +227,8 @@ pub(super) fn build_path_allow_plan(
         abi,
         handled: HANDLED,
         rules,
+        root_dev,
+        root_ino,
     })
 }
 
