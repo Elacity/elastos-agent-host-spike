@@ -6338,7 +6338,7 @@ async fn spawn_inactive_custody_wrapper_for_test(
 ) -> InactiveCustodyProvider {
     let state_root = inactive_custody_state_root(data_dir);
     let bridge = ProviderBridge::spawn(
-        binary,
+        &crate::test_support::fixture_executable(binary),
         ProviderConfig {
             base_path: state_root.to_str().unwrap().to_owned(),
             ..Default::default()
@@ -7189,7 +7189,7 @@ async fn runtime_decrypt_registry_adapter_process_reconstructs_for_prepared_reci
     let (clear_init_segment, clear_segments) = clear_media_components(0x11);
     let protect_registry = Arc::new(ProviderRegistry::new());
     let protect_bridge = ProviderBridge::spawn(
-        &protect_binary,
+        &crate::test_support::fixture_executable(&protect_binary),
         ProviderConfig {
             extra: json!({}),
             ..Default::default()

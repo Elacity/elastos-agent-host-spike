@@ -50,11 +50,18 @@ fn assert_refusal_as(
     manifest: &[u8],
     bus_error: &str,
 ) -> std::process::Output {
+    use agent_conformance::harness::{Launch, RunningInstances};
     let _serial = EFFECT_RUN.lock().unwrap_or_else(|error| error.into_inner());
     let bytes = build_probe(effect, 1);
     let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
     let home = ThrowawayHome::new().unwrap();
-    let capsule = agent_conformance::identity::stage_probe(&home, &bytes, manifest, label)
+    let client = ThrowawayHome::new().unwrap();
+    std::fs::write(
+        client.data().join("config.toml"),
+        include_bytes!("../fixtures/operator-config.toml"),
+    )
+    .unwrap();
+    let capsule = agent_conformance::identity::stage_probe(&client, &bytes, manifest, label)
         .expect("name the exact staged probe bundle");
 
     let mut operator = common::operator::Operator::start(&home)
@@ -62,20 +69,22 @@ fn assert_refusal_as(
     let sampled = operator
         .begin_check()
         .expect("operator ready and first census");
-    let output = home
-        .launch(
-            &runtime.binary,
-            &[
-                "run",
-                "--dev-unsigned-component",
-                capsule.path.to_str().unwrap(),
-            ],
-            // A refusal returns at once. The bound passes the probe's own
-            // 30-second pending wait, so a declared request still reports its
-            // refusal reason instead of the harness bound.
-            Duration::from_secs(40),
-        )
-        .expect("bounded probe launch through the existing primitive");
+    let launch = Launch {
+        home: &client,
+        program: &runtime.binary,
+        args: vec![
+            "run",
+            "--dev-unsigned-component",
+            capsule.path.to_str().unwrap(),
+        ],
+    };
+    // The unsigned client borrows only the signed operator's coordinates.
+    // The bound passes the probe's 30-second pending wait.
+    let mut completed = RunningInstances::start(&[launch], Some(&home))
+        .expect("start unsigned refusal probe")
+        .collect(Duration::from_secs(40))
+        .expect("bounded unsigned refusal probe");
+    let output = completed.remove(0).output;
     Observation::Launched {
         probe: capsule.identity,
     }
@@ -87,6 +96,7 @@ fn assert_refusal_as(
             .expect("final census and operator group stop")
     );
     assert_output_refusal(&output, effect, bus_error);
+    client.finish().unwrap();
     home.finish().unwrap();
     output
 }
@@ -278,8 +288,8 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
     let home = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
     // As in the existing parallel journey, each client owns its local Home
     // state and borrows only the operator's coordinates through the spawn site.
-    let client_homes: Vec<_> = if instances {
-        (0..2)
+    let client_homes: Vec<_> = {
+        (0..if instances { 2 } else { 1 })
             .map(|_| {
                 let client = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
                 client.guard(client.home(), client.data()).unwrap();
@@ -291,14 +301,8 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
                 client
             })
             .collect()
-    } else {
-        Vec::new()
     };
-    let launch_homes: Vec<_> = if client_homes.is_empty() {
-        vec![&home]
-    } else {
-        client_homes.iter().collect()
-    };
+    let launch_homes: Vec<_> = client_homes.iter().collect();
     let capsules: Vec<_> = effects
         .iter()
         .zip(&builds)
@@ -672,6 +676,9 @@ fn exercise_read(effect: Effect, outcome: ReadOutcome, require_live_grants: bool
             Ok("pending:0 grants:0"),
             "blocked: AC-021-GRANTS"
         );
+    }
+    for client in client_homes {
+        client.finish().unwrap();
     }
     home.finish().unwrap();
 }

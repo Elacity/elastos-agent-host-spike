@@ -974,6 +974,7 @@ async fn provision_custody_node_with_installed_provider(
     // against the signed release, which refuses an unrelated override root.
     let prepared =
         crate::setup::verify_installed_component_start(data_dir, "custody-provider", &binary)?;
+    prepared.signed_checksum()?;
     let issuer_hex = format!("0x{}", hex::encode(issuer.as_bytes()));
     let mut command = tokio::process::Command::new(prepared.exec_path());
     command
@@ -1077,7 +1078,7 @@ fn validated_custody_node_label(value: &str, label: &str) -> anyhow::Result<Stri
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1213,71 +1214,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn sign_test_install(data_dir: &Path) {
-        use elastos_common::localhost::{
-            publisher_release_head_path, publisher_release_manifest_path,
-        };
-        let cid = |bytes: &[u8]| {
-            cid::Cid::new_v1(
-                0x55,
-                cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap(),
-            )
-            .to_string()
-        };
-        let descriptor = |bytes: &[u8]| {
-            serde_json::json!({
-                "cid":cid(bytes), "sha256":hex::encode(Sha256::digest(bytes)), "size":bytes.len()
-            })
-        };
-        let key = SigningKey::from_bytes(&[0x71; 32]);
-        let publisher = crate::crypto::encode_signing_key_did(&key);
-        let signed = |payload: serde_json::Value, domain: &str| {
-            let (signature, signer_did) = crate::crypto::domain_separated_sign(
-                &key,
-                domain,
-                &serde_json::to_vec(&payload).unwrap(),
-            );
-            serde_json::to_vec(&serde_json::json!({
-                "payload":payload, "signature":signature, "signer_did":signer_did
-            }))
-            .unwrap()
-        };
-        let runtime = data_dir.join("runtime");
-        let runtime_bytes = b"fixture runtime";
-        std::fs::write(&runtime, runtime_bytes).unwrap();
-        let components = std::fs::read(data_dir.join("components.json")).unwrap();
-        let release = signed(
-            serde_json::json!({
-                "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
-                "platforms":{(crate::update::detect_release_platform()):{
-                    "binary":descriptor(runtime_bytes), "components":descriptor(&components)
-                }}
-            }),
-            "elastos.release.v1",
-        );
-        let head = signed(
-            serde_json::json!({
-                "schema":"elastos.release.head/v1", "version":"0.7.0", "channel":"stable",
-                "latest_release_cid":cid(&release), "release_sha256":hex::encode(Sha256::digest(&release))
-            }),
-            "elastos.release.head.v1",
-        );
-        let head_path = publisher_release_head_path(data_dir);
-        std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-        std::fs::write(head_path, &head).unwrap();
-        std::fs::write(publisher_release_manifest_path(data_dir), &release).unwrap();
-        std::fs::write(
-            data_dir.join("sources.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "schema":"elastos.trusted-sources/v1", "default_source":"fixture", "sources":[{
-                    "name":"fixture", "publisher_dids":[publisher], "channel":"stable",
-                    "installed_version":"0.7.0", "install_path":runtime, "head_cid":cid(&head)
-                }]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    }
+    pub(crate) use crate::installed_release::tests::sign_test_install;
 
     #[cfg(unix)]
     fn provisioned_template(
@@ -1584,6 +1521,37 @@ mod tests {
         assert!(!unverified_error
             .to_string()
             .contains(&data_dir.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn source_home_dev_mode_refuses_unchecked_custody_provider_before_spawn() {
+        let dir = safe_ancestor_tempdir();
+        let data_dir = dir.path().join("data");
+        owner_only_dir(&data_dir);
+        let marker = dir.path().join("provider-started");
+        let script = format!("#!/bin/sh\nprintf started > '{}'\n", marker.display());
+        install_verified_custody_provider(&data_dir, script.as_bytes());
+        std::fs::remove_file(data_dir.join("sources.json")).unwrap();
+        std::fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
+        assert!(crate::setup::installed_release_source(&data_dir)
+            .unwrap()
+            .is_none());
+
+        let descriptor = dir.path().join("node.descriptor.json");
+        let error = run_provision_custody_node_for_test(
+            data_dir,
+            descriptor.clone(),
+            test_runtime_issuer_hex(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!marker.exists(), "unchecked provider was started");
+        assert!(
+            error.to_string().contains("no signed release digest"),
+            "{error}"
+        );
+        assert!(!descriptor.exists());
     }
 
     #[cfg(unix)]
