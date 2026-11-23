@@ -610,6 +610,7 @@ mod tests {
         DefaultConversationAdmissionPolicy, DefaultConversationGrant,
         VerifiedDefaultConversationGrant, DEFAULT_CONVERSATION_GRANT_SCHEMA_V1,
     };
+    #[cfg(unix)]
     use crate::collaboration_device_authority::DefaultConversationDeviceAuthority;
     use crate::collaboration_network::{
         canonical_collaboration_network_profile_payload_bytes,
@@ -618,25 +619,35 @@ mod tests {
         SignedCollaborationNetworkProfile, VerifiedCollaborationNetworkProfile,
         COLLABORATION_NETWORK_PROFILE_SCHEMA, COLLABORATION_NETWORK_PROFILE_SIGNATURE_DOMAIN,
     };
+    #[cfg(unix)]
     use crate::collaboration_presence_grant::PresenceDecision;
+    #[cfg(unix)]
     use crate::collaboration_protocol::sign_collaboration_transport_frame;
+    #[cfg(unix)]
     use crate::esp_binding::{esp_request_binding, EspRequestBinding};
+    #[cfg(unix)]
     use elastos_common::collaboration_protocol::SignedCollaborationMessage;
     #[cfg(unix)]
     use elastos_common::collaboration_protocol::{
         canonical_collaboration_message_bytes, canonical_signed_collaboration_message_bytes,
         collaboration_message_envelope_sha256, COLLABORATION_MESSAGE_SIGNATURE_DOMAIN_V1,
     };
+    #[cfg(unix)]
     use elastos_runtime::provider::ProviderCarrierInvoker;
     use elastos_runtime::signature::{generate_keypair, SigningKey};
     use sha2::{Digest, Sha256};
-    use std::collections::{BTreeMap, VecDeque};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[cfg(unix)]
+    use std::collections::BTreeMap;
+    use std::collections::VecDeque;
+    #[cfg(unix)]
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, Ordering};
     const NETWORK: &str = "collaboration-transport-test";
     const CONVERSATION: &str = "default-conversation";
     const SERVICE: &str = "chat";
     const OPERATION_CAPSULE: &str = "chat-room";
     const NOW: u64 = 1_800_000_000;
+    #[cfg(unix)]
     const TTL: u64 = 300;
 
     struct FakeCarrier {
@@ -662,12 +673,14 @@ mod tests {
                 .unwrap()
                 .extend(replies.into_iter().map(Ok));
         }
+        #[cfg(unix)]
         fn push_failure(&self, message: &str) {
             self.replies
                 .lock()
                 .unwrap()
                 .push_back(Err(ProviderError::Unavailable(message.to_string())));
         }
+        #[cfg(unix)]
         fn observe_durable_incoming_before_send(&self, core: Arc<CollaborationCore>) {
             *self.durable_incoming_before_send.lock().unwrap() = Some(core);
         }
@@ -736,6 +749,7 @@ mod tests {
         }})
     }
 
+    #[cfg(unix)]
     fn gossip(frame: &[u8]) -> serde_json::Value {
         serde_json::json!({"content":std::str::from_utf8(frame).unwrap()})
     }
@@ -803,6 +817,7 @@ mod tests {
             )
         }
 
+        #[cfg(unix)]
         fn authority(&self, key: SigningKey) -> DefaultConversationDeviceAuthority {
             DefaultConversationDeviceAuthority::new(key, self.profile.clone(), self.grant.clone())
                 .unwrap()
@@ -865,6 +880,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn operation(
         profile: &crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
         request_id: &str,
@@ -894,6 +910,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn prepare_outgoing(
         core: &CollaborationCore,
         request_id: &str,
@@ -922,6 +939,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn remote_message(fixture: &Fixture, key: SigningKey, content: &str) -> (SigningKey, Vec<u8>) {
         let authority = fixture.authority(key.clone());
         let prepared = authority
@@ -936,6 +954,7 @@ mod tests {
         (key, prepared.envelope_bytes().to_vec())
     }
 
+    #[cfg(unix)]
     fn prepare_metadata(
         fixture: &Fixture,
         core: &CollaborationCore,
@@ -957,9 +976,11 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     const PRESENCE_PRINCIPAL: &str = "runtime-principal";
 
     /// A presence port whose person has granted "Always", as on a Home.
+    #[cfg(unix)]
     async fn granted_presence_port(
         fixture: &Fixture,
         core: Arc<CollaborationCore>,
@@ -1002,6 +1023,7 @@ mod tests {
         (port, authority)
     }
 
+    #[cfg(unix)]
     async fn granted_presence_driver(
         fixture: &Fixture,
         core: Arc<CollaborationCore>,
@@ -1021,6 +1043,7 @@ mod tests {
         (driver, port, authority)
     }
 
+    #[cfg(unix)]
     async fn set_presence(
         fixture: &Fixture,
         port: &CollaborationPresenceProductPort,
@@ -1044,6 +1067,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     async fn queued_presence(
         fixture: &Fixture,
         port: &CollaborationPresenceProductPort,
@@ -1550,6 +1574,7 @@ mod tests {
             .all(|request| request["op"] != "gossip_send"));
     }
 
+    #[cfg(unix)]
     fn remote_receipt(
         fixture: &Fixture,
         outgoing: &crate::collaboration_core::DurableOutgoingMessage,
@@ -1571,6 +1596,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn peer_fixture(owner: &Fixture) -> Fixture {
         let mut peer = Fixture::new();
         peer.profile = owner.profile.clone();
@@ -1578,6 +1604,7 @@ mod tests {
         peer
     }
 
+    #[cfg(unix)]
     fn presence_frame(fixture: &Fixture, key: &SigningKey, now: u64) -> Vec<u8> {
         let message = fixture
             .authority(key.clone())
@@ -1592,6 +1619,7 @@ mod tests {
         sign_collaboration_transport_frame(key, message.envelope_bytes()).unwrap()
     }
 
+    #[cfg(unix)]
     fn observe(
         fixture: &Fixture,
         core: &Arc<CollaborationCore>,
@@ -1608,6 +1636,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn invocation(frame: &[u8], source: &str) -> serde_json::Value {
         serde_json::json!({"op":SHARED_OP,"frame":std::str::from_utf8(frame).unwrap(),"_runtime_invocation":{
             "schema":"elastos.provider.invocation/v1", "source":SHARED_PROVIDER,"target":SHARED_PROVIDER,"op":SHARED_OP,
@@ -1615,6 +1644,7 @@ mod tests {
         }})
     }
 
+    #[cfg(unix)]
     fn delivery(
         core: Arc<CollaborationCore>,
         registry: Arc<ProviderRegistry>,
@@ -1627,6 +1657,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct Plane {
         source: String,
         peers: BTreeMap<String, SharedHomeDelivery>,
@@ -1635,12 +1666,15 @@ mod tests {
         stall: bool,
         active: Arc<AtomicUsize>,
     }
+    #[cfg(unix)]
     struct Active(Arc<AtomicUsize>);
+    #[cfg(unix)]
     impl Drop for Active {
         fn drop(&mut self) {
             self.0.fetch_sub(1, Ordering::SeqCst);
         }
     }
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl ProviderCarrierInvoker for Plane {
         async fn invoke_carrier_provider(
@@ -1679,6 +1713,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     async fn home_driver(
         fixture: &Fixture,
         core: Arc<CollaborationCore>,
@@ -1701,6 +1736,7 @@ mod tests {
         plane_driver(fixture, core, carrier, peers, lose_reply, stall).await
     }
 
+    #[cfg(unix)]
     async fn plane_driver(
         fixture: &Fixture,
         core: Arc<CollaborationCore>,
@@ -1735,14 +1771,17 @@ mod tests {
 
     /// One gossip topic whose bootstrap forwards every frame to every other
     /// joined Home. Homes share no direct path.
+    #[cfg(unix)]
     struct BootstrapRelay {
         profile: VerifiedCollaborationNetworkProfile,
         homes: Mutex<Vec<(Vec<String>, u64)>>,
     }
+    #[cfg(unix)]
     struct RelayCarrier {
         relay: Arc<BootstrapRelay>,
         home: usize,
     }
+    #[cfg(unix)]
     impl BootstrapRelay {
         fn new(profile: &VerifiedCollaborationNetworkProfile) -> Arc<Self> {
             Arc::new(Self {
@@ -1763,10 +1802,12 @@ mod tests {
         }
     }
     /// Carrier's reply to `remember_peer` for the profile's one bootstrap.
+    #[cfg(unix)]
     fn remembered(profile: &VerifiedCollaborationNetworkProfile) -> serde_json::Value {
         let node = &profile.profile().bootstrap_peers[0].node_id;
         serde_json::json!({"status":"ok","data":{"added":[node]}})
     }
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Provider for RelayCarrier {
         async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
@@ -1820,6 +1861,7 @@ mod tests {
     }
 
     /// A fixture whose profile names `seed` as its Community bootstrap.
+    #[cfg(unix)]
     fn bootstrap_fixture(seed: &SigningKey) -> Fixture {
         let mut fixture = Fixture::new();
         let key = crate::carrier::did_to_public_key(&crate::crypto::encode_signing_key_did(seed))
@@ -1842,6 +1884,7 @@ mod tests {
         fixture
     }
 
+    #[cfg(unix)]
     fn receipt_message_hash(frame: &str) -> String {
         let receipt =
             crate::collaboration_protocol::verify_collaboration_transport_frame(frame.as_bytes())
