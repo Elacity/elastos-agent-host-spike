@@ -1037,6 +1037,7 @@ mod tests {
         notifications.entries
     }
 
+    #[cfg(unix)]
     #[test]
     fn a15r_inbox_card_shows_every_stored_step_and_the_full_binding_hash() {
         let dir = tempfile::tempdir().unwrap();
@@ -1088,6 +1089,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a15r_plan_changed_after_storing_shows_the_new_hash() {
         let dir = tempfile::tempdir().unwrap();
@@ -1123,6 +1125,7 @@ mod tests {
         assert!(!second[0].body.contains(&stored_hash), "{}", second[0].body);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a15r_over_long_plan_is_refused_not_cut() {
         let dir = tempfile::tempdir().unwrap();

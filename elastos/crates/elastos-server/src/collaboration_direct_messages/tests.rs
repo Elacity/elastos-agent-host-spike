@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use iroh::Watcher as _;
 

@@ -284,6 +284,11 @@ fn run_index_lock() -> &'static std::sync::Mutex<()> {
 }
 
 fn read_run_index(data_dir: &Path) -> anyhow::Result<RemoteModelRunIndex> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "model run index custody is unsupported on Windows",
+    ))?;
     let path = run_index_path(data_dir);
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
@@ -306,6 +311,11 @@ fn read_run_index(data_dir: &Path) -> anyhow::Result<RemoteModelRunIndex> {
 }
 
 fn write_run_index(data_dir: &Path, index: &RemoteModelRunIndex) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "model run index custody is unsupported on Windows",
+    ))?;
     let path = run_index_path(data_dir);
     let temp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(index)?;
@@ -1902,7 +1912,7 @@ mod tests {
         assert!(a1.starts_with("remote:"));
         assert_eq!(a1.len(), "remote:".len() + 32);
     }
-
+    #[cfg(unix)]
     #[test]
     fn p2a_iii_remote_context_root_refuses_localhost_users_write() {
         use crate::auth::*;
@@ -2168,7 +2178,7 @@ mod tests {
             "provider_failure"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn run_index_round_trips_and_prunes_old_terminal_runs() {
         let dir = tempfile::tempdir().unwrap();

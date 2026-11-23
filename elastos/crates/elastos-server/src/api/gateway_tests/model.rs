@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 use crate::api::gateway::gateway_home_token;
 use crate::api::gateway::gateway_provider_proxy::project_model_provider_response;

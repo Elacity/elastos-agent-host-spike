@@ -316,6 +316,7 @@ async fn operator_runtime_coords() -> anyhow::Result<crate::runtime_control::Run
         .ok_or_else(|| anyhow::anyhow!(crate::runtime_control::OPERATOR_RUNTIME_REQUIRED_MESSAGE))
 }
 
+#[cfg(unix)]
 async fn run_microvm_via_operator_runtime(
     manifest: &elastos_common::CapsuleManifest,
     capsule_args: &[String],
@@ -365,6 +366,14 @@ async fn run_microvm_via_operator_runtime(
         .send()
         .await;
     Ok(())
+}
+
+#[cfg(windows)]
+async fn run_microvm_via_operator_runtime(
+    _manifest: &elastos_common::CapsuleManifest,
+    _capsule_args: &[String],
+) -> anyhow::Result<()> {
+    Err(elastos_server::supervisor::MicroVmUnavailable.into())
 }
 
 #[cfg(test)]

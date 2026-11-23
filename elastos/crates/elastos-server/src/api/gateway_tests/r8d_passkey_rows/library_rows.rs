@@ -11,6 +11,7 @@ fn library(dir: &std::path::Path, op: &str, mut request: Value) -> Value {
     crate::library::handle_object_provider_raw_request(dir, &request)
 }
 
+#[cfg(unix)]
 #[test]
 fn r8d_child_library_lists_writes_and_reads_under_the_passkey_persons_root() {
     let person = passkey_person(LIBRARY_CAPSULE_ID);

@@ -5037,6 +5037,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn passkey_begin_flood_keeps_credentials_private_and_guest_completion_available() {
         use axum::body::{to_bytes, Body, Bytes};
@@ -5411,6 +5412,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn owner_enrollment_initial_profile_resumes_without_export() {
         use super::super::handlers::identity::{self, IdentityState};
@@ -5844,21 +5846,25 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_registration_gateway_rejects_no_live_admin_begin() {
         assert_guest_registration_rejects_missing_admin(false, false).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_registration_gateway_rejects_no_live_admin_completion() {
         assert_guest_registration_rejects_missing_admin(false, true).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_registration_direct_rejects_no_live_admin_begin() {
         assert_guest_registration_rejects_missing_admin(true, false).await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_registration_direct_rejects_no_live_admin_completion() {
         assert_guest_registration_rejects_missing_admin(true, true).await;
@@ -5913,6 +5919,7 @@ mod tests {
         headers
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn first_owner_registration_public_begin_returns_forbidden() {
         let temp = tempfile::tempdir().unwrap();
@@ -5997,6 +6004,7 @@ mod tests {
         (status, cookie, body)
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guided_owner_http_rejects_malformed_intent_before_credentials() {
         for body in [
@@ -6061,6 +6069,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guided_enrollment_http_rejects_name_before_effects_then_accepts_correction() {
         for guest in [false, true] {
@@ -6199,6 +6208,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guided_owner_http_rejects_missing_intent_and_legacy_names_at_completion() {
         let root = local_profile_fixture_root();
@@ -6257,6 +6267,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guided_owner_http_preserves_intent_and_exact_retry_after_restart() {
         for intent in [
@@ -6407,6 +6418,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guided_guest_https_cookie_is_separate_from_remote_owner_authority() {
         use tower::ServiceExt;
@@ -6475,6 +6487,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guided_guest_http_disabled_policy_rejects_intent_before_effects() {
         let root = local_profile_fixture_root();
@@ -6507,6 +6520,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guided_guest_http_create_recover_keeps_role_and_replays_completion() {
         for intent in [
@@ -6673,6 +6687,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn first_owner_registration_public_complete_returns_forbidden() {
         let temp = tempfile::tempdir().unwrap();
@@ -6721,6 +6736,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_enrollment_orphan_login_cannot_create_authority() {
         let temp = tempfile::tempdir().unwrap();
@@ -6745,6 +6761,7 @@ mod tests {
         assert!(auth.sessions.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn first_owner_registration_rejects_public_origin() {
         let temp = tempfile::tempdir().unwrap();
@@ -6765,6 +6782,7 @@ mod tests {
             .is_some());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn first_owner_registration_accepts_local_runtime() {
         let temp = tempfile::tempdir().unwrap();
@@ -6785,6 +6803,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn allowed_https_guest_registration_binds_begin_origin() {
         let temp = local_profile_fixture_root();
@@ -6960,6 +6979,7 @@ mod tests {
         assert!(!local_first_owner_registration(&headers, None));
     }
 
+    #[cfg(unix)]
     #[test]
     fn passkey_session_grant_is_runtime_bound_and_active() {
         let temp = tempfile::tempdir().unwrap();
@@ -7008,6 +7028,7 @@ mod tests {
         assert!(!response.system_token.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn each_passkey_gets_its_own_principal_root_and_role() {
         let temp = tempfile::tempdir().unwrap();
@@ -7065,6 +7086,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn passkey_list_returns_runtime_bound_credentials() {
         let temp = tempfile::tempdir().unwrap();
@@ -7112,6 +7134,7 @@ mod tests {
         assert!(response.passkeys[0].current);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_passkey_list_is_scoped_to_current_principal() {
         let temp = tempfile::tempdir().unwrap();
@@ -7167,6 +7190,7 @@ mod tests {
         assert!(guest_list.passkeys[0].current);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_status_is_bound_to_current_principal() {
         let temp = tempfile::tempdir().unwrap();
@@ -7227,6 +7251,7 @@ mod tests {
             .contains(&"create_recovery_kit".to_string()));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_status_reports_matching_root_protection() {
         let temp = tempfile::tempdir().unwrap();
@@ -7269,6 +7294,7 @@ mod tests {
         assert!(status.required_actions.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_status_distinguishes_configured_protection_from_plaintext_objects() {
         let temp = tempfile::tempdir().unwrap();
@@ -7317,6 +7343,7 @@ mod tests {
             .contains(object_uri.as_str()));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_status_requires_verified_protector() {
         let temp = tempfile::tempdir().unwrap();
@@ -7362,6 +7389,7 @@ mod tests {
             .contains(&"verify_recovery_before_public_guest_hosting".to_string()));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_status_ignores_cross_principal_root_protection() {
         let temp = tempfile::tempdir().unwrap();
@@ -7422,6 +7450,7 @@ mod tests {
         assert!(!guest_status.recovery_configured);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_status_fails_closed_for_invalid_matching_root_protection() {
         let temp = tempfile::tempdir().unwrap();
@@ -7461,6 +7490,7 @@ mod tests {
         assert!(err.contains("at least one protector"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_status_rejects_proofless_session() {
         let temp = tempfile::tempdir().unwrap();
@@ -7583,6 +7613,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_rejects_invalid_material() {
         let temp = tempfile::tempdir().unwrap();
@@ -7637,6 +7668,7 @@ mod tests {
         assert!(event.reason.contains("encrypted_root_descriptor"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_accepts_exact_kit_envelope_binding_without_prior_protection() {
         let temp = tempfile::tempdir().unwrap();
@@ -7738,6 +7770,7 @@ mod tests {
     /// principal binding mismatch (Users root kept) and the `localhost_root`
     /// principal-owned check (UsersAI root). S3c-4 tightens this row to the
     /// explicit kind refusal message.
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_refuses_a_principal_stored_as_an_agent() {
         for keep_users_root in [true, false] {
@@ -7772,6 +7805,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_reassignment_uses_the_recovered_stored_root_and_kind() {
         use crate::auth::{r4_fixture, PrincipalKind};
@@ -7914,6 +7948,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_rejects_wrong_key_binding_without_mutation() {
         let temp = tempfile::tempdir().unwrap();
@@ -8016,6 +8051,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_requires_plaintext_migration_before_any_commit() {
         let temp = tempfile::tempdir().unwrap();
@@ -8109,6 +8145,7 @@ mod tests {
             .all(|uri| { !uri.contains("/ProviderLogs") && !uri.contains("/.Runtime/Providers") }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn configured_principal_root_readiness_rejects_declared_plaintext() {
         let temp = tempfile::tempdir().unwrap();
@@ -8136,6 +8173,7 @@ mod tests {
         assert_eq!(std::fs::read(object_path).unwrap(), b"legacy save");
     }
 
+    #[cfg(unix)]
     #[test]
     fn configured_readiness_keeps_recordless_stored_human_protection_and_object() {
         let temp = tempfile::tempdir().unwrap();
@@ -8190,6 +8228,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn configured_readiness_keeps_recordless_noncanonical_stored_human_root() {
         let temp = tempfile::tempdir().unwrap();
@@ -8234,6 +8273,7 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
+    #[cfg(unix)]
     #[test]
     fn configured_readiness_refuses_recordless_usersai_protection() {
         // The protection belongs to a valid agent. save_auth_state refuses to
@@ -8257,6 +8297,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_consumes_matching_did_recovery_proof() {
         let temp = tempfile::tempdir().unwrap();
@@ -8328,6 +8369,7 @@ mod tests {
         assert!(did.archive.is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_rejects_unverified_did_recovery_proof() {
         let temp = tempfile::tempdir().unwrap();
@@ -8391,6 +8433,7 @@ mod tests {
             .all(|protector| protector.verified_at.is_none()));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_reassigns_orphaned_root_to_current_passkey() {
         let temp = tempfile::tempdir().unwrap();
@@ -8553,6 +8596,7 @@ mod tests {
         assert_eq!(event.result, "ok");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_reassignment_precommit_failures_preserve_original_authority() {
         for fault in [
@@ -8695,6 +8739,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_reassignment_response_sets_reissued_home_cookie() {
         let temp = tempfile::tempdir().unwrap();
@@ -8808,6 +8853,7 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_reassignment_replaces_active_root_binding() {
         let temp = tempfile::tempdir().unwrap();
@@ -8916,6 +8962,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_refuses_fabricated_kit_for_admin_principal() {
         let temp = tempfile::tempdir().unwrap();
@@ -9195,6 +9242,7 @@ mod tests {
         assert_eq!(status.principal_id, home.guest_principal.principal_id);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn sec_kit_naming_this_runtimes_device_principal_is_refused() {
         for decoy in [false, true] {
@@ -9217,6 +9265,7 @@ mod tests {
 
     /// A subordinate Runtime trusts its parent's DID without holding that key;
     /// the parent's device principal has no stored record here either.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sec_kit_naming_a_parent_runtimes_device_did_is_refused() {
         let parent = elastos_runtime::auth::PrincipalId::device_did(
@@ -9228,6 +9277,7 @@ mod tests {
     }
 
     /// An agent id that is not minted yet must not be taken by a person's Kit.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sec_kit_naming_an_unminted_agent_id_is_refused() {
         let agent = "agent:v1:00112233445566778899aabbccddeeff";
@@ -9236,6 +9286,7 @@ mod tests {
 
     /// Control: the same Guest, route and request with a Kit that names a
     /// person id of the minted form still reassigns.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sec_kit_naming_a_minted_person_id_still_reassigns() {
         let home = sec_kit_home();
@@ -9261,6 +9312,7 @@ mod tests {
         assert_eq!(rebound.role, crate::auth::RuntimePrincipalRole::Guest);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_kit_import_rejects_cross_principal_material() {
         let temp = tempfile::tempdir().unwrap();
@@ -9333,6 +9385,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn passkey_management_rejects_missing_grant() {
         let temp = tempfile::tempdir().unwrap();
@@ -9352,6 +9405,7 @@ mod tests {
         assert!(refresh_err.contains("missing home launch token"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_passkey_registration_is_policy_gated() {
         let temp = tempfile::tempdir().unwrap();
@@ -9523,6 +9577,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_profile_setup_resumes_with_current_grant_after_interruption() {
         for fault in ["after-terminal", "after-root", "after-profile"] {
@@ -9610,6 +9665,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_profile_setup_concurrent_retry_preserves_edited_profile() {
         let root = local_profile_fixture_root();
@@ -9686,6 +9742,7 @@ mod tests {
         assert_eq!(edited.document().display_name, "Edited public name");
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_profile_guest_retry_and_unrelated_sign_in_keep_separate_consent() {
         let root = local_profile_fixture_root();
@@ -9810,6 +9867,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn registration_with_a_name_keeps_profile_setup_explicit() {
         let temp = tempfile::tempdir().unwrap();
@@ -9923,6 +9981,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn authentication_survives_an_invalid_profile_without_reporting_ready() {
         let temp = tempfile::tempdir().unwrap();
@@ -9997,6 +10056,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn authentication_reports_ready_only_after_profile_verification() {
         let temp = tempfile::tempdir().unwrap();
@@ -10064,6 +10124,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_session_reissues_proof_bound_home_and_system_tokens() {
         let temp = tempfile::tempdir().unwrap();
@@ -10109,6 +10170,7 @@ mod tests {
         assert!(!response.system_token.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_session_audit_and_save_failures_issue_no_tokens() {
         for fault in [
@@ -10150,6 +10212,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_session_accepts_http_only_home_cookie() {
         let temp = tempfile::tempdir().unwrap();
@@ -10181,6 +10244,7 @@ mod tests {
         assert!(!response.home_token.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn refresh_session_uses_trusted_auth_data_dir_for_refreshed_tokens() {
         let temp = tempfile::tempdir().unwrap();
@@ -10230,6 +10294,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn sign_out_revokes_only_active_session_without_resetting_principal_or_passkey() {
         let temp = tempfile::tempdir().unwrap();
@@ -10301,6 +10366,7 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn revoke_session_uses_trusted_auth_data_dir_for_target_session() {
         let temp = tempfile::tempdir().unwrap();
@@ -10342,6 +10408,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn sign_out_accepts_stale_header_beside_rotated_session_cookie() {
         let temp = tempfile::tempdir().unwrap();
@@ -10392,6 +10459,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn sign_out_response_clears_home_cookie() {
         let temp = tempfile::tempdir().unwrap();
@@ -10442,6 +10510,7 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn passkey_revoke_removes_credential_and_revokes_current_session() {
         let temp = tempfile::tempdir().unwrap();
@@ -10484,6 +10553,7 @@ mod tests {
         assert!(manager.credentials().is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_passkey_cannot_revoke_admin_passkey() {
         let temp = tempfile::tempdir().unwrap();
@@ -10541,6 +10611,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn admin_can_revoke_guest_passkey_without_revoking_admin_session() {
         let temp = tempfile::tempdir().unwrap();
@@ -10610,6 +10681,7 @@ mod tests {
         assert_eq!(credentials[0].credential_id, admin_credential.credential_id);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn admin_can_promote_guest_passkey_to_admin() {
         let temp = tempfile::tempdir().unwrap();
@@ -10674,6 +10746,7 @@ mod tests {
         assert_eq!(event.result, "ok");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn admin_can_demote_another_admin_passkey_to_guest() {
         let temp = tempfile::tempdir().unwrap();
@@ -10745,6 +10818,7 @@ mod tests {
         assert_eq!(event.result, "ok");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn admin_cannot_demote_self() {
         let temp = tempfile::tempdir().unwrap();
@@ -10807,6 +10881,7 @@ mod tests {
         assert!(crate::auth::is_admin(&admin_record));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_cannot_promote_passkeys_to_admin() {
         let temp = tempfile::tempdir().unwrap();
@@ -10866,6 +10941,7 @@ mod tests {
         assert!(!crate::auth::is_admin(&guest_record));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_cannot_demote_admin_passkeys() {
         let temp = tempfile::tempdir().unwrap();
@@ -10921,6 +10997,7 @@ mod tests {
         assert!(crate::auth::is_admin(&admin_record));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn last_admin_passkey_cannot_be_removed_while_guests_remain() {
         let temp = tempfile::tempdir().unwrap();
@@ -10978,6 +11055,7 @@ mod tests {
         .unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn revoked_passkey_cannot_mint_new_session_grant() {
         let temp = tempfile::tempdir().unwrap();
@@ -11174,6 +11252,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn owner_adds_passkey_after_fresh_approval_and_it_signs_in_as_owner() {
         let temp = tempfile::tempdir().unwrap();
@@ -11310,6 +11389,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_cannot_add_a_passkey() {
         let temp = tempfile::tempdir().unwrap();
@@ -11338,6 +11418,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn only_the_starting_owner_still_admin_can_finish_adding() {
         let temp = tempfile::tempdir().unwrap();
@@ -11379,6 +11460,7 @@ mod tests {
         assert_eq!(records_for(temp.path(), &other_admin.principal_id).len(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_auth_write_after_credential_leaves_no_account_and_retry_finishes() {
         let temp = tempfile::tempdir().unwrap();
@@ -11431,6 +11513,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_removals_of_an_owners_two_passkeys_keep_one_admin() {
         let temp = tempfile::tempdir().unwrap();

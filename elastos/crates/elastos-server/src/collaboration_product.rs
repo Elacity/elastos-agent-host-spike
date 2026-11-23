@@ -972,7 +972,7 @@ mod tests {
         )
         .unwrap()
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_availability_tracks_current_peers_and_left_takes_priority() {
         let fixture = fixture();
@@ -1039,7 +1039,7 @@ mod tests {
             Some(unreachable)
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_recovery_exhaustion_keeps_connected_and_left_status_priority() {
         let fixture = fixture();
@@ -1058,7 +1058,7 @@ mod tests {
             Some(crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL)
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn leaving_community_keeps_original_history_and_refuses_new_shared_intent() {
         let fixture = fixture();
@@ -1184,7 +1184,7 @@ mod tests {
             )
             .unwrap()
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_receipt_refreshes_own_row_without_settling_other_peers() {
         use crate::room_service::CommunityDeliveryState::{Accepted, Sending};
@@ -1292,7 +1292,7 @@ mod tests {
             .unwrap();
         assert_eq!(retained.objects[0].delivery_state, Some(Accepted));
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_terminal_outcomes_survive_closed_chat_and_restart() {
         use crate::room_service::CommunityDeliveryState::{Accepted, Expired, Sending};
@@ -1436,7 +1436,7 @@ mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_recovered_outgoing_survives_closed_chat_pruning_and_restart() {
         use crate::room_service::CommunityDeliveryState::{Accepted, Expired};
@@ -1609,7 +1609,7 @@ mod tests {
             assert!(read_objects()[1]["delivery_state"].is_null());
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_delayed_restart_preserves_unprojected_terminal_message() {
         use crate::room_service::CommunityDeliveryState::Expired;
@@ -1737,7 +1737,7 @@ mod tests {
             assert_eq!(poll.own_delivery[0].state, Expired);
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_stale_poll_preserves_terminal_outcomes_after_core_pruning() {
         use crate::room_service::CommunityDeliveryState::{Accepted, Expired, Sending};
@@ -1880,7 +1880,7 @@ mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_observed_expiry_survives_core_pruning_and_restart() {
         use crate::room_service::CommunityDeliveryState::Expired;
@@ -1977,7 +1977,7 @@ mod tests {
         );
         assert_eq!(fixture.core.conversation_history(later).unwrap(), history);
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_lost_evidence_is_unknown_without_labeling_unobserved_history() {
         use crate::room_service::CommunityDeliveryState::{Sending, Unknown};
@@ -2064,7 +2064,7 @@ mod tests {
         assert_eq!(view.objects[1].delivery_state, None);
         assert_eq!(view.objects.len(), 2);
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_is_private_to_the_current_profile_and_original_scope() {
         let fixture = fixture();
@@ -2140,7 +2140,7 @@ mod tests {
         assert!(foreign_scope.objects.is_empty());
         assert!(foreign_scope.own_delivery.is_empty());
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_unread_uses_scoped_other_authors_and_only_visible_returned_rows() {
         let fixture = fixture();
@@ -2305,7 +2305,7 @@ mod tests {
             .community_unread(&fixture.data_root, &fixture.person_profile, now + 1)
             .unwrap());
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_delivery_pending_projection_keeps_sending_across_poll_and_restart() {
         use crate::room_service::CommunityDeliveryState::Sending;
@@ -2422,7 +2422,7 @@ mod tests {
             vec![prepared.envelope_bytes]
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn room_durability_failure_keeps_projection_and_history_retryable_after_restart() {
         use crate::room_service::CollaborationProjectionWriteFault::{
@@ -2557,7 +2557,7 @@ mod tests {
             }
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn partial_history_projection_reserves_identities_and_recovers_locally_after_restart() {
         use elastos_common::collaboration_protocol::{
@@ -2695,7 +2695,7 @@ mod tests {
         assert_eq!(replay.latest_seq, completed.latest_seq);
         assert_eq!(restarted.core.conversation_history(now).unwrap(), retained);
     }
-
+    #[cfg(unix)]
     #[test]
     fn product_retains_original_after_durable_projection_and_retries_a_failed_sidecar_write() {
         let fixture = fixture();
@@ -2764,7 +2764,7 @@ mod tests {
             bytes
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn outgoing_chat_is_fixed_bounded_and_restart_idempotent() {
         let fixture = fixture();
@@ -2913,7 +2913,7 @@ mod tests {
         .unwrap();
         assert!(wrong_capsule_core.summary().is_err());
     }
-
+    #[cfg(unix)]
     #[test]
     fn incoming_chat_projection_is_typed_opaque_and_restart_safe() {
         let fixture = fixture();
@@ -3050,7 +3050,7 @@ mod tests {
         let restarted_again_port = CollaborationChatProductPort::new(restarted_again).unwrap();
         assert!(restarted_again_port.pending_messages().unwrap().is_empty());
     }
-
+    #[cfg(unix)]
     #[test]
     fn chat_accepts_full_profile_names_and_projects_every_handoff_after_restart() {
         let fixture = fixture();
@@ -3135,7 +3135,7 @@ mod tests {
             .iter()
             .all(|object| names.contains(&object.sender)));
     }
-
+    #[cfg(unix)]
     #[test]
     fn chat_projection_is_port_bound_restart_idempotent_and_scope_isolated() {
         let fixture = fixture();
@@ -3287,7 +3287,7 @@ mod tests {
             1
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn incoming_projection_writes_before_ack_and_retries_one_chat_object() {
         let fixture = fixture();

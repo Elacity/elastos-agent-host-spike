@@ -436,6 +436,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervisor_launch_accepts_signed_launch_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -459,6 +460,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervisor_launch_rejects_wrong_app_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -504,6 +506,7 @@ mod tests {
     /// No part of this row depends on the agents build switch: the stored
     /// human grant path and the two refusals behave the same in both builds.
     /// The agent refusal itself is covered by its own gated row.
+    #[cfg(unix)]
     #[tokio::test]
     async fn r6_launch_capsule_reaches_the_microvm_gate_with_the_typed_person() {
         use crate::setup::{CapsuleEntry, ComponentsManifest};
@@ -836,6 +839,7 @@ mod tests {
     /// the planted handler could not change this row's literal. It is skipped
     /// by name in that build.
     #[tokio::test]
+    #[cfg(unix)]
     async fn r6_2b_an_agent_shaped_payload_launches_as_the_person_and_touches_no_agent_root() {
         let Some((home, agents)) =
             crate::agents::tests::home_with_agents_if_built(1, "bafkreia5probe")
@@ -981,7 +985,7 @@ mod tests {
             "the agent file is not rewritten"
         );
     }
-
+    #[cfg(unix)]
     /// F3.3 (r3, options §2.1; fix r1): the supervisor launch entrance takes
     /// no raw principal authority. A plain name without an installed manifest
     /// gets the named walk refusal. Raw authority is refused before the walk.
@@ -1026,6 +1030,7 @@ mod tests {
     /// (`supervisor_launch_principal_from_input`), as its sibling row does.
     /// (ii) A token minted for another capsule is refused through the real
     /// HTTP handler.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_supervisor_launch_principal_comes_from_a_person_grant() {
         use elastos_runtime::auth::AuthSessionGrantV1;
@@ -1133,6 +1138,7 @@ mod tests {
 
     /// Stage one verified host artifact at <data_dir>/bin/<name> and return
     /// the on-disk platform entry that pins its bytes.
+    #[cfg(unix)]
     fn f35_stage_component(data_dir: &Path, name: &str, source: &Path) -> serde_json::Value {
         let dest = data_dir.join("bin").join(name);
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -1236,6 +1242,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn f35_fixture() -> F35Fixture {
         use crate::setup::{CapsuleEntry, ComponentsManifest};
         let crosvm = f35_host_file("ELASTOS_F35_CROSVM");
@@ -1383,6 +1390,7 @@ mod tests {
     /// find them.
     #[tokio::test]
     #[ignore = "F3.5 needs /dev/kvm; run the KVM receipt with --ignored"]
+    #[cfg(unix)]
     async fn two_people_launching_a_vm_get_two_bridge_principals() {
         // Independent literals, derived outside Rust:
         // printf %s '<id>' | shasum -a 256 | cut -c1-24

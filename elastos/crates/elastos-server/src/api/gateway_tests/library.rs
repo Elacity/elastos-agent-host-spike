@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 
 fn provider_body(value: serde_json::Value) -> Body {
