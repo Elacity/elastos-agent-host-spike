@@ -1069,8 +1069,10 @@ fn set_local_copy_permissions(_source: &Path, _dest: &Path) -> anyhow::Result<()
 
 /// Spelling record (owner unanswered): the release id is `x86_64-windows`
 /// (update.rs release table) and the component id is `windows-amd64` (here);
-/// this pair is the stricter choice, so the signer and release scripts stay
-/// unchanged and a manifest without a `windows-amd64` row still fails closed.
+/// the signer and packaging scripts stay unchanged, and
+/// scripts/release-platforms.json registers the pair as a pure name alias.
+/// A manifest without a `windows-amd64` row still fails closed: the
+/// `#[cfg(windows)]` install stub refuses before any fetch or file write.
 pub fn detect_platform() -> String {
     component_platform_for(std::env::consts::OS, std::env::consts::ARCH)
 }
@@ -10958,31 +10960,46 @@ mod component_platform_tests {
     use super::*;
 
     #[test]
-    fn detect_platform_names_windows_x86_64_windows_amd64() {
-        assert_eq!(component_platform_for("windows", "x86_64"), "windows-amd64");
+    fn component_platform_for_maps_every_host_row() {
+        for (os, arch, expected) in [
+            ("linux", "x86_64", "linux-amd64"),
+            ("linux", "aarch64", "linux-arm64"),
+            ("macos", "aarch64", "darwin-arm64"),
+            ("macos", "x86_64", "darwin-amd64"),
+            ("windows", "x86_64", "windows-amd64"),
+        ] {
+            assert_eq!(component_platform_for(os, arch), expected);
+        }
+        assert_eq!(component_platform_for("freebsd", "x86_64"), "unknown-amd64");
     }
 
-    #[test]
-    fn a_linux_amd64_only_manifest_refuses_a_windows_host_before_any_download() {
-        // A manifest that only names linux-amd64 has no windows-amd64 row:
-        // setup's pre-download component lookup (setup::run's exact host-row
-        // check) refuses, and the general row lookup finds no row, so no
-        // fetch or file write can start.
-        let manifest: ComponentsManifest = serde_json::from_value(serde_json::json!({
-            "external": {"browser-vm-image": {
-                "install_path": "browser-vm/image-set",
-                "platforms": {"linux-amd64": {
-                    "release_path": "browser-vm/linux-amd64.tar.gz",
-                    "install_path": "browser-vm/image-set",
-                    "extract_path": "browser-vm-image",
-                    "strategy": "browser-vm-image"
-                }}
-            }},
-            "profiles": {}
+    /// The Windows fail-closed guard itself: the `#[cfg(windows)]` install
+    /// stub refuses before the Carrier fetch, so an admitted row cannot start
+    /// a download or write a file, whatever the manifest names.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_install_stub_refuses_before_any_fetch_or_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("component");
+        let info: PlatformInfo = serde_json::from_value(serde_json::json!({
+            "cid": "fixture-cid",
+            "checksum": format!("sha256:{}", "a".repeat(64))
         }))
         .unwrap();
-        assert!(browser_vm_image::component_info(&manifest, "windows-amd64").is_err());
-        let component = &manifest.external["browser-vm-image"];
-        assert!(resolve_platform_info(component, "windows-amd64").is_none());
+        let row = crate::capsule_record::AdmittedRow::for_test("fixture", &info);
+        let err = install_first_party_component_via_carrier(
+            dir.path(),
+            &row,
+            &dest,
+            FirstPartyCarrierContext::Setup,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "component installation custody is unsupported on Windows"
+        );
+        assert!(!dest.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 }

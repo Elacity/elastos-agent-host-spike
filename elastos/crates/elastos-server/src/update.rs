@@ -3305,6 +3305,30 @@ mod tests {
         assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
     }
 
+    /// Every release platform update.rs can select is a registered setup
+    /// pairing, so setup's component ids and the release ids stay one map
+    /// (scripts/release-platforms.json, embedded by setup.rs too).
+    #[test]
+    fn every_release_platform_row_is_a_registered_setup_pair() {
+        let pairs: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(include_str!("../../../../scripts/release-platforms.json"))
+                .expect("scripts/release-platforms.json is a string map");
+        for (os, arch) in [
+            ("linux", "x86_64"),
+            ("linux", "aarch64"),
+            ("macos", "x86_64"),
+            ("macos", "aarch64"),
+            ("windows", "x86_64"),
+        ] {
+            let release_platform = release_platform_for(os, arch);
+            assert!(
+                pairs.values().any(|value| value == release_platform),
+                "update.rs release row {release_platform} is missing from \
+                 scripts/release-platforms.json"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn wrong_signed_artifact_content_stops_before_install() {
         let release = binding_envelope(
@@ -6353,5 +6377,102 @@ mod tests {
         assert_eq!(release_files(&data, &binary), original);
         assert!(std::fs::symlink_metadata(startup_config(&data)).is_err());
         assert!(!InstallTransaction::has_pending_recovery(&binary));
+    }
+}
+
+/// Windows-host update-path checks. The main `tests` module above is
+/// `#[cfg(unix)]` (its fixtures exercise paths Windows refuses), so these
+/// carry their own minimal copies of the signed-envelope fixtures.
+#[cfg(windows)]
+#[cfg(test)]
+mod windows_update_tests {
+    use super::*;
+
+    fn signed_envelope(seed: u8, payload: serde_json::Value, domain: &str) -> Vec<u8> {
+        // Disposable deterministic identity; never a live publisher key.
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let (signature, signer_did) = crate::crypto::domain_separated_sign(
+            &key,
+            domain,
+            &serde_json::to_vec(&payload).unwrap(),
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "payload": payload, "signature": signature, "signer_did": signer_did
+        }))
+        .unwrap()
+    }
+
+    fn binding_envelope(payload: serde_json::Value, domain: &str) -> Vec<u8> {
+        signed_envelope(7, payload, domain)
+    }
+
+    fn binding_head(release: &[u8]) -> serde_json::Value {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(release);
+        let multihash = cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice()).unwrap();
+        serde_json::json!({
+            "schema": "elastos.release.head/v1", "version": "0.7.1", "channel": "stable",
+            "latest_release_cid": cid::Cid::new_v1(0x55, multihash).to_string(),
+            "release_sha256": hex::encode(digest)
+        })
+    }
+
+    fn raw_cid(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(bytes);
+        let hash = cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice()).unwrap();
+        cid::Cid::new_v1(0x55, hash).to_string()
+    }
+
+    /// On a Windows host the update path refuses a release without an
+    /// `x86_64-windows` platform before any fetch, and writes nothing.
+    #[tokio::test]
+    async fn windows_host_refuses_a_release_without_its_platform_before_any_fetch() {
+        let release = binding_envelope(
+            serde_json::json!({
+                "schema": "elastos.release/v1", "version": "0.7.1", "channel": "stable",
+                "platforms": {"x86_64-linux": {
+                    "binary": {"cid": "binary-a", "sha256": "a".repeat(64)},
+                    "components": {"cid": "components-a", "sha256": "b".repeat(64)}
+                }}
+            }),
+            "elastos.release.v1",
+        );
+        let head_bytes = binding_envelope(binding_head(&release), "elastos.release.head.v1");
+        let did =
+            crate::crypto::encode_signing_key_did(&ed25519_dalek::SigningKey::from_bytes(&[7; 32]));
+        let head = verify_release_envelope(&head_bytes, "elastos.release.head.v1", &did).unwrap();
+        let source: TrustedSource = serde_json::from_value(serde_json::json!({
+            "name": "fixture", "publisher_dids": [did], "channel": "canary"
+        }))
+        .unwrap();
+        let release_cid = raw_cid(&release);
+        let fetch: FetchFn = Box::new(move |_| {
+            let bytes = release.clone();
+            Box::pin(async move { Ok(bytes) })
+        });
+        let data = tempfile::tempdir().unwrap();
+        let err = run_upgrade_from_head(
+            &fetch,
+            &head,
+            &head_bytes,
+            None,
+            "0.7.1",
+            &release_cid,
+            None,
+            "0.7.0",
+            &source,
+            data.path(),
+            false,
+            true,
+            false,
+            "fixture",
+            crate::setup::FirstPartyCarrierContext::Setup,
+            ApplyMode::Normal,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), "No binary CID for platform x86_64-windows");
+        assert_eq!(std::fs::read_dir(data.path()).unwrap().count(), 0);
     }
 }
