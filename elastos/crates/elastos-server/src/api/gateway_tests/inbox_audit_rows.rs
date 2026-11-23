@@ -51,6 +51,7 @@ async fn post_inbox_action(
     (status, String::from_utf8_lossy(&body).to_string())
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inbox_wallet_approval_reject_audits_acting_principal_and_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -88,6 +89,7 @@ async fn inbox_wallet_approval_reject_audits_acting_principal_and_session() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn inbox_wallet_price_deny_audits_acting_principal_and_session() {
     let dir = tempfile::tempdir().unwrap();

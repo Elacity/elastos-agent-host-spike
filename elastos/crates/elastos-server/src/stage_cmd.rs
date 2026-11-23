@@ -159,6 +159,7 @@ fn store(error: std::io::Error) -> BundleRefusal {
     BundleRefusal::Store(error.to_string())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;

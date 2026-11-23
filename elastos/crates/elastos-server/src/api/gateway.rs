@@ -70,6 +70,8 @@ mod gateway_esp;
 mod gateway_frontdoor;
 #[path = "gateway_home_agent.rs"]
 mod gateway_home_agent;
+#[path = "gateway_home_cli_mint.rs"]
+mod gateway_home_cli_mint;
 #[path = "gateway_home_external_link.rs"]
 mod gateway_home_external_link;
 #[path = "gateway_home_runtime.rs"]
@@ -159,9 +161,15 @@ pub(crate) use gateway_home_system::{
     authorize_home_service_exit, carrier_source_is_contact_of, sync_runtime_services_mailboxes,
 };
 use gateway_home_terminal::*;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(super) use gateway_home_token::agent_launch_grants_minted_for_test;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
+#[cfg(test)]
+pub(super) use gateway_home_token::issue_home_agent_launch_token_at_for_test;
+pub(super) use gateway_home_token::issue_home_agent_launch_token_with_context;
 #[cfg(test)]
 pub(super) use gateway_home_token::issue_home_launch_token_with_context;
 #[cfg(test)]
@@ -178,11 +186,11 @@ pub(super) use gateway_home_token::{
     require_home_launch_token_for_any_app_context, require_home_launch_token_for_any_context,
     require_home_page_or_cli_launch_context, require_home_projection_launch_token_context,
     require_home_runtime_wallet_authority, require_home_token, require_home_token_context,
-    require_home_viewer_launch_token_context, require_internal_shell_content_open_context,
-    require_internal_shell_launch_grant_principal, require_internal_shell_projection_context,
-    require_internal_shell_runtime_wallet_authority, require_launch_bound_token,
-    require_runtime_wallet_authority, runtime_wallet_authority, HomeLaunchContext,
-    RequiredHomeLaunchToken,
+    require_home_viewer_launch_token_context, require_internal_shell_agent_launch_grant,
+    require_internal_shell_content_open_context, require_internal_shell_launch_grant_principal,
+    require_internal_shell_projection_context, require_internal_shell_runtime_wallet_authority,
+    require_launch_bound_token, require_runtime_wallet_authority, runtime_wallet_authority,
+    HomeLaunchContext, RequiredHomeLaunchToken,
 };
 use gateway_home_update::*;
 
@@ -193,6 +201,11 @@ pub(super) use gateway_home_system_ai_provider::{
     install_venice_validate_double, OpenRouterModelsDouble, VeniceAuthDouble,
 };
 
+pub use gateway_home_cli_mint::run_exported_home_cli_launch_grant;
+use gateway_home_cli_mint::{
+    home_cli_mint_approve, home_cli_mint_begin, home_cli_mint_cancel, home_cli_mint_claim,
+    home_cli_mint_request, home_cli_mint_waiting,
+};
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
     issue_expired_home_launch_token_with_context, issue_home_launch_token,
@@ -226,6 +239,7 @@ pub(crate) use gateway_room::{
 };
 pub(crate) use gateway_server::advertised_gateway_urls;
 pub use gateway_server::start_gateway_server;
+#[cfg(unix)]
 pub(crate) use gateway_server::start_gateway_server_with_collaboration_context;
 pub(crate) use gateway_server::start_gateway_server_with_ready;
 pub use gateway_server::GatewayCollaborationContext;
@@ -400,17 +414,15 @@ pub fn issue_gateway_owned_home_cli_launch_token(
     ))
 }
 
-/// Give an authenticated Home owner a grant for the two headless Home launch
-/// operations. The gateway-owned terminal supplies the session context; the
-/// existing projection issuer supplies the signer, session check and expiry.
+/// Refuse an exported Home CLI grant. This function does not read the process
+/// environment and does not sign a launch grant.
 pub fn issue_gateway_owned_home_cli_launch_grant(
-    data_dir: &std::path::Path,
+    _data_dir: &std::path::Path,
 ) -> anyhow::Result<String> {
-    let context = gateway_owned_home_cli_launch_context_from_env(data_dir)?
-        .ok_or_else(|| anyhow::anyhow!("an authenticated Home CLI session is required"))?;
-    issue_home_cli_launch_grant_for_context(data_dir, &context)
+    anyhow::bail!("exported home cli grant requires a fresh passkey approval");
 }
 
+#[cfg(test)]
 fn issue_home_cli_launch_grant_for_context(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
@@ -739,6 +751,30 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             post(passkey_step_up_cancel).layer(DefaultBodyLimit::max(8 * 1024)),
         )
         .route(
+            "/api/home/cli-mint/request",
+            post(home_cli_mint_request).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/begin",
+            post(home_cli_mint_begin).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/approve",
+            post(home_cli_mint_approve).layer(DefaultBodyLimit::max(96 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/claim",
+            post(home_cli_mint_claim).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/cancel",
+            post(home_cli_mint_cancel).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/waiting",
+            post(home_cli_mint_waiting).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
             "/api/browser/session/request",
             post(super::browser_sessions::browser_session_request),
         )
@@ -862,6 +898,8 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route("/api/apps/system/agents/retire", post(agents_retire))
         .route("/api/apps/system/agents/rename", post(agents_rename))
         .route("/api/apps/system/agents/activate", post(agents_activate))
+        .route("/api/apps/system/agents/launch", post(agents_launch))
+        .route("/api/apps/system/agents/stop", post(agents_stop))
         .route(
             "/api/apps/system/community",
             get(system_community_membership_get).post(system_community_membership_update),
@@ -1645,4 +1683,7 @@ fn home_error_response(err: anyhow::Error) -> Response {
 mod gateway_browser_tests;
 #[cfg(test)]
 #[path = "gateway_tests/mod.rs"]
+// P2-11 step 6: tests that write state Windows refuses are cfg(unix); the
+// fixtures only they use are unused in the Windows test build.
+#[cfg_attr(not(unix), allow(dead_code, unused_imports))]
 pub(in crate::api) mod gateway_tests;

@@ -8,7 +8,8 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use elastos_runtime::primitives::audit::{AuditLog, TrustLevel};
+use elastos_runtime::primitives::audit::{AuditEvent, AuditLog, TrustLevel};
+use elastos_runtime::primitives::SecureTimestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::resource_bridge::BridgePrincipal;
@@ -105,7 +106,7 @@ pub async fn launch_capsule(
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     let path = std::path::Path::new(&req.path);
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
-    let (launcher, admission, grant_name) = match req.agent_id.as_deref() {
+    let (launcher, admission, grant_name, agent_audit) = match req.agent_id.as_deref() {
         None => {
             let (launcher, grant_name) = principal_from_launch_request(
                 data_dir.as_deref(),
@@ -113,7 +114,7 @@ pub async fn launch_capsule(
                 req.principal_id,
                 req.launch_grant,
             )?;
-            (launcher, None, grant_name)
+            (launcher, None, grant_name, None)
         }
         Some(agent_id) => {
             let data_dir = data_dir.as_deref().ok_or((
@@ -130,20 +131,23 @@ pub async fn launch_capsule(
             // and the loader; nothing reads the folder between them.
             let walked = crate::agent_admission::walk_launch(path)
                 .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-            let launcher = principal_from_capsule_name(
-                Some(data_dir),
-                &walked.manifest.name,
-                req.launch_grant,
-            )?;
+            let host_cid = walked.bundle_cid.clone();
+            let (launcher, launch_id, expires_at) =
+                agent_launch_grant(data_dir, &walked.manifest.name, agent_id, req.launch_grant)?;
             let admission = admit_agent_launch(
                 Some(data_dir),
                 walked,
-                launcher
-                    .as_ref()
-                    .map(crate::resource_bridge::BridgePrincipal::principal_str),
+                Some(launcher.principal_str()),
                 agent_id,
             )?;
-            (launcher, Some(admission), None)
+            let audit = (
+                agent_id.to_string(),
+                launcher.principal_str().to_string(),
+                host_cid,
+                launch_id,
+                expires_at,
+            );
+            (Some(launcher), Some(admission), None, Some(audit))
         }
     };
     // An admitted agent launch starts through the one entry that may hand the
@@ -154,7 +158,23 @@ pub async fn launch_capsule(
     // session. The worker changes it to `running` on `started`, and records
     // the status and cause when the guest ends.
     let started = match admission {
-        Some(admission) => runtime.start_local_admitted(path, vec![], admission).await,
+        Some(admission) => {
+            let (agent_id, owner, host_cid, launch_id, expires_at) =
+                agent_audit.as_ref().expect("agent admission has a grant");
+            runtime
+                .start_agent_once(
+                    path,
+                    admission,
+                    crate::runtime::AgentStartFacts {
+                        agent_id,
+                        owner,
+                        host_cid,
+                        launch_id,
+                        expires_at: *expires_at,
+                    },
+                )
+                .await
+        }
         None => {
             runtime
                 .start_local_with_signer(path, vec![], launcher, grant_name.as_deref())
@@ -173,13 +193,28 @@ pub async fn launch_capsule(
                 crate::runtime::Signer::Key { did } => Some(did.as_str()),
                 _ => None,
             };
-            audit_log.capsule_launch(
-                &handle.id.0,
-                &handle.manifest.name,
-                None,
-                TrustLevel::Untrusted,
-                signer_did,
-            );
+            if let Some((agent_id, owner, host_cid, launch_id, _)) = agent_audit {
+                audit_log.emit(AuditEvent::CapsuleLaunch {
+                    timestamp: SecureTimestamp::now(),
+                    capsule_id: handle.id.0.clone(),
+                    capsule_name: handle.manifest.name.clone(),
+                    cid: Some(host_cid),
+                    trust_level: TrustLevel::Untrusted,
+                    signer_did: signer_did.map(String::from),
+                    agent_id: Some(agent_id),
+                    owner: Some(owner),
+                    launch_id: Some(launch_id),
+                    session_id: Some(handle.id.0.clone()),
+                });
+            } else {
+                audit_log.capsule_launch(
+                    &handle.id.0,
+                    &handle.manifest.name,
+                    None,
+                    TrustLevel::Untrusted,
+                    signer_did,
+                );
+            }
             Ok(Json(LaunchResponse {
                 id: handle.id.0.clone(),
                 name: handle.manifest.name,
@@ -189,6 +224,37 @@ pub async fn launch_capsule(
         }
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
+}
+
+fn agent_launch_grant(
+    data_dir: &std::path::Path,
+    capsule_name: &str,
+    agent_id: &str,
+    launch_grant: Option<String>,
+) -> Result<(BridgePrincipal, String, u64), (StatusCode, String)> {
+    let grant = launch_grant
+        .filter(|grant| !grant.trim().is_empty())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "an agent launch needs its owner's launch grant".to_string(),
+        ))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-elastos-home-token",
+        HeaderValue::from_str(&grant).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "invalid launch_grant header value".to_string(),
+            )
+        })?,
+    );
+    super::gateway::require_internal_shell_agent_launch_grant(
+        data_dir,
+        &headers,
+        agent_id,
+        capsule_name,
+    )
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
 }
 
 /// Admits a launch that names a stored agent. The capsule's manifest must
@@ -228,8 +294,7 @@ fn reject_raw_launch_principal_id(principal_id: Option<&str>) -> Result<(), (Sta
     Ok(())
 }
 
-/// A launch grant names the capsule it authorizes. For an agent launch that
-/// name comes from the one walk, never from a second read of the folder.
+/// A non-Agent launch grant names the capsule it authorizes.
 fn principal_from_capsule_name(
     data_dir: Option<&std::path::Path>,
     capsule_name: &str,
@@ -361,11 +426,147 @@ pub async fn stop_capsule(
     }
 }
 
+/// Body of `POST /api/capsules/stop-agent`. The only selector is the agent
+/// id, which is the principal on the Runtime row. A capsule name is not a
+/// field: an unknown field is refused and nothing is stopped.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopAgentRequest {
+    agent_id: String,
+}
+
+#[derive(Serialize)]
+struct StoppedAgentBody {
+    session_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct StopAgentResponse {
+    stopped: Vec<StoppedAgentBody>,
+    /// `stopping` or `stopped` when this call found the sessions already
+    /// ending and did not stop a further row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    already: Option<String>,
+}
+
+/// Stops every live row whose principal is this agent. The start record is
+/// checked before the row is stopped: a missing record, or one that names
+/// another agent, is refused and that row stays up. The session's one end
+/// writes the one audit, with the reason of that end, and then drops the
+/// record. This route does not write a second one. A row is chosen by the
+/// principal. The host's capsule name is not read.
+pub async fn stop_agent_session(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    Extension(_audit_log): Extension<Arc<AuditLog>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let request = match serde_json::from_slice::<StopAgentRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            let refusal =
+                serde_json::json!({"error": "invalid_stop_request", "detail": error.to_string()});
+            return (StatusCode::BAD_REQUEST, Json(refusal)).into_response();
+        }
+    };
+    let agent_id = request.agent_id;
+    if agent_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "an agent stop needs an agent id".to_string(),
+        )
+            .into_response();
+    }
+    let ids = runtime.live_sessions_for_agent(&agent_id).await;
+    if ids.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("agent {agent_id} has no running session"),
+        )
+            .into_response();
+    }
+    let mut ready = Vec::new();
+    let mut refusal: Option<&'static str> = None;
+    for id in &ids {
+        let Some(info) = runtime.get_capsule(id).await else {
+            continue;
+        };
+        if info.ended_at.is_some() {
+            continue;
+        }
+        match runtime.agent_session(id).await {
+            Some(record) if record.agent_id == agent_id => ready.push(id.clone()),
+            Some(_) => {
+                refusal = Some("agent session record names a different agent");
+            }
+            None => {
+                refusal = Some("agent session has no start record");
+            }
+        }
+    }
+    if ready.is_empty() {
+        if let Some(reason) = refusal {
+            return (StatusCode::CONFLICT, reason.to_string()).into_response();
+        }
+        return (
+            StatusCode::OK,
+            Json(StopAgentResponse {
+                stopped: Vec::new(),
+                already: Some("stopped".to_string()),
+            }),
+        )
+            .into_response();
+    }
+    let mut stopped = Vec::with_capacity(ready.len());
+    for id in ready {
+        let matches = runtime
+            .agent_session(&id)
+            .await
+            .is_some_and(|record| record.agent_id == agent_id);
+        if !matches {
+            if let Some(info) = runtime.get_capsule(&id).await {
+                stopped.push(StoppedAgentBody {
+                    session_id: info.session_id,
+                    status: info.status,
+                });
+            }
+            continue;
+        }
+        let info = match runtime.stop_capsule_with_reason(&id, "owner").await {
+            Ok(Some(info)) => info,
+            Ok(None) => continue,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to stop agent session: {error}"),
+                )
+                    .into_response();
+            }
+        };
+        stopped.push(StoppedAgentBody {
+            session_id: info.session_id,
+            status: info.status,
+        });
+    }
+    let already = stopped.is_empty().then(|| "stopped".to_string());
+    (StatusCode::OK, Json(StopAgentResponse { stopped, already })).into_response()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::api::gateway;
     use std::future::Future;
+
+    pub(crate) fn make_admin(data_dir: &std::path::Path, principal_id: &str) {
+        let mut state = crate::auth::load_auth_state(data_dir).unwrap();
+        for principal in &mut state.principals {
+            if principal.principal_id == principal_id {
+                principal.role = crate::auth::RuntimePrincipalRole::Admin;
+            }
+        }
+        crate::auth::save_auth_state(data_dir, &state, None).unwrap();
+    }
 
     fn write_test_capsule(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let capsule_dir = dir.join(name);
@@ -437,6 +638,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_launch_rejects_raw_principal_id_even_with_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -458,6 +660,7 @@ pub(crate) mod tests {
         assert!(err.1.contains("not launch authority"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_launch_accepts_home_launch_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -480,6 +683,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_launch_rejects_grant_without_runtime_data_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -495,6 +699,7 @@ pub(crate) mod tests {
         assert_eq!(err.1, "principal launch grant unavailable");
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_launch_rejects_wrong_app_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -937,7 +1142,7 @@ pub(crate) mod tests {
         registry: Arc<elastos_runtime::provider::ProviderRegistry>,
         provider: Arc<CapturingLocalhostProvider>,
         capsule_dir: std::path::PathBuf,
-        grant: String,
+        context: gateway::HomeLaunchTokenContext,
         pub(crate) agents: Vec<String>,
         /// The stored person every agent here belongs to. It is the person
         /// `agents::create` records in each agent's `owner`.
@@ -1062,7 +1267,7 @@ pub(crate) mod tests {
             let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
             let owner = context.principal_id().to_string();
             crate::auth::store_test_principal_root_protection(&data_dir, &owner);
-            crate::agents::tests::make_admin(&data_dir, &owner);
+            make_admin(&data_dir, &owner);
             let record = crate::auth::stored_principal_record(&data_dir, &owner)
                 .unwrap()
                 .unwrap();
@@ -1276,19 +1481,6 @@ pub(crate) mod tests {
             for id in &agents {
                 agents::set_active(&data_dir, &caller, id, true, 1).unwrap();
             }
-            // A person's Home launch token is a projection under the Home
-            // capsule's authority (`gateway_home_runtime.rs:149`), which is
-            // the app the person's sign-in grant authorizes. The Runtime-local
-            // fixture has no sign-in grant apps, so its direct token stays.
-            let grant = match context.proof_binding_id() {
-                Some(_) => gateway::issue_home_projection_launch_token_with_context(
-                    &data_dir, PROBE_HOST, PROBE_HOST, context,
-                ),
-                None => {
-                    gateway::issue_home_launch_token_with_context(&data_dir, PROBE_HOST, context)
-                }
-            }
-            .unwrap();
             Self {
                 _temp: temp,
                 fixture_root,
@@ -1301,7 +1493,7 @@ pub(crate) mod tests {
                 registry,
                 provider,
                 capsule_dir,
-                grant,
+                context: context.clone(),
                 agents,
                 owner: owner.to_string(),
                 tokens: None,
@@ -1653,7 +1845,13 @@ pub(crate) mod tests {
             dir: &'a std::path::Path,
             agent_id: &'a str,
         ) -> impl Future<Output = Result<Json<LaunchResponse>, (StatusCode, String)>> + 'a {
-            let grant = self.grant.clone();
+            let grant = gateway::issue_home_agent_launch_token_with_context(
+                &self.data_dir,
+                agent_id,
+                PROBE_HOST,
+                &self.context,
+            )
+            .unwrap();
             let agent_id = agent_id.to_string();
             let data_dir = Some(self.data_dir.clone());
             let runtime = self.runtime.clone();
@@ -1923,6 +2121,7 @@ pub(crate) mod tests {
     /// own id and root, and the same holds after a stop and relaunch. Row 6b
     /// rides here too: the manifest declares the agent kind and names no id,
     /// and the audited actor is still the id the request named.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_binds_each_agents_own_principal_and_root() {
         if crate::agents::require_build().is_err() {
@@ -2048,6 +2247,7 @@ pub(crate) mod tests {
     /// object its own agent wrote: its envelope names that agent, that root
     /// and that URI, so the bytes under one root cannot be the other agent's
     /// object.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_journal_and_memory_sit_only_under_its_own_root_on_disk() {
         if crate::agents::require_build().is_err() {
@@ -2131,6 +2331,7 @@ pub(crate) mod tests {
     /// running. Two registry entries are `running` with distinct id, session
     /// and principal, and both end `stopped` with cause `completed` after
     /// their calls are granted.
+    #[cfg(unix)]
     #[tokio::test]
     async fn two_agents_resident_at_once() {
         if crate::agents::require_build().is_err() {
@@ -2241,6 +2442,7 @@ pub(crate) mod tests {
     /// Installs the launch probe as this Home's signed Agent Host, under the
     /// publisher key the release fixture already uses. Create and launch both
     /// walk this one directory.
+    #[cfg(unix)]
     fn install_probe_as_signed_agent_host() -> crate::installed_release::tests::Fixture {
         use elastos_runtime::signature::{hash_content, sign_capsule, SigningKey};
 
@@ -2418,6 +2620,7 @@ pub(crate) mod tests {
     /// instance is the other agent's id, and both run the one installed host.
     /// A created agent starts off, so the owner turns each one on through
     /// `POST /api/apps/system/agents/activate` before it launches.
+    #[cfg(unix)]
     #[tokio::test]
     async fn two_route_created_ids_one_host() {
         if crate::agents::require_build().is_err() {
@@ -2509,13 +2712,6 @@ pub(crate) mod tests {
             assert_eq!(status, StatusCode::OK, "{body}");
         }
 
-        let launch_grant = gateway::issue_home_projection_launch_token_with_context(
-            &data_dir,
-            "agent-host",
-            "agent-host",
-            &context,
-        )
-        .unwrap();
         let home = Arc::new(
             ProbeLaunch::over_home(
                 data_dir.clone(),
@@ -2534,7 +2730,13 @@ pub(crate) mod tests {
 
         let a_home = home.clone();
         let a_dir = capsule_dir.clone();
-        let a_grant = launch_grant.clone();
+        let a_grant = gateway::issue_home_agent_launch_token_with_context(
+            &data_dir,
+            &a_id,
+            "agent-host",
+            &context,
+        )
+        .unwrap();
         let a_name = a_id.clone();
         let a_task =
             tokio::spawn(async move { launch_installed(a_home, a_dir, a_grant, a_name).await });
@@ -2551,7 +2753,13 @@ pub(crate) mod tests {
 
         let b_home = home.clone();
         let b_dir = capsule_dir.clone();
-        let b_grant = launch_grant.clone();
+        let b_grant = gateway::issue_home_agent_launch_token_with_context(
+            &data_dir,
+            &b_id,
+            "agent-host",
+            &context,
+        )
+        .unwrap();
         let b_name = b_id.clone();
         let b_task =
             tokio::spawn(async move { launch_installed(b_home, b_dir, b_grant, b_name).await });
@@ -2638,6 +2846,7 @@ pub(crate) mod tests {
     /// The launch answers `starting` with its session while its guest runs; the
     /// entry is `running` from the moment the worker reports `started` until the
     /// guest ends.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn the_launch_answers_starting_and_the_entry_runs_from_the_workers_started() {
         if crate::agents::require_build().is_err() {
@@ -2683,6 +2892,7 @@ pub(crate) mod tests {
 
     /// A worker that cannot enter the guest leaves the admitted entry failed
     /// with the start error; it never reports running.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn a_pre_guest_start_failure_ends_failed_with_its_cause() {
         if crate::agents::require_build().is_err() {
@@ -2713,6 +2923,7 @@ pub(crate) mod tests {
 
     /// Dropping the route while registration waits releases the admission
     /// context and the loaded component through the launch guard.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancelling_a_launch_before_registration_releases_its_context() {
         if crate::agents::require_build().is_err() {
@@ -2757,6 +2968,7 @@ pub(crate) mod tests {
 
     /// A natural return ends the entry `stopped` with cause `completed`, and
     /// the list route carries the session and the cause.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_natural_return_ends_the_entry_stopped_with_cause_completed() {
         if crate::agents::require_build().is_err() {
@@ -2790,6 +3002,7 @@ pub(crate) mod tests {
     }
 
     /// A guest that traps ends the entry `failed` with the trap's cause.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_trap_ends_the_entry_failed_with_its_cause() {
         if crate::agents::require_build().is_err() {
@@ -2847,6 +3060,7 @@ pub(crate) mod tests {
     /// revoked, its guest ran once (five calls in one session), and it is
     /// never launched again. B, held in its own first call the whole time, is
     /// untouched and then completes.
+    #[cfg(unix)]
     #[tokio::test]
     async fn trap_recorded_once() {
         if crate::agents::require_build().is_err() {
@@ -3014,6 +3228,7 @@ pub(crate) mod tests {
     /// when the guest traps is denied by the Runtime with a reason that names
     /// the cause, and the grant it made before the trap no longer validates.
     /// A pending request of another session is left pending.
+    #[cfg(unix)]
     #[tokio::test]
     async fn failure_settles_and_revokes() {
         use elastos_runtime::capability::manager::ValidationError;
@@ -3185,6 +3400,7 @@ pub(crate) mod tests {
     /// and its one `capsule_stop` carries that cause. The Home restarted from
     /// its store and that list refuses every grant; the store alone would
     /// accept them.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unsaved_revoke_ends_the_activation_unsettled() {
         use elastos_runtime::capability::manager::ValidationError;
@@ -3270,6 +3486,7 @@ pub(crate) mod tests {
     /// Then a second run is stopped while its guest is held in its first
     /// call; the stop leaves the entry to the run's own end. Each run ends
     /// exactly once, with one cause and one `capsule_stop` that carries it.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stop_racing_a_trap_ends_once() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -3420,6 +3637,7 @@ pub(crate) mod tests {
     /// `stopped: <reason>` as its cause, one `Requested` stop is audited, and
     /// the entry is kept for its session. The other agent is untouched and
     /// completes.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_mid_compute() {
         if crate::agents::require_build().is_err() {
@@ -3534,6 +3752,7 @@ pub(crate) mod tests {
 
     /// The route's optional body: a bodyless `DELETE` records the reason
     /// `user`, as the API's earlier stop did.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bodyless_stop_records_the_user_reason() {
         if crate::agents::require_build().is_err() {
@@ -3560,6 +3779,7 @@ pub(crate) mod tests {
     /// its cause, and the request it was waiting on is denied by the Runtime
     /// with that cause. B, held in its own first call throughout, is
     /// untouched and then completes.
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_mid_wait() {
         if crate::agents::require_build().is_err() {
@@ -3656,6 +3876,7 @@ pub(crate) mod tests {
     /// `Requested` stop is audited. A stop given to the provider only once
     /// the entry is `running` (F-startskip) leaves the start function to run
     /// to its own ending, which is then the entry's.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stop_during_start_ends_it_before_run() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -3726,6 +3947,7 @@ pub(crate) mod tests {
     /// later `DELETE` with another reason answers the same and removes
     /// nothing. A request taken away before the end is recorded (F-earlydrop)
     /// sends the stop down the launcher's path, which removes the entry.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stop_racing_an_end_keeps_its_record_for_60_s() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -3823,6 +4045,7 @@ pub(crate) mod tests {
     /// text. The activation runs on with no stop recorded or audited. An
     /// empty body is still the stop with the reason `user`. A refused body
     /// read as no body (F-lenient) makes the first refusal a stop.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_malformed_stop_body_is_refused() {
         if crate::agents::require_build().is_err() {
@@ -3863,6 +4086,7 @@ pub(crate) mod tests {
     /// and both stops, and a third after the end, answer that one outcome.
     /// One stop is audited. (`runtime::tests::a_later_stop_keeps_the_first_cause`
     /// holds the rule itself.)
+    #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_stops_answer_the_first_recorded_cause() {
         use elastos_runtime::primitives::audit::StopReason;
@@ -3915,6 +4139,7 @@ pub(crate) mod tests {
 
     /// An ended entry is listed for the 60 s retention and is gone after it,
     /// read at a caller's instant rather than waited for.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_ended_entry_is_listed_for_sixty_seconds() {
         if crate::agents::require_build().is_err() {
@@ -4139,6 +4364,7 @@ pub(crate) mod tests {
     /// reason; the ask it was already granted is revoked, the one still
     /// pending is denied by the Runtime, its ceiling and provider entry are
     /// gone, a late call is refused, and its entry leaves the list at 60 s.
+    #[cfg(unix)]
     #[tokio::test]
     async fn nothing_remains_after_stop() {
         if crate::agents::require_build().is_err() {
@@ -4189,6 +4415,7 @@ pub(crate) mod tests {
     /// with the stop's cause, and the instance leaves no live grant, no
     /// pending request, no context or principal, no accepting late call and
     /// no entry after 60 s.
+    #[cfg(unix)]
     #[tokio::test]
     async fn nothing_remains_after_cancel() {
         if crate::agents::require_build().is_err() {
@@ -4241,6 +4468,7 @@ pub(crate) mod tests {
     /// another agent's stored root; the grants it had are revoked, the ask
     /// still pending is denied by the Runtime, the context and principal are
     /// gone, a late call is refused, and the entry leaves the list at 60 s.
+    #[cfg(unix)]
     #[tokio::test]
     async fn nothing_remains_after_failure() {
         if crate::agents::require_build().is_err() {
@@ -4300,6 +4528,7 @@ pub(crate) mod tests {
     /// stored root. The bridge refuses the request, nothing under Y's root is
     /// read or audited for X, and X's activation ends `failed` with that
     /// refusal as its cause.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_refuses_another_agents_stored_root() {
         if crate::agents::require_build().is_err() {
@@ -4379,6 +4608,7 @@ pub(crate) mod tests {
     /// root is an envelope on disk, and only the owner's stored key opens it.
     /// The activation ends only when the guest's own bridge read returns the
     /// bytes it wrote, so the read half is already proven by its end.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_object_is_encrypted_and_needs_the_owners_key() {
         if crate::agents::require_build().is_err() {
@@ -4460,6 +4690,7 @@ pub(crate) mod tests {
     /// stays beyond the probe host's `.../self/*` ceiling, and the traversal
     /// spellings stay outside the root. The capturing localhost double shows
     /// exactly which calls fell past the protected path.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_serves_its_own_root_on_the_component_bridge() {
         if crate::agents::require_build().is_err() {
@@ -4599,6 +4830,7 @@ pub(crate) mod tests {
     /// request, and it carries none of Y's data. Each bare spelling is also
     /// sent as the operation itself with X's held grant, and that answer
     /// carries none of Y's names, bytes or root segment either.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_is_refused_every_other_spelling_of_another_agents_root() {
         if crate::agents::require_build().is_err() {
@@ -4895,6 +5127,7 @@ pub(crate) mod tests {
     /// request, and it carries none of Y's data. Each bare spelling is also
     /// sent as the operation itself with X's held grant, and that answer
     /// carries none of Y's names, bytes or root segment either.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path() {
         if crate::agents::require_build().is_err() {
@@ -5604,6 +5837,7 @@ pub(crate) mod tests {
 
     /// A9-R clause one, ISO-journal: with both agents live, B is refused A's
     /// agent journal through the real Runtime, and A reads its own.
+    #[cfg(unix)]
     #[tokio::test]
     async fn both_resident_b_is_refused_a_journal_and_a_reads_its_own() {
         if crate::agents::require_build().is_err() {
@@ -5632,6 +5866,7 @@ pub(crate) mod tests {
 
     /// A9-R clause two, ISO-memory: with both agents live, B is refused A's
     /// `memory/notes.md`, and A reads its own.
+    #[cfg(unix)]
     #[tokio::test]
     async fn both_resident_b_is_refused_a_memory_file_and_a_reads_its_own() {
         if crate::agents::require_build().is_err() {
@@ -5660,6 +5895,7 @@ pub(crate) mod tests {
 
     /// A9-R clause three, ISO-foreign: with both agents live, B is refused a
     /// file of A's that is neither journal nor memory, and A reads its own.
+    #[cfg(unix)]
     #[tokio::test]
     async fn both_resident_b_is_refused_a_foreign_file_and_a_reads_its_own() {
         if crate::agents::require_build().is_err() {
@@ -5691,6 +5927,7 @@ pub(crate) mod tests {
     /// folder. This is the attached start route that row 4's route 4 lacks.
     /// The folder declares no agent, so this row stops at the principal rule
     /// and not at the launcher rule.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_attached_start_refuses_a_stored_agents_principal() {
         if crate::agents::require_build().is_err() {
@@ -5730,6 +5967,7 @@ pub(crate) mod tests {
     /// but its entrypoint bytes are other code. Admission compares the walk of
     /// the folder with the CID the Runtime stored at creation, so the forged
     /// receipt decides nothing. Nothing is bound and no launch is audited.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_refuses_a_forged_package_receipt() {
         use crate::agents;
@@ -5766,7 +6004,7 @@ pub(crate) mod tests {
         let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
         let owner = context.principal_id().to_string();
         crate::auth::store_test_principal_root_protection(&data_dir, &owner);
-        crate::agents::tests::make_admin(&data_dir, &owner);
+        make_admin(&data_dir, &owner);
         let record = crate::auth::stored_principal_record(&data_dir, &owner)
             .unwrap()
             .unwrap();
@@ -5839,8 +6077,10 @@ pub(crate) mod tests {
             std::fs::read(fixtures.join("bus-v1/bus-v1-conformance.component.wasm")).unwrap();
         sign(&forged_dir, "forged.component.wasm", &other_wasm);
         std::fs::write(forged_dir.join(".elastos-cid"), format!("{stored_cid}\n")).unwrap();
-        let grant =
-            gateway::issue_home_launch_token_with_context(&data_dir, PROBE_HOST, &context).unwrap();
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &data_dir, &agent, PROBE_HOST, &context,
+        )
+        .unwrap();
 
         let response = launch_capsule(
             Extension(runtime),
@@ -5878,6 +6118,7 @@ pub(crate) mod tests {
     /// one walked manifest, not against an earlier read of `capsule.json`.
     /// The stored host's own bytes are unchanged; a grant that names another
     /// capsule is refused before admission and before any principal binds.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_refuses_a_grant_for_another_capsule() {
         if crate::agents::require_build().is_err() {
@@ -5930,6 +6171,7 @@ pub(crate) mod tests {
     /// can: a signer key that does not decode, a signature that does not
     /// verify, and a signature by a key this Home does not trust. Each gives
     /// the one refusal, and each takes the same steps before it.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_route_refuses_three_slot_signature_failures_with_the_same_work() {
         use elastos_compute::providers::ComponentProvider;
@@ -5999,7 +6241,7 @@ pub(crate) mod tests {
         let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
         let owner = context.principal_id().to_string();
         crate::auth::store_test_principal_root_protection(&data_dir, &owner);
-        crate::agents::tests::make_admin(&data_dir, &owner);
+        make_admin(&data_dir, &owner);
         let grant =
             gateway::issue_home_launch_token_with_context(&data_dir, name, &context).unwrap();
 
@@ -6088,6 +6330,7 @@ pub(crate) mod tests {
     /// Host's byte CID still loads through the real strict parser, and every
     /// launch of it is refused by name. The missing CID is never re-derived
     /// from `.elastos-cid` or from the release record.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_older_agent_record_without_byte_identity_refuses_launch() {
         if crate::agents::require_build().is_err() {
@@ -6155,6 +6398,7 @@ pub(crate) mod tests {
     /// A capsule whose manifest does not declare an agent cannot be launched
     /// as one, whatever the request names or the person owns. With agents off
     /// the launch is refused before any folder is read, by name.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_capsule_that_does_not_declare_an_agent_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -6228,6 +6472,7 @@ pub(crate) mod tests {
     /// Row 8: the record of a real bridge call from an admitted agent is the
     /// agent as actor (`principal_id`) and the person it acts for (the owner),
     /// named in the existing `reason` field as `owner=<id>`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bridge_call_from_an_admitted_agent_names_the_agent_and_its_owner() {
         if crate::agents::require_build().is_err() {
@@ -6282,6 +6527,7 @@ pub(crate) mod tests {
     /// `launch_capsule` without its launcher. A request that names the agent
     /// and holds no grant stops at admission; a request that names no agent
     /// stops at the start, because the manifest declares one.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_without_a_grant_refuses_on_launch_capsule() {
         if crate::agents::require_build().is_err() {
@@ -6333,6 +6579,7 @@ pub(crate) mod tests {
     /// Row 5, entrance two: the attach route. `run_cmd` and `capsule_cmd`
     /// attach a component with `Runtime::run_local`, which has no launcher and
     /// no admission context, so a manifest that declares an agent is refused.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_component_attached_without_an_admitted_launch_refuses_an_agent_host() {
         if crate::agents::require_build().is_err() {
@@ -6358,6 +6605,7 @@ pub(crate) mod tests {
     /// Row 5: unsigned. The same attach start of an unsigned copy of the Agent
     /// Host refuses by the signature rule before any launcher question, and
     /// nothing starts.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unsigned_agent_host_refuses_the_attach_route_by_name() {
         if crate::agents::require_build().is_err() {
@@ -6394,6 +6642,7 @@ pub(crate) mod tests {
     /// Row 5: an agent retired or unknown. A retired agent still holds its id
     /// and root; both spellings of "no such agent of yours" refuse the launch
     /// with the same literal, and nothing starts.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_retired_or_unknown_agent_refuses_its_launch() {
         use crate::agents;
@@ -6434,6 +6683,7 @@ pub(crate) mod tests {
     /// Row 5: the launcher is a stored person whose current protection is
     /// gone. The agent's data key cannot open, so admission refuses before
     /// anything starts and mints nothing.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_agent_launch_refuses_an_owner_without_current_protection() {
         if crate::agents::require_build().is_err() {
@@ -6464,6 +6714,7 @@ pub(crate) mod tests {
     /// Row 6, second half: a manifest claim that names another agent's root
     /// neither selects the actor nor moves its root. The actor is the id
     /// admission recorded, and every call names that agent's own root.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_manifest_claim_naming_another_agents_root_leaves_the_actors_id() {
         if crate::agents::require_build().is_err() {
@@ -6667,6 +6918,7 @@ pub(crate) mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn over_cap_refused_before_dispatch() {
         if crate::agents::require_build().is_err() {
@@ -6688,6 +6940,7 @@ pub(crate) mod tests {
         assert!(outcome.contains("model_budget_exceeded"), "{outcome}");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn resident_create_after_launch_returns_is_reserved() {
         if crate::agents::require_build().is_err() {
@@ -6715,6 +6968,7 @@ pub(crate) mod tests {
         assert_eq!(create_calls(&model).len(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn retry_not_double_charged() {
         if crate::agents::require_build().is_err() {
@@ -6741,6 +6995,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn changed_offer_retry_refused_before_dispatch() {
         if crate::agents::require_build().is_err() {
@@ -6784,6 +7039,7 @@ pub(crate) mod tests {
         assert_eq!(calls[0]["offer_id"], "offer:fixture");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn changed_revision_retry_refused_before_dispatch() {
         if crate::agents::require_build().is_err() {
@@ -6826,6 +7082,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_creates_share_cap() {
         if crate::agents::require_build().is_err() {
@@ -6880,6 +7137,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn b_unaffected_by_a_exhaustion() {
         if crate::agents::require_build().is_err() {
@@ -6913,6 +7171,7 @@ pub(crate) mod tests {
         assert_eq!(calls[1]["runtime_binding"]["principal_id"], b);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn guest_cannot_raise_cap() {
         if crate::agents::require_build().is_err() {
@@ -6940,6 +7199,7 @@ pub(crate) mod tests {
 
     /// An admitted agent whose signed manifest asks for no model tokens cannot
     /// reach the model. The provider records no call.
+    #[cfg(unix)]
     #[tokio::test]
     async fn no_ask_no_model() {
         if crate::agents::require_build().is_err() {
@@ -6960,6 +7220,7 @@ pub(crate) mod tests {
     /// a larger ask. The body here names 0, which would refuse the call if the
     /// decision read it. The call still reaches the provider, and the Runtime
     /// map still holds the signed ceiling.
+    #[cfg(unix)]
     #[tokio::test]
     async fn bridge_holds_signed_ceiling() {
         if crate::agents::require_build().is_err() {
@@ -7001,6 +7262,7 @@ pub(crate) mod tests {
 
     /// An admitted agent with a positive signed ceiling reaches the model.
     /// The provider records one call.
+    #[cfg(unix)]
     #[tokio::test]
     async fn positive_ceiling_reaches_model() {
         if crate::agents::require_build().is_err() {
@@ -7018,6 +7280,7 @@ pub(crate) mod tests {
     /// records the file's own object and only the Runtime's `op`. The `invoke`
     /// line beside it still sends `{"path": …}`, so the wrapper the fixture
     /// has always sent is unchanged.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_plan_send_line_sends_the_body_files_own_bytes() {
         if crate::agents::require_build().is_err() {
@@ -7092,7 +7355,7 @@ pub(crate) mod tests {
             "the body file's text arrives intact"
         );
     }
-
+    #[cfg(unix)]
     /// A signed component that declares no agent has no ceiling entry, and
     /// its model invoke still reaches the provider. One call is recorded.
     #[tokio::test]
@@ -7202,6 +7465,519 @@ pub(crate) mod tests {
             vec![Vec::<(String, u64)>::new()],
             "a non-agent has no ceiling entry while the model call runs"
         );
+    }
+
+    async fn post_agent_grant(
+        home: &ProbeLaunch,
+        agent_id: &str,
+        grant: &str,
+    ) -> (StatusCode, String) {
+        use axum::{body::Body, http::Request, routing::post};
+        use tower::ServiceExt;
+        let app = axum::Router::new()
+            .route("/api/capsules", post(launch_capsule))
+            .layer(Extension(Some(home.data_dir.clone())))
+            .layer(Extension(home.audit_log.clone()))
+            .layer(Extension(home.runtime.clone()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capsules")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "path": home.capsule_dir,
+                            "agent_id": agent_id,
+                            "launch_grant": grant,
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn agent_launch_selected_resource_and_short_lifetime_guard_the_router() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a", "b"]).await;
+        let a = &home.agents[0];
+        let b = &home.agents[1];
+        let bound = |id: &str| {
+            gateway::issue_home_agent_launch_token_with_context(
+                &home.data_dir,
+                id,
+                PROBE_HOST,
+                &home.context,
+            )
+            .unwrap()
+        };
+        let other_agent = bound(b);
+        let host_only = gateway::issue_home_launch_token_with_context(
+            &home.data_dir,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let hop_grant = gateway::issue_home_projection_launch_token_with_context(
+            &home.data_dir,
+            PROBE_HOST,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let now = crate::auth::now_ts();
+        let overlong = gateway::issue_home_agent_launch_token_at_for_test(
+            &home.data_dir,
+            a,
+            PROBE_HOST,
+            &home.context,
+            now,
+            now + 61,
+        )
+        .unwrap();
+        let expired = gateway::issue_home_agent_launch_token_at_for_test(
+            &home.data_dir,
+            a,
+            PROBE_HOST,
+            &home.context,
+            now - 61,
+            now - 1,
+        )
+        .unwrap();
+        for (case, grant) in [
+            ("other agent", other_agent),
+            ("host only", host_only),
+            ("12 hour hop", hop_grant),
+            ("over 60 seconds", overlong),
+            ("expired", expired),
+        ] {
+            let (status, body) = post_agent_grant(&home, a, &grant).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {body}");
+            if case == "expired" {
+                assert!(body.contains("expired"), "{case}: {body}");
+            }
+            assert!(
+                home.runtime.list_capsules().await.is_empty(),
+                "{case} started a guest"
+            );
+        }
+        let good = bound(a);
+        let (status, body) = post_agent_grant(&home, a, &good).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["status"], "starting");
+        assert_eq!(home.runtime.list_capsules().await.len(), 1);
+        let event = home.audit_log.recent_events(1).pop().unwrap();
+        let audit = serde_json::to_value(event).unwrap();
+        assert_eq!(audit["type"], "capsule_launch");
+        assert_eq!(audit["agent_id"], a.as_str());
+        assert_eq!(audit["owner"], home.owner);
+        assert_eq!(audit["session_id"], answer["session_id"]);
+        assert!(audit["cid"].as_str().is_some_and(|cid| !cid.is_empty()));
+        assert!(audit["launch_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("launch:")));
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let ended = home
+            .wait_ended(answer["session_id"].as_str().unwrap())
+            .await;
+        assert_eq!(ended.cause.as_deref(), Some("completed"), "the guest ran");
+        grants.abort();
+    }
+
+    /// The router row above refuses an already-expired token at the gateway
+    /// (`home launch token expired`) and never calls `start_agent_once`. This
+    /// row verifies a grant while that check still accepts it, then calls the
+    /// Runtime gate once the same `expires_at` is in the past.
+    #[tokio::test]
+    async fn agent_launch_grant_past_expiry_is_refused_at_the_runtime_gate() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = &home.agents[0];
+        let issued_at = crate::auth::now_ts();
+        // Inside the 60-second agent cap, and long enough that verification
+        // finishes while the grant is still valid. The gate then waits out
+        // this same lifetime on the wall clock.
+        let expires_at = issued_at + 2;
+        let grant = gateway::issue_home_agent_launch_token_at_for_test(
+            &home.data_dir,
+            agent,
+            PROBE_HOST,
+            &home.context,
+            issued_at,
+            expires_at,
+        )
+        .unwrap();
+        let (launcher, launch_id, verified_exp) =
+            super::agent_launch_grant(&home.data_dir, PROBE_HOST, agent, Some(grant))
+                .expect("the grant is valid when the gateway verifies it");
+        assert_eq!(verified_exp, expires_at);
+        assert!(
+            verified_exp > crate::auth::now_ts(),
+            "verification finished before the grant expired"
+        );
+        let principal = launcher.principal_str().to_string();
+        let walked = crate::agent_admission::walk_launch(&home.capsule_dir).unwrap();
+        let admission = super::admit_agent_launch(
+            Some(&home.data_dir),
+            walked,
+            Some(principal.as_str()),
+            agent,
+        )
+        .expect("the stored agent is admitted");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if verified_exp <= now {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the wall clock did not reach the verified expiry"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let err = home
+            .runtime
+            .start_agent_once(
+                &home.capsule_dir,
+                admission,
+                crate::runtime::AgentStartFacts {
+                    agent_id: agent,
+                    owner: principal.as_str(),
+                    host_cid: "cid",
+                    launch_id: &launch_id,
+                    expires_at: verified_exp,
+                },
+            )
+            .await
+            .expect_err("the runtime gate refuses the expired grant");
+        match err {
+            elastos_common::ElastosError::InvalidManifest(message) => {
+                assert_eq!(message, "agent launch grant expired");
+            }
+            other => panic!("expected the runtime expiry refusal, got {other}"),
+        }
+        assert!(
+            home.runtime.list_capsules().await.is_empty(),
+            "an expired grant started a guest"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_launch_id_is_one_use_after_the_guest_ends() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = &home.agents[0];
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let (status, body) = post_agent_grant(&home, agent, &grant).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let ended = home
+            .wait_ended(answer["session_id"].as_str().unwrap())
+            .await;
+        assert_eq!(
+            ended.cause.as_deref(),
+            Some("completed"),
+            "the first guest ran"
+        );
+        grants.abort();
+        let (status, body) = post_agent_grant(&home, agent, &grant).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "replayed launch_id: {body}"
+        );
+        assert!(body.contains("already used"), "{body}");
+        assert_eq!(
+            home.runtime.list_capsules().await.len(),
+            1,
+            "replay started no guest"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_launch_double_click_with_one_grant_starts_one_guest() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = &home.agents[0];
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let (first, second) = tokio::join!(
+            post_agent_grant(&home, agent, &grant),
+            post_agent_grant(&home, agent, &grant)
+        );
+        let (success, refusal) = match (first, second) {
+            ((StatusCode::OK, success), (StatusCode::BAD_REQUEST, refusal))
+            | ((StatusCode::BAD_REQUEST, refusal), (StatusCode::OK, success)) => (success, refusal),
+            other => panic!("double click outcomes: {other:?}"),
+        };
+        assert!(refusal.contains("already used"), "{refusal}");
+        let answer: serde_json::Value = serde_json::from_str(&success).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if !home.pending_store.list_pending().await.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first guest remains live in its bridge call");
+        assert_eq!(
+            home.runtime.list_capsules().await.len(),
+            1,
+            "double click started only one guest"
+        );
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        home.wait_ended(answer["session_id"].as_str().unwrap())
+            .await;
+        grants.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_launch_end_records_the_real_reason_and_drops_the_session() {
+        use elastos_runtime::primitives::audit::{AuditEvent, StopReason};
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = &home.agents[0];
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let (status, body) = post_agent_grant(&home, agent, &grant).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let session = answer["session_id"].as_str().unwrap().to_string();
+        home.wait_pending(&session).await;
+        assert!(
+            home.runtime.agent_session(&session).await.is_some(),
+            "the running guest has no start record"
+        );
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let ended = home.wait_ended(&session).await;
+        grants.abort();
+        assert_eq!(ended.cause.as_deref(), Some("completed"));
+        // `ended_at` is published before the start record is removed, so the
+        // wait can return in that gap. The record is gone once the end returns.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if home.runtime.agent_session(&session).await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a guest that ended on its own kept its start record");
+        let stops: Vec<_> = home
+            .audit_log
+            .recent_events(usize::MAX)
+            .into_iter()
+            .filter_map(|event| match event {
+                AuditEvent::CapsuleStop {
+                    capsule_id,
+                    reason,
+                    agent_id,
+                    owner,
+                    cid,
+                    launch_id,
+                    session_id,
+                    ..
+                } if capsule_id == session => {
+                    Some((reason, agent_id, owner, cid, launch_id, session_id))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stops.len(),
+            1,
+            "the guest's own end wrote one stop: {stops:?}"
+        );
+        assert!(
+            matches!(stops[0].0, StopReason::Completed),
+            "a guest that ended on its own was audited as requested: {stops:?}"
+        );
+        assert_eq!(stops[0].1.as_deref(), Some(agent.as_str()));
+        assert_eq!(stops[0].2.as_deref(), Some(home.owner.as_str()));
+        assert!(stops[0].3.as_ref().is_some_and(|cid| !cid.is_empty()));
+        assert!(stops[0]
+            .4
+            .as_ref()
+            .is_some_and(|id| id.starts_with("launch:")));
+        assert_eq!(stops[0].5.as_deref(), Some(session.as_str()));
+        let response = stop_agent_session(
+            Extension(home.runtime.clone()),
+            Extension(home.audit_log.clone()),
+            axum::body::Bytes::from(serde_json::json!({ "agent_id": agent }).to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let again = home.audit_log.recent_events(usize::MAX).into_iter().filter(|event| {
+            matches!(event, AuditEvent::CapsuleStop { capsule_id, .. } if capsule_id == &session)
+        }).count();
+        assert_eq!(
+            again, 1,
+            "a stop after the guest ended wrote another record"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_launch_stop_route_follows_the_build() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use elastos_runtime::capability::{
+            CapabilityManager, CapabilityStore, PendingRequestStore,
+        };
+        use elastos_runtime::primitives::metrics::MetricsManager;
+        use elastos_runtime::session::SessionRegistry;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            None,
+        ));
+        let audit = Arc::new(AuditLog::new());
+        let sessions = Arc::new(SessionRegistry::new(audit.clone()));
+        let shell = sessions
+            .create_session(elastos_runtime::session::SessionType::Shell, None)
+            .await;
+        let store = Arc::new(CapabilityStore::new());
+        let manager = Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit));
+        let app = crate::api::server::tests::test_server(
+            runtime,
+            sessions,
+            manager,
+            store,
+            pending,
+            Some(dir.path().to_path_buf()),
+        );
+        // A shell session gets past the router's auth. An empty body then
+        // reaches the stop handler only when that route is mounted. An
+        // unmatched path on this router is 404, or 405 where `/:id` is the
+        // only capsules path.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capsules/stop-agent")
+                    .header("content-type", "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {}", shell.token),
+                    )
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        if crate::agents::build_allows() {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+            assert!(
+                text.contains("invalid_stop_request"),
+                "the agents build did not run the stop handler: {status} {text}"
+            );
+        } else {
+            assert!(
+                status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED,
+                "a build without agents mounted stop-agent: {status} {text}"
+            );
+            assert!(
+                !text.contains("invalid_stop_request"),
+                "a build without agents ran the stop handler: {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_launch_feature_off_refuses_before_start() {
+        use crate::runtime::tests::test_runtime;
+        if crate::agents::require_build().is_ok() {
+            return;
+        }
+        use axum::{body::Body, http::Request, routing::post};
+        use tower::ServiceExt;
+        let (runtime, temp) = test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let app = axum::Router::new()
+            .route("/api/capsules", post(launch_capsule))
+            .layer(Extension(Some(temp.path().to_path_buf())))
+            .layer(Extension(Arc::new(AuditLog::new())))
+            .layer(Extension(runtime.clone()));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capsules")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"path":"unused", "agent_id":"agent:v2:test"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(runtime.list_capsules().await.is_empty());
     }
 }
 

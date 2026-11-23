@@ -1338,6 +1338,7 @@ fn canonical_state_bytes(state: &PresenceState) -> anyhow::Result<Vec<u8>> {
     Ok(serde_json::to_vec(&serde_json::to_value(state)?)?)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;

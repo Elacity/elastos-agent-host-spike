@@ -1,8 +1,8 @@
 //! Identity files below the operator-selected, trusted Runtime data root.
-//! Unix uses descriptor-bound paths. Other hosts retain the existing path/ACL
-//! model; that adapter is not sufficient for secure public owner enrollment.
-//! The stable identity lock orders key creation and credential mutations. Callers
-//! must release it before taking an auth-state lock, or acquire auth before identity.
+//! Unix uses descriptor-bound paths. Windows refuses identity files until owner,
+//! no-follow, and handle identity exist. The stable identity lock orders key
+//! creation and credential mutations. Callers must release it before taking an
+//! auth-state lock, or acquire auth before identity.
 
 #[cfg(unix)]
 use anyhow::Context;
@@ -197,16 +197,17 @@ pub(super) enum SaveFault {
     AfterReplace,
 }
 
-// Compile-time adapter for existing non-Unix identity use. This intentionally
-// makes no descriptor-relative path or parent-directory durability guarantee.
+// Unix tests keep this path adapter. Windows refuses open, read, replace, and
+// sync: the adapter has no owner-only mode, no-follow open, or parent sync.
 #[cfg(any(not(unix), test))]
 mod portable {
     #[cfg(test)]
     use super::SaveFault;
+    #[cfg(unix)]
+    use std::io::{Read, Write};
     use std::{
         ffi::CStr,
         fs::File,
-        io::{Read, Write},
         path::{Path, PathBuf},
     };
 
@@ -224,6 +225,7 @@ mod portable {
             Self::open_mode(data_dir, false)
         }
 
+        #[cfg(unix)]
         fn open_mode(data_dir: &Path, create: bool) -> anyhow::Result<Self> {
             let directory = data_dir.join("identity");
             if create {
@@ -249,6 +251,7 @@ mod portable {
             })
         }
 
+        #[cfg(unix)]
         pub(crate) fn read(&self, name: &CStr) -> anyhow::Result<Option<Vec<u8>>> {
             let mut file = match File::open(self.directory.join(name.to_str()?)) {
                 Ok(file) => file,
@@ -264,12 +267,14 @@ mod portable {
             Ok(Some(std::mem::take(&mut *bytes)))
         }
 
+        #[cfg(unix)]
         pub(crate) fn sync(&self) -> anyhow::Result<()> {
             // std does not expose a portable parent-directory sync operation.
             std::fs::metadata(&self.directory)?;
             Ok(())
         }
 
+        #[cfg(unix)]
         pub(crate) fn replace(
             &self,
             name: &CStr,
@@ -300,8 +305,43 @@ mod portable {
             }
             result
         }
+
+        #[cfg(not(unix))]
+        fn open_mode(_data_dir: &Path, _create: bool) -> anyhow::Result<Self> {
+            Err(unsupported_identity_files())
+        }
+
+        #[cfg(not(unix))]
+        pub(crate) fn read(&self, _name: &CStr) -> anyhow::Result<Option<Vec<u8>>> {
+            Err(unsupported_identity_files())
+        }
+
+        #[cfg(not(unix))]
+        pub(crate) fn sync(&self) -> anyhow::Result<()> {
+            Err(unsupported_identity_files())
+        }
+
+        #[cfg(not(unix))]
+        pub(crate) fn replace(
+            &self,
+            _name: &CStr,
+            _bytes: &[u8],
+            #[cfg(test)] _fault: Option<SaveFault>,
+        ) -> anyhow::Result<()> {
+            Err(unsupported_identity_files())
+        }
     }
 
+    #[cfg(not(unix))]
+    fn unsupported_identity_files() -> anyhow::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported on this platform",
+        )
+        .into()
+    }
+
+    #[cfg(unix)]
     #[test]
     fn portable_existing_reader_requires_state_without_creating_it() {
         let root = tempfile::tempdir().unwrap();
@@ -319,6 +359,7 @@ mod portable {
         assert!(!lock.exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn portable_adapter_locks_and_replaces_without_changing_format() {
         let root = tempfile::tempdir().unwrap();
@@ -353,6 +394,40 @@ mod portable {
                 .ends_with(".tmp")));
         drop(files);
         other.try_lock().unwrap();
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn windows_identity_files_refuse_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let Err(opened) = IdentityFiles::open(root.path()) else {
+            panic!("identity files opened on a platform without owner checks");
+        };
+        assert_eq!(
+            opened
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Unsupported)
+        );
+        assert!(opened.to_string().contains("unsupported on this platform"));
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+
+        let files = IdentityFiles {
+            directory: root.path().to_path_buf(),
+            _lock: File::create(root.path().join("lock")).unwrap(),
+        };
+        for err in [
+            files.read(c"device.key").unwrap_err(),
+            files.replace(c"device.key", &[7; 32], None).unwrap_err(),
+            files.sync().unwrap_err(),
+        ] {
+            assert!(
+                err.to_string().contains("unsupported on this platform"),
+                "{err}"
+            );
+        }
+        assert!(!root.path().join("identity").exists());
+        assert!(!root.path().join("device.key").exists());
     }
 }
 

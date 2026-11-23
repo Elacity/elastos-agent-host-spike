@@ -2583,7 +2583,7 @@ mod tests {
         assert!(started.elapsed() >= OPERATOR_REQUEST_WAIT - Duration::from_millis(100));
         drop(send);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn operator_stream_audits_verified_requests_only() {
         let dir = tempfile::tempdir().unwrap();

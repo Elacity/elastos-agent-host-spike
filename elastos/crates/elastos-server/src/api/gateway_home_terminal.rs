@@ -2,6 +2,7 @@ use super::*;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex as StdMutex, OnceLock};
@@ -9,7 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use rand::RngCore;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
+#[cfg(unix)]
+use tokio::process::Command;
 use tokio::sync::{broadcast, watch, Mutex, Notify};
 
 #[cfg(unix)]
@@ -247,6 +250,8 @@ struct HomeTerminalSession {
 enum HomeTerminalInput {
     #[cfg(unix)]
     Pty(AsyncFd<File>),
+    #[cfg(windows)]
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -950,6 +955,11 @@ fn open_home_terminal_pty(size: HomeTerminalSize) -> anyhow::Result<HomeTerminal
 impl HomeTerminalInput {
     async fn write_all(&mut self, mut data: &[u8], closed: &watch::Sender<bool>) -> io::Result<()> {
         match self {
+            #[cfg(windows)]
+            HomeTerminalInput::Unsupported => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Home terminal input is unsupported on Windows",
+            )),
             #[cfg(unix)]
             HomeTerminalInput::Pty(file) => {
                 let mut closed = closed.subscribe();
@@ -976,6 +986,11 @@ impl HomeTerminalInput {
 
     fn resize(&mut self, size: HomeTerminalSize) -> io::Result<()> {
         match self {
+            #[cfg(windows)]
+            HomeTerminalInput::Unsupported => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Home terminal resize is unsupported on Windows",
+            )),
             #[cfg(unix)]
             HomeTerminalInput::Pty(file) => {
                 let winsize = libc::winsize {
@@ -1961,6 +1976,7 @@ fn now_unix_ms() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;

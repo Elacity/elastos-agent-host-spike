@@ -68,6 +68,7 @@ async fn presence_steps(steps: &mut Steps, state: &GatewayState, ctx: &HomeLaunc
     steps.check("read presence state: always", read == Some("always"), &read);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
 async fn r8c_child_presence_request_and_grant_under_the_parent_root() {
@@ -91,6 +92,7 @@ async fn r8c_child_presence_request_and_grant_under_the_parent_root() {
     steps.finish();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn r8c_control_presence_request_and_grant_under_the_stored_persons_root() {
     let control = control(CHAT_ROOM_CAPSULE_ID);

@@ -57,6 +57,9 @@ pub enum ReplayClaimError {
     AlreadyClaimed,
     #[error("atomic replay storage is unavailable")]
     Unavailable,
+    #[cfg(windows)]
+    #[error("atomic replay storage is unsupported on Windows")]
+    UnsupportedOnWindows,
 }
 
 /// Runtime/node integration must implement atomic insert-if-absent semantics.

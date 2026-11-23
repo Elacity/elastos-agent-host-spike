@@ -2,6 +2,7 @@
 """Run journeys against this job's installed Home; save only public proof."""
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -1085,21 +1086,42 @@ def process_rows():
     return rows
 
 
+def runs_installed_provider(pid, command, installed):
+    """Identify an installed provider by its argv path or by /proc/<pid>/exe."""
+    if command.startswith(installed):
+        return True
+    try:
+        executable = os.readlink(Path("/proc") / str(pid) / "exe")
+    except OSError as error:
+        # A missing /proc entry is ENOENT or ESRCH (macOS has no /proc). EACCES/EPERM is
+        # another user's process (e.g. root on a CI runner): the installed provider runs
+        # as this job's user, so a process we may not inspect is never it.
+        if error.errno in (errno.ENOENT, errno.ESRCH, errno.EACCES, errno.EPERM):
+            return False
+        raise
+    return os.path.realpath(executable) == os.path.realpath(installed)
+
+
 def owned_processes(rows, runtime_pid, data):
     owned = {}
+    provider = str(data / "bin/model-provider")
     root_owned = rows.get(runtime_pid, {}).get("command", "").startswith(str(data / "bin/elastos"))
     for pid, row in rows.items():
         command = row["command"]
-        path_owned = command.startswith(str(data / "bin") + "/") or command.startswith(str(data / "libexec") + "/")
+        provider_process = runs_installed_provider(pid, command, provider)
+        path_owned = (provider_process
+                      or command.startswith(str(data / "bin") + "/")
+                      or command.startswith(str(data / "libexec") + "/"))
         parent, visited = pid, set()
         while parent in rows and parent not in visited and parent != runtime_pid:
             visited.add(parent)
             parent = rows[parent]["ppid"]
         if not path_owned and (not root_owned or parent != runtime_pid):
             continue
+        # The guard re-execs model-provider, so the flag stays ahead of the executable.
         role = ("runtime" if pid == runtime_pid else
                 "guard" if " --internal-local-llama-guard" in command else
-                "model_provider" if command.startswith(str(data / "bin/model-provider")) else
+                "model_provider" if provider_process else
                 "llama_server" if "/llama-server" in command else "other")
         owned[pid] = dict(row, role=role)
     return owned

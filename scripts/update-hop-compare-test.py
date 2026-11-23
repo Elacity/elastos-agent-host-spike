@@ -1391,6 +1391,8 @@ class CliFixtureTests(unittest.TestCase):
             self.manifest["initial_home"] = {"entrypoint": "capsules/home/browser/index.html", "files": sorted(mapping)}
         self.manifest["holder"]["content"] = {cid: relative for cid, relative in self.manifest["holder"]["content"].items()
                                               if self.manifest["files"][relative].get("cid") == cid}
+        # The signed components name this artifact. The holder must serve those bytes.
+        self.manifest["holder"]["files"][observer.CLI_DATA + "/bin/ipfs-provider"] = mapping["bin/ipfs-provider"]
         self.freeze()
 
     def test_setup_archive_and_artifact_closure_are_deterministic_and_admitted(self):
@@ -2790,6 +2792,20 @@ class CliFixtureTests(unittest.TestCase):
                 stdout, stderr = "", ""
                 args = argv[1:]
                 if args[0] == "gateway":
+                    release_path = self.home / observer.CLI_DATA / "installation/release.json"
+                    if not release_path.is_file():
+                        raise ValueError("holder has no signed release for ipfs-provider")
+                    signed = json.loads(release_path.read_bytes())
+                    platform_info = signed["payload"]["platforms"][manifest["platform"]]
+                    served = self.home / ".local/bin/elastos"
+                    served_components = self.home / observer.CLI_DATA / "components.json"
+                    if (platform_info["binary"]["sha256"] != observer.digest(served)
+                            or platform_info["components"]["sha256"] != observer.digest(served_components)):
+                        raise ValueError("holder signed release does not bind the Runtime and components it serves")
+                    trusted = observer.read(self.home / observer.CLI_DATA / "sources.json")["sources"][0]
+                    if (trusted["publisher_dids"] != [manifest["signer_did"]]
+                            or trusted["install_path"] != str(served.resolve())):
+                        raise ValueError("holder trusted source is not its signed release")
                     config = (holder_data / "config.toml").read_text()
                     # Model the actual public-bootstrap gate; mocks cannot supply it for free.
                     if 'gateway_public_publisher_bootstrap = true\n' not in config:
@@ -3315,6 +3331,105 @@ class CliFixtureTests(unittest.TestCase):
             self.assertEqual(server.fallback_requests, 1)
         finally:
             server.close()
+
+    def place_holder(self, holder, phase, provider=None):
+        publication = self.manifest["publications"][phase]
+        binary = holder / ".local/bin/elastos"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes((self.root / publication["binary"]).read_bytes())
+        data = holder / observer.CLI_DATA
+        (data / "bin").mkdir(parents=True, exist_ok=True)
+        (data / "components.json").write_bytes((self.root / publication["components"]).read_bytes())
+        if provider is not None:
+            (data / "bin/ipfs-provider").write_bytes(provider)
+
+    def test_holder_installs_the_signed_release_of_the_runtime_it_serves(self):
+        holder = self.root / "signed-old"
+        self.place_holder(holder, "old")
+        observer.cli_install_holder_signed_release(holder, self.root, self.manifest)
+        data = holder / observer.CLI_DATA
+        publication = self.manifest["publications"]["old"]
+        self.assertEqual((data / "installation/release.json").read_bytes(), (self.root / publication["release"]).read_bytes())
+        self.assertEqual((data / "installation/release-head.json").read_bytes(), (self.root / publication["head"]).read_bytes())
+        source = observer.read(data / "sources.json")["sources"][0]
+        self.assertEqual(source["publisher_dids"], [self.manifest["signer_did"]])
+        self.assertEqual(source["installed_version"], self.manifest["old"]["version"])
+        self.assertNotEqual(source["installed_version"], observer.cli_phase_version(self.manifest, "wrong-version"))
+        self.assertEqual(source["install_path"], str((holder / ".local/bin/elastos").resolve()))
+        self.assertEqual(source["head_cid"], self.manifest["files"][publication["head"]]["cid"])
+        self.assertEqual((data / "installation").stat().st_mode & 0o777, 0o700)
+        self.assertEqual((data / "installation/release.json").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((data / "sources.json").stat().st_mode & 0o777, 0o600)
+
+    def test_production_holder_prefers_the_new_signed_release(self):
+        holder = self.root / "signed-new"
+        self.place_holder(holder, "new")
+        observer.cli_install_holder_signed_release(holder, self.root, self.manifest)
+        source = observer.read(holder / observer.CLI_DATA / "sources.json")["sources"][0]
+        self.assertEqual(source["installed_version"], self.manifest["new"]["version"])
+        self.assertEqual((holder / observer.CLI_DATA / "installation/release.json").read_bytes(),
+                         (self.root / self.manifest["publications"]["new"]["release"]).read_bytes())
+
+    def test_holder_without_a_matching_signed_release_is_refused(self):
+        holder = self.root / "signed-bad"
+        self.place_holder(holder, "old")
+        (holder / ".local/bin/elastos").write_bytes(b"not a signed runtime")
+        with self.assertRaisesRegex(ValueError, "no signed release"):
+            observer.cli_install_holder_signed_release(holder, self.root, self.manifest)
+        self.assertFalse((holder / observer.CLI_DATA / "installation").exists())
+        self.assertFalse((holder / observer.CLI_DATA / "sources.json").exists())
+
+    def test_ipfs_provider_bytes_must_match_the_signed_components(self):
+        provider = b"signed ipfs provider"
+        platform = observer.cli_component_platform(self.manifest["platform"])
+        document = observer.cli_json(self.root / self.manifest["publications"]["new"]["components"])
+        document["external"]["ipfs-provider"] = {"install_path": "bin/ipfs-provider", "platforms": {platform: {
+            "checksum": "sha256:" + hashlib.sha256(provider).hexdigest(), "install_path": "bin/ipfs-provider"}}}
+        components = self.add("served-components.json", document)
+        binary = self.manifest["publications"]["new"]["binary"]
+
+        def binding(relative):
+            item = self.manifest["files"][relative]
+            return {"cid": item["cid"], "sha256": item["sha256"], "size": item["bytes"]}
+
+        payload = {"schema": "elastos.release/v1", "channel": self.manifest["channel"], "version": "9.9.9",
+                   "platforms": {self.manifest["platform"]: {"binary": binding(binary), "components": binding(components)}}}
+        signer = self.manifest["signer_did"]
+        release = self.add("served/release.json", {"payload": payload, "signature": "00" * 64, "signer_did": signer})
+        head = self.add("served/head.json", {"payload": {
+            "schema": "elastos.release.head/v1", "channel": self.manifest["channel"], "version": "9.9.9",
+            "latest_release_cid": self.manifest["files"][release]["cid"],
+            "release_sha256": self.manifest["files"][release]["sha256"]}, "signature": "00" * 64, "signer_did": signer})
+        self.manifest["publications"]["served"] = {
+            "head": head, "release": release, "receipt": release, "binary": binary, "components": components,
+            "catalogue": self.manifest["publications"]["new"]["catalogue"]}
+        holder = self.root / "signed-ipfs"
+        self.place_holder(holder, "served", provider=b"different bytes")
+        with self.assertRaisesRegex(ValueError, "differ from the signed components digest"):
+            observer.cli_install_holder_signed_release(holder, self.root, self.manifest)
+        self.assertFalse((holder / observer.CLI_DATA / "installation").exists())
+        (holder / observer.CLI_DATA / "bin/ipfs-provider").write_bytes(provider)
+        observer.cli_install_holder_signed_release(holder, self.root, self.manifest)
+        installed = observer.cli_json(holder / observer.CLI_DATA / "installation/release.json")
+        self.assertEqual(installed["payload"]["version"], "9.9.9")
+        self.assertEqual(installed["payload"]["platforms"][self.manifest["platform"]]["components"]["sha256"],
+                         hashlib.sha256((holder / observer.CLI_DATA / "components.json").read_bytes()).hexdigest())
+
+    def test_cli_run_installs_that_release_before_the_holder_gateway(self):
+        self.setup_fixture()
+        code, calls, result = self.fake_run(setup_exit=1)
+        self.assertEqual(code, 1)
+        self.assertIn("installed setup failed", result["failure"])
+        self.assertTrue(any(len(argv) > 1 and argv[1] == "gateway" for argv, _ in calls))
+        data = self.root / "results/homes/holder" / observer.CLI_DATA
+        self.assertEqual((data / "installation/release.json").read_bytes(),
+                         (self.root / self.manifest["publications"]["old"]["release"]).read_bytes())
+        source = observer.read(data / "sources.json")["sources"][0]
+        self.assertEqual(source["publisher_dids"], [self.manifest["signer_did"]])
+        provider = data / "bin/ipfs-provider"
+        components = observer.cli_json(data / "components.json")
+        checksum = components["external"]["ipfs-provider"]["platforms"][observer.cli_component_platform(self.manifest["platform"])]["checksum"]
+        self.assertEqual(checksum, "sha256:" + hashlib.sha256(provider.read_bytes()).hexdigest())
 
 
 class PreviousReleaseInstallTests(unittest.TestCase):

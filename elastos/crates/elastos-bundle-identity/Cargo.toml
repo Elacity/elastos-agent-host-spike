@@ -7,8 +7,14 @@ description = "Names a capsule bundle by the CID of its files, or refuses; admit
 
 [dependencies]
 elastos-common = { path = "../elastos-common" }
-rustix = { version = "=1.1.4", features = ["fs"] }
 sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.4", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+elastos-bundle-identity-windows-handle = { path = "../elastos-bundle-identity-windows-handle" }
+windows-sys = { version = "=0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [features]
 # The lab's own refusals (its test signatures, records and platform variants).

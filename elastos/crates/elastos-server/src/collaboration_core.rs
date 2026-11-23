@@ -2713,6 +2713,7 @@ impl CollaborationCore {
     fn write_history(&self, state: &ConversationHistoryState) -> anyhow::Result<()> {
         self.validate_history(state)?;
         let bytes = canonical_history_bytes(state)?;
+        refuse_non_unix_collaboration_state_custody()?;
         #[cfg(test)]
         let fault = self
             .history_write_fault
@@ -2895,6 +2896,10 @@ impl CollaborationCore {
         &self,
         #[cfg(test)] fault: Option<WriteFault>,
     ) -> anyhow::Result<()> {
+        // `File::open` on a directory returns Access Denied on Windows, so the
+        // directory fsync this durability step needs cannot be performed.
+        // Refuse before that call. Writers refuse earlier, before creating a file.
+        refuse_non_unix_collaboration_state_custody()?;
         let mut directory = self.state_dir.as_path();
         loop {
             anyhow::ensure!(
@@ -2933,6 +2938,7 @@ impl CollaborationCore {
         if bytes.len() > MAX_CORE_STATE_BYTES {
             anyhow::bail!("collaboration durable state exceeds its byte limit");
         }
+        refuse_non_unix_collaboration_state_custody()?;
         #[cfg(test)]
         let write_fault = self.take_write_fault();
         #[cfg(test)]
@@ -3441,6 +3447,24 @@ pub(crate) fn random_hex_128() -> anyhow::Result<String> {
     Ok(hex::encode(bytes))
 }
 
+/// Windows cannot fsync a directory through `File::open`, and this state
+/// is only durable when that fsync completes. Refuse the write and the sync
+/// before either one creates or renames a file.
+fn refuse_non_unix_collaboration_state_custody() -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "collaboration state directory custody is unsupported on Windows",
+        )
+        .into())
+    }
+    #[cfg(unix)]
+    {
+        Ok(())
+    }
+}
+
 pub(crate) fn ensure_owner_only_directory(path: &Path) -> anyhow::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => validate_owner_only_directory(path, &metadata),
@@ -3733,6 +3757,31 @@ mod tests {
         )
     }
 
+    #[cfg(not(unix))]
+    #[test]
+    fn windows_refuses_collaboration_state_directory_custody_before_a_write() {
+        let fixture = Fixture::new();
+        let core = fixture.core();
+        let error = prepare(
+            &core,
+            "win-refuse",
+            serde_json::json!({"body":"x"}),
+            NOW,
+            TTL,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("collaboration state directory custody is unsupported on Windows"),
+            "{error:#}"
+        );
+        assert!(
+            !core.state_path().exists(),
+            "the refusal happens before a state file exists"
+        );
+    }
+
     fn prepare(
         core: &CollaborationCore,
         request_id: &str,
@@ -3750,7 +3799,7 @@ mod tests {
             ttl_secs,
         )
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_leave_serializes_with_durable_admission_and_refuses_left_intents() {
         use std::sync::{mpsc, Arc};
@@ -3818,7 +3867,7 @@ mod tests {
             .iter()
             .all(|record| record.operation.request_id != "refused-while-left"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn entered_home_delivery_and_receipt_writes_finish_before_leave() {
         use std::sync::{mpsc, Arc, TryLockError};
@@ -4278,7 +4327,7 @@ mod tests {
             quiet_worker_validation_reads(core).unwrap();
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn verified_state_reuses_signatures_and_verifies_only_new_records() {
         let fixture = Fixture::new();
@@ -4402,7 +4451,7 @@ mod tests {
                 > 0
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn verified_state_is_seeded_only_after_successful_fsync() {
         let fixture = Fixture::new();
@@ -4496,7 +4545,7 @@ mod tests {
         assert_eq!(cache.get(b"new"), Some(2));
         assert_eq!(cache.bytes, 3);
     }
-
+    #[cfg(unix)]
     #[test]
     fn signed_validation_fixture_keeps_noop_reads_and_ack_read_only_and_rejects_tampering() {
         let fixture = Fixture::new();
@@ -4515,7 +4564,7 @@ mod tests {
         assert_eq!(fs::read(core.state_path()).unwrap(), original);
         assert_validation_fixture_rejects_tampering(&fixture, &core, &state);
     }
-
+    #[cfg(unix)]
     #[test]
     fn new_incoming_frames_verify_only_new_records_beside_retained_replay_state() {
         let fixture = Fixture::new();
@@ -4565,7 +4614,7 @@ mod tests {
             (2, MAX_INCOMING_RECORDS_AND_TOMBSTONES - 2)
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn receipt_verification_cache_preserves_exact_original_binding() {
         let fixture = Fixture::new();
@@ -4713,7 +4762,7 @@ mod tests {
             })
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn chat_payload_is_validated_before_any_durable_acceptance() {
         let fixture = Fixture::new();
@@ -4756,7 +4805,7 @@ mod tests {
             .unwrap();
         assert_eq!(core.pending_product_handoffs().unwrap().len(), 1);
     }
-
+    #[cfg(unix)]
     #[test]
     fn restart_retires_only_verified_malformed_chat_handoffs_and_frees_slots() {
         let fixture = Fixture::new();
@@ -4847,7 +4896,7 @@ mod tests {
             .unwrap();
         assert_eq!(fixture.core().pending_product_handoffs().unwrap().len(), 2);
     }
-
+    #[cfg(unix)]
     #[test]
     fn malformed_presence_cannot_fill_handoffs_and_legacy_restart_keeps_replay_protection() {
         let fixture = Fixture::new();
@@ -4976,7 +5025,7 @@ mod tests {
             MAX_PENDING_INCOMING
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn shared_consumer_matrix_refuses_unconsumable_payloads_before_storage_and_repairs_on_load() {
         let fixture = Fixture::new();
@@ -5221,7 +5270,7 @@ mod tests {
             0
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn generated_shared_products_cannot_fill_handoffs_and_consumers_work_after_restart() {
         fn next(seed: &mut u64) -> u64 {
@@ -5629,7 +5678,7 @@ mod tests {
         assert!(final_chat.pending_messages().unwrap().is_empty());
         assert!(final_presence.pending_presences().unwrap().is_empty());
     }
-
+    #[cfg(unix)]
     #[test]
     fn legacy_unconsumable_outgoing_is_retired_without_losing_request_replay_protection() {
         let fixture = Fixture::new();
@@ -5818,7 +5867,7 @@ mod tests {
         assert!(fixture.core().load_state().is_err());
         assert_eq!(fs::read(core.state_path()).unwrap(), bytes);
     }
-
+    #[cfg(unix)]
     #[test]
     fn retained_history_retires_invalid_consumers_but_keeps_signed_replay_bindings() {
         let fixture = Fixture::new();
@@ -5929,7 +5978,7 @@ mod tests {
         assert!(expired.retired_envelope_hashes.is_empty());
         core.validate_history(&expired).unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn concurrent_shared_admission_keeps_five_cap_and_counts_only_new_commits() {
         use std::sync::{Arc, Barrier};
@@ -6021,7 +6070,7 @@ mod tests {
             other => panic!("expected incoming acceptance, got {other:?}"),
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_send_limit_refuses_a_burst_but_not_retries_or_a_later_message() {
         let fixture = Fixture::new();
@@ -6072,7 +6121,7 @@ mod tests {
         )
         .unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_send_limit_counts_exactly_the_saved_messages() {
         let fixture = Fixture::new();
@@ -6124,7 +6173,7 @@ mod tests {
         )
         .unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn community_receive_limit_drops_a_flooding_sender_without_stalling_others() {
         let fixture = Fixture::new();
@@ -6180,7 +6229,7 @@ mod tests {
             .unwrap();
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn steady_presence_from_twenty_peers_never_exhausts_intake() {
         let fixture = Fixture::new();
@@ -6205,7 +6254,7 @@ mod tests {
         let (_, post) = remote_transport_message(&fixture, peers[0].clone(), now);
         assert!(transport_incoming(&core, &post, now).product_handoff_pending());
     }
-
+    #[cfg(unix)]
     #[test]
     fn hostile_presence_flood_cannot_exhaust_intake_or_spend_chat_budget() {
         let fixture = Fixture::new();
@@ -6248,7 +6297,7 @@ mod tests {
             acknowledge_all_handoffs(&core);
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn failed_presence_acknowledgement_keeps_its_slot_until_a_retry_removes_it() {
         let fixture = Fixture::new();
@@ -6269,7 +6318,7 @@ mod tests {
         assert_eq!(core.summary().unwrap().replay_tombstones, 0);
         core.acknowledge_product_handoff(&hash).unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn chat_replays_stay_refused_and_presence_leaves_no_tombstone() {
         let fixture = Fixture::new();
@@ -6435,7 +6484,7 @@ mod tests {
         );
         assert!(!core.state_path().exists());
     }
-
+    #[cfg(unix)]
     #[test]
     fn transport_incoming_is_durable_replayable_and_retryable_on_capacity_or_write_failure() {
         let fixture = Fixture::new();
@@ -6522,7 +6571,7 @@ mod tests {
             transport_incoming(&indeterminate_fixture.core(), &indeterminate_frame, NOW);
         assert!(recovered.product_handoff_pending());
     }
-
+    #[cfg(unix)]
     #[test]
     fn transport_acceptance_receipts_are_typed_durable_and_idempotent() {
         let fixture = Fixture::new();
@@ -6722,7 +6771,7 @@ mod tests {
             )
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn missing_projection_field_is_pending_and_cannot_hide_remote_acceptance() {
         let fixture = Fixture::new();
@@ -6766,7 +6815,7 @@ mod tests {
         write_owner_only(&restarted.state_path(), &inconsistent_bytes);
         assert!(fixture.core().load_state().is_err());
     }
-
+    #[cfg(unix)]
     #[test]
     fn history_sidecar_keeps_originals_without_changing_live_state_format() {
         let fixture = Fixture::new();
@@ -6843,7 +6892,7 @@ mod tests {
             alternate_grant_core(&fixture, fixture.device_key.clone(), "foreign-conversation");
         assert!(foreign.authorize_history_message(&original, NOW).is_err());
     }
-
+    #[cfg(unix)]
     #[test]
     fn history_reservation_write_failures_precede_projection_and_retry_publication() {
         for fault in [
@@ -6897,7 +6946,7 @@ mod tests {
             assert_eq!(restarted.conversation_history(now).unwrap(), originals);
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn history_publication_failure_preserves_binding_and_recovers_room_offline() {
         let fixture = Fixture::new();
@@ -6976,7 +7025,7 @@ mod tests {
             serde_json::from_slice(&fs::read(restarted.history_path()).unwrap()).unwrap();
         assert!(history.get("pending_projection_hashes").is_none());
     }
-
+    #[cfg(unix)]
     #[test]
     fn cold_acceptance_sync_failure_returns_no_receipt_and_retries_saved_original() {
         let fixture = Fixture::new();
@@ -7009,7 +7058,7 @@ mod tests {
         assert_eq!(fs::read(restarted.state_path()).unwrap(), saved);
         assert_eq!(restarted.pending_product_handoffs().unwrap().len(), 1);
     }
-
+    #[cfg(unix)]
     #[test]
     fn history_retention_enforces_age_count_and_serialized_byte_bounds() {
         let fixture = Fixture::new();
@@ -7105,7 +7154,7 @@ mod tests {
         prune_history(&mut state, NOW + 405 + CONVERSATION_HISTORY_RETENTION_SECS).unwrap();
         assert!(state.envelopes.is_empty());
     }
-
+    #[cfg(unix)]
     #[test]
     fn history_refuses_live_identity_conflicts_after_original_cache_eviction_before_product_writes()
     {
@@ -7269,7 +7318,7 @@ mod tests {
             assert_eq!(fs::read(&room_path).unwrap(), saved);
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn history_first_identity_conflicts_refuse_custody_and_retire_legacy_handoffs_on_hot_cache() {
         let fixture = Fixture::new();
@@ -7389,7 +7438,7 @@ mod tests {
             .unwrap()
             .is_empty());
     }
-
+    #[cfg(unix)]
     #[test]
     fn history_batch_conflicts_keep_unrelated_originals_in_both_orders() {
         for reversed in [false, true] {
@@ -7471,7 +7520,7 @@ mod tests {
             assert_eq!(core.conversation_history(now).unwrap(), saved);
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn absent_summary_is_pure_and_outgoing_idempotency_uses_the_exact_runtime_binding() {
         let fixture = Fixture::new();
@@ -7550,7 +7599,7 @@ mod tests {
             .to_string()
             .contains("context"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn incoming_commit_replay_acknowledgement_and_restart_are_exact() {
         let expired_fixture = Fixture::new();
@@ -7710,7 +7759,7 @@ mod tests {
             .incoming_tombstones
             .is_empty());
     }
-
+    #[cfg(unix)]
     #[test]
     fn custody_settles_presence_while_shared_chat_retries_its_original_lifetime() {
         let fixture = Fixture::new();
@@ -7759,7 +7808,7 @@ mod tests {
         assert!(core.pending_outgoing(NOW + TTL).unwrap().is_empty());
         assert_eq!(fs::read(core.state_path()).unwrap(), before);
     }
-
+    #[cfg(unix)]
     #[test]
     fn self_echo_remote_acceptance_and_recipient_replay_are_fail_closed() {
         let fixture = Fixture::new();
@@ -7860,7 +7909,7 @@ mod tests {
             "accepted-prune-anchor"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn bounded_offline_outgoing_prunes_only_after_terminal_expiry() {
         let clock_fixture = Fixture::new();
@@ -7982,7 +8031,7 @@ mod tests {
             admitted.envelope_bytes()
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn expired_pending_presence_is_acknowledged_before_terminal_pruning() {
         let fixture = Fixture::new();
@@ -8052,7 +8101,7 @@ mod tests {
             .outgoing
             .is_empty());
     }
-
+    #[cfg(unix)]
     #[test]
     fn incoming_capacity_is_reserved_before_receipt_and_never_evicts_pending_work() {
         let fixture = Fixture::new();
@@ -8124,7 +8173,7 @@ mod tests {
             .to_string()
             .contains("entry limits"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn candidate_state_is_fully_validated_before_replacement() {
         let fixture = Fixture::new();
@@ -8151,7 +8200,7 @@ mod tests {
             .contains("binding"));
         assert_eq!(fs::read(core.state_path()).unwrap(), original);
     }
-
+    #[cfg(unix)]
     #[test]
     fn stored_state_is_structurally_verified_after_expiry_and_rejects_tampering() {
         let fixture = Fixture::new();
@@ -8303,7 +8352,7 @@ mod tests {
         .unwrap();
         assert!(core.summary().is_err());
     }
-
+    #[cfg(unix)]
     #[test]
     fn owner_only_no_follow_paths_and_each_write_failure_boundary_are_enforced() {
         for fault in [

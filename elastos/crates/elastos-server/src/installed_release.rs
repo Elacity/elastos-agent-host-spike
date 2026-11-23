@@ -1,8 +1,13 @@
 //! Runtime's installed signed inputs. Publisher keeps independent publication custody.
 
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
@@ -111,7 +116,7 @@ pub(crate) fn load_or_migrate_for_update(
         data,
         (admitted.head.len() + admitted.release.len()) as u64,
     )?;
-    fs::DirBuilder::new().mode(0o700).create(&stage)?;
+    create_private_directory(&stage)?;
     sync(data)?;
     write_private(&stage.join(HEAD), &admitted.head)?;
     write_private(&stage.join(RELEASE), &admitted.release)?;
@@ -599,6 +604,7 @@ fn check_data_root(path: &Path) -> Result<()> {
     check_directory_mode(path, 0o7002, false)
 }
 
+#[cfg(unix)]
 fn check_directory_mode(path: &Path, refused: u32, private: bool) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     anyhow::ensure!(
@@ -609,6 +615,15 @@ fn check_directory_mode(path: &Path, refused: u32, private: bool) -> Result<()> 
         "{REPAIR}"
     );
     Ok(())
+}
+
+#[cfg(windows)]
+fn check_directory_mode(_path: &Path, _refused: u32, _private: bool) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "installed release owner-only directory checks are unsupported on Windows",
+    )
+    .into())
 }
 
 fn check_parents(data: &Path, parent: &Path, private: bool) -> Result<()> {
@@ -623,6 +638,7 @@ fn check_parents(data: &Path, parent: &Path, private: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn open_regular(path: &Path, private: bool) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -638,6 +654,15 @@ fn open_regular(path: &Path, private: bool) -> Result<File> {
         "{REPAIR}"
     );
     Ok(file)
+}
+
+#[cfg(windows)]
+fn open_regular(_path: &Path, _private: bool) -> Result<File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "installed release no-follow file admission is unsupported on Windows",
+    )
+    .into())
 }
 
 fn read_regular(path: &Path, limit: u64, private: bool) -> Result<Vec<u8>> {
@@ -711,6 +736,7 @@ fn clean_partial_stage(stage: &Path, admitted: &InstalledRelease) -> Result<()> 
     sync(stage.parent().context(REPAIR)?)
 }
 
+#[cfg(unix)]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -722,6 +748,30 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn write_private(_path: &Path, _bytes: &[u8]) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "installed release private writes are unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_private_directory(_path: &Path) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "installed release private directories are unsupported on Windows",
+    )
+    .into())
 }
 
 fn publish_stage(data: &Path, binary: &Path, stage: &Path, root: &Path) -> Result<()> {
@@ -736,5 +786,17 @@ fn sync(path: &Path) -> Result<()> {
     File::open(path)?.sync_all().map_err(Into::into)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests;
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_installed_release_admission() {
+    let error = check_directory_mode(Path::new("C:\\invalid"), 0o7022, true).unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::Unsupported)
+    );
+}

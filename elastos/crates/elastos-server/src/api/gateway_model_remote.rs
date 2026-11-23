@@ -125,6 +125,11 @@ fn index_lock() -> &'static std::sync::Mutex<()> {
 }
 
 fn read_index(data_dir: &Path) -> anyhow::Result<RemoteRunIndex> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "remote run index custody is unsupported on Windows",
+    ))?;
     match std::fs::read(index_path(data_dir)) {
         Ok(bytes) => {
             let index: RemoteRunIndex =
@@ -149,6 +154,11 @@ fn update_index<T>(
     now: u64,
     update: impl FnOnce(&mut RemoteRunIndex) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "remote run index custody is unsupported on Windows",
+    ))?;
     let _guard = index_lock()
         .lock()
         .map_err(|_| anyhow::anyhow!("remote run index unavailable"))?;
@@ -349,6 +359,10 @@ async fn call_grant(
     request: Value,
 ) -> Result<Value, RemoteRouteError> {
     let expected_refusal = super::gateway_model_service::invocation_refusal_binding(&request);
+    registry
+        .remember_carrier_peer_ticket(&grant.peer_did, &grant.connect_ticket)
+        .await
+        .map_err(|err| classify_carrier_error(&err.to_string()))?;
     let response = registry
         .invoke_provider(ProviderInvocation {
             source: "model-consumer".to_string(),
@@ -358,10 +372,10 @@ async fn call_grant(
             transfer: ProviderTransfer::Json,
             range: None,
             progress: None,
-            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::ConnectTicket {
-                connect_ticket: grant.connect_ticket.clone(),
-                peer_did: Some(grant.peer_did.clone()),
+            transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                peer_did: grant.peer_did.clone(),
                 timeout_ms: Some(CARRIER_TIMEOUT_MS),
+                reply_wait_ms: None,
             }),
         })
         .await
@@ -930,7 +944,7 @@ mod tests {
             "nested-user-offer"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn remote_run_index_is_principal_scoped_and_pruned() {
         let dir = tempfile::tempdir().unwrap();
@@ -994,7 +1008,7 @@ mod tests {
             None
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_offers_and_unknown_runs_stay_local() {
         let dir = tempfile::tempdir().unwrap();

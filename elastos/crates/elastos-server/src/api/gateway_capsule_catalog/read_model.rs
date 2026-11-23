@@ -755,6 +755,7 @@ fn load_capsule_components(data_dir: &std::path::Path) -> BTreeMap<String, Capsu
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     #[test]
     fn linux_marketplace_lists_browser_with_its_opt_in_command() {
         let root = tempfile::tempdir().unwrap();

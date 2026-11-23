@@ -5204,7 +5204,7 @@ mod browser_open_outcome_tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn unprepared_linux_browser_open_explains_setup_and_restart_before_acquiring_effects() {
         let data = tempfile::tempdir().unwrap();
@@ -5279,7 +5279,7 @@ mod r4_root_tests {
     use super::*;
     use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
     use crate::auth::PrincipalKind;
-
+    #[cfg(unix)]
     #[test]
     fn r4_browser_profile_uses_resolved_root() {
         let missing = tempfile::tempdir().unwrap();

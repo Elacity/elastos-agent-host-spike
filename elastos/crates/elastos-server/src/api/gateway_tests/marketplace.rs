@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_marketplace_uses_canonical_catalog_and_alias_is_gone() {
     let dir = tempfile::tempdir().unwrap();
@@ -57,7 +58,7 @@ async fn test_marketplace_uses_canonical_catalog_and_alias_is_gone() {
         .unwrap();
     assert_eq!(marketplace_scoped_response.status(), StatusCode::NOT_FOUND);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn model_consumers_can_read_catalog_with_current_scoped_authority() {
     let dir = tempfile::tempdir().unwrap();

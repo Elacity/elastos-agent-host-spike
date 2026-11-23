@@ -1,5 +1,6 @@
 use super::super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_send_signs_and_broadcasts_managed_evm_transaction() {
     let dir = tempfile::tempdir().unwrap();
@@ -241,6 +242,7 @@ async fn test_wallet_send_signs_and_broadcasts_managed_evm_transaction() {
     }));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_send_recovered_step_up_rejects_missing_transaction_effect() {
     let dir = tempfile::tempdir().unwrap();

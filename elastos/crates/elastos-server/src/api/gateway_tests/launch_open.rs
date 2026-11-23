@@ -65,6 +65,7 @@ fn token_life(token: &str) -> (u64, u64) {
     )
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_launch_grant_is_refused_by_wallet_authority_itself() {
     let dir = tempfile::tempdir().unwrap();
@@ -78,6 +79,7 @@ fn cli_launch_grant_is_refused_by_wallet_authority_itself() {
     assert_eq!(error.to_string(), "home_cli_launch_grant_scope_mismatch");
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_launch_grant_is_refused_by_front_door_without_wallet_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -90,6 +92,7 @@ fn cli_launch_grant_is_refused_by_front_door_without_wallet_authority() {
     assert_eq!(error.to_string(), "home_launch_grant_scope_mismatch");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn owner_cli_issuer_limits_headless_launch_and_open_gates() {
     let dir = tempfile::tempdir().unwrap();
@@ -184,6 +187,7 @@ async fn owner_cli_issuer_limits_headless_launch_and_open_gates() {
     assert_eq!(opened.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_issuer_refuses_guest_and_unbound_context() {
     let dir = tempfile::tempdir().unwrap();
@@ -205,6 +209,7 @@ fn cli_issuer_refuses_guest_and_unbound_context() {
     assert!(issue_home_cli_launch_grant_for_context(dir.path(), &device).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_issuer_refuses_agent_principal() {
     let dir = tempfile::tempdir().unwrap();
@@ -231,6 +236,7 @@ fn cli_issuer_refuses_agent_principal() {
 /// that person, and answers the page's name, its address under the launch,
 /// and the page's own token, bound to that launch with the page as its
 /// executable, for fifteen minutes at most, refused by every other check.
+#[cfg(unix)]
 #[tokio::test]
 async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -292,6 +298,7 @@ async fn home_opens_a_set_by_its_cid_and_gets_its_pages_address_and_token() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn content_open_gate_accepts_page_and_cli_before_runtime_lookup() {
     let dir = tempfile::tempdir().unwrap();
@@ -318,6 +325,7 @@ async fn content_open_gate_accepts_page_and_cli_before_runtime_lookup() {
     assert_eq!(answer.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn content_open_names_non_home_page_and_accepts_cli_grant() {
     let dir = tempfile::tempdir().unwrap();
@@ -374,6 +382,7 @@ async fn content_open_names_non_home_page_and_accepts_cli_grant() {
     assert_eq!(runtime.kept_launch_reads.lock().await.len(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn content_open_refuses_agent_home_page_before_minting() {
     let dir = tempfile::tempdir().unwrap();
@@ -405,6 +414,7 @@ async fn content_open_refuses_agent_home_page_before_minting() {
 /// both) names that file and no other. A 200 from the Runtime in any other
 /// shape (an id that is not 32 hex, an entrypoint or page name that is not
 /// plain) is a 502, and no token is minted.
+#[cfg(unix)]
 #[tokio::test]
 async fn home_open_encodes_the_pages_address_and_uses_only_a_well_formed_answer() {
     let dir = tempfile::tempdir().unwrap();
@@ -463,6 +473,7 @@ async fn home_open_encodes_the_pages_address_and_uses_only_a_well_formed_answer(
 /// is not asked: no session at all, or another app's token sent as that app's
 /// frame sends it (`Origin: null`), so that only Home's own check refuses it. The Runtime's
 /// refusals are passed on as they are, by name, and no token is minted.
+#[cfg(unix)]
 #[tokio::test]
 async fn home_open_needs_homes_session_and_passes_refusals_on_by_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -511,6 +522,7 @@ async fn home_open_needs_homes_session_and_passes_refusals_on_by_name() {
 /// among what `img-src` allows), `nosniff`, `no-referrer` and the opaque
 /// origin; an asset byte for byte, with no policy. A path that is not plain,
 /// or an id that is no launch id, is `not_found` and the Runtime is not asked.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_page_of_a_kept_launch_is_served_under_the_app_policy() {
     let dir = tempfile::tempdir().unwrap();
