@@ -380,14 +380,11 @@ impl LocalProvider {
 
         // Check against allowed paths if configured, on the resolved path
         if !self.config.allowed_paths.is_empty() {
-            let rel_str = resolved_relative.to_string_lossy();
-
-            let allowed = self.config.allowed_paths.iter().any(|allowed| {
-                if allowed == "*" {
-                    return true;
-                }
-                rel_str.as_ref() == allowed || rel_str.starts_with(&format!("{}/", allowed))
-            });
+            let allowed = self
+                .config
+                .allowed_paths
+                .iter()
+                .any(|allowed| Self::is_within_allowed_root(resolved_relative, allowed));
 
             if !allowed {
                 return Err(io::Error::new(
@@ -429,6 +426,22 @@ impl LocalProvider {
             resolved.push(name);
         }
         Ok(resolved)
+    }
+
+    /// Compare path components, not separator-dependent strings: Windows
+    /// canonicalizes to backslash paths, so a `/`-based string check would
+    /// refuse every nested path there. The strictness is unchanged: the
+    /// resolved relative path must equal the allowed root or name it as a
+    /// whole-component prefix.
+    fn is_within_allowed_root(relative: &Path, allowed: &str) -> bool {
+        if allowed == "*" {
+            return true;
+        }
+        if allowed.is_empty() {
+            return false;
+        }
+        let allowed_path = Path::new(allowed);
+        relative == allowed_path || relative.starts_with(allowed_path)
     }
 
     /// Validate a capability token (placeholder - runtime validates tokens)
@@ -1050,6 +1063,69 @@ mod tests {
         assert_eq!(content, b"hello rooted world");
     }
 
+    #[test]
+    fn allowed_root_check_compares_path_components() {
+        assert!(LocalProvider::is_within_allowed_root(
+            Path::new("Users"),
+            "Users"
+        ));
+        assert!(LocalProvider::is_within_allowed_root(
+            Path::new("Users/self/Documents/a.md"),
+            "Users"
+        ));
+        assert!(LocalProvider::is_within_allowed_root(
+            Path::new("Users/self/Documents/a.md"),
+            "Users/self"
+        ));
+        // A sibling root whose name extends the allowed root must not match.
+        assert!(!LocalProvider::is_within_allowed_root(
+            Path::new("UsersAI/agent-root"),
+            "Users"
+        ));
+        assert!(!LocalProvider::is_within_allowed_root(
+            Path::new("Public"),
+            "Users"
+        ));
+        // The wildcard root admits anything; an empty root admits nothing.
+        assert!(LocalProvider::is_within_allowed_root(
+            Path::new("Anything/at/all"),
+            "*"
+        ));
+        assert!(!LocalProvider::is_within_allowed_root(
+            Path::new("Users"),
+            ""
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn backslash_paths_inside_and_outside_the_allowed_root_on_windows() {
+        let dir = setup_test_dir();
+        let config = ProviderConfig {
+            base_path: dir.path().to_string_lossy().to_string(),
+            allowed_paths: vec!["Users".to_string()],
+            read_only: false,
+            encryption_key: String::new(),
+        };
+        fs::create_dir_all(dir.path().join("Users")).unwrap();
+        fs::write(dir.path().join("Users").join("note.txt"), b"backslash ok").unwrap();
+        fs::create_dir_all(dir.path().join("Public")).unwrap();
+        fs::write(dir.path().join("Public").join("outside.txt"), b"outside").unwrap();
+
+        let provider = LocalProvider::new(config).unwrap();
+
+        // A backslash-separated path inside the allowed root is accepted.
+        let content = provider
+            .read_file(r"Users\note.txt", "token", None, None)
+            .unwrap();
+        assert_eq!(content, b"backslash ok");
+
+        // A backslash-separated path outside every allowed root is refused.
+        let refused = provider
+            .read_file(r"Public\outside.txt", "token", None, None)
+            .expect_err("path outside the allowed roots must be refused");
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied);
+    }
     fn protected_area_provider(dir: &tempfile::TempDir) -> LocalProvider {
         fs::create_dir_all(dir.path().join("Public")).unwrap();
         fs::create_dir_all(dir.path().join("UsersAI/agent-root/Documents")).unwrap();
