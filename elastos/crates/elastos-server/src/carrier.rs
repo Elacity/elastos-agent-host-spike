@@ -8571,9 +8571,19 @@ impl CarrierProviderInvoker {
     }
 }
 
+/// The one named refusal for the retired connect-ticket dial route. Tests
+/// assert it verbatim, so treat the wording as part of the Runtime contract.
+const CONNECT_TICKET_ROUTE_UNAVAILABLE: &str =
+    "Carrier connect-ticket provider route is unavailable; the Runtime dials only the peer-DID route";
+
 enum TicketRouteKind {
+    // The connect-ticket dial arm refuses before building this kind; the
+    // variant stays until a later P2-9 slice deletes it.
+    #[allow(dead_code)]
     ConnectTicket,
-    PeerDid { reply_wait_ms: Option<u64> },
+    PeerDid {
+        reply_wait_ms: Option<u64>,
+    },
 }
 
 impl CarrierProviderInvoker {
@@ -8809,20 +8819,13 @@ impl ProviderCarrierInvoker for CarrierProviderInvoker {
     ) -> std::result::Result<serde_json::Value, ProviderError> {
         let timeout_secs = carrier_route_timeout_secs(route);
         match route {
-            ProviderCarrierRoute::ConnectTicket {
-                connect_ticket,
-                peer_did,
-                ..
-            } => {
-                self.invoke_ticket_endpoints(
-                    decode_ticket_endpoints(connect_ticket),
-                    peer_did.as_deref(),
-                    timeout_secs,
-                    TicketRouteKind::ConnectTicket,
-                    invocation,
-                    request,
-                )
-                .await
+            ProviderCarrierRoute::ConnectTicket { .. } => {
+                // One dialling route: the Runtime dials only the peer-DID
+                // route. A connect ticket never opens a connection, so the
+                // answer is the named refusal before any provider effect.
+                Err(ProviderError::Unavailable(
+                    CONNECT_TICKET_ROUTE_UNAVAILABLE.to_string(),
+                ))
             }
             ProviderCarrierRoute::PeerDid {
                 peer_did,
@@ -14094,6 +14097,13 @@ pub(crate) mod tests {
         grant_peer(slow._dir.path(), &local_did, &["content.replica"]);
         // The holder published what the bounded fetch reads.
         slow.publish("bafyfixture");
+        // The peer-DID route is the one dialling route; remembering the
+        // holder's ticket gives it the endpoints the retired ticket route
+        // decoded, so the deadline rule below runs on the same transport.
+        local_registry
+            .remember_carrier_peer_ticket(&slow.did, &slow.ticket)
+            .await
+            .unwrap();
         let route =
             |op: &str, request: serde_json::Value, transfer: ProviderTransfer| ProviderInvocation {
                 source: "carrier-availability".into(),
@@ -14103,13 +14113,11 @@ pub(crate) mod tests {
                 transfer,
                 range: None,
                 progress: None,
-                transport: ProviderInvocationTransport::Carrier(
-                    ProviderCarrierRoute::ConnectTicket {
-                        connect_ticket: slow.ticket.clone(),
-                        peer_did: Some(slow.did.clone()),
-                        timeout_ms: Some(1_000),
-                    },
-                ),
+                transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+                    peer_did: slow.did.clone(),
+                    timeout_ms: Some(1_000),
+                    reply_wait_ms: None,
+                }),
             };
 
         // An effectful operation keeps its open-ended answer past the route budget.
@@ -14152,55 +14160,11 @@ pub(crate) mod tests {
             "bounded fetch is cut at its budget, before the slow answer: {cut_after:?}"
         );
 
-        // A peer-DID route keeps the same rule: effects wait, bounded reads are cut.
-        let by_did = |op: &str, request: serde_json::Value, transfer: ProviderTransfer| {
-            let mut invocation = route(op, request, transfer);
-            invocation.transport =
-                ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
-                    peer_did: slow.did.clone(),
-                    timeout_ms: Some(1_000),
-                    reply_wait_ms: None,
-                });
-            invocation
-        };
-        // The ticket fetch's answer deadline dropped the live client. PeerDid
-        // resolves the peer id, so these calls start once that route is back.
-        wait_for_verified_peer_route(&local_invoker, &local_node.endpoint, &slow.addr).await;
-        let response = local_registry
-            .invoke_provider(by_did(
-                "import_exact",
-                serde_json::json!({"op":"import_exact","cid":"bafyfixture"}),
-                ProviderTransfer::Json,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            response["data"]["receipt"], "effect-completed",
-            "{response}"
-        );
-        let started = std::time::Instant::now();
-        local_registry
-            .invoke_provider(by_did(
-                "fetch",
-                serde_json::json!({"op":"fetch","cid":"bafyfixture","path":"weights.gguf",
-                    "local_only":true,"bounded_read":true,"range":{"start":0,"end":3},
-                    "transfer":"bytes"}),
-                ProviderTransfer::Bytes,
-            ))
-            .await
-            .unwrap_err();
-        let cut_after = started.elapsed();
-        assert!(
-            cut_after >= std::time::Duration::from_secs(1)
-                && cut_after < std::time::Duration::from_millis(2_400),
-            "peer-DID bounded fetch is cut at its budget: {cut_after:?}"
-        );
-
         local_registry
             .remember_carrier_peer_ticket(&slow.did, &slow.ticket)
             .await
             .unwrap();
-        let mut bounded_with_longer_reply_wait = by_did(
+        let mut bounded_with_longer_reply_wait = route(
             "fetch",
             serde_json::json!({"op":"fetch","cid":"bafyfixture","path":"weights.gguf",
                 "local_only":true,"bounded_read":true,"range":{"start":0,"end":3},
@@ -16176,7 +16140,7 @@ pub(crate) mod tests {
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_connect_ticket_self_route_uses_carrier_admission_without_network_connect() {
+    async fn test_connect_ticket_self_route_returns_the_named_refusal() {
         let fixture = peer_did_route_fixture(93, 94).await;
         let local_did = public_key_to_did(&fixture.local_node.endpoint.id())
             .expect("test endpoint must encode as DID");
@@ -16197,28 +16161,23 @@ pub(crate) mod tests {
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
 
-        let response = fixture
+        // The connect-ticket arm refuses even for the invoker's own endpoint;
+        // the peer-DID route keeps the loopback property above.
+        let error = fixture
             .local_registry
             .invoke_provider(connect_ticket_invocation(local_addr, &local_did))
             .await
-            .expect("same-endpoint ticket must loop through Carrier admission");
+            .expect_err("the connect-ticket arm must refuse closed");
 
-        assert_eq!(response["status"], "ok");
+        assert!(error
+            .to_string()
+            .ends_with(CONNECT_TICKET_ROUTE_UNAVAILABLE));
+        assert!(local_requests.lock().unwrap().is_empty());
         assert!(fixture.remote_requests.lock().unwrap().is_empty());
-        let requests = local_requests.lock().unwrap().clone();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            requests[0]["_runtime_invocation"]["transport"],
-            "carrier-provider-plane"
-        );
-        assert_eq!(
-            requests[0]["_runtime_invocation"]["carrier"]["source_endpoint_did"],
-            local_did
-        );
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_connect_ticket_self_route_rejects_mismatched_peer_before_provider_effect() {
+    async fn test_connect_ticket_route_refuses_before_the_peer_did_check() {
         let fixture = peer_did_route_fixture(95, 96).await;
         let mut local_watch = fixture.local_node.endpoint.watch_addr();
         let local_addr = local_watch.get();
@@ -16234,15 +16193,17 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
+        // A peer_did that does not match the ticket would have failed the
+        // ticket checks; the arm refuses before reaching them.
         let error = fixture
             .local_registry
             .invoke_provider(connect_ticket_invocation(local_addr, &fixture.remote_did))
             .await
-            .expect_err("mismatched peer_did and ticket must fail closed");
+            .expect_err("the connect-ticket arm must refuse closed");
 
         assert!(error
             .to_string()
-            .contains("peer_did does not match connect_ticket"));
+            .ends_with(CONNECT_TICKET_ROUTE_UNAVAILABLE));
         assert!(local_requests.lock().unwrap().is_empty());
         assert!(fixture.remote_requests.lock().unwrap().is_empty());
 
@@ -16313,16 +16274,13 @@ pub(crate) mod tests {
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_connect_ticket_route_reuses_runtime_endpoint_identity() {
+    async fn test_peer_did_route_reuses_runtime_endpoint_identity() {
         let fixture = peer_did_route_fixture(72, 73).await;
 
         for expected in 1..=2usize {
             let response = fixture
                 .local_registry
-                .invoke_provider(connect_ticket_invocation(
-                    fixture.remote_addr.clone(),
-                    &fixture.remote_did,
-                ))
+                .invoke_provider(peer_did_invocation(&fixture.remote_did))
                 .await
                 .unwrap();
 
@@ -16342,7 +16300,7 @@ pub(crate) mod tests {
     }
     #[cfg(unix)]
     #[tokio::test]
-    async fn test_connect_ticket_route_retains_one_peer_connection_across_invokes() {
+    async fn test_peer_did_route_retains_one_peer_connection_across_invokes() {
         let fixture = peer_did_route_fixture(80, 81).await;
         let invoker = Arc::new(CarrierProviderInvoker::with_carrier_endpoint_and_registry(
             fixture.local_node.endpoint.clone(),
@@ -16356,10 +16314,7 @@ pub(crate) mod tests {
         for expected in 1..=2usize {
             let response = fixture
                 .local_registry
-                .invoke_provider(connect_ticket_invocation(
-                    fixture.remote_addr.clone(),
-                    &fixture.remote_did,
-                ))
+                .invoke_provider(peer_did_invocation(&fixture.remote_did))
                 .await
                 .unwrap();
             assert_eq!(response["status"], "ok");
@@ -16426,6 +16381,44 @@ pub(crate) mod tests {
 
         shutdown_test_carrier_node(fixture.remote_node).await;
         shutdown_test_carrier_node(fixture.local_node).await;
+    }
+
+    /// The one dialling route is PeerDid. The connect-ticket arm refuses with
+    /// the named error before any dial or provider effect, on every OS: the
+    /// invoker owns no endpoint, so a restored dial would answer with a
+    /// different message and fail the verbatim assert.
+    #[tokio::test]
+    async fn connect_ticket_route_returns_named_unavailable_without_dialling() {
+        let invoker = CarrierProviderInvoker::new();
+        let holder = iroh::SecretKey::from_bytes(&[241u8; 32]).public();
+        let route = ProviderCarrierRoute::ConnectTicket {
+            connect_ticket: encode_ticket_for(iroh::EndpointAddr::from(holder)),
+            peer_did: None,
+            timeout_ms: Some(5_000),
+        };
+        let request = serde_json::json!({"op":"fetch","cid":FIXTURE_CID});
+        let invocation = ProviderInvocation {
+            source: "carrier-refusal".into(),
+            target: "content".into(),
+            op: "fetch".into(),
+            request: request.clone(),
+            transfer: ProviderTransfer::Json,
+            range: None,
+            progress: None,
+            transport: ProviderInvocationTransport::Carrier(route.clone()),
+        };
+        let error = invoker
+            .invoke_carrier_provider(&route, &invocation, request)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, ProviderError::Unavailable(message)
+                if message == CONNECT_TICKET_ROUTE_UNAVAILABLE),
+            "connect-ticket route must return the named refusal: {error:?}"
+        );
+        // No dial: the invoker opened no peer client and stored no route.
+        assert!(invoker.peer_clients.lock().await.is_empty());
+        assert!(invoker.ticket_routes.lock().await.is_empty());
     }
     #[cfg(unix)]
     #[tokio::test]
@@ -21202,12 +21195,20 @@ pub(crate) mod tests {
             conn.closed().await;
         });
         let invoker = CarrierProviderInvoker::with_carrier_endpoint(consumer.clone());
+        // The peer-DID route is the one dialling route; remembering the
+        // holder's ticket gives it the endpoints the retired ticket route
+        // decoded, so the invalid answer below reaches the same reader.
+        let holder_did = public_key_to_did(&holder.id()).unwrap();
+        invoker
+            .remember_peer_ticket(&holder_did, &encode_ticket_for(address))
+            .await
+            .unwrap();
         let request = serde_json::json!({"op":"fetch", "cid":"bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
             "path":"weights.gguf", "bounded_read":true, "range":{"start":0,"end":3}});
-        let route = ProviderCarrierRoute::ConnectTicket {
-            connect_ticket: encode_ticket_for(address),
-            peer_did: None,
+        let route = ProviderCarrierRoute::PeerDid {
+            peer_did: holder_did.clone(),
             timeout_ms: Some(5_000),
+            reply_wait_ms: None,
         };
         let invocation = ProviderInvocation {
             source: "carrier-availability".into(),
