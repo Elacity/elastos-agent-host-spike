@@ -4,10 +4,8 @@
 //! Storage operations require capability tokens and are scoped to allowed paths.
 //! When an encryption key is provided, files are encrypted at rest with AES-256-GCM.
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use elastos_guest::prelude::*;
-use rand::RngCore;
+use localhost_provider::{decrypt_bytes, encrypt_bytes};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -145,74 +143,6 @@ pub struct DirEntry {
     pub is_file: bool,
     pub is_dir: bool,
     pub size: u64,
-}
-
-/// On-disk encrypted envelope (same format as identity crate)
-#[derive(Serialize, Deserialize)]
-struct EncryptedEnvelope {
-    version: u8,
-    nonce: String,
-    ciphertext: String,
-}
-
-/// Encrypt raw bytes with AES-256-GCM, returning JSON envelope bytes.
-fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> io::Result<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| io::Error::other(format!("AES key init: {}", e)))?;
-    let mut nonce_bytes = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    // Keep the current aes-gcm API until the upstream generic-array 1.x
-    // migration is available through a compatible aes-gcm release.
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext)
-        .map_err(|e| io::Error::other(format!("encryption: {}", e)))?;
-
-    let envelope = EncryptedEnvelope {
-        version: 1,
-        nonce: hex::encode(nonce_bytes),
-        ciphertext: hex::encode(ciphertext),
-    };
-    serde_json::to_vec(&envelope)
-        .map_err(|e| io::Error::other(format!("envelope serialize: {}", e)))
-}
-
-/// Decrypt bytes from an EncryptedEnvelope.
-fn decrypt_bytes(key: &[u8; 32], data: &[u8]) -> io::Result<Vec<u8>> {
-    let envelope: EncryptedEnvelope = serde_json::from_slice(data).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("not an encrypted envelope: {}", e),
-        )
-    })?;
-
-    let nonce_bytes = hex::decode(&envelope.nonce)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad nonce hex: {}", e)))?;
-    let ct = hex::decode(&envelope.ciphertext).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("bad ciphertext hex: {}", e),
-        )
-    })?;
-
-    if nonce_bytes.len() != 12 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid nonce length {}", nonce_bytes.len()),
-        ));
-    }
-
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| io::Error::other(format!("AES key init: {}", e)))?;
-    // See encrypt_bytes above for the aes-gcm/generic-array migration context.
-    #[allow(deprecated)]
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    cipher
-        .decrypt(nonce, ct.as_ref())
-        .map_err(|e| io::Error::other(format!("decryption: {}", e)))
 }
 
 /// Local filesystem provider

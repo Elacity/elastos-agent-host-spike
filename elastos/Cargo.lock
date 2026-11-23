@@ -1829,6 +1829,7 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "k256",
  "libc",
+ "localhost-provider",
  "memchr",
  "p256",
  "qrcodegen",

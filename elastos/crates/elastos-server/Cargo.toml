@@ -138,6 +138,7 @@ gossip-rand = { package = "rand", version = "0.10", default-features = false, fe
 
 [target.'cfg(unix)'.dependencies]
 elastos-crosvm = { path = "../elastos-crosvm" }
+localhost-provider = { path = "../../capsules/localhost-provider" }
 
 [features]
 default = []

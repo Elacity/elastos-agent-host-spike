@@ -91,7 +91,7 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "elastos-server/src/server_infra.rs",
-        "setup_server_infrastructure_impl",
+        "localhost_provider_bridge_config",
         "encryption_key: device_key_hex",
     ),
     (
@@ -1379,6 +1379,13 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/server_infra.rs",
+        "localhost_provider_bridge_config",
+        "encryption_key: device_key_hex",
+        1,
+        mark("open", "device private key", "localhost provider", "On Unix the encryption field is the HKDF file key `elastos-localhost-file-v1`, not the raw device key. On Windows the field is still the device key, because this slice does not rewrite files there. The child is unconfined and `base_path` is the data directory, so it can open `identity/device.key`. The object process has that same file-read. The row stays open until slice C."),
+    ),
+    row(
+        "elastos-server/src/server_infra.rs",
         "register_chain_provider_plane",
         "load_or_create_device_key",
         1,
@@ -1390,13 +1397,6 @@ fn rows() -> Vec<HeldRow> {
         "CapabilityManager::load_or_generate",
         1,
         mark("runtime-own", "capability signer", "Runtime", "Home startup loads the Runtime capability signer"),
-    ),
-    row(
-        "elastos-server/src/server_infra.rs",
-        "setup_server_infrastructure_impl",
-        "encryption_key: device_key_hex",
-        1,
-        mark("open", "device private key", "localhost provider", "Home hands the device private key to the localhost provider. The object config no longer carries the device key; the process is an unconfined child and `base_path` is the data directory, so it can open `identity/device.key`."),
     ),
     row(
         "elastos-server/src/server_infra.rs",

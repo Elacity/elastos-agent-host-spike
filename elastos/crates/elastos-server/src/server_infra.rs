@@ -482,6 +482,284 @@ fn wallet_provider_bridge_config(data_dir: &Path) -> provider::BridgeProviderCon
     }
 }
 
+#[cfg(unix)]
+const LOCALHOST_FILE_KEY_INFO: &[u8] = b"elastos-localhost-file-v1";
+#[cfg(unix)]
+const LOCALHOST_MIGRATION_MARKER: &str = "localhost-file-key-v1";
+#[cfg(unix)]
+const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
+#[cfg(unix)]
+const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
+/// Local-app roots whose files are sealed. `MyWebSite` and `Public` stay
+/// plaintext. `identity/` and `did/` are not in this list.
+#[cfg(unix)]
+const LOCALHOST_ENCRYPTED_ROOTS: &[&str] = &["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"];
+
+#[cfg(unix)]
+fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "localhost file {} {why}; local apps were not started",
+        path.display()
+    )
+}
+
+/// HKDF-SHA256 file key for localhost envelopes.
+///
+/// `ikm` is the device key, salt is empty, and info is
+/// `elastos-localhost-file-v1`. The provider uses these 32 bytes as AES-256,
+/// with no further expansion.
+#[cfg(unix)]
+fn localhost_file_key(device_key: &[u8; 32]) -> anyhow::Result<[u8; 32]> {
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, device_key);
+    let mut okm = [0u8; 32];
+    hk.expand(LOCALHOST_FILE_KEY_INFO, &mut okm)
+        .map_err(|_| anyhow::anyhow!("localhost file key expansion failed"))?;
+    Ok(okm)
+}
+
+/// Write `bytes` by creating a temp file in the same directory, calling
+/// `fsync`, then `rename` over `path`. A crash keeps the previous bytes.
+#[cfg(unix)]
+fn replace_file_fsync_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "localhost file has no directory",
+        )
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "localhost file has no name",
+        )
+    })?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(file_name);
+    tmp_name.push(LOCALHOST_REWRITE_SUFFIX);
+    let tmp = parent.join(tmp_name);
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    if let Err(err) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    drop(file);
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    let dir = std::fs::File::open(parent)?;
+    dir.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_nofollow(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Rewrite one envelope onto the file key.
+///
+/// A file that is not the JSON envelope is left as it is. An envelope that
+/// opens with the raw device key is sealed again under the file key. An
+/// envelope that opens only with the file key was written by an earlier pass
+/// that crashed before the marker; it is left as it is. Any other envelope
+/// stops local apps and is not written.
+#[cfg(unix)]
+fn migrate_localhost_envelope(
+    path: &Path,
+    device_key: &[u8; 32],
+    file_key: &[u8; 32],
+) -> anyhow::Result<()> {
+    let bytes = read_nofollow(path).with_context(|| localhost_refused(path, "cannot be read"))?;
+    if !localhost_provider::is_encrypted_envelope(&bytes) {
+        return Ok(());
+    }
+    if let Ok(plaintext) = localhost_provider::decrypt_bytes(device_key, &bytes) {
+        let sealed = localhost_provider::encrypt_bytes(file_key, &plaintext)
+            .with_context(|| localhost_refused(path, "cannot be sealed"))?;
+        replace_file_fsync_rename(path, &sealed)
+            .with_context(|| localhost_refused(path, "cannot be replaced"))?;
+        return Ok(());
+    }
+    // The file key recognizes a file already replaced. The raw device key is
+    // not tried again after the file key fails, and it is not a fallback once
+    // the marker says migration finished.
+    if localhost_provider::decrypt_bytes(file_key, &bytes).is_ok() {
+        return Ok(());
+    }
+    Err(localhost_refused(path, "does not decrypt"))
+}
+
+#[cfg(unix)]
+fn migrate_localhost_tree(
+    dir: &Path,
+    device_key: &[u8; 32],
+    file_key: &[u8; 32],
+) -> anyhow::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir).with_context(|| localhost_refused(dir, "cannot be read"))? {
+        let entry = entry.with_context(|| localhost_refused(dir, "cannot be read"))?;
+        names.push(entry.file_name());
+    }
+    names.sort();
+    let suffix = LOCALHOST_REWRITE_SUFFIX.as_bytes();
+    for name in names {
+        let path = dir.join(&name);
+        let meta = std::fs::symlink_metadata(&path)
+            .with_context(|| localhost_refused(&path, "cannot be read"))?;
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            return Err(localhost_refused(&path, "is a link"));
+        }
+        let name_bytes = name.as_bytes();
+        if file_type.is_file() && name_bytes.starts_with(b".") && name_bytes.ends_with(suffix) {
+            std::fs::remove_file(&path)
+                .with_context(|| localhost_refused(&path, "cannot be removed"))?;
+            continue;
+        }
+        if file_type.is_dir() {
+            migrate_localhost_tree(&path, device_key, file_key)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            return Err(localhost_refused(&path, "is not a regular file"));
+        }
+        if std::os::unix::fs::MetadataExt::nlink(&meta) > 1 {
+            return Err(localhost_refused(&path, "is linked from another path"));
+        }
+        migrate_localhost_envelope(&path, device_key, file_key)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn localhost_marker_finished(marker: &Path) -> anyhow::Result<bool> {
+    match std::fs::symlink_metadata(marker) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(localhost_refused(marker, "is a link")),
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => Err(localhost_refused(marker, "is not a file")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| localhost_refused(marker, "cannot be read")),
+    }
+}
+
+#[cfg(unix)]
+fn write_localhost_marker(marker: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let identity = marker.parent().ok_or_else(|| {
+        anyhow::anyhow!("localhost file key marker has no directory; local apps were not started")
+    })?;
+    match std::fs::symlink_metadata(identity) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(localhost_refused(identity, "is a link"));
+        }
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err(localhost_refused(identity, "is not a directory")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(identity)
+                .with_context(|| localhost_refused(identity, "cannot be created"))?;
+            std::fs::set_permissions(identity, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| localhost_refused(identity, "cannot be created"))?;
+        }
+        Err(err) => {
+            return Err(err).with_context(|| localhost_refused(identity, "cannot be read"));
+        }
+    }
+    replace_file_fsync_rename(marker, LOCALHOST_MIGRATION_RECORD)
+        .with_context(|| localhost_refused(marker, "cannot be replaced"))?;
+    Ok(())
+}
+
+/// Rewrite local-app envelopes under the five encrypted roots onto the file key.
+///
+/// When `identity/localhost-file-key-v1` is a regular file, migration has
+/// finished. This returns without reading those roots and without opening any
+/// file with the raw device key. The raw device key is never a fallback after
+/// that marker exists.
+#[cfg(unix)]
+fn migrate_localhost_files_to_file_key(
+    data_dir: &Path,
+    device_key: &[u8; 32],
+) -> anyhow::Result<()> {
+    let marker = data_dir.join("identity").join(LOCALHOST_MIGRATION_MARKER);
+    if localhost_marker_finished(&marker)? {
+        return Ok(());
+    }
+    let file_key = zeroize::Zeroizing::new(localhost_file_key(device_key)?);
+    for root in LOCALHOST_ENCRYPTED_ROOTS {
+        let path = data_dir.join(root);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(localhost_refused(&path, "is a link"));
+            }
+            Ok(meta) if meta.is_dir() => {
+                migrate_localhost_tree(&path, device_key, &file_key)?;
+            }
+            Ok(_) => return Err(localhost_refused(&path, "is not a directory")),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err).with_context(|| localhost_refused(&path, "cannot be read"));
+            }
+        }
+    }
+    write_localhost_marker(&marker)
+}
+
+/// Localhost-provider init config.
+///
+/// On Unix, files under the five encrypted roots are rewritten onto the HKDF
+/// file key before this returns. The encryption field is that file key.
+/// On Windows, files are not rewritten and the field stays the device key.
+///
+/// The local below is the authority-census needle for the row
+/// `elastos-server/src/server_infra.rs` /
+/// `localhost_provider_bridge_config` / `encryption_key: device_key_hex`
+/// in `home_held_authority`. On Unix the value is the file key, not the raw
+/// device key.
+fn localhost_provider_bridge_config(
+    data_dir: &Path,
+    device_key: &[u8; 32],
+) -> anyhow::Result<provider::BridgeProviderConfig> {
+    #[cfg(unix)]
+    let device_key_hex = {
+        use zeroize::Zeroize;
+        migrate_localhost_files_to_file_key(data_dir, device_key)?;
+        let mut file_key = localhost_file_key(device_key)?;
+        let file_key_hex = hex::encode(file_key);
+        file_key.zeroize();
+        file_key_hex
+    };
+    #[cfg(not(unix))]
+    let device_key_hex = hex::encode(device_key);
+    Ok(provider::BridgeProviderConfig {
+        base_path: data_dir.to_string_lossy().to_string(),
+        allowed_paths: file_backed_prefixes(),
+        read_only: false,
+        encryption_key: device_key_hex,
+        ..Default::default()
+    })
+}
+
 async fn start_wallet_provider(
     data_dir: &Path,
     provider_registry: &provider::ProviderRegistry,
@@ -1072,13 +1350,7 @@ async fn setup_server_infrastructure_impl(
             hex::encode(elastos_runtime::signature::hash_content(&provider_bytes))
         );
 
-        let config = provider::BridgeProviderConfig {
-            base_path: data_dir.to_string_lossy().to_string(),
-            allowed_paths: file_backed_prefixes(),
-            read_only: false,
-            encryption_key: device_key_hex.clone(),
-            ..Default::default()
-        };
+        let config = localhost_provider_bridge_config(&data_dir, &device_key)?;
         let bridge = provider::ProviderBridge::spawn(&binary_path, config)
             .await
             .map_err(|e| {
@@ -4452,6 +4724,252 @@ mod tests {
         assert!(!region.contains("device_key_hex"));
         assert!(!region.contains("encryption_key:"));
         assert_init_omits_device_key(object_provider_bridge_config(temp.path()), &device_key);
+    }
+
+    fn expected_localhost_file_key(device_key: &[u8; 32]) -> [u8; 32] {
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, device_key);
+        let mut okm = [0u8; 32];
+        hk.expand(b"elastos-localhost-file-v1", &mut okm).unwrap();
+        okm
+    }
+
+    fn assert_no_localhost_rewrite_temps(dir: &std::path::Path) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let text = name.to_string_lossy();
+            assert!(
+                !text.contains("elastos-localhost-file-key-v1.tmp"),
+                "rewrite temp left behind: {text}"
+            );
+            if entry.file_type().unwrap().is_dir() {
+                assert_no_localhost_rewrite_temps(&entry.path());
+            }
+        }
+    }
+
+    #[test]
+    fn localhost_provider_config_omits_device_key() {
+        let device_key = [0x5a; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        assert_ne!(file_key, device_key);
+        assert_eq!(localhost_file_key(&device_key).unwrap(), file_key);
+        let temp = TempDir::new().unwrap();
+        plant_device_key(temp.path(), &device_key);
+        let device_key_bytes = fs::read(temp.path().join("identity/device.key")).unwrap();
+        assert_eq!(device_key_bytes, device_key);
+
+        let config = localhost_provider_bridge_config(temp.path(), &device_key).unwrap();
+
+        assert_eq!(
+            fs::read(temp.path().join("identity/device.key")).unwrap(),
+            device_key
+        );
+        assert_eq!(config.encryption_key, hex::encode(file_key));
+        assert_ne!(config.encryption_key, hex::encode(device_key));
+        let init =
+            serde_json::to_value(provider::bridge::ProviderRequest::Init { config }).unwrap();
+        assert_eq!(init["op"], "init");
+        assert_eq!(init["config"]["encryption_key"], hex::encode(file_key));
+        let serialized = serde_json::to_string(&init).unwrap();
+        assert!(
+            !serialized.contains(&hex::encode(device_key)),
+            "init JSON contains the device private key: {serialized}"
+        );
+        let source = include_str!("server_infra.rs");
+        let region = source
+            .split_once("resolve_verified_native_provider_binary(\"localhost-provider\")")
+            .unwrap()
+            .1
+            .split_once("resolve_verified_native_provider_binary(\"content-block-graph-provider\")")
+            .unwrap()
+            .0;
+        let config_at = region
+            .find("localhost_provider_bridge_config(&data_dir, &device_key)?;")
+            .unwrap();
+        let spawn_at = region.find("ProviderBridge::spawn(").unwrap();
+        assert!(config_at < spawn_at);
+        assert!(!region.contains("encryption_key:"));
+        assert!(!region.contains("device_key_hex"));
+        let replace = source
+            .split_once("fn replace_file_fsync_rename(")
+            .unwrap()
+            .1;
+        let replace = &replace[..replace.find("fn read_nofollow(").unwrap()];
+        assert!(replace.contains(".sync_all()"));
+        assert!(replace.contains("std::fs::rename("));
+        assert!(replace.contains(".create_new(true)"));
+        assert!(!replace.contains("std::fs::write("));
+    }
+
+    #[test]
+    fn migrated_localhost_envelope_roundtrip() {
+        let device_key = [0x11; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let plaintext = b"local-app secret";
+        let original = localhost_provider::encrypt_bytes(&device_key, plaintext).unwrap();
+        for dir in [
+            "AppCapsules",
+            "ElastOS/SystemServices",
+            "Local",
+            "Users/person",
+            "UsersAI",
+        ] {
+            let folder = root.join(dir);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("note.bin"), &original).unwrap();
+        }
+        fs::write(root.join("Users/readme.txt"), b"plain").unwrap();
+        fs::write(root.join("Users/meta.json"), br#"{"version":1}"#).unwrap();
+        fs::create_dir_all(root.join("identity")).unwrap();
+        fs::write(root.join("identity/credentials.json"), &original).unwrap();
+        fs::create_dir_all(root.join("did")).unwrap();
+        fs::write(root.join("did/nickname.enc"), &original).unwrap();
+        fs::create_dir_all(root.join("Public")).unwrap();
+        fs::write(root.join("Public/page.bin"), &original).unwrap();
+        fs::create_dir_all(root.join("MyWebSite")).unwrap();
+        fs::write(root.join("MyWebSite/index.bin"), &original).unwrap();
+
+        let config = localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(config.encryption_key, hex::encode(file_key));
+
+        for dir in [
+            "AppCapsules",
+            "ElastOS/SystemServices",
+            "Local",
+            "Users/person",
+            "UsersAI",
+        ] {
+            let migrated = fs::read(root.join(dir).join("note.bin")).unwrap();
+            assert_ne!(migrated, original);
+            assert_eq!(
+                localhost_provider::decrypt_bytes(&file_key, &migrated).unwrap(),
+                plaintext
+            );
+            assert!(localhost_provider::decrypt_bytes(&device_key, &migrated).is_err());
+        }
+        assert_eq!(fs::read(root.join("Users/readme.txt")).unwrap(), b"plain");
+        assert_eq!(
+            fs::read(root.join("Users/meta.json")).unwrap(),
+            br#"{"version":1}"#
+        );
+        assert_eq!(
+            fs::read(root.join("identity/credentials.json")).unwrap(),
+            original
+        );
+        assert_eq!(fs::read(root.join("did/nickname.enc")).unwrap(), original);
+        assert_eq!(fs::read(root.join("Public/page.bin")).unwrap(), original);
+        assert_eq!(
+            fs::read(root.join("MyWebSite/index.bin")).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read(root.join("identity/localhost-file-key-v1")).unwrap(),
+            b"elastos-localhost-file-v1\n"
+        );
+        assert_no_localhost_rewrite_temps(root);
+
+        let sealed = fs::read(root.join("Users/person/note.bin")).unwrap();
+        let again = localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(again.encryption_key, hex::encode(file_key));
+        assert_eq!(
+            fs::read(root.join("Users/person/note.bin")).unwrap(),
+            sealed
+        );
+        assert_eq!(
+            fs::read(root.join("identity/credentials.json")).unwrap(),
+            original
+        );
+        assert_eq!(
+            fs::read(root.join("identity/localhost-file-key-v1")).unwrap(),
+            b"elastos-localhost-file-v1\n"
+        );
+
+        let later = localhost_provider::encrypt_bytes(&device_key, b"later").unwrap();
+        fs::write(root.join("Local/later.bin"), &later).unwrap();
+        localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(fs::read(root.join("Local/later.bin")).unwrap(), later);
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &later).unwrap(),
+            b"later"
+        );
+    }
+
+    #[test]
+    fn corrupt_localhost_envelope_stops_start_and_names_the_file() {
+        let device_key = [0x22; 32];
+        let temp = TempDir::new().unwrap();
+        let path = temp
+            .path()
+            .join("Users")
+            .join("corrupt-localhost-envelope.bin");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let corrupt =
+            br#"{"version":1,"nonce":"00112233445566778899aabb","ciphertext":"deadbeef"}"#;
+        fs::write(&path, corrupt).unwrap();
+
+        let err = localhost_provider_bridge_config(temp.path(), &device_key).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(
+            message.contains("corrupt-localhost-envelope.bin"),
+            "{message}"
+        );
+        assert!(message.contains("does not decrypt"), "{message}");
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
+        assert!(!temp.path().join("identity/localhost-file-key-v1").exists());
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["corrupt-localhost-envelope.bin".to_string()]);
+    }
+
+    #[test]
+    fn localhost_link_stops_start_and_leaves_outside_bytes_unchanged() {
+        let device_key = [0x33; 32];
+        let original = localhost_provider::encrypt_bytes(&device_key, b"credential").unwrap();
+
+        let linked = TempDir::new().unwrap();
+        fs::create_dir_all(linked.path().join("identity")).unwrap();
+        let creds = linked.path().join("identity/credentials.json");
+        fs::write(&creds, &original).unwrap();
+        fs::create_dir_all(linked.path().join("Users")).unwrap();
+        let alias = linked.path().join("Users/alias.json");
+        std::os::unix::fs::symlink(&creds, &alias).unwrap();
+        let err = localhost_provider_bridge_config(linked.path(), &device_key).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(&alias.display().to_string()), "{message}");
+        assert!(message.contains("is a link"), "{message}");
+        assert_eq!(fs::read(&creds).unwrap(), original);
+        assert!(fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!linked
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .exists());
+
+        let shared = TempDir::new().unwrap();
+        fs::create_dir_all(shared.path().join("identity")).unwrap();
+        let creds = shared.path().join("identity/credentials.json");
+        fs::write(&creds, &original).unwrap();
+        fs::create_dir_all(shared.path().join("Local")).unwrap();
+        let hard = shared.path().join("Local/linked.bin");
+        fs::hard_link(&creds, &hard).unwrap();
+        let err = localhost_provider_bridge_config(shared.path(), &device_key).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(&hard.display().to_string()), "{message}");
+        assert!(message.contains("is linked from another path"), "{message}");
+        assert_eq!(fs::read(&creds).unwrap(), original);
+        assert_eq!(fs::read(&hard).unwrap(), original);
+        assert!(!shared
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .exists());
     }
 
     #[cfg(unix)]
