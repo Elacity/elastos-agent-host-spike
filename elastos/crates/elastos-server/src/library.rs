@@ -8507,7 +8507,7 @@ pub(crate) fn published_cid_audience(data_dir: &Path, cid: &str) -> Option<Publi
     (!audience.principals.is_empty()).then_some(audience)
 }
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) fn cid_is_published_here(data_dir: &Path, cid: &str) -> bool {
     published_cid_audience(data_dir, cid).is_some()
 }
@@ -8515,7 +8515,7 @@ pub(crate) fn cid_is_published_here(data_dir: &Path, cid: &str) -> bool {
 /// Rewrites `object_uri`'s publish record as alpha.25 withdrew it after an
 /// Undo: withdrawn, without the publication id it never knew, and with the
 /// index left as it was.
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) fn withdraw_as_alpha25_for_test(data_dir: &Path, principal_id: &str, object_uri: &str) {
     let mut record = read_publish_record(data_dir, principal_id, object_uri).unwrap();
     record.publication_id = None;
@@ -8577,7 +8577,7 @@ pub(crate) fn publish_cid_for_test(data_dir: &Path, cid: &str) {
 }
 
 /// Lists `cid` as `principal_id`'s Library publication, for their contacts.
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) fn publish_cid_for_contacts_for_test(data_dir: &Path, principal_id: &str, cid: &str) {
     update_published_index(data_dir, |index| {
         index.publications.insert(
@@ -10289,12 +10289,14 @@ mod publish_tests {
 
     /// This Home's Content: records each request; a publish answers the same
     /// CID for the same bytes.
+    #[cfg(unix)]
     #[derive(Default)]
     struct RecordingContent {
         requests: Mutex<Vec<Value>>,
         down: AtomicBool,
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Provider for RecordingContent {
         async fn handle(
@@ -10336,6 +10338,7 @@ mod publish_tests {
         }
     }
 
+    #[cfg(unix)]
     struct Home {
         dir: tempfile::TempDir,
         registry: Arc<ProviderRegistry>,
@@ -10344,6 +10347,7 @@ mod publish_tests {
         root: String,
     }
 
+    #[cfg(unix)]
     async fn home(principal: &'static str) -> Home {
         let registry = Arc::new(ProviderRegistry::new());
         let content = Arc::new(RecordingContent::default());
@@ -10364,6 +10368,7 @@ mod publish_tests {
         }
     }
 
+    #[cfg(unix)]
     impl Home {
         async fn call(&self, op: &str, mut body: Value) -> Value {
             body["op"] = json!(op);
@@ -10418,6 +10423,7 @@ mod publish_tests {
         }
     }
 
+    #[cfg(unix)]
     fn assert_refused(response: &Value, code: &str) {
         assert_eq!(response["status"], "error", "{response}");
         assert_eq!(response["code"], code, "{response}");
@@ -11055,6 +11061,7 @@ mod r5a_tests {
             .push(uri.to_string());
     }
 
+    #[cfg(unix)]
     fn runtime_json_dir_reads(data_dir: &Path) -> Vec<String> {
         RUNTIME_JSON_DIR_READS
             .lock()
@@ -11064,6 +11071,7 @@ mod r5a_tests {
             .unwrap_or_default()
     }
 
+    #[cfg(unix)]
     fn home(kind: PrincipalKind) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         r4_fixture::store(dir.path(), kind);
@@ -11079,6 +11087,7 @@ mod r5a_tests {
         dir
     }
 
+    #[cfg(unix)]
     /// Writes real data where the id rule for `r4_fixture::ID` points, so an
     /// unresolved-principal fallback would have something to read or overwrite.
     fn seed_id_rule_file(data_dir: &Path, uri: &str, bytes: &[u8]) -> PathBuf {
@@ -11088,12 +11097,14 @@ mod r5a_tests {
         path
     }
 
+    #[cfg(unix)]
     pub(super) struct IdRuleDecoy<'a> {
         dir: &'a Path,
         path: PathBuf,
         bytes: &'a [u8],
     }
 
+    #[cfg(unix)]
     impl IdRuleDecoy<'_> {
         pub(super) fn untouched(&self) {
             assert_eq!(
@@ -11112,6 +11123,7 @@ mod r5a_tests {
         }
     }
 
+    #[cfg(unix)]
     pub(super) fn id_rule_decoy<'a>(dir: &'a Path, uri: &str, bytes: &'a [u8]) -> IdRuleDecoy<'a> {
         IdRuleDecoy {
             dir,
@@ -11420,9 +11432,11 @@ mod r5a_tests {
         decoy.untouched();
     }
 
+    #[cfg(unix)]
     #[derive(Clone)]
     struct WarningWriter(Arc<Mutex<Vec<u8>>>);
 
+    #[cfg(unix)]
     impl std::io::Write for WarningWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(bytes);
@@ -11496,6 +11510,7 @@ mod r5a_tests {
         decoy.untouched();
     }
 
+    #[cfg(unix)]
     fn trash(root: &str) -> LibraryTrashRecord {
         LibraryTrashRecord {
             schema: LIBRARY_TRASH_RECORD_SCHEMA.into(),
@@ -11625,6 +11640,7 @@ mod r5a_tests {
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
+    #[cfg(unix)]
     fn published(root: &str) -> LibraryPublishRecord {
         serde_json::from_value(json!({
             "schema": "elastos.library.publish/v1", "object_uri": format!("{root}/Documents/p.txt"),
@@ -11774,6 +11790,7 @@ mod r5a_tests {
         assert!(!principal_object_io::writes(dir.path()).contains(&id_path));
     }
 
+    #[cfg(unix)]
     fn event(root: &str) -> LibraryEvent {
         LibraryEvent {
             schema: LIBRARY_EVENT_SCHEMA.into(),
@@ -12052,10 +12069,13 @@ mod r5a_tests {
         decoy.untouched();
     }
 
+    #[cfg(unix)]
     const UNSTORED_INDEX: &[u8] = br#"{"schema":"elastos.library.published-cids/v1","publications":{"k":{"any_peer":true,"cids":["bafy-r5b-unstored"],"principal_id":"person:local:r4"}}}"#;
+    #[cfg(unix)]
     const UNSTORED_REFUSAL: &str =
         "principal 'person:local:r4' has no stored record; its root cannot be chosen";
 
+    #[cfg(unix)]
     fn block<T>(future: impl std::future::Future<Output = T>) -> T {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -12064,6 +12084,7 @@ mod r5a_tests {
             .block_on(future)
     }
 
+    #[cfg(unix)]
     /// An unstored principal, with a publish-index entry seeded as literal
     /// bytes. The call must refuse by the resolve's own sentence, those
     /// bytes must stay, and `published_cid_audience` must still report the
@@ -12089,6 +12110,7 @@ mod r5a_tests {
         assert_unstored_audience(dir.path(), op);
     }
 
+    #[cfg(unix)]
     fn assert_unstored_audience(dir: &Path, op: &str) {
         let audience = published_cid_audience(dir, "bafy-r5b-unstored").unwrap();
         assert!(audience.any_peer, "{op}");
@@ -12099,10 +12121,12 @@ mod r5a_tests {
         );
     }
 
+    #[cfg(unix)]
     fn principal() -> String {
         r4_fixture::ID.to_string()
     }
 
+    #[cfg(unix)]
     fn unstored_publish_op(op: &str, dir: &Path) -> anyhow::Result<()> {
         let file = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/Documents/p.txt";
         let trash = "localhost://Users/b2caa01d2e3d5fb2ec0d1478/.Trash/p.txt";
@@ -12216,6 +12240,7 @@ mod r5a_tests {
         }
     }
 
+    #[cfg(unix)]
     fn unstored_publish_row(op: &'static str) {
         unstored_index_stays(op, |dir| unstored_publish_op(op, dir));
     }
