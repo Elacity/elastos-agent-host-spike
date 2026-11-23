@@ -373,6 +373,13 @@ fn home_app_token(data_dir: &std::path::Path) -> String {
     issue_home_launch_token(data_dir, HOME_CAPSULE_ID).unwrap()
 }
 
+/// Home token whose live grant lets a launch mint a projection for another app.
+fn granted_home_app_token(data_dir: &std::path::Path) -> String {
+    let context = bind_device_session_grant(data_dir, &[HOME_CAPSULE_ID]).unwrap();
+    issue_home_launch_token_with_context(data_dir, HOME_CAPSULE_ID, &context).unwrap()
+}
+
+#[allow(dead_code)] // used when prototype-agents is off
 fn system_app_token(data_dir: &std::path::Path) -> String {
     issue_home_launch_token(data_dir, SYSTEM_CAPSULE_ID).unwrap()
 }

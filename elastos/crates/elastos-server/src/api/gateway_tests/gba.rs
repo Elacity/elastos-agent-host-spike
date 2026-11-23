@@ -158,7 +158,7 @@ async fn home_content_launch_uses_the_bound_gba_viewer_without_compute() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", granted_home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"gba-ucity"}"#))
                 .unwrap(),
@@ -290,7 +290,7 @@ async fn home_launches_gba_nonogram_through_the_bound_viewer() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", granted_home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"gba-nonogram"}"#))
                 .unwrap(),
@@ -334,7 +334,7 @@ async fn home_launches_gba_nonogram_through_the_bound_viewer() {
 async fn old_install_upgrade_encrypts_ucity_save_and_state_before_normal_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let state = library_test_state(dir.path()).await;
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap();
     let protection =
         crate::auth::store_test_principal_root_protection(dir.path(), context.principal_id());
     let save_uri = format!(
@@ -572,7 +572,7 @@ async fn selected_gba_content_token_rejects_resource_substitution() {
         dir.path(),
         "gba-ucity",
         GBA_EMULATOR_CAPSULE_ID,
-        &local_home_launch_token_context(dir.path()).unwrap(),
+        &bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap(),
     )
     .unwrap();
 
@@ -773,7 +773,7 @@ async fn viewer_storage_cannot_reach_the_agents_area() {
         dir.path(),
         "gba-ucity",
         GBA_EMULATOR_CAPSULE_ID,
-        &local_home_launch_token_context(dir.path()).unwrap(),
+        &bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap(),
     )
     .unwrap();
     let send = |method: &str, uri: String, token: &str| {
@@ -838,9 +838,10 @@ async fn viewer_storage_cannot_reach_the_agents_area() {
             let body = axum::body::to_bytes(response.into_body(), usize::MAX)
                 .await
                 .unwrap();
+            let text = String::from_utf8_lossy(&body);
             assert!(
-                String::from_utf8_lossy(&body).contains(".AppData/Agents/"),
-                "{method} {storage} {scope} {name}"
+                text.contains(".AppData/Agents/"),
+                "{method} {storage} {scope} {name}: {text}"
             );
         }
     }

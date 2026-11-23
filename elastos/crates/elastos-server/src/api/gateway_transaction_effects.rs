@@ -4683,7 +4683,12 @@ mod r8c_child_rows {
     #[tokio::test]
     async fn r8c_control_transaction_effects_load_and_save_under_the_stored_persons_root() {
         let dir = tempfile::tempdir().unwrap();
-        verified_parent_device_context(dir.path(), WALLET_CAPSULE_ID);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
         let record =
             crate::auth::store_test_human_principal(dir.path(), "person:local:r8c-wallet-control");
         let now = now_ts();

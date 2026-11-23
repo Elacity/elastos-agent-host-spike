@@ -97,7 +97,13 @@ struct Control {
 }
 
 fn control(app: &str) -> Control {
-    let dir = child(app).dir;
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    elastos_identity::load_or_create_did(dir.path()).unwrap();
     let authority = passkey_authority_with_name(dir.path(), Some("Stored Person"));
     let root =
         crate::auth::store_test_principal_root_protection(dir.path(), &authority.principal_id)

@@ -139,10 +139,12 @@ public journey smoke requires `ELASTOS_CLI_LAUNCH_TOKEN` from the operator.
 
 The device key issues a launch token for two shells: `home` and `home-cli`. A
 standalone summary read for one of those shells uses that token. A standalone
-write for another app stops. The gateway-owned environment route remains open
-and is listed in the inventory. When that route is absent, the command stops
-and reports that device launch authority is limited to home and home-cli. This
-closed result for a standalone write on behalf of another app is the boundary
+write for another app stops. The gateway-owned environment route mints a token
+only when its proof-binding variable is set and the live grant matches that
+binding, the session, and the person. With no proof binding, that route mints
+nothing and the command uses the device mint, which accepts only `home` and
+`home-cli`. A proofless device token for another app is refused. This closed
+result for a standalone write on behalf of another app is the boundary
 recorded in #1817.
 
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.

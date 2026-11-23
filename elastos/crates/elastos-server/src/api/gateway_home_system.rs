@@ -9666,17 +9666,24 @@ mod stored_root_tests {
     ) -> (HomeLaunchTokenContext, String) {
         let parent = tempfile::tempdir().unwrap();
         let (_, parent_did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
+        // A proofless device token verifies only for Home's own shell. These
+        // rows record the parent device root, which does not depend on the app.
+        let shell = if app == HOME_CAPSULE_ID || app == HOME_CLI_SHELL_ID {
+            app
+        } else {
+            HOME_CAPSULE_ID
+        };
         let parent_context =
             super::super::gateway_home_token::local_home_launch_token_context(parent.path())
                 .unwrap();
         let token = super::super::gateway_home_token::issue_home_launch_token_with_context(
             parent.path(),
-            app,
+            shell,
             &parent_context,
         )
         .unwrap();
         let verified = super::super::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
-            data_dir, &token, &[app], parent_did.clone(), parent.path(),
+            data_dir, &token, &[shell], parent_did.clone(), parent.path(),
         ).unwrap();
         (verified.context, parent_did)
     }
@@ -10655,7 +10662,12 @@ mod r8c_child_rows {
     #[test]
     fn r8c_control_profile_update_writes_under_the_stored_persons_root() {
         let dir = tempfile::tempdir().unwrap();
-        verified_parent_device_context(dir.path(), PEOPLE_CAPSULE_ID);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        elastos_identity::load_or_create_did(dir.path()).unwrap();
         let now = now_ts();
         let binding = ProofBinding::passkey_webauthn(PasskeyWebAuthnBinding {
             credential_id: "r8c-control".to_string(),

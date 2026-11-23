@@ -8174,7 +8174,8 @@ pub(crate) mod kept_launch_test_tokens {
     }
 
     pub(crate) fn shell(data_dir: &std::path::Path) -> String {
-        let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
+        let context =
+            super::super::gateway::bind_device_session_grant(data_dir, &["home"]).unwrap();
         super::super::gateway::issue_home_projection_launch_token_with_context(
             data_dir,
             "home",
