@@ -85,16 +85,6 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "load_or_create_did",
     ),
     (
-        "elastos-server/src/provider_host.rs",
-        "compose",
-        "load_or_create_device_key",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
-        "register_chain_provider_plane",
-        "load_or_create_device_key",
-    ),
-    (
         "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
@@ -102,11 +92,6 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     (
         "elastos-server/src/server_infra.rs",
         "start_did_provider",
-        "encryption_key: device_key_hex",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
-        "start_wallet_provider",
         "encryption_key: device_key_hex",
     ),
 ];
@@ -1322,7 +1307,7 @@ fn rows() -> Vec<HeldRow> {
         "compose",
         "load_or_create_device_key",
         1,
-        mark("open", "provider-host DID", "provider host", "The provider host derives its DID from the device private key"),
+        mark("home-own", "provider-host DID", "provider host", "this is the host's Carrier identity, the same `derive_did` the Home server already owns. The raw key is not copied into a child config."),
     ),
     row(
         "elastos-server/src/resource_bridge.rs",
@@ -1392,7 +1377,7 @@ fn rows() -> Vec<HeldRow> {
         "register_chain_provider_plane",
         "load_or_create_device_key",
         1,
-        mark("open", "runtime issuer", "chain provider", "The chain plane receives an issuer derived from the device key"),
+        mark("narrowed", "runtime issuer", "chain provider", "the child config carries the Ed25519 verifying key of `derive_did(device_key)`, which `RuntimeOperationIssuerKeyV1` accepts only as a public key. The private key is not in the config."),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1405,8 +1390,8 @@ fn rows() -> Vec<HeldRow> {
         "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
-        2,
-        mark("open", "device private key", "localhost and object providers", "Home hands the device private key to the localhost and object providers"),
+        1,
+        mark("open", "device private key", "localhost and object providers", "Home hands the device private key to the localhost provider. The object config no longer carries the device key; the process is an unconfined child and `base_path` is the data directory, so it can open `identity/device.key`."),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1424,10 +1409,10 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/server_infra.rs",
-        "start_wallet_provider",
+        "wallet_provider_bridge_config",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "wallet provider", "Home hands the device private key to the wallet provider"),
+        mark("narrowed", "device private key", "wallet provider", "wallet storage key is the random `wallet-key.hex`; the confined process is not given the device key."),
     ),
     row(
         "elastos-server/src/sources.rs",
