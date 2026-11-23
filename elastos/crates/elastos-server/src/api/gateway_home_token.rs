@@ -340,6 +340,9 @@ pub(crate) fn issue_local_runtime_home_launch_token(
     data_dir: &std::path::Path,
     app: &str,
 ) -> anyhow::Result<String> {
+    if app != HOME_CAPSULE_ID && app != HOME_CLI_SHELL_ID {
+        anyhow::bail!("device launch authority is limited to home and home-cli");
+    }
     let context = local_home_launch_token_context(data_dir)?;
     issue_home_launch_token_with_context(data_dir, app, &context)
 }
@@ -3513,5 +3516,29 @@ mod tests {
                 .to_string(),
             "home_shell_content_open_grant_mismatch"
         );
+    }
+
+    #[test]
+    fn device_launch_authority_is_limited_to_home_and_home_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        for app in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID] {
+            let token = issue_local_runtime_home_launch_token(dir.path(), app)
+                .unwrap_or_else(|err| panic!("{app} is Home's own shell: {err}"));
+            assert_eq!(
+                decode_launch_token(&token)
+                    .payload
+                    .launch_context
+                    .executable_actor,
+                app
+            );
+        }
+        for app in ["people", "marketplace"] {
+            let err =
+                issue_local_runtime_home_launch_token(dir.path(), app).expect_err("another app");
+            assert_eq!(
+                err.to_string(),
+                "device launch authority is limited to home and home-cli"
+            );
+        }
     }
 }
