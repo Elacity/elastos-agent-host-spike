@@ -2075,7 +2075,9 @@ async fn command_names_home_when_nothing_is_listening() {
     let result = super::super::gateway_home_cli_mint::request_and_wait_observed_for_test(
         &format!("http://{addr}"),
         std::time::Duration::from_millis(20),
-        std::time::Duration::from_millis(200),
+        // Windows takes about 2 s to refuse a connect to a closed loopback port (SYN retries);
+        // Unix refuses at once, so this longer deadline costs nothing there.
+        std::time::Duration::from_secs(5),
         &mut notice,
         |_| async {},
     )
