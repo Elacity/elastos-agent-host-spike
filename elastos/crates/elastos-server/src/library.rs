@@ -9745,6 +9745,7 @@ mod tests {
         .is_ok());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires ELASTOS_LIVE_IPFS_PROVIDER_BIN and ELASTOS_LIVE_IPFS_DATA_DIR"]
     async fn library_live_ipfs_publish_provider_route_smoke() {

@@ -22,6 +22,12 @@ impl VerifiedExecutable {
         &self.path
     }
 
+    /// Native providers require a signed digest. Windows has no held executable,
+    /// so admission refuses before a start.
+    pub fn signed_checksum(&self) -> Result<&str> {
+        Err(super::windows_unsupported("Verified executable start"))
+    }
+
     pub fn attach_std(&self, _command: &mut std::process::Command, _clear_env: bool) -> Result<()> {
         Err(super::windows_unsupported("Verified executable start"))
     }

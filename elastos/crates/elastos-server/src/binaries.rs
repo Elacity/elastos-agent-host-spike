@@ -17,7 +17,7 @@ pub fn checked_native_provider(path: &Path) -> CheckedExecutable {
 pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> CheckedExecutable {
     // Library tests start isolated fixture executables that live outside the
     // Home they run against; an executable inside the Home is always admitted.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if path.is_file() && !path.starts_with(data_dir) {
         return crate::test_support::fixture_executable(path).with_home_data_dir(data_dir);
     }
