@@ -14,6 +14,7 @@ use std::io::Read as _;
 #[cfg(unix)]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 
 mod browser_config;
@@ -2380,6 +2381,7 @@ pub(crate) enum LocalModelExecutionUnavailable {
 }
 
 impl LocalModelExecutionUnavailable {
+    #[cfg(unix)]
     pub(crate) fn public_class(self) -> &'static str {
         match self {
             Self::UnsupportedHost => "unsupported_host",
@@ -2524,6 +2526,7 @@ fn probe_arm64_model_engine(path: &Path) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn local_model_engine_receipt_args<'a>(
     component: &'a Component,
     platform_info: &'a PlatformInfo,

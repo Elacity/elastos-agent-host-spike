@@ -2784,6 +2784,7 @@ pub async fn publish_bytes_via_provider(
     content_response_cid(&response)
 }
 
+#[cfg(any(unix, test))]
 const MODEL_PREPARATION_SOURCE: &str = "runtime-model-preparation";
 
 /// One preparation's read route for its package parts. Parts come from the
@@ -2792,11 +2793,13 @@ const MODEL_PREPARATION_SOURCE: &str = "runtime-model-preparation";
 /// miss instead of one per 64 KiB part. Reads take `&self` so preparation can
 /// keep several parts in flight. Preparation still checks each file's SHA-256
 /// and the package CID, whichever route served the bytes.
+#[cfg(any(unix, test))]
 #[derive(Debug, Default)]
 pub(crate) struct ModelPartReads {
     holders_only: std::sync::atomic::AtomicBool,
 }
 
+#[cfg(any(unix, test))]
 impl ModelPartReads {
     /// Complete one bounded model read. Preparation owns aggregate accounting,
     /// ordering, integrity and settlement.
@@ -2886,6 +2889,7 @@ impl ModelPartReads {
 }
 
 /// One part through the local Content path only; a miss never reaches Carrier.
+#[cfg(any(unix, test))]
 async fn read_local_model_part(
     registry: &ProviderRegistry,
     request: Value,
@@ -2908,6 +2912,7 @@ async fn read_local_model_part(
     Ok(stream.drain_to_vec()?)
 }
 
+#[cfg(any(unix, test))]
 fn checked_model_part(
     bytes: Vec<u8>,
     limit: u64,

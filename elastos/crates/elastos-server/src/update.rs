@@ -21,6 +21,7 @@ use crate::sources::{
     default_data_dir, default_install_path, load_trusted_sources, normalize_gateways, TrustedSource,
 };
 
+#[cfg(unix)]
 const INSTALLED_BINARY_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(test)]
 const TEST_INSTALLED_BINARY_VERSION_TIMEOUT: std::time::Duration =
@@ -30,6 +31,7 @@ tokio::task_local! {
     static TEST_INSTALLED_BINARY_VERSION_TIMEOUT_OVERRIDE: std::time::Duration;
 }
 
+#[cfg(unix)]
 fn installed_binary_version_timeout() -> std::time::Duration {
     #[cfg(test)]
     {
@@ -503,6 +505,7 @@ async fn verify_installed_binary_version(
     .into())
 }
 
+#[cfg(unix)]
 fn verify_installed_binary_version_output(
     bin_path: &Path,
     expected_version: &str,

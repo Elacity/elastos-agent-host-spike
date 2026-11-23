@@ -33,8 +33,10 @@ mod fs {
     use std::io;
     use std::path::Path;
 
+    #[cfg(unix)]
+    pub use std::fs::write;
     pub use std::fs::{
-        create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, write, Metadata,
+        create_dir, create_dir_all, remove_dir, remove_dir_all, remove_file, Metadata,
     };
 
     fn note_read(path: &Path) {
@@ -10282,9 +10284,13 @@ mod tests {
 
 #[cfg(test)]
 mod publish_tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicBool, Ordering};
+    #[cfg(unix)]
     use std::sync::Mutex;
 
     /// This Home's Content: records each request; a publish answers the same
@@ -11044,6 +11050,7 @@ mod publish_tests {
 #[cfg(test)]
 mod r5a_tests {
     use super::*;
+    #[cfg(unix)]
     use crate::auth::{principal_object_io, r4_fixture, PrincipalKind};
     use std::collections::HashMap;
     use std::sync::LazyLock;

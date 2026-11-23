@@ -690,6 +690,7 @@ pub(crate) async fn register_content_plane(
 
 /// Spawn the ipfs-provider capsule and register `elastos://ipfs`, the block
 /// backend the content plane pins imported objects through.
+#[cfg(unix)]
 pub(crate) async fn register_ipfs_provider_plane(
     provider_registry: &Arc<provider::ProviderRegistry>,
     binary_path: &Path,
@@ -753,6 +754,7 @@ pub(crate) async fn register_availability_provider_plane(
 /// every release through its own `protected_content_rights_evidence` call,
 /// so the configuration is required here (the full Home profile tolerates its
 /// absence because it degrades protected operations, not the whole host).
+#[cfg(unix)]
 pub(crate) async fn register_chain_provider_plane(
     provider_registry: &Arc<provider::ProviderRegistry>,
     binary_path: &Path,
@@ -1336,6 +1338,8 @@ async fn setup_server_infrastructure_impl(
                             }
                             #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                             let _ = local_sockets;
+                            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                            let _ = model_config;
                             #[cfg(not(target_os = "macos"))]
                             let _ = hosted_listener;
                             let bridge = Arc::new(bridge);
@@ -2100,6 +2104,7 @@ fn remove_existing_browser_local_exit_socket(path: &Path) -> anyhow::Result<()> 
         }
     }
 
+    #[cfg(unix)]
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         // The incumbent reaped itself and removed its own socket.

@@ -6,16 +6,22 @@ use std::io;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex as StdMutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
 use anyhow::Context;
+#[cfg(unix)]
 use rand::RngCore;
 use tokio::process::Child;
 #[cfg(unix)]
 use tokio::process::Command;
-use tokio::sync::{broadcast, watch, Mutex, Notify};
+#[cfg(unix)]
+use tokio::sync::Notify;
+use tokio::sync::{broadcast, watch, Mutex};
 
 #[cfg(unix)]
 use std::fs::File;
