@@ -9,11 +9,29 @@ class FakeElement {
     this.textContent = "";
     this.value = "";
     this.title = "";
+    this.type = "";
+    this.className = "";
     this.dataset = {};
+    this.children = [];
     this.attributes = new Map();
     this.listeners = new Map();
     this.style = { setProperty() {}, removeProperty() {} };
     this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false };
+  }
+
+  get firstChild() {
+    return this.children[0] || null;
+  }
+
+  appendChild(child) {
+    this.children.push(child);
+    return child;
+  }
+
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    return child;
   }
 
   setAttribute(name, value) {
@@ -40,6 +58,7 @@ globalThis.document = {
   body: { dataset: {} },
   querySelector: element,
   getElementById: (id) => element(`#${id}`),
+  createElement: () => new FakeElement(),
 };
 globalThis.location = new URL("http://localhost:61180/home/");
 globalThis.window = {
@@ -65,7 +84,11 @@ Object.defineProperty(globalThis, "navigator", {
 let routes = {};
 const requests = [];
 globalThis.fetch = async (url, init = {}) => {
-  requests.push({ url, body: init.body ? JSON.parse(init.body) : null });
+  requests.push({
+    url,
+    body: init.body ? JSON.parse(init.body) : null,
+    headers: init.headers || {},
+  });
   const route = routes[url];
   if (!route) throw new TypeError("Failed to fetch");
   const { status = 200, body = {} } = await route();
@@ -97,9 +120,14 @@ const settle = async () => {
 
 const {
   addAccountPasskey,
+  approveHomeCliMintRequest,
   bindHomeUnlock,
+  cancelShownHomeCliMint,
   recoveryImportIncompleteMessage,
+  refreshHomeCliMintPrompt,
+  setHomeAuthorityToken,
   showHomeUnlock,
+  terminalRequestCode,
 } = await import("./shell-auth.js");
 
 routes["/api/auth/passkey/status"] = () => ({ body: { registered: true, guest_registration_enabled: false } });
@@ -220,4 +248,262 @@ test("recovery says it worked when only the Home's recovery record is missing", 
   }
   assert.match(recoveryImportIncompleteMessage(imported("complete", "absent", "complete")),
     /has no signed Profile or name/);
+});
+
+const CLI_REQUEST = "ab".repeat(16);
+
+function cliMintRoutes() {
+  routes["/api/home/cli-mint/waiting"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.waiting.result/v1",
+      requests: [{
+        request_id: CLI_REQUEST,
+        operation: "home-cli.export-grant",
+        expires_at: 1,
+        status: "pending",
+      }],
+    },
+  });
+  routes["/api/home/cli-mint/begin"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.begin.result/v1",
+      request_id: CLI_REQUEST,
+      options: { publicKey: { challenge: "AA", allowCredentials: [] } },
+      expires_at: 1,
+    },
+  });
+  routes["/api/home/cli-mint/approve"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.approve.result/v1",
+      request_id: CLI_REQUEST,
+      status: "approved",
+    },
+  });
+}
+
+test("a waiting terminal shows the passkey prompt and begin runs before approve", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  cliMintRoutes();
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = true;
+  requests.length = 0;
+  await refreshHomeCliMintPrompt();
+  assert.equal(prompt.hidden, false);
+  assert.match(element("#home-cli-mint-copy").textContent, /passkey/);
+  assert.match(element("#home-cli-mint-copy").textContent, /ABAB-ABAB/);
+  assert.equal(prompt.dataset.requestId, CLI_REQUEST);
+  assert.equal(prompt.dataset.mode, "approve");
+  requests.length = 0;
+  const calls = [];
+  credentials = {
+    get: async () => {
+      calls.push("get");
+      return fakeCredential();
+    },
+  };
+  element("#home-cli-mint-approve").click();
+  await settle();
+  assert.deepEqual(calls, ["get"]);
+  const urls = requests.map((request) => request.url);
+  assert.deepEqual(urls, ["/api/home/cli-mint/begin", "/api/home/cli-mint/approve"]);
+  assert.ok(urls.indexOf("/api/home/cli-mint/begin") < urls.indexOf("/api/home/cli-mint/approve"));
+  assert.equal(requests[0].body.schema, "elastos.home.cli-mint.begin/v1");
+  assert.equal(requests[0].body.request_id, CLI_REQUEST);
+  assert.equal(requests[0].headers["x-elastos-home-token"], "home-admin-token");
+  assert.equal(requests[1].body.schema, "elastos.home.cli-mint.approve/v1");
+  assert.equal(requests[1].body.request_id, CLI_REQUEST);
+  assert.equal(requests[1].headers["x-elastos-home-token"], "home-admin-token");
+  assert.equal(requests[1].body.response.type, "public-key");
+  assert.equal(prompt.hidden, true);
+});
+
+test("the terminal prompt does not approve when begin fails", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  cliMintRoutes();
+  routes["/api/home/cli-mint/begin"] = () => ({ status: 400, body: "cli mint request is not waiting for approval" });
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = true;
+  prompt.dataset.mode = "approve";
+  prompt.dataset.requestId = CLI_REQUEST;
+  requests.length = 0;
+  credentials = { get: async () => fakeCredential() };
+  await assert.rejects(approveHomeCliMintRequest(), /request failed: 400/);
+  assert.match(
+    element("#home-cli-mint-status").textContent,
+    /did not approve the terminal/,
+  );
+  assert.deepEqual(requests.map((request) => request.url), ["/api/home/cli-mint/begin"]);
+});
+
+const OTHER_REQUEST = "cd".repeat(16);
+const MIXED_REQUEST = "0123456789abcdef0123456789abcdef";
+
+function waitingRoute(ids) {
+  routes["/api/home/cli-mint/waiting"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.waiting.result/v1",
+      requests: ids.map((requestId) => ({
+        request_id: requestId,
+        operation: "home-cli.export-grant",
+        expires_at: 1,
+        status: "pending",
+      })),
+    },
+  });
+}
+
+test("the prompt shows the same code the terminal prints", async () => {
+  assert.equal(terminalRequestCode(MIXED_REQUEST), "0123-4567");
+  assert.equal(terminalRequestCode(CLI_REQUEST), "ABAB-ABAB");
+  assert.match(terminalRequestCode(MIXED_REQUEST), /^[0-9A-F]{4}-[0-9A-F]{4}$/);
+  setHomeAuthorityToken("home-admin-token");
+  waitingRoute([MIXED_REQUEST]);
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = true;
+  delete prompt.dataset.requestId;
+  delete prompt.dataset.mode;
+  await refreshHomeCliMintPrompt();
+  const copy = element("#home-cli-mint-copy").textContent;
+  assert.match(copy, /0123-4567/);
+  assert.equal(copy.includes(MIXED_REQUEST), false);
+  assert.equal(prompt.dataset.requestId, MIXED_REQUEST);
+});
+
+test("two pending requests ask the owner to pick and show both codes", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  waitingRoute([CLI_REQUEST, OTHER_REQUEST]);
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = true;
+  delete prompt.dataset.requestId;
+  delete prompt.dataset.mode;
+  delete prompt.dataset.choiceKey;
+  await refreshHomeCliMintPrompt();
+  const copy = element("#home-cli-mint-copy").textContent;
+  assert.match(copy, /Choose/);
+  assert.match(copy, /ABAB-ABAB/);
+  assert.match(copy, /CDCD-CDCD/);
+  assert.equal(prompt.dataset.mode, "pick");
+  assert.equal(prompt.dataset.requestId, undefined);
+  assert.equal(element("#home-cli-mint-approve").hidden, true);
+  const labels = element("#home-cli-mint-choices").children.map((child) => child.textContent);
+  assert.deepEqual(labels, ["ABAB-ABAB", "CDCD-CDCD"]);
+  element("#home-cli-mint-choices").children[1].click();
+  assert.equal(prompt.dataset.mode, "approve");
+  assert.equal(prompt.dataset.requestId, OTHER_REQUEST);
+  assert.match(element("#home-cli-mint-copy").textContent, /CDCD-CDCD/);
+  assert.equal(element("#home-cli-mint-approve").hidden, false);
+});
+
+test("an open prompt stays bound to the request it opened for", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  waitingRoute([CLI_REQUEST]);
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = true;
+  delete prompt.dataset.requestId;
+  delete prompt.dataset.mode;
+  await refreshHomeCliMintPrompt();
+  assert.equal(prompt.dataset.requestId, CLI_REQUEST);
+  waitingRoute([OTHER_REQUEST, CLI_REQUEST]);
+  await refreshHomeCliMintPrompt();
+  assert.equal(prompt.dataset.mode, "approve");
+  assert.equal(prompt.dataset.requestId, CLI_REQUEST);
+  assert.match(element("#home-cli-mint-copy").textContent, /ABAB-ABAB/);
+  waitingRoute([OTHER_REQUEST]);
+  await refreshHomeCliMintPrompt();
+  assert.equal(prompt.hidden, true);
+  assert.notEqual(prompt.dataset.requestId, OTHER_REQUEST);
+  await refreshHomeCliMintPrompt();
+  assert.equal(prompt.dataset.requestId, OTHER_REQUEST);
+  assert.equal(prompt.hidden, false);
+});
+
+test("a dismissed passkey cancels the terminal request", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  cliMintRoutes();
+  routes["/api/home/cli-mint/cancel"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.cancel.result/v1",
+      request_id: CLI_REQUEST,
+      status: "cancelled",
+    },
+  });
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = false;
+  prompt.dataset.mode = "approve";
+  prompt.dataset.requestId = CLI_REQUEST;
+  requests.length = 0;
+  credentials = {
+    get: async () => {
+      const error = new Error("The operation either timed out or was not allowed.");
+      error.name = "NotAllowedError";
+      throw error;
+    },
+  };
+  await assert.rejects(approveHomeCliMintRequest(), /not allowed/);
+  const cancel = requests.find((request) => request.url === "/api/home/cli-mint/cancel");
+  assert.equal(cancel.body.request_id, CLI_REQUEST);
+  assert.match(element("#home-cli-mint-status").textContent, /No passkey was used/);
+  assert.doesNotMatch(element("#home-cli-mint-status").textContent, /Use passkey to try again/);
+});
+
+test("an already started request does not offer the same passkey again", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  cliMintRoutes();
+  routes["/api/home/cli-mint/begin"] = () => ({
+    status: 400,
+    body: "cli mint request is already waiting for approval",
+  });
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = false;
+  prompt.dataset.mode = "approve";
+  prompt.dataset.requestId = CLI_REQUEST;
+  requests.length = 0;
+  credentials = { get: async () => { throw new Error("the passkey prompt must not open"); } };
+  await assert.rejects(approveHomeCliMintRequest(), /already waiting/);
+  assert.match(element("#home-cli-mint-status").textContent, /Select Cancel/);
+  assert.doesNotMatch(element("#home-cli-mint-status").textContent, /Use passkey to try again/);
+  assert.deepEqual(requests.map((request) => request.url), ["/api/home/cli-mint/begin"]);
+});
+
+test("a failed approval cancels the begun request", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  cliMintRoutes();
+  routes["/api/home/cli-mint/approve"] = () => ({ status: 400, body: "Signature verification failed" });
+  routes["/api/home/cli-mint/cancel"] = () => ({
+    body: {
+      schema: "elastos.home.cli-mint.cancel.result/v1",
+      request_id: CLI_REQUEST,
+      status: "cancelled",
+    },
+  });
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = false;
+  prompt.dataset.mode = "approve";
+  prompt.dataset.requestId = CLI_REQUEST;
+  requests.length = 0;
+  credentials = { get: async () => fakeCredential() };
+  await assert.rejects(approveHomeCliMintRequest(), /request failed: 400/);
+  assert.ok(requests.some((request) => request.url === "/api/home/cli-mint/cancel"));
+  assert.match(element("#home-cli-mint-status").textContent, /Run the command again/);
+  assert.doesNotMatch(element("#home-cli-mint-status").textContent, /Use passkey to try again/);
+});
+
+test("a cancel during the commit window does not say Home did not approve", async () => {
+  setHomeAuthorityToken("home-admin-token");
+  const prompt = element("#home-cli-mint-prompt");
+  prompt.hidden = false;
+  prompt.dataset.mode = "approve";
+  prompt.dataset.requestId = CLI_REQUEST;
+  routes["/api/home/cli-mint/cancel"] = () => ({
+    status: 400,
+    body: "cli mint request is already decided",
+  });
+  requests.length = 0;
+  await cancelShownHomeCliMint();
+  const status = element("#home-cli-mint-status").textContent;
+  assert.match(status, /Too late to cancel/);
+  assert.match(status, /sign out/i);
+  assert.doesNotMatch(status, /did not approve/);
+  assert.equal(prompt.hidden, false);
+  assert.equal(prompt.dataset.requestId, CLI_REQUEST);
 });

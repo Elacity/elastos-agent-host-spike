@@ -437,7 +437,7 @@ fn rows() -> Vec<AuthorityRow> {
             "home_admin_context",
             "require_home_token_context",
             1,
-            "runtime-admin:human admin passkey before cli mint begin, approve, or cancel",
+            "runtime-admin:human admin passkey before cli mint begin, approve, cancel, or waiting",
         ),
         row(
             ROUTES,
