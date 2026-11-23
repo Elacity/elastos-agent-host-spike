@@ -241,6 +241,10 @@ impl CapabilityStore {
             }
             file.sync_all()?;
             fs::rename(&tmp_path, &revoked_path)?;
+            // Flushing the directory makes the rename durable on Unix. Windows
+            // cannot open a directory as a file (os error 5), which made every
+            // revocation fail there; the rename is the durable step on Windows.
+            #[cfg(unix)]
             fs::File::open(path)?.sync_all()?;
         }
         Ok(())
