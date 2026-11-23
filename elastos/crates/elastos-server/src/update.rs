@@ -3318,7 +3318,6 @@ mod tests {
             ("linux", "aarch64"),
             ("macos", "x86_64"),
             ("macos", "aarch64"),
-            ("windows", "x86_64"),
         ] {
             let release_platform = release_platform_for(os, arch);
             assert!(
@@ -3327,6 +3326,14 @@ mod tests {
                  scripts/release-platforms.json"
             );
         }
+        // scripts/release-platforms.json is also the publish allowlist (publish-release.sh), so
+        // the Windows pair stays out until the owner decides Windows signing; Windows is named in
+        // update.rs only so a Windows host refuses with a clear "no binary for x86_64-windows".
+        assert_eq!(release_platform_for("windows", "x86_64"), "x86_64-windows");
+        assert!(
+            !pairs.values().any(|value| value == "x86_64-windows"),
+            "x86_64-windows must not be publishable before the Windows signing decision"
+        );
     }
 
     #[tokio::test]
