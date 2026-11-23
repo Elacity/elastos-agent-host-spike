@@ -1384,7 +1384,7 @@ async fn home_session_cannot_invoke_an_app_only_documents_operation() {
     );
 }
 
-fn protected_names(repo: &Path) -> BTreeSet<String> {
+pub(super) fn protected_names(repo: &Path) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for suffix in ["custody", "contracts", "runtime", "provider-contracts"] {
         // The crate name is joined at run time so the generic Runtime product
@@ -1443,7 +1443,7 @@ fn protected_names(repo: &Path) -> BTreeSet<String> {
     names
 }
 
-fn protected_symbol_name(name: &str) -> bool {
+pub(super) fn protected_symbol_name(name: &str) -> bool {
     [
         "Custody",
         "Decrypt",
