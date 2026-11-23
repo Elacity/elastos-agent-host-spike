@@ -4980,7 +4980,9 @@ fn random_hex(bytes_len: usize) -> String {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    #[cfg(unix)]
     use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
+    #[cfg(unix)]
     use std::sync::Arc;
 
     #[test]

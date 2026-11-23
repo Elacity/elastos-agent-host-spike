@@ -92,16 +92,21 @@ impl BrowserInternetService {
 #[derive(Clone)]
 pub(super) struct BrowserInternetEffect {
     pub(super) fence: DispatchFence,
+    #[cfg(unix)]
     pub(super) cancelled: watch::Receiver<bool>,
+    #[cfg(unix)]
     copies: Arc<watch::Sender<usize>>,
 }
 
+#[cfg(unix)]
 pub(super) struct InternetCopy(Arc<watch::Sender<usize>>);
+#[cfg(unix)]
 impl Drop for InternetCopy {
     fn drop(&mut self) {
         self.0.send_modify(|count| *count -= 1);
     }
 }
+#[cfg(unix)]
 impl BrowserInternetEffect {
     // The caller holds this read guard through listener registration. Stop owns
     // the write barrier after it signals cancellation, then waits for all copies.
@@ -178,7 +183,7 @@ pub(in crate::api::gateway) fn granted_fixture(
     Arc::new(BrowserInternetService::new(Some(manager)))
 }
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(in crate::api::gateway) fn transport_fixture() -> BrowserInternetEffect {
     let (keepalive, cancelled) = watch::channel(false);
     BrowserInternetEffect {
@@ -604,6 +609,8 @@ pub(super) async fn effect(
     );
     let cancelled = instance.cancel.subscribe();
     let stopped = cancelled.clone();
+    #[cfg(windows)]
+    let _ = cancelled;
     let data = state.data_dir.clone();
     let session = context.session_id.clone();
     let principal = context.principal_id().to_string();
@@ -625,7 +632,9 @@ pub(super) async fn effect(
     });
     Ok(BrowserInternetEffect {
         fence,
+        #[cfg(unix)]
         cancelled,
+        #[cfg(unix)]
         copies: instance.copies.clone(),
     })
 }

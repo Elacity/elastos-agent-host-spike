@@ -165,6 +165,7 @@ pub fn approved_connection(data_dir: &Path, offer_id: &str) -> bool {
         })
 }
 
+#[cfg(unix)]
 pub fn end_connection_approval(data_dir: &Path, offer_id: &str) -> anyhow::Result<()> {
     let request_id = hosted_http_request_id(offer_id)?;
     let record = load_record(data_dir, &request_id)?;

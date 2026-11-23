@@ -572,9 +572,11 @@ fn browser_profile_reset_error_response(
 ) -> Response {
     use crate::api::browser_profile_reset::ProfileResetError;
     match error {
-        ProfileResetError::Busy
-        | ProfileResetError::Unsafe(_)
-        | ProfileResetError::UnsupportedHost => {
+        #[cfg(unix)]
+        ProfileResetError::Busy | ProfileResetError::Unsafe(_) => {
+            (StatusCode::CONFLICT, error.to_string()).into_response()
+        }
+        ProfileResetError::UnsupportedHost => {
             (StatusCode::CONFLICT, error.to_string()).into_response()
         }
         error => gateway_provider_error_response("browser", anyhow::anyhow!(error)),

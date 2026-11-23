@@ -850,6 +850,7 @@ struct StagedHostedKey {
     key: String,
 }
 
+#[cfg(unix)]
 pub(crate) fn staged_hosted_connections(data_dir: &Path) -> anyhow::Result<Vec<(String, String)>> {
     let dir = model_provider_secrets_dir(data_dir);
     if !dir.exists() {

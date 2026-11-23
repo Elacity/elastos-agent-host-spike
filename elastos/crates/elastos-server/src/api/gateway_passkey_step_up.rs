@@ -1345,7 +1345,9 @@ fn ensure_private_directory(path: &Path) -> anyhow::Result<()> {
     let (metadata, created) = match std::fs::symlink_metadata(path) {
         Ok(metadata) => (metadata, false),
         Err(err) if err.kind() == ErrorKind::NotFound => {
-            let mut builder = std::fs::DirBuilder::new();
+            let builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            let mut builder = builder;
             #[cfg(unix)]
             builder.mode(0o700);
             match builder.create(path) {
