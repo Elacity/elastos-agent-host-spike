@@ -188,10 +188,10 @@ fn columns() -> Vec<TrustColumn> {
             file: "elastos-server/src/carrier.rs",
             function: "start_carrier_node_with_network",
             call: "spawn()",
-            class: "other",
+            class: "n/a",
             trust_root: "none",
             verified_when: "never",
-            evidence: [".spa", "wn()"].concat(),
+            evidence: ["Router::builder", "(endpoint.clone())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -371,9 +371,13 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_inactive_custody_provider",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat(),
             os_path: "",
         },
         TrustColumn {
@@ -681,9 +685,13 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_availability_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat(),
             os_path: "",
         },
         TrustColumn {
@@ -691,9 +699,13 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_chain_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; separate verified spawn via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat(),
             os_path: "",
         },
         TrustColumn {
@@ -701,9 +713,13 @@ fn columns() -> Vec<TrustColumn> {
             function: "register_ipfs_provider_plane_with_role",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via register_ipfs_provider_plane through ProviderPlane::register"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1327,17 +1343,55 @@ fn assert_caller_paths(sources: &BTreeMap<String, String>) {
             .into_iter()
             .find(|column| (column.file, column.function) == row)
             .unwrap();
-        let all_checked = paths
+        let all_callers_checked = paths
             .iter()
             .filter(|path| (path.row_file, path.row_function) == row)
             .all(|path| path.check.is_some());
-        assert_eq!(
-            column.trust_root == "components-json-in-data-dir",
-            all_checked,
-            "weakest caller path changed for {}::{}",
-            row.0,
-            row.1
-        );
+        // Hosted planes check the executable in their own entry, including
+        // direct callers that have no separate caller check.
+        let entry_checked = matches!(
+            row,
+            (
+                "elastos-server/src/protected_content_runtime.rs",
+                "register_inactive_custody_provider"
+            ) | (
+                "elastos-server/src/server_infra.rs",
+                "register_availability_provider_plane"
+            ) | (
+                "elastos-server/src/server_infra.rs",
+                "register_chain_provider_plane"
+            ) | (
+                "elastos-server/src/server_infra.rs",
+                "register_ipfs_provider_plane_with_role"
+            )
+        ) && {
+            let text = &sources[row.0];
+            let code = source::code_only(text);
+            let check = [
+                "checked_native_provider_with_data_dir",
+                "(data_dir, binary_path)",
+            ]
+            .concat();
+            text.match_indices(&check)
+                .any(|(at, _)| source::enclosing_fn(&code, at) == row.1)
+        };
+        // Hosted planes admit against the served Home's signed release in their own entry
+        // (checked_native_provider_with_data_dir -> verify_installed_component_start).
+        if entry_checked {
+            assert_eq!(
+                column.trust_root, "release-signature",
+                "hosted plane no longer records its signed-release admission: {}::{}",
+                row.0, row.1
+            );
+        } else {
+            assert_eq!(
+                column.trust_root == "components-json-in-data-dir",
+                all_callers_checked,
+                "weakest caller path changed for {}::{}",
+                row.0,
+                row.1
+            );
+        }
     }
     for path in paths.iter().filter(|path| path.check.is_some()) {
         let check = path.check.as_ref().unwrap();
@@ -1631,23 +1685,30 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
+    // Census-truth head, already on #1802 at 8ad0c8fb6: 103 rows, n/a 55,
+    // other 36, none 52, release-signature 28, at-every-start 35, never 52,
+    // to_gate 30. That head keeps the carrier spawn as n/a, the probe and
+    // migration rows as none, and the four hosted planes as release-signature
+    // at every start. #1802 at 5d84ce258 adds start_wallet_provider
+    // (n/a, release-signature, at-every-start): +1 row, n/a +1,
+    // release-signature +1, at-every-start +1.
     assert_eq!(columns.len(), 104);
-    assert_eq!(classes.get("n/a"), Some(&55));
+    assert_eq!(classes.get("n/a"), Some(&56));
     assert_eq!(classes.get("os-tool"), Some(&2));
-    assert_eq!(classes.get("other"), Some(&37));
+    assert_eq!(classes.get("other"), Some(&36));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&56));
+    assert_eq!(roots.get("none"), Some(&52));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&25));
+    assert_eq!(roots.get("release-signature"), Some(&29));
     assert_eq!(roots.get("staged-cid"), Some(&7));
-    assert_eq!(times.get("at-every-start"), Some(&32));
+    assert_eq!(times.get("at-every-start"), Some(&36));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&8));
-    assert_eq!(times.get("never"), Some(&56));
-    assert_eq!(to_gate, 31);
+    assert_eq!(times.get("never"), Some(&52));
+    assert_eq!(to_gate, 30);
 }
 
 #[test]
