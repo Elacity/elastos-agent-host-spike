@@ -11,6 +11,7 @@ mod gateway_entry;
 mod home_cmd;
 mod identity_cmd;
 mod init_cmd;
+mod localhost_file_migration;
 mod node_cmd;
 mod provider_host;
 mod publish;

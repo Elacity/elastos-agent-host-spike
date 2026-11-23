@@ -90,7 +90,7 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "load_or_create_device_key",
     ),
     (
-        "elastos-server/src/server_infra.rs",
+        "elastos-server/src/localhost_file_migration.rs",
         "localhost_provider_bridge_config",
         "encryption_key: device_key_hex",
     ),
@@ -1378,7 +1378,7 @@ fn rows() -> Vec<HeldRow> {
         mark("runtime-own", "capability signer", "Runtime", "Emergency control loads the Runtime capability signer"),
     ),
     row(
-        "elastos-server/src/server_infra.rs",
+        "elastos-server/src/localhost_file_migration.rs",
         "localhost_provider_bridge_config",
         "encryption_key: device_key_hex",
         1,
