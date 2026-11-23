@@ -318,7 +318,7 @@ impl PendingIncomingContactRequest {
         self.handle.as_deref()
     }
 
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn test_new(
         request_hash: impl Into<String>,
         requester_profile_did: impl Into<String>,

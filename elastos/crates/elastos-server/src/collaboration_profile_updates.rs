@@ -99,7 +99,7 @@ enum ProfileUpdateContextAuthority {
     /// Carries its proof binding so this authority stays revocable: it
     /// outlives every session, so nothing else would ever end it.
     RuntimeOwned { proof_binding_id: String },
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     VerifiedForTest,
 }
 
@@ -145,7 +145,7 @@ impl CollaborationProfileUpdateService {
         Ok(ordering)
     }
 
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn context_snapshot_for_test(&self) -> serde_json::Value {
         let Ok(contexts) = self.inner.contexts.lock() else {
             return serde_json::Value::String("poisoned".to_string());
@@ -252,7 +252,7 @@ impl CollaborationProfileUpdateService {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn register_verified_context_for_test(
         &self,
         contact_store: Arc<CollaborationContactStore>,
@@ -281,7 +281,7 @@ impl CollaborationProfileUpdateService {
     /// Announcement is a pure function of the local head and the accepted
     /// contacts, so the only correct behaviour afterwards is a re-announce the
     /// receiver treats as an idempotent replay — which tests prove.
-    #[cfg(test)]
+    #[cfg(all(unix, test))]
     pub(crate) fn forget_acknowledgements_for_test(&self) {
         if let Ok(mut acknowledged) = self.inner.acknowledged.lock() {
             acknowledged.clear();
@@ -509,7 +509,7 @@ impl CollaborationProfileUpdateService {
                 }
                 Ok(())
             }
-            #[cfg(test)]
+            #[cfg(all(unix, test))]
             ProfileUpdateContextAuthority::VerifiedForTest => Ok(()),
         }
     }
@@ -547,7 +547,7 @@ impl CollaborationProfileUpdateService {
                         return Ok(());
                     }
                 }
-                #[cfg(test)]
+                #[cfg(all(unix, test))]
                 ProfileUpdateContextAuthority::VerifiedForTest => {
                     if ordering == std::cmp::Ordering::Greater {
                         existing.contact_store = contact_store;

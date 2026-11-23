@@ -441,7 +441,7 @@ fn write_stored_profile_authority(
 /// passkey-binding check. Production `update_profile_authority` still requires
 /// `proof:passkey:`. A stored agent fixture has an admission binding, so the
 /// rows that need a real bundle under that agent's root call this.
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(crate) fn test_plant_profile_authority(
     data_dir: &Path,
     principal_id: &str,
@@ -1215,6 +1215,7 @@ mod tests {
     /// Protected principal-root writes require an owner-only parent chain, and
     /// `tempfile` creates its root using the process umask. A fixture that
     /// writes a profile authority bundle must own its root explicitly.
+    #[cfg(unix)]
     fn owner_only_tempdir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -1225,6 +1226,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn write_device_key(data_dir: &Path, seed_byte: u8) -> String {
         let seed = [seed_byte; 32];
         std::fs::create_dir_all(data_dir.join("identity")).unwrap();
@@ -1244,6 +1246,7 @@ mod tests {
         did
     }
 
+    #[cfg(unix)]
     fn store_passkey_principal(
         data_dir: &Path,
         principal_id: &str,
@@ -1274,6 +1277,7 @@ mod tests {
         .proof_binding_id
     }
 
+    #[cfg(unix)]
     fn read_bundle_bytes(data_dir: &Path, principal_id: &str, localhost_root: &str) -> Vec<u8> {
         let path = profile_authority_path(data_dir, localhost_root).unwrap();
         crate::auth::read_principal_root_object(
@@ -1286,6 +1290,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn write_bundle_bytes(data_dir: &Path, principal_id: &str, localhost_root: &str, bytes: &[u8]) {
         let path = profile_authority_path(data_dir, localhost_root).unwrap();
         crate::auth::write_protected_principal_root_object(
@@ -1299,6 +1304,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     fn raw_signed_profile_document(
         signing_key: &SigningKey,
         payload: CollaborationProfileDocument,
