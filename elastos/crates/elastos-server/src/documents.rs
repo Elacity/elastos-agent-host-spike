@@ -1543,6 +1543,7 @@ mod tests {
         assert_eq!(documents_root(data_dir.path(), AGENT_ID).unwrap(), want);
     }
 
+    #[cfg(unix)]
     fn r6_document_home(kind: crate::auth::PrincipalKind) -> tempfile::TempDir {
         use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT};
         let dir = tempfile::tempdir().unwrap();
@@ -1651,9 +1652,12 @@ mod tests {
     }
 
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
+    #[cfg(unix)]
     const TEST_PRINCIPAL: &str = "person:local:test-documents";
+    #[cfg(unix)]
     const OTHER_PRINCIPAL: &str = "person:local:other-documents";
 
+    #[cfg(unix)]
     fn test_home() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for principal in [TEST_PRINCIPAL, OTHER_PRINCIPAL] {
@@ -1662,6 +1666,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     fn save_request(
         document: &DocumentsDocumentView,
         title: &str,
@@ -1930,6 +1935,7 @@ mod tests {
         assert_eq!(recovered.body, "Newer local edits");
     }
 
+    #[cfg(unix)]
     struct MockIpfsProvider {
         cid: String,
         add_count: tokio::sync::Mutex<usize>,
@@ -1937,6 +1943,7 @@ mod tests {
         unpinned: tokio::sync::Mutex<Vec<String>>,
     }
 
+    #[cfg(unix)]
     impl MockIpfsProvider {
         fn new(cid: &str) -> Self {
             Self {
@@ -1948,6 +1955,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Provider for MockIpfsProvider {
         async fn handle(
@@ -2006,6 +2014,7 @@ mod tests {
 
     /// Installs the repository's real Documents capsule (manifest plus its
     /// `browser/` entrypoint directory), the layout setup installs.
+    #[cfg(unix)]
     fn install_test_documents_viewer(data_dir: &Path) {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../capsules/documents");
         let viewer_dir = data_dir.join("capsules").join("documents");

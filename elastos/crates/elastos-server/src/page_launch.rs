@@ -365,6 +365,7 @@ impl Runtime {
         kept.values_mut().for_each(|one| one.until = past);
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn reuse_kept_id_for_test(&self, old: &str, new: &str, old_binding: &str) {
         let mut kept = self.page_launches.lock().unwrap();

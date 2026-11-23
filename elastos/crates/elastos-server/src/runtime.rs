@@ -816,6 +816,7 @@ use verified_bundle::VerifiedBundle;
 
 /// Test only: the four tables the installed bridge host call reads for one
 /// capsule id, so a row can make a late call under exactly what an end left.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) struct BridgeTables {
     pub manifest_capabilities: Vec<AuthorityBound>,
@@ -1211,7 +1212,8 @@ impl Runtime {
     /// beside [`Self::start_local_admitted`] because it is the call the launch
     /// route's F-sync falsifier restores, and the agent rows that assert a
     /// whole run use it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) async fn run_local_admitted(
         &self,
         path: &Path,
@@ -2067,6 +2069,7 @@ impl Runtime {
 
     /// Test only: the model-token ceilings the bridge holds right now, one
     /// entry per admitted instance. A missing id is not an admitted agent.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn model_token_ceilings_held(&self) -> Vec<(String, u64)> {
         let ceilings = self
@@ -2117,6 +2120,7 @@ impl Runtime {
     /// Test only: whether the compute provider still holds an activation
     /// entry for this handle. `status` is the provider's own answer: an entry
     /// is a status, a forgotten one is not found.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) async fn provider_entry_for_test(&self, handle: &CapsuleHandle) -> bool {
         match &self.component_provider {
@@ -2128,6 +2132,7 @@ impl Runtime {
     /// Test only: the principal the compute provider holds for this handle's
     /// activation; `Some(None)` for an activation bound to no principal, `None`
     /// when it holds no binding.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) async fn provider_principal_for_test(
         &self,
@@ -2143,6 +2148,7 @@ impl Runtime {
     /// from `id`, as it reads them: the manifest ceiling, the launch content,
     /// the model-token ceiling and the stop request. A row builds the context
     /// from these, so a late call is judged by exactly what the end left.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn bridge_tables_for_test(&self, id: &str) -> BridgeTables {
         let manifest_capabilities = self
@@ -2291,6 +2297,7 @@ impl Runtime {
 
     /// Remove a loaded component before the watcher can start its guest. This
     /// exercises the real provider's pre-start error through the registry.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) async fn remove_loaded_component_for_test(&self, id: &str) {
         let handle = self
@@ -2310,6 +2317,7 @@ impl Runtime {
 
     /// Hold registration so a route can be cancelled after it has installed
     /// its admission context and before its watcher owns that context.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) async fn hold_capsule_registry_for_test(
         &self,
@@ -2319,6 +2327,7 @@ impl Runtime {
 
     /// The compute provider's own status of a registered component: it is
     /// `Running` from the moment its start runs guest code.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) async fn component_status_for_test(
         &self,
@@ -2331,6 +2340,7 @@ impl Runtime {
 
     /// The cause a stop of `id` has recorded so far, read from its stop
     /// request.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn requested_stop_for_test(&self, id: &str) -> Option<String> {
         let stops = self
@@ -2544,6 +2554,7 @@ impl Runtime {
     }
 
     /// Test the retention boundary without waiting for the clock.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) async fn list_capsules_at(
         &self,
@@ -4808,6 +4819,7 @@ pub(crate) mod tests {
         })
     }
 
+    #[cfg(unix)]
     async fn next_pending(
         store: &elastos_runtime::capability::pending::PendingRequestStore,
         launch: &mut tokio::task::JoinHandle<
@@ -4833,6 +4845,7 @@ pub(crate) mod tests {
         .expect("the agent host must ask for a grant")
     }
 
+    #[cfg(unix)]
     fn component_invoke_outcomes(audit_log: &AuditLog) -> Vec<(String, String)> {
         audit_log
             .recent_events(100)
@@ -4926,6 +4939,7 @@ pub(crate) mod tests {
     /// A journal written by the agent host's format 1 encoder (examples/
     /// agent-host at f873957): two turns, a person's "goal\nship it", a goal
     /// record and a read.
+    #[cfg(unix)]
     const AGENT_HOST_FORMAT_1_JOURNAL: &[&str] = &[
         "4541484a010001000000000000000000000000000000000000000000000000000000000000000000",
         "000000000000000000000000000000000008000000012500000001011f000000596f752061726520",

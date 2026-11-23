@@ -197,6 +197,7 @@ pub(crate) fn read_signed_release(
 
 /// Tests drive the host-start gate with an explicit update generation and
 /// process id; production reads both from the environment and this process.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn read_signed_release_for_host_start_with_generation(
     data: &Path,

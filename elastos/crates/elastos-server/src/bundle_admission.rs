@@ -717,6 +717,7 @@ pub(crate) mod tests {
     }
 
     /// The steps the signature check has taken since the last call, in order.
+    #[cfg(unix)]
     pub(crate) fn take_signature_check_work() -> Vec<&'static str> {
         SIGNATURE_CHECK_WORK.with(|work| std::mem::take(&mut *work.borrow_mut()))
     }

@@ -8495,6 +8495,7 @@ impl CarrierProviderInvoker {
         }
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     async fn retained_peer_count(&self) -> usize {
         self.peer_clients.lock().await.len()

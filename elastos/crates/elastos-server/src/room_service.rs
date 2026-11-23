@@ -1209,6 +1209,7 @@ fn accept_room_invite_in_state(
     Ok(room_member_view_from_record(&member))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn accept_room_invite_for_test(
     data_dir: &Path,
@@ -5238,6 +5239,7 @@ thread_local! {
     > = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn inject_collaboration_projection_write_fault(
     data_dir: &Path,
@@ -5246,6 +5248,7 @@ pub(crate) fn inject_collaboration_projection_write_fault(
     inject_collaboration_projection_write_fault_after(data_dir, fault, 0)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn inject_collaboration_projection_write_fault_after(
     data_dir: &Path,

@@ -295,8 +295,10 @@ impl AdmittedProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use sha2::Digest;
 
+    #[cfg(unix)]
     fn current_platform() -> &'static str {
         match (std::env::consts::OS, std::env::consts::ARCH) {
             ("linux", "x86_64") => "linux-amd64",
@@ -306,6 +308,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn write_components_manifest(
         data_dir: &Path,
         name: &str,
@@ -338,6 +341,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     fn native_runtime(provides: &str) -> serde_json::Value {
         serde_json::json!({
             "role": "provider",
@@ -570,6 +574,7 @@ mod tests {
     }
 
     /// A Home whose `did-provider` row, binary and manifest all verify.
+    #[cfg(unix)]
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("data");
@@ -589,6 +594,7 @@ mod tests {
         (temp, data_dir, path)
     }
 
+    #[cfg(unix)]
     fn write_manifest(data_dir: &Path, dir_key: &str, name: &str, provides: &str) {
         let text = format!(
             r#"{{"schema":"elastos.capsule/v1","version":"0.2.0","name":"{name}","role":"provider",
@@ -601,6 +607,7 @@ mod tests {
         std::fs::write(dir.join("capsule.json"), text).unwrap();
     }
 
+    #[cfg(unix)]
     fn admit(
         data_dir: &Path,
         signers: &BTreeMap<String, String>,

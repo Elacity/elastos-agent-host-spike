@@ -68,6 +68,7 @@ pub(crate) fn next() -> Option<u64> {
 ///
 /// A test uses this to advance the script while an operation is queued, so
 /// the operation's read happens after the test's chosen step.
+#[cfg(unix)]
 pub(crate) fn set_next(value: u64) {
     SCRIPT.with(|slot| {
         let Some(mut script) = slot.get() else {

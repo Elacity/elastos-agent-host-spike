@@ -9464,6 +9464,7 @@ impl ResolvedPrincipalRoot {
     }
 
     /// Whether this root may own `object_uri`; a remote root owns nothing.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn owns_object_uri(&self, object_uri: &str) -> anyhow::Result<()> {
         match &self.arm {
@@ -13278,6 +13279,7 @@ fn auth_state_file_bytes(data_dir: &Path) -> Vec<u8> {
     std::fs::read(auth_state_path(data_dir).unwrap()).unwrap()
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod r4_fixture {
     use super::*;
@@ -13698,6 +13700,7 @@ pub(crate) mod tests {
             );
         }
     }
+    #[cfg(unix)]
     use elastos_runtime::auth::PasskeyWebAuthnBinding;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
