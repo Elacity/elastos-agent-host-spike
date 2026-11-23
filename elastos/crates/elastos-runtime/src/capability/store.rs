@@ -241,14 +241,31 @@ impl CapabilityStore {
             }
             file.sync_all()?;
             fs::rename(&tmp_path, &revoked_path)?;
-            // Flushing the directory makes the rename durable on Unix. Windows
-            // cannot open a directory as a file (os error 5), which made every
-            // revocation fail there; the rename is the durable step on Windows.
-            #[cfg(unix)]
-            fs::File::open(path)?.sync_all()?;
+            sync_dir(path)?;
         }
         Ok(())
     }
+}
+
+/// Flush a directory so a rename inside it survives power loss before the
+/// caller reports success.
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+/// Windows opens a directory only with FILE_FLAG_BACKUP_SEMANTICS; a plain
+/// open fails with os error 5, which made every revocation write fail. The
+/// handle needs write access for FlushFileBuffers to commit the rename.
+#[cfg(windows)]
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .sync_all()
 }
 
 impl Default for CapabilityStore {
