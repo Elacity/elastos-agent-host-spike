@@ -7453,52 +7453,52 @@ fn services_attach_peer_runtime_blocking(
         &crate::collaboration_discovery_runtime::CollaborationDiscoveryService,
     >,
 ) -> anyhow::Result<ServicesPeerRuntimeBlocking> {
-    let transport = if let Some(service) = discovery_service {
-        ServicesPeerTransportBlocking::Runtime(service.clone())
+    let (transport, ticket) = if let Some(service) = discovery_service {
+        let ticket = service.private_local_ticket_blocking()?;
+        (
+            ServicesPeerTransportBlocking::Runtime(service.clone()),
+            ticket,
+        )
     } else {
         let coords = load_home_runtime_coords(data_dir)
             .ok_or_else(|| anyhow::anyhow!("local ElastOS service is not running"))?;
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(3))
             .build()?;
-        let token = services_attach_client_token_blocking(&client, &coords)
+        let shell_token = services_attach_scope_token_blocking(&client, &coords, "shell")
             .ok_or_else(|| anyhow::anyhow!("failed to attach to local ElastOS service"))?;
-        let cap = services_request_attached_capability_blocking(
+        let response = services_private_carrier_request_blocking(
             &client,
             &coords.api_url,
-            &token,
+            &shell_token,
+            "get_ticket",
+            serde_json::json!({}),
+        )?;
+        let ticket = crate::carrier::require_services_private_ticket(&response)?;
+        let client_token = services_attach_client_token_blocking(&client, &coords)
+            .ok_or_else(|| anyhow::anyhow!("failed to attach to local ElastOS service"))?;
+        let peer_cap = services_request_attached_capability_blocking(
+            &client,
+            &coords.api_url,
+            &client_token,
             "elastos://peer/*",
             "message",
         )
         .ok_or_else(|| anyhow::anyhow!("failed to acquire Carrier peer capability"))?;
-        ServicesPeerTransportBlocking::Attached {
-            client,
-            api_url: coords.api_url,
-            client_token: token,
-            peer_cap: cap,
-        }
+        (
+            ServicesPeerTransportBlocking::Attached {
+                client,
+                api_url: coords.api_url,
+                client_token,
+                peer_cap,
+            },
+            ticket,
+        )
     };
-    let response =
-        services_peer_provider_request_blocking(&transport, "get_ticket", serde_json::json!({}))?;
-    let peer_id = response
-        .get("data")
-        .and_then(|data| data.get("node_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Carrier peer provider did not return a node id"))?;
-    let connect_ticket = response
-        .get("data")
-        .and_then(|data| data.get("ticket"))
-        .and_then(serde_json::Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .filter(|value| value.len() <= HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES)
-        .ok_or_else(|| anyhow::anyhow!("Carrier peer provider did not return a bounded ticket"))?;
     Ok(ServicesPeerRuntimeBlocking {
         transport,
-        peer_id,
-        connect_ticket,
+        peer_id: ticket.node_id,
+        connect_ticket: ticket.ticket,
     })
 }
 
@@ -7534,15 +7534,16 @@ fn services_gossip_join_known_peers_blocking(
     .map(|_| ())
 }
 
-fn services_attach_client_token_blocking(
+fn services_attach_scope_token_blocking(
     client: &reqwest::blocking::Client,
     coords: &GatewayRuntimeCoords,
+    scope: &str,
 ) -> Option<String> {
     let body: serde_json::Value = client
         .post(format!("{}/api/auth/attach", coords.api_url))
         .json(&serde_json::json!({
             "secret": coords.attach_secret,
-            "scope": "client",
+            "scope": scope,
         }))
         .send()
         .ok()?
@@ -7551,6 +7552,40 @@ fn services_attach_client_token_blocking(
     serde_json::from_value::<GatewayAttachResponse>(body)
         .ok()
         .map(|resp| resp.token)
+}
+
+fn services_attach_client_token_blocking(
+    client: &reqwest::blocking::Client,
+    coords: &GatewayRuntimeCoords,
+) -> Option<String> {
+    services_attach_scope_token_blocking(client, coords, "client")
+}
+
+fn services_private_carrier_request_blocking(
+    client: &reqwest::blocking::Client,
+    api: &str,
+    shell_token: &str,
+    op: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let response = client
+        .post(format!("{api}/api/provider/peer/{op}"))
+        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
+        .json(&body)
+        .send()?;
+    if !response.status().is_success() {
+        anyhow::bail!("private Carrier request was refused");
+    }
+    let body: serde_json::Value = response.json()?;
+    if body.get("status").and_then(|status| status.as_str()) == Some("error") {
+        anyhow::bail!(
+            "{}",
+            body.get("message")
+                .and_then(|message| message.as_str())
+                .unwrap_or("unknown Carrier provider error")
+        );
+    }
+    Ok(body)
 }
 
 fn services_request_attached_capability_blocking(
@@ -11003,5 +11038,148 @@ mod r8d_passkey_rows {
             Some(KEPT_ELSEWHERE)
         );
         person.assert_child_holds_only(&[]);
+    }
+}
+
+#[cfg(test)]
+mod services_private_ticket_tests {
+    use super::services_attach_peer_runtime_blocking;
+    use crate::api::handlers::provider::{provider_proxy, ProviderProxyState};
+    use elastos_runtime::provider::{
+        Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
+    };
+    use elastos_runtime::session::{Session, SessionType};
+
+    struct ServicesCarrier {
+        requests: std::sync::Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ServicesCarrier {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider(
+                "services test carrier accepts raw requests only".into(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["peer"]
+        }
+
+        fn name(&self) -> &'static str {
+            "services-test-carrier"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            self.requests.lock().await.push(request.clone());
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "ticket": "private-services-ticket",
+                    "node_id": "private-services-node"
+                }
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn services_attach_reads_the_private_carrier_ticket() {
+        let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let registry = std::sync::Arc::new(ProviderRegistry::new());
+        registry
+            .register_sub_provider(
+                "peer",
+                std::sync::Arc::new(ServicesCarrier {
+                    requests: requests.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let proxy = axum::Router::new()
+            .route(
+                "/api/provider/:scheme/:op",
+                axum::routing::post(provider_proxy),
+            )
+            .layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let shell = request
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer shell-services");
+                    let kind = if shell {
+                        SessionType::Shell
+                    } else {
+                        SessionType::Capsule
+                    };
+                    request.extensions_mut().insert(Session::new(kind, None));
+                    next.run(request).await
+                },
+            ))
+            .with_state(ProviderProxyState {
+                registry,
+                capability_manager: None,
+            });
+        let app = axum::Router::new()
+            .route(
+                "/api/auth/attach",
+                axum::routing::post(
+                    |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        let scope = body
+                            .get("scope")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("client");
+                        if body.get("secret").and_then(|value| value.as_str())
+                            != Some("services-secret")
+                        {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"error": "bad attach secret"})),
+                            );
+                        }
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({"token": format!("{scope}-services")})),
+                        )
+                    },
+                ),
+            )
+            .route(
+                "/api/capability/request",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({"token": "services-cap"}))
+                }),
+            )
+            .merge(proxy);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("home-runtime-coords.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "api_url": api_url,
+                "attach_secret": "services-secret"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let path = dir.path().to_path_buf();
+        let runtime = tokio::task::spawn_blocking(move || {
+            services_attach_peer_runtime_blocking(&path, None).expect("services attach")
+        })
+        .await
+        .expect("services attach task");
+        server.abort();
+        assert_eq!(runtime.peer_id, "private-services-node");
+        assert_eq!(runtime.connect_ticket, "private-services-ticket");
+        let seen = requests.lock().await.clone();
+        assert_eq!(seen, vec![serde_json::json!({"op": "get_ticket"})]);
     }
 }

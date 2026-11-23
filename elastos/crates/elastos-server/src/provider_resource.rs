@@ -91,7 +91,8 @@ pub fn build_capability_resource(
         ),
         // A Message grant does not name connect, remember_peer, or get_ticket.
         // Those operations carry a Carrier socket address. Startup and the
-        // operator store keep the crate-private Carrier handlers.
+        // operator store keep the crate-private Carrier handlers. The action
+        // map below does not classify them as Message.
         "peer" => simple_elastos_resource(
             "peer",
             op,
@@ -181,10 +182,12 @@ pub fn provider_operation_action(scheme: &str, op: &str) -> Option<Action> {
             "write_bytes" => Some(Action::Write),
             _ => None,
         },
+        // connect, remember_peer, and get_ticket stay off this map. They are
+        // crate-private Carrier handlers, not Message grants.
         "peer" => match op {
-            "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"
-            | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"
-            | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),
+            "init" | "gossip_join" | "gossip_leave" | "gossip_send" | "get_node_id"
+            | "list_peers" | "list_topics" | "list_topic_peers" | "gossip_join_peers"
+            | "gossip_recv" => Some(Action::Message),
             _ => None,
         },
         "tunnel" => {
@@ -1561,6 +1564,21 @@ mod tests {
         assert_eq!(
             build_capability_resource("peer", "list_peers", &request).unwrap(),
             "elastos://peer/list_peers"
+        );
+    }
+
+    #[test]
+    fn peer_address_operations_are_not_message_actions() {
+        for op in ["get_ticket", "connect", "remember_peer"] {
+            assert_eq!(
+                provider_operation_action("peer", op),
+                None,
+                "{op} is still a Message action"
+            );
+        }
+        assert_eq!(
+            provider_operation_action("peer", "list_peers"),
+            Some(Action::Message)
         );
     }
 

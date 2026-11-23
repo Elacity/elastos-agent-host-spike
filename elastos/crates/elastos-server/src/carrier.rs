@@ -1588,6 +1588,84 @@ fn endpoint_addr_for_network(
     Ok(next)
 }
 
+pub(crate) const PRIVATE_CARRIER_TICKET_MAX_BYTES: usize = 8192;
+
+pub(crate) fn is_private_carrier_address_op(op: &str) -> bool {
+    matches!(op, "connect" | "get_ticket" | "remember_peer")
+}
+
+/// A Carrier ticket read from this process's handler. Callers do not build a
+/// Message grant to obtain it.
+pub(crate) struct PrivateCarrierTicket {
+    pub ticket: String,
+    pub node_id: String,
+}
+
+impl PrivateCarrierTicket {
+    pub(crate) fn from_handler_body(body: &serde_json::Value) -> Option<Self> {
+        if body.get("status").and_then(|status| status.as_str()) == Some("error") {
+            return None;
+        }
+        let data = body.get("data")?;
+        let ticket = data
+            .get("ticket")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|ticket| {
+                !ticket.is_empty() && ticket.len() <= PRIVATE_CARRIER_TICKET_MAX_BYTES
+            })?;
+        let node_id = data
+            .get("node_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|node_id| !node_id.is_empty())?;
+        Some(Self {
+            ticket: ticket.to_string(),
+            node_id: node_id.to_string(),
+        })
+    }
+}
+
+pub(crate) async fn read_private_carrier_ticket(
+    registry: &ProviderRegistry,
+    exported: bool,
+) -> Result<PrivateCarrierTicket> {
+    let request = if exported {
+        serde_json::json!({ "op": "get_ticket", "exported": true })
+    } else {
+        serde_json::json!({ "op": "get_ticket" })
+    };
+    let body = registry
+        .send_raw("peer", &request)
+        .await
+        .map_err(|err| anyhow::anyhow!("private Carrier ticket handler failed: {err}"))?;
+    if body.get("status").and_then(|status| status.as_str()) == Some("error") {
+        let message = body
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or("private Carrier ticket handler failed");
+        anyhow::bail!("{message}");
+    }
+    PrivateCarrierTicket::from_handler_body(&body)
+        .ok_or_else(|| anyhow::anyhow!("private Carrier ticket store is empty"))
+}
+
+pub(crate) fn require_services_private_ticket(
+    body: &serde_json::Value,
+) -> Result<PrivateCarrierTicket> {
+    PrivateCarrierTicket::from_handler_body(body).ok_or_else(|| {
+        let node_id = body
+            .pointer("/data/node_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if node_id.trim().is_empty() {
+            anyhow::anyhow!("Carrier peer provider did not return a node id")
+        } else {
+            anyhow::anyhow!("Carrier peer provider did not return a bounded ticket")
+        }
+    })
+}
+
 fn retain_network_ticket_endpoints(
     endpoints: Vec<iroh::EndpointAddr>,
     network: CarrierNodeNetwork,

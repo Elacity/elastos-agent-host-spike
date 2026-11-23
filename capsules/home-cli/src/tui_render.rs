@@ -838,17 +838,11 @@ fn network_summary(snapshot: &HomeSnapshot) -> String {
         return "home session not running yet".to_string();
     }
 
-    let peers = snapshot.runtime.peer_count.unwrap_or(0);
-    if peers == 0 {
-        if snapshot.runtime.ticket.is_some() {
-            "Collaboration ready; waiting for another participant".to_string()
-        } else {
-            "starting up".to_string()
-        }
-    } else if peers == 1 {
-        "1 collaboration connection active".to_string()
-    } else {
-        format!("{peers} collaboration connections active")
+    match snapshot.runtime.peer_count {
+        None => "starting up".to_string(),
+        Some(0) => "Collaboration ready; waiting for another participant".to_string(),
+        Some(1) => "1 collaboration connection active".to_string(),
+        Some(peers) => format!("{peers} collaboration connections active"),
     }
 }
 

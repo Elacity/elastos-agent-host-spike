@@ -1916,6 +1916,49 @@ fn public_key_from_did(did: &str) -> Result<iroh::PublicKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct OperatorCarrier {
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl elastos_runtime::provider::Provider for OperatorCarrier {
+        async fn handle(
+            &self,
+            _request: elastos_runtime::provider::ResourceRequest,
+        ) -> std::result::Result<
+            elastos_runtime::provider::ResourceResponse,
+            elastos_runtime::provider::ProviderError,
+        > {
+            Err(elastos_runtime::provider::ProviderError::Provider(
+                "operator test carrier accepts raw requests only".into(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["peer"]
+        }
+
+        fn name(&self) -> &'static str {
+            "operator-test-carrier"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, elastos_runtime::provider::ProviderError>
+        {
+            self.requests.lock().await.push(request.clone());
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "ticket": "operator-private-ticket",
+                    "node_id": "operator-private-node"
+                }
+            }))
+        }
+    }
+
     use crate::carrier::start_carrier_node;
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse;
@@ -2340,6 +2383,67 @@ mod tests {
             .unwrap_err();
         assert!(!format!("{error:#}").contains("ticket-secret"));
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn operator_fetch_reads_the_private_carrier_ticket() {
+        use crate::api::handlers::provider::{provider_proxy, ProviderProxyState};
+        use elastos_runtime::provider::ProviderRegistry;
+        use elastos_runtime::session::{Session, SessionType};
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(ProviderRegistry::new());
+        registry
+            .register_sub_provider(
+                "peer",
+                Arc::new(OperatorCarrier {
+                    requests: requests.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/api/provider/:scheme/:op", post(provider_proxy))
+            .layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let shell = request
+                        .headers()
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer shell-test");
+                    let kind = if shell {
+                        SessionType::Shell
+                    } else {
+                        SessionType::Capsule
+                    };
+                    request.extensions_mut().insert(Session::new(kind, None));
+                    next.run(request).await
+                },
+            ))
+            .with_state(ProviderProxyState {
+                registry,
+                capability_manager: None,
+            });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = build_http_client(2).unwrap();
+        assert_eq!(
+            fetch_ticket_and_node_id(&client, &api_url, "shell-test")
+                .await
+                .unwrap(),
+            (
+                "operator-private-ticket".to_string(),
+                "operator-private-node".to_string()
+            )
+        );
+        let error = fetch_ticket_and_node_id(&client, &api_url, "client-test")
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:#}").contains("operator-private-ticket"));
+        let seen = requests.lock().await.clone();
+        task.abort();
+        assert_eq!(seen, vec![serde_json::json!({"op": "get_ticket"})]);
     }
 
     #[test]

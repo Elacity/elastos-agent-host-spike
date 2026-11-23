@@ -390,7 +390,7 @@ fn layer_2_runtime_owned_counts() {
         ("net", 5),
         ("object", 26),
         ("operator-drive-adapter", 4),
-        ("peer", 13),
+        ("peer", 10),
         ("rights", 9),
         ("tunnel", 4),
         ("wallet", 1),
@@ -404,7 +404,7 @@ fn layer_2_runtime_owned_counts() {
             .collect::<BTreeMap<_, _>>(),
         expected
     );
-    assert_eq!(pairs(&table).len(), 193);
+    assert_eq!(pairs(&table).len(), 190);
 }
 
 /// OPEN (P2-3 and P2-10): report both directions of manifest/action drift.
@@ -424,7 +424,8 @@ fn declared_versus_mapped_open() {
     );
     println!("OPEN mapped-only {}: {mapped_only:?}", mapped_only.len());
     assert_eq!(declared_only.len(), 0);
-    assert_eq!(mapped_only.len(), 71);
+    // connect, get_ticket, and remember_peer are crate-private and unmapped.
+    assert_eq!(mapped_only.len(), 68);
 }
 
 fn is_file_operation(scheme: &str, op: &str) -> bool {
@@ -455,7 +456,7 @@ fn file_operations_first() {
         all.len() - file.len()
     );
     assert_eq!(file.len(), 61);
-    assert_eq!(all.len() - file.len(), 132);
+    assert_eq!(all.len() - file.len(), 129);
 }
 
 /// OPEN (P2-10): today the proxy refuses a scheme/operation without a Runtime
@@ -522,10 +523,12 @@ fn is_network_verb(scheme: &str, op: &str) -> bool {
 /// session, whose network path belongs to the browser-engine contract, not to
 /// Net/Exit; `tunnel/start` and `tunnel/stop` are tunnel lifecycle verbs
 /// under the tunnel scheme's Admin action, not data-path verbs;
-/// `peer/connect` manages a peer session under the peer scheme's Message
-/// action; `did/resolve` names an identity and `webspace/resolve` names a
-/// WebSpace file. The list is pinned in the test below: a new operation with
-/// a network effect outside net/exit needs an explicit decision there.
+/// `connect`, `get_ticket`, and `remember_peer` are crate-private Carrier
+/// handlers. They are absent from the action map, so they are not network
+/// verbs in this count. `did/resolve` names an identity and `webspace/resolve`
+/// names a WebSpace file. The list is pinned in the test below: a new
+/// operation with a network effect outside net/exit needs an explicit decision
+/// there.
 #[test]
 fn network_verbs_stay_with_network_providers() {
     let all = pairs(&mapped_pairs());
@@ -564,11 +567,6 @@ fn network_verbs_stay_with_network_providers() {
             "stop",
             "tunnel lifecycle under the Admin action, not a data-path verb",
         ),
-        (
-            "peer",
-            "connect",
-            "peer session under the peer scheme's Message action",
-        ),
         ("did", "resolve", "names an identity, not a network locator"),
         (
             "webspace",
@@ -591,6 +589,12 @@ fn network_verbs_stay_with_network_providers() {
             "pinned network-effect operation counted as a network verb: {scheme}/{op}"
         );
         println!("  {scheme}/{op}: {reason}");
+    }
+    for op in ["connect", "get_ticket", "remember_peer"] {
+        assert!(
+            !all.contains(&("peer".to_owned(), op.to_owned())),
+            "private Carrier operation is mapped: peer/{op}"
+        );
     }
 }
 
@@ -705,7 +709,7 @@ fn not_dispatchable(
 /// provider_resource.rs, and prints the count next to layer 2's total so the
 /// headline number is not over-read.
 ///
-/// Today's 43: `drm` 7, `key` 7, `decrypt` 6 and `rights` 4 share the
+/// Today's 40: `drm` 7, `key` 7, `decrypt` 6 and `rights` 4 share the
 /// nine-operation `read_only_provider_action` helper, but each scheme's
 /// builder accepts fewer (provider_resource.rs:808-846) — 24 pairs. `did` 6
 /// are operations in `execute_op_required_action` that `did_resource` does
@@ -716,10 +720,9 @@ fn not_dispatchable(
 /// `webspace` 9 has no builder arm at all: WebSpace requests are addressed
 /// as `localhost://WebSpaces/` URIs and dispatched under the `localhost`
 /// scheme, and provider_resource.rs pins the bare-scheme refusal in its own
-/// tests. `peer` 3 are `connect`, `get_ticket`, and `remember_peer`: the
-/// action map still names them, and the Message grant list does not, so an
-/// app grant cannot build a resource that carries a Carrier socket address.
-/// `list_peers` stays on that list.
+/// tests. `connect`, `get_ticket`, and `remember_peer` are not in this gap:
+/// the action map does not classify them, and the Message grant list does
+/// not name them. `list_peers` stays on that list.
 #[test]
 fn mapped_but_not_dispatchable_today() {
     let table = mapped_pairs();
@@ -793,10 +796,6 @@ fn mapped_but_not_dispatchable_today() {
             .as_slice(),
         ),
         (
-            "peer",
-            ["connect", "get_ticket", "remember_peer"].as_slice(),
-        ),
-        (
             "rights",
             ["open", "open_session", "release", "render"].as_slice(),
         ),
@@ -816,7 +815,7 @@ fn mapped_but_not_dispatchable_today() {
         )
     })
     .collect();
-    assert_eq!(pairs(&table).len(), 193);
-    assert_eq!(total, 43);
+    assert_eq!(pairs(&table).len(), 190);
+    assert_eq!(total, 40);
     assert_eq!(gap, expected);
 }
