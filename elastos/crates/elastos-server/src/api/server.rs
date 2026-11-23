@@ -477,10 +477,17 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         Router::new()
     };
 
-    // Capsule management routes (require shell session — launching/stopping is an orchestrator operation)
-    let capsule_mgmt_routes = Router::new()
+    // Capsule management routes (require shell session — launching/stopping is an orchestrator operation).
+    // The agent stop route belongs to a build that carries agents. A build
+    // without them does not mount it, so that build has no agent selector.
+    let mut capsule_mgmt_routes = Router::new()
         .route("/api/capsules", get(routes::list_capsules))
-        .route("/api/capsules", post(routes::launch_capsule))
+        .route("/api/capsules", post(routes::launch_capsule));
+    if crate::agents::build_allows() {
+        capsule_mgmt_routes =
+            capsule_mgmt_routes.route("/api/capsules/stop-agent", post(routes::stop_agent_session));
+    }
+    let capsule_mgmt_routes = capsule_mgmt_routes
         .route("/api/capsules/:id", delete(routes::stop_capsule))
         .route("/api/launch/open", post(routes::open_launch))
         .route(
@@ -635,7 +642,7 @@ pub(crate) mod tests {
 
     #[test]
     fn serve_and_the_test_server_build_one_router() {
-        let source = include_str!("server.rs");
+        let source = include_str!("server.rs").replace("\r\n", "\n");
         let (production, tests) = source.split_once("\n#[cfg(test)]\n").unwrap();
         let serve = production
             .split_once("fn start_server_with_sessions(")

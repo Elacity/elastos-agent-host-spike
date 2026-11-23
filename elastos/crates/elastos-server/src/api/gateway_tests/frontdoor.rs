@@ -52,7 +52,7 @@ async fn frontdoor_refuses_foreign_origins_rebinding_and_missing_or_duplicate_ho
         .unwrap();
     assert_eq!(app.oneshot(valid).await.unwrap().status(), StatusCode::OK);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn frontdoor_refuses_opaque_cookie_and_forged_token_before_reading_100mb() {
     let dir = tempfile::tempdir().unwrap();
@@ -103,7 +103,7 @@ async fn frontdoor_refuses_opaque_cookie_and_forged_token_before_reading_100mb()
         );
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn frontdoor_only_admits_signed_launches_to_private_opaque_apis() {
     let dir = tempfile::tempdir().unwrap();

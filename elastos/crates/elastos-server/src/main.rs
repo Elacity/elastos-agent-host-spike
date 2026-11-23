@@ -53,6 +53,7 @@ use elastos_compute::providers::ComponentProvider;
 use elastos_compute::ComputeProvider;
 use elastos_storage::providers::LocalFSProvider;
 
+#[cfg(unix)]
 use elastos_crosvm::{CrosvmConfig, CrosvmProvider};
 
 const ELASTOS_VERSION: &str = env!("ELASTOS_VERSION");
@@ -335,7 +336,7 @@ enum Commands {
     /// Launch Home
     Home {
         /// Open local Home in the default web browser
-        #[arg(long, conflicts_with_all = &["status", "json"])]
+        #[arg(long, conflicts_with_all = &["status", "json", "cli_launch_token"])]
         browser: bool,
 
         /// Print a local Home-state probe without opening the home-cli surface
@@ -345,6 +346,10 @@ enum Commands {
         /// Emit the local Home-state probe as machine-readable JSON
         #[arg(long)]
         json: bool,
+
+        /// Refuse an exported Home CLI grant. The process environment is not a mint
+        #[arg(long, conflicts_with_all = &["status", "json"])]
+        cli_launch_token: bool,
     },
 
     #[command(name = "__update-controller", hide = true)]
@@ -1399,6 +1404,7 @@ async fn run() -> anyhow::Result<()> {
         browser: false,
         status: false,
         json: false,
+        cli_launch_token: false,
     });
     if matches!(&command, Commands::Home { browser: true, .. }) {
         // A pending Home restart belongs to the retained controller; this execs it.
@@ -1408,7 +1414,8 @@ async fn run() -> anyhow::Result<()> {
         &command,
         Commands::Serve { .. } | Commands::Gateway { .. } | Commands::Home { browser: true, .. }
     ) {
-        elastos_server::host_lock::authorize_host_process_start(&sources::default_data_dir())?;
+        let data_dir = sources::default_data_dir();
+        elastos_server::host_lock::authorize_host_process_start(&data_dir)?;
     }
 
     match command {
@@ -1485,11 +1492,12 @@ async fn run() -> anyhow::Result<()> {
             browser,
             status,
             json,
+            cli_launch_token,
         } => {
             if browser {
                 return gateway_entry::run_browser_home().await;
             }
-            return home_cmd::run(status, json).await;
+            return home_cmd::run(status, json, cli_launch_token).await;
         }
 
         Commands::UpdateController { receipt } => {
@@ -2396,6 +2404,7 @@ pub(crate) async fn create_runtime(
     let mut compute_providers: Vec<Arc<dyn ComputeProvider>> = Vec::new();
 
     // Add crosvm provider if KVM is available
+    #[cfg(unix)]
     if elastos_crosvm::is_supported() {
         match CrosvmProvider::new(CrosvmConfig::default()) {
             Ok(provider) => {
@@ -2845,7 +2854,8 @@ mod tests {
             Some(super::Commands::Home {
                 browser: false,
                 status: false,
-                json: false
+                json: false,
+                cli_launch_token: false
             })
         ));
         let browser = super::Cli::try_parse_from(["elastos", "home", "--browser"]).unwrap();
@@ -2856,6 +2866,16 @@ mod tests {
         for probe in ["--status", "--json"] {
             assert!(super::Cli::try_parse_from(["elastos", "home", probe]).is_ok());
             assert!(super::Cli::try_parse_from(["elastos", "home", "--browser", probe]).is_err());
+        }
+        assert!(super::Cli::try_parse_from(["elastos", "home", "--cli-launch-token"]).is_ok());
+        for conflict in ["--browser", "--status", "--json"] {
+            assert!(super::Cli::try_parse_from([
+                "elastos",
+                "home",
+                "--cli-launch-token",
+                conflict,
+            ])
+            .is_err());
         }
     }
 

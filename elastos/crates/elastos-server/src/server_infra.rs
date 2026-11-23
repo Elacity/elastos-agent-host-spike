@@ -1,5 +1,5 @@
 use elastos_server::binaries::{checked_native_provider, checked_native_provider_with_data_dir};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::fs;
 #[cfg(all(unix, test))]
 use std::os::unix::fs::PermissionsExt as _;
@@ -59,31 +59,50 @@ const BROWSER_ENGINE_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const MODEL_PROVIDER_ID: &str = "model-provider";
 const MODEL_PROVIDER_PROTOCOL_VERSION: &str = "elastos.model-provider/v1";
 const MODEL_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MODEL_PROVIDER_CONFIG_FILE_NAME: &str = "config.json";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MODEL_PROVIDER_CONFIG_MAX_BYTES: usize = 256 * 1024;
 const MEDIA_PROVIDER_ID: &str = "media-provider";
 const MEDIA_PROVIDER_ROUTE: &str = "media";
-#[cfg(test)]
+#[cfg(all(test, unix))]
 const MEDIA_PROVIDER_PROTOCOL_VERSION: &str = "elastos.media-provider/v1";
 const MEDIA_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const WALLET_PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[cfg(test)]
+fn report_missing_home_provider(data_dir: &Path, name: &str, consequence: &str) {
+    let required = match std::fs::read(data_dir.join("components.json")) {
+        Ok(bytes) => serde_json::from_slice::<elastos_server::setup::ComponentsManifest>(&bytes)
+            .map(|manifest| {
+                manifest.profiles.get("home").is_some_and(|profile| {
+                    profile.components.iter().any(|component| component == name)
+                })
+            })
+            .unwrap_or(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    };
+    if required {
+        tracing::warn!("{name} binary is not installed; {consequence}");
+    } else {
+        tracing::debug!("{name} binary is not installed; {consequence}");
+    }
+}
+
+#[cfg(all(test, unix))]
 use api::model_provider_bridge_config;
 use api::model_provider_config as model_provider_startup_config;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_root_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("providers").join(MODEL_PROVIDER_ID)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_config_path(data_dir: &Path) -> PathBuf {
     model_provider_root_dir(data_dir).join(MODEL_PROVIDER_CONFIG_FILE_NAME)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn model_provider_journal_dir(data_dir: &Path) -> PathBuf {
     model_provider_root_dir(data_dir).join("journal")
 }
@@ -137,12 +156,12 @@ fn chain_provider_protected_startup_config(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn media_provider_root_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("protected-content").join(MEDIA_PROVIDER_ID)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn media_provider_config_path(data_dir: &Path) -> PathBuf {
     media_provider_root_dir(data_dir).join("config.json")
 }
@@ -256,17 +275,36 @@ async fn request_wallet_provider_v2_status(
     .map_err(|err| anyhow::anyhow!("wallet-provider status request failed: {err}"))
 }
 
+async fn check_wallet_provider_v2_status(
+    bridge: &provider::ProviderBridge,
+    status_timeout: Duration,
+) -> anyhow::Result<()> {
+    let status = request_wallet_provider_v2_status(bridge, status_timeout).await?;
+    require_wallet_provider_v2_status(&status)
+}
+
 async fn start_wallet_provider_v2(
     registry: &provider::ProviderRegistry,
+    confined: provider::Confined,
+    status_timeout: Duration,
+) -> anyhow::Result<()> {
+    let bridge = Arc::clone(confined.bridge());
+    let wallet_provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::from_confined(confined, "wallet"));
+    check_and_register_wallet_provider_v2(registry, bridge, wallet_provider, status_timeout).await
+}
+
+/// Check the bounded status, then register the provider. A status or
+/// registration failure sends Shutdown, reaps the child, and reports both
+/// errors when the shutdown also fails.
+async fn check_and_register_wallet_provider_v2(
+    registry: &provider::ProviderRegistry,
     bridge: Arc<provider::ProviderBridge>,
+    wallet_provider: Arc<dyn provider::Provider>,
     status_timeout: Duration,
 ) -> anyhow::Result<()> {
     let startup = async {
-        let status = request_wallet_provider_v2_status(&bridge, status_timeout).await?;
-        require_wallet_provider_v2_status(&status)?;
-        let wallet_provider: Arc<dyn provider::Provider> = Arc::new(
-            provider::CapsuleProvider::with_scheme(bridge.clone(), "wallet"),
-        );
+        check_wallet_provider_v2_status(&bridge, status_timeout).await?;
         register_wallet_provider_v2(registry, wallet_provider).await
     }
     .await;
@@ -279,6 +317,180 @@ async fn start_wallet_provider_v2(
         return Err(startup_error);
     }
     Ok(())
+}
+
+#[cfg(any(
+    test,
+    elastos_unsupported_os_check,
+    not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))
+))]
+const WALLET_UNSUPPORTED_OS: &str = "provider start is refused: this operating system has no confinement, so the provider binary does not start";
+
+/// Return the Runtime's confined-start refusal before creating `SystemServices`.
+/// The row below checks these texts against the Runtime's private OS entry.
+fn wallet_confinement_refusal() -> Option<&'static str> {
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        None
+    }
+    #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+    {
+        // The Runtime starts the wallet under its Seatbelt profile here.
+        None
+    }
+    #[cfg(any(
+        elastos_unsupported_os_check,
+        not(any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        ))
+    ))]
+    {
+        Some(WALLET_UNSUPPORTED_OS)
+    }
+}
+
+/// Create the wallet storage parent at 0700 when missing, or tighten an
+/// existing directory of ours so the confined entry accepts it.
+///
+/// `spawn_confined` creates `Wallet` at 0700 and opens its parent only when that
+/// parent is our non-symlink directory with no group or other write permission.
+/// A fresh source Home creates only `ElastOS`, while other services create
+/// `SystemServices` under the umask (0775 under umask 002), so the Runtime fills
+/// a missing level at 0700 and removes group and other write bits from an
+/// existing one. Inspect and tighten the same opened directory, after checking
+/// its owner. The confined entry checks the storage root again at launch.
+#[cfg(unix)]
+fn tighten_wallet_parent(directory: &std::fs::File, effective_uid: u32) -> anyhow::Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = directory.metadata()?;
+    if metadata.uid() != effective_uid {
+        anyhow::bail!("wallet storage parent has a foreign owner");
+    }
+    let mode = metadata.permissions().mode();
+    if mode & 0o022 != 0 {
+        directory.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777 & !0o022))?;
+    }
+    Ok(())
+}
+
+/// Windows has no owner-checked, no-follow wallet storage parent yet; the wallet
+/// start refuses there before this point, and this refuses as well.
+#[cfg(windows)]
+fn prepare_wallet_storage_parent(_wallet_root: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("wallet storage is unsupported on Windows")
+}
+
+#[cfg(unix)]
+fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+
+    let parent = wallet_root
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("wallet storage root has no parent directory"))?;
+    let open_parent = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)
+    };
+    let directory = match open_parent() {
+        Ok(directory) => directory,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(parent)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "cannot prepare wallet storage parent {}: {err}",
+                        parent.display()
+                    )
+                })?;
+            open_parent().map_err(|err| {
+                anyhow::anyhow!(
+                    "cannot open wallet storage parent {}: {err}",
+                    parent.display()
+                )
+            })?
+        }
+        Err(err) if err.raw_os_error() == Some(libc::ENOTDIR) => {
+            anyhow::bail!(
+                "wallet storage parent is not a directory: {}",
+                parent.display()
+            )
+        }
+        Err(err) => {
+            return Err(anyhow::anyhow!(
+                "cannot open wallet storage parent {}: {err}",
+                parent.display()
+            ))
+        }
+    };
+    tighten_wallet_parent(&directory, unsafe { libc::geteuid() }).map_err(|err| {
+        anyhow::anyhow!(
+            "cannot tighten wallet storage parent {}: {err}",
+            parent.display()
+        )
+    })?;
+    Ok(())
+}
+
+async fn start_wallet_provider(
+    data_dir: &Path,
+    provider_registry: &provider::ProviderRegistry,
+    device_key_hex: &str,
+    status_timeout: Duration,
+) -> anyhow::Result<Option<Arc<provider::ProviderBridge>>> {
+    let Some(admitted) = binaries::AdmittedProvider::admit(data_dir, "wallet-provider")? else {
+        return Ok(None);
+    };
+    if let Some(refusal) = wallet_confinement_refusal() {
+        anyhow::bail!(refusal);
+    }
+    // The bridge re-checks the admitted signed digest at spawn and starts the
+    // bytes it checked; check before the Home's storage is touched.
+    let checked = admitted
+        .checked_executable(data_dir)
+        .map_err(anyhow::Error::msg)?;
+    let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
+    prepare_wallet_storage_parent(&wallet_root)?;
+    let wallet_config = provider::BridgeProviderConfig {
+        base_path: data_dir.to_string_lossy().to_string(),
+        allowed_paths: file_backed_prefixes(),
+        read_only: false,
+        encryption_key: device_key_hex.to_owned(),
+        ..Default::default()
+    };
+    let confined = provider::ProviderBridge::spawn_confined(
+        admitted.key(),
+        admitted.authority(),
+        &checked,
+        &wallet_root,
+        wallet_config,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("Failed to spawn wallet-provider: {err}"))?;
+    let bridge = Arc::clone(confined.bridge());
+    start_wallet_provider_v2(provider_registry, confined, status_timeout).await?;
+    tracing::info!(
+        "wallet-provider v2 capsule from {}",
+        admitted.path().display()
+    );
+    Ok(Some(bridge))
 }
 
 async fn request_model_provider_status(
@@ -667,6 +879,85 @@ async fn serve_capability_store(
         .map_err(|err| anyhow::anyhow!("capability store unavailable: {err}"))
 }
 
+async fn start_did_provider(
+    data_dir: &Path,
+    provider_registry: &provider::ProviderRegistry,
+    device_key_hex: &str,
+) -> anyhow::Result<Option<Arc<provider::ProviderBridge>>> {
+    // Refuse a symlink root before admission reads the signed release through it.
+    if std::fs::symlink_metadata(data_dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        anyhow::bail!("provider start is refused: the storage root's parent is a symlink");
+    }
+    let Some(admitted) = binaries::AdmittedProvider::admit(data_dir, "did-provider")? else {
+        return Ok(None);
+    };
+    let data_dir_metadata = std::fs::symlink_metadata(data_dir).with_context(|| {
+        format!(
+            "failed to inspect DID provider data root {}",
+            data_dir.display()
+        )
+    })?;
+    if data_dir_metadata.file_type().is_symlink() {
+        anyhow::bail!("provider start is refused: the storage root's parent is a symlink");
+    }
+    let confined_data_dir = std::fs::canonicalize(data_dir).with_context(|| {
+        format!(
+            "failed to resolve DID provider data root {}",
+            data_dir.display()
+        )
+    })?;
+    let did_config = provider::BridgeProviderConfig {
+        base_path: confined_data_dir.to_string_lossy().to_string(),
+        allowed_paths: file_backed_prefixes(),
+        read_only: false,
+        encryption_key: device_key_hex.to_owned(),
+        ..Default::default()
+    };
+    // The bridge re-checks the admitted signed digest at spawn and starts the
+    // bytes it checked.
+    let checked = admitted
+        .checked_executable(data_dir)
+        .map_err(anyhow::Error::msg)?;
+    let confined = provider::ProviderBridge::spawn_confined(
+        admitted.key(),
+        admitted.authority(),
+        &checked,
+        &confined_data_dir.join("did"),
+        did_config,
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("Failed to spawn did-provider: {err}"))?;
+    let bridge = Arc::clone(confined.bridge());
+    let provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::from_confined(confined, "did"));
+    if let Err(registration_error) = provider_registry
+        .register_sub_provider("did", provider)
+        .await
+    {
+        let shutdown_error = bridge.shutdown().await.err();
+        if let Some(shutdown_error) = shutdown_error {
+            anyhow::bail!(
+                "Failed to register elastos://did sub-provider: {registration_error}; shutdown failed: {shutdown_error}"
+            );
+        }
+        anyhow::bail!("Failed to register elastos://did sub-provider: {registration_error}");
+    }
+    tracing::info!("did-provider capsule from {}", admitted.path().display());
+    Ok(Some(bridge))
+}
+
+async fn start_did_provider_for_server(
+    data_dir: &Path,
+    provider_registry: &provider::ProviderRegistry,
+    device_key_hex: &str,
+) -> anyhow::Result<()> {
+    if let Err(err) = start_did_provider(data_dir, provider_registry, device_key_hex).await {
+        tracing::warn!("Skipping did-provider: {}", err);
+        return Err(err);
+    }
+    Ok(())
+}
+
 async fn setup_server_infrastructure_impl(
     spawn_host_providers: bool,
     ipfs_role: elastos_server::ipfs::IpfsHostRole,
@@ -766,34 +1057,7 @@ async fn setup_server_infrastructure_impl(
         Ok(())
     };
 
-    match binaries::resolve_verified_native_provider_binary("did-provider") {
-        Ok(Some(path)) => {
-            let did_config = provider::BridgeProviderConfig {
-                base_path: data_dir.to_string_lossy().to_string(),
-                allowed_paths: file_backed_prefixes(),
-                read_only: false,
-                encryption_key: device_key_hex.clone(),
-                ..Default::default()
-            };
-            match provider::ProviderBridge::spawn(&path, did_config).await {
-                Ok(bridge) => {
-                    let provider: Arc<dyn provider::Provider> = Arc::new(
-                        provider::CapsuleProvider::with_scheme(Arc::new(bridge), "did"),
-                    );
-                    if let Err(e) = provider_registry
-                        .register_sub_provider("did", provider)
-                        .await
-                    {
-                        tracing::warn!("Failed to register elastos://did sub-provider: {}", e);
-                    }
-                    tracing::info!("did-provider capsule from {}", path.display());
-                }
-                Err(e) => tracing::warn!("Failed to spawn did-provider: {}", e),
-            }
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!("Skipping did-provider due to verification failure: {}", e),
-    }
+    let _ = start_did_provider_for_server(&data_dir, &provider_registry, &device_key_hex).await;
 
     if spawn_host_providers {
         let binary_path = binaries::resolve_verified_native_provider_binary("localhost-provider")?
@@ -938,8 +1202,10 @@ async fn setup_server_infrastructure_impl(
             }
         }
         Ok(None) => {
-            tracing::warn!(
-                "object-provider binary is not installed; Library object operations will fail closed"
+            report_missing_home_provider(
+                &data_dir,
+                "object-provider",
+                "Library object operations will fail closed",
             );
         }
         Err(e) => tracing::warn!(
@@ -967,8 +1233,10 @@ async fn setup_server_infrastructure_impl(
             }
         }
         Ok(None) => {
-            tracing::warn!(
-                "webspace-provider binary is not installed; WebSpace roots will fail closed"
+            report_missing_home_provider(
+                &data_dir,
+                "webspace-provider",
+                "WebSpace roots will fail closed",
             );
         }
         Err(e) => tracing::warn!(
@@ -1349,41 +1617,15 @@ async fn setup_server_infrastructure_impl(
         ),
     }
 
-    match binaries::resolve_verified_native_provider_binary("wallet-provider") {
-        Ok(Some(path)) => {
-            let wallet_config = provider::BridgeProviderConfig {
-                base_path: data_dir.to_string_lossy().to_string(),
-                allowed_paths: file_backed_prefixes(),
-                read_only: false,
-                encryption_key: hex::encode(&device_key),
-                ..Default::default()
-            };
-            match provider::ProviderBridge::spawn(&path, wallet_config).await {
-                Ok(bridge) => {
-                    let bridge = Arc::new(bridge);
-                    let startup = start_wallet_provider_v2(
-                        &provider_registry,
-                        bridge,
-                        WALLET_PROVIDER_STATUS_TIMEOUT,
-                    )
-                    .await;
-                    match startup {
-                        Ok(()) => {
-                            tracing::info!("wallet-provider v2 capsule from {}", path.display())
-                        }
-                        Err(e) => {
-                            tracing::warn!("Skipping wallet-provider after shutdown/reap: {}", e)
-                        }
-                    }
-                }
-                Err(e) => tracing::warn!("Failed to spawn wallet-provider: {}", e),
-            }
-        }
-        Ok(None) => {}
-        Err(e) => tracing::warn!(
-            "Skipping wallet-provider due to verification failure: {}",
-            e
-        ),
+    if let Err(err) = start_wallet_provider(
+        &data_dir,
+        &provider_registry,
+        &device_key_hex,
+        WALLET_PROVIDER_STATUS_TIMEOUT,
+    )
+    .await
+    {
+        tracing::warn!("Skipping wallet-provider: {}", err);
     }
 
     if let Some(path) = crate::find_installed_provider_binary("drm-provider") {
@@ -1585,8 +1827,10 @@ async fn setup_server_infrastructure_impl(
             );
         }
     } else {
-        tracing::warn!(
-            "custody-provider binary is not installed; the inactive Runtime custody route will be unavailable"
+        report_missing_home_provider(
+            &data_dir,
+            "custody-provider",
+            "the inactive Runtime custody route will be unavailable",
         );
     }
 
@@ -1828,8 +2072,14 @@ fn browser_local_exit_socket_ready(path: &Path) -> anyhow::Result<bool> {
     #[cfg(not(unix))]
     {
         let _ = metadata;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported on this platform",
+        )
+        .into());
     }
 
+    #[cfg(unix)]
     Ok(true)
 }
 
@@ -2189,6 +2439,7 @@ fn provider_config_from_env_or_file(
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2232,6 +2483,435 @@ mod tests {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn absent_optional_home_providers_are_quiet_but_required_provider_warns() {
+        use std::io::Write;
+
+        #[derive(Clone)]
+        struct WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for WarningWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        fs::write(
+            temp.path().join("components.json"),
+            serde_json::json!({"external": {}, "profiles": {"home": {
+                "components": ["ipfs-provider"]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let writer = WarningWriter(log.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        for name in ["custody-provider", "object-provider", "webspace-provider"] {
+            report_missing_home_provider(temp.path(), name, "unavailable");
+        }
+        assert!(log.lock().unwrap().is_empty(), "optional providers warned");
+
+        fs::write(
+            temp.path().join("components.json"),
+            serde_json::json!({"external": {}, "profiles": {"home": {
+                "components": ["object-provider"]
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        report_missing_home_provider(temp.path(), "object-provider", "unavailable");
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("object-provider binary is not installed"),
+            "{output}"
+        );
+
+        fs::write(temp.path().join("components.json"), "{").unwrap();
+        report_missing_home_provider(temp.path(), "custody-provider", "unavailable");
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("custody-provider binary is not installed"),
+            "{output}"
+        );
+    }
+
+    fn did_fixture() -> (TempDir, PathBuf, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        // The signed source names this path. Canonicalize it so the release
+        // record and the start-time check name the same file.
+        let data_dir = fs::canonicalize(&data_dir).unwrap();
+        let bin = data_dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let binary = bin.join("did-provider");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let source = temp.path().join("did-probe.rs");
+            let text = include_str!("../tests/fixtures/did_confined_probe.rs").replace(
+                "@@ROOT@@",
+                &fs::canonicalize(&data_dir)
+                    .unwrap()
+                    .join("did")
+                    .to_string_lossy(),
+            );
+            fs::write(&source, text).unwrap();
+            let output = Command::new("rustc")
+                .args(["--edition", "2021", "-o"])
+                .arg(&binary)
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            fs::write(
+                &binary,
+                format!("#!/bin/sh\ntouch '{}'\n", data_dir.join("marker").display()),
+            )
+            .unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        use sha2::Digest as _;
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(fs::read(&binary).unwrap()))
+        );
+        let row = serde_json::json!({"external": {"did-provider": {
+            "install_path": "bin/did-provider",
+            "provider_runtime": {"role": "provider", "substrate": "native",
+                "runtime_abi": "elastos.provider-stdio/v1", "execution": "native-provider",
+                "provides": "elastos://did/*"},
+            "platforms": {elastos_server::setup::detect_platform(): {
+                "checksum": checksum, "install_path": "bin/did-provider"}}
+        }}, "capsules": {}, "profiles": {}});
+        fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&row).unwrap(),
+        )
+        .unwrap();
+        let manifest_dir = data_dir.join("capsules/did-provider");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../capsules/did-provider/capsule.json"),
+            manifest_dir.join("capsule.json"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        sign_test_home(&data_dir);
+        (temp, data_dir, binary)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn did_probe_failure(data_dir: &Path) -> String {
+        let path = data_dir.join("did/probe.error");
+        match fs::read_to_string(&path) {
+            Ok(report) => {
+                let mut lines: Vec<_> = report.lines().rev().take(8).collect();
+                lines.reverse();
+                format!("probe error (last lines): {}", lines.join("\n"))
+            }
+            Err(error) => format!("probe error unavailable at {}: {error}", path.display()),
+        }
+    }
+
+    #[test]
+    fn did_caller_has_one_confined_start_and_no_plain_spawn() {
+        let source = include_str!("server_infra.rs");
+        let start = source.find("async fn start_did_provider(").unwrap();
+        let end = source[start..]
+            .find("\n    if spawn_host_providers {")
+            .unwrap()
+            + start;
+        let block = &source[start..end];
+        assert_eq!(
+            block
+                .matches("AdmittedProvider::admit(data_dir, \"did-provider\")")
+                .count(),
+            1
+        );
+        assert_eq!(block.matches("ProviderBridge::spawn_confined(").count(), 1);
+        assert!(!block.contains("ProviderBridge::spawn("));
+        assert_eq!(
+            block
+                .matches("if let Err(err) = start_did_provider(")
+                .count(),
+            1
+        );
+        assert!(block.contains("let _ = start_did_provider_for_server("));
+        assert_eq!(block.matches("bridge.shutdown().await").count(), 1);
+        assert!(block.contains("CapsuleProvider::from_confined(confined, \"did\")"));
+    }
+
+    #[tokio::test]
+    async fn did_missing_row_leaves_route_and_storage_absent() {
+        let temp = TempDir::new().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let fixture = bin.join("did-provider");
+        fs::write(
+            &fixture,
+            format!(
+                "#!/bin/sh\ntouch '{}'\n",
+                temp.path().join("marker").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = provider::ProviderRegistry::new();
+        assert!(start_did_provider(temp.path(), &registry, "fixture")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        assert!(!temp.path().join("did").exists());
+        assert!(!temp.path().join("marker").exists());
+    }
+
+    #[tokio::test]
+    async fn did_unadmitted_bytes_leave_route_storage_and_marker_absent() {
+        let (_temp, data_dir, binary) = did_fixture();
+        fs::write(&binary, b"changed after the row checksum").unwrap();
+        let registry = provider::ProviderRegistry::new();
+        let error = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("checksum"), "{error}");
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        assert!(!data_dir.join("did").exists());
+        assert!(!data_dir.join("marker").exists());
+    }
+
+    /// A Home with no signed release, and the same Home with `dev_mode`,
+    /// refuses the DID start. The route, storage root and marker stay absent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn did_unsigned_and_dev_mode_homes_refuse_before_anything_is_created() {
+        for dev_mode in [false, true] {
+            let (_temp, data_dir, _) = did_fixture();
+            fs::remove_file(data_dir.join("sources.json")).unwrap();
+            if dev_mode {
+                fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
+            }
+            let registry = provider::ProviderRegistry::new();
+            let error = start_did_provider(&data_dir, &registry, "fixture")
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the DID provider"));
+            let message = error.to_string();
+            if dev_mode {
+                assert!(
+                    message.contains("no signed release digest"),
+                    "dev_mode={dev_mode}: {message}"
+                );
+            } else {
+                assert!(
+                    message.contains("No trusted source configured"),
+                    "dev_mode={dev_mode}: {message}"
+                );
+            }
+            assert!(registry
+                .registration_for_uri("elastos://did/identity")
+                .await
+                .is_none());
+            assert!(!data_dir.join("did").exists(), "dev_mode={dev_mode}");
+            assert!(!data_dir.join("marker").exists(), "dev_mode={dev_mode}");
+            assert!(
+                !data_dir.join("provider-copies").exists(),
+                "dev_mode={dev_mode}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn did_data_dir_symlink_is_refused_before_storage_creation() {
+        let (temp, data_dir, _) = did_fixture();
+        let linked_data_dir = temp.path().join("linked-data");
+        std::os::unix::fs::symlink(&data_dir, &linked_data_dir).unwrap();
+        let registry = provider::ProviderRegistry::new();
+        let error = match start_did_provider(&linked_data_dir, &registry, "fixture").await {
+            Err(error) => error,
+            Ok(Some(bridge)) => {
+                bridge.shutdown().await.unwrap();
+                panic!("a symlinked data directory started the DID provider");
+            }
+            Ok(None) => panic!("the admitted DID provider row was not found"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "provider start is refused: the storage root's parent is a symlink"
+        );
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        assert!(!data_dir.join("did").exists());
+        assert!(!data_dir.join("marker").exists());
+    }
+
+    #[cfg(elastos_unsupported_os_check)]
+    #[tokio::test]
+    async fn did_os_refusal_keeps_child_and_route_absent() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        let error = start_did_provider_for_server(&data_dir, &registry, "fixture")
+            .await
+            .err()
+            .unwrap();
+        #[cfg(elastos_unsupported_os_check)]
+        assert!(
+            error.to_string().contains(
+                "this operating system has no confinement, so the provider binary does not start"
+            ),
+            "{error}"
+        );
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_none());
+        #[cfg(target_os = "linux")]
+        assert!(!data_dir.join("did/child.pid").exists());
+        #[cfg(not(target_os = "linux"))]
+        assert!(!data_dir.join("marker").exists());
+        assert!(!data_dir.join("did").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn did_linux_admitted_row_answers_and_stays_confined() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
+            .unwrap();
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_some());
+        let response = registry
+            .send_raw("did", &serde_json::json!({"op":"get_did"}))
+            .await
+            .unwrap();
+        assert_eq!(response["data"]["did"], "did:key:zFixture");
+        registry
+            .send_raw("did", &serde_json::json!({"op":"set_nickname"}))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(data_dir.join("did/nickname")).unwrap(), b"Ada");
+        let outside = registry
+            .send_raw("did", &serde_json::json!({"op":"probe_outside_write"}))
+            .await
+            .unwrap();
+        assert_eq!(outside["data"]["outside_write_refused"], true);
+        assert!(!data_dir.join("outside").exists());
+        let pid: libc::pid_t = fs::read_to_string(data_dir.join("did/child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        assert!(status.lines().any(|line| line == "Seccomp:\t2"), "{status}");
+        assert!(
+            status.lines().any(|line| line == "NoNewPrivs:\t1"),
+            "{status}"
+        );
+        bridge.shutdown().await.unwrap();
+        assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[tokio::test]
+    async fn did_macos_admitted_row_answers_and_stays_confined() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
+            .unwrap();
+        assert!(registry
+            .registration_for_uri("elastos://did/identity")
+            .await
+            .is_some());
+        let answer = registry
+            .send_raw("did", &serde_json::json!({"op":"get_did"}))
+            .await
+            .unwrap();
+        assert_eq!(answer["data"]["did"], "did:key:zFixture");
+        registry
+            .send_raw("did", &serde_json::json!({"op":"set_nickname"}))
+            .await
+            .unwrap();
+        assert_eq!(fs::read(data_dir.join("did/nickname")).unwrap(), b"Ada");
+        let outside = registry
+            .send_raw("did", &serde_json::json!({"op":"probe_outside_write"}))
+            .await
+            .unwrap();
+        assert_eq!(outside["data"]["outside_write_refused"], true);
+        assert!(!data_dir.join("outside").exists());
+        bridge.shutdown().await.unwrap();
+        assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn did_registration_collision_sends_shutdown_and_reaps_child() {
+        let (_temp, data_dir, _) = did_fixture();
+        let registry = provider::ProviderRegistry::new();
+        registry
+            .register_sub_provider(
+                "did",
+                Arc::new(DocumentsProvider::new(
+                    data_dir.clone(),
+                    std::sync::Weak::new(),
+                )),
+            )
+            .await
+            .unwrap();
+        let error = start_did_provider(&data_dir, &registry, "fixture")
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("already registered"),
+            "{error}; {}",
+            did_probe_failure(&data_dir)
+        );
+        assert_eq!(fs::read(data_dir.join("did/shutdown")).unwrap(), b"yes");
+        let pid: libc::pid_t = fs::read_to_string(data_dir.join("did/child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
 
     fn test_provider_bridge(
         status: serde_json::Value,
@@ -2281,6 +2961,538 @@ mod tests {
                 "protocol_version": protocol_version,
             }
         })
+    }
+
+    fn wallet_fixture() -> (TempDir, PathBuf, PathBuf) {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        let bin = data_dir.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(data_dir.join("ElastOS")).unwrap();
+        let binary = bin.join("wallet-provider");
+        #[cfg(target_os = "linux")]
+        {
+            let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
+            let source = temp.path().join("wallet-probe.rs");
+            let text = include_str!("../tests/fixtures/wallet_confined_probe.rs")
+                .replace("@@ROOT@@", &wallet_root.to_string_lossy())
+                .replace("@@BASE@@", &data_dir.to_string_lossy())
+                .replace("@@MARKER@@", &data_dir.join("marker").to_string_lossy())
+                .replace("@@PROTOCOL@@", WALLET_PROTOCOL_VERSION);
+            fs::write(&source, text).unwrap();
+            let output = Command::new("rustc")
+                .args(["--edition", "2021", "-o"])
+                .arg(&binary)
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            fs::write(
+                &binary,
+                format!("#!/bin/sh\ntouch '{}'\n", data_dir.join("marker").display()),
+            )
+            .unwrap();
+            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        use sha2::Digest as _;
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(fs::read(&binary).unwrap()))
+        );
+        let row = serde_json::json!({"external": {"wallet-provider": {
+            "install_path": "bin/wallet-provider",
+            "provider_runtime": {"role": "provider", "substrate": "native",
+                "runtime_abi": "elastos.provider-stdio/v1", "execution": "native-provider",
+                "provides": "elastos://wallet/meta/status"},
+            "platforms": {elastos_server::setup::detect_platform(): {
+                "checksum": checksum, "install_path": "bin/wallet-provider"}}
+        }}, "capsules": {}, "profiles": {}});
+        fs::write(
+            data_dir.join("components.json"),
+            serde_json::to_vec(&row).unwrap(),
+        )
+        .unwrap();
+        let manifest_dir = data_dir.join("capsules/wallet-provider");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../capsules/wallet-provider/capsule.json"),
+            manifest_dir.join("capsule.json"),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        sign_test_home(&data_dir);
+        (temp, data_dir, binary)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wallet_probe_failure(wallet_root: &Path) -> String {
+        let path = wallet_root.join("probe.error");
+        match fs::read_to_string(&path) {
+            Ok(report) => format!("wallet probe panic: {report}"),
+            Err(error) => format!(
+                "wallet probe report unavailable at {}: {error}",
+                path.display()
+            ),
+        }
+    }
+
+    #[test]
+    fn wallet_start_path_admits_and_starts_only_confined() {
+        let source = include_str!("server_infra.rs");
+        let helper_start = source.find("async fn start_wallet_provider_v2(").unwrap();
+        let helper_end = source[helper_start..]
+            .find("\nasync fn request_model_provider_status(")
+            .unwrap()
+            + helper_start;
+        let caller_start = source
+            .find("if let Err(err) = start_wallet_provider(")
+            .unwrap();
+        let caller_end = source[caller_start..]
+            .find(
+                "\n    if let Some(path) = crate::find_installed_provider_binary(\"drm-provider\")",
+            )
+            .unwrap()
+            + caller_start;
+        let start_path = format!(
+            "{}\n{}",
+            &source[helper_start..helper_end],
+            &source[caller_start..caller_end]
+        );
+        assert_eq!(
+            start_path
+                .matches("AdmittedProvider::admit(data_dir, \"wallet-provider\")")
+                .count(),
+            1
+        );
+        assert_eq!(
+            start_path
+                .matches("ProviderBridge::spawn_confined(")
+                .count(),
+            1
+        );
+        assert!(!start_path.contains("ProviderBridge::spawn("));
+        assert!(!start_path.contains("CapsuleProvider::with_scheme("));
+        assert_eq!(
+            start_path
+                .matches("CapsuleProvider::from_confined(confined, \"wallet\")")
+                .count(),
+            1
+        );
+        assert_eq!(start_path.matches("bridge.shutdown().await").count(), 1);
+    }
+
+    #[test]
+    fn wallet_refusal_texts_and_os_choice_match_runtime_entry() {
+        let runtime = include_str!("../../elastos-runtime/src/provider/os_entry.rs");
+        let server = include_str!("server_infra.rs");
+        let unsupported = runtime
+            .split_once("const UNSUPPORTED_OS: &str =")
+            .unwrap()
+            .1
+            .split('"')
+            .nth(1)
+            .unwrap();
+        assert_eq!(WALLET_UNSUPPORTED_OS, unsupported);
+        assert!(!runtime.contains("const MACOS_NO_SPAWN"));
+
+        // The three choices must use the Runtime's Linux, macOS and
+        // unsupported-OS cfg arms, in that order.
+        fn cfg_before(source: &str, position: usize) -> String {
+            let start = source[..position].rfind("#[cfg(").unwrap();
+            let end = start + source[start..].find(")]").unwrap() + 2;
+            source[start..end]
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect()
+        }
+        let choices = server
+            .split_once("fn wallet_confinement_refusal()")
+            .unwrap()
+            .1
+            .split_once("/// Create the wallet storage parent")
+            .unwrap()
+            .0;
+        let dispatches: Vec<_> = runtime
+            .match_indices("\nfn dispatch(")
+            .map(|(position, _)| position)
+            .collect();
+        assert_eq!(dispatches.len(), 3);
+        let linux = choices.find("        None\n").unwrap();
+        let macos = linux + 1 + choices[linux + 1..].find("        None\n").unwrap();
+        let unsupported_choice = choices.find("Some(WALLET_UNSUPPORTED_OS)").unwrap();
+        for (position, dispatch) in [
+            (linux, dispatches[0]),
+            (macos, dispatches[1]),
+            (unsupported_choice, dispatches[2]),
+        ] {
+            assert_eq!(cfg_before(choices, position), cfg_before(runtime, dispatch));
+        }
+
+        let expected = if cfg!(elastos_unsupported_os_check)
+            || !cfg!(any(
+                target_os = "macos",
+                all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            )) {
+            Some(WALLET_UNSUPPORTED_OS)
+        } else {
+            None
+        };
+        assert_eq!(wallet_confinement_refusal(), expected);
+    }
+
+    #[test]
+    fn wallet_parent_preparation_uses_real_effective_uid() {
+        let source = include_str!("server_infra.rs");
+        let prepare = source
+            .split_once("fn prepare_wallet_storage_parent(")
+            .unwrap()
+            .1
+            .split_once("\nasync fn start_wallet_provider(")
+            .unwrap()
+            .0;
+        assert_eq!(
+            prepare
+                .matches("tighten_wallet_parent(&directory, unsafe { libc::geteuid() })")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn wallet_missing_row_leaves_helper_route_and_storage_absent() {
+        let temp = TempDir::new().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let fixture = bin.join("wallet-provider");
+        fs::write(
+            &fixture,
+            format!(
+                "#!/bin/sh\ntouch '{}'\n",
+                temp.path().join("marker").display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
+        let registry = provider::ProviderRegistry::new();
+        assert!(
+            start_wallet_provider(temp.path(), &registry, "fixture", Duration::from_secs(1))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(registry
+            .registration_for_uri("elastos://wallet/status")
+            .await
+            .is_none());
+        assert!(!temp.path().join("ElastOS/SystemServices/Wallet").exists());
+        assert!(!temp.path().join("marker").exists());
+    }
+
+    /// A Home with no signed release, and the same Home with `dev_mode`,
+    /// refuses the wallet start before its storage is touched. The route,
+    /// storage root and marker stay absent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn wallet_unsigned_and_dev_mode_homes_refuse_before_anything_is_created() {
+        for dev_mode in [false, true] {
+            let (_temp, data_dir, _) = wallet_fixture();
+            fs::remove_file(data_dir.join("sources.json")).unwrap();
+            if dev_mode {
+                fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
+            }
+            let registry = provider::ProviderRegistry::new();
+            let error =
+                start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the wallet provider"));
+            let message = error.to_string();
+            if dev_mode {
+                assert!(
+                    message.contains("no signed release digest"),
+                    "dev_mode={dev_mode}: {message}"
+                );
+            } else {
+                assert!(
+                    message.contains("No trusted source configured"),
+                    "dev_mode={dev_mode}: {message}"
+                );
+            }
+            assert!(registry
+                .registration_for_uri("elastos://wallet/status")
+                .await
+                .is_none());
+            assert!(
+                !data_dir.join("ElastOS/SystemServices/Wallet").exists(),
+                "dev_mode={dev_mode}"
+            );
+            assert!(!data_dir.join("marker").exists(), "dev_mode={dev_mode}");
+            assert!(
+                !data_dir.join("provider-copies").exists(),
+                "dev_mode={dev_mode}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn wallet_unadmitted_bytes_leave_route_storage_and_marker_absent() {
+        let (_temp, data_dir, binary) = wallet_fixture();
+        fs::write(&binary, b"changed after the row checksum").unwrap();
+        let registry = provider::ProviderRegistry::new();
+        let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("checksum"), "{error}");
+        assert!(registry
+            .registration_for_uri("elastos://wallet/status")
+            .await
+            .is_none());
+        assert!(!data_dir.join("ElastOS/SystemServices/Wallet").exists());
+        assert!(!data_dir.join("marker").exists());
+    }
+
+    #[test]
+    fn wallet_storage_parent_is_prepared_and_unsuitable_parent_refused() {
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(data_dir.join("ElastOS")).unwrap();
+        let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
+        prepare_wallet_storage_parent(&wallet_root).unwrap();
+        let parent = data_dir.join("ElastOS/SystemServices");
+        let metadata = fs::symlink_metadata(&parent).unwrap();
+        assert!(metadata.file_type().is_dir());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(data_dir.join("ElastOS")).unwrap();
+        fs::write(data_dir.join("ElastOS/SystemServices"), b"not a directory").unwrap();
+        let error = prepare_wallet_storage_parent(&data_dir.join("ElastOS/SystemServices/Wallet"))
+            .unwrap_err();
+        assert!(error.to_string().contains("not a directory"), "{error}");
+    }
+
+    #[test]
+    fn wallet_symlinked_parent_is_refused_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(data_dir.join("ElastOS")).unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o777)).unwrap();
+        symlink(&target, data_dir.join("ElastOS/SystemServices")).unwrap();
+
+        let result = prepare_wallet_storage_parent(&data_dir.join("ElastOS/SystemServices/Wallet"));
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o777,
+            "the symlink target's permissions must stay unchanged"
+        );
+        assert!(result.is_err(), "a symlinked wallet parent must be refused");
+    }
+
+    #[test]
+    fn wallet_foreign_parent_owner_is_refused_before_tightening() {
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().join("SystemServices");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+        let directory = fs::File::open(&parent).unwrap();
+        // The seam supplies a different effective uid; changing an owner needs root.
+        let foreign_effective_uid = unsafe { libc::geteuid() }.wrapping_add(1);
+
+        let result = tighten_wallet_parent(&directory, foreign_effective_uid);
+        assert_eq!(
+            fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o777,
+            "a refused parent's permissions must stay unchanged"
+        );
+        assert!(result.is_err(), "a foreign wallet parent must be refused");
+    }
+
+    #[tokio::test]
+    async fn wallet_upgraded_home_with_group_writable_parent_still_starts() {
+        let (_temp, data_dir, _) = wallet_fixture();
+        let parent = data_dir.join("ElastOS/SystemServices");
+        // Another service creates the shared level with `create_dir_all` under umask 002
+        // (the signed test Home may already have created it).
+        fs::create_dir_all(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o775)).unwrap();
+        let wallet_root = parent.join("Wallet");
+        prepare_wallet_storage_parent(&wallet_root).unwrap();
+        let mode = fs::symlink_metadata(&parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "group and other write bits are removed and owner rwx is kept"
+        );
+
+        #[cfg(target_os = "linux")]
+        {
+            let registry = provider::ProviderRegistry::new();
+            let bridge =
+                start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(registry
+                .registration_for_uri("elastos://wallet/status")
+                .await
+                .is_some());
+            bridge.shutdown().await.unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn wallet_linux_admitted_row_answers_and_stays_confined() {
+        let (_temp, data_dir, _) = wallet_fixture();
+        let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
+        let registry = provider::ProviderRegistry::new();
+        let bridge = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+            .await
+            .unwrap_or_else(|error| panic!("{error}; {}", wallet_probe_failure(&wallet_root)))
+            .unwrap();
+        assert!(registry
+            .registration_for_uri("elastos://wallet/status")
+            .await
+            .is_some());
+        let created = registry
+            .send_raw("wallet", &serde_json::json!({"op": "create_wallet"}))
+            .await
+            .unwrap();
+        assert_eq!(created["data"]["created"], "a1");
+        let listed = registry
+            .send_raw("wallet", &serde_json::json!({"op": "list_wallets"}))
+            .await
+            .unwrap();
+        assert_eq!(listed["data"]["accounts"], 1);
+        let outside = registry
+            .send_raw("wallet", &serde_json::json!({"op": "probe_outside_write"}))
+            .await
+            .unwrap();
+        assert_eq!(outside["data"]["outside_write_refused"], true);
+
+        let pid: libc::pid_t = fs::read_to_string(wallet_root.join("child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        bridge.shutdown().await.unwrap();
+        assert_eq!(fs::read(wallet_root.join("shutdown")).unwrap(), b"yes");
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+
+        let registry = provider::ProviderRegistry::new();
+        let bridge = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let listed = registry
+            .send_raw("wallet", &serde_json::json!({"op": "list_wallets"}))
+            .await
+            .unwrap();
+        assert_eq!(listed["data"]["accounts"], 1);
+        bridge.shutdown().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn wallet_unsuitable_parent_leaves_route_absent() {
+        let (_temp, data_dir, _) = wallet_fixture();
+        // The signed Home keeps its release under this level, so replacing it
+        // with a file is refused when the provider is admitted (the release
+        // envelope's parents are checked), before the signed-digest check and
+        // before the storage parent is prepared; nothing is created.
+        let parent = data_dir.join("ElastOS/SystemServices");
+        fs::remove_dir_all(&parent).unwrap();
+        fs::write(&parent, b"not a directory").unwrap();
+        let registry = provider::ProviderRegistry::new();
+        let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+            .await
+            .err()
+            .unwrap();
+        let message = format!("{error:#}").to_lowercase();
+        assert!(
+            message.contains("installed release inputs require repair"),
+            "{error:#}"
+        );
+        assert!(registry
+            .registration_for_uri("elastos://wallet/status")
+            .await
+            .is_none());
+        assert!(!data_dir.join("ElastOS/SystemServices/Wallet").exists());
+        assert!(!data_dir.join("marker").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn wallet_registration_failure_reaps_the_confined_child() {
+        let (_temp, data_dir, _) = wallet_fixture();
+        let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
+        let registry = provider::ProviderRegistry::new();
+        registry
+            .register_sub_provider(
+                "wallet",
+                Arc::new(DocumentsProvider::new(
+                    data_dir.clone(),
+                    std::sync::Weak::new(),
+                )),
+            )
+            .await
+            .unwrap();
+        let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("already registered"),
+            "{error}; {}",
+            wallet_probe_failure(&wallet_root)
+        );
+        assert_eq!(fs::read(wallet_root.join("shutdown")).unwrap(), b"yes");
+        let pid: libc::pid_t = fs::read_to_string(wallet_root.join("child.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[cfg(elastos_unsupported_os_check)]
+    #[tokio::test]
+    async fn wallet_os_refusal_leaves_marker_storage_and_route_absent() {
+        let (_temp, data_dir, _) = wallet_fixture();
+        let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
+        let registry = provider::ProviderRegistry::new();
+        let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+            .await
+            .err()
+            .unwrap();
+        assert!(registry
+            .registration_for_uri("elastos://wallet/status")
+            .await
+            .is_none());
+        assert!(!data_dir.join("marker").exists());
+        assert!(!wallet_root.exists());
+        assert!(!wallet_root.join("child.pid").exists());
+        #[cfg(elastos_unsupported_os_check)]
+        assert!(
+            error
+                .to_string()
+                .contains("this operating system has no confinement"),
+            "{error}"
+        );
     }
 
     fn media_provider_status() -> serde_json::Value {
@@ -2675,27 +3887,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wallet_provider_v2_startup_registers_only_exact_identity_and_version() {
-        let registry = provider::ProviderRegistry::new();
-        let (bridge, provider) = test_provider_bridge(
-            provider_status("wallet-provider", WALLET_PROTOCOL_VERSION),
-            Duration::ZERO,
-        );
-        start_wallet_provider_v2(&registry, bridge, Duration::from_secs(1))
-            .await
-            .unwrap();
-
-        let registration = registry
-            .registration_for_uri("elastos://wallet/status")
-            .await
-            .unwrap();
-        assert_eq!(registration.route, "wallet");
-        assert_eq!(registration.provider, "capsule-provider");
-        provider.abort();
-    }
-
-    #[tokio::test]
-    async fn wallet_provider_v2_startup_reaps_identity_or_version_mismatch() {
+    async fn wallet_provider_v2_status_rejects_identity_or_version_mismatch() {
         for status in [
             provider_status("wallet-provider", "2.0"),
             provider_status("wallet-provider", "2.1"),
@@ -2703,43 +3895,58 @@ mod tests {
             provider_status("wallet-provider", "1.0"),
             provider_status("other-provider", WALLET_PROTOCOL_VERSION),
         ] {
-            let registry = provider::ProviderRegistry::new();
             let (bridge, provider) = test_provider_bridge(status, Duration::ZERO);
-            let error = start_wallet_provider_v2(&registry, bridge, Duration::from_secs(1))
+            let error = check_wallet_provider_v2_status(&bridge, Duration::from_secs(1))
                 .await
                 .unwrap_err();
 
             assert!(error.to_string().contains("unsupported"));
-            assert!(registry
-                .registration_for_uri("elastos://wallet/status")
-                .await
-                .is_none());
-            let requests = provider.await.unwrap();
-            assert_eq!(requests[0]["op"], "status");
-            assert_eq!(requests[1]["op"], "shutdown");
+            provider.abort();
         }
     }
 
     #[tokio::test]
-    async fn wallet_provider_v2_startup_reaps_failed_or_malformed_status() {
+    async fn wallet_provider_v2_status_rejects_failed_or_malformed_data() {
         for status in [
             serde_json::json!({"status": "error"}),
             serde_json::json!({"status": "ok", "data": []}),
         ] {
-            let registry = provider::ProviderRegistry::new();
             let (bridge, provider) = test_provider_bridge(status, Duration::ZERO);
-            start_wallet_provider_v2(&registry, bridge, Duration::from_secs(1))
+            check_wallet_provider_v2_status(&bridge, Duration::from_secs(1))
                 .await
                 .unwrap_err();
 
-            assert!(registry
-                .registration_for_uri("elastos://wallet/status")
-                .await
-                .is_none());
-            let requests = provider.await.unwrap();
-            assert_eq!(requests[0]["op"], "status");
-            assert_eq!(requests[1]["op"], "shutdown");
+            provider.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn wallet_provider_v2_status_failure_reaps_the_provider() {
+        let registry = provider::ProviderRegistry::new();
+        let (bridge, provider) =
+            test_provider_bridge(provider_status("wallet-provider", "1.0"), Duration::ZERO);
+        let wallet_provider: Arc<dyn provider::Provider> = Arc::new(
+            provider::CapsuleProvider::with_scheme(Arc::clone(&bridge), "wallet"),
+        );
+
+        let error = check_and_register_wallet_provider_v2(
+            &registry,
+            bridge,
+            wallet_provider,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported"), "{error}");
+        assert!(registry
+            .registration_for_uri("elastos://wallet/status")
+            .await
+            .is_none());
+        let requests = provider.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["op"], "status");
+        assert_eq!(requests[1]["op"], "shutdown");
     }
 
     #[tokio::test(start_paused = true)]
@@ -2759,24 +3966,17 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn wallet_provider_v2_startup_reaps_provider_that_does_not_answer_in_time() {
-        let registry = provider::ProviderRegistry::new();
+    async fn wallet_provider_v2_status_probe_times_out_without_an_answer() {
         let (bridge, provider) = test_provider_bridge(
             provider_status("wallet-provider", WALLET_PROTOCOL_VERSION),
             Duration::from_millis(20),
         );
-        let error = start_wallet_provider_v2(&registry, bridge, Duration::from_millis(5))
+        let error = check_wallet_provider_v2_status(&bridge, Duration::from_millis(5))
             .await
             .unwrap_err();
 
         assert!(error.to_string().contains("timed out"));
-        assert!(registry
-            .registration_for_uri("elastos://wallet/status")
-            .await
-            .is_none());
-        let requests = provider.await.unwrap();
-        assert_eq!(requests[0]["op"], "status");
-        assert_eq!(requests[1]["op"], "shutdown");
+        provider.abort();
     }
 
     #[tokio::test]
@@ -3956,7 +5156,16 @@ mod tests {
         }
         #[cfg(not(unix))]
         {
-            assert!(browser_local_exit_socket_ready(&relay_path).unwrap());
+            let err = browser_local_exit_socket_ready(&relay_path).unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
+                Some(std::io::ErrorKind::Unsupported)
+            );
+            assert!(
+                err.to_string().contains("unsupported on this platform"),
+                "{err}"
+            );
         }
     }
 

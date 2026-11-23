@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use anyhow::Context;
 use std::path::Path;
 
@@ -11,11 +12,7 @@ fn sudo_target_owner() -> Option<(u32, u32)> {
     Some((uid, gid))
 }
 
-#[cfg(not(unix))]
-fn sudo_target_owner() -> Option<(u32, u32)> {
-    None
-}
-
+#[cfg(unix)]
 pub fn repair_path_recursive(path: &Path) -> anyhow::Result<()> {
     let Some((uid, gid)) = sudo_target_owner() else {
         return Ok(());
@@ -24,6 +21,15 @@ pub fn repair_path_recursive(path: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
     repair_inner(path, uid, gid)
+}
+
+#[cfg(windows)]
+pub fn repair_path_recursive(_path: &Path) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "recursive ownership repair is unsupported on Windows",
+    )
+    .into())
 }
 
 #[cfg(unix)]
@@ -47,10 +53,5 @@ fn repair_inner(path: &Path, uid: u32, gid: u32) -> anyhow::Result<()> {
             repair_inner(&entry.path(), uid, gid)?;
         }
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn repair_inner(_path: &Path, _uid: u32, _gid: u32) -> anyhow::Result<()> {
     Ok(())
 }

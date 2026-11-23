@@ -67,8 +67,39 @@ fn test_browser_request(host: &'static str, origin: &'static str) -> axum::http:
     if origin == "null" {
         request
     } else {
-        request.header("sec-fetch-site", "same-origin")
+        request
+            .header("sec-fetch-site", "same-origin")
+            .header("referer", format!("{origin}/home/"))
     }
+}
+
+fn owner_cli_home_launch_grant(data_dir: &std::path::Path, owner: &TestPasskeyAuthority) -> String {
+    let context = home_launch_token_context_from_parts(
+        data_dir,
+        &owner.principal_id,
+        &owner.session_id,
+        Some(&owner.proof_binding_id),
+        &owner.grant_id,
+    )
+    .unwrap();
+    issue_home_cli_launch_grant_for_context(data_dir, &context).unwrap()
+}
+
+fn agent_home_token(data_dir: &std::path::Path) -> String {
+    let agent = crate::auth::valid_agent::plant(data_dir);
+    let now = crate::auth::now_ts();
+    let grant = AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: "grant:home-launch-agent".to_string(),
+        session_id: "session:home-launch-agent".to_string(),
+        principal_id: agent.principal_id,
+        proof_binding_id: agent.proof_binding_id,
+        issued_at: now,
+        expires_at: now + 600,
+        apps: vec![HOME_CAPSULE_ID.to_string()],
+    };
+    crate::auth::plant_session_grant(data_dir, grant.clone());
+    issue_home_launch_token_for_auth_grant(data_dir, HOME_CAPSULE_ID, &grant).unwrap()
 }
 
 /// Reads Home events once from `cursor` and reports whether Inbox changed.
@@ -1153,11 +1184,14 @@ async fn wallet_chain_test_state_with_shared_wallet_provider(
 include!("support_providers.rs");
 include!("support_runtime.rs");
 
+#[cfg(feature = "prototype-agents")]
+mod agent_launch;
 mod agent_plan;
 mod agent_routes;
 mod assistant_workspace_v2;
 mod browser_profile;
 mod browser_reconciliation;
+mod cli_mint;
 mod collaboration_presence;
 mod content_sandbox;
 mod documents;

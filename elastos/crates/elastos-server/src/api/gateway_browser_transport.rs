@@ -10,7 +10,9 @@ use hmac::{Hmac, Mac};
 use rand::RngCore as _;
 use serde::Deserialize;
 use sha1::Sha1;
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::io::Read as _;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
@@ -734,6 +736,7 @@ fn browser_vz_value_contains_secret(value: &serde_json::Value) -> bool {
     }
 }
 
+#[cfg(unix)]
 fn read_browser_vz_transport_config(
     data_dir: &Path,
 ) -> Result<Option<BrowserVzTransportConfig>, String> {
@@ -775,6 +778,13 @@ fn read_browser_vz_transport_config(
     let config = serde_json::from_slice(&bytes)
         .map_err(|err| format!("Browser VZ transport config is invalid JSON: {err}"))?;
     Ok(Some(config))
+}
+
+#[cfg(windows)]
+fn read_browser_vz_transport_config(
+    _data_dir: &Path,
+) -> Result<Option<BrowserVzTransportConfig>, String> {
+    Err("Browser VZ transport file custody is unsupported on Windows".to_string())
 }
 
 fn validate_browser_vz_transport_config(config: &BrowserVzTransportConfig) -> Result<(), String> {
@@ -1251,7 +1261,7 @@ mod tests {
         assert!(!ports_bindable_here("127.0.0.1", udp, udp, true));
         assert!(ports_bindable_here("192.0.2.10", tcp, tcp, true));
     }
-
+    #[cfg(unix)]
     #[test]
     fn remote_engine_offer_requires_enabled_valid_transport() {
         let root = tempfile::tempdir().unwrap();
@@ -1319,7 +1329,7 @@ mod tests {
             .unwrap(),
         })
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn reserved_generation_prepares_vz_transport_authority() {
         let root = tempfile::tempdir().unwrap();
@@ -1470,7 +1480,7 @@ mod tests {
             assert_eq!(proof["zero_owned_residue"], true);
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn authority_binds_exact_launch_without_persisting_secrets() {
         let root = tempfile::tempdir().unwrap();
@@ -1516,7 +1526,7 @@ mod tests {
         assert!(public.get("credential").is_none());
         assert!(public.get("auth_secret").is_none());
     }
-
+    #[cfg(unix)]
     #[test]
     fn transport_outlives_ten_minutes_up_to_home_token_lifetime() {
         let root = tempfile::tempdir().unwrap();
@@ -1554,7 +1564,7 @@ mod tests {
         assert!(expires_at_ms > issued_at_ms + 10 * 60 * 1_000);
         validate_browser_vz_transport_authority(&launch.authority).unwrap();
     }
-
+    #[cfg(unix)]
     #[test]
     fn viewer_turn_capability_is_exact_ephemeral_and_relay_only() {
         let root = tempfile::tempdir().unwrap();
@@ -1634,7 +1644,7 @@ mod tests {
                 .contains(credential));
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn viewer_turn_capability_rejects_substitution_and_expiry() {
         let root = tempfile::tempdir().unwrap();
@@ -1714,7 +1724,7 @@ mod tests {
                 .contains("expired")
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn authority_rejects_binding_substitution_replay_and_expiry() {
         let root = tempfile::tempdir().unwrap();
@@ -1774,7 +1784,7 @@ mod tests {
             validate_browser_vz_transport_effect_receipt(&launch.authority, &malformed).is_err()
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn runtime_normalizes_only_exact_vz_mdns_host_candidates_to_loopback() {
         let root = tempfile::tempdir().unwrap();
@@ -1862,7 +1872,7 @@ mod tests {
         .unwrap_err()
         .contains("binding hash"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn runtime_accepts_only_exact_typed_transport_terminal_cleanup() {
         let root = tempfile::tempdir().unwrap();

@@ -719,6 +719,7 @@ impl TwoRuntimes {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn offers_list_over_carrier_shares_only_local_offers() {
     let fx = TwoRuntimes::start().await;
@@ -736,6 +737,7 @@ async fn offers_list_over_carrier_shares_only_local_offers() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn older_generic_grant_and_newly_shared_hosted_offer_cannot_expand_access() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
@@ -798,6 +800,7 @@ async fn older_generic_grant_and_newly_shared_hosted_offer_cannot_expand_access(
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn replacing_local_model_under_the_same_id_requires_a_new_grant() {
     let fx = TwoRuntimes::start().await;
@@ -819,6 +822,7 @@ async fn replacing_local_model_under_the_same_id_requires_a_new_grant() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn marketplace_remote_discovery_requires_grant_and_has_no_run_authority() {
     let fx = TwoRuntimes::start().await;
@@ -845,6 +849,7 @@ async fn marketplace_remote_discovery_requires_grant_and_has_no_run_authority() 
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn runs_create_rebinds_the_request_to_the_remote_principal() {
     let fx = TwoRuntimes::start().await;
@@ -892,6 +897,7 @@ async fn runs_create_rebinds_the_request_to_the_remote_principal() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn run_lifecycle_stays_with_the_creating_principal_through_denial_and_revoke() {
     let fx = TwoRuntimes::start().await;
@@ -958,6 +964,7 @@ async fn run_lifecycle_stays_with_the_creating_principal_through_denial_and_revo
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn p2a_iii_stored_run_with_malformed_remote_id_is_denied_before_dispatch() {
     let fx = TwoRuntimes::start().await;
@@ -984,6 +991,7 @@ async fn p2a_iii_stored_run_with_malformed_remote_id_is_denied_before_dispatch()
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn p2a_iii_revoke_sweep_skips_malformed_remote_id_without_dispatch() {
     let fx = TwoRuntimes::start().await;
@@ -1012,6 +1020,7 @@ async fn p2a_iii_revoke_sweep_skips_malformed_remote_id_without_dispatch() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn revoke_before_dispatch_sends_no_create() {
     let fx = TwoRuntimes::start().await;
@@ -1036,6 +1045,7 @@ async fn revoke_before_dispatch_sends_no_create() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn provider_rejects_a_changed_execution_revision_after_owner_precheck() {
     let fx = TwoRuntimes::start().await;
@@ -1060,6 +1070,7 @@ async fn provider_rejects_a_changed_execution_revision_after_owner_precheck() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn local_share_pause_waits_for_admitted_create_then_refuses_next_create() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
@@ -1116,6 +1127,7 @@ async fn local_share_pause_waits_for_admitted_create_then_refuses_next_create() 
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn revoke_after_dispatch_keeps_ownership_and_cancels() {
     let fx = TwoRuntimes::start().await;
@@ -1144,6 +1156,7 @@ async fn revoke_after_dispatch_keeps_ownership_and_cancels() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_mismatched_create_reply_keeps_the_run_and_cancels() {
     let fx = TwoRuntimes::start().await;
@@ -1167,6 +1180,7 @@ async fn a_mismatched_create_reply_keeps_the_run_and_cancels() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_ambiguous_create_reply_keeps_the_reservation() {
     let fx = TwoRuntimes::start().await;
@@ -1254,6 +1268,7 @@ impl TwoRuntimes {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_full_run_index_refuses_before_any_model_work_starts() {
     let fx = TwoRuntimes::start().await;
@@ -1269,6 +1284,7 @@ async fn a_full_run_index_refuses_before_any_model_work_starts() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn two_creates_at_the_last_slot_dispatch_exactly_one_run() {
     let fx = TwoRuntimes::start().await;
@@ -1296,6 +1312,7 @@ async fn two_creates_at_the_last_slot_dispatch_exactly_one_run() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_recorded_request_retries_through_a_full_index_without_a_new_slot() {
     let fx = TwoRuntimes::start().await;
@@ -1330,6 +1347,7 @@ mod consumer_path {
         RemoteRouteError, REMOTE_RUN_INDEX_MAX,
     };
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn remote_model_create_does_not_retry_ticket_entries_after_dispatch_error() {
         let fx = TwoRuntimes::start().await;
@@ -1517,6 +1535,7 @@ mod consumer_path {
             "runtime_binding": { "principal_id": SEED_PRINCIPAL, "request_id": request_id } })
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn route_run_operation_rewrites_protocol_offer_ids_only() {
         let fx = TwoRuntimes::start().await;
@@ -1548,6 +1567,7 @@ mod consumer_path {
         fx.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn existing_runs_settle_after_the_grant_is_denied_while_new_runs_are_refused() {
         let fx = TwoRuntimes::start().await;
@@ -1634,6 +1654,7 @@ mod consumer_path {
         fx.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_full_consumer_index_refuses_a_second_capsule_before_any_model_work() {
         let fx = TwoRuntimes::start().await;
@@ -1807,6 +1828,7 @@ mod denial_authority {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn another_principal_cannot_deny_or_cancel_the_owners_runs() {
         let fx = TwoRuntimes::start().await;
@@ -1861,6 +1883,7 @@ mod denial_authority {
         fx.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_saved_denial_cancels_the_open_run_even_when_delivery_fails() {
         let fx = TwoRuntimes::start().await;
@@ -1884,6 +1907,7 @@ mod denial_authority {
     /// which MUST NOT resolve, and a device principal has no stored record.
     /// The decision must use the verified root: save the denial there and
     /// cancel the open run.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_parent_signed_device_owner_records_its_denial_and_cancels_the_open_run() {
         let fx = TwoRuntimes::start().await;
@@ -1939,6 +1963,7 @@ mod denial_authority {
         fx.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn inbox_revoke_cancels_the_open_run_after_the_owner_saves_denial() {
         let fx = TwoRuntimes::start().await;
@@ -2003,6 +2028,7 @@ mod denial_authority {
         fx.shutdown().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn another_principal_cannot_revoke_the_owners_grant_from_inbox() {
         let fx = TwoRuntimes::start().await;
@@ -2055,6 +2081,7 @@ mod denial_authority {
 
 // The provider journal prunes a run after its retention; the owning Runtime's
 // record outlives it and answers the consumer's settlement read.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_pruned_run_settles_from_the_owners_record() {
     let fx = TwoRuntimes::start().await;
@@ -2120,6 +2147,7 @@ async fn a_pruned_run_settles_from_the_owners_record() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_completed_run_does_not_dispatch_again_after_the_journal_is_pruned() {
     let fx = TwoRuntimes::start().await;
@@ -2153,6 +2181,7 @@ async fn a_completed_run_does_not_dispatch_again_after_the_journal_is_pruned() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_recorded_request_rejects_a_conflicting_offer_on_retry() {
     let fx = TwoRuntimes::start().await;
@@ -2170,6 +2199,7 @@ async fn a_recorded_request_rejects_a_conflicting_offer_on_retry() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_provider_read_fault_stays_recoverable_instead_of_settling() {
     let fx = TwoRuntimes::start().await;
@@ -2194,6 +2224,7 @@ async fn a_provider_read_fault_stays_recoverable_instead_of_settling() {
     }
     fx.shutdown().await;
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn a_lost_create_reply_recovers_completed_output_from_the_journal() {
     let fx = TwoRuntimes::start().await;
@@ -2229,6 +2260,7 @@ async fn a_lost_create_reply_recovers_completed_output_from_the_journal() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_attached_events_cursor_settles_after_the_journal_is_pruned() {
     let fx = TwoRuntimes::start().await;
@@ -2256,6 +2288,7 @@ async fn an_attached_events_cursor_settles_after_the_journal_is_pruned() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_changed_input_is_rejected_before_and_after_journal_prune() {
     let fx = TwoRuntimes::start().await;
@@ -2295,6 +2328,7 @@ async fn a_changed_input_is_rejected_before_and_after_journal_prune() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_and_home_agent_keeps_separate_runs_for_the_same_request_id() {
     let fx = TwoRuntimes::start().await;
@@ -2339,6 +2373,7 @@ async fn assistant_and_home_agent_keeps_separate_runs_for_the_same_request_id() 
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_legacy_record_refuses_changed_input_replay_while_the_journal_exists() {
     let fx = TwoRuntimes::start().await;
@@ -2373,6 +2408,7 @@ async fn a_legacy_record_refuses_changed_input_replay_while_the_journal_exists()
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_legacy_record_refuses_changed_input_replay_after_the_journal_is_pruned() {
     let fx = TwoRuntimes::start().await;
@@ -2409,6 +2445,7 @@ async fn a_legacy_record_refuses_changed_input_replay_after_the_journal_is_prune
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn shared_hosted_offer_denies_fresh_creates_and_recovers_without_losing_old_runs() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
@@ -2532,6 +2569,7 @@ async fn shared_hosted_offer_denies_fresh_creates_and_recovers_without_losing_ol
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_active_grant_stays_active_while_another_home_holds_the_audit_lock() {
     let fx = TwoRuntimes::start().await;
@@ -2554,6 +2592,7 @@ async fn an_active_grant_stays_active_while_another_home_holds_the_audit_lock() 
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_active_grant_stays_active_while_another_home_holds_the_principal_root_lock() {
     let fx = TwoRuntimes::start().await;
@@ -2627,6 +2666,7 @@ fn assert_authority_timeout_refusal(response: &Value, request: &Value) {
     assert_eq!(response["result"]["refusal"], expected);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_same_home_authority_timeout_is_not_an_inactive_grant() {
     let fx = TwoRuntimes::start().await;
@@ -2663,6 +2703,7 @@ async fn a_same_home_authority_timeout_is_not_an_inactive_grant() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_same_home_authority_timeout_before_dispatch_releases_the_reservation() {
     let fx = TwoRuntimes::start().await;
@@ -2710,6 +2751,7 @@ async fn a_same_home_authority_timeout_before_dispatch_releases_the_reservation(
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_same_home_authority_timeout_after_dispatch_cancels_the_run() {
     let fx = TwoRuntimes::start().await;
@@ -2741,6 +2783,7 @@ async fn a_same_home_authority_timeout_after_dispatch_cancels_the_run() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_hosted_grant_serves_only_while_its_provider_is_an_admin() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
@@ -2832,6 +2875,7 @@ async fn a_hosted_grant_serves_only_while_its_provider_is_an_admin() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_admin_with_two_passkeys_serves_local_and_hosted_model_grants() {
     use crate::api::model_provider_config::{HostedAiProvider, HostedOfferSave};
@@ -2895,6 +2939,7 @@ async fn an_admin_with_two_passkeys_serves_local_and_hosted_model_grants() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn two_principals_holding_one_model_grant_are_refused_as_ambiguous() {
     let fx = TwoRuntimes::start().await;
@@ -2978,6 +3023,7 @@ async fn two_principals_holding_one_model_grant_are_refused_as_ambiguous() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn remote_model_expired_request_records_the_provider_refusal_phase() {
     let fx = TwoRuntimes::start().await;
@@ -3028,6 +3074,7 @@ async fn remote_model_expired_request_records_the_provider_refusal_phase() {
     fx.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn remote_model_refusal_proves_this_invocation_and_preserves_older_uncertainty() {
     let fx = TwoRuntimes::start().await;

@@ -3528,6 +3528,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn r4_transaction_effect_location_uses_resolved_root() {
         use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
@@ -3572,6 +3573,7 @@ mod approved_request_resume_tests {
     /// check only with its principal's stored root. With no stored record it
     /// is refused first: the reason names the root, not the internet
     /// permission, and nothing under the id-rule folder is read or written.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_browser_transaction_authority_with_no_stored_root_is_refused_first() {
         use crate::auth::r4_fixture::{HUMAN_ROOT, ID};
@@ -3944,6 +3946,7 @@ mod approved_request_resume_tests {
         (request, effect, approval, transaction_hash)
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exact_transaction_approval_creates_once_and_pending_resume_reuses_same_approval() {
         let root = tempfile::tempdir().unwrap();
@@ -4014,6 +4017,7 @@ mod approved_request_resume_tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exact_transaction_approval_adopts_prepared_effect_without_duplicate() {
         let root = tempfile::tempdir().unwrap();
@@ -4101,6 +4105,7 @@ mod approved_request_resume_tests {
         assert_eq!(audit_count_again, 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exact_transaction_approval_recreates_prepared_effect_after_authoritative_absence() {
         let root = tempfile::tempdir().unwrap();
@@ -4155,6 +4160,7 @@ mod approved_request_resume_tests {
         assert!(persisted.effects[0].requested_audit_completed);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exact_transaction_approval_rejects_expired_prepared_effect_before_rebind() {
         let root = tempfile::tempdir().unwrap();
@@ -4200,6 +4206,7 @@ mod approved_request_resume_tests {
         assert!(persisted.effects[0].approval_snapshot.is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exact_transaction_approval_resumes_completed_effect_without_duplicate() {
         let root = tempfile::tempdir().unwrap();
@@ -4265,6 +4272,7 @@ mod approved_request_resume_tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exact_transaction_approval_rejects_conflicting_wallet_approval_and_bad_lists() {
         let root = tempfile::tempdir().unwrap();
@@ -4345,6 +4353,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn exact_transaction_approval_rejects_substituted_bindings_and_wrong_approval_id() {
         let root = tempfile::tempdir().unwrap();
@@ -4473,6 +4482,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn approved_request_resume_completes_exact_effect_after_session_restart() {
         let root = tempfile::tempdir().unwrap();
@@ -4550,6 +4560,7 @@ mod approved_request_resume_tests {
         .is_ok());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn approved_request_resume_rejects_substituted_principal() {
         let root = tempfile::tempdir().unwrap();
@@ -4644,6 +4655,7 @@ mod r8c_child_rows {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
     async fn r8c_child_transaction_effects_load_and_save_under_the_parent_root() {
@@ -4667,6 +4679,7 @@ mod r8c_child_rows {
         assert_eq!(outcome, Ok(()));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn r8c_control_transaction_effects_load_and_save_under_the_stored_persons_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -4709,6 +4722,7 @@ mod r8d_passkey_rows {
     use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, PERSON, ROOT};
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_transaction_effects_load_and_save_under_the_passkey_persons_root() {
         let person = passkey_person(WALLET_CAPSULE_ID);

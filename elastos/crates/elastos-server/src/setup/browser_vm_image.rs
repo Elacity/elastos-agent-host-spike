@@ -2449,6 +2449,7 @@ JSON
         assert_eq!(fs::read(dest.join("good")).unwrap(), b"preserved");
     }
 
+    #[cfg(unix)]
     #[test]
     fn browser_image_ended_install_lock_is_free_while_a_command_spawned_under_it_runs() {
         use crate::host_lock::test_support::{lock_is_free, SpawnedWhileOpen};

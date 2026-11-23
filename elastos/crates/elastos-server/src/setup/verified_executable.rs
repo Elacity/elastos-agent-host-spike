@@ -88,6 +88,8 @@ impl VerifiedExecutable {
                 "private executable copy differs from signed release digest"
             );
             Ok(Self {
+                // The child can keep running after this private path is unlinked.
+                // Future macOS helpers must not resolve resources from current_exe().
                 _private_dir: private_dir,
                 exec_path,
                 checksum: checksum.map(str::to_owned),
@@ -101,10 +103,12 @@ impl VerifiedExecutable {
         &self.exec_path
     }
 
-    /// The signed release digest the held bytes matched; `None` for an
-    /// unchecked dev-mode start.
-    pub fn checksum(&self) -> Option<&str> {
-        self.checksum.as_deref()
+    /// Native providers require a signed digest even in a source Home's
+    /// `dev_mode`; refuse an unchecked executable before process creation.
+    pub fn signed_checksum(&self) -> Result<&str> {
+        self.checksum.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("no signed release digest (dev_mode start is unchecked)")
+        })
     }
 
     /// Attach after the caller has set all arguments and environment changes.

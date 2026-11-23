@@ -59,7 +59,7 @@ async fn r8c_child_documents_summary_and_create_under_the_parent_root() {
     documents_steps(&mut steps, child.dir.path(), &child.ctx).await;
     steps.finish();
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn r8c_control_documents_summary_and_create_under_the_stored_persons_root() {
     let control = control(DOCUMENTS_CAPSULE_ID);

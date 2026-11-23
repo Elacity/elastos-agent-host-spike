@@ -54,6 +54,7 @@ async fn contact_steps(
     steps.step("contact store write (set_discovery_enabled)", direct);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
 async fn r8c_child_contacts_load_and_add_under_the_parent_root() {
@@ -106,6 +107,7 @@ async fn r8c_child_contacts_load_and_add_under_the_parent_root() {
     steps.finish();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn r8c_control_contacts_load_and_add_under_the_stored_persons_root() {
     let control = control(PEOPLE_CAPSULE_ID);

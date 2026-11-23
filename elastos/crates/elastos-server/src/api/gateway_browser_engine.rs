@@ -869,7 +869,7 @@ mod tests {
             }
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn image_acquisition_matches_the_complete_source_home_generator() {
         use std::io::Write;

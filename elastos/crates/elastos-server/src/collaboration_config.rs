@@ -440,6 +440,7 @@ pub(crate) fn create_owner_only_file(path: &Path, bytes: &[u8], label: &str) -> 
     result
 }
 
+#[cfg(unix)]
 fn validate_owner_only_parent(path: &Path) -> anyhow::Result<PathBuf> {
     let parent = path
         .parent()
@@ -453,6 +454,16 @@ fn validate_owner_only_parent(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(parent.to_path_buf())
 }
 
+#[cfg(windows)]
+fn validate_owner_only_parent(_path: &Path) -> anyhow::Result<PathBuf> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration owner-only parent admission is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn validate_private_output_target(path: &Path) -> anyhow::Result<()> {
     let parent = validate_owner_only_parent(path)?;
     #[cfg(unix)]
@@ -469,6 +480,16 @@ fn validate_private_output_target(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_private_output_target(_path: &Path) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration private output admission is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn validate_owner_only_regular_file(
     path: &Path,
     metadata: &fs::Metadata,
@@ -485,6 +506,19 @@ fn validate_owner_only_regular_file(
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn validate_owner_only_regular_file(
+    _path: &Path,
+    _metadata: &fs::Metadata,
+    _label: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "collaboration owner-only file admission is unsupported on Windows",
+    )
+    .into())
 }
 
 fn random_hex_128() -> anyhow::Result<String> {
@@ -645,7 +679,7 @@ mod tests {
             .to_string();
         assert!(error.contains("not a trusted signer"), "{error}");
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn deterministic_golden_generation_and_pure_round_trip() {
         let (key, peer, expected) = valid_config();
@@ -716,7 +750,7 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_dir(isolated.path()).unwrap().count(), 0);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn key_and_config_files_are_owner_only_no_follow_and_create_new() {
         let temp = tempfile::tempdir().unwrap();
@@ -831,7 +865,7 @@ mod tests {
             assert!(read_collaboration_startup_config_candidate(&oversized).is_err());
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_bootstrap_export_is_canonical_private_redacted_and_pre_effect() {
         let temp = tempfile::tempdir().unwrap();
@@ -980,7 +1014,7 @@ mod tests {
         assert!(!error.contains("attach-secret-must-not-render"));
         assert!(!error.contains(stopped_runtime_root.path().to_string_lossy().as_ref()));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_bootstrap_export_uses_only_the_explicit_gateway_coordinate() {
         let temp = tempfile::tempdir().unwrap();

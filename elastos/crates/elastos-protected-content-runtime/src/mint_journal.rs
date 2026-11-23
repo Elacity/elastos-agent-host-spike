@@ -22,7 +22,9 @@ use elastos_protected_content_contracts::{
 use elastos_protected_content_provider_contracts::{
     CencFmp4MediaIdentityV1, MAX_PROVIDER_OPAQUE_HANDLE_BYTES_V1,
 };
+#[cfg(unix)]
 use nix::fcntl::{Flock, FlockArg};
+#[cfg(unix)]
 use nix::unistd::geteuid;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -54,6 +56,9 @@ const MAX_AVAILABILITY_TEXT_BYTES: usize = 256;
 pub enum RuntimeMintJournalError {
     #[error("runtime mint journal is unavailable")]
     Unavailable,
+    #[cfg(windows)]
+    #[error("runtime mint journal is unsupported on Windows")]
+    UnsupportedOnWindows,
     #[error("runtime mint journal record is corrupt")]
     Corrupt,
     #[error("runtime mint journal record conflicts with existing authority")]
@@ -2200,6 +2205,9 @@ impl RuntimeMintJournal {
     }
 
     fn ensure_root_dir(&self) -> Result<(), RuntimeMintJournalError> {
+        #[cfg(windows)]
+        require_supported_store()?;
+
         if let Some(parent) = self.root_dir.parent() {
             create_owner_only_directory(parent)?;
             validate_owner_only_directory(parent)?;
@@ -3240,10 +3248,12 @@ fn read_nested(payload: &[u8], off: &mut usize) -> Result<Vec<u8>, RuntimeMintJo
     Ok(slice.to_vec())
 }
 
+#[cfg(unix)]
 struct ExclusiveFileLock {
     _lock: Flock<File>,
 }
 
+#[cfg(unix)]
 impl ExclusiveFileLock {
     fn acquire(path: &Path) -> Result<Self, RuntimeMintJournalError> {
         if let Some(parent) = path.parent() {
@@ -3267,6 +3277,17 @@ impl ExclusiveFileLock {
     }
 }
 
+#[cfg(windows)]
+struct ExclusiveFileLock;
+
+#[cfg(windows)]
+impl ExclusiveFileLock {
+    fn acquire(_path: &Path) -> Result<Self, RuntimeMintJournalError> {
+        Err(RuntimeMintJournalError::UnsupportedOnWindows)
+    }
+}
+
+#[cfg(unix)]
 fn create_owner_only_directory(path: &Path) -> Result<(), RuntimeMintJournalError> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -3281,6 +3302,17 @@ fn create_owner_only_directory(path: &Path) -> Result<(), RuntimeMintJournalErro
     }
 }
 
+#[cfg(windows)]
+fn create_owner_only_directory(_path: &Path) -> Result<(), RuntimeMintJournalError> {
+    Err(RuntimeMintJournalError::UnsupportedOnWindows)
+}
+
+#[cfg(windows)]
+fn require_supported_store() -> Result<(), RuntimeMintJournalError> {
+    Err(RuntimeMintJournalError::UnsupportedOnWindows)
+}
+
+#[cfg(unix)]
 fn validate_owner_only_directory(path: &Path) -> Result<(), RuntimeMintJournalError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| RuntimeMintJournalError::Unavailable)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -3296,7 +3328,15 @@ fn validate_owner_only_directory(path: &Path) -> Result<(), RuntimeMintJournalEr
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_owner_only_directory(_path: &Path) -> Result<(), RuntimeMintJournalError> {
+    Err(RuntimeMintJournalError::UnsupportedOnWindows)
+}
+
 fn open_owner_only_file_for_read(path: &Path) -> Result<File, RuntimeMintJournalError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -3310,6 +3350,9 @@ fn open_owner_only_file_for_read(path: &Path) -> Result<File, RuntimeMintJournal
 }
 
 fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, RuntimeMintJournalError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -3324,12 +3367,31 @@ fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, RuntimeMintJ
 }
 
 fn sync_directory(path: &Path) -> Result<(), RuntimeMintJournalError> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let dir = File::open(path).map_err(|_| RuntimeMintJournalError::Unavailable)?;
     dir.sync_all()
         .map_err(|_| RuntimeMintJournalError::Unavailable)
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_secure_store_before_creating_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("journal");
+    assert_eq!(
+        create_owner_only_directory(&path),
+        Err(RuntimeMintJournalError::UnsupportedOnWindows)
+    );
+    assert!(matches!(
+        ExclusiveFileLock::acquire(&path),
+        Err(RuntimeMintJournalError::UnsupportedOnWindows)
+    ));
+    assert!(!path.exists());
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::path::PathBuf;

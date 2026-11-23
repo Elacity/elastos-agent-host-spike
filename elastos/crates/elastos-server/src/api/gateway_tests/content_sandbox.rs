@@ -302,7 +302,7 @@ async fn content_sandbox_site_files_and_admitted_bundle_preserve_provenance() {
     assert_eq!(health.status(), StatusCode::OK);
     assert!(health.headers().get("content-security-policy").is_none());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn content_sandbox_opaque_cookie_requests_require_explicit_launch_authority() {
     let dir = tempfile::tempdir().unwrap();

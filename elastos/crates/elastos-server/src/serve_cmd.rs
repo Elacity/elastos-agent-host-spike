@@ -1,12 +1,18 @@
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(unix)]
 use elastos_compute::ComputeProvider;
+#[cfg(unix)]
 use elastos_crosvm::{CrosvmConfig, CrosvmProvider};
+#[cfg(unix)]
 use elastos_runtime::capsule::check_entrypoint_file;
 use elastos_runtime::{bootstrap, session};
 use sha2::Digest as _;
 
+#[cfg(unix)]
 async fn load_microvm_capsule(
     provider: &dyn ComputeProvider,
     capsule_dir: &Path,
@@ -91,6 +97,12 @@ pub async fn run_serve(
                 anyhow::bail!("Web projections and native helpers use their existing Runtime-owned host paths");
             }
 
+            #[cfg(windows)]
+            if manifest.capsule_type == elastos_common::CapsuleType::MicroVM {
+                return Err(elastos_server::supervisor::MicroVmUnavailable.into());
+            }
+
+            #[cfg(unix)]
             if manifest.capsule_type == elastos_common::CapsuleType::MicroVM {
                 tracing::info!("Launching MicroVM capsule: {}", manifest.name);
 
@@ -549,6 +561,7 @@ pub(crate) fn shell_capsule_command(
 
 /// The first VM capsule gets the same Capsule session the supervisor gives every
 /// capsule other than the shell. Its token is readable inside the guest.
+#[cfg(any(unix, test))]
 async fn create_initial_vm_session(
     registry: &session::SessionRegistry,
     vm_id: &str,
@@ -575,8 +588,10 @@ mod tests {
     use elastos_server::api::middleware::{auth_middleware, shell_only_middleware, ApiState};
     use tower::ServiceExt;
 
+    #[cfg(unix)]
     struct LoadMustNotRun;
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl ComputeProvider for LoadMustNotRun {
         fn supports(&self, _capsule_type: &elastos_common::CapsuleType) -> bool {

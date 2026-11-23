@@ -10,7 +10,9 @@ pub(crate) fn fixture_executable(path: &Path) -> elastos_runtime::provider::Chec
     use sha2::Digest as _;
     let bytes = std::fs::read(path).unwrap_or_default();
     let pin = format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)));
-    elastos_runtime::provider::CheckedExecutable::pinned(path, &pin).unwrap()
+    elastos_runtime::provider::CheckedExecutable::pinned(path, &pin)
+        .unwrap()
+        .with_home_data_dir(path.parent().expect("fixture executable has a parent"))
 }
 
 /// Writes a fixture that a test later executes, from a child process, then

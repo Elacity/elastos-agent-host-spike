@@ -2,6 +2,8 @@
 //!
 //! `off` runs in a build without the feature and `on` in a build with it.
 
+#![cfg(unix)]
+
 use super::*;
 
 const ENABLE: &str = "/api/apps/system/agents/enable";
@@ -10,6 +12,10 @@ const CREATE: &str = "/api/apps/system/agents/create";
 const RETIRE: &str = "/api/apps/system/agents/retire";
 const RENAME: &str = "/api/apps/system/agents/rename";
 const ACTIVATE: &str = "/api/apps/system/agents/activate";
+#[cfg(not(feature = "prototype-agents"))]
+const LAUNCH: &str = "/api/apps/system/agents/launch";
+#[cfg(not(feature = "prototype-agents"))]
+const STOP: &str = "/api/apps/system/agents/stop";
 const LIST: &str = "/api/apps/system/agents";
 
 /// Sends one request and returns its status and body text.
@@ -59,6 +65,7 @@ fn protected_owner(data_dir: &std::path::Path) -> TestPasskeyAuthority {
 mod off {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn feature_off_has_no_agent_surface() {
         let dir = tempfile::tempdir().unwrap();
@@ -89,6 +96,11 @@ mod off {
                 ACTIVATE,
                 Some(json!({ "agent_id": &agent_id, "active": true })),
             ),
+            (
+                LAUNCH,
+                Some(json!({ "agent_id": &agent_id, "step_up_token": "step-up" })),
+            ),
+            (STOP, Some(json!({ "agent_id": &agent_id }))),
         ];
         for (path, body) in routes {
             assert_eq!(
@@ -153,6 +165,7 @@ mod on {
     }
 
     /// U3 acceptance: Home asks, Runtime owns the authority check and id.
+    #[cfg(unix)]
     #[tokio::test]
     async fn u3_owner_create_replaces_admission_mint() {
         let installed = installed_home();
@@ -244,6 +257,7 @@ mod on {
     }
 
     /// A stored Agent can hold a valid token, but cannot ask Runtime to create.
+    #[cfg(unix)]
     #[tokio::test]
     async fn u3_agent_principal_cannot_call_create() {
         let installed = installed_home();
@@ -309,6 +323,7 @@ mod on {
         assert_eq!(std::fs::read(agent_file(data)).unwrap(), before);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn enable_needs_the_admin_passkey_owner() {
         let dir = tempfile::tempdir().unwrap();
@@ -358,6 +373,7 @@ mod on {
         assert!(agent_file(dir.path()).exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_revoked_admin_is_refused_on_every_route() {
         let dir = tempfile::tempdir().unwrap();
@@ -408,6 +424,7 @@ mod on {
         assert_eq!(std::fs::read(agent_file(dir.path())).unwrap(), written);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_routes_refuse_until_the_owner_turns_agents_on() {
         let dir = tempfile::tempdir().unwrap();
@@ -427,6 +444,7 @@ mod on {
         assert!(!agent_file(dir.path()).exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_owner_creates_lists_and_retires_an_agent() {
         let installed = installed_home();
@@ -520,6 +538,7 @@ mod on {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_child_runtime_refuses_create_and_the_home_itself_passes() {
         let installed = installed_home();
@@ -567,6 +586,7 @@ mod on {
         assert_eq!(std::fs::read(agent_file(&home.data)).unwrap(), written);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_refused_file_keeps_its_bytes_and_the_owner_still_signs_in() {
         let dir = tempfile::tempdir().unwrap();
@@ -634,6 +654,7 @@ mod on {
             .to_string()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_agent_off_until_owner_activation() {
         let installed = installed_home();
@@ -669,6 +690,7 @@ mod on {
         assert_eq!(launch(&agent_id).unwrap().unwrap().actor(), agent_id);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn another_admin_cannot_turn_on_someone_elses_agent() {
         let installed = installed_home();
@@ -713,6 +735,7 @@ mod on {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn owner_turns_agent_off_again() {
         let installed = installed_home();
@@ -780,6 +803,7 @@ mod on {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn agent_cannot_activate_itself() {
         let installed = installed_home();

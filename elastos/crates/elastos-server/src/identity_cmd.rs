@@ -166,6 +166,7 @@ mod tests {
     use super::{load_identity_profile, prompt_for_nickname, set_local_nickname};
     use std::io::IsTerminal;
 
+    #[cfg(unix)]
     #[test]
     fn identity_profile_reports_three_nickname_path_states() {
         use std::os::unix::fs::PermissionsExt;
@@ -217,6 +218,7 @@ mod tests {
         assert_eq!(present.nickname.as_deref(), Some("owner"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn set_nickname_refuses_an_unreadable_store_and_keeps_the_file() {
         use std::os::unix::fs::PermissionsExt;

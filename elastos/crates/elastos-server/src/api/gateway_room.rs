@@ -550,19 +550,15 @@ pub(super) async fn chat_room_summary(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
-    let chat_launch =
-        require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID);
-    if state.collaboration_chat_product_port.is_none() {
-        // The legacy summary lists guest requests and sessions: Chat or Home only.
-        if let Err(err) = chat_launch {
-            if require_home_token(&state.data_dir, &headers).is_err() {
-                return room_service_error_response(err);
-            }
-        }
-        return room_service_summary(State(state)).await;
+    if require_home_launch_token_context(&state.data_dir, &headers, CHAT_ROOM_CAPSULE_ID).is_err() {
+        return (
+            StatusCode::FORBIDDEN,
+            "chat_room_summary_requires_chat_launch",
+        )
+            .into_response();
     }
-    if let Err(err) = chat_launch {
-        return room_service_error_response(err);
+    if state.collaboration_chat_product_port.is_none() {
+        return room_service_summary(State(state)).await;
     }
     Json(serde_json::json!({
         "room_slug": crate::room_service::room_slug(),
@@ -2786,6 +2782,7 @@ mod stored_root_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_stored_room_principal_keeps_todays_profile_decision() {
         let temp = tempfile::tempdir().unwrap();

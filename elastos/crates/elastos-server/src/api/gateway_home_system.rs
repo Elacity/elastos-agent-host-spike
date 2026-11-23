@@ -1418,6 +1418,7 @@ fn unconfigured_people_discovery_summary() -> HomePeopleDiscoverySummary {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod discovery_summary_tests {
     use super::*;
@@ -6404,6 +6405,11 @@ pub(super) fn require_home_active_shell_wallet_authority(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
 ) -> anyhow::Result<RuntimeWalletAuthority> {
+    // This projection authorizes only Home launch and content open. The
+    // front door sends those exact routes to their own launch gate.
+    if gateway_home_token::verified_home_cli_launch_grant(data_dir, headers) {
+        anyhow::bail!("home_cli_launch_grant_scope_mismatch");
+    }
     if let Ok(authority) = require_home_runtime_wallet_authority(data_dir, headers) {
         return Ok(authority);
     }
@@ -9617,6 +9623,7 @@ mod home_events_pacing_tests {
 /// R2 rows: the Home state surfaces read the root the context resolved, and a
 /// principal with no stored record is refused instead of served from the
 /// principal-id rule.
+#[cfg(unix)]
 #[cfg(test)]
 mod stored_root_tests {
     use super::*;
@@ -10632,6 +10639,7 @@ mod r8c_child_rows {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
     fn r8c_child_profile_update_passes_the_passkey_gate_and_writes_under_the_parent_root() {
@@ -10643,6 +10651,7 @@ mod r8c_child_rows {
         assert_eq!(roots, 1, "only the parent root holds files");
     }
 
+    #[cfg(unix)]
     #[test]
     fn r8c_control_profile_update_writes_under_the_stored_persons_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -10696,6 +10705,7 @@ mod r8d_passkey_rows {
     use super::*;
     use crate::collaboration_profile_authority as authority;
 
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_profile_update_is_refused_for_the_passkey_person() {
         // F1, whether a second Runtime accepts Profile setup, is the change expected to flip this row.
@@ -10746,6 +10756,7 @@ mod r8d_passkey_rows {
     /// Entry: `home_save_background_image` with the name
     /// `background-image.png`. The child holds no protection for this
     /// person's root, so the save is refused and creates nothing.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_background_image_save_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
@@ -10767,6 +10778,7 @@ mod r8d_passkey_rows {
     /// Entry: `home_save_background_overlay` with opacity 0.4, which is not
     /// the default. The child holds no protection for this person's root, so
     /// the save is refused and creates nothing.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_background_overlay_save_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
@@ -10782,6 +10794,7 @@ mod r8d_passkey_rows {
 
     /// A later image upload is refused the same way as the first, and the
     /// child creates nothing.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_background_image_replace_for_the_passkey_person() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
@@ -10802,6 +10815,7 @@ mod r8d_passkey_rows {
     /// that already holds an image saved before the held-root rule. The save
     /// is refused before any image is removed, so the seeded image stays in
     /// place byte for byte.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_refused_background_image_save_keeps_the_seeded_image() {
         let person = passkey_person(SYSTEM_CAPSULE_ID);
@@ -10832,6 +10846,7 @@ mod r8d_passkey_rows {
     /// Entry: `home_save_appearance_preferences` with one field set. The
     /// child holds no protection for this person's root, so the save is
     /// refused and creates nothing.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_appearance_preferences_save_for_the_passkey_person() {
         let person = passkey_person(HOME_CAPSULE_ID);
@@ -10850,6 +10865,7 @@ mod r8d_passkey_rows {
     /// Entry: `home_save_browser_state` with an empty update. The child
     /// holds no protection for this person's root, so the save is refused
     /// and creates nothing.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_browser_state_save_for_the_passkey_person() {
         let person = passkey_person(HOME_CAPSULE_ID);
@@ -10869,6 +10885,7 @@ mod r8d_passkey_rows {
     /// reaches the held-root write. The child holds no protection for this
     /// person's root, so the route answers 403 with the bare refusal text and
     /// creates no state file or Home folder.
+    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn r8d_child_active_shell_save_is_refused_for_the_passkey_person() {
         let person = passkey_person(HOME_GUI_SHELL_ID);
@@ -10917,6 +10934,7 @@ mod r8d_passkey_rows {
     /// refused and creates nothing.
     /// `home_state_write_error` puts the file's path on top of the refusal,
     /// so the row reads through that context.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_services_selection_save_for_the_passkey_person() {
         let person = passkey_person(SERVICES_CAPSULE_ID);
@@ -10938,6 +10956,7 @@ mod r8d_passkey_rows {
     /// its save, and `home_services_record_access_decision` returns "service
     /// request not found" before its save. The child holds no protection for
     /// this person's root, so the save is refused and creates nothing.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_services_requests_save_for_the_passkey_person() {
         let person = passkey_person(SERVICES_CAPSULE_ID);

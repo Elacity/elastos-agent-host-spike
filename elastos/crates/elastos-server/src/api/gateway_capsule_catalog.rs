@@ -927,6 +927,131 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn browser_catalogue_reuses_only_the_unchanged_verified_release() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut fixture = crate::installed_release::tests::Fixture::new();
+        let data_root = fixture.data.clone();
+        let data = data_root.as_path();
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        activate_test_capsule(data, "browser");
+        copy_test_tree(
+            &repo.join("capsules/browser/capsule.json"),
+            &data.join("capsules/browser/capsule.json"),
+        );
+        copy_test_tree(
+            &repo.join("capsules/browser/browser/index.html"),
+            &data.join("capsules/browser/browser/index.html"),
+        );
+        let supervisor = data.join("bin/browser-vz-engine-supervisor");
+        fs::create_dir_all(supervisor.parent().unwrap()).unwrap();
+        let script = b"#!/bin/sh\nprintf '%s\\n' '{\"schema\":\"elastos.browser.vm-host-capabilities/v1\",\"available\":true}'\n";
+        fs::write(&supervisor, script).unwrap();
+        fs::set_permissions(&supervisor, fs::Permissions::from_mode(0o755)).unwrap();
+        let components_path = data.join("components.json");
+        let mut components: serde_json::Value =
+            serde_json::from_slice(&fs::read(&components_path).unwrap()).unwrap();
+        components["external"]["browser-vz-engine-supervisor"] = serde_json::json!({
+            "install_path": "bin/browser-vz-engine-supervisor",
+            "platforms": {(crate::setup::detect_platform()): {
+                "install_path": "bin/browser-vz-engine-supervisor",
+                "checksum": format!("sha256:{}", hex::encode(Sha256::digest(script)))
+            }}
+        });
+        fs::write(&components_path, serde_json::to_vec(&components).unwrap()).unwrap();
+        fixture.bind_components();
+
+        let catalogue = || {
+            read_model::capsule_catalog_summary_for_with_host_check(
+                data,
+                "linux-arm64",
+                |data, platform| {
+                    crate::setup::linux_host_setup_message_with_kvm(data, platform, true)
+                },
+            )
+            .capsules
+            .into_iter()
+            .find(|capsule| capsule.name == "browser")
+            .expect("Browser catalogue row")
+            .description
+        };
+        let reads = || crate::setup::catalogue_release_verification_count(data);
+        let ready = catalogue();
+        assert_ne!(ready, crate::setup::BROWSER_SETUP_MESSAGE);
+        assert_eq!(reads(), 1);
+        assert_eq!(catalogue(), ready);
+        assert_eq!(
+            reads(),
+            1,
+            "unchanged catalogue reread reverified the envelope"
+        );
+
+        let runtime = data.join("runtime");
+        let original_runtime = fs::read(&runtime).unwrap();
+        fs::write(&runtime, b"changed runtime").unwrap();
+        assert_eq!(catalogue(), crate::setup::BROWSER_SETUP_MESSAGE);
+        assert_eq!(reads(), 2, "changed runtime reused the release result");
+        assert_eq!(catalogue(), crate::setup::BROWSER_SETUP_MESSAGE);
+        assert_eq!(reads(), 3, "a failed release check entered the cache");
+        assert!(crate::setup::verify_installed_component_start(
+            data,
+            "browser-vz-engine-supervisor",
+            &supervisor
+        )
+        .is_err());
+        fs::write(&runtime, original_runtime).unwrap();
+        assert_eq!(catalogue(), ready);
+        assert_eq!(reads(), 4);
+        crate::setup::verify_installed_component_start(
+            data,
+            "browser-vz-engine-supervisor",
+            &supervisor,
+        )
+        .unwrap();
+
+        let original_components = fs::read(&components_path).unwrap();
+        fs::write(
+            &components_path,
+            [original_components.as_slice(), b" "].concat(),
+        )
+        .unwrap();
+        assert_eq!(catalogue(), crate::setup::BROWSER_SETUP_MESSAGE);
+        assert_eq!(reads(), 5, "changed components reused the release result");
+        fs::write(&components_path, original_components).unwrap();
+        assert_eq!(catalogue(), ready);
+        assert_eq!(reads(), 6);
+
+        let sources_path = data.join("sources.json");
+        let original_sources = fs::read(&sources_path).unwrap();
+        let mut sources: serde_json::Value = serde_json::from_slice(&original_sources).unwrap();
+        sources["sources"][0]["publisher_dids"] = serde_json::json!(["did:example:changed"]);
+        fs::write(&sources_path, serde_json::to_vec(&sources).unwrap()).unwrap();
+        assert_eq!(catalogue(), crate::setup::BROWSER_SETUP_MESSAGE);
+        assert_eq!(reads(), 7, "changed sources reused the release result");
+        fs::write(&sources_path, original_sources).unwrap();
+        assert_eq!(catalogue(), ready);
+        assert_eq!(reads(), 8);
+
+        fs::write(&supervisor, b"#!/bin/sh\nexit 1\n").unwrap();
+        assert_eq!(catalogue(), crate::setup::BROWSER_SETUP_MESSAGE);
+        assert_eq!(reads(), 8, "the executable check still runs on cache hits");
+
+        fs::write(&supervisor, script).unwrap();
+        let source_target = data.join("sources-target.json");
+        fs::rename(&sources_path, &source_target).unwrap();
+        std::os::unix::fs::symlink(&source_target, &sources_path).unwrap();
+        assert_eq!(catalogue(), ready);
+        assert_eq!(reads(), 9);
+        assert_eq!(catalogue(), ready);
+        assert_eq!(reads(), 10, "symlinked source used a stale cache key");
+        fs::write(&source_target, serde_json::to_vec(&sources).unwrap()).unwrap();
+        assert_eq!(catalogue(), crate::setup::BROWSER_SETUP_MESSAGE);
+        assert_eq!(reads(), 11);
+    }
+
     #[cfg(unix)]
     #[test]
     fn model_catalog_device_fit_is_a_signed_row_fact_with_safe_refusals() {
@@ -1290,7 +1415,15 @@ mod tests {
             .filter(|capsule| capsule.role == CapsuleRole::Shell && capsule.launchable)
             .map(|capsule| capsule.name)
             .collect::<Vec<_>>();
-        assert_eq!(developer_shells, vec!["home-cli", "home-gui"]);
+        // An absent auth store means guests are disabled, so developer mode
+        // offers home-cli. When that read is refused, the policy keeps the
+        // terminal hidden.
+        let expected_developer_shells = if cfg!(unix) {
+            vec!["home-cli".to_string(), "home-gui".to_string()]
+        } else {
+            vec!["home-gui".to_string()]
+        };
+        assert_eq!(developer_shells, expected_developer_shells);
         let marketplace = catalog
             .capsules
             .iter()
@@ -1936,6 +2069,7 @@ mod tests {
         assert_eq!(provider.summary.required_action.as_deref(), Some("read"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn generic_invoke_executes_runtime_binding_and_never_dispatches_provider_path() {
         let data_dir = tempfile::tempdir().unwrap();

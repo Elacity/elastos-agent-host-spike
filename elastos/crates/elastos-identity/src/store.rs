@@ -255,6 +255,7 @@ pub fn save_nickname(data_dir: &Path, nickname: &str) -> anyhow::Result<()> {
 }
 
 /// Persist the local DID nickname using an explicit device key.
+#[cfg(unix)]
 pub fn save_nickname_with_device_key(
     data_dir: &Path,
     device_key: &[u8; 32],
@@ -284,10 +285,21 @@ pub fn save_nickname_with_device_key(
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.write_all(&encrypted)?;
     }
-    #[cfg(not(unix))]
-    std::fs::write(&path, encrypted)?;
 
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn save_nickname_with_device_key(
+    _data_dir: &Path,
+    _device_key: &[u8; 32],
+    _nickname: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "unsupported on this platform",
+    )
+    .into())
 }
 
 /// Derive an Ed25519 SigningKey + `did:key` from a 32-byte secret.
@@ -743,6 +755,7 @@ mod tests {
         format!("did:key:z{}", bs58::encode(encoded).into_string())
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_store_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -779,6 +792,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn competing_credential_saves_preserve_the_winner_and_reload_the_loser() {
         let dir = tempfile::tempdir().unwrap();
@@ -812,6 +826,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn guest_history_allows_counter_advance_and_unrelated_addition() {
         let dir = tempfile::tempdir().unwrap();
@@ -833,6 +848,7 @@ mod tests {
         assert_eq!(std::fs::read(&pending.path).unwrap(), bytes);
     }
 
+    #[cfg(unix)]
     #[test]
     fn guest_history_rejects_removed_or_conflicting_keys_without_writes() {
         for change in [
@@ -875,6 +891,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn stale_credential_save_cannot_lower_counter_or_resurrect_revocation() {
         let dir = tempfile::tempdir().unwrap();
@@ -897,6 +914,7 @@ mod tests {
         assert!(stale.get_credentials().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn existing_did_reads_current_identity_without_creating_missing_state() {
         let dir = tempfile::tempdir().unwrap();
@@ -921,6 +939,7 @@ mod tests {
         assert_eq!(std::fs::read(device_key_path(dir.path())).unwrap(), key);
     }
 
+    #[cfg(unix)]
     #[test]
     fn existing_did_revalidates_key_and_credentials_on_every_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -964,6 +983,7 @@ mod tests {
         assert_eq!(std::fs::read(&alias).unwrap(), bytes);
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_device_key_with_credentials_fails_without_replacement() {
         let dir = tempfile::tempdir().unwrap();
@@ -977,6 +997,7 @@ mod tests {
         assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
     }
 
+    #[cfg(unix)]
     #[test]
     fn credential_insert_failure_reloads_old_or_new_state() {
         for fault in [
@@ -1015,6 +1036,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn competing_fresh_identity_managers_share_one_device_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -1042,6 +1064,7 @@ mod tests {
         assert_eq!(std::fs::read(device_key_path(dir.path())).unwrap(), bytes);
     }
 
+    #[cfg(unix)]
     #[test]
     fn corrupt_or_removed_key_clears_cached_credentials_without_writing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1065,6 +1088,7 @@ mod tests {
         assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_counter_save_reloads_durable_counter_before_retry() {
         for fault in [
@@ -1099,6 +1123,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn duplicate_credential_save_preserves_bytes_and_reloads_cache() {
         let dir = tempfile::tempdir().unwrap();
@@ -1121,6 +1146,7 @@ mod tests {
         assert!(id1.starts_with("identity_"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_encrypted_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -1152,6 +1178,7 @@ mod tests {
         assert_eq!(store2.get_credentials()[0].sign_count, 5);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_device_key_persistence() {
         let dir = tempfile::tempdir().unwrap();
@@ -1161,6 +1188,7 @@ mod tests {
         assert_ne!(*key1, [0u8; 32], "device key should not be all zeros");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_remove_credential() {
         let dir = tempfile::tempdir().unwrap();
@@ -1180,6 +1208,7 @@ mod tests {
         assert!(!store.remove_credential("remove-test-cred"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_load_or_create_did_deterministic() {
         let dir = tempfile::tempdir().unwrap();
@@ -1193,6 +1222,7 @@ mod tests {
         assert_eq!(did1, did2, "same device_key must produce same DID");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_nickname_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -1263,6 +1293,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_did_format() {
         let dir = tempfile::tempdir().unwrap();

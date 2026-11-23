@@ -5836,6 +5836,7 @@ fn unlock_state_file(lock: FileLock) -> anyhow::Result<()> {
     lock.release().context("failed to unlock group chat state")
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6477,6 +6478,7 @@ mod tests {
         assert!(paths.objects_path.is_file());
     }
 
+    #[cfg(unix)]
     #[test]
     fn refused_room_change_frees_its_lock_while_a_command_spawned_during_it_runs() {
         use crate::host_lock::test_support::{lock_is_free, SpawnedWhileOpen};

@@ -620,6 +620,7 @@ mod tests {
     use elastos_runtime::primitives::metrics::MetricsManager;
     use elastos_runtime::session::SessionType;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn s5_p7_storage_closes_both_launched_agent_roots() {
         if crate::agents::require_build().is_err() {
