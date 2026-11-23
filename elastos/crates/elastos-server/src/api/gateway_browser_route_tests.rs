@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::*;
 
 #[tokio::test]
@@ -8778,23 +8780,50 @@ async fn test_browser_account_access_creates_review_only_inbox_handoff_without_d
         .unwrap()
         .to_string();
 
-    let summary = app
-        .clone()
-        .oneshot(
-            test_browser_request("localhost:61180", "null")
-                .uri("/api/apps/wallet/wallet/summary")
-                .header("x-elastos-home-token", wallet_token)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(summary.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(summary.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let review = &summary["wallet_approvals"]["approval_requests"][0]["review"];
+    // Review rejects a grant more than 12 hours ahead of its clock reading.
+    // The request grants exactly 12 hours, so a backward wall-clock step can
+    // briefly leave its review null even though the request was created.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let summary = loop {
+        let response = app
+            .clone()
+            .oneshot(
+                test_browser_request("localhost:61180", "null")
+                    .uri("/api/apps/wallet/wallet/summary")
+                    .header("x-elastos-home-token", wallet_token.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let summary: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let review_ready = summary["wallet_approvals"]["approval_requests"]
+            .as_array()
+            .is_some_and(|requests| {
+                requests.iter().any(|request| {
+                    request["request_id"] == request_id
+                        && request["review"]["kind"] == "account_access"
+                })
+            });
+        if review_ready {
+            break summary;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "account-access review for {request_id} did not become available within 120 seconds; last summary: {summary}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    let review = &summary["wallet_approvals"]["approval_requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["request_id"] == request_id)
+        .unwrap()["review"];
     assert_eq!(review["kind"], "account_access");
     assert_eq!(review["origin"], "https://dapp.example");
     assert_eq!(

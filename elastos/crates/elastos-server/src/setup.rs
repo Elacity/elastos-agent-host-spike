@@ -10,16 +10,42 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
+#[cfg(unix)]
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 mod browser_config;
+#[cfg(unix)]
+mod catalogue_release_cache;
+#[cfg(windows)]
+#[path = "setup/catalogue_release_cache_windows.rs"]
+mod catalogue_release_cache;
 pub use browser_config::browser_available;
 pub(crate) use browser_config::linux_host_setup_message;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use browser_config::linux_host_setup_message_with_kvm;
 pub(crate) use browser_config::repair_browser_host_components_for_open;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use catalogue_release_cache::verification_count as catalogue_release_verification_count;
+#[cfg(unix)]
 mod browser_linux;
+#[cfg(windows)]
+#[path = "setup/browser_linux_windows.rs"]
+mod browser_linux;
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use browser_linux::SETUP_MESSAGE as BROWSER_SETUP_MESSAGE;
+#[cfg(unix)]
 mod browser_vm_image;
+#[cfg(windows)]
+#[path = "setup/browser_vm_image_windows.rs"]
+mod browser_vm_image;
+#[cfg(unix)]
+pub mod verified_executable;
+#[cfg(windows)]
+#[path = "setup/verified_executable_windows.rs"]
+pub mod verified_executable;
 pub(crate) use browser_vm_image::start_background_verification as start_browser_image_verification;
 pub(crate) use browser_vm_image::verified_seed_identity as verified_browser_vm_seed_identity;
 #[cfg(unix)]
@@ -32,6 +58,15 @@ pub(crate) const CACHED_ARTIFACT_SHA_FILE: &str = ".elastos-artifact-sha256";
 /// sha256 of a single-file archive component's executable, bound at extraction.
 const CACHED_EXECUTABLE_SHA_FILE: &str = ".elastos-executable-sha256";
 const PROVIDER_ICON_SIZES: [u16; 4] = [32, 64, 128, 256];
+
+#[cfg(windows)]
+fn windows_unsupported(operation: &'static str) -> anyhow::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{operation} is unsupported on Windows"),
+    )
+    .into()
+}
 
 // ── Manifest types ──────────────────────────────────────────────────
 
@@ -562,7 +597,7 @@ async fn run_with_data_dir(
             };
             let dest = data_dir.join(install_path);
             let copied = atomic_copy_file(&source, &dest).and_then(|()| {
-                set_local_copy_permissions(&source, &dest);
+                set_local_copy_permissions(&source, &dest)?;
                 write_cache_metadata(&manifest, Some(platform_info), &platform, name, &dest)
             });
             if let Err(error) = copied {
@@ -954,6 +989,34 @@ fn missing_manifest_message() -> String {
         .to_string()
 }
 
+/// The owner's explicit opt-in: `dev_mode = true` (a TOML bool) in a regular,
+/// non-symlink `{data_dir}/config.toml`. Read-only; anything else is no opt-in.
+fn source_home_dev_mode(data_dir: &Path) -> bool {
+    const MAX_CONFIG: u64 = 64 * 1024;
+    #[cfg(windows)]
+    {
+        // No O_NOFOLLOW read on Windows yet: no opt-in, so a source Home never starts unchecked.
+        let _ = (data_dir, MAX_CONFIG);
+        false
+    }
+    #[cfg(unix)]
+    let read = || -> anyhow::Result<bool> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(data_dir.join("config.toml"))?;
+        anyhow::ensure!(file.metadata()?.is_file() && file.metadata()?.len() <= MAX_CONFIG);
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut std::io::Read::take(file, MAX_CONFIG + 1), &mut text)?;
+        anyhow::ensure!(text.len() as u64 <= MAX_CONFIG);
+        let config: toml::Table = toml::from_str(&text)?;
+        Ok(config.get("dev_mode").and_then(toml::Value::as_bool) == Some(true))
+    };
+    #[cfg(unix)]
+    read().unwrap_or(false)
+}
+
 fn missing_trusted_source_error() -> anyhow::Error {
     anyhow::anyhow!(
         "No trusted source configured.\n\
@@ -984,18 +1047,22 @@ pub(crate) fn installed_release_source(
         .ok_or_else(missing_trusted_source_error)
 }
 
-fn set_local_copy_permissions(source: &Path, dest: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+fn set_local_copy_permissions(source: &Path, dest: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
 
-        let mode = match fs::metadata(source) {
-            Ok(metadata) if metadata.permissions().mode() & 0o111 != 0 => 0o755,
-            Ok(_) => 0o644,
-            Err(_) => 0o644,
-        };
-        let _ = fs::set_permissions(dest, fs::Permissions::from_mode(mode));
-    }
+    let mode = match fs::metadata(source) {
+        Ok(metadata) if metadata.permissions().mode() & 0o111 != 0 => 0o755,
+        Ok(_) => 0o644,
+        Err(_) => 0o644,
+    };
+    let _ = fs::set_permissions(dest, fs::Permissions::from_mode(mode));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_local_copy_permissions(_source: &Path, _dest: &Path) -> anyhow::Result<()> {
+    Err(windows_unsupported("local copy permission admission"))
 }
 
 // ── Platform detection ──────────────────────────────────────────────
@@ -1033,6 +1100,7 @@ fn installed_component_entry(
     data_dir: &Path,
     name: &str,
     path: &Path,
+    signed_bytes: Option<&[u8]>,
 ) -> anyhow::Result<InstalledComponentEntry> {
     let Some(install_root) = installed_component_root_for_path(data_dir, name, path) else {
         anyhow::bail!(
@@ -1043,15 +1111,18 @@ fn installed_component_entry(
     };
 
     let manifest_path = install_root.join("components.json");
-    let manifest_bytes = fs::read(&manifest_path).map_err(|e| {
-        anyhow::anyhow!(
-            "cannot verify installed component '{}' at {}: failed to read {}: {}",
-            name,
-            path.display(),
-            manifest_path.display(),
-            e
-        )
-    })?;
+    let manifest_bytes = match signed_bytes {
+        Some(bytes) => bytes.to_vec(),
+        None => fs::read(&manifest_path).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot verify installed component '{}' at {}: failed to read {}: {}",
+                name,
+                path.display(),
+                manifest_path.display(),
+                e
+            )
+        })?,
+    };
     let mut manifest: ComponentsManifest =
         serde_json::from_slice(&manifest_bytes).map_err(|e| {
             anyhow::anyhow!(
@@ -1111,7 +1182,7 @@ pub fn verify_installed_component_binary(
     name: &str,
     path: &Path,
 ) -> anyhow::Result<String> {
-    let entry = installed_component_entry(data_dir, name, path)?;
+    let entry = installed_component_entry(data_dir, name, path, None)?;
     verify_installed_component_bytes(name, path, &entry)?;
     Ok(entry.checksum)
 }
@@ -1143,9 +1214,92 @@ fn verify_installed_component_bytes(
 /// bytes, a binary extracted from a signed archive by the receipts bound when
 /// setup verified and extracted that archive into the component's capsule metadata.
 pub fn verify_installed_component(data_dir: &Path, name: &str, path: &Path) -> anyhow::Result<()> {
-    let entry = installed_component_entry(data_dir, name, path)?;
+    let entry = installed_component_entry(data_dir, name, path, None)?;
+    verify_installed_component_with_entry(name, path, &entry)
+}
+
+/// Admit executable bytes from the current publisher-signed installed release.
+/// Call immediately before an installed component starts. A source Home has no
+/// release; it starts the file unchecked only when its owner set `dev_mode = true`.
+pub fn verify_installed_component_start(
+    data_dir: &Path,
+    name: &str,
+    path: &Path,
+) -> anyhow::Result<verified_executable::VerifiedExecutable> {
+    let Some(source) = installed_release_source(data_dir)? else {
+        if !source_home_dev_mode(data_dir) {
+            return Err(missing_trusted_source_error());
+        }
+        tracing::warn!("dev_mode = true: starting source Home component '{name}' unchecked");
+        return verified_executable::VerifiedExecutable::unchecked(path);
+    };
+    let runtime = fs::canonicalize(&source.install_path)?;
+    let (_, manifest) =
+        crate::installed_release::read_signed_release(data_dir, &runtime, &source, false, true)?;
+    prepare_installed_component(data_dir, name, path, &manifest)
+}
+
+/// Catalogue presentation reuses only a verified release envelope. The
+/// executable is still held and checked against its signed digest on each read.
+pub(crate) fn verify_installed_component_catalogue(
+    data_dir: &Path,
+    name: &str,
+    path: &Path,
+) -> anyhow::Result<verified_executable::VerifiedExecutable> {
+    let Some(source) = installed_release_source(data_dir)? else {
+        return verify_installed_component_start(data_dir, name, path);
+    };
+    let runtime = fs::canonicalize(&source.install_path)?;
+    let manifest = catalogue_release_cache::verified_components(data_dir, &runtime, &source)?;
+    prepare_installed_component(data_dir, name, path, &manifest)
+}
+
+fn prepare_installed_component(
+    data_dir: &Path,
+    name: &str,
+    path: &Path,
+    manifest: &[u8],
+) -> anyhow::Result<verified_executable::VerifiedExecutable> {
+    let entry = installed_component_entry(data_dir, name, path, Some(manifest))
+        .context("Installed component manifest verification failed")?;
+    let checksum = if entry.platform_info.extract_path.is_some() {
+        // The archive receipt is separate from the executable's bytes. The
+        // held descriptor below makes the only executable byte check at start.
+        if name == "home-cli" && path == entry.install_root.join("capsules/home-cli/bin/home-cli") {
+            verify_home_cli_receipts(&entry)
+                .context("Installed component binary verification failed")?;
+        } else {
+            anyhow::bail!("Installed component binary verification failed: installed archive executable has no signed digest");
+        }
+        signed_executable_checksum(&entry.platform_info)
+            .ok_or_else(|| anyhow::anyhow!("installed archive executable has no signed digest"))?
+    } else {
+        &entry.checksum
+    };
+    verified_executable::VerifiedExecutable::prepare(path, checksum)
+        .context("Installed component binary verification failed")
+}
+
+fn verify_installed_component_with_entry(
+    name: &str,
+    path: &Path,
+    entry: &InstalledComponentEntry,
+) -> anyhow::Result<()> {
     if entry.platform_info.extract_path.is_none() {
-        return verify_installed_component_bytes(name, path, &entry);
+        return verify_installed_component_bytes(name, path, entry);
+    }
+    if name == "home-cli" && path == entry.install_root.join("capsules/home-cli/bin/home-cli") {
+        let file = fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            file.file_type().is_file(),
+            "Home CLI executable is not a regular file"
+        );
+        let executable_checksum = verify_home_cli_receipts(entry)?;
+        anyhow::ensure!(
+            bare_sha256(&compute_sha256_checksum(path)?) == bare_sha256(executable_checksum),
+            "Home CLI executable differs from its signed release digest"
+        );
+        return Ok(());
     }
     let metadata = entry.component.capsule_metadata.as_ref().ok_or_else(|| {
         anyhow::anyhow!("archive component '{name}' has no capsule metadata receipt")
@@ -1174,8 +1328,19 @@ pub fn verify_installed_component(data_dir: &Path, name: &str, path: &Path) -> a
         use std::os::unix::fs::PermissionsExt;
         file.permissions().mode() & 0o111 != 0
     };
-    #[cfg(not(unix))]
-    let executable = true;
+    #[cfg(windows)]
+    let executable = {
+        let named_executable = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+        let mut signature = [0u8; 2];
+        named_executable
+            && std::fs::File::open(path)
+                .and_then(|mut file| file.read_exact(&mut signature))
+                .is_ok()
+            && signature == *b"MZ"
+    };
     anyhow::ensure!(
         file.file_type().is_file() && executable,
         "archive component '{name}' at {} is not a regular executable file",
@@ -1187,6 +1352,27 @@ pub fn verify_installed_component(data_dir: &Path, name: &str, path: &Path) -> a
         path.display()
     );
     Ok(())
+}
+
+fn signed_executable_checksum(info: &PlatformInfo) -> Option<&str> {
+    info.extra.get("executable_checksum")?.as_str()
+}
+
+fn verify_home_cli_receipts(entry: &InstalledComponentEntry) -> anyhow::Result<&str> {
+    let bundle = entry.install_root.join("capsules/home-cli");
+    let executable_checksum = signed_executable_checksum(&entry.platform_info)
+        .ok_or_else(|| anyhow::anyhow!("Home CLI signed executable digest is missing"))?;
+    // Older installs predate the archive receipt. Its presence is checked,
+    // while the signed executable digest admits the held bytes either way.
+    match read_artifact_sha256_receipt(&bundle) {
+        Ok(receipt) => anyhow::ensure!(
+            receipt == bare_sha256(&entry.checksum),
+            "Home CLI archive receipt differs from its signed release digest"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(executable_checksum)
 }
 
 /// Where a single-file archive component's executable lies inside its capsule
@@ -1242,6 +1428,9 @@ fn write_archive_executable_receipt(
 }
 
 fn installed_component_root_for_path(data_dir: &Path, name: &str, path: &Path) -> Option<PathBuf> {
+    if name == "home-cli" && path == data_dir.join("capsules/home-cli/bin/home-cli") {
+        return Some(data_dir.to_path_buf());
+    }
     // Browser host setup executes this exact release-owned script through Python.
     if name == "browser-vm-linux-network"
         && path == data_dir.join("scripts/browser-vm-linux-network.py")
@@ -1387,7 +1576,8 @@ pub(crate) fn admit_installed_components(
     };
     let binary = fs::canonicalize(&source.install_path)?;
     let (release, bytes) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false, false)
+            .context(crate::installed_release::REPAIR)?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
         &source.publisher_dids,
@@ -1413,8 +1603,10 @@ pub(crate) fn installed_release_signers(
         return Ok(Default::default());
     };
     let binary = fs::canonicalize(&source.install_path)?;
+    // The confined DID start reads the signers during a claimed update restart
+    // too (#1750), through #1816's host-start reader.
     let (release, components) =
-        crate::installed_release::read_signed_release(data_dir, &binary, &source, false)?;
+        crate::installed_release::read_signed_release(data_dir, &binary, &source, false, true)?;
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
         &source.publisher_dids,
@@ -2103,6 +2295,17 @@ fn write_cache_metadata(
     if !dest.is_dir() {
         return Ok(());
     }
+    if name == "home-cli" {
+        let executable = dest.join("bin/home-cli");
+        anyhow::ensure!(
+            executable.is_file(),
+            "Home CLI executable missing from signed archive"
+        );
+        fs::write(
+            dest.join(CACHED_EXECUTABLE_SHA_FILE),
+            format!("{}\n", bare_sha256(&compute_sha256_checksum(&executable)?)),
+        )?;
+    }
 
     #[cfg(unix)]
     if name == "llama-server"
@@ -2743,12 +2946,14 @@ fn folder_name(dir: &Path) -> Option<std::ffi::OsString> {
 /// canonical path and the walk CID its install recorded. The Home reads this
 /// file, not a file beside the folder, so the folder's parent directory alone
 /// cannot name an install.
+#[cfg(any(unix, test))]
 fn install_cid_ledger(data_dir: &Path) -> PathBuf {
     data_dir.join("capsules").join("install-cids.json")
 }
 
 /// The canonical path of `dir`, whether or not it exists yet: a path whose
 /// last name does not exist is keyed under its canonical parent.
+#[cfg(any(unix, test))]
 fn canonical_install_folder(dir: &Path) -> Option<PathBuf> {
     fs::canonicalize(dir).ok().or_else(|| {
         let parent = fs::canonicalize(dir.parent()?).ok()?;
@@ -2756,6 +2961,7 @@ fn canonical_install_folder(dir: &Path) -> Option<PathBuf> {
     })
 }
 
+#[cfg(any(unix, test))]
 fn read_install_cid_ledger(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
     fs::read_to_string(install_cid_ledger(data_dir))
         .ok()
@@ -2766,6 +2972,7 @@ fn read_install_cid_ledger(data_dir: &Path) -> std::collections::BTreeMap<String
 /// The CID an install of `dir` recorded in the Home at `data_dir`, matched on
 /// that Home's canonical path for the folder. An absent or unreadable ledger,
 /// and one with no row for the folder, give `None`.
+#[cfg(unix)]
 pub(crate) fn recorded_install_cid(data_dir: &Path, dir: &Path) -> Option<String> {
     let key = canonical_install_folder(dir)?;
     read_install_cid_ledger(data_dir)
@@ -2773,9 +2980,16 @@ pub(crate) fn recorded_install_cid(data_dir: &Path, dir: &Path) -> Option<String
         .cloned()
 }
 
+#[cfg(windows)]
+pub(crate) fn recorded_install_cid(_data_dir: &Path, _dir: &Path) -> Option<String> {
+    // An unprotected ledger cannot establish an installed capsule identity.
+    None
+}
+
 /// Points the Home's ledger row for `dir` at `cid`, or removes the row when
 /// `cid` is `None`. The file is written from a new, randomly named file in one
 /// rename, so a link at the path is replaced, not followed.
+#[cfg(unix)]
 fn write_install_cid_ledger(data_dir: &Path, dir: &Path, cid: Option<&str>) -> anyhow::Result<()> {
     let path = install_cid_ledger(data_dir);
     let parent = path.parent().context("install CID ledger has no parent")?;
@@ -2808,6 +3022,15 @@ fn write_install_cid_ledger(data_dir: &Path, dir: &Path, cid: Option<&str>) -> a
     scratch.persist(&path).map_err(|err| err.error)?;
     sync_path(parent)?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn write_install_cid_ledger(
+    _data_dir: &Path,
+    _dir: &Path,
+    _cid: Option<&str>,
+) -> anyhow::Result<()> {
+    Err(windows_unsupported("installed CID ledger locking"))
 }
 
 /// Records the walk CID of `walked`, its extracted bytes and receipts, as the
@@ -2859,6 +3082,7 @@ fn record_installed_component_folders(
 /// Writes the Home's ledger row and the file beside the folder, the Home's
 /// record being the one a start reads. A folder the walk refuses keeps no
 /// record.
+#[cfg(unix)]
 pub(crate) fn write_install_cid(data_dir: &Path, walked: &Path, dir: &Path) -> anyhow::Result<()> {
     use crate::bundle_admission::BUNDLE_WALK_BUDGET;
     let record = install_cid_record(dir)?;
@@ -2885,6 +3109,15 @@ pub(crate) fn write_install_cid(data_dir: &Path, walked: &Path, dir: &Path) -> a
     scratch.persist(&record).map_err(|err| err.error)?;
     sync_path(parent)?;
     write_install_cid_ledger(data_dir, dir, Some(&bundle.cid().to_string()))
+}
+
+#[cfg(windows)]
+pub(crate) fn write_install_cid(
+    _data_dir: &Path,
+    _walked: &Path,
+    _dir: &Path,
+) -> anyhow::Result<()> {
+    Err(windows_unsupported("installed capsule identity ledger"))
 }
 
 fn write_platform_cache_metadata(platform_info: &PlatformInfo, dest: &Path) -> anyhow::Result<()> {
@@ -3266,6 +3499,7 @@ fn report_release_network(outcome: crate::collaboration_release_network::Release
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn install_signed_model_catalog(
     data_dir: &Path,
     manifest: &ComponentsManifest,
@@ -3299,6 +3533,21 @@ pub(crate) fn install_signed_model_catalog(
     Ok(())
 }
 
+#[cfg(windows)]
+pub(crate) fn install_signed_model_catalog(
+    _data_dir: &Path,
+    manifest: &ComponentsManifest,
+    _manifest_path: &Path,
+) -> anyhow::Result<()> {
+    if manifest.model_catalog.is_none() {
+        Ok(())
+    } else {
+        Err(windows_unsupported(
+            "signed model catalogue private installation",
+        ))
+    }
+}
+
 const MODEL_CATALOG_UNAVAILABLE: &str = "The signed model catalogue for this release could not be fetched from the trusted source over Carrier. Nothing was changed. Connect to the internet and try again.";
 
 /// Installed custody keeps the pinned signed snapshot; offer discovery checks expiry
@@ -3315,12 +3564,19 @@ pub(crate) fn verify_pinned_model_catalog(
     Ok(())
 }
 
+#[cfg(unix)]
 fn installed_model_catalog_matches(path: &Path, trust: &ModelCatalogConfig) -> bool {
     fs::symlink_metadata(path)
         .is_ok_and(|meta| meta.is_file() && meta.len() <= MAX_MODEL_CATALOG_BYTES as u64)
         && fs::read(path).is_ok_and(|bytes| verify_catalog_head(&trust.head_cid, &bytes).is_ok())
 }
 
+#[cfg(windows)]
+fn installed_model_catalog_matches(_path: &Path, _trust: &ModelCatalogConfig) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn write_model_catalog_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     atomic_write_file(path, bytes)?;
     #[cfg(unix)]
@@ -3329,6 +3585,13 @@ fn write_model_catalog_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn write_model_catalog_file(_path: &Path, _bytes: &[u8]) -> anyhow::Result<()> {
+    Err(windows_unsupported(
+        "model catalogue owner-only publication",
+    ))
 }
 
 async fn fetch_pinned_model_catalog(
@@ -3418,8 +3681,13 @@ pub(crate) async fn repair_installed_support(
     catalogue: CatalogueRepair<'_>,
     carrier_context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
-    let (release, components) =
-        crate::installed_release::read_signed_release(data_dir, binary, source, repair_version)?;
+    let (release, components) = crate::installed_release::read_signed_release(
+        data_dir,
+        binary,
+        source,
+        repair_version,
+        false,
+    )?;
     // Repair restores rows of the installed release, checked against its own records.
     let (manifest, admission) = crate::capsule_record::admit_release(
         &release,
@@ -4085,7 +4353,7 @@ async fn refresh_support(
                     continue;
                 }
                 atomic_copy_file(&source, &dest)?;
-                set_local_copy_permissions(&source, &dest);
+                set_local_copy_permissions(&source, &dest)?;
             } else {
                 let row = records.next.row(name, info)?;
                 download_component(data_dir, &row, &dest, carrier_context).await?;
@@ -4115,6 +4383,7 @@ async fn refresh_support(
 
 /// Prepare installed support in an isolated tree. The release transaction owns
 /// publication and rollback; setup owns archive validation and cache metadata.
+#[cfg(unix)]
 pub(crate) async fn stage_update_support(
     data_dir: &Path,
     old_bytes: &[u8],
@@ -4311,6 +4580,19 @@ pub(crate) async fn stage_update_support(
             .any(|root| root != path && path.starts_with(root))
     });
     Ok((stage, complete.into_iter().collect()))
+}
+
+#[cfg(windows)]
+pub(crate) async fn stage_update_support(
+    _data_dir: &Path,
+    _old_bytes: &[u8],
+    _new_bytes: &[u8],
+    _platform: &str,
+    _records: &crate::capsule_record::UpdateRecords,
+    _fetch: &crate::update::FetchFn,
+    _owner: &mut dyn crate::update::RestartOwner,
+) -> anyhow::Result<(tempfile::TempDir, Vec<(PathBuf, PathBuf)>)> {
+    Err(windows_unsupported("signed update support staging"))
 }
 
 /// The bytes of one admitted release row through an update's fetcher, checked
@@ -4511,6 +4793,7 @@ fn require_component_not_model(name: &str, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub(crate) async fn install_first_party_component_via_carrier(
     data_dir: &Path,
     row: &crate::capsule_record::AdmittedRow,
@@ -4556,6 +4839,16 @@ pub(crate) async fn install_first_party_component_via_carrier(
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) async fn install_first_party_component_via_carrier(
+    _data_dir: &Path,
+    _row: &crate::capsule_record::AdmittedRow,
+    _dest: &Path,
+    _context: FirstPartyCarrierContext,
+) -> anyhow::Result<()> {
+    Err(windows_unsupported("component installation custody"))
 }
 
 async fn download_component(
@@ -4831,6 +5124,7 @@ fn ensure_bundle_executable_link(
 }
 
 /// A scratch name beside `dest`, so the final rename stays on one filesystem.
+#[cfg(unix)]
 fn sibling_scratch(dest: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     let parent = dest
         .parent()
@@ -4851,6 +5145,7 @@ fn sync_path(path: &Path) -> std::io::Result<()> {
 }
 
 /// Flushes a staged tree, files before their directories, before it is published.
+#[cfg(unix)]
 fn sync_tree(path: &Path) -> std::io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_dir() {
@@ -4865,6 +5160,7 @@ fn sync_tree(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn atomic_write_file(dest: &Path, data: &[u8]) -> anyhow::Result<()> {
     let (parent, tmp) = sibling_scratch(dest)?;
     {
@@ -4877,6 +5173,14 @@ fn atomic_write_file(dest: &Path, data: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn atomic_write_file(_dest: &Path, _data: &[u8]) -> anyhow::Result<()> {
+    Err(windows_unsupported(
+        "setup file publication without owner-only staging",
+    ))
+}
+
+#[cfg(unix)]
 fn atomic_copy_file(src: &Path, dest: &Path) -> anyhow::Result<()> {
     let (parent, tmp) = sibling_scratch(dest)?;
     fs::copy(src, &tmp)?;
@@ -4886,10 +5190,18 @@ fn atomic_copy_file(src: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn atomic_copy_file(_src: &Path, _dest: &Path) -> anyhow::Result<()> {
+    Err(windows_unsupported(
+        "setup file copy without owner-only staging",
+    ))
+}
+
 const REPLACEMENT_SUFFIX: &str = ".elastos-replace";
 
 /// Beside an installed tree: its staged copy before the exchange, the previous tree
 /// after it. One fixed name per target, so any later writer finds what a crash left.
+#[cfg(unix)]
 fn replacement_scratch(parent: &Path, name: &std::ffi::OsStr) -> PathBuf {
     let mut scratch = std::ffi::OsString::from(".");
     scratch.push(name);
@@ -4900,6 +5212,7 @@ fn replacement_scratch(parent: &Path, name: &std::ffi::OsStr) -> PathBuf {
 /// Removes a leftover replacement only when it is a real directory owned by `owner`.
 /// Anything else under that name is left in place and reported; returns whether the
 /// name is free.
+#[cfg(unix)]
 fn remove_replacement_leftover(path: &Path, owner: u32) -> anyhow::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     match fs::symlink_metadata(path) {
@@ -4921,6 +5234,7 @@ fn remove_replacement_leftover(path: &Path, owner: u32) -> anyhow::Result<bool> 
 
 /// Publishes a complete copy of `src` at `dest`. The previous tree stays in place
 /// until one atomic exchange, so an interruption leaves either tree, never neither.
+#[cfg(unix)]
 fn atomic_copy_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
     let (Some(parent), Some(name)) = (dest.parent(), dest.file_name()) else {
         anyhow::bail!("Destination has no parent: {}", dest.display());
@@ -4943,6 +5257,11 @@ fn atomic_copy_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
     // Before the exchange the scratch holds the staged copy, after it the previous tree.
     let removed = remove_path(&scratch);
     swapped.and(removed)
+}
+
+#[cfg(windows)]
+fn atomic_copy_dir(_src: &Path, _dest: &Path) -> anyhow::Result<()> {
+    Err(windows_unsupported("setup directory replacement ownership"))
 }
 
 /// Every installed path this manifest names on `platform`.
@@ -4985,6 +5304,7 @@ fn refuse_reserved_install_targets(
 /// manifest names. Only owned real directories under the data root are visited
 /// or removed, and never a path the manifest names or one that holds such a path.
 /// The caller holds the installation writer.
+#[cfg(unix)]
 fn remove_replacement_leftovers(
     data_dir: &Path,
     manifest: &ComponentsManifest,
@@ -5025,6 +5345,16 @@ fn remove_replacement_leftovers(
     Ok(())
 }
 
+#[cfg(windows)]
+fn remove_replacement_leftovers(
+    _data_dir: &Path,
+    _manifest: &ComponentsManifest,
+    _platform: &str,
+) -> anyhow::Result<()> {
+    Err(windows_unsupported("setup replacement cleanup ownership"))
+}
+
+#[cfg(unix)]
 fn remove_path(path: &Path) -> anyhow::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)?,
@@ -5037,6 +5367,7 @@ fn remove_path(path: &Path) -> anyhow::Result<()> {
 
 /// Moves `staged` to `dest` in one step: a rename when `dest` is absent, else an
 /// exchange that leaves the previous entry at `staged`.
+#[cfg(unix)]
 fn replace_directory(staged: &Path, dest: &Path) -> anyhow::Result<()> {
     if fs::symlink_metadata(dest).is_err() {
         fs::rename(staged, dest)?;
@@ -5080,6 +5411,7 @@ fn replace_directory(staged: &Path, dest: &Path) -> anyhow::Result<()> {
     anyhow::bail!("atomic replacement is unsupported on this host")
 }
 
+#[cfg(unix)]
 fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -5132,6 +5464,7 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -8572,7 +8905,7 @@ pub(crate) mod tests {
         fs::write(&dest, b"binary").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
 
-        set_local_copy_permissions(&source, &dest);
+        set_local_copy_permissions(&source, &dest).unwrap();
 
         let mode = fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o755);

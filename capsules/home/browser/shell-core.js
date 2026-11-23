@@ -85,7 +85,11 @@ export async function fetchJson(url, init) {
   const requiresHomeAuthority = url === "/api/apps/home/launch"
     || url === "/api/apps/home/active-shell"
     || url === "/api/apps/home/shared-content/get"
-    || url === "/api/apps/home/shared-content/check";
+    || url === "/api/apps/home/shared-content/check"
+    || url === "/api/home/cli-mint/waiting"
+    || url === "/api/home/cli-mint/begin"
+    || url === "/api/home/cli-mint/approve"
+    || url === "/api/home/cli-mint/cancel";
   const authorityHeaders = requiresHomeAuthority && homeAuthorityToken
     ? { "x-elastos-home-token": homeAuthorityToken }
     : {};

@@ -955,16 +955,28 @@ async fn provision_custody_node_with_installed_provider(
     inactive_root: &Path,
     issuer: RuntimeOperationIssuerKeyV1,
 ) -> anyhow::Result<ProvisionedCustodyProviderPublicKeys> {
+    #[cfg(windows)]
+    crate::protected_content_runtime::require_isolated_provider("custody")?;
+
+    anyhow::ensure!(
+        data_dir.join("bin/custody-provider").is_file(),
+        "verified custody provider binary is unavailable"
+    );
     let Some(binary) = crate::binaries::resolve_verified_native_provider_binary_with_data_dir(
         data_dir,
         "custody-provider",
     )
-    .map_err(|_| anyhow::anyhow!("verified custody provider binary is unavailable"))?
+    .map_err(|_| anyhow::anyhow!("Installed component binary verification failed"))?
     else {
         anyhow::bail!("verified custody provider binary is unavailable");
     };
+    // The resolver can select ELASTOS_CAPSULE_BIN_DIR. Admit that exact path
+    // against the signed release, which refuses an unrelated override root.
+    let prepared =
+        crate::setup::verify_installed_component_start(data_dir, "custody-provider", &binary)?;
     let issuer_hex = format!("0x{}", hex::encode(issuer.as_bytes()));
-    let mut child = tokio::process::Command::new(binary)
+    let mut command = tokio::process::Command::new(prepared.exec_path());
+    command
         .arg("provision")
         .arg("--base-path")
         .arg(inactive_root)
@@ -973,7 +985,9 @@ async fn provision_custody_node_with_installed_provider(
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    prepared.attach_tokio(&mut command, false)?;
+    let mut child = command
         .spawn()
         .map_err(|_| anyhow::anyhow!("verified custody provider binary is unavailable"))?;
     let output_result = tokio::time::timeout(CUSTODY_PROVIDER_PROVISION_TIMEOUT, async {
@@ -1089,7 +1103,7 @@ mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn create_policy_authority_key_creates_owner_only_key_and_receipt() {
         let dir = tempfile::tempdir().unwrap();
@@ -1194,7 +1208,75 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        sign_test_install(data_dir);
         binary
+    }
+
+    #[cfg(unix)]
+    fn sign_test_install(data_dir: &Path) {
+        use elastos_common::localhost::{
+            publisher_release_head_path, publisher_release_manifest_path,
+        };
+        let cid = |bytes: &[u8]| {
+            cid::Cid::new_v1(
+                0x55,
+                cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap(),
+            )
+            .to_string()
+        };
+        let descriptor = |bytes: &[u8]| {
+            serde_json::json!({
+                "cid":cid(bytes), "sha256":hex::encode(Sha256::digest(bytes)), "size":bytes.len()
+            })
+        };
+        let key = SigningKey::from_bytes(&[0x71; 32]);
+        let publisher = crate::crypto::encode_signing_key_did(&key);
+        let signed = |payload: serde_json::Value, domain: &str| {
+            let (signature, signer_did) = crate::crypto::domain_separated_sign(
+                &key,
+                domain,
+                &serde_json::to_vec(&payload).unwrap(),
+            );
+            serde_json::to_vec(&serde_json::json!({
+                "payload":payload, "signature":signature, "signer_did":signer_did
+            }))
+            .unwrap()
+        };
+        let runtime = data_dir.join("runtime");
+        let runtime_bytes = b"fixture runtime";
+        std::fs::write(&runtime, runtime_bytes).unwrap();
+        let components = std::fs::read(data_dir.join("components.json")).unwrap();
+        let release = signed(
+            serde_json::json!({
+                "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
+                "platforms":{(crate::update::detect_release_platform()):{
+                    "binary":descriptor(runtime_bytes), "components":descriptor(&components)
+                }}
+            }),
+            "elastos.release.v1",
+        );
+        let head = signed(
+            serde_json::json!({
+                "schema":"elastos.release.head/v1", "version":"0.7.0", "channel":"stable",
+                "latest_release_cid":cid(&release), "release_sha256":hex::encode(Sha256::digest(&release))
+            }),
+            "elastos.release.head.v1",
+        );
+        let head_path = publisher_release_head_path(data_dir);
+        std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
+        std::fs::write(head_path, &head).unwrap();
+        std::fs::write(publisher_release_manifest_path(data_dir), &release).unwrap();
+        std::fs::write(
+            data_dir.join("sources.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema":"elastos.trusted-sources/v1", "default_source":"fixture", "sources":[{
+                    "name":"fixture", "publisher_dids":[publisher], "channel":"stable",
+                    "installed_version":"0.7.0", "install_path":runtime, "head_cid":cid(&head)
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     #[cfg(unix)]
@@ -1497,11 +1579,48 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             unverified_error.to_string(),
-            "verified custody provider binary is unavailable"
+            "Installed component binary verification failed"
         );
         assert!(!unverified_error
             .to_string()
             .contains(&data_dir.display().to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn custody_start_refuses_override_binary_with_own_manifest() {
+        let dir = safe_ancestor_tempdir();
+        let data_dir = dir.path().join("data");
+        owner_only_dir(&data_dir);
+        install_verified_custody_provider(&data_dir, b"#!/bin/sh\nexit 0\n");
+
+        let override_root = dir.path().join("override");
+        let override_bin = override_root.join("bin/custody-provider");
+        std::fs::create_dir_all(override_bin.parent().unwrap()).unwrap();
+        let replacement = b"#!/bin/sh\nexit 91\n";
+        crate::test_support::write_from_child(&override_bin, replacement, 0o700);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(data_dir.join("components.json")).unwrap())
+                .unwrap();
+        manifest["external"]["custody-provider"]["platforms"][current_platform()]["checksum"] = serde_json::json!(
+            format!("sha256:{}", hex::encode(Sha256::digest(replacement)))
+        );
+        std::fs::write(
+            override_root.join("components.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = crate::setup::verify_installed_component_start(
+            &data_dir,
+            "custody-provider",
+            &override_bin,
+        )
+        .expect_err("the selected override must match the signed release");
+        assert!(
+            format!("{error:#}").contains("Installed component binary verification failed"),
+            "{error:#}"
+        );
     }
 
     #[cfg(unix)]

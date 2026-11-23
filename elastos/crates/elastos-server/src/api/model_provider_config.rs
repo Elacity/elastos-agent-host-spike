@@ -5,7 +5,9 @@ use rand::RngCore as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{ErrorKind, Read as _, Write as _};
+#[cfg(unix)]
+use std::io::Write as _;
+use std::io::{ErrorKind, Read as _};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -428,8 +430,12 @@ pub async fn model_provider_config(
     }
     #[cfg(not(unix))]
     {
-        let _ = registry;
-        Ok((config, None))
+        let _ = (config, registry);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "unsupported on this platform",
+        )
+        .into())
     }
 }
 
@@ -684,6 +690,7 @@ fn status_from_offers(offers: &[serde_json::Value]) -> AiProviderStatus {
     }
 }
 
+#[cfg(unix)]
 fn write_model_provider_config_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -719,6 +726,15 @@ fn write_model_provider_config_atomic(path: &Path, bytes: &[u8]) -> anyhow::Resu
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(windows)]
+fn write_model_provider_config_atomic(_path: &Path, _bytes: &[u8]) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "owner-only model provider configuration writes are unsupported on Windows",
+    )
+    .into())
 }
 
 fn strip_runtime_share_fields(mut offer: serde_json::Value) -> serde_json::Value {
@@ -1716,6 +1732,7 @@ pub(crate) fn seed_model_provider_operator_offers_for_test(
     persist_model_provider_operator_offers(data_dir, offers)
 }
 
+#[cfg(unix)]
 fn validate_model_provider_private_directory(path: &Path, label: &str) -> anyhow::Result<()> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {label} {}", path.display()))?;
@@ -1732,6 +1749,16 @@ fn validate_model_provider_private_directory(path: &Path, label: &str) -> anyhow
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_model_provider_private_directory(_path: &Path, _label: &str) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "owner-only model provider directories are unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn validate_model_provider_private_file(
     path: &Path,
     metadata: &fs::Metadata,
@@ -1749,6 +1776,19 @@ fn validate_model_provider_private_file(
     }
     let _ = path;
     Ok(())
+}
+
+#[cfg(windows)]
+fn validate_model_provider_private_file(
+    _path: &Path,
+    _metadata: &fs::Metadata,
+    _label: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "owner-only model provider files are unsupported on Windows",
+    )
+    .into())
 }
 
 fn read_model_provider_private_file(
@@ -1787,7 +1827,8 @@ fn read_model_provider_private_file(
     Ok(bytes)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
+#[cfg(test)]
 mod hosted_decision_write_fault_tests {
     #[tokio::test]
     async fn decision_writer_reports_post_rename_durability_failure() {
@@ -1987,7 +2028,7 @@ mod hosted_hint_tests {
         assert!(!status_debug.contains("sk-or-fixture-valid"));
         assert!(!status_debug.contains("openrouter.ai"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn decision_model_stays_private() {
         let dir = tempfile::tempdir().unwrap();
@@ -2080,6 +2121,7 @@ mod hosted_hint_tests {
         assert_eq!(preserved["share"]["processor"], "OpenRouter");
         assert_eq!(preserved["share"]["payer"], "this Home");
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn staged_hosted_key_waits_for_save_and_preserves_existing_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -2152,7 +2194,7 @@ mod hosted_hint_tests {
             "first-key"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn editing_jev_keeps_other_instances() {
         let dir = tempfile::tempdir().unwrap();
@@ -2191,7 +2233,7 @@ mod hosted_hint_tests {
             "typesafe/jev-1.13-20260917"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn replacing_shared_text_with_jev_clears_share() {
         let dir = tempfile::tempdir().unwrap();
@@ -2252,6 +2294,7 @@ mod hosted_hint_tests {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod validate_fixture_tests {
     use super::{load_hosted_validate_fixtures, parse_loopback_http_url};

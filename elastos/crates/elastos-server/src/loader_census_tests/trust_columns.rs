@@ -99,6 +99,29 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(binary_path)"].concat(),
             os_path: "",
         },
+        // The macOS confined start checks the storage root's identity and
+        // wraps the provider in a Seatbelt profile. Neither checks the
+        // executable's bytes; the caller's admission does that.
+        TrustColumn {
+            file: "elastos-runtime/src/provider/os_entry.rs",
+            function: "macos_command",
+            call: "command",
+            class: "n/a",
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["Command::new", "(launcher)"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-runtime/src/provider/os_entry.rs",
+            function: "macos_start",
+            call: "spawn()",
+            class: "n/a",
+            trust_root: "none",
+            verified_when: "never",
+            evidence: [".spa", "wn()"].concat(),
+            os_path: "",
+        },
         TrustColumn {
             file: "elastos-server/src/agent_admission.rs",
             function: "verify_agent_host",
@@ -234,9 +257,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_home_cli_renderer",
             call: "command",
             class: "release-component",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(&renderer)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -294,7 +317,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "serve_web_capsule",
             call: "spawn()",
             class: "release-component",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: ["find_installed_prov", "ider_binary(\"shell\")"].concat(),
             os_path: "",
@@ -314,9 +337,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "provision_custody_node_with_installed_provider",
             call: "command",
             class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-install-only",
-            evidence: ["Command::n", "ew(binary)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -324,9 +347,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "provision_custody_node_with_installed_provider",
             call: "spawn()",
             class: "release-component",
-            trust_root: "components-json-in-data-dir",
-            verified_when: "at-install-only",
-            evidence: ["Command::n", "ew(binary)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -604,7 +627,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_serve",
             call: "spawn()",
             class: "release-component",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: ["find_installed_prov", "ider_binary(\"shell\")"].concat(),
             os_path: "",
@@ -677,6 +700,29 @@ fn columns() -> Vec<TrustColumn> {
             trust_root: "components-json-in-data-dir",
             verified_when: "at-every-start",
             evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        // AdmittedProvider::admit checks the binary's checksum against the
+        // data-dir components.json at each start. It reads the release
+        // signer but does not check the binary against it.
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "start_did_provider",
+            call: concat!("ProviderBridge::spawn", "_confined"),
+            class: "n/a",
+            trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBridge::", "spawn_confined("].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "start_wallet_provider",
+            call: concat!("ProviderBridge::spawn", "_confined"),
+            class: "n/a",
+            trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBridge::", "spawn_confined("].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -824,9 +870,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "probe_native_host",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::n", "ew(program)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -834,9 +880,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "probe_native_host",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::n", "ew(program)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::n", "ew(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1033,7 +1079,7 @@ fn handoffs() -> Vec<Handoff> {
             call: "command",
             caller_file: "elastos-server/src/serve_cmd.rs",
             caller_function: "run_serve",
-            check: ["verify_component_", "binary(\"shell\""].concat(),
+            check: ["verify_installed_", "component_start("].concat(),
         },
         Handoff {
             file: "elastos-server/src/serve_cmd.rs",
@@ -1041,7 +1087,7 @@ fn handoffs() -> Vec<Handoff> {
             call: "command",
             caller_file: "elastos-server/src/main.rs",
             caller_function: "serve_web_capsule",
-            check: ["verify_component_", "binary(\"shell\""].concat(),
+            check: ["verify_installed_", "component_start("].concat(),
         },
         Handoff {
             file: "elastos-server/src/server_infra.rs",
@@ -1097,7 +1143,7 @@ fn handoffs() -> Vec<Handoff> {
             call: "command",
             caller_file: "elastos-server/src/setup/browser_config.rs",
             caller_function: "native_host_available",
-            check: ["verify_installed_", "component_binary("].concat(),
+            check: ["verify_installed_", "component_start("].concat(),
         },
         Handoff {
             file: "elastos-server/src/setup/browser_config.rs",
@@ -1105,7 +1151,7 @@ fn handoffs() -> Vec<Handoff> {
             call: "spawn()",
             caller_file: "elastos-server/src/setup/browser_config.rs",
             caller_function: "native_host_available",
-            check: ["verify_installed_", "component_binary("].concat(),
+            check: ["verify_installed_", "component_start("].concat(),
         },
     ]
 }
@@ -1302,7 +1348,7 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
     let mut census = BTreeSet::new();
     for row in &listed {
         assert!(
-            census.insert((row.file, row.function, row.call)),
+            census.insert((row.file, row.function, row.call.as_str())),
             "duplicate census key"
         );
     }
@@ -1313,7 +1359,7 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         assert!(census.contains(&key), "overlay lacks census row: {key:?}");
         let row = listed
             .iter()
-            .find(|row| (row.file, row.function, row.call) == key)
+            .find(|row| (row.file, row.function, row.call.as_str()) == key)
             .unwrap();
         if row.kind == "host process" {
             assert!(
@@ -1458,6 +1504,12 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             ["ProviderBridge::", "spawn(&path, did_config)"].concat(),
+            0,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "start_did_provider",
+            ["ProviderBridge::", "spawn_confined("].concat(),
             1,
         ),
         (
@@ -1506,6 +1558,12 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             ["ProviderBridge::", "spawn(&path, wallet_config)"].concat(),
+            0,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "start_wallet_provider",
+            ["ProviderBridge::", "spawn_confined("].concat(),
             1,
         ),
     ] {
@@ -1553,21 +1611,133 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 99);
-    assert_eq!(classes.get("n/a"), Some(&50));
+    assert_eq!(columns.len(), 103);
+    assert_eq!(classes.get("n/a"), Some(&54));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&15));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&13));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&63));
+    assert_eq!(roots.get("none"), Some(&62));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&9));
+    assert_eq!(roots.get("release-signature"), Some(&16));
     assert_eq!(roots.get("staged-cid"), Some(&7));
-    assert_eq!(times.get("at-every-start"), Some(&18));
-    assert_eq!(times.get("at-install-only"), Some(&10));
+    assert_eq!(times.get("at-every-start"), Some(&25));
+    assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&8));
-    assert_eq!(times.get("never"), Some(&63));
-    assert_eq!(to_gate, 42);
+    assert_eq!(times.get("never"), Some(&62));
+    assert_eq!(to_gate, 35);
+}
+
+#[test]
+fn installed_component_start_callers_keep_the_signed_gate() {
+    let sources = source::production_sources();
+    let browser = &sources["elastos-server/src/setup/browser_config.rs"];
+    let browser_code = source::code_only(browser);
+    let start_gate = ["verify_installed_", "component_start("].concat();
+    assert!(
+        browser
+            .match_indices(&start_gate)
+            .all(|(at, _)| { source::enclosing_fn(&browser_code, at) != "browser_available" }),
+        "browser_available remains pure; the catalogue host check owns release verification"
+    );
+    for (file, function) in [
+        ("elastos-server/src/home_cmd.rs", "run_home_cli_renderer"),
+        ("elastos-server/src/main.rs", "serve_web_capsule"),
+        (
+            "elastos-server/src/protected_content_config.rs",
+            "provision_custody_node_with_installed_provider",
+        ),
+        ("elastos-server/src/serve_cmd.rs", "run_serve"),
+        (
+            "elastos-server/src/setup/browser_config.rs",
+            "native_host_available",
+        ),
+    ] {
+        let text = &sources[file];
+        let code = source::code_only(text);
+        let gate = ["verify_installed_", "component_start("].concat();
+        assert!(
+            text.match_indices(&gate)
+                .any(|(at, _)| source::enclosing_fn(&code, at) == function),
+            "installed component start lost signed gate: {file}::{function}"
+        );
+    }
+    let custody = &sources["elastos-server/src/protected_content_config.rs"];
+    let selected = "verify_installed_component_start(data_dir, \"custody-provider\", &binary)";
+    assert!(
+        custody.match_indices(selected).any(|(at, _)| {
+            source::enclosing_fn(&source::code_only(custody), at)
+                == "provision_custody_node_with_installed_provider"
+        }),
+        "custody start must admit the resolver's selected binary"
+    );
+}
+
+/// A start path that runs a component with no check, only on an owner's opt-in.
+struct DevOptIn {
+    file: &'static str,
+    function: &'static str,
+    evidence: &'static str,
+    trust_root: &'static str,
+    verified_when: &'static str,
+    note: &'static str,
+}
+
+fn dev_opt_ins() -> Vec<DevOptIn> {
+    vec![DevOptIn {
+        file: "elastos-server/src/setup.rs",
+        function: "verify_installed_component_start",
+        evidence: "VerifiedExecutable::unchecked(path)",
+        trust_root: "none",
+        verified_when: "never",
+        note: "dev-only explicit opt-in: source Home with config.toml dev_mode = true",
+    }]
+}
+
+#[test]
+fn dev_opt_in_start_is_one_honest_row_behind_the_installed_release() {
+    let sources = source::production_sources();
+    let rows = dev_opt_ins();
+    assert_eq!(rows.len(), 1);
+    for row in &rows {
+        assert_eq!((row.trust_root, row.verified_when), ("none", "never"));
+        assert!(row.note.starts_with("dev-only explicit opt-in"));
+        let text = &sources[row.file];
+        let code = source::code_only(text);
+        let at = |needle: &str| {
+            let found: Vec<usize> = text
+                .match_indices(needle)
+                .map(|(at, _)| at)
+                .filter(|at| source::enclosing_fn(&code, *at) == row.function)
+                .collect();
+            assert_eq!(found.len(), 1, "{needle} in {}::{}", row.file, row.function);
+            found[0]
+        };
+        // A Home with a release never reaches the opt-in; the opt-in is
+        // asked before the unchecked start.
+        let release = at("let Some(source) = installed_release_source(data_dir)? else {");
+        let opt_in = at("if !source_home_dev_mode(data_dir) {");
+        let unchecked = at(row.evidence);
+        let signed = at("read_signed_release(data_dir, &runtime, &source, false, true)");
+        assert!(release < opt_in && opt_in < unchecked && unchecked < signed);
+    }
+    // No other production code starts a component unchecked.
+    let callers: Vec<_> = sources
+        .iter()
+        .flat_map(|(file, text)| {
+            let code = source::code_only(text);
+            text.match_indices("VerifiedExecutable::unchecked(")
+                .map(|(at, _)| (file.clone(), source::enclosing_fn(&code, at)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        callers,
+        [(
+            "elastos-server/src/setup.rs".to_string(),
+            "verify_installed_component_start".to_string()
+        )]
+    );
 }

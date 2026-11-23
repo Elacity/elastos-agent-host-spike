@@ -11171,6 +11171,7 @@ mod tests {
         assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn content_boundary_refuses_forged_holder_signature() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11192,6 +11193,7 @@ mod tests {
         assert!(matches!(result, DistinctHolderGate::Unproven));
     }
 
+    #[cfg(unix)]
     #[test]
     fn plant_boundary_refuses_old_signature_with_matching_row_nonce() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11210,6 +11212,7 @@ mod tests {
         eprintln!("P26B plant boundary replay: RED, old signed row refused");
     }
 
+    #[cfg(unix)]
     #[test]
     fn content_boundary_refuses_a_row_without_collector_nonce() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11228,6 +11231,7 @@ mod tests {
         assert!(matches!(result, DistinctHolderGate::Unproven));
     }
 
+    #[cfg(unix)]
     #[test]
     fn distinct_holder_refusal_does_not_sign_a_foreign_cid_row() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11246,6 +11250,7 @@ mod tests {
         assert!(answer.get("receipt_set").is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn distinct_holder_refusal_signs_only_rows_for_the_requested_cid() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11273,6 +11278,7 @@ mod tests {
         assert_eq!(receipts[0].requested_cid, TEST_CID);
     }
 
+    #[cfg(unix)]
     #[test]
     fn content_boundary_does_not_sign_only_foreign_cid_rows() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11330,6 +11336,7 @@ mod tests {
         eprintln!("P26B plant set verifier replay: RED, old signed row refused");
     }
 
+    #[cfg(unix)]
     #[test]
     fn plant_fresh_honest_answer_passes_boundary_and_set_verifier() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -11589,6 +11596,7 @@ mod tests {
 
     /// A distinct-holder answer gains the requester's signed set and the
     /// honest attestation label, replacing the self-attested one.
+    #[cfg(unix)]
     #[tokio::test]
     async fn distinct_holder_answer_carries_a_requester_signed_set() {
         let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
@@ -11664,6 +11672,7 @@ mod tests {
 
     /// A distinct-holder refusal keeps its code and signed rows instead of
     /// collapsing into an error string.
+    #[cfg(unix)]
     #[tokio::test]
     async fn distinct_holder_refusal_answer_keeps_its_signed_set() {
         let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
@@ -11781,6 +11790,7 @@ mod tests {
 
     /// A local copy does not answer a distinct-holder fetch. Two verified
     /// holders still produce their receipts and the signed set.
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_copy_with_distinct_holders_returns_holder_receipts() {
         let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -11978,6 +11988,7 @@ mod tests {
 
     /// A bridge that answers success with no receipts is refused. The bytes
     /// stay unreturned, including the local copy.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_success_without_receipts_returns_no_bytes() {
         let cid = fixture_file_cid(BRIDGE_BYTES);
@@ -12000,6 +12011,7 @@ mod tests {
 
     /// One verified receipt does not prove a request for two, even when the
     /// answer's own count fields say the requirement is met.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_success_with_one_holder_when_two_are_required_is_refused() {
         let cid = fixture_file_cid(BRIDGE_BYTES);
@@ -12086,6 +12098,7 @@ mod tests {
     /// An availability error with one verified receipt and a required count of
     /// 1, while the caller asked for 2, is the refusal. The signed set says
     /// required 2 and observed 1.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_error_with_required_one_signs_the_callers_two() {
         assert_availability_error_signs_the_callers_two(distinct_holder_error_answer(true)).await;
@@ -12093,6 +12106,7 @@ mod tests {
 
     /// The same error with the required-count field omitted is the same
     /// refusal: required 2 and observed 1.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_error_without_required_count_signs_the_callers_two() {
         assert_availability_error_signs_the_callers_two(distinct_holder_error_answer(false)).await;
@@ -12103,7 +12117,7 @@ mod tests {
     /// and discard the values. The needles are joined at run time.
     #[test]
     fn content_product_source_does_not_read_availability_holder_count_keys() {
-        let source = include_str!("content.rs");
+        let source = include_str!("content.rs").replace("\r\n", "\n");
         let product = source
             .split_once("\nmod tests {\n")
             .expect("content.rs tests module")
@@ -12130,6 +12144,7 @@ mod tests {
     }
 
     /// Two verified receipts for another CID do not prove this CID.
+    #[cfg(unix)]
     #[tokio::test]
     async fn availability_success_for_another_cid_is_refused() {
         let cid = fixture_file_cid(BRIDGE_BYTES);
@@ -13071,7 +13086,7 @@ mod tests {
             })
             .await
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_wraps_ipfs_with_availability_status() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13133,7 +13148,7 @@ mod tests {
         .unwrap();
         assert_eq!(*ipfs.add_count.lock().await, 1);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_records_local_only_repair_task() {
         let (_data_dir, _registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13188,7 +13203,7 @@ mod tests {
             .to_string()
             .contains("requires Runtime provider invocation metadata"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_import_exact_accepts_matching_cid_stream() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13216,7 +13231,7 @@ mod tests {
             ["content.bin".to_string()]
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_import_with_a_wrong_expected_cid_leaves_existing_pins_untouched() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13310,7 +13325,7 @@ mod tests {
         assert!(ipfs.added_directories.lock().await.is_empty());
         assert!(ipfs.pinned.lock().await.is_empty());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_uses_registered_availability_provider() {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13541,7 +13556,7 @@ mod tests {
         );
         assert!(!dashboard.to_string().contains("connect_ticket"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_local_pin_policy_never_calls_availability() {
         let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13576,7 +13591,7 @@ mod tests {
             vec!["notes.txt".to_string()]
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_repair_and_ensure_with_local_pin_policy_never_call_availability() {
         let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13608,7 +13623,7 @@ mod tests {
             .unwrap();
         assert_eq!(availability.requests.lock().await.len(), 1);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_unpublish_completes_when_the_cid_is_verified_no_longer_pinned() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13645,7 +13660,7 @@ mod tests {
             .to_string()
             .contains("repair_worker requires Runtime provider invocation metadata"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_repair_worker_retries_queued_availability_task() {
         let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13817,7 +13832,7 @@ mod tests {
             false
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_repair_worker_reuses_three_replica_live_requirement_after_replica_loss() {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -13923,7 +13938,7 @@ mod tests {
             true
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_repair_worker_dispatches_configured_external_repair_fleet() {
         let (url, handle) = spawn_external_repair_fleet_endpoint(json!({
@@ -14211,7 +14226,7 @@ mod tests {
         assert!(accepted_request.contains(EXTERNAL_REPAIR_FLEET_DISPATCH_REQUEST_SCHEMA));
         assert!(rejected_request.contains(EXTERNAL_REPAIR_FLEET_DISPATCH_REQUEST_SCHEMA));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_repair_worker_enforces_attempt_budget() {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14310,7 +14325,7 @@ mod tests {
         let requests = availability.requests.lock().await;
         assert_eq!(requests.len(), 2);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_accepts_carrier_announced_availability() {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14390,7 +14405,7 @@ mod tests {
         assert_eq!(requests[0]["local"]["replicas"], 1);
         assert_eq!(requests[0]["policy"], "network_default");
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_rejects_unproven_multi_peer_availability_claim() {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14432,7 +14447,7 @@ mod tests {
             "repair_needed"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_enforces_availability_requirements() {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14495,7 +14510,7 @@ mod tests {
             true
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_requires_peer_selection_policy_metadata() {
         let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14544,7 +14559,7 @@ mod tests {
             "repair_needed"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_directory_injects_object_manifest() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14624,7 +14639,7 @@ mod tests {
             json!({"rel": "rights.policy", "cid": TEST_CID}),
         ]
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_directory_accepts_linked_release_and_sealed_manifests() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14726,7 +14741,7 @@ mod tests {
             .to_string()
             .contains("key_envelope.algorithms.cipher uses unsupported algorithm"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_directory_sorts_entries_for_stable_cids() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14818,7 +14833,7 @@ mod tests {
             "protected-content-listing"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_unpublish_wraps_ipfs_unpin() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14841,7 +14856,7 @@ mod tests {
             [TEST_CID.to_string()]
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_repair_pins_cid_and_records_receipt() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14861,7 +14876,7 @@ mod tests {
         );
         assert_eq!(ipfs.pinned.lock().await.as_slice(), [TEST_CID.to_string()]);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_ensure_pins_cid_and_records_policy() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14881,7 +14896,7 @@ mod tests {
         );
         assert_eq!(ipfs.pinned.lock().await.as_slice(), [TEST_CID.to_string()]);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_repair_records_repair_needed_when_pin_fails() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14907,7 +14922,7 @@ mod tests {
             "repair_needed"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_ensure_imports_complete_local_object_when_pin_fails() {
         let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -14983,7 +14998,7 @@ mod tests {
             "carrier_announced"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_restore_pins_only_local_objects_with_a_content_receipt() {
         let (data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -15027,7 +15042,7 @@ mod tests {
         content.restore_complete_local_objects().await;
         assert!(ipfs.pinned.lock().await.is_empty());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_file_wraps_ipfs_bytes_with_receipt() {
         let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -15817,8 +15832,14 @@ mod tests {
         assert!(!output.contains("stage=\"runtime_stream_validation\""));
         assert!(!output.contains(TEST_CID));
         assert!(!output.contains("private-fixture-marker"));
-        // One local-only read and its single not-ready retry, then one holder read.
-        assert_eq!(ipfs.requests.lock().await.len(), 2);
+        // The not-ready read is one call. Linux and macOS then ask the local
+        // backend to prepare. Other platforms refuse that preparation first.
+        let local_backend_calls = if cfg!(any(target_os = "linux", target_os = "macos")) {
+            2
+        } else {
+            1
+        };
+        assert_eq!(ipfs.requests.lock().await.len(), local_backend_calls);
         assert_eq!(availability.requests.lock().await.len(), 1);
     }
 
@@ -16367,7 +16388,7 @@ mod tests {
             size: bytes.len() as u64,
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_status_reads_latest_availability_receipt() {
         let (_data_dir, _registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -16427,7 +16448,7 @@ mod tests {
             AVAILABILITY_RECEIPT_SCHEMA
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_status_without_cid_returns_availability_dashboard() {
         let (_data_dir, _registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -16726,7 +16747,7 @@ mod tests {
             false
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_status_can_emit_operator_alert_receipt_without_sink() {
         let (_data_dir, _registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -16769,7 +16790,7 @@ mod tests {
         assert!(outbox.contains(CONTENT_OPERATOR_ALERT_RECEIPT_SCHEMA));
         assert!(outbox.contains(CONTENT_OPERATOR_ALERT_SCHEMA));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_status_delivers_operator_alert_to_configured_loopback_sink() {
         let (url, handle) = spawn_operator_alert_sink();
@@ -16840,7 +16861,7 @@ mod tests {
             .unwrap_or("")
             .contains("operator-alert-test"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_status_exchanges_operator_alert_with_configured_federated_endpoint() {
         let (url, handle) = spawn_federated_operator_alert_exchange(json!({
@@ -16926,7 +16947,7 @@ mod tests {
             .unwrap_or("")
             .contains("federated-alert-test"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_storage_accounting_ledger_is_durable_per_principal() {
         let (data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -16990,7 +17011,7 @@ mod tests {
             "did:key:z6Mkpublisher"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_enforces_principal_storage_quota() {
         let (_data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
@@ -17050,7 +17071,7 @@ mod tests {
             1
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_accepts_within_principal_quota() {
         let (_data_dir, _registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -17108,7 +17129,7 @@ mod tests {
             admission["data"]["admission"]
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_rejects_quota_exceeded() {
         let (_data_dir, _registry, _ipfs, content) = registry_with_content_and_ipfs().await;
@@ -17163,7 +17184,7 @@ mod tests {
             admission["data"]["admission"]
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_records_configured_federated_quota_ledger_acceptance() {
         let receipt = signed_federated_quota_ledger_exchange_receipt(true, None);
@@ -17274,7 +17295,7 @@ mod tests {
         )
         .unwrap();
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_accepts_configured_federated_quota_ledger_quorum() {
         let receipt_a = signed_federated_quota_ledger_exchange_receipt(true, None);
@@ -17379,7 +17400,7 @@ mod tests {
             .unwrap_or("")
             .contains("quota-b"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_rejects_when_configured_federated_quota_ledger_rejects() {
         let receipt =
@@ -17439,7 +17460,7 @@ mod tests {
         let request = handle.join().unwrap();
         assert!(request.contains(CONTENT_FEDERATED_QUOTA_LEDGER_EXCHANGE_REQUEST_SCHEMA));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_rejects_configured_federated_quota_ledger_quorum_failure() {
         let accepted_receipt = signed_federated_quota_ledger_exchange_receipt(true, None);
@@ -17504,7 +17525,7 @@ mod tests {
         assert!(accepted_request.contains(CONTENT_FEDERATED_QUOTA_LEDGER_EXCHANGE_REQUEST_SCHEMA));
         assert!(rejected_request.contains(CONTENT_FEDERATED_QUOTA_LEDGER_EXCHANGE_REQUEST_SCHEMA));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_records_configured_federated_abuse_control_acceptance() {
         let receipt = signed_federated_abuse_control_exchange_receipt(true, None);
@@ -17619,7 +17640,7 @@ mod tests {
         )
         .unwrap();
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_accepts_configured_federated_abuse_control_quorum() {
         let receipt_a = signed_federated_abuse_control_exchange_receipt(true, None);
@@ -17720,7 +17741,7 @@ mod tests {
             .unwrap_or("")
             .contains("abuse-secret-b"));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_rejects_when_configured_federated_abuse_control_rejects() {
         let receipt = signed_federated_abuse_control_exchange_receipt(
@@ -17778,7 +17799,7 @@ mod tests {
         let request = handle.join().unwrap();
         assert!(request.contains(CONTENT_FEDERATED_ABUSE_CONTROL_EXCHANGE_REQUEST_SCHEMA));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_rejects_configured_federated_abuse_control_quorum_failure() {
         let accepted_receipt = signed_federated_abuse_control_exchange_receipt(true, None);
@@ -17841,7 +17862,7 @@ mod tests {
         assert!(accepted_request.contains(CONTENT_FEDERATED_ABUSE_CONTROL_EXCHANGE_REQUEST_SCHEMA));
         assert!(rejected_request.contains(CONTENT_FEDERATED_ABUSE_CONTROL_EXCHANGE_REQUEST_SCHEMA));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_records_configured_storage_market_acceptance() {
         let (url, handle) = spawn_storage_market_admission_endpoint(json!({
@@ -18076,7 +18097,7 @@ mod tests {
         assert!(accepted_request.contains(CONTENT_STORAGE_MARKET_ADMISSION_REQUEST_SCHEMA));
         assert!(rejected_request.contains(CONTENT_STORAGE_MARKET_ADMISSION_REQUEST_SCHEMA));
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_admission_rejects_when_configured_storage_market_rejects() {
         let (url, handle) = spawn_storage_market_admission_endpoint(json!({

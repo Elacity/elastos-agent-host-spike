@@ -1059,7 +1059,7 @@ fn the_list_and_the_refused_keys_cover_the_manifest_type() {
         "model_content",
         "signature",
     ];
-    let source = include_str!("../../elastos-common/src/manifest.rs");
+    let source = include_str!("../../elastos-common/src/manifest.rs").replace("\r\n", "\n");
     let start = source.find("pub struct CapsuleManifest {").unwrap();
     let body = &source[start..start + source[start..].find("\n}\n").unwrap()];
     let mut fields = Vec::new();
@@ -1259,7 +1259,7 @@ async fn a_runtime_without_a_component_provider_cannot_start_a_bundle() {
 /// (`a_manifest_with_asks_is_held_to_their_resources_and_their_actions`).
 #[test]
 fn a_capsule_the_bridge_holds_no_ceiling_for_gets_the_empty_one() {
-    let source = include_str!("runtime.rs");
+    let source = include_str!("runtime.rs").replace("\r\n", "\n");
     let handler = &source[source.find("component.set_bus_hostcall(Arc::new(").unwrap()..];
     let handler = &handler[..handler.find("\n            }));\n").unwrap()];
     let lookup = "let manifest_capabilities = host_manifest_capabilities\n                    \
@@ -1438,7 +1438,7 @@ fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
 /// in `stage_cmd`, does not count this file.)
 #[test]
 fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
-    let source = include_str!("runtime.rs");
+    let source = include_str!("runtime.rs").replace("\r\n", "\n");
     let body_of = |signature: &str| {
         let body = &source[source.find(signature).unwrap()..];
         &body[..body.find("\n    }\n").unwrap()]
@@ -1449,7 +1449,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     // impl that owns the type is the anchor, and the close matches that
     // function's own indent.
     assert_eq!(source.matches("impl VerifiedBundle {").count(), 1);
-    let maker = fn_body(source, "impl VerifiedBundle {", "pub(crate) fn check(");
+    let maker = fn_body(&source, "impl VerifiedBundle {", "pub(crate) fn check(");
     let walk = ["checked_bundle", "_within("].concat();
     assert_eq!(start.matches(&walk).count(), 0);
     // The walk, then the moment after it, then the one maker. The CID, the
@@ -1628,7 +1628,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
 /// that `into_component` binds.
 #[test]
 fn verified_bundle_has_one_maker_and_start_by_bundle_takes_it() {
-    let source = include_str!("runtime.rs");
+    let source = include_str!("runtime.rs").replace("\r\n", "\n");
     let header = "\nmod verified_bundle {\n";
     assert_eq!(source.matches(header).count(), 1, "one private module");
     assert!(!source.contains("pub mod verified_bundle"));
@@ -1646,7 +1646,7 @@ fn verified_bundle_has_one_maker_and_start_by_bundle_takes_it() {
         .filter(|line| verified_bundle_literal(line, true))
         .collect();
     assert_eq!(in_module.len(), 1, "{in_module:?}");
-    let check = fn_body(source, "impl VerifiedBundle {", "pub(crate) fn check(");
+    let check = fn_body(&source, "impl VerifiedBundle {", "pub(crate) fn check(");
     let in_check: Vec<&str> = check
         .lines()
         .filter(|line| verified_bundle_literal(line, true))
@@ -1718,8 +1718,12 @@ fn the_pins_are_taken_off_a_manifest_at_one_place_and_kept_beside_it() {
         .iter()
         .map(|path| {
             let text = fs::read_to_string(path).expect("read");
-            let name = path.strip_prefix(&sources).unwrap().to_string_lossy();
-            (name.into_owned(), text.matches(&taken_off).count())
+            let name = path
+                .strip_prefix(&sources)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            (name, text.matches(&taken_off).count())
         })
         .filter(|(_, count)| *count > 0)
         .collect();
@@ -3255,6 +3259,7 @@ async fn only_a_started_content_is_kept_for_its_page() {
 /// page token bound to another launch or naming another page, a path that is
 /// not plain, an id that is not kept. A program, not content, is not opened.
 /// (The routes sit behind the shell-only layers in `api/server.rs`.)
+#[cfg(unix)]
 #[tokio::test]
 async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     use crate::api::routes::kept_launch_test_tokens as tokens;
@@ -3309,7 +3314,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
         "no Home token, nothing opened"
     );
     assert_eq!(home.runtime.kept_launch_count(), 0);
-    let (status, _, body) = send(open(&cid, Some(tokens::home(&data)))).await;
+    let (status, _, body) = send(open(&cid, Some(tokens::shell(&data)))).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let opened: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let (id, page) = (
@@ -3317,6 +3322,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
         opened["page"].as_str().unwrap(),
     );
     assert_eq!(page, "page");
+    let binding = home.runtime.kept_launch_binding(id).unwrap();
     home.runtime.write_kept_output(id, "playlist.json", b"[1]");
 
     let read = |uri: String, token: Option<String>| {
@@ -3329,7 +3335,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     let own = || {
         Some(tokens::page(
             &data,
-            &format!("elastos://launch/{id}"),
+            &format!("elastos://launch/{id}/pictures/{binding}"),
             "page",
         ))
     };
@@ -3347,7 +3353,76 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
     .await;
     assert_eq!((status, body), (StatusCode::OK, b"a picture".to_vec()));
 
+    let (status, _, body) = send(open(&cid, Some(tokens::shell(&data)))).await;
+    assert_eq!(status, StatusCode::OK);
+    let second: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let second_id = second["id"].as_str().unwrap();
+    assert_ne!(id, second_id);
+    let (status, _, body) = send(read(
+        format!("/api/launch/{second_id}/content/{ENTRYPOINT}"),
+        own(),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+    let wrong_case = tokens::page(
+        &data,
+        &format!("elastos://launch/{id}/Pictures/{binding}"),
+        "page",
+    );
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(wrong_case),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+
     let other = "0".repeat(32);
+    let wrong_content = tokens::page(
+        &data,
+        &format!("elastos://launch/{id}/another-set/{binding}"),
+        "page",
+    );
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(wrong_content),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+    let wrong_launch = tokens::page(
+        &data,
+        &format!("elastos://launch/{other}/pictures/{binding}"),
+        "page",
+    );
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(wrong_launch),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
     for (uri, token) in [
         (format!("/api/launch/{id}/content/{ENTRYPOINT}"), None),
         (
@@ -3358,15 +3433,7 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
             format!("/api/launch/{id}/content/{ENTRYPOINT}"),
             Some(tokens::page(
                 &data,
-                &format!("elastos://launch/{other}"),
-                "page",
-            )),
-        ),
-        (
-            format!("/api/launch/{id}/content/{ENTRYPOINT}"),
-            Some(tokens::page(
-                &data,
-                &format!("elastos://launch/{id}"),
+                &format!("elastos://launch/{id}/pictures/{binding}"),
                 "another-page",
             )),
         ),
@@ -3385,10 +3452,57 @@ async fn the_runtime_api_opens_and_reads_a_kept_launch_by_the_pages_token() {
         );
     }
 
+    for name in ["pictures..backup", "pictures/backup"] {
+        let token = tokens::page(
+            &data,
+            &format!("elastos://launch/{id}/{name}/{binding}"),
+            "page",
+        );
+        let (status, _, _) = send(read(
+            format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+            Some(token),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{name}");
+    }
+
+    let old_token = own().unwrap();
+    home.runtime.expire_kept_launches();
+    let (status, _, body) = send(open(&cid, Some(tokens::shell(&data)))).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let reopened: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let new_id = reopened["id"].as_str().unwrap();
+    home.runtime.reuse_kept_id_for_test(id, new_id, &binding);
+    let new_binding = home.runtime.kept_launch_binding(id).unwrap();
+    assert_ne!(binding, new_binding);
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(old_token),
+    ))
+    .await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::FORBIDDEN,
+            b"kept_launch_grant_mismatch".to_vec()
+        )
+    );
+    let new_token = tokens::page(
+        &data,
+        &format!("elastos://launch/{id}/pictures/{new_binding}"),
+        "page",
+    );
+    let (status, _, body) = send(read(
+        format!("/api/launch/{id}/content/{ENTRYPOINT}"),
+        Some(new_token),
+    ))
+    .await;
+    assert_eq!((status, body), (StatusCode::OK, b"a picture".to_vec()));
+
     let program = home
         .staged("core", &manifest("core"), &quiet_component(), &publisher)
         .await;
-    let (status, _, body) = send(open(&program, Some(tokens::home(&data)))).await;
+    let (status, _, body) = send(open(&program, Some(tokens::shell(&data)))).await;
     assert_eq!(
         (status, body),
         (StatusCode::BAD_REQUEST, b"not_content".to_vec())
@@ -3647,10 +3761,17 @@ async fn a_page_whose_entrypoint_is_not_plain_is_refused_by_name_and_nothing_kep
     let core = home
         .staged("core", &manifest("core"), &quiet_component(), &publisher)
         .await;
-    for (label, entrypoint) in [
+    // Both names are legal file names only on Unix; on Windows the list is empty,
+    // so it carries an explicit type.
+    let cases: &[(&str, &str)] = &[
+        // A file name that contains a backslash exists only on Unix.
+        #[cfg(unix)]
         ("backslash", "browser\\a.html"),
+        // Windows does not allow a tab in a file name either.
+        #[cfg(unix)]
         ("tab", "browser/a\tb.html"),
-    ] {
+    ];
+    for &(label, entrypoint) in cases {
         let mut page = page_manifest("page", &[("core", &core)]);
         page["entrypoint"] = entrypoint.into();
         let folder = home.bundle(&format!("page-{label}"), &page.to_string(), b"a page");
@@ -4117,6 +4238,7 @@ async fn a_signature_grants_nothing() {
 /// D1a-http-hash. `POST /api/launch/open` starts a signed content bundle by
 /// its CID for a Home token, and the same request on a slot whose entrypoint
 /// changed is refused by the mismatch code.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tampered_one() {
     use crate::api::routes::kept_launch_test_tokens as tokens;
@@ -4138,7 +4260,7 @@ async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tamper
             .method("POST")
             .uri("/api/launch/open")
             .header("content-type", "application/json")
-            .header("x-elastos-home-token", tokens::home(&data))
+            .header("x-elastos-home-token", tokens::shell(&data))
             .body(Body::from(serde_json::json!({"cid": cid}).to_string()))
             .unwrap()
     };
@@ -4223,7 +4345,7 @@ struct ServerHome {
     app: axum::Router,
     shell_token: String,
     shell_id: String,
-    home_token: String,
+    open_grant: String,
 }
 
 impl ServerHome {
@@ -4241,13 +4363,13 @@ impl ServerHome {
             bridge.pending.clone(),
             Some(bridge.data()),
         );
-        let home_token = crate::api::routes::kept_launch_test_tokens::home(&bridge.data());
+        let open_grant = crate::api::routes::kept_launch_test_tokens::shell(&bridge.data());
         ServerHome {
             bridge,
             app,
             shell_token: shell.token,
             shell_id: shell.id.to_string(),
-            home_token,
+            open_grant,
         }
     }
 
@@ -4284,7 +4406,7 @@ impl ServerHome {
         let (app, shell, token) = (
             self.app.clone(),
             self.shell_token.clone(),
-            self.home_token.clone(),
+            self.open_grant.clone(),
         );
         let body = serde_json::json!({"cid": cid}).to_string();
         tokio::spawn(async move {
@@ -4336,7 +4458,7 @@ async fn wait_for_request(
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
-
+#[cfg(unix)]
 /// B1-R. A trusted publisher's signature admits a start by CID on the server
 /// Home and grants nothing. While the core waits on its one read of the
 /// probe, the live view is empty and the audit log has no grant for that
@@ -4427,7 +4549,7 @@ async fn a_valid_signature_grants_nothing_on_the_server_home() {
         &home.shell_token,
         "POST",
         "/api/launch/open",
-        Some(&home.home_token),
+        Some(&home.open_grant),
         Some(&body),
     )
     .await;

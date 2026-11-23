@@ -693,6 +693,7 @@ mod tests {
     use elastos_runtime::primitives::audit::AuditEvent;
 
     /// A5-S3c-0b: the presence grant file names the stored Agent root.
+    #[cfg(unix)]
     #[test]
     fn a_stored_agents_presence_grant_file_is_under_its_usersai_root() {
         use crate::auth::r4_fixture::{AGENT_ID, AGENT_ROOT};
@@ -748,6 +749,7 @@ mod tests {
         dir
     }
 
+    #[cfg(unix)]
     #[test]
     fn r6_grant_object_uri_uses_stored_kind() {
         use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
@@ -768,6 +770,7 @@ mod tests {
             .to_string()
             .contains("has no stored record"));
     }
+    #[cfg(unix)]
     #[test]
     fn r6_grant_empty_file_uses_stored_kind() {
         use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
@@ -787,6 +790,7 @@ mod tests {
             .to_string()
             .contains("has no stored record"));
     }
+    #[cfg(unix)]
     #[test]
     fn r6_grant_load_file_uses_stored_kind() {
         use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
@@ -806,6 +810,7 @@ mod tests {
             .to_string()
             .contains("has no stored record"));
     }
+    #[cfg(unix)]
     #[test]
     fn r6_grant_save_file_uses_stored_kind() {
         use crate::auth::r4_fixture::{AGENT_ROOT, HUMAN_ROOT, ID};
@@ -927,6 +932,7 @@ mod tests {
         CapabilityToken::from_base64(&file.grants[0].token).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn requests_and_answers_follow_the_contract() {
         let (temp, principal) = home();
@@ -1036,6 +1042,7 @@ mod tests {
         assert_eq!(state(data, &principal, &scope()).unwrap(), Some("hidden"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn mode_is_in_the_resource_and_each_publisher_asks_for_its_own() {
         let (temp, principal) = home();
@@ -1118,6 +1125,7 @@ mod tests {
         assert!(load_file(data, other).unwrap().grants.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn undecided_and_refused_are_silent() {
         let (temp, principal) = home();
@@ -1147,6 +1155,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn revoke_and_epoch_are_effective_on_the_next_tick() {
         let (temp, principal) = home();
@@ -1207,6 +1216,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_profile_change_revokes_the_grant() {
         let (temp, principal) = home();
@@ -1252,6 +1262,7 @@ mod tests {
             .is_err());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn audit_volume_is_bounded_over_an_hour_of_ticks() {
         let (temp, principal) = home();
@@ -1285,6 +1296,7 @@ mod tests {
         assert_eq!(successes(&authority) - before, 2);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_grant_is_one_owner_only_file_that_holds_the_token() {
         // Undo to alpha.22 reads only the files it knows; the grant writes
@@ -1364,6 +1376,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn revoked_ids_persist_in_the_store_files_alpha22_reads() {
         // Undo: the capability store gains only revoked ids; the same loader

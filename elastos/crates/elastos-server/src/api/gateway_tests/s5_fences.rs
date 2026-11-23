@@ -401,6 +401,7 @@ async fn assert_agent_launch_refused(
 /// (`api/routes.rs:182-187`, `runtime.rs:402-462`); a tokenless request is
 /// refused by the gateway's admission step before the route's own token check
 /// runs (`gateway_frontdoor.rs:276`, literal at `:190`) and writes nothing.
+#[cfg(unix)]
 #[tokio::test]
 async fn route_13_home_agent_workspace_refuses_an_agent_launch_and_two_people_get_two_locations() {
     let home = two_person_home().await;
@@ -532,6 +533,7 @@ async fn route_13_home_agent_workspace_refuses_an_agent_launch_and_two_people_ge
 /// `runtime.rs:402-462`); a tokenless request is refused by the gateway's
 /// admission step before the route's own token check runs
 /// (`gateway_frontdoor.rs:276`, literal at `:190`) and writes nothing.
+#[cfg(unix)]
 #[tokio::test]
 async fn route_14_assistant_workspace_refuses_an_agent_launch_and_two_people_get_two_locations() {
     let home = two_person_home().await;
@@ -647,6 +649,7 @@ async fn route_14_assistant_workspace_refuses_an_agent_launch_and_two_people_get
 /// `runtime.rs:402-462`); a tokenless request is refused by the gateway's
 /// admission step before the route's own token check runs
 /// (`gateway_frontdoor.rs:276`, literal at `:190`) and writes nothing.
+#[cfg(unix)]
 #[tokio::test]
 async fn route_15_assistant_workspace_v2_refuses_an_agent_launch_and_two_people_get_two_locations()
 {
@@ -768,6 +771,7 @@ async fn route_15_assistant_workspace_v2_refuses_an_agent_launch_and_two_people_
 /// `runtime.rs:402-462`); a tokenless request is refused by the gateway's
 /// admission step before the route's own token check runs
 /// (`gateway_frontdoor.rs:276`, literal at `:190`) and writes nothing.
+#[cfg(unix)]
 #[tokio::test]
 async fn route_16_home_state_refuses_an_agent_launch_and_two_people_get_two_locations() {
     let home = two_person_home().await;
@@ -941,6 +945,7 @@ fn decoded_read_bytes(response: &Value) -> Vec<u8> {
 /// Route 10: gateway object provider proxy. Two people write and read their
 /// own `Documents` objects, and a cross-principal URI is refused at the
 /// library root check (`library.rs` "outside the active principal root").
+#[cfg(unix)]
 #[tokio::test]
 async fn route_10_two_people_get_two_locations_and_a_cross_principal_uri_is_refused() {
     let home = two_person_home().await;
@@ -994,6 +999,7 @@ async fn route_10_two_people_get_two_locations_and_a_cross_principal_uri_is_refu
 /// Route 11: viewer storage. Both people save and read the same viewer object
 /// under their own root, and an absolute grant for P's root is refused for Q
 /// at the viewer root check.
+#[cfg(unix)]
 #[tokio::test]
 async fn route_11_two_people_get_two_locations_and_a_cross_principal_grant_is_refused() {
     let home = two_person_home().await;
@@ -1089,6 +1095,7 @@ async fn route_11_two_people_get_two_locations_and_a_cross_principal_grant_is_re
 /// Route 12: viewer library object. Both people read their own object through
 /// the viewer route, and a cross-principal URI is refused at the library root
 /// check.
+#[cfg(unix)]
 #[tokio::test]
 async fn route_12_two_people_get_two_locations_and_a_cross_principal_uri_is_refused() {
     let home = two_person_home().await;
@@ -1161,6 +1168,7 @@ async fn route_12_two_people_get_two_locations_and_a_cross_principal_uri_is_refu
 /// Route 20: Library raw transfer. Each person uploads and downloads under
 /// their own root, and a cross-principal URI is refused at the library root
 /// check.
+#[cfg(unix)]
 #[tokio::test]
 async fn route_20_two_people_get_two_locations_and_a_cross_principal_uri_is_refused() {
     let home = two_person_home().await;
@@ -1312,6 +1320,7 @@ async fn route_20_two_people_get_two_locations_and_a_cross_principal_uri_is_refu
 /// argument: the objects are seeded through the library runtime, so a plant at
 /// `gateway_provider_proxy.rs:442` leaves the single and selection downloads
 /// green while `:1007` and `:1015` redden them.
+#[cfg(unix)]
 #[tokio::test]
 async fn route_20_download_sites_read_seeded_objects_without_the_upload_route() {
     let home = two_person_home().await;
@@ -1411,6 +1420,7 @@ async fn route_20_download_sites_read_seeded_objects_without_the_upload_route() 
 // Home launches through the production `POST /api/capsules` handler and then
 // presents nothing to the route. The front door refuses it by name.
 
+#[cfg(unix)]
 #[cfg(feature = "prototype-agents")]
 #[tokio::test]
 async fn route_10_refuses_a_tokenless_agent_launch_at_the_front_door() {
@@ -1455,6 +1465,7 @@ async fn route_10_refuses_a_tokenless_agent_launch_at_the_front_door() {
     assert_eq!(stat["data"]["object"]["kind"], "file", "{stat}");
 }
 
+#[cfg(unix)]
 #[cfg(feature = "prototype-agents")]
 #[tokio::test]
 async fn route_11_refuses_a_tokenless_agent_launch_at_the_front_door() {
@@ -1472,6 +1483,7 @@ async fn route_11_refuses_a_tokenless_agent_launch_at_the_front_door() {
     .await;
 }
 
+#[cfg(unix)]
 #[cfg(feature = "prototype-agents")]
 #[tokio::test]
 async fn route_12_refuses_a_tokenless_agent_launch_at_the_front_door() {
@@ -1489,6 +1501,7 @@ async fn route_12_refuses_a_tokenless_agent_launch_at_the_front_door() {
     .await;
 }
 
+#[cfg(unix)]
 #[cfg(feature = "prototype-agents")]
 #[tokio::test]
 async fn route_20_refuses_a_tokenless_agent_launch_at_the_front_door() {

@@ -751,6 +751,7 @@ mod tests {
         );
         assert_eq!(normalize_query_path("///a///b///c///").unwrap(), "a/b/c");
     }
+    #[cfg(unix)]
     /// S5 row R4.9: the namespace route addresses the session owner's own
     /// namespace key, not the principal whose root the path names.
     ///

@@ -9,6 +9,7 @@ fn identity_summary(dir: &std::path::Path, ctx: &HomeLaunchTokenContext) -> Valu
     serde_json::to_value(load_gateway_identity_summary_for_context(dir, ctx).unwrap()).unwrap()
 }
 
+#[cfg(unix)]
 #[test]
 fn r8d_child_profile_load_reads_the_passkey_persons_profile() {
     // F1, whether a second Runtime accepts Profile setup, is the change expected to flip this row.

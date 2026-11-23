@@ -611,6 +611,22 @@ img {
   white-space: pre-wrap;
 }
 
+.home-cli-mint-choices {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.home-cli-mint-choices[hidden] {
+  display: none;
+}
+
+.home-cli-mint-choice {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: 0.06em;
+}
+
 .home-prompt-actions {
   display: flex;
   flex-wrap: wrap;

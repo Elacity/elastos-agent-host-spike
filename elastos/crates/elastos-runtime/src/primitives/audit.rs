@@ -38,13 +38,36 @@ pub enum AuditEvent {
         /// `did:key` of the trusted key that verified this capsule, when one did.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signer_did: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
 
-    /// Capsule stopped
+    /// Capsule stopped. The one end of an agent session names the agent, the
+    /// owner, the host bundle CID, the launch id, and the session. The reason
+    /// is that end: requested when an owner stop ended it, completed when the
+    /// guest ended on its own. A stop that is not an agent session leaves
+    /// those fields empty.
     CapsuleStop {
         timestamp: SecureTimestamp,
         capsule_id: String,
         reason: StopReason,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        /// Host bundle CID of the agent session this stop ended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cid: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
 
     /// Capability granted
@@ -367,6 +390,10 @@ impl AuditLog {
             cid: cid.map(String::from),
             trust_level,
             signer_did: signer_did.map(String::from),
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
         });
     }
 
@@ -376,6 +403,11 @@ impl AuditLog {
             timestamp: SecureTimestamp::now(),
             capsule_id: capsule_id.to_string(),
             reason,
+            agent_id: None,
+            owner: None,
+            cid: None,
+            launch_id: None,
+            session_id: None,
         });
     }
 
@@ -716,6 +748,10 @@ mod tests {
             cid: Some("Qm123".to_string()),
             trust_level: TrustLevel::Trusted,
             signer_did: Some("did:key:zTest".to_string()),
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
         };
 
         let json = serde_json::to_string(&event).unwrap();

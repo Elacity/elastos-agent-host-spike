@@ -1,30 +1,36 @@
 use super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn room_session_bound_to_frame_expiry() {
     room_session_bound_fixture(300, "active", false).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn room_session_bound_preserves_twelve_hours() {
     room_session_bound_fixture(12 * 60 * 60, "active", false).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn room_session_bound_rejects_revoked_grant_on_poll() {
     room_session_bound_fixture(300, "revoked", false).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn room_session_bound_rejects_sign_out_on_poll() {
     room_session_bound_fixture(300, "signed-out", false).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn room_session_bound_rejects_expired_grant_on_poll() {
     room_session_bound_fixture(300, "expired", false).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn room_session_bound_configured_community() {
     for outcome in ["active", "revoked", "signed-out", "expired"] {
@@ -292,7 +298,7 @@ async fn test_room_service_assets_serve() {
         Some("application/wasm")
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_gateway_carrier_bootstrap_route_returns_live_ticket() {
     let dir = tempfile::tempdir().unwrap();
@@ -353,6 +359,7 @@ async fn test_gateway_carrier_bootstrap_route_returns_live_ticket() {
     assert_eq!(payload["node_id"], "gateway-live-node");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_gateway_carrier_bootstrap_prefers_managed_runtime_ticket() {
     let dir = tempfile::tempdir().unwrap();
@@ -408,6 +415,7 @@ async fn test_gateway_carrier_bootstrap_prefers_managed_runtime_ticket() {
     assert_eq!(payload["node_id"], "managed-room-peer");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_gateway_carrier_bootstrap_publisher_role_uses_gateway_ticket() {
     let dir = tempfile::tempdir().unwrap();
@@ -455,7 +463,7 @@ async fn test_gateway_carrier_bootstrap_publisher_role_uses_gateway_ticket() {
     assert_eq!(payload["role"], "publisher");
     assert!(payload.get("did").is_none());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_summary_requires_signed_launch_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -501,12 +509,31 @@ async fn test_chat_room_summary_requires_signed_launch_authority() {
         "Collaboration is isolated on this Runtime."
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
-async fn legacy_chat_room_summary_admits_only_chat_or_home() {
+async fn legacy_chat_room_summary_requires_chat_launch_even_with_home_cookie() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
+
+    // Handler proof: the front door admits this same-origin Home cookie.
+    let home = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/chat-room/summary")
+                .header(COOKIE, signed_home_cookie_for_room_test(&authority))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(home.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(home.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"chat_room_summary_requires_chat_launch");
+
     let capsule_summary = |token: String| {
         app.clone().oneshot(
             test_browser_request("localhost:61180", "null")
@@ -524,7 +551,7 @@ async fn legacy_chat_room_summary_admits_only_chat_or_home() {
     ))
     .await
     .unwrap();
-    assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(other.status(), StatusCode::FORBIDDEN);
     let body = axum::body::to_bytes(other.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -539,20 +566,34 @@ async fn legacy_chat_room_summary_admits_only_chat_or_home() {
     .unwrap();
     assert_eq!(chat.status(), StatusCode::OK);
 
-    let home = app
+    let home_page = app
         .clone()
         .oneshot(
             test_browser_request("localhost:61180", "http://localhost:61180")
-                .uri("/api/apps/chat-room/summary")
+                .uri("/api/apps/home/summary")
                 .header(COOKIE, signed_home_cookie_for_room_test(&authority))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(home.status(), StatusCode::OK);
+    assert_eq!(home_page.status(), StatusCode::OK);
+
+    // Front-door check: an opaque Home token is refused before the Chat handler.
+    let opaque_home = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .uri("/api/apps/chat-room/summary")
+                .header("x-elastos-home-token", authority.home_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opaque_home.status(), StatusCode::FORBIDDEN);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_session_start_connects_open_room_local_runtime() {
     let dir = tempfile::tempdir().unwrap();
@@ -600,6 +641,7 @@ async fn test_chat_room_session_start_connects_open_room_local_runtime() {
     assert_eq!(payload["display_name"], "owner");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_join_link_create_returns_elastos_join_object() {
     let dir = tempfile::tempdir().unwrap();
@@ -687,6 +729,7 @@ async fn test_chat_room_join_link_create_returns_elastos_join_object() {
     assert_ne!(signer_did, profile.document().profile_did);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_join_link_create_rejects_caller_supplied_issuer_gateway() {
     let dir = tempfile::tempdir().unwrap();
@@ -739,6 +782,7 @@ async fn test_chat_room_join_link_create_rejects_caller_supplied_issuer_gateway(
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_session_start_requires_active_local_member_for_seeded_room() {
     let dir = tempfile::tempdir().unwrap();
@@ -798,6 +842,7 @@ async fn test_chat_room_session_start_requires_active_local_member_for_seeded_ro
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_session_start_connects_active_local_member() {
     let dir = tempfile::tempdir().unwrap();
@@ -861,6 +906,7 @@ async fn test_chat_room_session_start_connects_active_local_member() {
         .all(|participant| participant.get("member_did").is_none()));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_configured_send_uses_signed_home_authority_and_scoped_port() {
     let dir = tempfile::tempdir().unwrap();
@@ -1313,6 +1359,7 @@ async fn test_chat_room_configured_send_uses_signed_home_authority_and_scoped_po
     assert_eq!(unscoped_objects_after, unscoped_objects_before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn configured_chat_rejects_every_legacy_control_and_guest_route_before_mutation() {
     let dir = tempfile::tempdir().unwrap();
@@ -1398,6 +1445,7 @@ async fn configured_chat_rejects_every_legacy_control_and_guest_route_before_mut
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn unconfigured_chat_room_access_policy_uses_strict_post_guard_decoding() {
     let dir = tempfile::tempdir().unwrap();
@@ -1497,6 +1545,7 @@ fn gateway_room_source_has_no_route_owned_resource_bridge() {
     assert!(source.contains("configured_legacy_room_control_unsupported_response"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_shell_can_kick_guest_without_exposing_session_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -1544,8 +1593,8 @@ async fn test_chat_room_shell_can_kick_guest_without_exposing_session_token() {
     let summary = app
         .clone()
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .method("GET")
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
@@ -1578,8 +1627,8 @@ async fn test_chat_room_shell_can_kick_guest_without_exposing_session_token() {
 
     let summary = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .method("GET")
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
@@ -1594,6 +1643,7 @@ async fn test_chat_room_shell_can_kick_guest_without_exposing_session_token() {
     assert_eq!(payload["active_session_count"], 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_cookie_auth_prefers_home_room_session_over_browser_session() {
     let dir = tempfile::tempdir().unwrap();
@@ -1699,6 +1749,7 @@ async fn test_chat_room_cookie_auth_prefers_home_room_session_over_browser_sessi
     }));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_shell_can_approve_browser_access_request() {
     let dir = tempfile::tempdir().unwrap();
@@ -1775,8 +1826,8 @@ async fn test_chat_room_shell_can_approve_browser_access_request() {
     let summary = app
         .clone()
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &home_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1818,18 +1869,18 @@ async fn test_chat_room_shell_can_approve_browser_access_request() {
     let approved_payload: serde_json::Value = serde_json::from_slice(&approved_body).unwrap();
     assert_eq!(approved_payload["status"], "approved");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_summary_omits_display_name_suggestion() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1863,7 +1914,7 @@ async fn test_room_service_summary_does_not_create_identity_on_read() {
     assert!(!dir.path().join("identity").join("device.key").exists());
     assert!(load_home_runtime_coords(dir.path()).is_none());
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_summary_includes_hosted_guest_urls() {
     let dir = tempfile::tempdir().unwrap();
@@ -1896,12 +1947,12 @@ async fn test_room_service_summary_includes_hosted_guest_urls() {
     .unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1924,6 +1975,7 @@ async fn test_room_service_summary_includes_hosted_guest_urls() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_summary_blocks_browser_access_when_seeded_room_has_no_runtime_member() {
     let dir = tempfile::tempdir().unwrap();
@@ -1939,12 +1991,12 @@ async fn test_room_service_summary_blocks_browser_access_when_seeded_room_has_no
     .unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1968,7 +2020,7 @@ async fn test_room_service_summary_blocks_browser_access_when_seeded_room_has_no
         .unwrap()
         .contains("not part of this conversation"));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn browser_room_cookie_capabilities_require_signed_home_admission() {
     let dir = tempfile::tempdir().unwrap();
@@ -2036,7 +2088,7 @@ async fn browser_room_cookie_capabilities_require_signed_home_admission() {
     }
     assert_eq!(room_store_snapshot(dir.path()), before);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_browser_session_request_and_status_routes_chat_room() {
     let dir = tempfile::tempdir().unwrap();
@@ -2089,7 +2141,7 @@ async fn test_browser_session_request_and_status_routes_chat_room() {
     let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
     assert_eq!(status_json["status"].as_str(), Some("pending"));
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn browser_session_request_status_requires_its_secret_not_the_request_id() {
     let dir = tempfile::tempdir().unwrap();
@@ -2164,6 +2216,7 @@ async fn browser_session_request_status_requires_its_secret_not_the_request_id()
     assert!(status_json["token"].is_null());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_browser_session_pair_is_forbidden_when_seeded_room_has_no_runtime_member() {
     let dir = tempfile::tempdir().unwrap();
@@ -2197,7 +2250,7 @@ async fn test_browser_session_pair_is_forbidden_when_seeded_room_has_no_runtime_
             .unwrap();
     assert_eq!(pair_resp.status(), StatusCode::FORBIDDEN);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_browser_access_and_object_flow() {
     let dir = tempfile::tempdir().unwrap();
@@ -2320,7 +2373,7 @@ async fn test_room_service_browser_access_and_object_flow() {
     assert_eq!(feed_json["objects"][1]["kind"].as_str(), Some("text"));
     assert_eq!(approved.display_name, "Alice");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_attachment_upload_and_fetch() {
     let dir = tempfile::tempdir().unwrap();
@@ -2458,7 +2511,7 @@ async fn test_room_service_attachment_upload_and_fetch() {
         .unwrap();
     assert_eq!(&bytes[..], b"png-data");
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_audio_attachment_upload_is_inline_media() {
     let dir = tempfile::tempdir().unwrap();
@@ -2592,7 +2645,7 @@ async fn test_room_service_audio_attachment_upload_is_inline_media() {
         Some("inline; filename=\"voice.ogg\"")
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_room_service_session_leave_appends_system_object() {
     let dir = tempfile::tempdir().unwrap();
@@ -2858,6 +2911,7 @@ fn test_participants_include_online_members_once_by_profile_did() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_contact_request_needs_configured_contacts() {
     let dir = tempfile::tempdir().unwrap();
@@ -2897,6 +2951,7 @@ async fn test_chat_contact_request_needs_configured_contacts() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_configured_community_read_requires_authority_and_returned_visible_rows() {
     let dir = tempfile::tempdir().unwrap();
@@ -3003,6 +3058,7 @@ async fn test_configured_community_read_requires_authority_and_returned_visible_
         .unwrap());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_chat_room_configured_send_asks_a_fast_sender_to_slow_down() {
     let dir = tempfile::tempdir().unwrap();
@@ -3230,6 +3286,7 @@ impl AttachFixture {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn community_attach_publishes_the_library_file_then_posts_its_link_once() {
     const CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
@@ -3303,6 +3360,7 @@ async fn community_attach_publishes_the_library_file_then_posts_its_link_once() 
     assert_eq!(home.port.test_live_unresolved_outgoing().unwrap(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn community_attach_checks_the_send_limit_before_publishing() {
     let home = attach_fixture().await;
@@ -3319,6 +3377,7 @@ async fn community_attach_checks_the_send_limit_before_publishing() {
     assert_eq!(stat["data"]["object"]["published"], false, "{stat}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn community_attach_keeps_the_publication_when_the_post_fails_and_retries_the_post() {
     let home = attach_fixture().await;
@@ -3390,6 +3449,7 @@ async fn community_attach_keeps_the_publication_when_the_post_fails_and_retries_
     assert_eq!(home.publishes().len(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn community_attach_request_id_stays_bound_to_its_file_and_publication() {
     let home = attach_fixture().await;
@@ -3425,6 +3485,7 @@ async fn community_attach_request_id_stays_bound_to_its_file_and_publication() {
     assert_eq!(home.port.test_live_unresolved_outgoing().unwrap(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn community_attach_refuses_files_it_must_not_publish() {
     let home = attach_fixture().await;
@@ -3521,6 +3582,7 @@ async fn community_attach_refuses_files_it_must_not_publish() {
     assert_eq!(home.port.test_live_unresolved_outgoing().unwrap(), 0);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn configured_inbox_refuses_legacy_room_decisions_before_mutation() {
     let dir = tempfile::tempdir().unwrap();
@@ -3582,6 +3644,7 @@ async fn configured_inbox_refuses_legacy_room_decisions_before_mutation() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn legacy_inbox_room_decisions_require_current_admin() {
     let dir = tempfile::tempdir().unwrap();

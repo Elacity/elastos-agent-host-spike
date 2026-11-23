@@ -174,7 +174,7 @@ async fn esp_initialize_requires_explicit_gateway_authority() {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn esp_initialize_describes_existing_projection_routes() {
     let dir = tempfile::tempdir().unwrap();
@@ -277,7 +277,7 @@ async fn esp_initialize_describes_existing_projection_routes() {
         .unwrap();
     assert_eq!(inspect_without_system_token.status(), StatusCode::FORBIDDEN);
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn esp_initialize_keeps_http_adapter_separate_from_authority_model() {
     let dir = tempfile::tempdir().unwrap();
@@ -359,7 +359,7 @@ async fn esp_initialize_keeps_http_adapter_separate_from_authority_model() {
         json!(["elastos.capsules.catalog/v1"])
     );
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn esp_initialize_negotiates_schema_tags_without_granting_method_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -417,6 +417,7 @@ async fn esp_initialize_negotiates_schema_tags_without_granting_method_authority
     assert_eq!(payload["supported"], json!(["0"]));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn esp_generic_invocation_executes_only_explicit_runtime_bindings() {
     let dir = tempfile::tempdir().unwrap();

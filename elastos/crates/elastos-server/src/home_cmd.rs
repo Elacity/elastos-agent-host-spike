@@ -618,7 +618,13 @@ impl Drop for LoggingSuppressionGuard {
     }
 }
 
-pub(crate) async fn run(status: bool, json: bool) -> anyhow::Result<()> {
+pub(crate) async fn run(status: bool, json: bool, cli_launch_token: bool) -> anyhow::Result<()> {
+    if cli_launch_token {
+        return elastos_server::api::gateway::run_exported_home_cli_launch_grant(
+            &default_data_dir(),
+        )
+        .await;
+    }
     let snapshot = gather_snapshot().await?;
 
     if json {
@@ -1672,11 +1678,16 @@ fn run_home_cli_renderer(
     session: &HomeSession,
 ) -> anyhow::Result<()> {
     let renderer = resolve_home_cli_renderer_program(data_dir)?;
-    let status = Command::new(&renderer)
+    let prepared =
+        crate::setup::verify_installed_component_start(data_dir, HOME_CLI_CAPSULE_NAME, &renderer)?;
+    let mut command = Command::new(prepared.exec_path());
+    command
         .arg(&session.uri_root)
         .env("ELASTOS_API", api_url)
         .env("ELASTOS_TOKEN", client_token)
-        .env_remove("ELASTOS_CARRIER_PATH")
+        .env_remove("ELASTOS_CARRIER_PATH");
+    prepared.attach_std(&mut command, false)?;
+    let status = command
         .status()
         .with_context(|| format!("failed to start Home CLI renderer {}", renderer.display()))?;
     if !status.success() {
@@ -2149,7 +2160,18 @@ fn catalog_capsule_has_cli_projection(capsule: &serde_json::Value) -> bool {
 }
 
 fn action_launch(action: ActionSpec, snapshot: &HomeSnapshot) -> ActionLaunch {
-    action_launch_with_kvm(action, snapshot, elastos_crosvm::is_supported())
+    action_launch_with_kvm(action, snapshot, kvm_supported())
+}
+
+fn kvm_supported() -> bool {
+    #[cfg(unix)]
+    {
+        elastos_crosvm::is_supported()
+    }
+    #[cfg(windows)]
+    {
+        false
+    }
 }
 
 fn action_launch_with_kvm(
@@ -2183,7 +2205,7 @@ fn action_args_with_kvm(
 }
 
 fn action_command(action: ActionSpec, snapshot: &HomeSnapshot) -> String {
-    action_command_with_kvm(action, snapshot, elastos_crosvm::is_supported())
+    action_command_with_kvm(action, snapshot, kvm_supported())
 }
 
 fn action_command_with_kvm(
@@ -3418,6 +3440,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_snapshot_names_the_nickname_file_when_it_is_unreadable() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -5137,6 +5160,7 @@ pub(crate) mod tests {
         server.abort();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_status_reports_a_serving_browser_home() {
         use std::os::unix::fs::PermissionsExt;

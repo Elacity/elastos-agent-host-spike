@@ -1155,6 +1155,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn owner_registration_rejects_cross_origin_and_top_origin() {
         for fields in [
@@ -1189,6 +1190,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn registration_rejects_changed_authority_even_when_completion_caller_accepts_it() {
         for (rp_id, origin) in [
@@ -1229,6 +1231,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn registration_bound_loopback_and_https_complete_once() {
         for (rp_id, origin) in [
@@ -1260,6 +1263,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn registration_missing_and_expired_ceremonies_leave_store_empty() {
         for expired in [false, true] {
@@ -1289,6 +1293,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn guided_registration_bounds_challenges_and_requires_exact_binding() {
         let temp = tempfile::tempdir().unwrap();
@@ -1331,6 +1336,7 @@ mod tests {
             .is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn new_registration_ceremony_cannot_adopt_an_existing_credential() {
         let temp = tempfile::tempdir().unwrap();
@@ -1360,6 +1366,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn registration_validates_client_data_and_attestation_against_bound_authority() {
         for (rp_id, origin, expected) in [
@@ -1383,6 +1390,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn registration_options_require_user_verification() {
         let temp = tempfile::tempdir().unwrap();
@@ -1398,6 +1406,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn registration_options_offer_default_algorithms_without_null_attachment() {
         let temp = tempfile::tempdir().unwrap();
@@ -1472,6 +1481,7 @@ mod tests {
         assert!(key.verify(b"elastos-rs256-tampered", &signature).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn principal_registration_does_not_exclude_existing_credentials() {
         let temp = tempfile::tempdir().unwrap();
@@ -1494,6 +1504,7 @@ mod tests {
         assert!(principal_options.public_key.exclude_credentials.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn authentication_options_require_user_verification() {
         let temp = tempfile::tempdir().unwrap();
@@ -1512,6 +1523,7 @@ mod tests {
         assert_eq!(options.public_key.user_verification, "required");
     }
 
+    #[cfg(unix)]
     #[test]
     fn anonymous_authentication_options_keep_all_credential_ids_private() {
         let mut manager = manager_with_credential(0);
@@ -1543,6 +1555,7 @@ mod tests {
         assert!(registration.public_key.exclude_credentials.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn challenge_flood_keeps_reserved_pools_and_valid_completions() {
         use p256::ecdsa::signature::Signer;
@@ -1649,6 +1662,7 @@ mod tests {
             .is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn challenge_bounds_apply_to_every_begin_and_expired_slots_recover() {
         let mut manager = manager_with_credential(0);
@@ -1800,6 +1814,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn authentication_rejects_wrong_origin_and_consumes_challenge() {
         let mut manager = manager_with_credential(0);
@@ -1827,6 +1842,7 @@ mod tests {
         assert!(replay.contains("No pending authentication challenge"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn authentication_rejects_expired_challenge() {
         let mut manager = manager_with_credential(0);
@@ -1850,6 +1866,7 @@ mod tests {
         assert!(err.contains("expired"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn authentication_rejects_wrong_rp_hash() {
         let mut manager = manager_with_credential(0);
@@ -1872,6 +1889,7 @@ mod tests {
         assert!(err.contains("RP ID hash mismatch"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn authentication_rejects_missing_user_verification() {
         let mut manager = manager_with_credential(0);
@@ -1894,6 +1912,7 @@ mod tests {
         assert!(err.contains("User verification"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn authentication_rejects_counter_regression_before_signature_check() {
         let mut manager = manager_with_credential(7);

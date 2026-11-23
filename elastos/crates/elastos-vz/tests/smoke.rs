@@ -1,4 +1,5 @@
 //! Public-API smoke tests for the elastos-vz crate.
+#![cfg(unix)]
 //!
 //! These tests live in `tests/` (integration tests) so they exercise
 //! only the crate's public surface — exactly what downstream callers

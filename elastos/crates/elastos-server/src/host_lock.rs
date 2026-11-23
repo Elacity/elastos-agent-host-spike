@@ -408,6 +408,7 @@ impl BinarySnapshotReader for RealBinarySnapshotReader {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::os::fd::{FromRawFd as _, RawFd};
@@ -533,7 +534,7 @@ mod tests {
             BinarySupersessionWatch::from_reader(Path::new("/unused"), &reader).expect("watch");
         (watch, reader)
     }
-
+    #[cfg(unix)]
     #[test]
     fn second_host_lock_for_same_data_dir_is_rejected() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -547,7 +548,7 @@ mod tests {
             "unexpected error: {err}"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn model_host_lock_is_data_root_scoped() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -571,6 +572,7 @@ mod tests {
         drop(first);
     }
 
+    #[cfg(unix)]
     #[test]
     fn ended_host_lock_is_free_while_a_command_spawned_under_it_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -582,6 +584,7 @@ mod tests {
             .expect("the next host must not wait for a command spawned under the last");
     }
 
+    #[cfg(unix)]
     #[test]
     fn released_lock_reports_ok_and_is_free_while_a_command_spawned_under_it_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -592,7 +595,7 @@ mod tests {
         lock.release().expect("release reports its unlock");
         assert!(test_support::lock_is_free(&path));
     }
-
+    #[cfg(unix)]
     #[test]
     fn active_host_process_reports_live_owner() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -648,6 +651,24 @@ mod tests {
 
         let replacement = temp.path().join("replacement");
         write_file(&replacement, b"same bytes");
+        // Two writes microseconds apart can share one file-clock tick (Windows ticks
+        // are coarse), so give the replacement a clearly different mtime.
+        // On Unix keep the original mtime so only the inode and device can reveal
+        // the swap; Windows has no inode, so there the replacement is later.
+        let original_mtime = fs::metadata(&exe)
+            .expect("original metadata")
+            .modified()
+            .expect("mtime");
+        #[cfg(not(unix))]
+        let replacement_mtime = original_mtime + std::time::Duration::from_secs(2);
+        #[cfg(unix)]
+        let replacement_mtime = original_mtime;
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("open replacement")
+            .set_modified(replacement_mtime)
+            .expect("set replacement mtime");
         fs::rename(&replacement, &exe).expect("replace file");
 
         assert_eq!(watch.superseded_reason_with(&reader), None);
@@ -684,6 +705,25 @@ mod tests {
         let initial_reads = reader.digest_reads();
         let replacement = temp.path().join("replacement");
         write_file(&replacement, b"modified");
+        // Same size as the original and written within one Windows file-clock
+        // tick; Windows has no inode, so give the replacement a clearly later
+        // mtime, as a real replacement has.
+        // On Unix keep the original mtime so only the inode and device can reveal
+        // the swap; Windows has no inode, so there the replacement is later.
+        let original_mtime = fs::metadata(&exe)
+            .expect("original metadata")
+            .modified()
+            .expect("mtime");
+        #[cfg(not(unix))]
+        let replacement_mtime = original_mtime + std::time::Duration::from_secs(2);
+        #[cfg(unix)]
+        let replacement_mtime = original_mtime;
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("open replacement")
+            .set_modified(replacement_mtime)
+            .expect("set replacement mtime");
         fs::rename(&replacement, &exe).expect("replace file");
 
         let reason = watch.superseded_reason_with(&reader).expect("superseded");
