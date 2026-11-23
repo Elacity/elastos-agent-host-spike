@@ -63,7 +63,15 @@ pub fn exercise() {
     let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
     let home = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
     let fake_path = seed(&home).expect("seed only the fake host fixture");
-    let capsule = stage_probe(&home, &bytes, effect);
+    // The signed operator serves the fake file; the unsigned probe uses a source Home.
+    let client = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
+    client.guard(client.home(), client.data()).unwrap();
+    fs::write(
+        client.data().join("config.toml"),
+        include_bytes!("../../fixtures/operator-config.toml"),
+    )
+    .unwrap();
+    let capsule = stage_probe(&client, &bytes, effect);
     let mut operator = common::operator::Operator::start(&home)
         .unwrap_or_else(|reason| probe::skipped(&format!("operator prerequisite: {reason}")));
     let sampled = operator
@@ -74,7 +82,7 @@ pub fn exercise() {
             .expect("fixture shell controller attaches once");
     let running = RunningInstances::start(
         &[Launch {
-            home: &home,
+            home: &client,
             program: &runtime.binary,
             args: vec![
                 "run",
@@ -154,5 +162,6 @@ pub fn exercise() {
         no_decision,
         "manifest refusal must precede operator decisions"
     );
+    client.finish().unwrap();
     home.finish().unwrap();
 }

@@ -1150,6 +1150,11 @@ fn consumed_path(data_dir: &Path, step_up_id: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn read_strict_json<T: serde::de::DeserializeOwned>(path: &Path, label: &str) -> anyhow::Result<T> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "passkey step-up record custody is unsupported on Windows",
+    ))?;
     let metadata =
         std::fs::symlink_metadata(path).map_err(|_| anyhow::anyhow!("{label} is unavailable"))?;
     if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 {
@@ -1224,6 +1229,11 @@ where
 }
 
 fn create_staging_file(parent: &Path, record_digest: &str) -> anyhow::Result<(PathBuf, File)> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "passkey step-up private staging is unsupported on Windows",
+    ))?;
     for _ in 0..8 {
         let nonce = gateway_home_token::uuid_like_token();
         let path = parent.join(format!(
@@ -1249,6 +1259,11 @@ fn create_staging_file(parent: &Path, record_digest: &str) -> anyhow::Result<(Pa
 }
 
 fn remove_staging_and_sync(path: &Path, parent: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "passkey step-up private staging cleanup is unsupported on Windows",
+    ))?;
     std::fs::remove_file(path)?;
     sync_directory(parent)
 }
@@ -1322,6 +1337,11 @@ fn ensure_private_record_root(root: &Path) -> anyhow::Result<()> {
 }
 
 fn ensure_private_directory(path: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "passkey step-up record custody is unsupported on Windows",
+    ))?;
     let (metadata, created) = match std::fs::symlink_metadata(path) {
         Ok(metadata) => (metadata, false),
         Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -1360,7 +1380,7 @@ fn set_private_directory_permissions(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn set_private_directory_permissions(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    anyhow::bail!("passkey step-up directory custody is unsupported on Windows")
 }
 
 #[cfg(unix)]
@@ -1371,7 +1391,7 @@ fn set_private_file_permissions(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn set_private_file_permissions(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    anyhow::bail!("passkey step-up file custody is unsupported on Windows")
 }
 
 #[cfg(unix)]
@@ -1382,7 +1402,7 @@ fn set_private_open_file_permissions(file: &File) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn set_private_open_file_permissions(_file: &File) -> anyhow::Result<()> {
-    Ok(())
+    anyhow::bail!("passkey step-up file custody is unsupported on Windows")
 }
 
 #[cfg(unix)]
@@ -1393,7 +1413,7 @@ fn sync_directory(path: &Path) -> anyhow::Result<()> {
 
 #[cfg(not(unix))]
 fn sync_directory(_path: &Path) -> anyhow::Result<()> {
-    Ok(())
+    anyhow::bail!("passkey step-up directory sync is unsupported on Windows")
 }
 
 fn passkey_step_up_error_response(err: anyhow::Error) -> Response {
@@ -1570,6 +1590,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn proof_bound_step_up_ends_with_the_grant() {
         let fixture = fixture();
@@ -1613,6 +1634,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn begin_limits_authentication_to_original_passkey_and_cancel_is_one_shot() {
         let fixture = fixture();
@@ -1694,6 +1716,7 @@ mod tests {
         assert!(replay.to_string().contains("unavailable"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn complete_rejects_substituted_credential_before_webauthn() {
         let fixture = fixture();
@@ -1741,6 +1764,7 @@ mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn begin_rejects_same_credential_id_with_different_public_key() {
         let fixture = fixture();
@@ -1777,6 +1801,7 @@ mod tests {
             .contains("original passkey credential is unavailable"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn signed_step_up_is_exact_intent_and_single_use() {
         let fixture = fixture();
@@ -1904,6 +1929,7 @@ mod tests {
         assert!(replay.to_string().contains("already been used"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn prepared_effect_validates_before_reserving_and_consumes_after_reservation() {
         let fixture = fixture();
@@ -1979,6 +2005,7 @@ mod tests {
         assert!(recovered.recovered);
     }
 
+    #[cfg(unix)]
     #[test]
     fn transaction_effect_recovery_accepts_only_the_identical_consumed_step_up() {
         let fixture = fixture();
@@ -2037,6 +2064,7 @@ mod tests {
         assert!(ordinary_replay.to_string().contains("already been used"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn token_rejects_expiry_mixed_schema_and_extra_envelope_fields() {
         let fixture = fixture();
@@ -2107,6 +2135,7 @@ mod tests {
         .contains("invalid passkey step-up token payload"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn committed_record_publication_never_overwrites_a_collision() {
         let fixture = fixture();
@@ -2147,6 +2176,7 @@ mod tests {
             }));
     }
 
+    #[cfg(unix)]
     #[test]
     fn replay_is_rejected_after_consumed_state_is_reopened() {
         let fixture = fixture();
@@ -2188,6 +2218,7 @@ mod tests {
         assert!(replay.to_string().contains("already been used"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn committed_state_rejects_malformed_and_nonregular_records() {
         let malformed = fixture();
@@ -2232,6 +2263,7 @@ mod tests {
             .contains("malformed passkey step-up state"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_removes_only_exact_private_staging_names() {
         let fixture = fixture();
@@ -2309,6 +2341,7 @@ mod tests {
         assert_eq!(mode(&consumed_path), 0o600);
     }
 
+    #[cfg(unix)]
     #[test]
     fn completion_audit_binds_only_verified_context_and_request_hash() {
         let fixture = fixture();
@@ -2371,6 +2404,7 @@ mod tests {
         assert!(!event.reason.contains("request_id"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn completion_fails_closed_when_audit_cannot_be_persisted() {
         let fixture = fixture();
@@ -2401,6 +2435,7 @@ mod tests {
             .contains("auth session is not active"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn state_rejects_malformed_entries_and_both_capacity_overflows() {
         let malformed = fixture();
@@ -2491,6 +2526,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn legacy_home_token_step_up_bodies_are_rejected() {
         let fixture = fixture();

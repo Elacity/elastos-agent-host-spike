@@ -8,6 +8,7 @@
 
 use super::*;
 
+#[cfg(unix)]
 #[test]
 fn r8d_child_home_cli_context_rebuilds_with_the_passkey_persons_root() {
     let person = passkey_person(HOME_CLI_SHELL_ID);

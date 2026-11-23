@@ -2,6 +2,7 @@
 """Run journeys against this job's installed Home; save only public proof."""
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -1085,21 +1086,42 @@ def process_rows():
     return rows
 
 
+def runs_installed_provider(pid, command, installed):
+    """Identify an installed provider by its argv path or by /proc/<pid>/exe."""
+    if command.startswith(installed):
+        return True
+    try:
+        executable = os.readlink(Path("/proc") / str(pid) / "exe")
+    except OSError as error:
+        # A missing /proc entry is ENOENT or ESRCH (macOS has no /proc). EACCES/EPERM is
+        # another user's process (e.g. root on a CI runner): the installed provider runs
+        # as this job's user, so a process we may not inspect is never it.
+        if error.errno in (errno.ENOENT, errno.ESRCH, errno.EACCES, errno.EPERM):
+            return False
+        raise
+    return os.path.realpath(executable) == os.path.realpath(installed)
+
+
 def owned_processes(rows, runtime_pid, data):
     owned = {}
+    provider = str(data / "bin/model-provider")
     root_owned = rows.get(runtime_pid, {}).get("command", "").startswith(str(data / "bin/elastos"))
     for pid, row in rows.items():
         command = row["command"]
-        path_owned = command.startswith(str(data / "bin") + "/") or command.startswith(str(data / "libexec") + "/")
+        provider_process = runs_installed_provider(pid, command, provider)
+        path_owned = (provider_process
+                      or command.startswith(str(data / "bin") + "/")
+                      or command.startswith(str(data / "libexec") + "/"))
         parent, visited = pid, set()
         while parent in rows and parent not in visited and parent != runtime_pid:
             visited.add(parent)
             parent = rows[parent]["ppid"]
         if not path_owned and (not root_owned or parent != runtime_pid):
             continue
+        # The guard re-execs model-provider, so the flag stays ahead of the executable.
         role = ("runtime" if pid == runtime_pid else
                 "guard" if " --internal-local-llama-guard" in command else
-                "model_provider" if command.startswith(str(data / "bin/model-provider")) else
+                "model_provider" if provider_process else
                 "llama_server" if "/llama-server" in command else "other")
         owned[pid] = dict(row, role=role)
     return owned
@@ -1216,6 +1238,13 @@ def serve_as_seed(data):
         path.mkdir(mode=0o700, exist_ok=True)
 
 
+def sign_fixture_install(home, data):
+    """Bind this journey's final component bytes to its disposable publisher."""
+    subprocess.run([sys.executable, str(Path(__file__).with_name("holder-canary-fixture.py")),
+                    "sign-install", str(home), str(data), str(data / "bin/elastos")],
+                   check=True, timeout=60)
+
+
 def start_holder(home, data, consumer_data, consumer_environment, evidence=None):
     """Start the separate holder Home and name it as the consumer's one Carrier peer.
 
@@ -1225,6 +1254,10 @@ def start_holder(home, data, consumer_data, consumer_environment, evidence=None)
     """
     environment = dict(os.environ, HOME=str(home), XDG_DATA_HOME=str(data.parent))
     serve_as_seed(data)
+    subprocess.run([sys.executable, str(Path(__file__).with_name("holder-canary-fixture.py")),
+                    "restrict-components", str(data), str(data / "components.json"),
+                    "localhost-provider", "ipfs-provider", "kubo"], check=True, timeout=30)
+    sign_fixture_install(home, data)
     installed, number = str(data / "bin/elastos"), free_port()
     with (home / "holder-runtime.private.log").open("wb") as log:
         child = subprocess.Popen([installed, "gateway", "--addr", f"127.0.0.1:{number}"], env=environment,
@@ -1540,6 +1573,7 @@ def run(home, data, evidence, model=True, carrier=False, memory_gib=0, repair=Fa
                 config.write(f'carrier_bind_addr = "127.0.0.1:{free_port(socket.SOCK_DGRAM)}"\n')
     subprocess.run(["node", "scripts/ci-model-package.mjs", str(package_data), str(data), str(inputs), str(evidence), *(["--model-repair"] if repair else [])],
                    env=environment, check=True)
+    sign_fixture_install(home, data)
     record["fixture_package_receipt_sha256"] = digest(evidence / "package.json")
     record["fixture_components_sha256"] = digest(data / "components.json")
     cid = json.loads((evidence / "package.json").read_text())["cid"]

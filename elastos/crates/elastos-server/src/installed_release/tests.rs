@@ -3,6 +3,10 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 
 use serde_json::{json, Value};
 
+/// Signs a test install: a publisher release head and manifest over this
+/// Home's components.json. Generic (no product names), shared by tests that
+/// need a Home with a signed installed release. The runtime file is
+/// `fixture-runtime-bin` so it does not collide with a `runtime` directory.
 #[cfg(unix)]
 pub(crate) fn sign_test_install(data_dir: &Path) {
     use ed25519_dalek::SigningKey;
@@ -170,6 +174,115 @@ fn checked_provider_refuses_untrusted_release_before_spawn() {
         .verify_at_spawn()
         .unwrap_err()
         .contains("provider signed release admission refused"));
+}
+
+#[test]
+fn installed_component_start_admits_claimed_update_restart_only_with_signed_bytes() {
+    use crate::install_transaction::{InstallTransaction, ReleaseFile, RestartPlan};
+
+    struct RestoreUpdateEnv(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+    impl Drop for RestoreUpdateEnv {
+        fn drop(&mut self) {
+            for (name, value) in [
+                ("ELASTOS_UPDATE_GENERATION", self.0.as_ref()),
+                ("ELASTOS_UPDATE_RESTART", self.1.as_ref()),
+            ] {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+    let _env = RestoreUpdateEnv(
+        std::env::var_os("ELASTOS_UPDATE_GENERATION"),
+        std::env::var_os("ELASTOS_UPDATE_RESTART"),
+    );
+    std::env::remove_var("ELASTOS_UPDATE_GENERATION");
+    std::env::remove_var("ELASTOS_UPDATE_RESTART");
+
+    let (fixture, path, marker) = start_fixture();
+    fixture.publish_consumed_pair();
+    let candidate_binary = b"candidate signed runtime";
+    let components = fs::read(fixture.data.join("components.json")).unwrap();
+    let mut release: Value = serde_json::from_slice(&fixture.release).unwrap();
+    release["payload"]["version"] = json!("0.7.1");
+    release["payload"]["platforms"][crate::update::detect_release_platform()]["binary"] =
+        descriptor(candidate_binary);
+    let release = signed(release["payload"].take(), "elastos.release.v1", 71);
+    let mut head: Value = serde_json::from_slice(&fixture.head).unwrap();
+    head["payload"]["version"] = json!("0.7.1");
+    head["payload"]["latest_release_cid"] = json!(raw_cid(&release));
+    head["payload"]["release_sha256"] = json!(hex::encode(Sha256::digest(&release)));
+    let head = signed(head["payload"].take(), "elastos.release.head.v1", 71);
+    let mut source = fixture.source.clone();
+    source.installed_version = "0.7.1".into();
+    source.head_cid = raw_cid(&head);
+    let sources = serde_json::to_vec(&crate::sources::TrustedSourcesConfig {
+        schema: "elastos.trusted-sources/v1".into(),
+        default_source: source.name.clone(),
+        sources: vec![source],
+    })
+    .unwrap();
+    let writer = InstallTransaction::acquire(&fixture.data, &fixture.binary).unwrap();
+    let files = [
+        (ReleaseFile::RuntimeBinary, candidate_binary.as_slice()),
+        (ReleaseFile::Components, components.as_slice()),
+        (ReleaseFile::Sources, sources.as_slice()),
+        (ReleaseFile::ReleaseHead, head.as_slice()),
+        (ReleaseFile::ReleaseManifest, release.as_slice()),
+    ];
+    writer.prepare(&files).unwrap();
+    writer
+        .prepare_restart(RestartPlan {
+            request_id: "c".repeat(32),
+            controller_sha256: "a".repeat(64),
+            launch_plan_sha256: "b".repeat(64),
+            support_sha256: "d".repeat(64),
+            support_paths: Default::default(),
+            previous_version: "0.7.0".into(),
+            candidate_version: "0.7.1".into(),
+            previous_binary_sha256: hex::encode(Sha256::digest(fs::read(&fixture.binary).unwrap())),
+        })
+        .unwrap();
+    writer.commit_checked(|| Ok(())).unwrap();
+    let generation = writer.claim_start(false).unwrap().generation;
+    assert!(fixture.data.join(".elastos.update-journal.json").exists());
+    assert!(fixture.data.join(".elastos.update-stage").exists());
+    assert!(fixture.data.join(".elastos.update-rollback").exists());
+    assert!(start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string()
+        .contains("claimed generation"));
+    assert!(!marker.exists());
+
+    std::env::set_var("ELASTOS_UPDATE_GENERATION", &generation);
+    std::env::set_var("ELASTOS_UPDATE_RESTART", "1");
+    start_shell(&fixture, &path, &marker).unwrap();
+    assert_eq!(fs::read(&marker).unwrap(), b"ran");
+    fs::remove_file(&marker).unwrap();
+
+    let head_path = installation_release_head_path(&fixture.data);
+    let mut broken: Value = serde_json::from_slice(&head).unwrap();
+    broken["signature"] = json!("invalid signature");
+    fs::write(&head_path, serde_json::to_vec(&broken).unwrap()).unwrap();
+    assert!(start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string()
+        .contains("Installed release envelope verification failed"));
+    fs::write(&head_path, &head).unwrap();
+    fs::write(fixture.data.join("components.json"), b"changed manifest").unwrap();
+    assert!(start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string()
+        .contains("Installed component manifest verification failed"));
+    fs::write(fixture.data.join("components.json"), &components).unwrap();
+    fs::write(&path, b"#!/bin/sh\nprintf replaced > \"$1\"\n").unwrap();
+    assert!(start_shell(&fixture, &path, &marker)
+        .unwrap_err()
+        .to_string()
+        .contains("Installed component binary verification failed"));
+    assert!(!marker.exists());
 }
 
 /// A source Home: no installation/, no trusted source, a local shell script.
@@ -352,13 +465,12 @@ fn installed_component_start_refuses_changed_manifest_before_exec() {
     let mut manifest = fs::read(fixture.data.join("components.json")).unwrap();
     manifest.push(b' ');
     fs::write(fixture.data.join("components.json"), manifest).unwrap();
-    let error = start_shell(&fixture, &path, &marker)
-        .unwrap_err()
-        .to_string();
+    let error = format!("{:#}", start_shell(&fixture, &path, &marker).unwrap_err());
     assert!(
         error.contains("Installed component manifest verification failed"),
         "{error}"
     );
+    assert!(error.contains(REPAIR), "{error}");
     assert!(!marker.exists());
 }
 
@@ -377,7 +489,7 @@ fn installed_component_start_refuses_changed_binary_before_exec() {
 }
 
 #[test]
-fn installed_home_cli_executable_uses_signed_archive_receipt() {
+fn installed_home_cli_executable_uses_signed_digest_with_optional_archive_receipt() {
     let mut fixture = Fixture::new();
     let bundle = fixture.data.join("capsules/home-cli");
     let binary = bundle.join("bin/home-cli");
@@ -393,13 +505,13 @@ fn installed_home_cli_executable_uses_signed_archive_receipt() {
         }}, "capsules":{}, "profiles":{}
     })).unwrap()).unwrap();
     crate::setup::write_artifact_sha256_receipt(&bundle, &checksum).unwrap();
-    fs::write(
-        bundle.join(".elastos-executable-sha256"),
-        hex::encode(Sha256::digest(b"signed renderer")),
-    )
-    .unwrap();
+    assert!(!bundle.join(".elastos-executable-sha256").exists());
     fixture.bind_components();
     crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary).unwrap();
+    crate::setup::verify_installed_component(&fixture.data, "home-cli", &binary).unwrap();
+    fs::remove_file(bundle.join(".elastos-artifact-sha256")).unwrap();
+    crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary).unwrap();
+    crate::setup::verify_installed_component(&fixture.data, "home-cli", &binary).unwrap();
     fs::write(&binary, b"changed renderer").unwrap();
     assert!(
         crate::setup::verify_installed_component_start(&fixture.data, "home-cli", &binary)

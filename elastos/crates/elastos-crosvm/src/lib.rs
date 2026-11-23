@@ -21,22 +21,33 @@
 //! let provider = CrosvmProvider::new(config)?;
 //! ```
 
+#[cfg(not(windows))]
 mod config;
 #[cfg(target_os = "linux")]
 mod network;
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(windows)))]
 #[path = "network_stub.rs"]
 mod network;
+#[cfg(not(windows))]
 mod provider;
+#[cfg(not(windows))]
 mod proxy;
+#[cfg(not(windows))]
 mod rootfs;
+#[cfg(not(windows))]
 mod vm;
 
+#[cfg(not(windows))]
 pub use config::{CrosvmConfig, VmConfig};
+#[cfg(not(windows))]
 pub use network::NetworkConfig;
+#[cfg(not(windows))]
 pub use provider::CrosvmProvider;
+#[cfg(not(windows))]
 pub use proxy::TcpProxy;
+#[cfg(not(windows))]
 pub use rootfs::{open_private_file, RootfsManager};
+#[cfg(not(windows))]
 pub use vm::RunningVm;
 
 /// Check process access to the supported KVM API before admitting a local VM.

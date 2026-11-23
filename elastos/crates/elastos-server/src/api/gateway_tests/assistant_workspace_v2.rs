@@ -140,6 +140,7 @@ fn adopt(get: &Value, document: Value) -> Value {
     json!({"schema":"elastos.assistant.workspace/v2", "if_revision":get["revision"], "migration_revision":get["migration_revision"], "document":document})
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_v2_read_is_side_effect_free_and_captures_all_three_sources_exactly() {
     let fixture = Fixture::new();
@@ -169,6 +170,7 @@ async fn assistant_v2_read_is_side_effect_free_and_captures_all_three_sources_ex
     assert!(!fixture.location(NEW_OBJECT).1.exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_v2_adoption_retains_sources_ciphertext_and_exact_document_across_restart() {
     let fixture = Fixture::new();
@@ -233,6 +235,7 @@ async fn assistant_v2_adoption_retains_sources_ciphertext_and_exact_document_acr
     assert_bounded_eq!(fixture.read(NEW_OBJECT)["revision"], 2);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_v2_source_change_and_concurrent_adoption_conflict_without_overwrite() {
     let fixture = Fixture::new();
@@ -305,6 +308,7 @@ async fn assistant_v2_source_change_and_concurrent_adoption_conflict_without_ove
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_v2_fences_old_writers_and_preserves_legacy_agent_on_window_updates() {
     let fixture = Fixture::new();
@@ -404,6 +408,7 @@ async fn assistant_v2_fences_old_writers_and_preserves_legacy_agent_on_window_up
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_v2_rejects_wrong_capsules_other_principals_and_malformed_sources() {
     let fixture = Fixture::new();
@@ -480,6 +485,7 @@ async fn assistant_v2_rejects_wrong_capsules_other_principals_and_malformed_sour
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_v2_failed_source_reads_and_invalid_adoption_fail_without_mutation() {
     let fixture = Fixture::new();
@@ -550,6 +556,7 @@ async fn assistant_v2_failed_source_reads_and_invalid_adoption_fail_without_muta
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_v2_limits_full_retained_envelope_and_preserves_unknown_document_fields() {
     let fixture = Fixture::new();

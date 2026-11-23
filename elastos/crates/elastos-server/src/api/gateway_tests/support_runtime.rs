@@ -877,30 +877,48 @@ async fn fake_runtime_open_launch(
         Some("bafy-good") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image-viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/index.html",
         }))
         .into_response(),
         Some("bafy-odd") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image-viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/my page#1.html",
         }))
         .into_response(),
         Some("bafy-badid") => AxumJson(json!({
             "id": format!("{}zz", "ab".repeat(15)),
             "page": "image-viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/index.html",
         }))
         .into_response(),
         Some("bafy-badentry") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image-viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/../index.html",
         }))
         .into_response(),
         Some("bafy-badpage") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image/viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
+            "entrypoint": "browser/index.html",
+        }))
+        .into_response(),
+        Some("bafy-dotdotname") | Some("bafy-slashname") => AxumJson(json!({
+            "id": "ab".repeat(16),
+            "page": "image-viewer",
+            "content_name": if body["cid"] == "bafy-dotdotname" { "photo..set" } else { "photo/set" },
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/index.html",
         }))
         .into_response(),
@@ -1056,6 +1074,10 @@ async fn fake_runtime_launch_capsule(
             cid: None,
             trust_level: elastos_runtime::primitives::audit::TrustLevel::Untrusted,
             signer_did: None,
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
         },
     );
     AxumJson(json!({

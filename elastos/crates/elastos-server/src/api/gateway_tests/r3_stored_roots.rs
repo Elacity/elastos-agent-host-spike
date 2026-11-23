@@ -57,7 +57,7 @@ async fn unstored_principal_is_refused(app: &str, endpoint: &str, body: Value) {
         );
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn assistant_refuses_unstored_principal() {
     unstored_principal_is_refused(
@@ -67,7 +67,7 @@ async fn assistant_refuses_unstored_principal() {
     )
     .await;
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn workspace_v2_refuses_unstored_principal() {
     unstored_principal_is_refused(
@@ -77,7 +77,7 @@ async fn workspace_v2_refuses_unstored_principal() {
     )
     .await;
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn home_agent_refuses_unstored_principal() {
     unstored_principal_is_refused(

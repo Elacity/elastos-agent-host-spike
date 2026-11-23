@@ -2,9 +2,13 @@
 //! Updates stage all five release files; the installer leaves components to setup.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -150,6 +154,7 @@ pub(crate) struct InstallationGuard {
 }
 
 impl InstallationGuard {
+    #[cfg(unix)]
     pub(crate) fn acquire(binary_parent: &Path) -> anyhow::Result<Self> {
         if !binary_parent.is_absolute() {
             bail!("installation binary parent must be an absolute existing path");
@@ -173,6 +178,14 @@ impl InstallationGuard {
         })
     }
 
+    #[cfg(windows)]
+    pub(crate) fn acquire(_binary_parent: &Path) -> anyhow::Result<Self> {
+        Err(unsupported_windows(
+            "installation writer lock and file custody",
+        ))
+    }
+
+    #[cfg(unix)]
     pub(crate) fn require_binary(&self, binary: &Path) -> anyhow::Result<()> {
         if !binary.is_absolute()
             || binary.parent().context("installed binary parent missing")?
@@ -189,6 +202,11 @@ impl InstallationGuard {
             bail!("installed release writer lock identity changed");
         }
         Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn require_binary(&self, _binary: &Path) -> anyhow::Result<()> {
+        Err(unsupported_windows("installation writer lock identity"))
     }
 }
 
@@ -439,6 +457,7 @@ impl InstallTransaction {
         Ok(tx)
     }
 
+    #[cfg(unix)]
     fn check_metadata_custody(&self, id: ReleaseFile) -> anyhow::Result<()> {
         if self.uses_consumed_layout()
             && matches!(id, ReleaseFile::ReleaseHead | ReleaseFile::ReleaseManifest)
@@ -468,6 +487,11 @@ impl InstallTransaction {
             }
         }
         Ok(())
+    }
+
+    #[cfg(windows)]
+    fn check_metadata_custody(&self, _id: ReleaseFile) -> anyhow::Result<()> {
+        Err(unsupported_windows("installation metadata custody"))
     }
 
     pub(crate) fn binary_path(&self) -> &Path {
@@ -567,7 +591,7 @@ impl InstallTransaction {
                 }
                 Ok(_) => check_directory(&path)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
-                    fs::DirBuilder::new().mode(0o700).create(&path)?;
+                    create_private_directory(&path)?;
                     sync_directory(path.parent().unwrap())?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -785,9 +809,7 @@ impl InstallTransaction {
         let result = (|| {
             for parent in self.parents() {
                 for directory in [STAGE, ROLLBACK] {
-                    fs::DirBuilder::new()
-                        .mode(0o700)
-                        .create(parent.join(directory))?;
+                    create_private_directory(&parent.join(directory))?;
                 }
                 sync_directory(&parent)?;
             }
@@ -1399,6 +1421,7 @@ impl InstallTransaction {
         sync_directory(self.binary.parent().unwrap())
     }
 
+    #[cfg(unix)]
     fn check_disk(&self, allocations: &BTreeMap<ReleaseFile, u64>) -> anyhow::Result<()> {
         let mut volumes = BTreeMap::<u64, (u128, u128, u128)>::new();
         for (&id, &bytes) in allocations {
@@ -1417,6 +1440,13 @@ impl InstallTransaction {
             require_update_space(*total, *available, *needed)?;
         }
         Ok(())
+    }
+
+    #[cfg(windows)]
+    fn check_disk(&self, _allocations: &BTreeMap<ReleaseFile, u64>) -> anyhow::Result<()> {
+        Err(unsupported_windows(
+            "installation volume identity and capacity",
+        ))
     }
 }
 
@@ -1438,6 +1468,7 @@ fn check_installation_root(path: &Path) -> anyhow::Result<()> {
     check_directory_mode(path, 0o002)
 }
 
+#[cfg(unix)]
 fn check_directory_mode(path: &Path, refused_mode: u32) -> anyhow::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.is_dir() {
@@ -1468,6 +1499,14 @@ fn check_directory_mode(path: &Path, refused_mode: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn check_directory_mode(_path: &Path, _refused_mode: u32) -> anyhow::Result<()> {
+    Err(unsupported_windows(
+        "installation directory ownership and permissions",
+    ))
+}
+
+#[cfg(unix)]
 fn check_private_directory(path: &Path) -> anyhow::Result<()> {
     check_directory(path)?;
     if fs::symlink_metadata(path)?.mode() & 0o077 != 0 {
@@ -1476,6 +1515,14 @@ fn check_private_directory(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn check_private_directory(_path: &Path) -> anyhow::Result<()> {
+    Err(unsupported_windows(
+        "installation private directory custody",
+    ))
+}
+
+#[cfg(unix)]
 fn check_file(file: &File, path: &Path, owner_only: bool) -> anyhow::Result<()> {
     let metadata = file.metadata()?;
     if !metadata.is_file()
@@ -1501,6 +1548,14 @@ fn check_file(file: &File, path: &Path, owner_only: bool) -> anyhow::Result<()> 
     Ok(())
 }
 
+#[cfg(windows)]
+fn check_file(_file: &File, _path: &Path, _owner_only: bool) -> anyhow::Result<()> {
+    Err(unsupported_windows(
+        "installation file ownership and permissions",
+    ))
+}
+
+#[cfg(unix)]
 fn open_read(path: &Path) -> anyhow::Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -1510,6 +1565,12 @@ fn open_read(path: &Path) -> anyhow::Result<File> {
     Ok(file)
 }
 
+#[cfg(windows)]
+fn open_read(_path: &Path) -> anyhow::Result<File> {
+    Err(unsupported_windows("installation no-follow file reads"))
+}
+
+#[cfg(unix)]
 fn open_new(path: &Path, mode: u32) -> anyhow::Result<File> {
     let file = OpenOptions::new()
         .write(true)
@@ -1519,6 +1580,33 @@ fn open_new(path: &Path, mode: u32) -> anyhow::Result<File> {
         .open(path)?;
     file.set_permissions(fs::Permissions::from_mode(mode))?;
     Ok(file)
+}
+
+#[cfg(windows)]
+fn open_new(_path: &Path, _mode: u32) -> anyhow::Result<File> {
+    Err(unsupported_windows("installation private file creation"))
+}
+
+#[cfg(unix)]
+fn create_private_directory(path: &Path) -> anyhow::Result<()> {
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_private_directory(_path: &Path) -> anyhow::Result<()> {
+    Err(unsupported_windows(
+        "installation private directory creation",
+    ))
+}
+
+#[cfg(windows)]
+fn unsupported_windows(operation: &'static str) -> anyhow::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{operation} is unsupported on Windows"),
+    )
+    .into()
 }
 
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
@@ -1532,6 +1620,7 @@ fn write_new(path: &Path, bytes: &[u8], mode: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn file_state(path: &Path) -> anyhow::Result<Option<(String, u32, u64)>> {
     let mut file = match open_read(path) {
         Ok(file) => file,
@@ -1563,6 +1652,11 @@ fn file_state(path: &Path) -> anyhow::Result<Option<(String, u32, u64)>> {
         before.mode() & 0o777,
         before.len(),
     )))
+}
+
+#[cfg(windows)]
+fn file_state(_path: &Path) -> anyhow::Result<Option<(String, u32, u64)>> {
+    Err(unsupported_windows("installation file identity and mode"))
 }
 
 fn state_matches(
@@ -1717,8 +1811,19 @@ pub(crate) fn authorize_host_start_with_generation(
     generation: Option<&str>,
     process_id: u32,
 ) -> anyhow::Result<()> {
+    claimed_host_start_with_generation(data_dir, binary, generation, process_id).map(drop)
+}
+
+/// As `authorize_host_start_with_generation`; true only when it admitted a
+/// controller-claimed update restart (a journal is pending), false with no journal.
+pub(crate) fn claimed_host_start_with_generation(
+    data_dir: &Path,
+    binary: &Path,
+    generation: Option<&str>,
+    process_id: u32,
+) -> anyhow::Result<bool> {
     let Some(journal) = read_host_start_journal(data_dir, binary)? else {
-        return Ok(());
+        return Ok(false);
     };
     if journal.restart.is_none() {
         bail!("{}", pending_home_recovery_hint(&journal));
@@ -1760,7 +1865,7 @@ pub(crate) fn authorize_host_start_with_generation(
     ) {
         bail!("claimed Runtime binary changed before startup");
     }
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn refuse_pending_home_start(data_dir: &Path, binary: &Path) -> anyhow::Result<()> {
@@ -1854,6 +1959,7 @@ fn sync_directory(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn disk_space(path: &Path) -> anyhow::Result<(u128, u128)> {
     #[cfg(test)]
     if let Some(space) = tests::injected_disk_space(path) {
@@ -1872,6 +1978,11 @@ fn disk_space(path: &Path) -> anyhow::Result<(u128, u128)> {
     ))
 }
 
+#[cfg(windows)]
+fn disk_space(_path: &Path) -> anyhow::Result<(u128, u128)> {
+    Err(unsupported_windows("installation volume capacity"))
+}
+
 /// Update staging, support staging, the update controller and the installer's
 /// `install-release` writer all admit their bytes through this one check.
 fn require_update_space(total: u128, available: u128, needed: u128) -> anyhow::Result<()> {
@@ -1887,6 +1998,7 @@ pub(crate) fn require_controller_update_space(path: &Path, needed: u64) -> anyho
 
 /// Device and available bytes of the volume holding `path` or its nearest
 /// existing ancestor. A volume that reports no size has nothing available.
+#[cfg(unix)]
 pub(crate) fn volume_space(path: &Path) -> anyhow::Result<(u64, u128)> {
     let mut volume = path;
     while !volume.exists() {
@@ -1899,11 +2011,19 @@ pub(crate) fn volume_space(path: &Path) -> anyhow::Result<(u64, u128)> {
     ))
 }
 
+#[cfg(windows)]
+pub(crate) fn volume_space(_path: &Path) -> anyhow::Result<(u64, u128)> {
+    Err(unsupported_windows(
+        "installation volume identity and capacity",
+    ))
+}
+
 /// Waits between attempts to start a binary that was just written. On Linux a
 /// concurrent fork can briefly inherit the closed writer descriptor, so exec
 /// reports ETXTBSY until that child execs. Only that error is retried (<2 s).
 const TEXT_FILE_BUSY_WAITS_MS: [u64; 9] = [20, 40, 80, 160, 200, 200, 200, 200, 200];
 
+#[cfg(unix)]
 fn text_file_busy(error: &std::io::Error) -> bool {
     let busy = error.raw_os_error() == Some(libc::ETXTBSY);
     #[cfg(test)]
@@ -1913,10 +2033,29 @@ fn text_file_busy(error: &std::io::Error) -> bool {
     busy
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn text_file_busy(_error: &std::io::Error) -> bool {
+    false
+}
+
+#[cfg(all(test, unix))]
 thread_local! {
     /// ETXTBSY results observed on this thread, so tests prove the retry ran.
     pub(crate) static TEXT_FILE_BUSY_SEEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_installation_writer_before_file_creation() {
+    let root = tempfile::tempdir().unwrap();
+    let error = InstallationGuard::acquire(root.path()).err().unwrap();
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::Unsupported)
+    );
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
 /// Blocking form for synchronous callers; see [`TEXT_FILE_BUSY_WAITS_MS`].
@@ -1949,10 +2088,11 @@ pub(crate) async fn retry_text_file_busy_async<T>(
     attempt()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "install_transaction/restart_tests.rs"]
 mod restart_tests;
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

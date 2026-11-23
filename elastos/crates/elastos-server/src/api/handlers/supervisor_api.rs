@@ -175,7 +175,19 @@ pub async fn launch_capsule(
     State(state): State<SupervisorState>,
     Json(input): Json<LaunchCapsuleInput>,
 ) -> Result<Json<SupervisorOutput>, (StatusCode, String)> {
-    let principal_id = supervisor_launch_principal_from_input(state.data_dir.as_deref(), &input)?;
+    reject_supervisor_launch_authority_fields(&input)?;
+    let (_, manifest) = state
+        .supervisor
+        .load_capsule_manifest(&input.name)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("launch_name_not_walked: {err}"),
+            )
+        })?;
+    let principal_id =
+        supervisor_launch_principal_from_input(state.data_dir.as_deref(), &input, &manifest.name)?;
     let req = supervisor_launch_request(input, principal_id);
     let resp = state.supervisor.handle_request(req).await;
     if resp.status != "ok" {
@@ -209,7 +221,49 @@ const SUPERVISOR_PRINCIPAL_AUTHORITY_KEYS: &[&str] =
 fn supervisor_launch_principal_from_input(
     data_dir: Option<&Path>,
     input: &LaunchCapsuleInput,
+    walked_name: &str,
 ) -> Result<Option<crate::resource_bridge::BridgePrincipal>, (StatusCode, String)> {
+    reject_supervisor_launch_authority_fields(input)?;
+    if input.name != walked_name {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "launch_name_not_walked".to_string(),
+        ));
+    }
+
+    let Some(grant) = input
+        .launch_grant
+        .as_deref()
+        .map(str::trim)
+        .filter(|grant| !grant.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let data_dir = data_dir.ok_or((
+        StatusCode::BAD_REQUEST,
+        "principal launch grant unavailable".to_string(),
+    ))?;
+    let mut headers = HeaderMap::new();
+    let header_value = HeaderValue::from_str(grant).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "invalid launch_grant header value".to_string(),
+        )
+    })?;
+    headers.insert("x-elastos-home-token", header_value);
+    let principal = crate::api::gateway::require_internal_shell_launch_grant_principal(
+        data_dir,
+        &headers,
+        &[walked_name],
+    )
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    Ok(Some(principal))
+}
+
+fn reject_supervisor_launch_authority_fields(
+    input: &LaunchCapsuleInput,
+) -> Result<(), (StatusCode, String)> {
     let has_top_level_authority = [
         input.principal_id.as_ref().map(|_| "principal_id"),
         input.home_token.as_ref().map(|_| "home_token"),
@@ -254,34 +308,7 @@ fn supervisor_launch_principal_from_input(
         }
     }
 
-    let Some(grant) = input
-        .launch_grant
-        .as_deref()
-        .map(str::trim)
-        .filter(|grant| !grant.is_empty())
-    else {
-        return Ok(None);
-    };
-
-    let data_dir = data_dir.ok_or((
-        StatusCode::BAD_REQUEST,
-        "principal launch grant unavailable".to_string(),
-    ))?;
-    let mut headers = HeaderMap::new();
-    let header_value = HeaderValue::from_str(grant).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "invalid launch_grant header value".to_string(),
-        )
-    })?;
-    headers.insert("x-elastos-home-token", header_value);
-    let principal = crate::api::gateway::require_internal_shell_launch_grant_principal(
-        data_dir,
-        &headers,
-        &[input.name.as_str()],
-    )
-    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
-    Ok(Some(principal))
+    Ok(())
 }
 
 /// POST /api/supervisor/stop-capsule — stop a running capsule VM.
@@ -354,7 +381,7 @@ mod tests {
             "principal_id": "person:local:admin"
         }));
 
-        let err = supervisor_launch_principal_from_input(None, &input)
+        let err = supervisor_launch_principal_from_input(None, &input, &input.name)
             .expect_err("principal_id must fail");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err
@@ -371,7 +398,7 @@ mod tests {
             }
         }));
 
-        let err = supervisor_launch_principal_from_input(None, &input)
+        let err = supervisor_launch_principal_from_input(None, &input, &input.name)
             .expect_err("launch_grant must fail");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err
@@ -397,7 +424,7 @@ mod tests {
                 "config": config
             }));
 
-            let err = supervisor_launch_principal_from_input(None, &input)
+            let err = supervisor_launch_principal_from_input(None, &input, &input.name)
                 .expect_err("a reserved config key must fail");
             assert_eq!(err.0, StatusCode::BAD_REQUEST);
             assert!(
@@ -409,6 +436,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervisor_launch_accepts_signed_launch_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -421,7 +449,8 @@ mod tests {
             "launch_grant": grant
         }));
 
-        let principal = supervisor_launch_principal_from_input(Some(dir.path()), &input).unwrap();
+        let principal =
+            supervisor_launch_principal_from_input(Some(dir.path()), &input, &input.name).unwrap();
 
         assert_eq!(
             principal
@@ -431,6 +460,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn supervisor_launch_rejects_wrong_app_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -446,10 +476,22 @@ mod tests {
             "launch_grant": grant
         }));
 
-        let err = supervisor_launch_principal_from_input(Some(dir.path()), &input).unwrap_err();
+        let err = supervisor_launch_principal_from_input(Some(dir.path()), &input, &input.name)
+            .unwrap_err();
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("not authorized"));
+    }
+
+    #[test]
+    fn supervisor_launch_refuses_typed_name_before_grant_check() {
+        let input =
+            launch_input(serde_json::json!({"name":"typed-app", "launch_grant":"signed-grant"}));
+        let err = supervisor_launch_principal_from_input(None, &input, "walked-app").unwrap_err();
+        assert_eq!(
+            (err.0, err.1.as_str()),
+            (StatusCode::BAD_REQUEST, "launch_name_not_walked")
+        );
     }
 
     /// R6-1 row r4: route 3 end to end through the HTTP handler
@@ -464,6 +506,7 @@ mod tests {
     /// No part of this row depends on the agents build switch: the stored
     /// human grant path and the two refusals behave the same in both builds.
     /// The agent refusal itself is covered by its own gated row.
+    #[cfg(unix)]
     #[tokio::test]
     async fn r6_launch_capsule_reaches_the_microvm_gate_with_the_typed_person() {
         use crate::setup::{CapsuleEntry, ComponentsManifest};
@@ -796,6 +839,7 @@ mod tests {
     /// the planted handler could not change this row's literal. It is skipped
     /// by name in that build.
     #[tokio::test]
+    #[cfg(unix)]
     async fn r6_2b_an_agent_shaped_payload_launches_as_the_person_and_touches_no_agent_root() {
         let Some((home, agents)) =
             crate::agents::tests::home_with_agents_if_built(1, "bafkreia5probe")
@@ -941,29 +985,21 @@ mod tests {
             "the agent file is not rewritten"
         );
     }
-
+    #[cfg(unix)]
     /// F3.3 (r3, options §2.1; fix r1): the supervisor launch entrance takes
-    /// no raw principal authority. The control below sends a body with no
-    /// principal key through the same router and real supervisor; the
-    /// supervisor's own registry-miss error is the response, so this channel
-    /// can see a launch request reach `Supervisor::handle_request`. Each
-    /// refused body then draws only the handler's exact 400 sentence, and that
-    /// chain never appears: the refusal returns before the supervisor is
-    /// asked. The row claims that response, not the absence of every launch
-    /// side effect, which this state cannot observe.
+    /// no raw principal authority. A plain name without an installed manifest
+    /// gets the named walk refusal. Raw authority is refused before the walk.
     #[tokio::test]
     async fn a_supervisor_launch_takes_no_raw_principal_authority() {
-        // Control first: same name, router and temp-directory shape as the
-        // refused bodies, with no authority key. Only a reach can produce this
-        // exact supervisor answer.
+        // Control first: a name the Runtime did not find in its registry.
         let dir = tempfile::tempdir().unwrap();
         let app = launch_router(test_state(dir.path()));
         let (status, text) = post_launch(app, serde_json::json!({"name": "chat"})).await;
         assert_eq!(
-            text, "launch_capsule failed: capsule 'chat' not in registry",
-            "the control body reaches the supervisor"
+            text, "launch_name_not_walked: capsule 'chat' not in registry",
+            "the control body reaches the manifest walk"
         );
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{text}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
 
         for (body, sentence) in [
             (
@@ -981,8 +1017,8 @@ mod tests {
             assert_eq!(text, sentence, "the entrance's full refusal sentence");
             assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
             assert!(
-                !text.contains("launch_capsule failed:"),
-                "the refusal returns before the supervisor's answer: {text}"
+                !text.contains("launch_name_not_walked"),
+                "raw authority is refused before the manifest walk: {text}"
             );
         }
     }
@@ -994,6 +1030,7 @@ mod tests {
     /// (`supervisor_launch_principal_from_input`), as its sibling row does.
     /// (ii) A token minted for another capsule is refused through the real
     /// HTTP handler.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_supervisor_launch_principal_comes_from_a_person_grant() {
         use elastos_runtime::auth::AuthSessionGrantV1;
@@ -1026,7 +1063,8 @@ mod tests {
             "name": "chat",
             "launch_grant": token_for("chat")
         }));
-        let principal = supervisor_launch_principal_from_input(Some(data_dir), &input).unwrap();
+        let principal =
+            supervisor_launch_principal_from_input(Some(data_dir), &input, &input.name).unwrap();
         assert_eq!(
             principal
                 .as_ref()
@@ -1035,6 +1073,14 @@ mod tests {
             "the principal is the stored person's id"
         );
 
+        let wrong =
+            launch_input(serde_json::json!({"name":"chat", "launch_grant":token_for("documents")}));
+        let wrong_grant =
+            supervisor_launch_principal_from_input(Some(data_dir), &wrong, "chat").unwrap_err();
+        assert_eq!(
+            wrong_grant.1,
+            "home launch token is not authorized for this provider"
+        );
         let app = launch_router(test_state(data_dir));
         let (status, text) = post_launch(
             app,
@@ -1043,8 +1089,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
         assert_eq!(
-            text, "home launch token is not authorized for this provider",
-            "the capsule-name binding refusal"
+            text, "launch_name_not_walked: capsule 'chat' not in registry",
+            "the route first requires a walked capsule"
         );
     }
 
@@ -1092,6 +1138,7 @@ mod tests {
 
     /// Stage one verified host artifact at <data_dir>/bin/<name> and return
     /// the on-disk platform entry that pins its bytes.
+    #[cfg(unix)]
     fn f35_stage_component(data_dir: &Path, name: &str, source: &Path) -> serde_json::Value {
         let dest = data_dir.join("bin").join(name);
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -1195,6 +1242,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn f35_fixture() -> F35Fixture {
         use crate::setup::{CapsuleEntry, ComponentsManifest};
         let crosvm = f35_host_file("ELASTOS_F35_CROSVM");
@@ -1342,6 +1390,7 @@ mod tests {
     /// find them.
     #[tokio::test]
     #[ignore = "F3.5 needs /dev/kvm; run the KVM receipt with --ignored"]
+    #[cfg(unix)]
     async fn two_people_launching_a_vm_get_two_bridge_principals() {
         // Independent literals, derived outside Rust:
         // printf %s '<id>' | shasum -a 256 | cut -c1-24

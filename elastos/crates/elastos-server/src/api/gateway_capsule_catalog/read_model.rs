@@ -22,6 +22,18 @@ pub(in crate::api::gateway) fn capsule_catalog_summary_for(
     data_dir: &std::path::Path,
     platform: &str,
 ) -> CapsuleCatalogResponse {
+    capsule_catalog_summary_for_with_host_check(
+        data_dir,
+        platform,
+        crate::setup::linux_host_setup_message,
+    )
+}
+
+pub(super) fn capsule_catalog_summary_for_with_host_check(
+    data_dir: &std::path::Path,
+    platform: &str,
+    host_check: impl Fn(&std::path::Path, &str) -> Option<&'static str>,
+) -> CapsuleCatalogResponse {
     let launch_targets = home_launch_targets(data_dir)
         .into_iter()
         .map(|target| (target.target.clone(), target))
@@ -53,7 +65,7 @@ pub(in crate::api::gateway) fn capsule_catalog_summary_for(
                 &accepted_content_by_viewer,
             );
             if summary.name == "browser" {
-                if let Some(message) = crate::setup::linux_host_setup_message(data_dir, platform) {
+                if let Some(message) = host_check(data_dir, platform) {
                     summary.description = message.to_string();
                 }
             }
@@ -743,6 +755,7 @@ fn load_capsule_components(data_dir: &std::path::Path) -> BTreeMap<String, Capsu
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     #[test]
     fn linux_marketplace_lists_browser_with_its_opt_in_command() {
         let root = tempfile::tempdir().unwrap();

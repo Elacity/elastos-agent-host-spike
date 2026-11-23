@@ -86,7 +86,12 @@ pub fn acquire_host_process_lock(
     if !matches!(role, "update" | "update-recovery") {
         authorize_host_process_start(data_dir)?;
     }
-    acquire_host_process_lock_inner(data_dir, role, addr)
+    let lock = acquire_host_process_lock_inner(data_dir, role, addr)?;
+    #[cfg(target_os = "macos")]
+    if let Err(reason) = elastos_runtime::provider::recover_verified_copies(data_dir) {
+        tracing::warn!("provider copy recovery skipped: {reason}");
+    }
+    Ok(lock)
 }
 
 pub(crate) fn acquire_principal_root_update_lock(
@@ -408,6 +413,7 @@ impl BinarySnapshotReader for RealBinarySnapshotReader {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::os::fd::{FromRawFd as _, RawFd};
@@ -533,7 +539,7 @@ mod tests {
             BinarySupersessionWatch::from_reader(Path::new("/unused"), &reader).expect("watch");
         (watch, reader)
     }
-
+    #[cfg(unix)]
     #[test]
     fn second_host_lock_for_same_data_dir_is_rejected() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -548,6 +554,101 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_provider_copy_survives_host_recovery_then_is_reaped() {
+        use sha2::Digest as _;
+        use std::io::Read as _;
+        use std::os::unix::process::ExitStatusExt as _;
+
+        const CHILD_HOME: &str = "ELASTOS_TEST_LIVE_COPY_HOME";
+        if let Some(home) = std::env::var_os(CHILD_HOME) {
+            let home = PathBuf::from(home);
+            let binary = home.join("provider");
+            let checksum = format!(
+                "sha256:{:x}",
+                sha2::Sha256::digest(fs::read(&binary).unwrap())
+            );
+            let _copy = elastos_runtime::provider::CheckedExecutable::pinned(&binary, &checksum)
+                .unwrap()
+                .with_home_data_dir(&home)
+                .verify_at_spawn()
+                .unwrap();
+            let copy_dir = fs::read_dir(home.join("provider-copies"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            fs::write(home.join("copy-ready"), copy_dir.to_str().unwrap()).unwrap();
+            std::io::stdin().read_exact(&mut [0u8]).unwrap();
+            return;
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        fs::write(home.path().join("provider"), b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host_lock::tests::live_provider_copy_survives_host_recovery_then_is_reaped",
+            ])
+            .env(CHILD_HOME, home.path())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let ready = home.path().join("copy-ready");
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "copy owner exited early"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "copy owner did not become ready");
+        let root = home.path().join("provider-copies");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let copy = PathBuf::from(fs::read_to_string(&ready).unwrap());
+        let lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
+        assert!(copy.exists(), "the live provider owns this copy");
+        drop(lock);
+        child.kill().unwrap();
+        assert_eq!(child.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert!(copy.exists(), "SIGKILL leaves the copy for recovery");
+        let _lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn provider_copy_recovery_problem_does_not_abort_host_start() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("provider-copies");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(elastos_runtime::provider::recover_verified_copies(home.path()).is_err());
+        let lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
+        drop(lock);
+
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let stale = root.join("elastos-provider-ABC123");
+        fs::create_dir(&stale).unwrap();
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(stale.join(".copy-live.lock"), b"").unwrap();
+        fs::set_permissions(
+            stale.join(".copy-live.lock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let _lock = acquire_host_process_lock(home.path(), "serve", "fixture").unwrap();
+        assert!(!stale.exists(), "host start also performs recovery");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn model_host_lock_is_data_root_scoped() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -571,6 +672,7 @@ mod tests {
         drop(first);
     }
 
+    #[cfg(unix)]
     #[test]
     fn ended_host_lock_is_free_while_a_command_spawned_under_it_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -582,6 +684,7 @@ mod tests {
             .expect("the next host must not wait for a command spawned under the last");
     }
 
+    #[cfg(unix)]
     #[test]
     fn released_lock_reports_ok_and_is_free_while_a_command_spawned_under_it_runs() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -592,7 +695,7 @@ mod tests {
         lock.release().expect("release reports its unlock");
         assert!(test_support::lock_is_free(&path));
     }
-
+    #[cfg(unix)]
     #[test]
     fn active_host_process_reports_live_owner() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -648,6 +751,24 @@ mod tests {
 
         let replacement = temp.path().join("replacement");
         write_file(&replacement, b"same bytes");
+        // Two writes microseconds apart can share one file-clock tick (Windows ticks
+        // are coarse), so give the replacement a clearly different mtime.
+        // On Unix keep the original mtime so only the inode and device can reveal
+        // the swap; Windows has no inode, so there the replacement is later.
+        let original_mtime = fs::metadata(&exe)
+            .expect("original metadata")
+            .modified()
+            .expect("mtime");
+        #[cfg(not(unix))]
+        let replacement_mtime = original_mtime + std::time::Duration::from_secs(2);
+        #[cfg(unix)]
+        let replacement_mtime = original_mtime;
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("open replacement")
+            .set_modified(replacement_mtime)
+            .expect("set replacement mtime");
         fs::rename(&replacement, &exe).expect("replace file");
 
         assert_eq!(watch.superseded_reason_with(&reader), None);
@@ -684,6 +805,25 @@ mod tests {
         let initial_reads = reader.digest_reads();
         let replacement = temp.path().join("replacement");
         write_file(&replacement, b"modified");
+        // Same size as the original and written within one Windows file-clock
+        // tick; Windows has no inode, so give the replacement a clearly later
+        // mtime, as a real replacement has.
+        // On Unix keep the original mtime so only the inode and device can reveal
+        // the swap; Windows has no inode, so there the replacement is later.
+        let original_mtime = fs::metadata(&exe)
+            .expect("original metadata")
+            .modified()
+            .expect("mtime");
+        #[cfg(not(unix))]
+        let replacement_mtime = original_mtime + std::time::Duration::from_secs(2);
+        #[cfg(unix)]
+        let replacement_mtime = original_mtime;
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("open replacement")
+            .set_modified(replacement_mtime)
+            .expect("set replacement mtime");
         fs::rename(&replacement, &exe).expect("replace file");
 
         let reason = watch.superseded_reason_with(&reader).expect("superseded");

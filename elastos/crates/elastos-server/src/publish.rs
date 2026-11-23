@@ -157,6 +157,11 @@ struct ReleaseHeadPayload {
 }
 
 pub(crate) async fn run_publish_release(mut options: PublishReleaseOptions) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "release publication custody is unsupported on Windows",
+    ))?;
     let workspace_root = workspace_root();
     validate_prepare_options(&options)?;
     validate_platform_input_options(&options)?;
@@ -804,6 +809,7 @@ struct StorageObservation {
     free: u64,
 }
 
+#[cfg(unix)]
 fn storage_observation(path: &Path) -> anyhow::Result<StorageObservation> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -838,6 +844,15 @@ fn storage_observation(path: &Path) -> anyhow::Result<StorageObservation> {
         capacity,
         free,
     })
+}
+
+#[cfg(windows)]
+fn storage_observation(_path: &Path) -> anyhow::Result<StorageObservation> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "publication volume custody is unsupported on Windows",
+    )
+    .into())
 }
 
 fn require_selected_repository(value: &serde_json::Value, repo: &Path) -> anyhow::Result<()> {
@@ -939,6 +954,11 @@ fn release_ledger_path(data_dir: &Path) -> PathBuf {
 }
 
 fn load_publish_state(path: &Path) -> anyhow::Result<PublishState> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "publication state custody is unsupported on Windows",
+    ))?;
     use std::io::Read;
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -1637,7 +1657,7 @@ fn is_executable_file(path: &Path) -> bool {
     }
     #[cfg(not(unix))]
     {
-        true
+        false
     }
 }
 

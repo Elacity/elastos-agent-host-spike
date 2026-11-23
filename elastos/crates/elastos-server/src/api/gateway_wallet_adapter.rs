@@ -288,6 +288,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn wallet_v2_authority_projection_preserves_verified_actor_and_launch_id() {
         let data_dir = tempfile::tempdir().unwrap();

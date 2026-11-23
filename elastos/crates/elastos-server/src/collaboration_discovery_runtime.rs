@@ -2474,6 +2474,14 @@ impl CollaborationDiscoveryService {
                     continue;
                 }
             };
+            if let Err(err) = self
+                .registry
+                .remember_carrier_peer_ticket(&peer_did, &peer.connect_ticket)
+                .await
+            {
+                errors.push(err.to_string());
+                continue;
+            }
             match self
                 .registry
                 .invoke_provider(ProviderInvocation {
@@ -2489,10 +2497,10 @@ impl CollaborationDiscoveryService {
                     range: None,
                     progress: None,
                     transport: ProviderInvocationTransport::Carrier(
-                        ProviderCarrierRoute::ConnectTicket {
-                            connect_ticket: peer.connect_ticket.clone(),
-                            peer_did: Some(peer_did),
+                        ProviderCarrierRoute::PeerDid {
+                            peer_did,
                             timeout_ms: Some(DISCOVERY_PROVIDER_TIMEOUT_MS),
+                            reply_wait_ms: None,
                         },
                     ),
                 })
@@ -4461,6 +4469,7 @@ fn require_discovery_provider_success(
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

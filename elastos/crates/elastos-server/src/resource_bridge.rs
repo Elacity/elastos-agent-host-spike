@@ -29,7 +29,9 @@ use elastos_model_contract::{
 };
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::io::BufReader;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use elastos_runtime::auth::RuntimeAuditEventV1;
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityToken, ResourceId};
@@ -607,6 +609,7 @@ pub(crate) struct ModelDispatchBudget {
 /// Must be called BEFORE starting the VM so the socket exists when crosvm launches.
 /// Reads `RequestEnvelope` JSON lines, dispatches to providers,
 /// writes `ResponseEnvelope` JSON lines back.
+#[cfg(unix)]
 pub async fn spawn_resource_bridge(
     socket_path: &Path,
     _provider_registry: Arc<ProviderRegistry>,
@@ -692,6 +695,20 @@ pub async fn spawn_resource_bridge(
     });
 
     Ok(())
+}
+
+#[cfg(windows)]
+pub async fn spawn_resource_bridge(
+    _socket_path: &Path,
+    _provider_registry: Arc<ProviderRegistry>,
+    _session_token: String,
+    _bridge_ctx: Option<BridgeContext>,
+) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "microVM resource bridge is unsupported on Windows",
+    )
+    .into())
 }
 
 /// Parse an action string into a capability Action.
@@ -2768,6 +2785,7 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn s5_p2_object_bridge_binds_every_operation_to_launched_x() {
         if crate::agents::require_build().is_err() {
@@ -2959,6 +2977,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn manifest_bound_users_self_matches_active_principal_root_only_with_context() {
         let principal_id = "person:local:abc123";
@@ -3883,6 +3902,7 @@ pub(crate) mod tests {
     /// The attached bridge's refusal of a launch name is audited as its other
     /// refusals are: a "requested" record and a "completed / denied" one,
     /// under one id that the answer carries. A read and a write alike.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_attached_bridge_audits_its_refusal_of_a_launch_name() {
         let temp = tempfile::tempdir().unwrap();
@@ -4109,7 +4129,7 @@ pub(crate) mod tests {
                     .strip_prefix(crates)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 found.push((name, count));
             }
         }
@@ -4335,7 +4355,7 @@ pub(crate) mod tests {
                     .strip_prefix(crates)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 found.push((name, count));
             }
         }
@@ -4375,10 +4395,10 @@ pub(crate) mod tests {
             expected_counts(&[("elastos-server/src/agent_admission.rs", 1)]),
             "AdmissionContext construction literal"
         );
-        // The one production caller of each constructor.
+        // The production callers of each constructor.
         assert_eq!(
             production_counts("BridgePrincipal::from_grant("),
-            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 2)]),
             "BridgePrincipal::from_grant callers"
         );
         assert_eq!(
@@ -4386,12 +4406,13 @@ pub(crate) mod tests {
             expected_counts(&[("elastos-server/src/runtime.rs", 1)]),
             "BridgePrincipal::from_admission callers"
         );
-        // The accessors: one read per agent refusal, one consuming conversion
-        // per route boundary. Definitions are excluded.
+        // The accessors: routes read the typed launcher for admission and
+        // audit; Runtime and supervisor each read it at their own boundary.
+        // Definitions are excluded.
         assert_eq!(
             production_counts("principal_str"),
             expected_counts(&[
-                ("elastos-server/src/api/routes.rs", 1),
+                ("elastos-server/src/api/routes.rs", 2),
                 ("elastos-server/src/runtime.rs", 1),
                 ("elastos-server/src/supervisor.rs", 1),
             ]),
@@ -4419,7 +4440,7 @@ pub(crate) mod tests {
 
     /// G1-r4 (r4 §3, kept by r6 §0): the production `SupervisorRequest`
     /// variant set and `LaunchCapsule`'s field set are exact literals read
-    /// from supervisor.rs's production text, and every production site that
+    /// from the shared supervisor protocol's production text, and every production site that
     /// builds a bridge principal or hands one to a bridge is pinned as a
     /// `(file, count)` list with the same walker as the row above. A new
     /// variant, a new field or a new caller turns this row red and forces a
@@ -4428,7 +4449,7 @@ pub(crate) mod tests {
     /// `elastos/crates` only.
     #[test]
     fn r6_g1_supervisor_variants_and_principal_sites_hold_tree_wide() {
-        let supervisor = production_text(include_str!("supervisor.rs"));
+        let supervisor = production_text(include_str!("supervisor_protocol.rs"));
         let body = {
             let rest = &supervisor[supervisor.find("pub enum SupervisorRequest {").unwrap()..];
             &rest[..rest.find("\n}\n").expect("the enum closes at column 0")]
@@ -4505,6 +4526,10 @@ pub(crate) mod tests {
             ("start_loaded", &[("elastos-server/src/runtime.rs", 2)][..]),
             (
                 "start_local_admitted",
+                &[("elastos-server/src/runtime.rs", 1)][..],
+            ),
+            (
+                "start_agent_once",
                 &[("elastos-server/src/api/routes.rs", 1)][..],
             ),
             ("run_local_admitted", &[][..]),
@@ -4567,7 +4592,8 @@ pub(crate) mod tests {
             expected_counts(&[
                 ("elastos-server/src/api/handlers/supervisor_api.rs", 7),
                 ("elastos-server/src/gateway_cmd.rs", 1),
-                ("elastos-server/src/supervisor.rs", 7),
+                ("elastos-server/src/supervisor.rs", 6),
+                ("elastos-server/src/supervisor_protocol.rs", 1),
             ]),
             "guest_payload uses"
         );
@@ -4632,8 +4658,12 @@ pub(crate) mod tests {
             let text = production_text(&std::fs::read_to_string(&file).unwrap());
             let calls = text.matches(".resource_authority_bounds()").count();
             if calls > 0 {
-                let name = file.strip_prefix(crates).unwrap().to_string_lossy();
-                callers.push((name.into_owned(), calls));
+                let name = file
+                    .strip_prefix(crates)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                callers.push((name, calls));
             }
         }
         callers.sort();
@@ -4653,6 +4683,7 @@ pub(crate) mod tests {
         temp
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_principal_root_comes_only_from_its_stored_record() {
         let id = "person:local:stored-root";
@@ -4676,6 +4707,7 @@ pub(crate) mod tests {
     }
 
     /// A5-S3a-2: a stored Agent owns UsersAI/self only; a Human owns no UsersAI root.
+    #[cfg(unix)]
     #[test]
     fn a_stored_agent_is_scoped_to_its_own_usersai_root() {
         let id = crate::auth::valid_agent::ID;
@@ -4704,7 +4736,7 @@ pub(crate) mod tests {
             scope_current_user_alias("localhost://UsersAI/self", Some(h), Some(human.path()));
         assert_eq!(refused.unwrap_err(), not_area("UsersAI"));
     }
-
+    #[cfg(unix)]
     /// F-S3-protected: the protected write path takes the stored Agent root,
     /// so the same id's Users root is refused with a data dir present.
     #[test]
@@ -4751,6 +4783,7 @@ pub(crate) mod tests {
 
     /// Codex FOLLOWUP (b) on #1442: the protected path refuses a missing
     /// record and an auth state that does not load.
+    #[cfg(unix)]
     #[test]
     fn the_protected_path_refuses_a_missing_record_and_a_malformed_state() {
         let id = "person:local:protected-lookup";
@@ -4769,7 +4802,7 @@ pub(crate) mod tests {
         std::fs::write(crate::auth::auth_state_path(temp.path()).unwrap(), b"{").unwrap();
         assert!(refused(&ctx).contains("failed to parse"));
     }
-
+    #[cfg(unix)]
     /// F-S3b-area: UsersAI paths take the protected path. A stored Agent is
     /// refused a foreign UsersAI root there, and the remote bridge refuses
     /// UsersAI root storage instead of dispatching it.
@@ -5003,6 +5036,7 @@ pub(crate) mod tests {
 
     /// A read grant calling localhost write is `capability_denied` before the
     /// file is created or changed. The manifest ceiling allows the call.
+    #[cfg(unix)]
     #[tokio::test]
     async fn b4r_read_grant_on_localhost_write_is_refused_before_effect() {
         let principal_id = "person:local:b4r-read-on-write";
@@ -5086,6 +5120,7 @@ pub(crate) mod tests {
     }
 
     /// A write grant calling localhost read is `capability_denied`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn b4r_write_grant_on_localhost_read_is_refused() {
         let (temp, ctx, root) = b4r_documents("person:local:b4r-write-on-read");
@@ -5147,6 +5182,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn resource_invoke_dispatch_scopes_current_user_alias_with_principal() {
         let principal_id = "person:local:test-principal";
@@ -5175,6 +5211,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn resource_invoke_dispatch_allows_active_explicit_principal_root() {
         let principal_id = "person:local:test-principal";
@@ -5196,6 +5233,7 @@ pub(crate) mod tests {
         assert_eq!(dispatch.resource, path);
     }
 
+    #[cfg(unix)]
     #[test]
     fn resource_invoke_dispatch_rejects_foreign_principal_root() {
         let active_principal_id = "person:local:active";
@@ -5708,6 +5746,7 @@ pub(crate) mod tests {
         assert_eq!(response["response"]["code"], "generic_wallet_denied");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn handle_remote_request_rejects_users_root_storage_without_protected_bridge() {
         let principal_id = "person:local:active";
@@ -5745,6 +5784,7 @@ pub(crate) mod tests {
     /// before dispatch as `invalid_resource_invoke`; with `Some(person)` the
     /// protected-bridge refusal names the principal context. Neither reads nor
     /// writes real data placed under the person's root.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_attached_bridge_serves_no_principal_root() {
         let principal_id = "person:local:active";
@@ -5814,7 +5854,7 @@ pub(crate) mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     /// S5-rem-f43-agent-id (rulings v4 R-B/R-C, route 4 fence part (b)): the
     /// same direct drive of the attached bridge entry as F4.3, run once with a
     /// stored agent's id. An agent's own root area takes the protected path, so
@@ -6085,6 +6125,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn handle_request_denies_foreign_user_root_before_pending() {
         let mut ctx = bridge_context();
@@ -6123,6 +6164,7 @@ pub(crate) mod tests {
     /// the ask itself grants nothing, and when the shell says no the answer
     /// is that no. The control is the same ask with write listed: the same
     /// write goes through.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_bridge_holds_a_capsule_with_asks_to_their_actions() {
         use elastos_common::AskAction;
@@ -6216,6 +6258,7 @@ pub(crate) mod tests {
         assert!(stored.exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn handle_request_uses_protected_principal_root_object_for_users_self_writes() {
         let temp = tempfile::tempdir().unwrap();
@@ -6336,6 +6379,7 @@ pub(crate) mod tests {
         rooted_localhost_fs_path(temp.path(), object_uri).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_journal_write_without_a_grant_never_reaches_storage() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6352,6 +6396,7 @@ pub(crate) mod tests {
         assert!(!journal_path(&temp, &object_uri).exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_read_grant_or_another_tasks_grant_cannot_write_the_journal() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6377,6 +6422,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn another_principals_journal_is_refused_before_the_grant_check() {
         let (temp, ctx, _object_uri) = journal_context("person:local:journal-owner");
@@ -6399,6 +6445,7 @@ pub(crate) mod tests {
         assert!(!journal_path(&temp, &foreign).exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_granted_journal_write_is_stored_encrypted_under_the_launching_person() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6417,6 +6464,7 @@ pub(crate) mod tests {
         assert!(!stored.contains("EAHJ journal v1"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_oversized_journal_write_is_refused_by_the_frame_cap() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6435,6 +6483,7 @@ pub(crate) mod tests {
 
     /// The protected write accepts `create_only` and `if_revision`, writes
     /// through write_principal_root_object_if_revision, and returns the new revision.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_stale_journal_revision_is_refused_and_the_stored_journal_is_kept() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6489,6 +6538,7 @@ pub(crate) mod tests {
 
     /// A write under .AppData/Agents/ must carry create_only or if_revision, so a
     /// journal is never overwritten blind.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unconditional_journal_write_is_refused() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6531,6 +6581,7 @@ pub(crate) mod tests {
         handle_request(&line, &Some(ctx.clone())).await.unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_append_to_a_journal_is_refused() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6569,6 +6620,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_journal_on_a_root_without_protection_is_refused() {
         let temp = tempfile::tempdir().unwrap();
@@ -6624,6 +6676,7 @@ pub(crate) mod tests {
         "localhost://Users/self/.AppData/./Agents/demo-agent/tasks/task-1/journal",
     ];
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_journal_path_with_empty_or_dot_segments_is_refused() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6676,6 +6729,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_odd_journal_path_on_a_root_without_protection_never_reaches_the_provider() {
         let temp = tempfile::tempdir().unwrap();
@@ -6711,6 +6765,7 @@ pub(crate) mod tests {
         assert!(provider.requests().await.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_precondition_on_a_root_without_protection_is_refused() {
         let temp = tempfile::tempdir().unwrap();
@@ -6856,6 +6911,7 @@ pub(crate) mod tests {
         assert!(!absent_or_same_file(&copy, &journal));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_folded_or_misspelled_agents_path_is_refused_before_storage() {
         let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6914,6 +6970,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn only_read_and_write_are_allowed_under_agents() {
         let (temp, mut ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -6990,6 +7047,7 @@ pub(crate) mod tests {
     /// `/api/provider/:scheme/:op` over HTTP. The Agents rule runs before any
     /// HTTP call: the API URL here has nothing listening, so a request that got
     /// past the rule would fail to connect instead of returning a refusal.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_attached_bridge_applies_the_agents_rule_before_http() {
         let manifest = any_action(vec!["localhost://Users/self/*".to_string()]);
@@ -7082,6 +7140,7 @@ pub(crate) mod tests {
     /// "completed / denied" record with the same id, as local dispatch does,
     /// and the response names that id. Nothing listens on the API URL, so a
     /// request that got past a refusal would fail to connect.
+    #[cfg(unix)]
     #[tokio::test]
     async fn attached_bridge_refusals_are_audited() {
         let temp = stored_human_dir("person:local:journal-owner");
@@ -7144,6 +7203,7 @@ pub(crate) mod tests {
 
     /// A bad API URL is found after the "requested" record and leaves a
     /// "completed / error" record; other request types still fail at once.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bad_api_url_is_audited_as_an_error() {
         let temp = tempfile::tempdir().unwrap();
@@ -7189,6 +7249,7 @@ pub(crate) mod tests {
 
     /// A provider reply that is not JSON (here a plain-text 403) is an error
     /// for the guest and still leaves a "completed / error" record.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_non_json_provider_reply_is_audited_as_an_error() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -7262,6 +7323,7 @@ pub(crate) mod tests {
 
     /// Inside the Agents area only read and write may be asked for. Anything
     /// else is refused at once, on both handlers, without a pending request.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_forbidden_agents_capability_request_is_refused_at_once() {
         let (_temp, mut ctx, _) = journal_context("person:local:journal-owner");
@@ -7339,6 +7401,7 @@ pub(crate) mod tests {
         assert_eq!(local["response"]["code"], "invalid_localhost_path");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_missing_journal_read_is_audited_as_an_error() {
         let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -7442,6 +7505,7 @@ pub(crate) mod tests {
     /// The shipped Agent Host asks for two journal grants and one plan submit
     /// grant. These grants cannot delete `.AppData`, the root, or the journal.
     #[tokio::test]
+    #[cfg(unix)]
     async fn the_agent_host_manifest_and_grants_cannot_delete_appdata_or_the_root() {
         let manifest: elastos_common::CapsuleManifest =
             serde_json::from_str(include_str!("../../../../examples/agent-host/capsule.json"))
@@ -7558,6 +7622,7 @@ pub(crate) mod tests {
         assert!(temp.path().join("UsersAI").is_dir());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_revision_conflict_is_audited_as_a_conflict() {
         let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -7603,6 +7668,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn preconditions_are_optional_outside_agents_and_honoured_when_sent() {
         let (_temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
@@ -7652,6 +7718,7 @@ pub(crate) mod tests {
         assert_eq!(current["response"]["result"]["status"], "ok");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_malformed_precondition_is_refused_before_storage() {
         let (temp, mut ctx, _object_uri) = journal_context("person:local:journal-owner");
@@ -7676,6 +7743,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_read_returns_the_revision_the_next_write_needs() {
         let (_temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -7716,6 +7784,7 @@ pub(crate) mod tests {
     /// MAX_RESOURCE_FRAME_BYTES even when every byte is 0xFF.
     const JOURNAL_CAP_BYTES: usize = 192 * 1024;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_worst_case_journal_at_the_cap_fits_through_the_bridge() {
         let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
@@ -7808,6 +7877,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn resource_invoke_refuses_bare_user_area_roots_before_provider() {
         let data = stored_human_dir("person:local:active");
@@ -8267,6 +8337,7 @@ pub(crate) mod tests {
     /// A Home with agents on and one stored agent, and that agent's bridge:
     /// (home, bridge, provider, requesting agent, owner). `None` in a build
     /// without agents.
+    #[cfg(unix)]
     async fn submit_agent_plan_context() -> Option<(
         crate::agents::tests::Home,
         BridgeContext,
@@ -8378,6 +8449,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_submit_records_one_bound_pending_plan_and_no_effect() {
         let Some((home, ctx, provider, requester, owner)) = submit_agent_plan_context().await
         else {
@@ -8468,6 +8540,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     #[ignore = "reads Agent Host preview bytes; run examples/agent-host/run-e2e.sh"]
+    #[cfg(unix)]
     async fn a15r_june_plan_stores_and_shows_the_document_step_bytes() {
         let Some((home, ctx, provider, _requester, owner)) = submit_agent_plan_context().await
         else {
@@ -8527,6 +8600,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_submit_requires_the_right_agent_identity_and_stored_owner() {
         let Some((home, ctx, _provider, requester, owner)) = submit_agent_plan_context().await
         else {
@@ -8610,6 +8684,7 @@ pub(crate) mod tests {
     // The Inbox listing that Inbox, Home's summary and Home events read: the
     // owner's holds the plan's card, and the agent's own holds none.
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_plan_card_reaches_owner_not_agent() {
         let Some((home, ctx, _provider, requester, owner)) = submit_agent_plan_context().await
         else {
@@ -8661,6 +8736,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_submit_refused_while_agents_are_off() {
         let Some((home, ctx, provider, _requester, _owner)) = submit_agent_plan_context().await
         else {
@@ -8672,6 +8748,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn a15r_bus_submit_refused_for_a_retired_agent() {
         let Some((home, ctx, provider, requester, _owner)) = submit_agent_plan_context().await
         else {
@@ -8681,7 +8758,7 @@ pub(crate) mod tests {
         let response = submit_with_write(&ctx, 80, &submitted_plan(serde_json::json!({}))).await;
         assert_submit_refused(&response, &ctx, &provider, "owns no agent with that id").await;
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn a15r_bus_submit_refused_for_a_quarantined_identity() {
         let temp = tempfile::tempdir().unwrap();
@@ -8703,6 +8780,7 @@ pub(crate) mod tests {
         assert_submit_refused(&response, &ctx, &provider, "quarantined agent record").await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a15r_bus_submit_refused_for_a_human_caller() {
         let temp = tempfile::tempdir().unwrap();
@@ -8916,6 +8994,7 @@ pub(crate) mod tests {
             "runtime_binding": {"principal_id": BOB, "capsule_id": "capsule-b"}})
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn model_dispatch_stamps_the_bridge_caller_over_a_body_binding() {
         let (ctx, provider, _temp) = model_bus(Some(ALICE), "capsule-x").await;
@@ -8934,6 +9013,7 @@ pub(crate) mod tests {
     /// Alice's capsule creates a run on the Bus and can get, stream and
     /// cancel it. Bob in the same capsule, and Alice in another capsule, are
     /// refused each of those even with a valid body binding naming hers.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bus_run_answers_only_the_principal_and_capsule_that_created_it() {
         let (alice, _provider, _temp) = model_bus(Some(ALICE), "capsule-x").await;
@@ -8972,6 +9052,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_model_run_without_a_principal_is_refused() {
         let (ctx, provider, _temp) = model_bus(None, "capsule-x").await;
@@ -8982,6 +9063,7 @@ pub(crate) mod tests {
     }
 
     /// The gateway's admin-only hosted gate applies on the Bus too.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_guest_bus_capsule_cannot_create_a_hosted_run() {
         let (ctx, provider, _temp) = model_bus(Some(BOB), "capsule-b").await;
@@ -9063,10 +9145,7 @@ pub async fn production_after() {
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("issue_home_launch_token_with_context("),
-            expected_counts(&[
-                ("elastos-server/src/api/gateway_home_token.rs", 1),
-                ("elastos-server/src/api/viewer_gateway.rs", 1),
-            ]),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 1)]),
             "context issuer callers"
         );
         assert_eq!(
@@ -9075,6 +9154,7 @@ pub async fn production_after() {
                 ("elastos-server/src/api/auth_gateway.rs", 2),
                 ("elastos-server/src/api/gateway.rs", 1),
                 ("elastos-server/src/api/gateway_home_runtime.rs", 3),
+                ("elastos-server/src/api/viewer_gateway.rs", 1),
             ]),
             "projection issuer callers"
         );
@@ -9088,14 +9168,24 @@ pub async fn production_after() {
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("issue_home_launch_token_at("),
-            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 4)]),
-            "the one signing issuer's callers"
+            expected_counts(&[
+                ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
+                ("elastos-server/src/api/gateway_home_token.rs", 5),
+            ]),
+            "the one signing issuer's callers, including the agent start grant"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_agent_launch_token_with_context("),
+            expected_counts(&[("elastos-server/src/api/gateway_agents.rs", 1)]),
+            "agent start grant issuer callers"
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("HomeLaunchTokenContext::resolved("),
             expected_counts(&[
                 ("elastos-server/src/api/auth_gateway.rs", 2),
                 ("elastos-server/src/api/gateway.rs", 1),
+                // The claim rebuilds the approved binding, then the existing signer uses it.
+                ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
                 ("elastos-server/src/api/gateway_home_system.rs", 2),
                 ("elastos-server/src/api/gateway_home_token.rs", 4),
                 ("elastos-server/src/api/gateway_model_service.rs", 1),
@@ -9125,16 +9215,24 @@ pub async fn production_after() {
                 ("elastos-server/src/api/gateway_home_external_link.rs", 1),
                 ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
                 ("elastos-server/src/api/gateway_home_system.rs", 2),
-                ("elastos-server/src/api/gateway_home_token.rs", 2),
+                ("elastos-server/src/api/gateway_home_token.rs", 3),
+                ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
                 ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
-                ("elastos-server/src/api/viewer_gateway.rs", 1),
             ]),
             "Home token context callers"
         );
+        // Gateway admission had two refusal calls. Home page/CLI launch,
+        // internal shell content open, and launch-bound reads now fence the
+        // same resolved agent principal before they use its context.
+        assert_eq!(
+            production_counts_ignoring_cfg_test("refuse_agent_principal("),
+            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 5)]),
+            "agent-principal refusal callers"
+        );
         // Blast radius of the one helper: the direct callers and the front
         // door's path through `require_gateway_launch_for`, which runs only
-        // when the request is not public, not sign-in, not a terminal ticket
-        // and not a runtime session.
+        // when the request is not public, not sign-in, not a terminal ticket,
+        // not a runtime session, and not a bound CLI mint request.
         assert_eq!(
             production_counts_ignoring_cfg_test("require_gateway_launch("),
             expected_counts(&[
@@ -9149,8 +9247,10 @@ pub async fn production_after() {
         )
         .unwrap();
         assert!(
-            source.contains("if !public && !sign_in && !ticket && !runtime_session {"),
-            "the front-door match keeps its four exclusions"
+            source.contains(
+                "if !public && !sign_in && !ticket && !runtime_session && !cli_mint_request {"
+            ),
+            "the front-door match keeps its five exclusions"
         );
         let start = source
             .find("match gateway_home_token::require_gateway_launch_for(")
@@ -9158,7 +9258,70 @@ pub async fn production_after() {
         let body = &source[start..];
         let open = body.find('{').expect("the match block opens");
         let end = cfg_test_item_end(&body[open..]);
-        let arms = body[open..open + end].matches("=>").count();
-        assert_eq!(arms, 4, "gateway admission match arms");
+        let match_block = &body[open..open + end];
+        let bytes = match_block.as_bytes();
+        let (mut braces, mut parens, mut brackets, mut outer_arms, mut total_arms) =
+            (0, 0, 0, 0, 0);
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                    index = match_block[index..]
+                        .find('\n')
+                        .map_or(bytes.len(), |at| index + at + 1);
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    index = match_block[index..]
+                        .find("*/")
+                        .map_or(bytes.len(), |at| index + at + 2);
+                }
+                b'"' => index = string_end(match_block, index),
+                b'\'' => index = char_or_lifetime_end(bytes, index),
+                b'r' => index = raw_string_end(match_block, index).unwrap_or(index + 1),
+                b'b' if matches!(bytes.get(index + 1), Some(b'"') | Some(b'\'')) => {
+                    index = if bytes[index + 1] == b'"' {
+                        string_end(match_block, index + 1)
+                    } else {
+                        char_or_lifetime_end(bytes, index + 1)
+                    };
+                }
+                b'{' => {
+                    braces += 1;
+                    index += 1;
+                }
+                b'}' => {
+                    braces -= 1;
+                    index += 1;
+                }
+                b'(' => {
+                    parens += 1;
+                    index += 1;
+                }
+                b')' => {
+                    parens -= 1;
+                    index += 1;
+                }
+                b'[' => {
+                    brackets += 1;
+                    index += 1;
+                }
+                b']' => {
+                    brackets -= 1;
+                    index += 1;
+                }
+                b'=' if bytes.get(index + 1) == Some(&b'>') => {
+                    total_arms += 1;
+                    if braces == 1 && parens == 0 && brackets == 0 {
+                        outer_arms += 1;
+                    }
+                    index += 2;
+                }
+                _ => index += 1,
+            }
+        }
+        // Nested error-response arms cannot compensate for removing an outer
+        // admission decision; the total also pins those nested mappings.
+        assert_eq!(outer_arms, 5, "gateway outer admission match arms");
+        assert_eq!(total_arms, 8, "gateway total admission match arms");
     }
 }

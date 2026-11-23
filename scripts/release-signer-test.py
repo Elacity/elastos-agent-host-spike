@@ -1085,7 +1085,9 @@ class SignerTests(unittest.TestCase):
         row = components["external"]["localhost-provider"]["platforms"]["linux-amd64"]
         image = b"prebuilt VM rootfs"
         row.update(strategy="prebuilt", vm_image={"path":"rootfs.ext4", "size":len(image),
-                   "sha256":S.sha256(image), "cid":S.raw_cid(image)})
+                   "sha256":S.sha256(image), "cid":S.raw_cid(image),
+                   "kernel": {"path": "vmlinux", "size": 6, "sha256": S.sha256(b"kernel")},
+                   "initrd": {"path": "initrd", "size": 6, "sha256": S.sha256(b"initrd")}})
         self.reapprove_components(components)
         signed = S.parse_json(dict(S.sign_publication(self.prepare(), FakeBackend()))["components-x86_64-linux.json"].read_bytes())
         self.assertEqual(signed["external"]["localhost-provider"]["platforms"]["linux-amd64"]["vm_image"], row["vm_image"])

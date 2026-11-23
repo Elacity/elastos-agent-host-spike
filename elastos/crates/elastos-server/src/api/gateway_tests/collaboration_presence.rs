@@ -139,6 +139,7 @@ fn install_signed_profile(
     .unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn room_attribution_name_map_never_upgrades_false_or_none_rows_after_reopen() {
     let local_dir = tempfile::tempdir().unwrap();
@@ -253,6 +254,7 @@ fn room_attribution_name_map_never_upgrades_false_or_none_rows_after_reopen() {
     assert_eq!(file_snapshot(local_dir.path()), before_reads);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn configured_room_poll_renders_signed_profile_names_only() {
     const NETWORK: &str = "gateway-presence-network";
@@ -407,6 +409,7 @@ async fn configured_room_poll_renders_signed_profile_names_only() {
     assert_eq!(local_participant["profile_verified"], json!(true));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_summary_ignores_legacy_people_contacts_without_profile_store() {
     let local_dir = tempfile::tempdir().unwrap();
@@ -499,6 +502,7 @@ async fn home_summary_ignores_legacy_people_contacts_without_profile_store() {
     assert_eq!(file_snapshot(local_dir.path()), steady_state);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn collaboration_presence_routes_are_capsule_scoped_and_unconfigured_is_pure() {
     let dir = tempfile::tempdir().unwrap();
@@ -646,6 +650,7 @@ async fn set_system_presence(app: &Router, token: &str, mode: &str) -> (StatusCo
     (status, response_text(response).await)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn heartbeat_is_strict_proof_bound_and_coalesces_exact_presentation() {
     let dir = tempfile::tempdir().unwrap();
@@ -771,6 +776,7 @@ async fn heartbeat_is_strict_proof_bound_and_coalesces_exact_presentation() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn only_the_persons_inbox_or_system_answer_mints_a_presence_grant() {
     let dir = tempfile::tempdir().unwrap();
@@ -901,6 +907,7 @@ async fn only_the_persons_inbox_or_system_answer_mints_a_presence_grant() {
     assert!(!body.contains("token"), "{body}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn corrupt_profile_state_is_an_internal_presence_error_without_detail() {
     let dir = tempfile::tempdir().unwrap();
@@ -940,6 +947,7 @@ async fn corrupt_profile_state_is_an_internal_presence_error_without_detail() {
     assert!(!text.contains("sha256:"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn people_snapshot_filters_local_and_exposes_only_signed_live_remote_presence() {
     let local_dir = tempfile::tempdir().unwrap();
@@ -1099,6 +1107,7 @@ async fn people_snapshot_filters_local_and_exposes_only_signed_live_remote_prese
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn system_mode_changes_retire_projected_and_queued_presence_at_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -1181,6 +1190,7 @@ async fn system_mode_changes_retire_projected_and_queued_presence_at_once() {
         .is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn restarted_presence_get_keeps_legacy_core_bytes_until_lifecycle_repair() {
     use crate::collaboration_presence_grant::{
@@ -1305,6 +1315,7 @@ async fn restarted_presence_get_keeps_legacy_core_bytes_until_lifecycle_repair()
 }
 
 // Reproduction controls: real gateway, isolated state, expiry moved without waiting.
+#[cfg(unix)]
 #[tokio::test]
 async fn chat_online_expired_frame_is_refused_while_home_session_remains_valid() {
     let dir = tempfile::tempdir().unwrap();
@@ -1422,6 +1433,7 @@ async fn chat_online_expired_frame_is_refused_while_home_session_remains_valid()
     eprintln!("chat_online frame: expired token -> 403 ({reason}); Home refresh 200; fresh frame -> session/start -> poll 200");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn chat_online_configured_poll_does_not_renew_room_session() {
     let dir = tempfile::tempdir().unwrap();

@@ -1,5 +1,6 @@
 //! Normal Home setup uses the same Engine/Exit configuration as source Homes.
 use std::fs;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -212,10 +213,13 @@ pub fn browser_available(platform: &str) -> bool {
     matches!(platform, "darwin-arm64" | "linux-arm64")
 }
 
-fn native_host_available(data: &Path) -> anyhow::Result<()> {
+fn native_host_available(data: &Path, catalogue: bool) -> anyhow::Result<()> {
     let program = data.join("bin/browser-vz-engine-supervisor");
-    let prepared =
-        super::verify_installed_component_start(data, "browser-vz-engine-supervisor", &program)?;
+    let prepared = if catalogue {
+        super::verify_installed_component_catalogue(data, "browser-vz-engine-supervisor", &program)?
+    } else {
+        super::verify_installed_component_start(data, "browser-vz-engine-supervisor", &program)?
+    };
     probe_native_host(&prepared, data, std::time::Duration::from_secs(2))
 }
 
@@ -227,7 +231,7 @@ pub(crate) fn linux_host_setup_message(data: &Path, platform: &str) -> Option<&'
     )
 }
 
-fn linux_host_setup_message_with_kvm(
+pub(crate) fn linux_host_setup_message_with_kvm(
     data: &Path,
     platform: &str,
     kvm_present: bool,
@@ -238,7 +242,7 @@ fn linux_host_setup_message_with_kvm(
     if !kvm_present {
         return Some(super::browser_linux::KVM_MESSAGE);
     }
-    require_linux_host(data)
+    require_linux_host_for_catalogue(data)
         .is_err()
         .then_some(super::browser_linux::SETUP_MESSAGE)
 }
@@ -246,7 +250,13 @@ fn linux_host_setup_message_with_kvm(
 pub(super) fn require_linux_host(data: &Path) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     require_kvm(Path::new("/dev/kvm"))?;
-    native_host_available(data)
+    native_host_available(data, false)
+}
+
+fn require_linux_host_for_catalogue(data: &Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    require_kvm(Path::new("/dev/kvm"))?;
+    native_host_available(data, true)
 }
 
 fn probe_native_host(
@@ -319,6 +329,7 @@ fn local_vm_selected_with_override(
     }))
 }
 
+#[cfg(unix)]
 fn ensure_viewer_ingress(data: &Path) -> anyhow::Result<()> {
     let path = data.join("config/browser-viewer-ingress.json");
     if path.symlink_metadata().is_ok() {
@@ -338,9 +349,20 @@ fn ensure_viewer_ingress(data: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn ensure_viewer_ingress(_data: &Path) -> anyhow::Result<()> {
+    Err(super::windows_unsupported("Browser viewer ingress setup"))
+}
+
+#[cfg(unix)]
 fn executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(windows)]
+fn executable(_path: &Path) -> bool {
+    false
 }
 
 fn host_program(data: &Path, name: &str) -> Option<PathBuf> {
@@ -411,7 +433,7 @@ pub(super) async fn prepare_home(
                 #[cfg(target_os = "linux")]
                 if platform == "linux-arm64" {
                     require_kvm(Path::new("/dev/kvm"))?;
-                    native_host_available(data)?;
+                    native_host_available(data, false)?;
                 }
                 println!("Preparing Browser Engine image...");
                 super::ensure_browser_vm_image_in_context(
@@ -477,6 +499,7 @@ pub(super) fn pending_download_bytes(
 /// release-owned Browser host files an earlier release installed, so neither
 /// Runtime nor the installer's Linux host step acts on them. Browser profiles
 /// under `Users/` belong to their owner and stay.
+#[cfg(unix)]
 fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Result<()> {
     let browser_installed = data.join("capsules/browser").is_dir();
     let selection = data.join("config/browser-engine-adapter.json");
@@ -550,6 +573,11 @@ fn retire_host(data: &Path, manifest: &super::ComponentsManifest) -> anyhow::Res
         println!("Browser is not available on this computer yet.");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn retire_host(_data: &Path, _manifest: &super::ComponentsManifest) -> anyhow::Result<()> {
+    Err(super::windows_unsupported("Browser host retirement"))
 }
 
 pub(super) fn configure(data: &Path, platform: &str, release_image: bool) -> anyhow::Result<()> {
@@ -658,6 +686,7 @@ fn generate(
     generate_with_migration(data, platform, release_image, node, turn, false)
 }
 
+#[cfg(unix)]
 fn generate_with_migration(
     data: &Path,
     platform: &str,
@@ -712,6 +741,21 @@ fn generate_with_migration(
     Ok(())
 }
 
+#[cfg(windows)]
+fn generate_with_migration(
+    _data: &Path,
+    _platform: &str,
+    _release_image: bool,
+    _node: &Path,
+    _turn: &Path,
+    _replace_selection: bool,
+) -> anyhow::Result<()> {
+    Err(super::windows_unsupported(
+        "Browser local Engine configuration",
+    ))
+}
+
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,7 +809,7 @@ mod tests {
             temp.path().join("bin/browser-vz-engine-supervisor"),
         )
         .unwrap();
-        assert!(native_host_available(temp.path()).is_err());
+        assert!(native_host_available(temp.path(), false).is_err());
     }
 
     fn fixture_node() -> PathBuf {

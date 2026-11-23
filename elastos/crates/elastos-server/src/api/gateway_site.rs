@@ -1,10 +1,16 @@
 use super::*;
+#[cfg(unix)]
 use crate::release_publication::Publication;
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::fs::File;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt};
 
+#[cfg(unix)]
 #[derive(Deserialize)]
 struct PublicationReceipt {
     publisher_did: String,
@@ -18,6 +24,7 @@ struct PublicationReceipt {
 #[derive(Clone)]
 pub(super) struct ReleaseReadGate {
     pub(super) permit: Arc<tokio::sync::Semaphore>,
+    #[cfg(unix)]
     cache: Arc<std::sync::Mutex<Option<CachedPublication>>>,
     pub(super) max_http_artifact_bytes: u64,
     #[cfg(test)]
@@ -28,6 +35,7 @@ impl ReleaseReadGate {
     pub(super) fn new() -> Self {
         Self {
             permit: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(unix)]
             cache: Arc::new(std::sync::Mutex::new(None)),
             max_http_artifact_bytes: 200 * 1024 * 1024,
             #[cfg(test)]
@@ -36,8 +44,10 @@ impl ReleaseReadGate {
     }
 }
 
+#[cfg(unix)]
 type ReceiptStamp = (u64, u64, u64, i64, i64, i64, i64, u32, u64);
 
+#[cfg(unix)]
 fn receipt_stamp(metadata: &std::fs::Metadata) -> ReceiptStamp {
     (
         metadata.dev(),
@@ -52,6 +62,7 @@ fn receipt_stamp(metadata: &std::fs::Metadata) -> ReceiptStamp {
     )
 }
 
+#[cfg(unix)]
 #[derive(PartialEq, Eq)]
 struct PublicationKey {
     root_path: std::path::PathBuf,
@@ -59,6 +70,7 @@ struct PublicationKey {
     head_stamp: ReceiptStamp,
 }
 
+#[cfg(unix)]
 struct PublicationContext {
     key: PublicationKey,
     receipt: PublicationReceipt,
@@ -66,6 +78,7 @@ struct PublicationContext {
     head_file: File,
 }
 
+#[cfg(unix)]
 struct CachedPublication {
     key: PublicationKey,
     // Retaining the receipt descriptor prevents inode reuse for this cache key.
@@ -75,6 +88,7 @@ struct CachedPublication {
     publication: Option<Publication>,
 }
 
+#[cfg(unix)]
 fn publication_open_at(parent: &File, name: &str, directory: bool) -> std::io::Result<File> {
     let name = CString::new(name)?;
     let flags = libc::O_RDONLY
@@ -89,6 +103,7 @@ fn publication_open_at(parent: &File, name: &str, directory: bool) -> std::io::R
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+#[cfg(unix)]
 fn publication_directory(path: &std::path::Path) -> std::io::Result<File> {
     use std::path::Component;
     let mut directory = File::open("/")?;
@@ -108,6 +123,7 @@ fn publication_directory(path: &std::path::Path) -> std::io::Result<File> {
     Ok(directory)
 }
 
+#[cfg(unix)]
 fn read_publication_receipt(
     root: &File,
 ) -> anyhow::Result<(PublicationReceipt, File, ReceiptStamp)> {
@@ -132,6 +148,7 @@ fn read_publication_receipt(
     Ok((serde_json::from_slice(&bytes)?, file, stamp))
 }
 
+#[cfg(unix)]
 fn publication_context(data_dir: &std::path::Path) -> Result<PublicationContext, StatusCode> {
     // Runtime owns data_dir. Normalize its OS alias (e.g. macOS /var) before
     // the no-follow walk of the publication and its saved policy receipt.
@@ -179,6 +196,7 @@ fn publication_context(data_dir: &std::path::Path) -> Result<PublicationContext,
     validated.map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
 }
 
+#[cfg(unix)]
 fn load_release_publication(context: &PublicationContext) -> anyhow::Result<Publication> {
     // The operator's committed receipt owns the pin, rather than the envelope.
     let receipt = &context.receipt;
@@ -199,6 +217,7 @@ enum ReleaseFile {
     Artifact(String),
 }
 
+#[cfg(unix)]
 async fn signed_release_response(
     state: GatewayState,
     gate: ReleaseReadGate,
@@ -297,6 +316,30 @@ async fn signed_release_response(
         )
             .into_response(),
     }
+}
+
+#[cfg(windows)]
+async fn signed_release_response(
+    _state: GatewayState,
+    gate: ReleaseReadGate,
+    file: ReleaseFile,
+    _media_type: &'static str,
+) -> Response {
+    // Publication reads need identity-stable, owner-only, no-follow opens.
+    // Keep the HTTP endpoint closed until those checks exist on Windows.
+    let _permit = gate.permit.acquire().await;
+    let _limit = gate.max_http_artifact_bytes;
+    let _requested = match file {
+        ReleaseFile::Head => "head",
+        ReleaseFile::Release => "release",
+        ReleaseFile::Installer => "installer",
+        ReleaseFile::Artifact(ref name) => name,
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Release publication is unsupported on Windows",
+    )
+        .into_response()
 }
 
 pub(super) async fn sandbox_content_response(mut response: Response) -> Response {

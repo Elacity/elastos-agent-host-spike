@@ -13,12 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::gateway::{
-    content_type, gateway_attach_runtime_token, issue_home_launch_token_with_context,
-    issue_launch_page_token, load_live_runtime_coords,
-    require_home_projection_launch_token_context, require_home_token_context,
-    require_home_viewer_launch_token_context, require_launch_bound_token,
-    viewer_object_shell_description, viewer_object_shell_title, GatewayState,
-    HomeLaunchTokenContext,
+    content_type, gateway_attach_runtime_token, issue_home_projection_launch_token_with_context,
+    issue_launch_page_token, load_live_runtime_coords, require_home_page_or_cli_launch_context,
+    require_home_projection_launch_token_context, require_home_viewer_launch_token_context,
+    require_launch_bound_token, viewer_object_shell_description, viewer_object_shell_title,
+    GatewayState, HomeLaunchTokenContext,
 };
 
 #[derive(Debug, Serialize)]
@@ -945,7 +944,7 @@ pub async fn viewer_launch_content(
 }
 
 /// A page's read of its kept launch. Only the page's own launch token opens
-/// it: bound to `elastos://launch/<id>` with `viewer` as its executable. The
+/// it: bound to the launch id, content name and per-open binding with `viewer` as its executable. The
 /// gateway then asks the Runtime as the shell, carrying that same token, and
 /// passes back its bytes, never to be stored. Anything else alike answers
 /// `not_found`, and the Runtime is not asked for a token or a path that
@@ -959,7 +958,8 @@ async fn viewer_launch_read(
     plain: bool,
 ) -> Response {
     let not_found = || (StatusCode::NOT_FOUND, "not_found").into_response();
-    let Ok((id, token, context)) = require_launch_bound_token(data_dir, headers, viewer, false)
+    let Ok((id, _content_name, _binding, token, context)) =
+        require_launch_bound_token(data_dir, headers, viewer, false)
     else {
         return not_found();
     };
@@ -1045,6 +1045,8 @@ struct RuntimeOpened {
     id: String,
     page: String,
     entrypoint: String,
+    content_name: String,
+    binding: String,
 }
 
 /// `POST /api/home/launch/content`: Home opens a content capsule by its CID
@@ -1058,7 +1060,7 @@ pub async fn home_launch_content(
     headers: HeaderMap,
     Json(request): Json<HomeLaunchContentRequest>,
 ) -> Response {
-    let context = match require_home_token_context(&state.data_dir, &headers) {
+    let context = match require_home_page_or_cli_launch_context(&state.data_dir, &headers) {
         Ok(context) => context,
         Err(err) => return viewer_error_response(err),
     };
@@ -1066,7 +1068,14 @@ pub async fn home_launch_content(
         Ok(opened) => opened,
         Err((status, refusal)) => return (status, refusal).into_response(),
     };
-    let token = match issue_launch_page_token(&state.data_dir, &opened.id, &opened.page, &context) {
+    let token = match issue_launch_page_token(
+        &state.data_dir,
+        &opened.id,
+        &opened.page,
+        &opened.content_name,
+        &opened.binding,
+        &context,
+    ) {
         Ok(token) => token,
         Err(err) => return viewer_error_response(err),
     };
@@ -1099,7 +1108,7 @@ async fn open_at_runtime(
             .await
             .map_err(|_| unavailable("runtime attach failed"))?;
     let grant =
-        issue_home_launch_token_with_context(data_dir, super::gateway::HOME_CAPSULE_ID, context)
+        issue_home_projection_launch_token_with_context(data_dir, "home", "home-shell", context)
             .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
     let answer = client
         .post(format!("{}/api/launch/open", coords.api_url))
@@ -1127,8 +1136,14 @@ async fn open_at_runtime(
     let page = !opened.page.is_empty()
         && !opened.page.contains('/')
         && crate::page_launch::plain_content_path(&opened.page);
+    let content_name = !opened.content_name.is_empty()
+        && !opened.content_name.contains('/')
+        && !opened.content_name.contains("..")
+        && crate::page_launch::plain_content_path(&opened.content_name);
+    let binding =
+        opened.binding.len() == 32 && opened.binding.bytes().all(|byte| byte.is_ascii_hexdigit());
     let entrypoint = crate::page_launch::plain_content_path(&opened.entrypoint);
-    match launch_id && page && entrypoint {
+    match launch_id && page && content_name && binding && entrypoint {
         true => Ok(opened),
         false => Err(odd()),
     }
@@ -1155,7 +1170,9 @@ pub(super) fn viewer_error_response(err: anyhow::Error) -> Response {
         return response;
     }
     let text = err.to_string();
-    let status = if text.contains("not found") {
+    let status = if text == "home_page_only" || text == "home_cli_launch_grant_mismatch" {
+        StatusCode::FORBIDDEN
+    } else if text.contains("not found") {
         StatusCode::NOT_FOUND
     } else if text.contains("home launch token") {
         StatusCode::UNAUTHORIZED
@@ -1207,6 +1224,7 @@ mod r4_root_tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn parent_signed_viewer_storage_round_trips_under_parent_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -1286,6 +1304,7 @@ mod r4_root_tests {
         assert!(!crate::auth::principal_object_io::writes(dir.path()).contains(&child_path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn r4_viewer_target_and_storage_grant_reach_agent_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -1388,7 +1407,7 @@ mod r4_root_tests {
             "invalid viewer storage root"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn r4_viewer_uses_context_root_at_all_three_sites() {
         let missing = tempfile::tempdir().unwrap();
@@ -1501,6 +1520,7 @@ mod r8d_passkey_rows {
 
     /// The child holds no protection for this person's root, so the write is
     /// refused and creates nothing.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_viewer_storage_save_for_the_passkey_person() {
         let person = passkey_person(GBA_VIEWER);
@@ -1540,6 +1560,7 @@ mod r8d_passkey_rows {
 
     /// Today a viewer whose manifest declares no storage grant is refused,
     /// and nothing is written.
+    #[cfg(unix)]
     #[test]
     fn r8d_child_viewer_storage_save_is_refused_for_a_viewer_without_a_storage_grant() {
         let person = passkey_person(DOCUMENTS);

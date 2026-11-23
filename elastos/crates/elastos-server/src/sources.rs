@@ -837,6 +837,19 @@ mod tests {
         format!("elastos://source/{channel}/{publisher}")
     }
 
+    fn fixture_install_path() -> String {
+        // The installed-writer check admits only an absolute path. This
+        // directory is absent, so the check holds no writer and the save
+        // still writes the source file. A leading slash is not absolute
+        // on Windows.
+        let unix_path = "/fixture/bin/elastos";
+        if std::path::Path::new(unix_path).is_absolute() {
+            unix_path.to_string()
+        } else {
+            r"C:\fixture\bin\elastos".to_string()
+        }
+    }
+
     fn fixture_source() -> TrustedSource {
         TrustedSource {
             name: "fixture".into(),
@@ -845,7 +858,7 @@ mod tests {
             discovery_uri: discovery_uri(OLD_DID, "canary"),
             connect_ticket: "fixture-ticket".into(),
             gateways: vec!["https://fixture.invalid".into()],
-            install_path: "/fixture/bin/elastos".into(),
+            install_path: fixture_install_path(),
             installed_version: "0.7.1".into(),
             head_cid: "fixture-head".into(),
             publisher_node_id: "fixture-delivery-node".into(),

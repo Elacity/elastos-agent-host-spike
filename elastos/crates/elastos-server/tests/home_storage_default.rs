@@ -4,6 +4,8 @@
 //! must then refuse, naming that exact path. A `/tmp/elastos/storage` default
 //! opens storage elsewhere, so the Home path never appears.
 
+#![cfg(unix)]
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

@@ -12,6 +12,7 @@ async fn documents(dir: &std::path::Path, op: &str, mut request: Value) -> Value
     provider.send_raw(&request).await.unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn r8d_child_documents_summary_and_create_under_the_passkey_persons_root() {
     let person = passkey_person(DOCUMENTS_CAPSULE_ID);

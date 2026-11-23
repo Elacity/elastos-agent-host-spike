@@ -457,10 +457,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       # ring's C build has no FreeBSD headers here, so the unsupported dispatch
       # is compiled on the host with this cfg. The workflow's RUSTFLAGS already
-      # deny warnings; this step adds the cfg and keeps that denial.
+      # deny warnings; this step adds the cfg and keeps that denial. It also
+      # runs the elastos-server OS-refusal tests under the same cfg, with a
+      # separate --target-dir so the normal build cache stays untouched.
       - name: unsupported operating system arm
         working-directory: elastos
-        run: RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo check -p elastos-runtime --lib
+        run: |
+          RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo check -p elastos-runtime --lib
+          RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo test -p elastos-server --bin elastos --target-dir target-unsupported -- os_refusal 2>&1 | tee unsupported-os-refusal.log
+          # The refusal tests live in the elastos binary (server_infra); a filter that matches nothing must fail.
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed;' unsupported-os-refusal.log
       - name: Rust compile cache statistics
         if: always() && env.RUSTC_WRAPPER == 'sccache'
         run: sccache --show-stats
@@ -1338,6 +1344,8 @@ jobs:
           scripts/setup-source-home.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/setup-source-home.log"
           ELASTOS_DATA_DIR="${XDG_DATA_HOME}/elastos" \
             scripts/installed-provider-verify.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/installed-provider-verify.log"
+          python3 scripts/holder-canary-fixture.py sign-install \
+            "${SOURCE_HOME}" "${XDG_DATA_HOME}/elastos" "${XDG_DATA_HOME}/elastos/bin/elastos"
       - name: local-carrier setup smoke
         env:
           ELASTOS_LLAMA_AMD64_BUNDLE: ${{ runner.temp }}/llama-amd64-bundle/llama-b10516-bin-ubuntu22.04-amd64-cpu.tar.gz
@@ -1635,6 +1643,9 @@ jobs:
           scripts/setup-source-home.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/setup-source-home.log"
           ELASTOS_DATA_DIR="${HOME}/Library/Application Support/elastos" \
             scripts/installed-provider-verify.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/installed-provider-verify.log"
+          python3 scripts/holder-canary-fixture.py sign-install \
+            "${MAC_TEST_HOME}" "${HOME}/Library/Application Support/elastos" \
+            "${HOME}/Library/Application Support/elastos/bin/elastos"
       # The installed Home journey signs up through the real page. Playwright
       # 1.59.1's installer hangs extracting Chromium under Node 26; the journey runs on 26.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

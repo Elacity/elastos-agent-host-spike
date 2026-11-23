@@ -21,6 +21,28 @@ use crate::sources::{
     default_data_dir, default_install_path, load_trusted_sources, normalize_gateways, TrustedSource,
 };
 
+const INSTALLED_BINARY_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(test)]
+const TEST_INSTALLED_BINARY_VERSION_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_INSTALLED_BINARY_VERSION_TIMEOUT_OVERRIDE: std::time::Duration;
+}
+
+fn installed_binary_version_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        TEST_INSTALLED_BINARY_VERSION_TIMEOUT_OVERRIDE
+            .try_with(|timeout| *timeout)
+            .unwrap_or(TEST_INSTALLED_BINARY_VERSION_TIMEOUT)
+    }
+    #[cfg(not(test))]
+    {
+        INSTALLED_BINARY_VERSION_TIMEOUT
+    }
+}
+
 /// Async callback for fetching a CID or `release-path:<path>` from the trusted source.
 pub type FetchFn = Box<
     dyn Fn(String) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<u8>>> + Send>> + Send + Sync,
@@ -364,6 +386,7 @@ pub fn evict_changed_capsule_cache(data_dir: &std::path::Path, changed_capsules:
 }
 
 /// The owned probe lives beside the installed binary and closes before migration.
+#[cfg(unix)]
 async fn verify_candidate_before_migration(
     transaction: &InstallTransaction,
     bytes: &[u8],
@@ -389,12 +412,27 @@ async fn verify_candidate_before_migration(
     probe.as_file().sync_all()?;
     // Linux requires the writer descriptor to close before executing these bytes.
     let path = probe.into_temp_path();
-    verify_installed_binary_version(&path, version).await
+    verify_installed_binary_version(&path, version, installed_binary_version_timeout()).await
 }
 
+#[cfg(windows)]
+async fn verify_candidate_before_migration(
+    _transaction: &InstallTransaction,
+    _bytes: &[u8],
+    _version: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "update candidate executable custody is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 async fn verify_installed_binary_version(
     bin_path: &Path,
     expected_version: &str,
+    timeout: std::time::Duration,
 ) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     use tokio::io::AsyncReadExt;
@@ -419,7 +457,7 @@ async fn verify_installed_binary_version(
     let mut stderr = child.stderr.take().unwrap().take(4097);
     let mut out = Vec::new();
     let mut err = Vec::new();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let result = tokio::time::timeout(timeout, async {
         // Keep the leader unreaped until pipe admission has finished. Its PID
         // then anchors the owned process group throughout any timeout cleanup.
         tokio::try_join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))?;
@@ -441,13 +479,28 @@ async fn verify_installed_binary_version(
             let _ = child.kill().await;
             let _ = child.wait().await;
             match failure {
-                Err(_) => anyhow::bail!("installed binary version check timed out after 5 seconds"),
+                Err(_) => anyhow::bail!(
+                    "installed binary version check timed out after {} seconds",
+                    timeout.as_secs()
+                ),
                 Ok(Err(error)) => return Err(error.into()),
                 _ => unreachable!(),
             }
         }
     };
     verify_installed_binary_version_output(bin_path, expected_version, status.success(), &out, &err)
+}
+
+#[cfg(windows)]
+async fn verify_installed_binary_version(
+    _bin_path: &Path,
+    _expected_version: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "update executable process tree custody is unsupported on Windows",
+    )
+    .into())
 }
 
 fn verify_installed_binary_version_output(
@@ -2154,6 +2207,7 @@ fn support_paths_snapshot(
     Ok(hex::encode(digest.finalize()))
 }
 
+#[cfg(unix)]
 fn fingerprint_support_tree(
     path: &Path,
     excluded: &std::collections::BTreeSet<PathBuf>,
@@ -2225,6 +2279,19 @@ fn fingerprint_support_tree(
     Ok(())
 }
 
+#[cfg(windows)]
+fn fingerprint_support_tree(
+    _path: &Path,
+    _excluded: &std::collections::BTreeSet<PathBuf>,
+    _digest: &mut sha2::Sha256,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "update support tree no-follow fingerprint is unsupported on Windows",
+    )
+    .into())
+}
+
 fn optional_release_object_cid(head: &serde_json::Value) -> anyhow::Result<Option<&str>> {
     let Some(cid) = head["payload"]["release_object_cid"].as_str() else {
         return Ok(None);
@@ -2242,6 +2309,7 @@ fn optional_release_object_cid(head: &serde_json::Value) -> anyhow::Result<Optio
     Ok(Some(cid))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4747,10 +4815,16 @@ mod tests {
                     std::fs::write(data.join(path), bytes).unwrap();
                 }
 
-                let error =
-                    apply_signed_fixture_with_mode(&data, &source, executable, components, mode)
+                let attempt =
+                    apply_signed_fixture_with_mode(&data, &source, executable, components, mode);
+                let result = if error_marker == "version check timed out" {
+                    TEST_INSTALLED_BINARY_VERSION_TIMEOUT_OVERRIDE
+                        .scope(std::time::Duration::from_secs(1), attempt)
                         .await
-                        .unwrap_err();
+                } else {
+                    attempt.await
+                };
+                let error = result.unwrap_err();
                 assert!(
                     error.to_string().contains(error_marker),
                     "{name}: {error:#}"
@@ -5057,13 +5131,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (bin, release) =
             crate::install_transaction::tests::briefly_busy_binary(dir.path(), "0.1.0");
-        verify_installed_binary_version(&bin, "0.1.0")
+        verify_installed_binary_version(&bin, "0.1.0", TEST_INSTALLED_BINARY_VERSION_TIMEOUT)
             .await
             .unwrap();
         release.join().unwrap();
         assert!(
             crate::install_transaction::TEXT_FILE_BUSY_SEEN.get() >= 1,
             "exec must have reported ETXTBSY"
+        );
+    }
+
+    #[tokio::test]
+    async fn installed_binary_version_check_times_out_with_injected_short_limit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        assert_eq!(INSTALLED_BINARY_VERSION_TIMEOUT.as_secs(), 5);
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("slow-version");
+        std::fs::write(&bin, b"#!/bin/sh\nsleep 60\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let error =
+            verify_installed_binary_version(&bin, "0.1.0", std::time::Duration::from_secs(1))
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "installed binary version check timed out after 1 seconds"
         );
     }
 

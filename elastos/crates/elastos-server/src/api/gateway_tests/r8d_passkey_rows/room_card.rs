@@ -5,6 +5,7 @@
 
 use super::*;
 
+#[cfg(unix)]
 #[test]
 fn r8d_child_room_card_and_authority_read_the_passkey_persons_profile() {
     let person = passkey_person(CHAT_ROOM_CAPSULE_ID);

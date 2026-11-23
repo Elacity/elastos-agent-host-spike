@@ -12,7 +12,9 @@ pub(crate) mod tests;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Write as _};
+#[cfg(unix)]
+use std::io::{Seek as _, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -1164,11 +1166,78 @@ pub fn unresolved_release_audit_records(
         .collect()
 }
 
+#[cfg(windows)]
+pub(crate) fn require_isolated_provider(provider: &'static str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!("{provider} provider process isolation is unsupported on Windows"),
+    ))
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_unisolated_providers() {
+    for provider in ["custody", "decrypt"] {
+        let error = require_isolated_provider(provider).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains(provider));
+    }
+}
+
+#[cfg(all(test, not(unix)))]
+#[test]
+fn windows_refuses_runtime_media_digest_verification_for_an_existing_private_pair() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path();
+    let supplied = dir.path().join("supplied-tools");
+    std::fs::create_dir_all(&supplied).unwrap();
+    std::fs::write(supplied.join("ffmpeg"), b"ffmpeg-bytes").unwrap();
+    std::fs::write(supplied.join("ffprobe"), b"ffprobe-bytes").unwrap();
+    let config = runtime_media_provider_config_path(data_dir);
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, b"{}\n").unwrap();
+    let before = std::fs::read(&config).unwrap();
+    let trust = MediaToolsTrust::SignedRelease(SignedMediaToolDigests {
+        ffmpeg: [7u8; 32],
+        ffprobe: [8u8; 32],
+    });
+
+    let err = prepare_runtime_media_provider_prerequisite(data_dir, &supplied, trust).unwrap_err();
+
+    assert_eq!(
+        err.downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::Unsupported)
+    );
+    assert!(
+        err.to_string()
+            .contains("runtime-media digest verification is unsupported on this platform"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+    let private_tools = runtime_media_provider_tools_root(data_dir);
+    assert!(
+        !private_tools.join("ffmpeg").exists() && !private_tools.join("ffprobe").exists(),
+        "digest refusal must not import a private pair"
+    );
+    assert_eq!(
+        std::fs::read(supplied.join("ffmpeg")).unwrap(),
+        b"ffmpeg-bytes"
+    );
+    assert_eq!(
+        std::fs::read(supplied.join("ffprobe")).unwrap(),
+        b"ffprobe-bytes"
+    );
+}
+
 pub async fn register_inactive_custody_provider(
     registry: &Arc<ProviderRegistry>,
     binary_path: &Path,
     data_dir: &Path,
 ) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    require_isolated_provider("custody")?;
+
     let state_root = inactive_custody_state_root(data_dir);
     validate_inactive_custody_state_root(&state_root)?;
     let base_path = state_root
@@ -1244,6 +1313,9 @@ pub async fn register_protected_content_decrypt_provider(
     binary_path: &Path,
     runtime_operation_issuer: RuntimeOperationIssuerKeyV1,
 ) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    require_isolated_provider("decrypt")?;
+
     let bridge = Arc::new(
         ProviderBridge::spawn(
             &checked_native_provider(binary_path),
@@ -1833,11 +1905,36 @@ pub(crate) fn runtime_media_import_differs(
     )
 }
 
+#[cfg(not(unix))]
+fn runtime_media_digest_verification_unsupported() -> anyhow::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "runtime-media digest verification is unsupported on this platform",
+    )
+    .into()
+}
+
 pub(crate) fn prepare_runtime_media_provider_prerequisite(
     data_dir: &Path,
     tools_dir: &Path,
     trust: MediaToolsTrust,
 ) -> anyhow::Result<()> {
+    // An existing private pair is compared, and a signed release replaces it,
+    // only where owner-only no-follow checks can verify those bytes. Windows
+    // has no such check, so an existing config is refused before any import.
+    #[cfg(not(unix))]
+    {
+        match fs::symlink_metadata(runtime_media_provider_config_path(data_dir)) {
+            Ok(_) => {
+                let _ = (tools_dir, trust);
+                return Err(runtime_media_digest_verification_unsupported());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(invalid_media_provider_config("config file is unavailable"));
+            }
+        }
+    }
     // Open the complete supplied pair before creating or changing private state.
     let mut ffmpeg = open_runtime_media_tool(tools_dir, "ffmpeg")?;
     let mut ffprobe = open_runtime_media_tool(tools_dir, "ffprobe")?;
@@ -1875,7 +1972,11 @@ pub(crate) fn prepare_runtime_media_provider_prerequisite(
                 })?;
             }
             #[cfg(not(unix))]
-            let _ = digests;
+            {
+                let _ = digests;
+                return Err(runtime_media_digest_verification_unsupported());
+            }
+            #[cfg(unix)]
             return Ok(());
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2371,6 +2472,19 @@ fn runtime_media_tool_matches(
             return Ok(true);
         }
     }
+}
+
+#[cfg(windows)]
+fn runtime_media_tool_matches(
+    _source: &mut RuntimeMediaToolSource,
+    _destination: &Path,
+    _name: &str,
+) -> anyhow::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private media tool verification is unsupported on Windows",
+    )
+    .into())
 }
 
 #[cfg(unix)]
@@ -3519,6 +3633,11 @@ fn stage_runtime_media_provider_input(
     destination_path: &Path,
     expected_digest: Digest32,
 ) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Runtime media input custody is unsupported on Windows",
+    ))?;
     if source_bytes.is_empty()
         || source_bytes.len() as u64 > MEDIA_PROVIDER_MAX_INPUT_BYTES
         || runtime_media_source_digest(source_bytes) != expected_digest
@@ -3560,15 +3679,12 @@ fn open_runtime_media_source_file(path: &Path) -> anyhow::Result<fs::File> {
 
 #[cfg(not(unix))]
 fn open_runtime_media_source_file(path: &Path) -> anyhow::Result<fs::File> {
-    let file = fs::File::open(path)
-        .map_err(|_| anyhow::anyhow!("Runtime custody media preparation input is invalid"))?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| anyhow::anyhow!("Runtime custody media preparation input is invalid"))?;
-    if !metadata.is_file() {
-        anyhow::bail!("Runtime custody media preparation input is invalid");
-    }
-    Ok(file)
+    let _ = path;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Runtime media source no-follow admission is unsupported on Windows",
+    )
+    .into())
 }
 
 fn load_validated_runtime_prepared_media(
@@ -3721,6 +3837,11 @@ fn read_runtime_media_prepared_part(
     require_non_empty: bool,
     max_output_part_bytes: u64,
 ) -> anyhow::Result<Vec<u8>> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Runtime media output no-follow admission is unsupported on Windows",
+    ))?;
     #[cfg(unix)]
     let file = {
         let mut options = fs::OpenOptions::new();
@@ -8071,6 +8192,11 @@ fn runtime_storage_temp_path(path: &Path) -> anyhow::Result<PathBuf> {
 }
 
 fn write_owner_only_bytes(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Runtime owner-only storage is unsupported on Windows",
+    ))?;
     if let Some(parent) = path.parent() {
         #[cfg(unix)]
         ensure_owner_only_runtime_storage_parent(parent)?;

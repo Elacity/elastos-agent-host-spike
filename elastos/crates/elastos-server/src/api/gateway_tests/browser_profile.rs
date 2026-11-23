@@ -108,6 +108,7 @@ async fn browser_profile_reset_removes_only_principal_profile_disk() {
     assert!(other_disk.exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn browser_profile_reset_requires_browser_launch_token() {
     let dir = tempfile::tempdir().unwrap();
@@ -151,6 +152,7 @@ async fn browser_profile_reset_requires_browser_launch_token() {
     assert!(profile_disk.exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn browser_profile_reset_refuses_live_principal_session() {
     let dir = tempfile::tempdir().unwrap();

@@ -119,6 +119,7 @@ fn ciphertext_first_envelope(envelope: &PrincipalRootObjectEnvelopeV1) -> Vec<u8
     .into_bytes()
 }
 
+#[cfg(unix)]
 #[test]
 fn classifier_accepts_canonical_envelopes_only() {
     let fixture = Fixture::new("person:local:classifier-canonical");
@@ -172,6 +173,7 @@ fn classifier_accepts_canonical_envelopes_only() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn classifier_never_calls_canonical_damage_plaintext() {
     let fixture = Fixture::new("person:local:classifier-damage");
@@ -234,6 +236,7 @@ fn classifier_never_calls_canonical_damage_plaintext() {
     damaged(&rest, "sche + 0xff with the rest");
 }
 
+#[cfg(unix)]
 #[test]
 fn classifier_damaged_noncanonical_shapes() {
     let fixture = Fixture::new("person:local:classifier-noncanonical");
@@ -263,6 +266,7 @@ fn classifier_damaged_noncanonical_shapes() {
     assert_eq!(fixture.classify(&uri, &malformed), label_unreadable());
 }
 
+#[cfg(unix)]
 #[test]
 fn classifier_never_plaintexts_a_parsable_envelope() {
     let fixture = Fixture::new("person:local:classifier-parsable");
@@ -294,6 +298,7 @@ fn classifier_never_plaintexts_a_parsable_envelope() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn classifier_leaves_a_padded_envelope_over_16_mib_unencrypted() {
     let fixture = Fixture::new("person:local:classifier-padded-17");
@@ -361,6 +366,7 @@ fn classifier_leaves_a_padded_envelope_over_16_mib_unencrypted() {
     assert_eq!(std::fs::read(&path).unwrap(), padded);
 }
 
+#[cfg(unix)]
 #[test]
 fn classifier_keeps_runtime_and_user_plaintext_plaintext() {
     let fixture = Fixture::new("person:local:classifier-plaintext");
@@ -434,6 +440,7 @@ fn classifier_keeps_runtime_and_user_plaintext_plaintext() {
     assert_eq!(fixture.classify(&uri, jwe), label_unreadable());
 }
 
+#[cfg(unix)]
 #[test]
 fn classifier_binding_reasons() {
     let fixture = Fixture::new("person:local:classifier-binding");
@@ -497,6 +504,7 @@ fn classifier_binding_reasons() {
     assert_eq!(fixture.classify(&uri, &nonce), label_unreadable());
 }
 
+#[cfg(unix)]
 #[test]
 fn read_path_blocks_damage_and_opens_authentic_noncanonical_envelopes() {
     let fixture = Fixture::new("person:local:classifier-read");
@@ -586,6 +594,7 @@ fn read_path_blocks_damage_and_opens_authentic_noncanonical_envelopes() {
 /// #450 L9: a file whose canonical label names another key is refused with
 /// its notice without reading past the label, however large it is: here a
 /// 1 TiB sparse file that no full read could finish.
+#[cfg(unix)]
 #[test]
 fn open_refuses_a_foreign_label_without_reading_the_body() {
     let fixture = Fixture::new("person:local:classifier-foreign-large");
@@ -664,6 +673,7 @@ fn open_refuses_a_fifo_without_blocking() {
         .contains("must be a regular file"));
 }
 
+#[cfg(unix)]
 #[test]
 fn migration_prepare_refuses_bytes_swapped_after_preflight() {
     let fixture = Fixture::new("person:local:classifier-swap");

@@ -331,6 +331,7 @@ mod tests {
         assert!(state.0.lock().unwrap().is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn service_envelopes_reject_forgery_relay_substitution_and_payload_changes() {
         let root = tempfile::tempdir().unwrap();

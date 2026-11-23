@@ -149,10 +149,13 @@ pub fn compute_content_digest(files: &[(String, Vec<u8>)]) -> anyhow::Result<Str
 }
 
 /// Upper bounds for the viewer files copied into a share bundle.
+#[cfg(unix)]
 const MAX_VIEWER_FILES: usize = 256;
+#[cfg(unix)]
 const MAX_VIEWER_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The viewer's web entrypoint, opened through directory file descriptors.
+#[cfg(unix)]
 struct ViewerEntrypoint {
     /// The entrypoint's directory: the web root copied into the bundle.
     web_root: std::fs::File,
@@ -162,13 +165,24 @@ struct ViewerEntrypoint {
 
 /// Checks that the installed viewer has a usable web entrypoint in its
 /// `capsule.json` (`browser/index.html` for Documents).
+#[cfg(unix)]
 pub fn check_viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<()> {
     open_viewer_entrypoint(viewer_dir).map(|_| ())
+}
+
+#[cfg(windows)]
+pub fn check_viewer_entrypoint(_viewer_dir: &std::path::Path) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "viewer no-follow path admission is unsupported on Windows",
+    )
+    .into())
 }
 
 /// Opens the manifest entrypoint one component at a time with `openat` and
 /// `O_NOFOLLOW` from the viewer directory, so it must be a relative path inside
 /// the capsule and no symlink on the way is followed, even one swapped in late.
+#[cfg(unix)]
 fn open_viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<ViewerEntrypoint> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let manifest_path = viewer_dir.join("capsule.json");
@@ -213,6 +227,7 @@ fn open_viewer_entrypoint(viewer_dir: &std::path::Path) -> anyhow::Result<Viewer
     })
 }
 
+#[cfg(unix)]
 fn viewer_open_at(
     dir: &std::fs::File,
     name: &std::ffi::OsStr,
@@ -243,6 +258,7 @@ fn viewer_open_at(
 }
 
 /// Names in an open directory, read through a duplicate of its descriptor.
+#[cfg(unix)]
 fn viewer_dir_names(dir: &std::fs::File) -> anyhow::Result<Vec<std::ffi::OsString>> {
     use std::os::fd::AsRawFd as _;
     use std::os::unix::ffi::OsStrExt as _;
@@ -278,6 +294,7 @@ fn viewer_dir_names(dir: &std::fs::File) -> anyhow::Result<Vec<std::ffi::OsStrin
     result.map(|()| names)
 }
 
+#[cfg(unix)]
 fn set_errno_zero() {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -290,6 +307,7 @@ fn set_errno_zero() {
 }
 
 /// Lists the regular files under `dir` (relative paths), refusing symlinks.
+#[cfg(unix)]
 fn list_viewer_files(
     dir: &std::fs::File,
     rel: &std::path::Path,
@@ -337,6 +355,7 @@ fn list_viewer_files(
 /// Copies listed files from `web_root` to the bundle, reopening every path
 /// component through `openat(O_NOFOLLOW)` so a symlink swapped in after the
 /// listing is refused. Skips the entrypoint and the viewer's own Markdown.
+#[cfg(unix)]
 fn copy_listed_viewer_files(
     web_root: &std::fs::File,
     files: &[std::path::PathBuf],
@@ -375,6 +394,7 @@ fn copy_listed_viewer_files(
 /// Copies the viewer's web files (the entrypoint's directory, without its own
 /// Markdown) to the bundle root, with the entrypoint as `index.html`. Refuses
 /// symlinks anywhere in that tree and bounds the file count and total size.
+#[cfg(unix)]
 fn copy_viewer_entrypoint(
     viewer_dir: &std::path::Path,
     bundle_dir: &std::path::Path,
@@ -394,6 +414,19 @@ fn copy_viewer_entrypoint(
     Ok(())
 }
 
+#[cfg(windows)]
+fn copy_viewer_entrypoint(
+    _viewer_dir: &std::path::Path,
+    _bundle_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "viewer no-follow bundle copy is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn copy_viewer_file(
     file: std::fs::File,
     dest: &std::path::Path,
@@ -592,6 +625,11 @@ pub fn load_or_create_share_key() -> anyhow::Result<signature::SigningKey> {
 pub fn load_or_create_share_key_at(
     path: &std::path::Path,
 ) -> anyhow::Result<signature::SigningKey> {
+    #[cfg(windows)]
+    Err::<(), _>(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "share signing key custody is unsupported on Windows",
+    ))?;
     if path.exists() {
         let hex_str = std::fs::read_to_string(path)?;
         let bytes = hex::decode(hex_str.trim())
@@ -963,6 +1001,7 @@ pub fn parse_share_uri(uri: &str) -> anyhow::Result<String> {
     );
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1803,5 +1842,19 @@ mod tests {
             "signer_did": did,
         });
         serde_json::to_vec(&envelope).unwrap()
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn windows_refuses_viewer_and_signing_key_before_filesystem_effects() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = temp.path().join("share.key");
+        assert!(load_or_create_share_key_at(&key).is_err());
+        assert!(!key.exists());
+        assert!(check_viewer_entrypoint(temp.path()).is_err());
     }
 }
