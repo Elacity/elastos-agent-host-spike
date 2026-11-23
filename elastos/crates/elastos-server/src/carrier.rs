@@ -8,12 +8,14 @@
 //!
 //! ## Trust boundary
 //!
-//! Carrier delivers gossip frames. A `sender_id` or `signature` in the frame
-//! is not the sending Home. `gossip_send` does not take a caller `sender_id`.
-//! `gossip_recv` shows a sending Home only when that frame was delivered
-//! directly by the Home's Carrier key. A forwarded frame shows no sender.
-//! A signed collaboration envelope keeps its own signature check above this
-//! layer. That check reads the envelope, not the gossip `sender_id`.
+//! Carrier delivers gossip frames. A `sender_id` in the frame is not the
+//! sending Home. `gossip_send` does not take a caller `sender_id` as that
+//! Home. When the caller names this Home's own DID, that DID is stored as
+//! `signed_author` for the signature check above this layer. `gossip_recv`
+//! and `gossip_peek` show a sending Home only when the frame was delivered
+//! directly by that Home's Carrier key. A forwarded frame shows no sender.
+//! A signed envelope keeps its own signature check above this layer. That
+//! check reads the envelope, not the gossip `sender_id`.
 //!
 //! A DID message is not gossip. [`send_did_message`] names a peer DID and
 //! opaque bytes, and rides the PeerDid connection. The receiver records the
@@ -26,6 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -455,6 +458,10 @@ pub struct GossipMessage {
     pub signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_session_id: Option<String>,
+    /// DID this Home named when it sent the frame. Not the transport sender.
+    /// A caller value that is not this Home's DID is not stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_author: Option<String>,
 }
 
 fn requested_gossip_ts(request: &serde_json::Value) -> u64 {
@@ -479,13 +486,23 @@ fn requested_gossip_nonce(request: &serde_json::Value) -> u64 {
         .unwrap_or_else(random_gossip_nonce)
 }
 
+/// Who may be skipped for one retained frame, and who `gossip_recv` may show.
+#[derive(Clone, Debug, Default)]
+enum GossipFrameHome {
+    /// Forwarded. No Home to show or skip.
+    #[default]
+    Forwarded,
+    /// Direct Carrier delivery. Shown as `sender_id` and skippable.
+    Direct(String),
+    /// Inserted on this Home. Skippable, and not shown.
+    Local(String),
+}
+
 #[derive(Default)]
 struct TopicBuffer {
     messages: VecDeque<GossipMessage>,
-    /// Sending Home for each retained frame, one entry per message. `None`
-    /// means `gossip_recv` shows no sender. The frame's `sender_id` is not
-    /// this value.
-    checked_senders: VecDeque<Option<String>>,
+    /// One entry per message. The frame's `sender_id` is not this value.
+    checked_senders: VecDeque<GossipFrameHome>,
     base_index: u64,
     retained_bytes: usize,
     /// Gossip frames received from peers on this topic, kept across a rejoin
@@ -621,13 +638,13 @@ fn pop_gossip_buffer_front(buffer: &mut TopicBuffer) -> Option<GossipMessage> {
 }
 
 fn push_gossip_buffer_message(buffer: &mut TopicBuffer, message: GossipMessage) -> bool {
-    push_gossip_buffer_frame(buffer, message, None)
+    push_gossip_buffer_frame(buffer, message, GossipFrameHome::Forwarded)
 }
 
 fn push_gossip_buffer_frame(
     buffer: &mut TopicBuffer,
     message: GossipMessage,
-    checked_sender: Option<String>,
+    home: GossipFrameHome,
 ) -> bool {
     if buffer
         .messages
@@ -651,17 +668,18 @@ fn push_gossip_buffer_frame(
     }
     buffer.retained_bytes += encoded_len;
     buffer.messages.push_back(message);
-    buffer
-        .checked_senders
-        .push_back(checked_sender.filter(|sender| !sender.is_empty()));
+    buffer.checked_senders.push_back(home);
     debug_assert_eq!(buffer.messages.len(), buffer.checked_senders.len());
     true
 }
 
-/// A caller `sender_id` is not the sending Home. A local insert has no
-/// Carrier delivery to check, so `gossip_recv` shows no sender.
-fn gossip_send_checked_sender(_request: &serde_json::Value) -> Option<String> {
-    None
+/// A local insert has no Carrier delivery to show. It is still this Home,
+/// so `skip_sender_id` can drop it. A caller `sender_id` is not that Home.
+fn gossip_send_home(local_did: Option<&str>) -> GossipFrameHome {
+    match local_did.filter(|did| !did.is_empty()) {
+        Some(did) => GossipFrameHome::Local(did.to_string()),
+        None => GossipFrameHome::Forwarded,
+    }
 }
 
 /// The sending Home is the Carrier key that delivered the frame, and only
@@ -674,6 +692,31 @@ fn gossip_checked_sender(
         return None;
     }
     public_key_to_did(delivered_from).ok()
+}
+
+fn frame_home_at(buffer: &TopicBuffer, index: usize) -> GossipFrameHome {
+    buffer
+        .checked_senders
+        .get(index)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn gossip_shown_sender(home: &GossipFrameHome) -> Option<&str> {
+    match home {
+        GossipFrameHome::Direct(did) if !did.is_empty() => Some(did.as_str()),
+        _ => None,
+    }
+}
+
+fn gossip_frame_matches_skip(home: &GossipFrameHome, skip: &str) -> bool {
+    let recorded = match home {
+        GossipFrameHome::Direct(did) | GossipFrameHome::Local(did) if !did.is_empty() => {
+            did.as_str()
+        }
+        _ => return false,
+    };
+    same_home_identity(recorded, skip)
 }
 
 fn gossip_recv_message(message: &GossipMessage, checked_sender: Option<&str>) -> serde_json::Value {
@@ -1117,6 +1160,29 @@ async fn connect_ticket_endpoints(
 pub fn did_to_public_key(did: &str) -> Option<iroh::PublicKey> {
     let verifying_key = decode_did_key(did).ok()?;
     iroh::PublicKey::from_bytes(verifying_key.as_bytes()).ok()
+}
+
+/// The Carrier key named by a canonical DID or by that key's hex endpoint id.
+pub(crate) fn home_public_key(value: &str) -> Option<iroh::PublicKey> {
+    if value.is_empty() {
+        return None;
+    }
+    did_to_public_key(value).or_else(|| iroh::PublicKey::from_str(value).ok())
+}
+
+/// True when both strings name the same Home key.
+/// A DID and the hex form of that key match. An empty string matches nothing.
+pub(crate) fn same_home_identity(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == right {
+        return true;
+    }
+    match (home_public_key(left), home_public_key(right)) {
+        (Some(left_key), Some(right_key)) => left_key == right_key,
+        _ => false,
+    }
 }
 
 pub(crate) fn public_key_to_did(public_key: &iroh::PublicKey) -> anyhow::Result<String> {
@@ -4738,6 +4804,7 @@ impl CarrierAvailabilityProvider {
             nonce: random_gossip_nonce(),
             signature: Some(signature.clone()),
             sender_session_id: None,
+            signed_author: None,
         };
         let bytes = serialize_gossip_wire_message(&msg).map_err(|encoded_bytes| {
             ProviderError::Provider(format!(
@@ -7555,7 +7622,7 @@ impl std::io::Write for BoundedJsonByteCounter {
 fn gossip_peek_response(
     cursor: u64,
     next_cursor: u64,
-    messages: &[&GossipMessage],
+    messages: &[serde_json::Value],
     limit: usize,
 ) -> serde_json::Value {
     serde_json::json!({
@@ -7583,9 +7650,9 @@ fn gossip_peek_response_envelope_max_bytes() -> usize {
 }
 
 fn bounded_gossip_peek_prefix<'a>(
-    messages: impl Iterator<Item = &'a GossipMessage>,
+    messages: impl Iterator<Item = (&'a GossipMessage, GossipFrameHome)>,
     limit: usize,
-) -> std::result::Result<Vec<&'a GossipMessage>, ()> {
+) -> std::result::Result<Vec<(&'a GossipMessage, GossipFrameHome)>, ()> {
     let mut selected = Vec::with_capacity(limit);
     let Some(encoded_messages_limit) =
         GOSSIP_PEEK_MAX_BATCH_BYTES.checked_sub(gossip_peek_response_envelope_max_bytes())
@@ -7593,7 +7660,7 @@ fn bounded_gossip_peek_prefix<'a>(
         return Err(());
     };
     let mut encoded_batch_bytes = 2_usize; // JSON array brackets.
-    for message in messages.take(limit) {
+    for (message, home) in messages.take(limit) {
         let separator_bytes = usize::from(!selected.is_empty());
         let Some(message_limit) = encoded_messages_limit
             .checked_sub(encoded_batch_bytes)
@@ -7608,14 +7675,25 @@ fn bounded_gossip_peek_prefix<'a>(
             bytes: 0,
             max_bytes: message_limit,
         };
-        if serde_json::to_writer(&mut counter, message).is_err() {
+        let visible = gossip_recv_message(message, gossip_shown_sender(&home));
+        if serde_json::to_writer(&mut counter, &visible).is_err() {
             if selected.is_empty() {
                 return Err(());
             }
             break;
         }
-        encoded_batch_bytes += separator_bytes + counter.bytes;
-        selected.push(message);
+        // Peek returns the visible frame. A direct Home DID can be longer
+        // than the stored sender_id, so that JSON counts. The stored frame
+        // can be longer than the frame peek shows, so that length counts too.
+        let counted = counter.bytes.max(gossip_message_encoded_len(message));
+        if counted > message_limit {
+            if selected.is_empty() {
+                return Err(());
+            }
+            break;
+        }
+        encoded_batch_bytes += separator_bytes + counted;
+        selected.push((message, home));
     }
     Ok(selected)
 }
@@ -7809,6 +7887,14 @@ impl Provider for CarrierGossipProvider {
                     }
                 };
 
+                // Only this Home's own DID is kept, and only as the signed
+                // author. Any other caller sender_id is ignored.
+                let signed_author = request
+                    .get("sender_id")
+                    .and_then(|value| value.as_str())
+                    .filter(|sender| !sender.is_empty() && state.did.as_deref() == Some(*sender))
+                    .map(str::to_string);
+                let home = gossip_send_home(state.did.as_deref());
                 let msg = GossipMessage {
                     sender_id: String::new(),
                     sender_nick: sender_nick.to_string(),
@@ -7823,6 +7909,7 @@ impl Provider for CarrierGossipProvider {
                         .get("sender_session_id")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string()),
+                    signed_author,
                 };
                 let bytes = match serialize_gossip_wire_message(&msg) {
                     Ok(bytes) => bytes,
@@ -7840,11 +7927,7 @@ impl Provider for CarrierGossipProvider {
                 {
                     let mut bufs = state.buffers.lock().await;
                     if let Some(buf) = bufs.get_mut(topic_name) {
-                        push_gossip_buffer_frame(
-                            buf,
-                            msg.clone(),
-                            gossip_send_checked_sender(request),
-                        );
+                        push_gossip_buffer_frame(buf, msg.clone(), home);
                     }
                 }
 
@@ -7957,7 +8040,12 @@ impl Provider for CarrierGossipProvider {
                     None => limit,
                 };
                 let messages = match bounded_gossip_peek_prefix(
-                    buffer.messages.iter().skip(start),
+                    buffer
+                        .messages
+                        .iter()
+                        .enumerate()
+                        .skip(start)
+                        .map(|(index, message)| (message, frame_home_at(buffer, index))),
                     batch_limit,
                 ) {
                     Ok(messages) => messages,
@@ -7983,11 +8071,15 @@ impl Provider for CarrierGossipProvider {
                     },
                     limit,
                 });
+                let visible = messages
+                    .iter()
+                    .map(|(message, home)| gossip_recv_message(message, gossip_shown_sender(home)))
+                    .collect::<Vec<_>>();
 
                 Ok(gossip_peek_response(
                     cursor.position,
                     next_cursor,
-                    &messages,
+                    &visible,
                     limit,
                 ))
             }
@@ -8098,7 +8190,9 @@ impl Provider for CarrierGossipProvider {
                     .and_then(|v| v.as_str())
                     .unwrap_or("default")
                     .to_string();
-                // Skip the transport-checked Home. A payload sender_id does not match.
+                // Skip this Home. The id is its DID, or the hex form of that key.
+                // A payload sender_id does not match. A local insert is this Home
+                // even though recv shows no sender.
                 let skip_sender_id = request
                     .get("skip_sender_id")
                     .and_then(|v| v.as_str())
@@ -8145,22 +8239,16 @@ impl Provider for CarrierGossipProvider {
                     .enumerate()
                     .skip(start)
                     .take(limit)
-                    .map(|(index, message)| {
-                        let checked = buf
-                            .checked_senders
-                            .get(index)
-                            .and_then(|sender| sender.as_deref())
-                            .filter(|sender| !sender.is_empty());
-                        (message, checked)
-                    })
+                    .map(|(index, message)| (message, frame_home_at(buf, index)))
                     .collect();
                 let count = window.len();
                 let messages: Vec<serde_json::Value> = window
                     .into_iter()
-                    .filter(|(_, checked)| {
-                        skip_sender_id.is_empty() || *checked != Some(skip_sender_id.as_str())
+                    .filter(|(_, home)| {
+                        skip_sender_id.is_empty()
+                            || !gossip_frame_matches_skip(home, &skip_sender_id)
                     })
-                    .map(|(message, checked)| gossip_recv_message(message, checked))
+                    .map(|(message, home)| gossip_recv_message(message, gossip_shown_sender(&home)))
                     .collect();
 
                 let next_cursor = buf.base_index + start as u64 + count as u64;
@@ -8486,7 +8574,10 @@ async fn handle_gossip_event(
             if let Some(buf) = bufs.get_mut(topic) {
                 buf.remote_frames = buf.remote_frames.wrapping_add(1);
                 if let Some(gossip_msg) = gossip_msg {
-                    let checked = gossip_checked_sender(msg.scope, &msg.delivered_from);
+                    let checked = match gossip_checked_sender(msg.scope, &msg.delivered_from) {
+                        Some(did) => GossipFrameHome::Direct(did),
+                        None => GossipFrameHome::Forwarded,
+                    };
                     push_gossip_buffer_frame(buf, gossip_msg, checked);
                 }
             }
@@ -10349,7 +10440,8 @@ pub(crate) mod tests {
             })
             .sum();
         assert!(retained_bytes <= GOSSIP_TOPIC_BUFFER_MAX_BYTES);
-        let checked_senders = std::iter::repeat_n(None, messages.len()).collect();
+        let checked_senders =
+            std::iter::repeat_n(GossipFrameHome::Forwarded, messages.len()).collect();
         TopicBuffer {
             messages,
             checked_senders,
@@ -10365,7 +10457,8 @@ pub(crate) mod tests {
     ) -> TopicBuffer {
         let messages: VecDeque<_> = messages.into_iter().collect();
         let retained_bytes = messages.iter().map(gossip_message_encoded_len).sum();
-        let checked_senders = std::iter::repeat_n(None, messages.len()).collect();
+        let checked_senders =
+            std::iter::repeat_n(GossipFrameHome::Forwarded, messages.len()).collect();
         TopicBuffer {
             messages,
             checked_senders,
@@ -11144,6 +11237,7 @@ pub(crate) mod tests {
             nonce: 42,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
         let bytes = serde_json::to_vec(&msg).unwrap();
         let decoded: GossipMessage = serde_json::from_slice(&bytes).unwrap();
@@ -11165,6 +11259,7 @@ pub(crate) mod tests {
             nonce: 1,
             signature: Some("deadbeef".to_string()),
             sender_session_id: None,
+            signed_author: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"signature\":\"deadbeef\""));
@@ -11254,6 +11349,7 @@ pub(crate) mod tests {
             nonce: 1,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
         let buffer = test_topic_buffer([message], 0);
         assert!(local_content_availability_catchup_message(&buffer.messages, &did).is_none());
@@ -11381,6 +11477,7 @@ pub(crate) mod tests {
             nonce: 1,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
 
         assert!(
@@ -11576,6 +11673,7 @@ pub(crate) mod tests {
                 nonce: 1,
                 signature: None,
                 sender_session_id: None,
+                signed_author: None,
             },
             did,
         )
@@ -22177,6 +22275,7 @@ pub(crate) mod tests {
             nonce: 99,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
         let msg_bytes = serde_json::to_vec(&msg).unwrap();
         sender2.broadcast(msg_bytes.into()).await.unwrap();
@@ -22210,6 +22309,7 @@ pub(crate) mod tests {
             nonce: 100,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         };
         let near_max_bytes = serialize_gossip_wire_message(&near_max).unwrap();
         assert!(
@@ -22711,6 +22811,7 @@ pub(crate) mod tests {
             nonce: index + 1,
             signature: Some(format!("untrusted-signature-{index}")),
             sender_session_id: Some(format!("untrusted-session-{index}")),
+            signed_author: None,
         }
     }
 
@@ -22763,9 +22864,17 @@ pub(crate) mod tests {
         assert_eq!(first["data"]["cursor"], 0);
         assert_eq!(first["data"]["next_cursor"], 1);
         assert_eq!(first["data"]["scanned"], 1);
-        assert_eq!(
-            first["data"]["messages"][0]["sender_id"],
-            "transport-sender-0"
+        assert!(
+            first["data"]["messages"][0].get("sender_id").is_none(),
+            "peek must not show a payload sender_id: {}",
+            first["data"]["messages"][0]
+        );
+        assert!(
+            !first["data"]["messages"][0]
+                .to_string()
+                .contains("transport-sender-0"),
+            "{}",
+            first["data"]["messages"][0]
         );
         assert_eq!(
             first["data"]["messages"][0]["sender_session_id"], "untrusted-session-0",
@@ -23019,14 +23128,9 @@ pub(crate) mod tests {
 
         {
             let state = node.gossip_state.lock().await;
-            state
-                .buffers
-                .lock()
-                .await
-                .get_mut(topic)
-                .unwrap()
-                .messages
-                .push_back(cursor_test_message(0));
+            let buffer = state.buffers.lock().await;
+            let mut buffers = buffer;
+            push_gossip_buffer_message(buffers.get_mut(topic).unwrap(), cursor_test_message(0));
         }
         let appended = provider.send_raw(&peek_request).await.unwrap();
         assert_eq!(appended["data"]["cursor"], 0);
@@ -23284,6 +23388,7 @@ pub(crate) mod tests {
                 nonce: 1,
                 signature: Some("sig_alice".to_string()),
                 sender_session_id: None,
+                signed_author: None,
             };
             push_gossip_buffer_message(buf, message);
         }
@@ -23336,6 +23441,7 @@ pub(crate) mod tests {
                 nonce: 2,
                 signature: Some("sig_bob".to_string()),
                 sender_session_id: None,
+                signed_author: None,
             };
             push_gossip_buffer_message(buf, message);
         }
@@ -23372,6 +23478,7 @@ pub(crate) mod tests {
             nonce: 1,
             signature: Some("sig_alice".to_string()),
             sender_session_id: None,
+            signed_author: None,
         };
         assert!(push_gossip_buffer_message(&mut buffer, message.clone()));
 
@@ -23972,6 +24079,7 @@ mod two_home_did_message_test {
 #[cfg(unix)]
 #[cfg(test)]
 mod gossip_visible_sender {
+    use ed25519_dalek::{Signer, Verifier};
     use elastos_runtime::provider::Provider;
 
     use super::tests::shutdown_test_carrier_node;
@@ -23989,6 +24097,7 @@ mod gossip_visible_sender {
             nonce: 7,
             signature: None,
             sender_session_id: None,
+            signed_author: None,
         }
     }
 
@@ -24117,7 +24226,636 @@ mod gossip_visible_sender {
             .iter()
             .all(|message| message["content"] != "direct-frame"));
 
+        let transport_hex = delivered_from.to_string();
+        assert_ne!(transport_hex, transport_did);
+        let skipped_hex = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "skip-hex",
+                "skip_sender_id": transport_hex,
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let kept_hex = skipped_hex["data"]["messages"].as_array().unwrap();
+        assert_eq!(kept_hex.len(), 2, "{skipped_hex}");
+        assert!(kept_hex
+            .iter()
+            .all(|message| message["content"] != "direct-frame"));
+
+        let skipped_local = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "skip-local",
+                "skip_sender_id": did,
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let kept_local = skipped_local["data"]["messages"].as_array().unwrap();
+        assert_eq!(kept_local.len(), 2, "{skipped_local}");
+        assert!(kept_local
+            .iter()
+            .all(|message| message["content"] != "local-frame"));
+
         shutdown_test_carrier_node(node).await;
+    }
+
+    fn chat_signature(
+        key: &ed25519_dalek::SigningKey,
+        did: &str,
+        ts: u64,
+        content: &str,
+    ) -> String {
+        let payload_hex = elastos_common::chat_protocol::signing_payload_hex(did, ts, content);
+        let payload = hex::decode(payload_hex).unwrap();
+        hex::encode(key.sign(&payload).to_bytes())
+    }
+
+    fn chat_signature_ok(did: &str, ts: u64, content: &str, signature: &str) -> bool {
+        let payload_hex = elastos_common::chat_protocol::signing_payload_hex(did, ts, content);
+        let Ok(payload) = hex::decode(payload_hex) else {
+            return false;
+        };
+        let Ok(verifying_key) = elastos_identity::decode_did_key(did) else {
+            return false;
+        };
+        let Ok(bytes) = hex::decode(signature) else {
+            return false;
+        };
+        let Ok(signature) = ed25519_dalek::Signature::from_slice(&bytes) else {
+            return false;
+        };
+        verifying_key.verify(&payload, &signature).is_ok()
+    }
+
+    fn gossip_frame(
+        sender_id: &str,
+        signed_author: Option<&str>,
+        content: &str,
+        ts: u64,
+        nonce: u64,
+        signature: Option<&str>,
+    ) -> GossipMessage {
+        GossipMessage {
+            sender_id: sender_id.to_string(),
+            sender_nick: "ada".to_string(),
+            content: content.to_string(),
+            ts,
+            nonce,
+            signature: signature.map(str::to_string),
+            sender_session_id: Some("session-a".to_string()),
+            signed_author: signed_author.map(str::to_string),
+        }
+    }
+
+    async fn deliver_frame(
+        buffers: &std::sync::Arc<
+            tokio::sync::Mutex<std::collections::HashMap<String, super::TopicBuffer>>,
+        >,
+        peers: &std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+        topic_peers: &std::sync::Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<String, std::collections::HashSet<String>>,
+            >,
+        >,
+        topic: &str,
+        frame: &GossipMessage,
+        scope: iroh_gossip::proto::DeliveryScope,
+        delivered_from: iroh::EndpointId,
+    ) {
+        handle_gossip_event(
+            iroh_gossip::api::Event::Received(iroh_gossip::api::Message {
+                content: serde_json::to_vec(frame).unwrap().into(),
+                scope,
+                delivered_from,
+            }),
+            buffers,
+            peers,
+            topic_peers,
+            topic,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn service_decision_accepted_direct_and_forwarded_forged_signer_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, did) = elastos_identity::load_or_create_did(dir.path()).unwrap();
+        let node = start_carrier_node(&signing_key, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/service-decision";
+        assert_eq!(
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_join",
+                    "topic": topic,
+                    "mode": "direct"
+                }))
+                .await
+                .unwrap()["status"],
+            "ok"
+        );
+        let peer = super::did_to_public_key(&did).unwrap().to_string();
+        let mut payload = serde_json::json!({
+            "schema": "elastos.service-access-decision/v1",
+            "kind": "service_access_decision",
+            "request_id": "req-1",
+            "provider_peer_id": peer,
+            "decision": "approved",
+            "service_kind": "exit",
+            "created_at": 1_700_000_000u64,
+        });
+        super::sign_service_message(dir.path(), &mut payload).unwrap();
+        let mut bad = payload.clone();
+        bad["signature"] = serde_json::json!("00");
+        let forged = elastos_identity::derive_did(&[0x91; 32]).1;
+        let (other_key, other_did) = elastos_identity::derive_did(&[0x92; 32]);
+        assert_ne!(forged, did);
+        assert_ne!(other_did, did);
+        let signer_from = iroh::SecretKey::from_bytes(&signing_key.to_bytes()).public();
+        let other_from = iroh::SecretKey::from_bytes(&other_key.to_bytes()).public();
+        assert_eq!(public_key_to_did(&signer_from).unwrap(), did);
+        let forwarded_scope: iroh_gossip::proto::DeliveryScope =
+            serde_json::from_str(r#"{"Swarm":1}"#).unwrap();
+        let (buffers, peers, topic_peers) = {
+            let state = node.gossip_state.lock().await;
+            (
+                state.buffers.clone(),
+                state.peers.clone(),
+                state.topic_peers.clone(),
+            )
+        };
+        let direct = gossip_frame(&forged, None, &payload.to_string(), 1, 1, None);
+        let forwarded = gossip_frame(&forged, None, &payload.to_string(), 2, 2, None);
+        let wrong_home = gossip_frame(&forged, None, &payload.to_string(), 3, 3, None);
+        let bad_signature = gossip_frame(&forged, None, &bad.to_string(), 4, 4, None);
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &direct,
+            iroh_gossip::proto::DeliveryScope::Neighbors,
+            signer_from,
+        )
+        .await;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &forwarded,
+            forwarded_scope,
+            other_from,
+        )
+        .await;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &wrong_home,
+            iroh_gossip::proto::DeliveryScope::Neighbors,
+            other_from,
+        )
+        .await;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &bad_signature,
+            forwarded_scope,
+            other_from,
+        )
+        .await;
+
+        let recv = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "service-decisions",
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let messages = recv["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4, "{recv}");
+        let mut accepted = 0;
+        for message in messages {
+            assert!(
+                !message.to_string().contains(&forged),
+                "body sender must not survive recv: {message}"
+            );
+            let result = super::verify_service_message(message, "provider_peer_id");
+            match message["ts"].as_u64() {
+                Some(1) => {
+                    assert_eq!(message["sender_id"], did);
+                    let decision = result.expect("direct decision");
+                    assert_eq!(decision["kind"], "service_access_decision");
+                    assert_eq!(decision["decision"], "approved");
+                    accepted += 1;
+                }
+                Some(2) => {
+                    assert!(message.get("sender_id").is_none(), "{message}");
+                    let decision = result.expect("forwarded decision");
+                    assert_eq!(decision["decision"], "approved");
+                    accepted += 1;
+                }
+                Some(3) => {
+                    assert_eq!(message["sender_id"], other_did);
+                    assert!(result.is_err(), "forged direct signer must be refused");
+                }
+                Some(4) => {
+                    assert!(message.get("sender_id").is_none(), "{message}");
+                    assert!(result.is_err(), "bad signature must be refused");
+                }
+                other => panic!("unexpected frame ts {other:?}"),
+            }
+        }
+        assert_eq!(accepted, 2);
+        shutdown_test_carrier_node(node).await;
+    }
+
+    #[tokio::test]
+    async fn forwarded_chat_and_presence_deliver_signed_author() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, did) = elastos_identity::derive_did(&[0x71; 32]);
+        let node = start_carrier_node(&signing_key, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/forwarded-chat";
+        assert_eq!(
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_join",
+                    "topic": topic,
+                    "mode": "direct"
+                }))
+                .await
+                .unwrap()["status"],
+            "ok"
+        );
+        let forged = elastos_identity::derive_did(&[0x72; 32]).1;
+        let (other_key, other_did) = elastos_identity::derive_did(&[0x73; 32]);
+        let signer_from = iroh::SecretKey::from_bytes(&signing_key.to_bytes()).public();
+        let other_from = iroh::SecretKey::from_bytes(&other_key.to_bytes()).public();
+        let forwarded_scope: iroh_gossip::proto::DeliveryScope =
+            serde_json::from_str(r#"{"Swarm":1}"#).unwrap();
+        let chat_ts = 1_700_000_100u64;
+        let chat = "hello from the other home";
+        let chat_sig = chat_signature(&signing_key, &did, chat_ts, chat);
+        assert!(chat_signature_ok(&did, chat_ts, chat, &chat_sig));
+        let sent = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_send",
+                "topic": topic,
+                "message": chat,
+                "sender": "ada",
+                "sender_id": did,
+                "ts": chat_ts,
+                "signature": chat_sig,
+                "sender_session_id": "session-a",
+                "nonce": 10,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(sent["status"], "ok", "{sent}");
+        let (buffers, peers, topic_peers) = {
+            let state = node.gossip_state.lock().await;
+            (
+                state.buffers.clone(),
+                state.peers.clone(),
+                state.topic_peers.clone(),
+            )
+        };
+        let forwarded_chat = gossip_frame(&forged, Some(&did), chat, chat_ts, 11, Some(&chat_sig));
+        let direct_chat = gossip_frame(
+            &forged,
+            Some(&did),
+            chat,
+            chat_ts + 1,
+            12,
+            Some(&chat_signature(&signing_key, &did, chat_ts + 1, chat)),
+        );
+        let mismatched = gossip_frame(
+            &forged,
+            Some(&did),
+            chat,
+            chat_ts + 2,
+            13,
+            Some(&chat_signature(&signing_key, &did, chat_ts + 2, chat)),
+        );
+        let forged_author_sig = chat_signature(&signing_key, &did, chat_ts + 3, chat);
+        let forged_author = gossip_frame(
+            &forged,
+            Some(&other_did),
+            chat,
+            chat_ts + 3,
+            14,
+            Some(&forged_author_sig),
+        );
+        let presence = serde_json::json!({
+            "kind": "chat_presence_v1",
+            "room": "#general",
+            "did": did,
+            "nick": "ada",
+            "ticket": "ticket",
+            "ts": 50u64,
+        });
+        let presence_text = presence.to_string();
+        let presence_sig = chat_signature(&signing_key, &did, 50, &presence_text);
+        let forwarded_presence =
+            gossip_frame(&forged, None, &presence_text, 50, 15, Some(&presence_sig));
+        let direct_presence = gossip_frame(
+            &forged,
+            Some(&did),
+            &presence_text,
+            51,
+            16,
+            Some(&chat_signature(&signing_key, &did, 51, &presence_text)),
+        );
+        let mismatched_presence = gossip_frame(
+            &forged,
+            Some(&did),
+            &presence_text,
+            52,
+            17,
+            Some(&chat_signature(&signing_key, &did, 52, &presence_text)),
+        );
+        for (frame, scope, from) in [
+            (&forwarded_chat, forwarded_scope, other_from),
+            (
+                &direct_chat,
+                iroh_gossip::proto::DeliveryScope::Neighbors,
+                signer_from,
+            ),
+            (
+                &mismatched,
+                iroh_gossip::proto::DeliveryScope::Neighbors,
+                other_from,
+            ),
+            (&forged_author, forwarded_scope, other_from),
+            (&forwarded_presence, forwarded_scope, other_from),
+            (
+                &direct_presence,
+                iroh_gossip::proto::DeliveryScope::Neighbors,
+                signer_from,
+            ),
+            (
+                &mismatched_presence,
+                iroh_gossip::proto::DeliveryScope::Neighbors,
+                other_from,
+            ),
+        ] {
+            deliver_frame(&buffers, &peers, &topic_peers, topic, frame, scope, from).await;
+        }
+
+        let recv = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_recv",
+                "topic": topic,
+                "consumer_id": "chat",
+                "limit": 20,
+            }))
+            .await
+            .unwrap();
+        let messages = recv["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 8, "{recv}");
+        let local = messages
+            .iter()
+            .find(|message| message["nonce"] == 10)
+            .unwrap();
+        assert_eq!(local["content"], chat);
+        assert!(local.get("sender_id").is_none(), "{local}");
+        assert_eq!(local["signed_author"], did);
+        assert!(!local.to_string().contains(&forged));
+        let local_author = elastos_common::chat_protocol::chat_line_author(local).unwrap();
+        assert_eq!(local_author, did);
+        assert!(chat_signature_ok(
+            local_author,
+            chat_ts,
+            chat,
+            local["signature"].as_str().unwrap()
+        ));
+        assert_eq!(
+            elastos_common::chat_protocol::chat_delivery(local, true),
+            Some(elastos_common::chat_protocol::ChatDelivery {
+                author: did.as_str(),
+                transport_sender: None,
+            })
+        );
+
+        let forwarded = messages
+            .iter()
+            .find(|message| message["nonce"] == 11)
+            .unwrap();
+        assert!(forwarded.get("sender_id").is_none(), "{forwarded}");
+        assert!(!forwarded.to_string().contains(&forged), "{forwarded}");
+        assert_eq!(forwarded["signed_author"], did);
+        let author = elastos_common::chat_protocol::chat_line_author(forwarded).unwrap();
+        assert_eq!(author, did);
+        assert!(chat_signature_ok(
+            author,
+            chat_ts,
+            chat,
+            forwarded["signature"].as_str().unwrap()
+        ));
+        assert_eq!(
+            elastos_common::chat_protocol::chat_delivery(forwarded, true)
+                .unwrap()
+                .transport_sender,
+            None
+        );
+
+        let direct = messages
+            .iter()
+            .find(|message| message["nonce"] == 12)
+            .unwrap();
+        assert_eq!(direct["sender_id"], did);
+        assert!(!direct.to_string().contains(&forged), "{direct}");
+        assert_eq!(
+            elastos_common::chat_protocol::chat_delivery(direct, true),
+            Some(elastos_common::chat_protocol::ChatDelivery {
+                author: did.as_str(),
+                transport_sender: Some(did.as_str()),
+            })
+        );
+
+        let mismatch = messages
+            .iter()
+            .find(|message| message["nonce"] == 13)
+            .unwrap();
+        assert_eq!(mismatch["sender_id"], other_did);
+        assert!(elastos_common::chat_protocol::chat_line_author(mismatch).is_none());
+        assert!(elastos_common::chat_protocol::chat_delivery(mismatch, true).is_none());
+
+        let forged_line = messages
+            .iter()
+            .find(|message| message["nonce"] == 14)
+            .unwrap();
+        assert_eq!(
+            elastos_common::chat_protocol::chat_line_author(forged_line),
+            Some(other_did.as_str())
+        );
+        assert!(!chat_signature_ok(
+            other_did.as_str(),
+            chat_ts + 3,
+            chat,
+            forged_line["signature"].as_str().unwrap()
+        ));
+        assert!(elastos_common::chat_protocol::chat_delivery(forged_line, false).is_none());
+
+        let presence_forwarded = messages
+            .iter()
+            .find(|message| message["nonce"] == 15)
+            .unwrap();
+        assert!(
+            presence_forwarded.get("sender_id").is_none(),
+            "{presence_forwarded}"
+        );
+        assert!(!presence_forwarded.to_string().contains(&forged));
+        let presence_author =
+            elastos_common::chat_protocol::presence_author(presence_forwarded, &did).unwrap();
+        assert_eq!(presence_author, did);
+        assert!(chat_signature_ok(
+            presence_author,
+            50,
+            presence_forwarded["content"].as_str().unwrap(),
+            presence_forwarded["signature"].as_str().unwrap()
+        ));
+
+        let presence_direct = messages
+            .iter()
+            .find(|message| message["nonce"] == 16)
+            .unwrap();
+        assert_eq!(presence_direct["sender_id"], did);
+        assert_eq!(
+            elastos_common::chat_protocol::presence_author(presence_direct, &did),
+            Some(did.as_str())
+        );
+
+        let presence_mismatch = messages
+            .iter()
+            .find(|message| message["nonce"] == 17)
+            .unwrap();
+        assert_eq!(presence_mismatch["sender_id"], other_did);
+        assert!(elastos_common::chat_protocol::presence_author(presence_mismatch, &did).is_none());
+
+        shutdown_test_carrier_node(node).await;
+    }
+
+    #[tokio::test]
+    async fn gossip_peek_hides_payload_sender_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (signing_key, did) = elastos_identity::derive_did(&[0x81; 32]);
+        let node = start_carrier_node(&signing_key, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let provider = CarrierGossipProvider::new(node.gossip_state.clone());
+        let topic = "__test/peek-hides-sender";
+        assert_eq!(
+            provider
+                .send_raw(&serde_json::json!({
+                    "op": "gossip_join",
+                    "topic": topic,
+                    "mode": "direct"
+                }))
+                .await
+                .unwrap()["status"],
+            "ok"
+        );
+        let forged = elastos_identity::derive_did(&[0x82; 32]).1;
+        let (transport_key, transport_did) = elastos_identity::derive_did(&[0x83; 32]);
+        let delivered_from = iroh::SecretKey::from_bytes(&transport_key.to_bytes()).public();
+        assert_eq!(public_key_to_did(&delivered_from).unwrap(), transport_did);
+        let forwarded_scope: iroh_gossip::proto::DeliveryScope =
+            serde_json::from_str(r#"{"Swarm":1}"#).unwrap();
+        let (buffers, peers, topic_peers) = {
+            let state = node.gossip_state.lock().await;
+            (
+                state.buffers.clone(),
+                state.peers.clone(),
+                state.topic_peers.clone(),
+            )
+        };
+        let mut direct = forged_frame(&forged, "peek-direct");
+        direct.sender_session_id = Some("keep-session".to_string());
+        direct.nonce = 1;
+        let mut forwarded = forged_frame(&forged, "peek-forwarded");
+        forwarded.nonce = 2;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &direct,
+            iroh_gossip::proto::DeliveryScope::Neighbors,
+            delivered_from,
+        )
+        .await;
+        deliver_frame(
+            &buffers,
+            &peers,
+            &topic_peers,
+            topic,
+            &forwarded,
+            forwarded_scope,
+            delivered_from,
+        )
+        .await;
+        let peek = provider
+            .send_raw(&serde_json::json!({
+                "op": "gossip_peek",
+                "topic": topic,
+                "consumer_id": "peek-hides-sender",
+                "limit": 10,
+            }))
+            .await
+            .unwrap();
+        let messages = peek["data"]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "{peek}");
+        assert_eq!(messages[0]["sender_id"], transport_did);
+        assert_ne!(messages[0]["sender_id"], forged);
+        assert!(
+            !messages[0].to_string().contains(&forged),
+            "{}",
+            messages[0]
+        );
+        assert_eq!(messages[0]["sender_session_id"], "keep-session");
+        assert_eq!(messages[0]["content"], "peek-direct");
+        assert!(messages[1].get("sender_id").is_none(), "{}", messages[1]);
+        assert!(
+            !messages[1].to_string().contains(&forged),
+            "{}",
+            messages[1]
+        );
+        assert_eq!(messages[1]["content"], "peek-forwarded");
+        shutdown_test_carrier_node(node).await;
+    }
+
+    #[test]
+    fn same_home_identity_matches_did_and_hex() {
+        let (key, did) = elastos_identity::derive_did(&[0x44; 32]);
+        let hex_id = iroh::SecretKey::from_bytes(&key.to_bytes())
+            .public()
+            .to_string();
+        assert_ne!(hex_id, did);
+        assert!(super::same_home_identity(&did, &hex_id));
+        assert!(super::same_home_identity(&hex_id, &did));
+        assert!(super::same_home_identity(&did, &did));
+        let (_, other) = elastos_identity::derive_did(&[0x45; 32]);
+        assert!(!super::same_home_identity(&did, &other));
+        assert!(!super::same_home_identity(&hex_id, &other));
+        assert!(!super::same_home_identity(&did, ""));
+        assert!(!super::same_home_identity("", &did));
+        assert!(!super::same_home_identity("not-a-home", &hex_id));
     }
 }
 
