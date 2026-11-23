@@ -118,6 +118,11 @@ async function api(req, res, url) {
       route: `/apps/home-gui/?${query}#home_token=fixture-shell-token` });
   }
   if (route === "POST /api/apps/home/state") { await body(req); return json(res, { saved: true }); }
+  // Home asks for terminals waiting on a passkey approval (P2-4 slice 3); this fixture has none.
+  if (route === "POST /api/home/cli-mint/waiting") {
+    await body(req);
+    return json(res, { schema: "elastos.home.cli-mint.waiting.result/v1", requests: [] });
+  }
   throw new Error(`Unexpected API request: ${route}`);
 }
 
