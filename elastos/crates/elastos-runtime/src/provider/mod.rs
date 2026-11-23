@@ -12,6 +12,11 @@ pub mod bridge;
 #[path = "bridge_windows.rs"]
 pub mod bridge;
 mod bridge_protocol;
+#[cfg(unix)]
+mod checked_executable;
+#[cfg(windows)]
+#[path = "checked_executable_windows.rs"]
+mod checked_executable;
 pub mod dispatch;
 #[cfg(unix)]
 mod landlock_plan;
@@ -36,6 +41,9 @@ mod seccomp_program;
 pub use bridge::{
     CapsuleProvider, Confined, ProviderBridge, ProviderConfig as BridgeProviderConfig,
 };
+#[cfg(any(windows, target_os = "macos"))]
+pub use checked_executable::recover_verified_copies;
+pub use checked_executable::CheckedExecutable;
 pub use registry::{
     decode_provider_stream_payload, EntryType, LocalIpfsCapacityObservation, Provider,
     ProviderByteRange, ProviderCarrierInvoker, ProviderCarrierRoute, ProviderError,

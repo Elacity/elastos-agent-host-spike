@@ -2221,6 +2221,7 @@ async fn handle_file_connection(
     gossip_state: Arc<Mutex<GossipState>>,
 ) -> Result<()> {
     let source_endpoint_id = conn.remote_id();
+    let transport = iroh_transport_observation(&source_endpoint_id)?;
     loop {
         let (mut send, recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
@@ -2229,6 +2230,7 @@ async fn handle_file_connection(
         let data_dir = data_dir.to_path_buf();
         let provider_registry = provider_registry.clone();
         let gossip_state = gossip_state.clone();
+        let transport = transport.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_file_stream(
                 &mut send,
@@ -2237,6 +2239,7 @@ async fn handle_file_connection(
                 provider_registry,
                 gossip_state,
                 source_endpoint_id,
+                &transport,
             )
             .await
             {
@@ -2254,6 +2257,7 @@ async fn handle_file_stream(
     provider_registry: Option<Weak<ProviderRegistry>>,
     gossip_state: Arc<Mutex<GossipState>>,
     source_endpoint_id: iroh::PublicKey,
+    transport: &CarrierTransportObservation,
 ) -> Result<()> {
     let mut reader = BufReader::new(recv);
     let line = read_peer_line(
@@ -2434,7 +2438,7 @@ async fn handle_file_stream(
                 carrier_provider_invoke_registry(
                     &registry,
                     &msg.data,
-                    &source_endpoint_id,
+                    transport,
                     CarrierProviderCaller::Peer {
                         data_dir,
                         network: network.as_ref(),
@@ -2850,6 +2854,33 @@ async fn bridge_browser_carrier_stream_to_relay(
     anyhow::bail!("Browser Carrier exit stream requires a Unix relay host")
 }
 
+/// Authenticated transport fact about the sending Runtime/device. This does
+/// not identify the author of a message carried in the request body.
+#[derive(Clone)]
+pub(crate) struct CarrierTransportObservation {
+    sending_runtime_did: String,
+}
+
+impl CarrierTransportObservation {
+    fn checked_sender_runtime_did(did: String) -> Result<Self> {
+        let key = decode_did_key(&did).context("Carrier sender Runtime DID is invalid")?;
+        anyhow::ensure!(
+            encode_did_key(&key)? == did,
+            "Carrier sender Runtime DID is not canonical"
+        );
+        Ok(Self {
+            sending_runtime_did: did,
+        })
+    }
+}
+
+/// Iroh's authenticated remote identity is converted only at its adapter.
+pub(crate) fn iroh_transport_observation(
+    source: &iroh::PublicKey,
+) -> Result<CarrierTransportObservation> {
+    CarrierTransportObservation::checked_sender_runtime_did(public_key_to_did(source)?)
+}
+
 /// Who sends a provider invocation into [`carrier_provider_invoke_registry`].
 #[derive(Clone, Copy)]
 enum CarrierProviderCaller<'a> {
@@ -2900,7 +2931,7 @@ pub(crate) async fn local_cid_pinned(registry: &ProviderRegistry, cid: &str) -> 
 pub(crate) async fn admit_carrier_peer_content_fetch(
     data_dir: &std::path::Path,
     network: Option<&crate::collaboration_network::VerifiedCollaborationNetworkProfile>,
-    source: &iroh::PublicKey,
+    transport: &CarrierTransportObservation,
     request: &serde_json::Value,
 ) -> std::result::Result<(), serde_json::Value> {
     if is_trusted_source_runtime(data_dir) {
@@ -2923,15 +2954,18 @@ pub(crate) async fn admit_carrier_peer_content_fetch(
     }
     let contact = match network.cloned() {
         Some(network) => {
-            let (data_dir, source) = (data_dir.to_path_buf(), *source);
+            let (data_dir, sender_runtime_did) = (
+                data_dir.to_path_buf(),
+                transport.sending_runtime_did.clone(),
+            );
             tokio::time::timeout(
                 Duration::from_secs(2),
                 tokio::task::spawn_blocking(move || {
-                    crate::api::gateway::carrier_source_is_contact_of(
+                    crate::api::gateway::carrier_sender_did_is_contact_of(
                         &data_dir,
                         &network,
                         &audience.principals,
-                        &source,
+                        &sender_runtime_did,
                     )
                 }),
             )
@@ -3005,7 +3039,7 @@ fn admit_carrier_peer_content_request(
 async fn carrier_provider_invoke_registry(
     registry: &ProviderRegistry,
     data: &serde_json::Value,
-    source_endpoint_id: &iroh::PublicKey,
+    transport: &CarrierTransportObservation,
     caller: CarrierProviderCaller<'_>,
     signing_key: Option<&ed25519_dalek::SigningKey>,
 ) -> Result<serde_json::Value> {
@@ -3050,8 +3084,7 @@ async fn carrier_provider_invoke_registry(
         }));
     }
 
-    let source_endpoint_did = public_key_to_did(source_endpoint_id)
-        .context("Carrier source endpoint DID encoding failed")?;
+    let source_endpoint_did = &transport.sending_runtime_did;
     let runtime = request
         .get_mut("_runtime_invocation")
         .and_then(serde_json::Value::as_object_mut)
@@ -3069,7 +3102,7 @@ async fn carrier_provider_invoke_registry(
     if let (CarrierProviderCaller::Peer { data_dir, network }, "content") = (caller, target) {
         if let Err(answer) = admit_carrier_peer_content_request(
             data_dir,
-            &source_endpoint_did,
+            source_endpoint_did,
             operation,
             &mut request,
         ) {
@@ -3077,8 +3110,7 @@ async fn carrier_provider_invoke_registry(
         }
         if operation == "fetch" {
             if let Err(answer) =
-                admit_carrier_peer_content_fetch(data_dir, network, source_endpoint_id, &request)
-                    .await
+                admit_carrier_peer_content_fetch(data_dir, network, transport, &request).await
             {
                 return Ok(answer);
             }
@@ -3098,7 +3130,7 @@ async fn carrier_provider_invoke_registry(
     };
     if let (Ok(_), Some((data_dir, network))) = (&result, admitted_read) {
         if let Err(answer) =
-            admit_carrier_peer_content_fetch(data_dir, network, source_endpoint_id, &request).await
+            admit_carrier_peer_content_fetch(data_dir, network, transport, &request).await
         {
             return Ok(answer);
         }
@@ -3127,7 +3159,7 @@ async fn carrier_provider_invoke_registry(
                             if let Ok(signed) = crate::content::sign_holder_serve_receipt(
                                 signing_key,
                                 cid,
-                                &source_endpoint_did,
+                                source_endpoint_did,
                                 bytes.len() as u64,
                                 nonce,
                                 now_secs(),
@@ -8522,7 +8554,9 @@ impl CarrierProviderInvoker {
         let response = carrier_provider_invoke_registry(
             &registry,
             &message.data,
-            &peer_endpoint.id(),
+            &iroh_transport_observation(&peer_endpoint.id()).map_err(|err| {
+                ProviderError::Provider(format!("Carrier loopback identity is invalid: {err}"))
+            })?,
             CarrierProviderCaller::Loopback,
             None,
         )
@@ -9754,6 +9788,21 @@ pub(crate) mod tests {
 
     fn authenticated_test_source_endpoint() -> iroh::PublicKey {
         iroh::SecretKey::from_bytes(&[42u8; 32]).public()
+    }
+
+    #[test]
+    fn carrier_sender_observation_requires_a_canonical_device_did() {
+        assert!(
+            CarrierTransportObservation::checked_sender_runtime_did("did:key:forged".into())
+                .is_err()
+        );
+        let source = authenticated_test_source_endpoint();
+        assert_eq!(
+            iroh_transport_observation(&source)
+                .unwrap()
+                .sending_runtime_did,
+            public_key_to_did(&source).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -11542,7 +11591,7 @@ pub(crate) mod tests {
         let response = carrier_provider_invoke_registry(
             &registry,
             &request,
-            &source_endpoint,
+            &iroh_transport_observation(&source_endpoint).unwrap(),
             CarrierProviderCaller::Loopback,
             None,
         )
@@ -11573,7 +11622,7 @@ pub(crate) mod tests {
             .unwrap();
         let request = serde_json::json!({
             "source": target, "target": target, "operation": "deliver", "transfer": "json",
-            "request": {"op":"deliver", "_runtime_invocation": {
+            "request": {"op":"deliver", "claimed_did":elastos_identity::derive_did(&[43; 32]).1, "_runtime_invocation": {
                 "schema":"elastos.provider.invocation/v1", "source":target, "target":target,
                 "op":"deliver", "capability":format!("provider:{target}->{target}:deliver"),
                 "transport":"carrier-provider-plane", "carrier":null, "transfer":"json",
@@ -11590,10 +11639,16 @@ pub(crate) mod tests {
             data_dir: data_dir.path(),
             network: None,
         };
-        let response = carrier_provider_invoke_registry(&registry, &request, &source, peer, None)
-            .await
-            .unwrap();
+        let transport = iroh_transport_observation(&source).unwrap();
+        let response =
+            carrier_provider_invoke_registry(&registry, &request, &transport, peer, None)
+                .await
+                .unwrap();
         assert_eq!(response["ok"], true);
+        assert_ne!(
+            request["request"]["claimed_did"],
+            response["result"]["data"]["runtime_invocation"]["carrier"]["source_endpoint_did"]
+        );
         assert_eq!(
             response["result"]["data"]["runtime_invocation"]["carrier"]["source_endpoint_did"],
             public_key_to_did(&source).unwrap()
@@ -11601,11 +11656,59 @@ pub(crate) mod tests {
         let mut forged = request;
         forged["request"]["_runtime_invocation"]["carrier"] =
             serde_json::json!({"source_endpoint_did":"forged"});
-        let refused = carrier_provider_invoke_registry(&registry, &forged, &source, peer, None)
+        let refused = carrier_provider_invoke_registry(&registry, &forged, &transport, peer, None)
             .await
             .unwrap();
         assert_eq!(refused["ok"], false);
         assert_eq!(refused["code"], "invalid_provider_invocation");
+    }
+
+    #[tokio::test]
+    async fn carrier_replica_grant_uses_observed_sender_not_body_claim() {
+        let registry = ProviderRegistry::new();
+        registry
+            .register_sub_provider("content", Arc::new(MockCarrierContentProvider))
+            .await
+            .unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let source = authenticated_test_source_endpoint();
+        let transport = iroh_transport_observation(&source).unwrap();
+        let claimed_did = elastos_identity::derive_did(&[43; 32]).1;
+        grant_peer(data_dir.path(), &claimed_did, &["content.replica"]);
+        let request = serde_json::json!({
+            "source":"content-provider", "target":"content", "operation":"ensure",
+            "transfer":"json", "request":{
+                "op":"ensure", "claimed_did":claimed_did,
+                "_runtime_invocation":{
+                    "schema":"elastos.provider.invocation/v1", "source":"content-provider",
+                    "target":"content", "op":"ensure",
+                    "capability":"provider:content-provider->content:ensure",
+                    "transport":"carrier-provider-plane", "carrier":null, "transfer":"json"
+                }
+            }
+        });
+        let peer = CarrierProviderCaller::Peer {
+            data_dir: data_dir.path(),
+            network: None,
+        };
+        let refused = carrier_provider_invoke_registry(&registry, &request, &transport, peer, None)
+            .await
+            .unwrap();
+        assert_eq!(refused["code"], CARRIER_PEER_REFUSED);
+        grant_peer(
+            data_dir.path(),
+            &transport.sending_runtime_did,
+            &["content.replica"],
+        );
+        let admitted =
+            carrier_provider_invoke_registry(&registry, &request, &transport, peer, None)
+                .await
+                .unwrap();
+        assert_eq!(admitted["ok"], true);
+        assert_eq!(
+            admitted["result"]["data"]["runtime_invocation"]["carrier"]["source_endpoint_did"],
+            transport.sending_runtime_did
+        );
     }
 
     #[test]
@@ -15206,10 +15309,11 @@ pub(crate) mod tests {
                 "range":null, "progress":null
             }}
         });
+        let source = authenticated_test_source_endpoint();
         let answer = carrier_provider_invoke_registry(
             &registry,
             &request,
-            &authenticated_test_source_endpoint(),
+            &iroh_transport_observation(&source).unwrap(),
             CarrierProviderCaller::Peer {
                 data_dir: data_dir.path(),
                 network: None,
@@ -15257,10 +15361,16 @@ pub(crate) mod tests {
             data_dir: data_dir.path(),
             network: None,
         };
-        let answer =
-            carrier_provider_invoke_registry(&registry, &request, &source, peer, Some(&holder_key))
-                .await
-                .unwrap();
+        let transport = iroh_transport_observation(&source).unwrap();
+        let answer = carrier_provider_invoke_registry(
+            &registry,
+            &request,
+            &transport,
+            peer,
+            Some(&holder_key),
+        )
+        .await
+        .unwrap();
         assert_eq!(answer["ok"], true, "{answer}");
         let bytes = remote_content_provider_response_bytes(&answer["result"]).unwrap();
         let signed: SignedHolderServeReceipt =
@@ -15290,7 +15400,7 @@ pub(crate) mod tests {
             let answer = carrier_provider_invoke_registry(
                 &registry,
                 &unsigned_request,
-                &source,
+                &transport,
                 peer,
                 Some(&holder_key),
             )
@@ -16658,7 +16768,7 @@ pub(crate) mod tests {
         let response = carrier_provider_invoke_registry(
             &registry,
             &request,
-            &authenticated_test_source_endpoint(),
+            &iroh_transport_observation(&authenticated_test_source_endpoint()).unwrap(),
             CarrierProviderCaller::Loopback,
             None,
         )
@@ -16718,7 +16828,7 @@ pub(crate) mod tests {
         let response = carrier_provider_invoke_registry(
             &registry,
             &request,
-            &authenticated_test_source_endpoint(),
+            &iroh_transport_observation(&authenticated_test_source_endpoint()).unwrap(),
             CarrierProviderCaller::Loopback,
             None,
         )
@@ -16763,7 +16873,7 @@ pub(crate) mod tests {
         let response = carrier_provider_invoke_registry(
             &registry,
             &request,
-            &authenticated_test_source_endpoint(),
+            &iroh_transport_observation(&authenticated_test_source_endpoint()).unwrap(),
             CarrierProviderCaller::Loopback,
             None,
         )
@@ -16808,7 +16918,7 @@ pub(crate) mod tests {
         let response = carrier_provider_invoke_registry(
             &registry,
             &request,
-            &authenticated_test_source_endpoint(),
+            &iroh_transport_observation(&authenticated_test_source_endpoint()).unwrap(),
             CarrierProviderCaller::Loopback,
             None,
         )

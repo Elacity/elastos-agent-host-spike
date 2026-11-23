@@ -305,7 +305,14 @@ components_dest.write_text(json.dumps(manifest, indent=2) + "\n")
 PY2
 
 printf 'dev_mode = true\n' > "$SOURCE_RUNTIME_DATA_DIR/config.toml"
-HOME="$SOURCE_RUNTIME_HOME" XDG_DATA_HOME="$SOURCE_RUNTIME_XDG" "$ROOT/elastos/target/debug/elastos" serve --addr "127.0.0.1:${SOURCE_API_PORT}"     >"$SOURCE_RUNTIME_LOG" 2>&1 &
+PUBLISHED_COMPONENTS="${HOME_DIR}/published-components.json"
+cp "$SOURCE_RUNTIME_DATA_DIR/components.json" "$PUBLISHED_COMPONENTS"
+python3 "$ROOT/scripts/holder-canary-fixture.py" restrict-components \
+    "$SOURCE_RUNTIME_DATA_DIR" "$PUBLISHED_COMPONENTS" localhost-provider
+install -m 700 "$ROOT/elastos/target/debug/elastos" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos"
+python3 "$ROOT/scripts/holder-canary-fixture.py" sign-install \
+    "$SOURCE_RUNTIME_HOME" "$SOURCE_RUNTIME_DATA_DIR" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos"
+HOME="$SOURCE_RUNTIME_HOME" XDG_DATA_HOME="$SOURCE_RUNTIME_XDG" "$SOURCE_RUNTIME_DATA_DIR/bin/elastos" serve --addr "127.0.0.1:${SOURCE_API_PORT}"     >"$SOURCE_RUNTIME_LOG" 2>&1 &
 SOURCE_RUNTIME_PID=$!
 
 for _ in $(seq 1 60); do
@@ -352,10 +359,27 @@ if [[ ! -f "$SOURCE_COMPONENTS_MANIFEST" ]]; then
 fi
 
 echo "[home-frontdoor] setup home profile"
-cp "$SOURCE_RUNTIME_DATA_DIR/components.json" "$HOME_DIR/xdg-data/elastos/components.json"
+cp "$PUBLISHED_COMPONENTS" "$HOME_DIR/xdg-data/elastos/components.json"
 # A source-manifest setup manages collaboration itself: a pinned release network in
 # components.json is neither required beside the manifest nor joined (live Community).
-HOME="$HOME_DIR" XDG_DATA_HOME="$HOME_DIR/xdg-data" ELASTOS_COLLABORATION_STARTUP_MODE=isolated ELASTOS_COMPONENTS_MANIFEST="$SOURCE_RUNTIME_DATA_DIR/components.json" "$ROOT/elastos/target/debug/elastos" setup --profile home >/tmp/elastos-home-frontdoor-setup.log
+HOME="$HOME_DIR" XDG_DATA_HOME="$HOME_DIR/xdg-data" ELASTOS_COLLABORATION_STARTUP_MODE=isolated ELASTOS_COMPONENTS_MANIFEST="$PUBLISHED_COMPONENTS" "$ROOT/elastos/target/debug/elastos" setup --profile home >/tmp/elastos-home-frontdoor-setup.log
+
+# Bind the final setup catalogue to the source binary used by both PTY runs.
+# The installed Home keeps its Carrier source and private release pair.
+HOME_TEST_BIN="$(python3 - "$HOME_DIR/xdg-data/elastos/sources.json" <<'PY2'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    sources = json.load(stream)
+source, = (row for row in sources["sources"] if row["name"] == sources["default_source"])
+print(source["install_path"])
+PY2
+)"
+[[ "$HOME_TEST_BIN" == "$HOME_DIR/"* && -f "$HOME_TEST_BIN" ]]
+install -m 700 "$ROOT/elastos/target/debug/elastos" "$HOME_TEST_BIN"
+python3 "$ROOT/scripts/holder-canary-fixture.py" sign-install \
+    "$HOME_DIR" "$HOME_DIR/xdg-data/elastos" "$HOME_TEST_BIN" --preserve-source
 
 INSTALLED_HOME_CLI_DIR="$HOME_DIR/xdg-data/elastos/capsules/home-cli"
 if [[ ! -d "$INSTALLED_HOME_CLI_DIR" ]]; then
@@ -416,7 +440,7 @@ done
 mv "$INSTALLED_HOME_CLI_DIR" "${INSTALLED_HOME_CLI_DIR}.installed"
 
 echo "[home-frontdoor] prove current source elastos + current source Home CLI component against clean-home data"
-HOME_DIR="$HOME_DIR" ROOT="$ROOT" SOURCE_COMPONENTS_MANIFEST="$SOURCE_COMPONENTS_MANIFEST" python3 - <<'PY'
+HOME_DIR="$HOME_DIR" HOME_TEST_BIN="$HOME_TEST_BIN" SOURCE_COMPONENTS_MANIFEST="$SOURCE_COMPONENTS_MANIFEST" python3 - <<'PY'
 import os
 import pty
 import select
@@ -425,14 +449,13 @@ import subprocess
 import time
 
 home = os.environ["HOME_DIR"]
-root = os.environ["ROOT"]
 env = os.environ.copy()
 env["HOME"] = home
 env["XDG_DATA_HOME"] = f"{home}/xdg-data"
 # Keep the smoke hermetic: chat launched from Home must stay on the slave PTY
 # instead of probing the caller's controlling terminal via /dev/tty.
 env["ELASTOS_CHAT_FORCE_STDIN"] = "1"
-cmd = [f"{root}/elastos/target/debug/elastos"]
+cmd = [os.environ["HOME_TEST_BIN"]]
 def launch_pty():
     master, slave = pty.openpty()
     proc = subprocess.Popen(

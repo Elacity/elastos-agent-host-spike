@@ -1344,6 +1344,8 @@ jobs:
           scripts/setup-source-home.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/setup-source-home.log"
           ELASTOS_DATA_DIR="${XDG_DATA_HOME}/elastos" \
             scripts/installed-provider-verify.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/installed-provider-verify.log"
+          python3 scripts/holder-canary-fixture.py sign-install \
+            "${SOURCE_HOME}" "${XDG_DATA_HOME}/elastos" "${XDG_DATA_HOME}/elastos/bin/elastos"
       - name: local-carrier setup smoke
         env:
           ELASTOS_LLAMA_AMD64_BUNDLE: ${{ runner.temp }}/llama-amd64-bundle/llama-b10516-bin-ubuntu22.04-amd64-cpu.tar.gz
@@ -1641,6 +1643,9 @@ jobs:
           scripts/setup-source-home.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/setup-source-home.log"
           ELASTOS_DATA_DIR="${HOME}/Library/Application Support/elastos" \
             scripts/installed-provider-verify.sh 2>&1 | tee "${RUNNER_TEMP}/source-home-logs/installed-provider-verify.log"
+          python3 scripts/holder-canary-fixture.py sign-install \
+            "${MAC_TEST_HOME}" "${HOME}/Library/Application Support/elastos" \
+            "${HOME}/Library/Application Support/elastos/bin/elastos"
       # The installed Home journey signs up through the real page. Playwright
       # 1.59.1's installer hangs extracting Chromium under Node 26; the journey runs on 26.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4

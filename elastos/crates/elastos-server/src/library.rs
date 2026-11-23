@@ -9750,6 +9750,7 @@ mod tests {
         .is_ok());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires ELASTOS_LIVE_IPFS_PROVIDER_BIN and ELASTOS_LIVE_IPFS_DATA_DIR"]
     async fn library_live_ipfs_publish_provider_route_smoke() {
@@ -9781,9 +9782,12 @@ mod tests {
             ..Default::default()
         };
         let bridge = Arc::new(
-            elastos_runtime::provider::ProviderBridge::spawn(&ipfs_provider_bin, ipfs_config)
-                .await
-                .expect("spawn live ipfs-provider"),
+            elastos_runtime::provider::ProviderBridge::spawn(
+                &crate::test_support::fixture_executable(&ipfs_provider_bin),
+                ipfs_config,
+            )
+            .await
+            .expect("spawn live ipfs-provider"),
         );
         let ipfs_provider: Arc<dyn Provider> = Arc::new(
             elastos_runtime::provider::CapsuleProvider::with_scheme(Arc::clone(&bridge), "ipfs"),
