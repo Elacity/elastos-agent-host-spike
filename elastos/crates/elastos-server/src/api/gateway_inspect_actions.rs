@@ -558,7 +558,7 @@ fn append_agent_plan_dispatch_audit(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(in crate::api::gateway) fn rebind_agent_plan_for_test(
     data_dir: &FsPath,
     request_id: &str,
@@ -983,11 +983,16 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     const PLAN_PRINCIPAL: &str = "person:owner";
+    #[cfg(unix)]
     const PLAN_REQUESTER: &str = "agent:v2:planrequester";
+    #[cfg(unix)]
     const PLAN_CAPSULE: &str = "capsule:agent-host";
+    #[cfg(unix)]
     const PLAN_SESSION: &str = "session:agent-1";
 
+    #[cfg(unix)]
     fn plan_context() -> agent_plan::AgentPlanContext<'static> {
         agent_plan::AgentPlanContext {
             principal_id: PLAN_PRINCIPAL,
@@ -997,11 +1002,13 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn status_plan(request: serde_json::Value) -> serde_json::Value {
         let step = stored_step(request);
         serde_json::json!({ "steps": [step] })
     }
 
+    #[cfg(unix)]
     fn stored_step(request: serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "scheme": "availability",
@@ -1010,6 +1017,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn expected_binding(
         request_id: &str,
         request: serde_json::Value,
@@ -1030,6 +1038,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn agent_plan_cards(dir: &std::path::Path) -> Vec<HomeNotificationEntrySummary> {
         let pending = store::pending_inspect_action_requests(dir, PLAN_PRINCIPAL).unwrap();
         let mut notifications = HomeNotificationsSummary::default();
