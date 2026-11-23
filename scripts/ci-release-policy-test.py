@@ -306,16 +306,26 @@ def cargo_configs(directory):
 
 
 def capsule_inputs(crate):
-    """A capsule crate is wholly an input, with every crate it names by path, transitively."""
-    found, queue, seen = set(), [crate], set()
+    """A release build reads dev manifests but compiles only normal and build dependencies."""
+    found, queue, seen = set(), [(crate, True)], set()
     while queue:
-        crate = queue.pop()
-        if crate in seen:
+        crate, compiled = queue.pop()
+        if (crate, compiled) in seen:
             continue
-        seen.add(crate)
-        found |= tracked_under(crate)
-        queue += [os.path.normpath(f"{crate}/{dependency}")
-                  for dependency in PATH_DEPENDENCY.findall((REPO / crate / "Cargo.toml").read_text())]
+        seen.add((crate, compiled))
+        if compiled:
+            found |= tracked_under(crate)
+        else:
+            found |= tracked_under(crate + "/Cargo.toml")
+        table = ""
+        for line in (REPO / crate / "Cargo.toml").read_text().splitlines():
+            header = re.fullmatch(r"\s*\[([^]]+)\]\s*", line)
+            if header:
+                table = header[1]
+            for dependency in PATH_DEPENDENCY.findall(line):
+                path = os.path.normpath(f"{crate}/{dependency}")
+                is_dev = table == "dev-dependencies" or table.endswith(".dev-dependencies")
+                queue.append((path, compiled and not is_dev))
     return found
 
 
@@ -2412,6 +2422,9 @@ class ReleasePolicyTests(unittest.TestCase):
             inputs = job_inputs(WORKFLOW, SOURCE, job)
             self.assertIn("scripts/setup-source-home.sh", inputs, job)
             self.assertIn("capsules/model-provider/Cargo.toml", inputs, job)
+            if job.startswith("source-home-"):
+                self.assertIn("lab/agent-conformance/Cargo.toml", inputs, job)
+            self.assertNotIn("lab/agent-conformance/standin-runtime/provider_launcher.rs", inputs, job)
             self.assertEqual(sorted(path for path in inputs if rule.is_notes_or_lab(path)), [], job)
         # Capsule folders are inputs whole, so a README.md inside one is no notes path.
         self.assertIn("capsules/home/README.md", inputs)

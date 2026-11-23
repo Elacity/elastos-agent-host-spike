@@ -342,17 +342,24 @@ pub async fn run_serve(
         .await;
 
     let _shell_child = if let Some(shell_path) = crate::find_installed_provider_binary("shell") {
-        if let Err(e) = crate::verify_component_binary("shell", &shell_path) {
+        let admitted = crate::setup::verify_installed_component_start(
+            &crate::sources::default_data_dir(),
+            "shell",
+            &shell_path,
+        );
+        if let Err(e) = &admitted {
             tracing::warn!("Skipping shell capsule due to verification failure: {}", e);
             None
         } else {
+            let prepared = admitted?;
             let api_url = format!("http://{}", addr);
             let (mut command, shell_mode) = shell_capsule_command(
-                &shell_path,
+                prepared.exec_path(),
                 &api_url,
                 &shell_session.token,
                 std::env::var("ELASTOS_SHELL_MODE").ok(),
             );
+            prepared.attach_tokio(&mut command, false)?;
             match command.spawn() {
                 Ok(child) => {
                     tracing::info!(

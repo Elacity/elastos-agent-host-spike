@@ -5,6 +5,8 @@ SERVER_URL="${ELASTOS_CHAT_ROOM_SERVER_URL:-http://127.0.0.1:8090}"
 MAC_URL="${ELASTOS_CHAT_ROOM_MAC_URL:-http://localhost:61180}"
 MAC_SSH="${ELASTOS_CHAT_ROOM_MAC_SSH:-}"
 EXPECTED_DIDS="${ELASTOS_CHAT_ROOM_EXPECTED_DIDS:-}"
+SERVER_TOKEN="${ELASTOS_CHAT_ROOM_SERVER_TOKEN:-}"
+MAC_TOKEN="${ELASTOS_CHAT_ROOM_MAC_TOKEN:-}"
 
 usage() {
     cat <<'EOF'
@@ -16,6 +18,8 @@ Environment:
   ELASTOS_CHAT_ROOM_MAC_URL          Mac staging gateway URL as seen from the Mac. Default: http://localhost:61180
   ELASTOS_CHAT_ROOM_MAC_SSH          SSH host used to fetch Mac summary. Default: empty, skip Mac.
                                      Set empty to skip Mac.
+  ELASTOS_CHAT_ROOM_SERVER_TOKEN     Signed Chat launch token for the server.
+  ELASTOS_CHAT_ROOM_MAC_TOKEN        Signed Chat launch token for the Mac, when used.
   ELASTOS_CHAT_ROOM_EXPECTED_DIDS    Optional comma-separated member DIDs expected in room_control on every checked runtime.
 
 This smoke is intentionally non-mutating. It fetches existing Chat Room summaries
@@ -53,9 +57,10 @@ fetch_local_summary() {
     local label="$1"
     local url="$2"
     local out="$3"
+    local token="$4"
     local fetched=0
     for _ in $(seq 1 12); do
-        if curl -fsS "${url%/}/api/apps/chat-room/summary" >"${out}"; then
+        if curl -fsS -H 'Origin: null' -H "x-elastos-home-token: ${token}" "${url%/}/api/apps/chat-room/summary" >"${out}"; then
             fetched=1
             summary_transport_ready "${out}" && return 0
         fi
@@ -73,10 +78,12 @@ fetch_ssh_summary() {
     local ssh_host="$2"
     local url="$3"
     local out="$4"
+    local token="$5"
     local fetched=0
     for _ in $(seq 1 12); do
         if ssh -o BatchMode=yes -o ConnectTimeout=8 "${ssh_host}" \
-            "curl -fsS '${url%/}/api/apps/chat-room/summary'" >"${out}"; then
+            "read -r token; curl -fsS -H 'Origin: null' -H \"x-elastos-home-token: \${token}\" '${url%/}/api/apps/chat-room/summary'" \
+            >"${out}" <<<"${token}"; then
             fetched=1
             summary_transport_ready "${out}" && return 0
         fi
@@ -92,13 +99,15 @@ fetch_ssh_summary() {
 declare -a labels files
 
 server_json="${tmpdir}/server.json"
-fetch_local_summary "server" "${SERVER_URL}" "${server_json}"
+[[ -n "${SERVER_TOKEN}" ]] || { echo "[chat-room-roster] server Chat token required" >&2; exit 1; }
+fetch_local_summary "server" "${SERVER_URL}" "${server_json}" "${SERVER_TOKEN}"
 labels+=("server")
 files+=("${server_json}")
 
 if [[ -n "${MAC_SSH}" && -n "${MAC_URL}" ]]; then
     mac_json="${tmpdir}/mac.json"
-    fetch_ssh_summary "mac" "${MAC_SSH}" "${MAC_URL}" "${mac_json}"
+    [[ -n "${MAC_TOKEN}" ]] || { echo "[chat-room-roster] Mac Chat token required" >&2; exit 1; }
+    fetch_ssh_summary "mac" "${MAC_SSH}" "${MAC_URL}" "${mac_json}" "${MAC_TOKEN}"
     labels+=("mac")
     files+=("${mac_json}")
 fi

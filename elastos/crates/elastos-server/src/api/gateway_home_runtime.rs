@@ -1,5 +1,14 @@
 use super::*;
 
+const HOME_LAUNCH_ALIASES: &[(&str, &str)] = &[("home-agent", "assistant")];
+
+fn home_launch_manifest_name(target: &str) -> &str {
+    HOME_LAUNCH_ALIASES
+        .iter()
+        .find_map(|(alias, name)| (*alias == target).then_some(*name))
+        .unwrap_or(target)
+}
+
 /// Home launch migrates the legacy Services peer-contacts object before it
 /// serves the target. A person whose stored record is kept on another Runtime
 /// reaches that write with no protection here, so the migration refuses and
@@ -43,20 +52,17 @@ pub(super) async fn home_launch(
     Json(req): Json<HomeLaunchRequest>,
     platform: &str,
 ) -> Result<Json<HomeLaunchResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let context = require_home_launch_token_context(&state.data_dir, &headers, HOME_CAPSULE_ID)
-        .map_err(|err| {
-            (
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({ "error": err.to_string() })),
-            )
-        })?;
+    let context =
+        gateway_home_token::require_home_page_or_cli_launch_context(&state.data_dir, &headers)
+            .map_err(|err| {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": err.to_string() })),
+                )
+            })?;
 
-    // Old Home bookmarks launch the canonical app. Normalize before package
-    // resolution and token creation; existing run actor bindings stay intact.
-    let target = match req.target.trim() {
-        "home-agent" => "assistant",
-        target => target,
-    };
+    // Old Home bookmarks resolve to an installed manifest name before lookup.
+    let target = home_launch_manifest_name(req.target.trim());
     if target.is_empty() || target == HOME_CAPSULE_ID {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -503,8 +509,21 @@ pub(super) async fn launch_runtime_backed_home_target(
         });
     }
 
-    let capsule_dir = resolve_capsule_dir(data_dir, target)?;
-    let manifest = crate::api::capsule_inventory::load_capsule_manifest(&capsule_dir, target)?;
+    let Some(capsule_dir) = resolve_capsule_dir(data_dir, target) else {
+        return Some(GatewayRuntimeLaunchOutcome {
+            status: "failed".into(),
+            capsule_id: None,
+            detail: Some("launch_name_not_walked".into()),
+        });
+    };
+    let Some(manifest) = crate::api::capsule_inventory::load_capsule_manifest(&capsule_dir, target)
+    else {
+        return Some(GatewayRuntimeLaunchOutcome {
+            status: "failed".into(),
+            capsule_id: None,
+            detail: Some("launch_name_not_walked".into()),
+        });
+    };
     if !manifest.role.is_shell_launchable() || manifest.capsule_type == CapsuleType::Data {
         return None;
     }
@@ -618,6 +637,143 @@ async fn launch_runtime_capsule(
         status: "launched".to_string(),
         capsule_id: Some(payload.id),
         detail: None,
+    })
+}
+
+/// One agent the Home Runtime accepted. The grant that authorized it stays
+/// on this hop and is not part of the response.
+pub(super) struct StartedRuntimeAgent {
+    pub(super) capsule_id: String,
+    pub(super) session_id: String,
+    pub(super) status: String,
+}
+
+#[derive(Deserialize)]
+struct RuntimeAgentLaunchResponse {
+    id: String,
+    session_id: String,
+    status: String,
+}
+
+/// Ask the live Home Runtime to start one agent. `capsule_dir` is the
+/// directory `verify_agent_host` already checked. The grant was minted by the
+/// caller after the passkey step-up was consumed.
+pub(super) async fn launch_runtime_agent(
+    data_dir: &FsPath,
+    capsule_dir: &FsPath,
+    agent_id: &str,
+    launch_grant: &str,
+) -> anyhow::Result<StartedRuntimeAgent> {
+    let coords = load_live_runtime_coords(data_dir)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let shell =
+        gateway_attach_runtime_token(&client, &coords.api_url, &coords.attach_secret, "shell")
+            .await?;
+    let response = client
+        .post(format!("{}/api/capsules", coords.api_url))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .json(&serde_json::json!({
+            "path": capsule_dir.display().to_string(),
+            "agent_id": agent_id,
+            "launch_grant": launch_grant,
+        }))
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("runtime launch failed ({}): {}", status, text.trim());
+    }
+    let payload = response.json::<RuntimeAgentLaunchResponse>().await?;
+    Ok(StartedRuntimeAgent {
+        capsule_id: payload.id,
+        session_id: payload.session_id,
+        status: payload.status,
+    })
+}
+
+/// One session the Runtime stopped. The hop sends the agent id and nothing
+/// else: the Runtime chooses the row by that principal.
+pub(super) struct StoppedRuntimeAgent {
+    pub(super) session_id: String,
+    pub(super) status: String,
+}
+
+/// What the Runtime's stop route answered. `already` is set when the route
+/// found the sessions already ending and stopped nothing further.
+pub(super) struct RuntimeAgentStop {
+    pub(super) stopped: Vec<StoppedRuntimeAgent>,
+    pub(super) already: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RuntimeAgentStopResponse {
+    stopped: Vec<RuntimeStoppedSession>,
+    #[serde(default)]
+    already: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RuntimeStoppedSession {
+    session_id: String,
+    status: String,
+}
+
+/// Ask the live Home Runtime to stop the live rows whose principal is
+/// `agent_id`. The body is that id. It does not name a capsule.
+pub(super) async fn stop_runtime_agent(
+    data_dir: &FsPath,
+    agent_id: &str,
+) -> anyhow::Result<RuntimeAgentStop> {
+    let coords = load_live_runtime_coords(data_dir)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let shell =
+        gateway_attach_runtime_token(&client, &coords.api_url, &coords.attach_secret, "shell")
+            .await?;
+    let response = client
+        .post(format!("{}/api/capsules/stop-agent", coords.api_url))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .json(&serde_json::json!({ "agent_id": agent_id }))
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        let detail = text.trim();
+        if status == StatusCode::NOT_FOUND {
+            return Err(
+                crate::agents::Refused("this agent has no running session".to_string()).into(),
+            );
+        }
+        if status == StatusCode::CONFLICT || status == StatusCode::BAD_REQUEST {
+            let reason = if detail.is_empty() {
+                "runtime stop was refused".to_string()
+            } else {
+                detail.to_string()
+            };
+            return Err(crate::agents::Refused(reason).into());
+        }
+        anyhow::bail!("runtime stop failed ({}): {}", status, detail);
+    }
+    let payload = response.json::<RuntimeAgentStopResponse>().await?;
+    Ok(RuntimeAgentStop {
+        stopped: payload
+            .stopped
+            .into_iter()
+            .map(|session| StoppedRuntimeAgent {
+                session_id: session.session_id,
+                status: session.status,
+            })
+            .collect(),
+        already: payload.already,
     })
 }
 
@@ -2103,6 +2259,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_home_bookmark_resolves_to_walked_assistant_manifest() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = home_launch_manifest_name("home-agent");
+        assert_eq!(target, "assistant");
+        assert_eq!(home_launch_manifest_name("wallet"), "wallet");
+        let installed = directory.path().join("capsules").join(target);
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(
+            installed.join("capsule.json"),
+            include_str!("../../../../../capsules/assistant/capsule.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::api::capsule_inventory::load_capsule_manifest(&installed, target)
+                .unwrap()
+                .name,
+            target
+        );
+    }
+
     /// Home's launch of an installed capsule whose manifest pins a
     /// requirement: Home's reader finds no manifest, so there is no Runtime
     /// launch and nothing is started or written for one. (There is no
@@ -2141,7 +2318,9 @@ mod tests {
                 .is_none()
         );
         let outcome = launch_runtime_backed_home_target(data_dir, "pinned-fixture", &context).await;
-        assert!(outcome.is_none());
+        let outcome = outcome.expect("a named launch refusal");
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.detail.as_deref(), Some("launch_name_not_walked"));
         assert!(!crate::runtime_control::home_runtime_coord_path(data_dir).exists());
         assert!(!data_dir.join("managed-runtimes").exists());
     }
