@@ -161,14 +161,18 @@ impl CurrentCarrier {
             .await
     }
 
-    async fn new() -> Self {
+    async fn new(row: ContractRow) -> Self {
         let sender_dir = tempfile::tempdir().unwrap();
         let receiver_dir = tempfile::tempdir().unwrap();
         let sender_registry = Arc::new(ProviderRegistry::new());
         let receiver_registry = Arc::new(ProviderRegistry::new());
         crate::library::publish_cid_for_test(receiver_dir.path(), &content_cid(FILE_BYTES));
-        let (sender_key, sender_did) = elastos_identity::derive_did(&[211; 32]);
-        let (receiver_key, receiver_did) = elastos_identity::derive_did(&[212; 32]);
+        // Parallel row tests run in one process. Identical keys would let mDNS
+        // LAN discovery land one row's peer dial on another row's endpoint, so
+        // every row derives its own key pair from a fresh seed range.
+        let index = row as u8;
+        let (sender_key, sender_did) = elastos_identity::derive_did(&[0x90 + 2 * index; 32]);
+        let (receiver_key, receiver_did) = elastos_identity::derive_did(&[0x91 + 2 * index; 32]);
         let sender_node = start_carrier_node_with_registry(
             &sender_key,
             &sender_did,
@@ -484,7 +488,17 @@ impl CarrierUnderTest for CurrentCarrier {
         }
     }
     fn remote_calls(&self) -> usize {
-        self.remote_requests.lock().unwrap().len()
+        // Count only calls this row's own sender made: a late call that another
+        // row's carrier landed here must not move a refusal assertion.
+        self.remote_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| {
+                request["_runtime_invocation"]["carrier"]["source_endpoint_did"].as_str()
+                    == Some(self.sender_did.as_str())
+            })
+            .count()
     }
 }
 
@@ -848,7 +862,7 @@ async fn run_contract(carrier: &dyn CarrierUnderTest, only: Option<ContractRow>)
 
 #[cfg(unix)]
 async fn run_current_row(row: ContractRow) {
-    let carrier = CurrentCarrier::new().await;
+    let carrier = CurrentCarrier::new(row).await;
     use ContractRow::*;
     if matches!(row, M1 | M2 | M3 | M4) {
         carrier.join_topic(MESSAGE_TOPIC).await;
