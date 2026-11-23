@@ -3550,6 +3550,9 @@ mod tests {
         );
     }
 
+    // Home launch tokens need the private identity store, which Windows
+    // refuses until the owner-only file rule (P2-11 W2) lands.
+    #[cfg(unix)]
     #[test]
     fn device_launch_authority_is_limited_to_home_and_home_cli() {
         let dir = tempfile::tempdir().unwrap();
@@ -3574,6 +3577,9 @@ mod tests {
         }
     }
 
+    // Home launch tokens need the private identity store, which Windows
+    // refuses until the owner-only file rule (P2-11 W2) lands.
+    #[cfg(unix)]
     #[test]
     fn verifier_refuses_a_proofless_device_token_for_people() {
         let dir = tempfile::tempdir().unwrap();
