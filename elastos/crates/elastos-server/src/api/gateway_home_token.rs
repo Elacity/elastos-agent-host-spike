@@ -105,7 +105,7 @@ impl HomeLaunchContext {
         }
     }
 
-    fn projection(selected_resource: &str, executable_actor: &str) -> Self {
+    pub(in crate::api) fn projection(selected_resource: &str, executable_actor: &str) -> Self {
         Self {
             schema: HOME_LAUNCH_CONTEXT_SCHEMA.to_string(),
             selected_resource: selected_resource.to_string(),
@@ -187,6 +187,7 @@ impl VerifiedLaunchGrant {
 
 #[derive(Debug, Clone)]
 pub(in crate::api) struct RequiredHomeLaunchToken {
+    pub(in crate::api) issued_at: u64,
     pub(in crate::api) expires_at: u64,
     pub(in crate::api) launch_id: String,
     pub(in crate::api) launch_context: HomeLaunchContext,
@@ -425,6 +426,75 @@ pub(in crate::api) fn issue_home_projection_launch_token_with_context(
     )
 }
 
+/// The internal grant for one Agent Host start. The resource is that agent,
+/// the executable is the host `verify_agent_host` named, and the lifetime is
+/// at most 60 seconds. The System route calls this only after it has consumed
+/// the one-use passkey step-up for the same agent.
+pub(in crate::api) fn issue_home_agent_launch_token_with_context(
+    data_dir: &std::path::Path,
+    agent_id: &str,
+    executable_actor: &str,
+    context: &HomeLaunchTokenContext,
+) -> anyhow::Result<String> {
+    let issued_at = now_ts();
+    let expiry = grant_bound_token_expiry(data_dir, context, issued_at, 60)?;
+    let token = issue_home_launch_token_at(
+        data_dir,
+        &HomeLaunchContext::projection(&format!("elastos://agent/{agent_id}"), executable_actor),
+        context,
+        issued_at,
+        Some(expiry),
+    )?;
+    #[cfg(test)]
+    note_agent_launch_grant_minted(data_dir);
+    Ok(token)
+}
+
+/// Counts grants this process minted for one Home. A refused Start stays at
+/// zero, including a refusal that happens before the guest is asked to run.
+#[cfg(test)]
+static AGENT_LAUNCH_GRANTS_MINTED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn note_agent_launch_grant_minted(data_dir: &std::path::Path) {
+    *AGENT_LAUNCH_GRANTS_MINTED
+        .lock()
+        .expect("agent launch mint counter")
+        .entry(data_dir.to_path_buf())
+        .or_insert(0) += 1;
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(in crate::api) fn agent_launch_grants_minted_for_test(data_dir: &std::path::Path) -> u64 {
+    AGENT_LAUNCH_GRANTS_MINTED
+        .lock()
+        .expect("agent launch mint counter")
+        .get(data_dir)
+        .copied()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(in crate::api) fn issue_home_agent_launch_token_at_for_test(
+    data_dir: &std::path::Path,
+    agent_id: &str,
+    executable_actor: &str,
+    context: &HomeLaunchTokenContext,
+    issued_at: u64,
+    expires_at: u64,
+) -> anyhow::Result<String> {
+    issue_home_launch_token_at(
+        data_dir,
+        &HomeLaunchContext::projection(&format!("elastos://agent/{agent_id}"), executable_actor),
+        context,
+        issued_at,
+        Some(expires_at),
+    )
+}
+
 /// Test seam: the same projection issuer with the issue time supplied, so a
 /// test can issue two tokens from one clock reading instead of racing the
 /// wall clock between them.
@@ -445,13 +515,42 @@ pub(crate) fn issue_home_projection_launch_token_with_context_at(
     )
 }
 
-fn issue_home_launch_token_at(
+#[cfg(test)]
+static HOME_LAUNCH_SIGNATURE_CALLS: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_home_launch_signature_for_test(data_dir: &std::path::Path) {
+    let mut guard = HOME_LAUNCH_SIGNATURE_CALLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = guard.iter_mut().find(|(path, _)| path == data_dir) {
+        entry.1 = entry.1.saturating_add(1);
+    } else {
+        guard.push((data_dir.to_path_buf(), 1));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn home_launch_signature_calls_for_test(data_dir: &std::path::Path) -> u64 {
+    HOME_LAUNCH_SIGNATURE_CALLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find(|(path, _)| path == data_dir)
+        .map(|(_, count)| *count)
+        .unwrap_or(0)
+}
+
+pub(in crate::api) fn issue_home_launch_token_at(
     data_dir: &std::path::Path,
     launch_context: &HomeLaunchContext,
     context: &HomeLaunchTokenContext,
     issued_at: u64,
     grant_expires_at: Option<u64>,
 ) -> anyhow::Result<String> {
+    #[cfg(test)]
+    note_home_launch_signature_for_test(data_dir);
     launch_context.validate()?;
     if context.principal_id().trim().is_empty()
         || context.session_id().trim().is_empty()
@@ -654,8 +753,8 @@ pub(crate) fn require_internal_shell_content_open_context(
 }
 
 /// The same signed grant check as its sibling, but it hands back the typed
-/// principal a bridge may run as. This is the only production caller of
-/// `BridgePrincipal::from_grant`.
+/// principal a bridge may run as. Agent launches use the same constructor
+/// after their narrower grant check.
 pub(crate) fn require_internal_shell_launch_grant_principal(
     data_dir: &std::path::Path,
     headers: &HeaderMap,
@@ -670,6 +769,32 @@ pub(crate) fn require_internal_shell_launch_grant_principal(
     )?;
     Ok(crate::resource_bridge::BridgePrincipal::from_grant(
         &required.grant,
+    ))
+}
+
+pub(crate) fn require_internal_shell_agent_launch_grant(
+    data_dir: &std::path::Path,
+    headers: &HeaderMap,
+    agent_id: &str,
+    executable_actor: &str,
+) -> anyhow::Result<(crate::resource_bridge::BridgePrincipal, String, u64)> {
+    let required = require_home_launch_token_for_any_from_with_origin(
+        data_dir,
+        headers,
+        &[executable_actor],
+        None,
+        HomeLaunchOriginPolicy::InternalShell,
+    )?;
+    if required.launch_context.selected_resource != format!("elastos://agent/{agent_id}")
+        || required.launch_context.executable_actor != executable_actor
+        || required.expires_at.saturating_sub(required.issued_at) > 60
+    {
+        anyhow::bail!("agent launch grant binding mismatch");
+    }
+    Ok((
+        crate::resource_bridge::BridgePrincipal::from_grant(&required.grant),
+        required.launch_id,
+        required.expires_at,
     ))
 }
 
@@ -1426,6 +1551,7 @@ fn verify_home_launch_token_value(
         principal_id: root.principal_id().to_string(),
     };
     Ok(RequiredHomeLaunchToken {
+        issued_at: envelope.payload.iat,
         expires_at: envelope.payload.exp,
         launch_id: envelope.payload.launch_id,
         launch_context: envelope.payload.launch_context,
@@ -1764,6 +1890,7 @@ mod tests {
         sign_launch_token_for_test(data_dir, envelope, HOME_LAUNCH_TOKEN_DOMAIN)
     }
 
+    #[cfg(unix)]
     #[test]
     fn r8_bad_signature_refuses_device_witness_and_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -1787,6 +1914,7 @@ mod tests {
         assert!(error.contains("invalid home launch token:"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn r8_wrong_signer_refuses_device_witness_and_root() {
         let parent = tempfile::tempdir().unwrap();
@@ -1819,6 +1947,7 @@ mod tests {
         assert!(error.contains("Signer DID mismatch"), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn r8_local_launch_uses_this_runtime_device_root() {
         use sha2::Digest as _;
@@ -1845,6 +1974,7 @@ mod tests {
         assert_eq!(checked.context.root().localhost_root(), expected_root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn proofless_parent_token_uses_stored_device_record_before_witness_root() {
         // A device id is not an agent id. Kind Agent on that record is
@@ -1897,6 +2027,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn proofless_parent_token_without_record_uses_witness_device_root() {
         use sha2::Digest as _;
@@ -1922,6 +2053,7 @@ mod tests {
         assert_eq!(verified.context.root().localhost_root(), expected_root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_sessions_are_isolated_between_localhost_ports() {
         let first = tempfile::tempdir().unwrap();
@@ -2001,6 +2133,7 @@ mod tests {
         assert!(home_session_cookie_name(&first_headers).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn browser_launch_token_requires_an_opaque_capsule_origin() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2046,6 +2179,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn projection_token_binds_resource_actor_and_unique_launch() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2114,7 +2248,7 @@ mod tests {
         .to_string()
         .contains("not authorized"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn frame_renewal_is_bounded_by_launch_ttl_and_current_parent_grant() {
         let dir = tempfile::tempdir().unwrap();
@@ -2175,6 +2309,7 @@ mod tests {
         assert!(renew().is_err(), "another principal's parent");
     }
 
+    #[cfg(unix)]
     #[test]
     fn proof_bound_home_projection_uses_home_as_its_non_transitive_authority() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2274,6 +2409,7 @@ mod tests {
         .contains("authority context mismatch"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn proof_bound_tokens_end_with_the_grant() {
         let data = tempfile::tempdir().unwrap();
@@ -2312,6 +2448,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_token_rejects_expiry_stale_schema_and_mixed_shape() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2434,6 +2571,7 @@ mod tests {
         .contains("must be non-delegatable"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_token_requires_exact_session_authority_and_origin() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2663,6 +2801,7 @@ mod tests {
             .contains("missing same-origin provenance"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_grant_accepts_explicit_parent_gateway_signer() {
         let parent = tempfile::tempdir().unwrap();
@@ -2720,6 +2859,7 @@ mod tests {
         .contains("must not carry browser provenance"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_grant_checks_parent_auth_sessions_for_child_runtime() {
         let parent = tempfile::tempdir().unwrap();
@@ -2787,6 +2927,7 @@ mod tests {
         assert_eq!(parent_auth_result.context.session_id, "auth:alice");
     }
 
+    #[cfg(unix)]
     #[test]
     fn internal_shell_runtime_wallet_authority_accepts_only_home_cli_without_browser_provenance() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2830,7 +2971,7 @@ mod tests {
         )
         .is_err());
     }
-
+    #[cfg(unix)]
     #[test]
     fn p2a_ii_0b_wallet_authority_for_principal_without_stored_record_fails_to_build() {
         use elastos_runtime::auth::{AuthSessionGrantV1, ProofBinding};
@@ -2880,6 +3021,7 @@ mod tests {
 
     /// R1: the local context stores the device root, and a launch token rebuilt
     /// from the wire keeps it. Same Users root as before.
+    #[cfg(unix)]
     #[test]
     fn r1_local_context_and_token_verification_keep_the_device_users_root() {
         let data_dir = tempfile::tempdir().unwrap();
@@ -2903,6 +3045,7 @@ mod tests {
 
     /// R1: an auth-grant launch stores the stored Human's root, the same Users
     /// root the id rule gave before.
+    #[cfg(unix)]
     #[test]
     fn r1_auth_grant_launch_keeps_the_stored_humans_users_root() {
         use elastos_runtime::auth::AuthSessionGrantV1;
@@ -2967,6 +3110,7 @@ mod tests {
 
     /// R1: an unstored principal refuses before a token is minted. The named
     /// error replaces the id-rule fallback.
+    #[cfg(unix)]
     #[test]
     fn r1_auth_grant_issue_refuses_a_principal_with_no_stored_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -2979,6 +3123,7 @@ mod tests {
 
     /// R1: a token whose principal has no stored record refuses when verified,
     /// with the same named error.
+    #[cfg(unix)]
     #[test]
     fn r1_launch_token_verification_refuses_a_principal_with_no_stored_root() {
         let dir = tempfile::tempdir().unwrap();
@@ -3005,6 +3150,7 @@ mod tests {
     /// copies the principal the signed token names. A real signed token from
     /// the stored-human fixture is verified through the same function route 3
     /// and route 1 use, and the grant it carries names that literal person.
+    #[cfg(unix)]
     #[test]
     fn r6_verified_launch_token_carries_its_grant_principal() {
         use elastos_runtime::auth::AuthSessionGrantV1;
@@ -3106,6 +3252,7 @@ mod tests {
     /// `require_gateway_launch` refuses it by the Agent literal for every
     /// gateway fence route and in both carriers. The same shape with a person
     /// principal is admitted.
+    #[cfg(unix)]
     #[test]
     fn gateway_admission_refuses_a_valid_agent_token_on_every_fence_route_and_both_carriers() {
         let dir = tempfile::tempdir().unwrap();
@@ -3163,6 +3310,7 @@ mod tests {
     /// A production device token stays admitted after the guard. The same test
     /// asserts an agent token is refused, so removing or widening the guard
     /// reddens it at the Agent literal or at the device acceptance.
+    #[cfg(unix)]
     #[test]
     fn gateway_admission_keeps_a_device_token_and_refuses_an_agent_token() {
         let dir = tempfile::tempdir().unwrap();
@@ -3178,6 +3326,7 @@ mod tests {
         assert_eq!(refused.to_string(), FENCE_AGENT_REFUSAL);
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_page_launch_gate_names_other_callers_and_keeps_cli_grant_narrow() {
         let dir = tempfile::tempdir().unwrap();
@@ -3249,6 +3398,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_and_shell_launch_gates_refuse_verified_agent_contexts() {
         let dir = tempfile::tempdir().unwrap();
@@ -3315,6 +3465,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn shell_content_open_grant_is_bound_to_its_operation() {
         let dir = tempfile::tempdir().unwrap();

@@ -161,6 +161,7 @@ async fn retry_reconciliation_after_minimum_backoff(
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn runtime_restart_scans_pending_launch_and_closes_late_success_without_another_open() {
     let dir = tempfile::tempdir().unwrap();
@@ -232,6 +233,7 @@ async fn runtime_restart_scans_pending_launch_and_closes_late_success_without_an
         .expect("restarted Runtime shutdown");
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn newly_committed_launch_obligation_wakes_reconciler_without_time_advance() {
     let dir = tempfile::tempdir().unwrap();
@@ -262,6 +264,7 @@ async fn newly_committed_launch_obligation_wakes_reconciler_without_time_advance
     reconciler.join().await.expect("Runtime shutdown");
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn periodic_reconciler_reaps_stale_active_page_without_another_browser_open() {
     let dir = tempfile::tempdir().unwrap();
@@ -308,6 +311,7 @@ async fn periodic_reconciler_reaps_stale_active_page_without_another_browser_ope
     reconciler.join().await.expect("Runtime shutdown");
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn periodic_stale_cleanup_retries_exact_binding_and_blocks_replacement_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
@@ -394,6 +398,7 @@ async fn periodic_stale_cleanup_retries_exact_binding_and_blocks_replacement_fai
     reconciler.join().await.expect("Runtime shutdown");
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn stale_stream_timeout_releases_exact_claim_for_retry_without_restart() {
     with_manual_test_clock(async {
@@ -508,6 +513,7 @@ async fn stale_stream_timeout_releases_exact_claim_for_retry_without_restart() {
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn hanging_stream_timeout_releases_exact_claim_for_retry_without_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -612,6 +618,7 @@ async fn hanging_stream_timeout_releases_exact_claim_for_retry_without_restart()
     reconciler.join().await.expect("Runtime shutdown");
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn transient_reconciliation_failure_retries_with_backoff_and_retains_ownership() {
     with_manual_test_clock(async {
@@ -654,6 +661,7 @@ async fn transient_reconciliation_failure_retries_with_backoff_and_retains_owner
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn reconciliation_timeout_retains_exact_ownership_until_late_terminal_cleanup() {
     with_manual_test_clock(async {
@@ -731,6 +739,7 @@ async fn reconciliation_timeout_retains_exact_ownership_until_late_terminal_clea
     .await;
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn unavailable_reconciliation_is_capped_and_blocks_replacement_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
@@ -781,6 +790,7 @@ async fn unavailable_reconciliation_is_capped_and_blocks_replacement_fail_closed
     reconciler.join().await.expect("Runtime shutdown");
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn shutdown_cancels_active_reconciliation_and_releases_its_durable_claim() {
     let dir = tempfile::tempdir().unwrap();
@@ -810,6 +820,7 @@ async fn shutdown_cancels_active_reconciliation_and_releases_its_durable_claim()
     release_browser_launch_reconciliation_claim(&state.data_dir, &claims[0]).await;
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn exact_cleanup_ownership_remains_until_typed_terminal_receipt() {
     let dir = tempfile::tempdir().unwrap();
@@ -879,6 +890,7 @@ async fn exact_cleanup_ownership_remains_until_typed_terminal_receipt() {
     release_browser_launch(&replacement).await;
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn expired_remote_engine_grant_forgets_launch_reconciliation_without_engine_call() {
     let dir = tempfile::tempdir().unwrap();
@@ -926,6 +938,7 @@ async fn expired_remote_engine_grant_forgets_launch_reconciliation_without_engin
     reconciler.join().await.expect("Runtime shutdown");
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn current_unserviceable_remote_engine_grant_retains_reconciliation() {
     with_manual_test_clock(async {

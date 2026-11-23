@@ -1084,6 +1084,7 @@ mod tests {
         presence
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn stale_profile_effect_preserves_the_replacement_profile_presence() {
         use crate::collaboration_presence_grant::{
@@ -1245,6 +1246,7 @@ mod tests {
         assert_eq!(driver.retry_gossip_once(NOW).await.unwrap().attempted, 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn selected_presence_keeps_its_original_grant_and_pending_operation() {
         use crate::collaboration_presence_grant::{
@@ -1491,6 +1493,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn a_queued_presence_is_not_sent_after_hidden() {
         let a = Fixture::new();
@@ -1510,6 +1513,7 @@ mod tests {
         assert!(ac.pending_outgoing(NOW + 5).unwrap().is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn a_queued_presence_is_not_sent_after_an_epoch_bump() {
         let a = Fixture::new();
@@ -1526,7 +1530,7 @@ mod tests {
         );
         assert!(ac.pending_outgoing(NOW + 5).unwrap().is_empty());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bare_driver_cannot_send_queued_own_presence() {
         let a = Fixture::new();
@@ -1847,6 +1851,7 @@ mod tests {
             .to_string()
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn direct_home_delivery_preserves_original_after_lost_reply_and_settles_only_selected_peer(
     ) {
@@ -1911,6 +1916,7 @@ mod tests {
         assert!(ac.pending_outgoing(NOW + TTL).unwrap().is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn blocked_metadata_cannot_delay_first_direct_attempt_or_lost_reply_retry() {
         let a = Fixture::new();
@@ -2006,6 +2012,7 @@ mod tests {
             ));
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn unreachable_homes_keep_exact_expiry_and_four_attempts_rotate_without_starvation() {
         let a = Fixture::new();
@@ -2078,7 +2085,7 @@ mod tests {
         );
         assert!(ac.pending_outgoing(NOW + TTL).unwrap().is_empty());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn shared_gossip_is_admitted_once_and_forged_provider_source_is_refused() {
         let a = Fixture::new();
@@ -2140,7 +2147,7 @@ mod tests {
         );
         assert_eq!(ac.summary().unwrap().pending_product_handoffs, 1);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn seed_sender_receiver_presence_and_receipt_are_excluded_from_chat_plane() {
         let (seed, _) = generate_keypair();
@@ -2228,6 +2235,7 @@ mod tests {
         assert_eq!(seed_core.summary().unwrap().pending_product_handoffs, 0);
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn homes_without_discovery_or_direct_path_exchange_a_post_over_bootstrap_gossip() {
         for stale_listing in [false, true] {
@@ -2315,7 +2323,7 @@ mod tests {
             assert!(sc.pending_product_handoffs().unwrap().is_empty());
         }
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn bootstrap_signed_receipt_never_accepts_a_shared_post() {
         let (seed, _) = generate_keypair();
@@ -2357,6 +2365,7 @@ mod tests {
         assert!((1..=7).all(|sends| gossip_resend_interval(false, sends) == SHARED_CUSTODY_RETRY));
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn unanswered_gossip_resends_on_its_schedule_not_every_cycle() {
         let a = Fixture::new();
@@ -2407,7 +2416,7 @@ mod tests {
         assert_eq!(ticks[post.envelope_sha256()][0], 0);
         assert_eq!(gaps(post.envelope_sha256()), [5, 10, 20, 40, 60, 60]);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn bootstrap_node_admits_and_sends_nothing_and_consumes_the_topic() {
         let (seed, _) = generate_keypair();
@@ -2458,7 +2467,7 @@ mod tests {
             0
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn redundant_receipts_that_cannot_be_stored_never_hold_the_gossip_batch() {
         // Full receipt capacity, or any storage failure such as byte capacity.
@@ -2509,6 +2518,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test(start_paused = true)]
     async fn direct_and_gossip_copies_give_one_row_and_one_receipt() {
         let a = Fixture::new();
@@ -2562,7 +2572,7 @@ mod tests {
         );
         assert_eq!(ac.summary().unwrap().remotely_accepted_outgoing, 1);
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn rate_limited_gossip_posts_are_held_and_released_in_order() {
         let fixture = Fixture::new();
@@ -2623,7 +2633,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(receipts, hashes, "every post is receipted, in send order");
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn held_direct_message_retries_without_sender_and_storage_failure_retains_metadata_batch()
     {
@@ -2692,7 +2702,7 @@ mod tests {
             "transient storage failure cannot acknowledge a batch"
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn mixed_batch_waits_for_retryable_core_work_but_consumes_deterministic_rejections() {
         let fixture = Fixture::new();
@@ -2842,7 +2852,7 @@ mod tests {
             ["gossip_join_exact", "gossip_peek", "gossip_ack"]
         );
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn incoming_receipt_is_durable_before_send_and_replayed_until_exact_ack() {
         let fixture = Fixture::new();
@@ -2918,6 +2928,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn outgoing_observations_never_replace_verified_remote_acceptance() {
         let fixture = Fixture::new();
@@ -2973,6 +2984,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn leave_and_cancellation_stop_owned_direct_attempts() {
         let a = Fixture::new();

@@ -2034,6 +2034,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn chat_nickname_read_reports_three_path_states() {
         use std::os::unix::fs::PermissionsExt;

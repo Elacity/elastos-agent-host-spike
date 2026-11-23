@@ -105,6 +105,7 @@ async fn create_and_export_raw_full_recovery_bundle(
     serde_json::from_slice(&body).unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn full_recovery_export_marks_handoff_only_after_the_complete_bundle_succeeds() {
     let dir = tempfile::tempdir().unwrap();
@@ -174,6 +175,7 @@ async fn full_recovery_export_marks_handoff_only_after_the_complete_bundle_succe
     assert!(payload["required_actions"].as_array().unwrap().is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn full_recovery_setup_preserves_identity_and_requires_successful_profile_coverage() {
     let dir = tempfile::tempdir().unwrap();
@@ -285,6 +287,7 @@ async fn full_recovery_setup_preserves_identity_and_requires_successful_profile_
     assert!(status.required_actions.is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn full_recovery_setup_concurrent_initial_profile_keeps_one_key() {
     let dir = tempfile::tempdir().unwrap();
@@ -322,6 +325,7 @@ fn full_recovery_setup_concurrent_initial_profile_keeps_one_key() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn full_recovery_export_rejects_changed_intent_and_wrong_actor_before_effects() {
     for wrong_actor in [false, true] {
@@ -479,7 +483,7 @@ async fn import_raw_full_recovery_bundle_with_terminal_retry(
         }),
     )
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_legacy_recovery_kit_routes_are_absent() {
     let dir = tempfile::tempdir().unwrap();
@@ -514,7 +518,7 @@ async fn test_legacy_recovery_kit_routes_are_absent() {
         );
     }
 }
-
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_bundle_prevents_admin_exporting_guest_root() {
     let dir = tempfile::tempdir().unwrap();
@@ -570,6 +574,7 @@ async fn test_full_recovery_bundle_prevents_admin_exporting_guest_root() {
     assert!(String::from_utf8_lossy(&body).contains("principal binding mismatch"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_bundle_exports_and_restores_wallet_keys() {
     let dir = tempfile::tempdir().unwrap();
@@ -775,6 +780,7 @@ async fn test_full_recovery_bundle_exports_and_restores_wallet_keys() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_activation_migrates_existing_plaintext_gba_save() {
     // First-run reality: the shell (and here a GBA save) writes declared
@@ -891,6 +897,7 @@ async fn test_full_recovery_activation_migrates_existing_plaintext_gba_save() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_fresh_export_rejects_envelope_shaped_data_before_mutation() {
     let dir = tempfile::tempdir().unwrap();
@@ -998,6 +1005,7 @@ async fn post_full_recovery_export(
         .unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn export_consumes_approval_before_scan_and_survives_long_scan() {
     let dir = tempfile::tempdir().unwrap();
@@ -1085,6 +1093,7 @@ async fn export_consumes_approval_before_scan_and_survives_long_scan() {
     .is_some());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn export_with_protection_returns_kit_despite_damaged_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -1136,6 +1145,7 @@ async fn export_with_protection_returns_kit_despite_damaged_file() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_bundle_recovers_existing_account_under_new_passkey() {
     let dir = tempfile::tempdir().unwrap();
@@ -1321,11 +1331,13 @@ async fn test_full_recovery_bundle_recovers_existing_account_under_new_passkey()
 /// it on a genuinely fresh machine — a different data root with a different
 /// device key — restores the same Profile DID and authorizes the new device
 /// through the normal signed-revision path, reported honestly in the response.
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_bundle_restores_people_identity_on_a_fresh_machine() {
     assert_fresh_machine_full_recovery(false).await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_after_real_enrollment_preserves_single_profile() {
     assert_fresh_machine_full_recovery(true).await;
@@ -1648,6 +1660,7 @@ impl Provider for MalformedFullRecoveryWalletProvider {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_bundle_returns_committed_root_and_retries_wallet_restore() {
     let dir = tempfile::tempdir().unwrap();
@@ -1785,6 +1798,7 @@ async fn test_full_recovery_bundle_returns_committed_root_and_retries_wallet_res
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_bundle_returns_tokens_when_outcome_audit_needs_retry() {
     let dir = tempfile::tempdir().unwrap();
@@ -2106,6 +2120,7 @@ async fn test_full_recovery_bundle_returns_tokens_when_outcome_audit_needs_retry
         .contains("private_key_hex"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_bundle_sanitizes_malformed_wallet_restore_after_reassignment() {
     let dir = tempfile::tempdir().unwrap();
@@ -2169,6 +2184,7 @@ async fn test_full_recovery_bundle_sanitizes_malformed_wallet_restore_after_reas
 
 /// A completed outcome recorded before ids bound the attempt (v1 id) still
 /// answers a repeat import, so an upgraded Home does not restore over newer data.
+#[cfg(unix)]
 #[tokio::test]
 async fn test_full_recovery_repeat_import_honours_v1_completed_outcome() {
     let dir = tempfile::tempdir().unwrap();
@@ -2273,6 +2289,7 @@ async fn test_full_recovery_repeat_import_honours_v1_completed_outcome() {
 /// The owner lost every passkey and guest registration is off. The operator
 /// arms a code on this computer; the sign-in screen registers a new passkey
 /// bound to the owner's Recovery Kit, and the usual full import then restores.
+#[cfg(unix)]
 #[tokio::test]
 async fn test_owner_recovery_restores_same_home_after_every_passkey_is_lost() {
     assert_owner_recovery_restores_same_home(false).await;
@@ -2281,6 +2298,7 @@ async fn test_owner_recovery_restores_same_home_after_every_passkey_is_lost() {
 /// The same Kit was already imported on this Home (an earlier recovery or a
 /// check). Recovering with it again is a new attempt with its own signed
 /// outcome, not a collision that leaves the record incomplete.
+#[cfg(unix)]
 #[tokio::test]
 async fn test_owner_recovery_with_a_kit_imported_here_before_records_its_outcome() {
     assert_owner_recovery_restores_same_home(true).await;
@@ -2465,6 +2483,7 @@ fn write_protected_test_object(
     path
 }
 
+#[cfg(unix)]
 #[test]
 fn recovery_status_reports_pending_journal_and_damage() {
     // A clean root, with one body-flipped envelope: status reads headers only,
@@ -2610,6 +2629,7 @@ fn recovery_status_reports_pending_journal_and_damage() {
         .any(|action| action == "finish_interrupted_principal_root_migration"));
 }
 
+#[cfg(unix)]
 #[test]
 fn recovery_status_reads_headers_only() {
     let dir = tempfile::tempdir().unwrap();

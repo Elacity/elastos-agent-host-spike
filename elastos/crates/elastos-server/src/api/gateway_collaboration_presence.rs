@@ -678,6 +678,7 @@ fn presence_heartbeat_request_id(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn r4_presence_pass_skips_missing_auth_record() {
         const ID: &str = "person:local:d27da763b7a38c5ef54051faf2ce09ef";
@@ -783,6 +784,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn r4_presence_pass_skips_remote_principal_before_root_lookup() {
         const REMOTE: &str = "remote:9c2e4a6b8d0f13572468ace0bdf13579";
@@ -876,6 +878,7 @@ mod tests {
         assert_eq!(senders, [profile.document().profile_did.as_str()]);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn r4_agent_root_profile_is_read_and_the_pass_refuses_a_quarantined_passkey() {
         // The pass itself cannot be driven with a valid agent. It walks
@@ -994,7 +997,7 @@ mod tests {
             "the pass returns the wallet root refusal for that quarantined record"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn r4_runtime_presence_uses_stored_root() {
         use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
@@ -1046,6 +1049,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_presence_publishes_from_durable_state_without_a_session() {
         // Presence used to require a signed-in browser tab, so two running
@@ -1193,6 +1197,7 @@ mod tests {
     /// being announced around the clock. Joining Community is automatic, so
     /// it is not that choice; Discovery is a different one. Leaving Community
     /// stops it for everyone on the Home.
+    #[cfg(unix)]
     #[tokio::test]
     async fn runtime_presence_follows_the_persons_community_choice_not_discovery() {
         const NETWORK: &str = "presence-runtime-opt-in";
@@ -1500,6 +1505,7 @@ mod tests {
         (state, principal)
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_presence_context_without_a_stored_root_is_refused_before_the_id_rule() {
         let temp = tempfile::tempdir().unwrap();
@@ -1534,6 +1540,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_stored_presence_principal_keeps_its_stored_profile_presentation() {
         let temp = tempfile::tempdir().unwrap();

@@ -3,7 +3,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
 use nix::fcntl::{Flock, FlockArg};
+#[cfg(unix)]
 use nix::unistd::geteuid;
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
@@ -33,6 +35,9 @@ const MAX_NODE_SHARE_RECORDS: usize = 4096;
 pub enum NodeLocalShareStoreErrorV1 {
     #[error("node share store is unavailable")]
     Unavailable,
+    #[cfg(windows)]
+    #[error("node share store is unsupported on Windows")]
+    UnsupportedOnWindows,
     #[error("node share store record is corrupt")]
     Corrupt,
     #[error("node share store record conflicts with existing authority")]
@@ -280,6 +285,9 @@ impl NodeLocalShareStoreV1 {
     }
 
     fn ensure_root_dir(&self) -> Result<(), NodeLocalShareStoreErrorV1> {
+        #[cfg(windows)]
+        require_supported_store()?;
+
         let parent = self
             .root_dir
             .parent()
@@ -389,12 +397,12 @@ impl NodeLocalShareStoreV1 {
             .join(format!(".{}.tmp", lower_hex_digest(slot_hash)))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn test_record_path(&self, slot_hash: Digest32) -> PathBuf {
         self.record_path(slot_hash)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn test_temp_path(&self, slot_hash: Digest32) -> PathBuf {
         self.temp_path(slot_hash)
     }
@@ -676,6 +684,7 @@ fn read_entry_from_path_with_link_count(
     decode_entry(&bytes, expected_slot_hash, expected_node_public_key)
 }
 
+#[cfg(unix)]
 fn create_owner_only_directory(path: &Path) -> Result<(), NodeLocalShareStoreErrorV1> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -689,6 +698,16 @@ fn create_owner_only_directory(path: &Path) -> Result<(), NodeLocalShareStoreErr
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(_) => Err(NodeLocalShareStoreErrorV1::Unavailable),
     }
+}
+
+#[cfg(windows)]
+fn create_owner_only_directory(_path: &Path) -> Result<(), NodeLocalShareStoreErrorV1> {
+    Err(NodeLocalShareStoreErrorV1::UnsupportedOnWindows)
+}
+
+#[cfg(windows)]
+fn require_supported_store() -> Result<(), NodeLocalShareStoreErrorV1> {
+    Err(NodeLocalShareStoreErrorV1::UnsupportedOnWindows)
 }
 
 fn validate_owner_only_directory(path: &Path) -> Result<(), NodeLocalShareStoreErrorV1> {
@@ -716,6 +735,8 @@ fn validate_owner_only_regular_file_metadata_with_link_count(
     metadata: &fs::Metadata,
     expected_link_count: u64,
 ) -> Result<(), NodeLocalShareStoreErrorV1> {
+    #[cfg(windows)]
+    let _ = expected_link_count;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(NodeLocalShareStoreErrorV1::Unavailable);
     }
@@ -731,6 +752,7 @@ fn validate_owner_only_regular_file_metadata_with_link_count(
     Ok(())
 }
 
+#[cfg(unix)]
 fn validate_owner_and_mode(
     metadata: &fs::Metadata,
     exact_mode: u32,
@@ -746,6 +768,15 @@ fn validate_owner_and_mode(
     Ok(())
 }
 
+#[cfg(windows)]
+fn validate_owner_and_mode(
+    _metadata: &fs::Metadata,
+    _exact_mode: u32,
+) -> Result<(), NodeLocalShareStoreErrorV1> {
+    Err(NodeLocalShareStoreErrorV1::UnsupportedOnWindows)
+}
+
+#[cfg(unix)]
 fn require_same_file(
     pre_metadata: &fs::Metadata,
     open_metadata: &fs::Metadata,
@@ -761,16 +792,21 @@ fn require_same_file(
             return Err(NodeLocalShareStoreErrorV1::Unavailable);
         }
     }
-    #[cfg(not(unix))]
-    {
-        if pre_metadata.len() != open_metadata.len() {
-            return Err(NodeLocalShareStoreErrorV1::Unavailable);
-        }
-    }
     Ok(())
 }
 
+#[cfg(windows)]
+fn require_same_file(
+    _pre_metadata: &fs::Metadata,
+    _open_metadata: &fs::Metadata,
+) -> Result<(), NodeLocalShareStoreErrorV1> {
+    Err(NodeLocalShareStoreErrorV1::UnsupportedOnWindows)
+}
+
 fn open_owner_only_file_for_read(path: &Path) -> Result<File, NodeLocalShareStoreErrorV1> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -785,6 +821,9 @@ fn open_owner_only_file_for_read(path: &Path) -> Result<File, NodeLocalShareStor
 }
 
 fn open_owner_only_temp_file_for_write(path: &Path) -> Result<File, NodeLocalShareStoreErrorV1> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     let parent = path
         .parent()
         .ok_or(NodeLocalShareStoreErrorV1::Unavailable)?;
@@ -825,16 +864,21 @@ fn remove_temp_file_if_present(path: &Path) -> Result<(), NodeLocalShareStoreErr
 }
 
 fn sync_directory(path: &Path) -> Result<(), NodeLocalShareStoreErrorV1> {
+    #[cfg(windows)]
+    require_supported_store()?;
+
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|_| NodeLocalShareStoreErrorV1::Unavailable)
 }
 
 #[derive(Debug)]
+#[cfg(unix)]
 struct ExclusiveFileLock {
     file: Option<Flock<File>>,
 }
 
+#[cfg(unix)]
 impl ExclusiveFileLock {
     fn acquire(path: &Path) -> Result<Self, NodeLocalShareStoreErrorV1> {
         let file = open_or_create_owner_only_lock_file(path)?;
@@ -849,6 +893,7 @@ impl ExclusiveFileLock {
     }
 }
 
+#[cfg(unix)]
 impl Drop for ExclusiveFileLock {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
@@ -857,6 +902,17 @@ impl Drop for ExclusiveFileLock {
     }
 }
 
+#[cfg(windows)]
+struct ExclusiveFileLock;
+
+#[cfg(windows)]
+impl ExclusiveFileLock {
+    fn acquire(_path: &Path) -> Result<Self, NodeLocalShareStoreErrorV1> {
+        Err(NodeLocalShareStoreErrorV1::UnsupportedOnWindows)
+    }
+}
+
+#[cfg(unix)]
 fn open_or_create_owner_only_lock_file(path: &Path) -> Result<File, NodeLocalShareStoreErrorV1> {
     let parent = path
         .parent()
@@ -963,6 +1019,23 @@ fn store_integrity_digest(payload: &[u8]) -> [u8; STORE_DIGEST_BYTES] {
     hasher.finalize().into()
 }
 
+#[cfg(all(test, windows))]
+#[test]
+fn windows_refuses_secure_store_before_creating_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("store");
+    assert_eq!(
+        create_owner_only_directory(&path),
+        Err(NodeLocalShareStoreErrorV1::UnsupportedOnWindows)
+    );
+    assert!(matches!(
+        ExclusiveFileLock::acquire(&path),
+        Err(NodeLocalShareStoreErrorV1::UnsupportedOnWindows)
+    ));
+    assert!(!path.exists());
+}
+
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;

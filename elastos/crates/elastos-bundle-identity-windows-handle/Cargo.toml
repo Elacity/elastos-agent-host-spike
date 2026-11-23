@@ -1,0 +1,9 @@
+[package]
+name = "elastos-bundle-identity-windows-handle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Windows handle-relative opens and enumeration for bundle identity"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }

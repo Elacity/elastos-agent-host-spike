@@ -52,25 +52,34 @@
 //! }
 //! ```
 
+#[cfg(not(windows))]
 mod config;
+#[cfg(not(windows))]
 mod error;
 #[cfg(target_os = "macos")]
 mod ffi;
 #[cfg(target_os = "macos")]
 mod network;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 #[path = "network_stub.rs"]
 mod network;
+#[cfg(not(windows))]
 mod provider;
+#[cfg(not(windows))]
 mod vm;
 
+#[cfg(not(windows))]
 pub use config::{
     ConfigError, VmConfig, VmConfigLimits, VzConfig, DEFAULT_MAX_MEMORY_MIB,
     DEFAULT_MAX_VCPU_COUNT, DEFAULT_VZ_STOP_TIMEOUT,
 };
+#[cfg(not(windows))]
 pub use error::{VzError, VzErrorReport, VzExitReason};
+#[cfg(not(windows))]
 pub use network::NetworkConfig;
+#[cfg(not(windows))]
 pub use provider::VzProvider;
+#[cfg(not(windows))]
 pub use vm::RunningVm;
 
 /// Shared fail-closed message for paths that cannot operate without a loaded

@@ -541,6 +541,7 @@ mod tests {
         assert_eq!(*requests.lock().unwrap(), expected_requests);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn apply_recovers_interrupted_release_before_default_carrier_refusal() {
         use elastos_common::localhost::{

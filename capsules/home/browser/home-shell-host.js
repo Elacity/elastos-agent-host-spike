@@ -30,6 +30,7 @@ import {
   profileReadinessActionTarget,
   showHomeUnlock,
   signOutHome,
+  startHomeCliMintWatch,
 } from "./shell-auth.js?v=home-wallpaper-20261030b";
 import {
   handleHomeWalletConnectorEffect,
@@ -2547,6 +2548,7 @@ async function boot() {
     console.error("home summary refresh failed after runtime ensure", error);
   });
   startShellTimers();
+  startHomeCliMintWatch();
 }
 
 function startShellTimers() {

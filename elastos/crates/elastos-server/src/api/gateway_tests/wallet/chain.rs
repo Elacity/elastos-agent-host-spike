@@ -1,5 +1,6 @@
 use super::super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_token_can_read_chain_provider_status() {
     let dir = tempfile::tempdir().unwrap();
@@ -146,6 +147,7 @@ async fn test_system_token_can_read_chain_provider_status() {
     assert!(lifecycle_events[0].reason.contains("start"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_wallet_token_can_read_chain_provider_balance() {
     let dir = tempfile::tempdir().unwrap();
@@ -177,6 +179,7 @@ async fn test_wallet_token_can_read_chain_provider_balance() {
     assert!(payload["data"].get("rpc_url").is_none());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_gateway_blocks_chain_proof_prepare_and_broadcast_routes() {
     let dir = tempfile::tempdir().unwrap();

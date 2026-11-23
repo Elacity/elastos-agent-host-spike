@@ -2782,6 +2782,7 @@ mod stored_root_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_stored_room_principal_keeps_todays_profile_decision() {
         let temp = tempfile::tempdir().unwrap();

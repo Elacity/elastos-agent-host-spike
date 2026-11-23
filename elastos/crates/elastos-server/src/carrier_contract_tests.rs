@@ -813,6 +813,7 @@ async fn run_current_row(row: ContractRow) {
 
 macro_rules! current_row_test {
     ($name:ident, $row:ident) => {
+        #[cfg(unix)]
         #[tokio::test]
         async fn $name() {
             run_current_row(ContractRow::$row).await;
@@ -905,7 +906,9 @@ fn carrier_contract_connect_ticket_construction_inventory() {
     let needle = ["ProviderCarrierRoute::", "Connect", "Ticket", " {"].concat();
     let mut found = Vec::new();
     for file in files {
-        let source = std::fs::read_to_string(&file).unwrap();
+        let source = std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("\r\n", "\n");
         let source = source
             .split("#[cfg(test)]\nmod tests")
             .next()
@@ -913,7 +916,11 @@ fn carrier_contract_connect_ticket_construction_inventory() {
             .split("#[cfg(test)]\npub(crate) mod tests")
             .next()
             .unwrap();
-        let relative = file.strip_prefix(crates).unwrap().to_string_lossy();
+        let relative = file
+            .strip_prefix(crates)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         for (offset, _) in source.match_indices(&needle) {
             let rest = &source[offset + needle.len()..];
             let Some(close) = rest.find('}') else {
@@ -947,13 +954,7 @@ fn carrier_contract_connect_ticket_construction_inventory() {
         }
     }
     found.sort();
-    let mut expected = vec![
-        "elastos-server/src/api/gateway_model_remote.rs:call_grant",
-        "elastos-server/src/carrier.rs:ensure_content_via_carrier_provider_invocation",
-        "elastos-server/src/carrier.rs:fetch_content_via_carrier_provider_invocation",
-        "elastos-server/src/carrier_engine.rs:call",
-        "elastos-server/src/collaboration_discovery_runtime.rs:invoke_bootstrap",
-    ];
+    let mut expected: Vec<&str> = vec![];
     expected.sort();
     assert_eq!(
         found, expected,

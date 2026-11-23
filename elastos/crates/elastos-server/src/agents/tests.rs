@@ -1,7 +1,10 @@
 //! Tests for the agent file. Rules that need the feature on are in
 //! `feature_on`; the rest run in every build.
 
+#![cfg(unix)]
+
 use super::*;
+use crate::api::routes::tests::make_admin;
 use serde_json::{json, Value};
 
 static DISPATCH_FIXTURES: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
@@ -203,16 +206,6 @@ impl Home {
             .filter(|event| event.event_type.starts_with("agent."))
             .collect()
     }
-}
-
-pub(crate) fn make_admin(data_dir: &Path, principal_id: &str) {
-    let mut state = crate::auth::load_auth_state(data_dir).unwrap();
-    for principal in &mut state.principals {
-        if principal.principal_id == principal_id {
-            principal.role = RuntimePrincipalRole::Admin;
-        }
-    }
-    crate::auth::save_auth_state(data_dir, &state, None).unwrap();
 }
 
 fn set_mode(path: &Path, mode: u32) {

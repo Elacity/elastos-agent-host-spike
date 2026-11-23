@@ -149,6 +149,7 @@ fn header_budget(files: usize) -> u64 {
     (files * (HEAD_WINDOW_FIRST + CANONICAL_TAIL.len())) as u64
 }
 
+#[cfg(unix)]
 #[test]
 fn start_ready_with_100_mib_envelope_over_64_mib_total_and_1100_files() {
     let home = Home::new("person:local:scan-large-home");
@@ -173,6 +174,7 @@ fn start_ready_with_100_mib_envelope_over_64_mib_total_and_1100_files() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn start_continues_with_damaged_and_names_it() {
     let home = Home::new("person:local:scan-damaged-home");
@@ -208,6 +210,7 @@ fn start_continues_with_damaged_and_names_it() {
     assert_eq!(home.read("Documents/other-key.txt"), other_key_envelope);
 }
 
+#[cfg(unix)]
 #[test]
 fn start_refuses_plaintext_with_names() {
     let home = Home::new("person:local:scan-plaintext-home");
@@ -280,6 +283,7 @@ fn start_refuses_plaintext_with_names() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn migration_refusals_name_the_file_before_any_write() {
     let assert_untouched = |home: &Home, backup_dir: &Path| {
@@ -358,6 +362,7 @@ fn migration_refusals_name_the_file_before_any_write() {
     assert_eq!(home.ready().unwrap(), Vec::<String>::new());
 }
 
+#[cfg(unix)]
 #[test]
 fn damaged_envelope_never_selected_or_rewrapped() {
     let home = Home::new("person:local:scan-never-rewrap-home");
@@ -397,6 +402,7 @@ fn damaged_envelope_never_selected_or_rewrapped() {
     assert_eq!(home.read("Documents/legacy.txt"), swapped);
 }
 
+#[cfg(unix)]
 #[test]
 fn plaintext_classified_fragment_is_wrapped_byte_exact() {
     let home = Home::new("person:local:scan-fragment-home");
@@ -453,6 +459,7 @@ fn plaintext_classified_fragment_is_wrapped_byte_exact() {
     assert_eq!(home.open("Documents/fragment.bin").unwrap(), fragment);
 }
 
+#[cfg(unix)]
 #[test]
 fn damaged_candidates_do_not_spend_the_plaintext_budget() {
     let home = Home::new("person:local:scan-damaged-budget-home");
@@ -479,6 +486,7 @@ fn damaged_candidates_do_not_spend_the_plaintext_budget() {
     assert_eq!(home.ready().unwrap().len(), 5);
 }
 
+#[cfg(unix)]
 #[test]
 fn probe_cap_names_unread_candidates_and_start_continues() {
     let home = Home::new("person:local:scan-probe-cap-home");
@@ -630,6 +638,7 @@ fn names_with_line_breaks_or_bidi_render_on_one_line() {
 
 /// #449: the writer's depth rule refuses exactly what the start walk refuses,
 /// and names the path on one line.
+#[cfg(unix)]
 #[test]
 fn writer_depth_rule_matches_the_start_walk() {
     let home = Home::new("person:local:scan-writer-depth-home");

@@ -1335,7 +1335,7 @@ mod tests {
     /// `localhost_read_right_on_a_write_effect_does_not_stand` executes that rule.
     #[test]
     fn localhost_effect_gates_the_row_only() {
-        let source = include_str!("provider_resource.rs");
+        let source = include_str!("provider_resource.rs").replace("\r\n", "\n");
         let prod = source.split("\n#[cfg(test)]\nmod tests").next().unwrap();
         let agree = prod.find("fn localhost_row_effect_agrees").unwrap();
         let next = prod.find("fn localhost_operation").unwrap();

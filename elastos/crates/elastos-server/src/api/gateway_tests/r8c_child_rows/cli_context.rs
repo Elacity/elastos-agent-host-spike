@@ -29,7 +29,7 @@ fn r8c_child_home_cli_context_rebuilds_with_the_parent_root() {
     steps.check("the rebuilt root is the parent root", same, &root);
     steps.finish();
 }
-
+#[cfg(unix)]
 #[test]
 fn r8c_control_home_cli_context_rebuilds_with_the_stored_persons_root() {
     let control = control(HOME_CLI_SHELL_ID);

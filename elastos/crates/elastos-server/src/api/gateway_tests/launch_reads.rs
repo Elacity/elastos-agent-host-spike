@@ -55,6 +55,7 @@ async fn read_at_origin(
 
 /// The Home session reaches the router with its own browser origin. It cannot
 /// read either kind of kept launch, including a path the Runtime would refuse.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_home_session_cannot_read_launch_content_or_nonplain_paths() {
     let dir = tempfile::tempdir().unwrap();
@@ -79,6 +80,7 @@ async fn a_home_session_cannot_read_launch_content_or_nonplain_paths() {
 }
 
 /// A page token for this launch stays with the viewer named by that token.
+#[cfg(unix)]
 #[tokio::test]
 async fn another_viewers_page_token_cannot_read_launch_content_or_nonplain_paths() {
     let dir = tempfile::tempdir().unwrap();
@@ -110,6 +112,7 @@ async fn another_viewers_page_token_cannot_read_launch_content_or_nonplain_paths
 
 /// The gateway carries the token's launch id to the Runtime. A token for a
 /// different launch cannot select the kept launch under either read kind.
+#[cfg(unix)]
 #[tokio::test]
 async fn another_launch_token_cannot_read_the_kept_launch() {
     let dir = tempfile::tempdir().unwrap();
@@ -163,6 +166,7 @@ async fn another_launch_token_cannot_read_the_kept_launch() {
 
 /// Without Runtime coordinates, the router still records the bound id it selected.
 /// This keeps the id handoff observable when the test host cannot start HTTP.
+#[cfg(unix)]
 #[tokio::test]
 async fn another_launch_token_keeps_its_bound_id_without_runtime() {
     let dir = tempfile::tempdir().unwrap();
@@ -230,6 +234,7 @@ fn launch_reads_audited(dir: &std::path::Path) -> Vec<String> {
 /// D1b-read. The page's own token reads its kept launch: the gateway asks the
 /// Runtime as the shell, carrying that same token and no browser marks, and
 /// passes the bytes back, never to be stored. Each read is audited once.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_pages_token_reads_its_kept_launch_through_the_runtime_as_the_shell() {
     let dir = tempfile::tempdir().unwrap();
@@ -279,6 +284,7 @@ async fn a_pages_token_reads_its_kept_launch_through_the_runtime_as_the_shell() 
 /// checks every other route goes through (a wallet's, the front door's for
 /// any other path, the one rooms and sites use) refuse it by name. Tokens
 /// bound to anything else are refused by the launch reads' check.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_launch_bound_token_opens_no_other_home_check() {
     let dir = tempfile::tempdir().unwrap();
@@ -350,6 +356,7 @@ async fn a_launch_bound_token_opens_no_other_home_check() {
 /// records every ask under `/api/launch/`, also one none of its routes takes.
 /// The Runtime's own `not_found` is passed on, and a redirect from it is not
 /// followed: it answers `not_found`, and the page's token goes nowhere else.
+#[cfg(unix)]
 #[tokio::test]
 async fn anything_else_is_not_found_and_the_runtime_is_not_asked() {
     let dir = tempfile::tempdir().unwrap();

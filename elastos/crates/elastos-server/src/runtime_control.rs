@@ -1,11 +1,16 @@
 use std::future::Future;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::ExitStatus;
 use std::time::Duration;
 
 use crate::local_http::LoopbackHttpBaseUrl;
 use sha2::Digest;
 
+#[cfg(unix)]
+pub(crate) mod gateway_children;
+#[cfg(windows)]
+#[path = "runtime_control/gateway_children_windows.rs"]
 pub(crate) mod gateway_children;
 pub use gateway_children::watch_gateway_owner;
 
@@ -167,6 +172,7 @@ where
     }
 }
 
+#[cfg(unix)]
 async fn wait_for_managed_runtime_ready(
     coords_path: &Path,
     expected_version: &str,
@@ -184,6 +190,7 @@ async fn wait_for_managed_runtime_ready(
     }
 }
 
+#[cfg(unix)]
 fn current_process_managed_runtime_child(runtime_kind: &str) -> Option<u32> {
     #[cfg(unix)]
     {
@@ -281,7 +288,11 @@ fn process_env_contains_runtime_kind(pid: u32, runtime_kind: &str) -> bool {
     command.contains("elastos") && command.contains(" serve ") && command.contains(" --addr ")
 }
 
-fn terminate_sibling_managed_runtime_children(runtime_kind: &str, keep_pid: u32) {
+#[cfg(unix)]
+fn terminate_sibling_managed_runtime_children(
+    runtime_kind: &str,
+    keep_pid: u32,
+) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         for child_pid in current_process_child_pids() {
@@ -300,7 +311,14 @@ fn terminate_sibling_managed_runtime_children(runtime_kind: &str, keep_pid: u32)
     {
         let _ = runtime_kind;
         let _ = keep_pid;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "managed Runtime sibling termination is unsupported on Windows",
+        )
+        .into());
     }
+    #[cfg(unix)]
+    Ok(())
 }
 
 fn is_managed_user_runtime_kind(kind: &str) -> bool {
@@ -384,8 +402,13 @@ fn parent_process_id() -> Option<u32> {
     }
 }
 
+#[cfg(unix)]
 struct SavedTermios(libc::termios);
 
+#[cfg(windows)]
+struct SavedTermios;
+
+#[cfg(unix)]
 fn enable_host_raw_mode() -> Option<SavedTermios> {
     unsafe {
         let mut original: libc::termios = std::mem::zeroed();
@@ -421,11 +444,20 @@ fn enable_host_raw_mode() -> Option<SavedTermios> {
     }
 }
 
+#[cfg(windows)]
+fn enable_host_raw_mode() -> Option<SavedTermios> {
+    None
+}
+
+#[cfg(unix)]
 fn restore_host_terminal(saved: SavedTermios) {
     unsafe {
         libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &saved.0);
     }
 }
+
+#[cfg(windows)]
+fn restore_host_terminal(_saved: SavedTermios) {}
 
 /// Public wrapper for raw mode — used by run_cmd, chat_cmd, and home_cmd.
 /// Returns a guard that restores the terminal on drop.
@@ -503,11 +535,10 @@ fn pid_is_alive(pid: u32) -> bool {
     }
     #[cfg(not(unix))]
     {
-        // Conservative fallback: assume alive so we don't tear down a live
-        // runtime's coords. Implement a Win32 OpenProcess-based check when
-        // Windows support lands.
+        // No Win32 process identity check exists. A pid that cannot be proved
+        // alive is not admitted, so runtime coordinate validation drops it.
         let _ = pid;
-        true
+        false
     }
 }
 
@@ -621,6 +652,7 @@ fn sync_managed_runtime_child_components_manifest(
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn write_runtime_coords(path: &Path, coords: &RuntimeCoords) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -634,6 +666,15 @@ pub fn write_runtime_coords(path: &Path, coords: &RuntimeCoords) -> anyhow::Resu
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+pub fn write_runtime_coords(_path: &Path, _coords: &RuntimeCoords) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "owner-only runtime coordinates are unsupported on Windows",
+    )
+    .into())
 }
 
 pub(crate) struct GatewayRuntimeCoordsGuard {
@@ -660,6 +701,7 @@ pub(crate) fn publish_gateway_runtime_coords(
     Ok(GatewayRuntimeCoordsGuard { path, coords })
 }
 
+#[cfg(unix)]
 fn write_private_runtime_coords_atomically(
     path: &Path,
     coords: &RuntimeCoords,
@@ -713,6 +755,19 @@ fn write_private_runtime_coords_atomically(
     write_result
 }
 
+#[cfg(windows)]
+fn write_private_runtime_coords_atomically(
+    _path: &Path,
+    _coords: &RuntimeCoords,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "private gateway coordinates are unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
     use std::io::Read as _;
 
@@ -756,6 +811,12 @@ fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
         }
         serde_json::from_slice(&data).ok()
     }
+}
+
+#[cfg(windows)]
+fn read_private_runtime_coords(_path: &Path) -> Option<RuntimeCoords> {
+    // Unknown file custody cannot establish a Runtime attach authority.
+    None
 }
 
 impl Drop for GatewayRuntimeCoordsGuard {
@@ -857,7 +918,11 @@ async fn runtime_version_from_health(api_url: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-async fn terminate_managed_chat_runtime(coords: &RuntimeCoords, coords_path: &Path) {
+#[cfg(unix)]
+async fn terminate_managed_chat_runtime(
+    coords: &RuntimeCoords,
+    coords_path: &Path,
+) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(coords_path);
 
     #[cfg(unix)]
@@ -880,6 +945,7 @@ async fn terminate_managed_chat_runtime(coords: &RuntimeCoords, coords_path: &Pa
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+    Ok(())
 }
 
 pub async fn read_operator_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
@@ -1107,6 +1173,7 @@ fn runtime_notices_enabled() -> bool {
         != Some("1")
 }
 
+#[cfg(unix)]
 async fn ensure_managed_runtime(
     data_dir: &Path,
     runtime_kind: &str,
@@ -1131,7 +1198,7 @@ async fn ensure_managed_runtime(
             )
             .await
             {
-                terminate_sibling_managed_runtime_children(runtime_kind, coords.pid);
+                terminate_sibling_managed_runtime_children(runtime_kind, coords.pid)?;
                 return Ok(coords);
             }
             anyhow::bail!(
@@ -1166,7 +1233,7 @@ async fn ensure_managed_runtime(
                         surface_name
                     );
                 }
-                terminate_managed_chat_runtime(&coords, &coords_path).await;
+                terminate_managed_chat_runtime(&coords, &coords_path).await?;
             } else {
                 let expected = env!("ELASTOS_VERSION");
                 // Dev-build restart disabled: multiple chat surfaces share the
@@ -1182,7 +1249,7 @@ async fn ensure_managed_runtime(
                                 terminate_sibling_managed_runtime_children(
                                     runtime_kind,
                                     coords.pid,
-                                );
+                                )?;
                                 return Ok(coords);
                             }
                             if runtime_notices_enabled() {
@@ -1191,7 +1258,7 @@ async fn ensure_managed_runtime(
                                     surface_name
                                 );
                             }
-                            terminate_managed_chat_runtime(&coords, &coords_path).await;
+                            terminate_managed_chat_runtime(&coords, &coords_path).await?;
                         }
                         Some(actual) => {
                             if runtime_notices_enabled() {
@@ -1200,7 +1267,7 @@ async fn ensure_managed_runtime(
                                 surface_name, actual, expected
                             );
                             }
-                            terminate_managed_chat_runtime(&coords, &coords_path).await;
+                            terminate_managed_chat_runtime(&coords, &coords_path).await?;
                         }
                         None => {
                             if runtime_notices_enabled() {
@@ -1209,7 +1276,7 @@ async fn ensure_managed_runtime(
                                 surface_name, expected
                             );
                             }
-                            terminate_managed_chat_runtime(&coords, &coords_path).await;
+                            terminate_managed_chat_runtime(&coords, &coords_path).await?;
                         }
                     }
                 }
@@ -1247,7 +1314,7 @@ async fn ensure_managed_runtime(
         )
         .await
         {
-            terminate_sibling_managed_runtime_children(runtime_kind, coords.pid);
+            terminate_sibling_managed_runtime_children(runtime_kind, coords.pid)?;
             drop(start_guard);
             return Ok(coords);
         }
@@ -1389,7 +1456,7 @@ async fn ensure_managed_runtime(
     .await?;
     match ready {
         StartWait::Ready(coords) => {
-            terminate_sibling_managed_runtime_children(runtime_kind, coords.pid);
+            terminate_sibling_managed_runtime_children(runtime_kind, coords.pid)?;
             child.ready();
             drop(start_guard);
             Ok(coords)
@@ -1405,6 +1472,39 @@ async fn ensure_managed_runtime(
     }
 }
 
+#[cfg(windows)]
+async fn ensure_managed_runtime(
+    _data_dir: &Path,
+    _runtime_kind: &str,
+    _policy_file_name: &str,
+    _allow_resources: &[&str],
+    _surface_name: &str,
+) -> anyhow::Result<RuntimeCoords> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "managed Runtime process ownership is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(all(test, windows))]
+#[tokio::test]
+async fn windows_refuses_managed_runtime_before_start() {
+    let temp = tempfile::tempdir().unwrap();
+    let error = ensure_managed_runtime(temp.path(), "test", "policy.json", &[], "test")
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::Unsupported)
+    );
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[cfg(any(unix, test))]
 async fn managed_runtime_ready(
     coords_path: &Path,
     expected_version: &str,
@@ -1416,6 +1516,7 @@ async fn managed_runtime_ready(
     }
 }
 
+#[cfg(unix)]
 fn format_runtime_start_exit_message(
     surface_name: &str,
     log_path: &Path,
@@ -1444,6 +1545,7 @@ fn format_runtime_start_exit_message(
     }
 }
 
+#[cfg(unix)]
 fn format_runtime_start_timeout_message(surface_name: &str, log_path: &Path) -> String {
     if let Some(summary) = summarize_runtime_start_failure(log_path) {
         format!(
@@ -1472,6 +1574,7 @@ pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     Ok(sha256_bytes(&bytes))
 }
 
+#[cfg(unix)]
 fn managed_runtime_dependency_sha256() -> String {
     let mut input = String::new();
     for name in MANAGED_RUNTIME_REQUIRED_NATIVE_PROVIDERS
@@ -1496,11 +1599,13 @@ fn managed_runtime_dependency_sha256() -> String {
     sha256_bytes(input.as_bytes())
 }
 
+#[cfg(unix)]
 fn summarize_runtime_start_failure(log_path: &Path) -> Option<String> {
     let contents = std::fs::read_to_string(log_path).ok()?;
     summarize_runtime_start_failure_contents(&contents)
 }
 
+#[cfg(any(unix, test))]
 fn summarize_runtime_start_failure_contents(contents: &str) -> Option<String> {
     let last_line = contents
         .lines()
@@ -1520,6 +1625,7 @@ fn summarize_runtime_start_failure_contents(contents: &str) -> Option<String> {
     Some(format!("Last runtime error: {}", last_line))
 }
 
+#[cfg(unix)]
 fn reserve_managed_chat_addr() -> std::io::Result<String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let addr = listener.local_addr()?;
@@ -1682,7 +1788,7 @@ mod tests {
         let ready = managed_runtime_ready(&coords_path, env!("ELASTOS_VERSION")).await;
         assert!(ready.is_none());
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn managed_runtime_ready_accepts_matching_health() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1828,7 +1934,7 @@ mod tests {
             home.join("Library/Application Support/elastos")
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_managed_runtime_copies_parent_components_manifest_into_child_data_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1872,7 +1978,7 @@ mod tests {
         );
         assert!(!child_data_dir.join("model-catalog.json").exists());
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_managed_runtime_copies_signed_model_catalog_into_child_data_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1898,7 +2004,7 @@ mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_managed_runtime_starts_without_a_missing_or_mismatched_catalogue() {
         for case in ["missing", "mismatched"] {
@@ -1939,7 +2045,7 @@ mod tests {
             .contains("managed home runtime requires installed manifest"));
         assert!(error.to_string().contains("components.json"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_managed_runtime_requires_verified_parent_provider_binary() {
         let tmp = tempfile::tempdir().unwrap();

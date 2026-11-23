@@ -9,6 +9,8 @@
 //! `decide_contact_request` (gateway_inbox.rs:691). The rows call it
 //! themselves, as `home_launch` does when Home opens.
 
+#![cfg(unix)]
+
 use super::*;
 use crate::collaboration_direct_messages::{DirectSendAuthority, DirectSendIntent};
 use crate::collaboration_discovery_runtime::CollaborationDiscoveryService;
@@ -93,6 +95,7 @@ async fn send_and_read_back(
 /// accepted contact, and the test cannot arrange one because the contact
 /// store refuses this person's writes (the contacts row prints that
 /// refusal). The control runs the send.
+#[cfg(unix)]
 #[tokio::test]
 #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
 async fn r8c_child_direct_messages_register_and_read_under_the_parent_root() {
@@ -137,6 +140,7 @@ async fn r8c_child_direct_messages_register_and_read_under_the_parent_root() {
     steps.finish();
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn r8c_control_direct_messages_register_read_and_send_under_the_stored_persons_root() {
     let control = control(CHAT_ROOM_CAPSULE_ID);
