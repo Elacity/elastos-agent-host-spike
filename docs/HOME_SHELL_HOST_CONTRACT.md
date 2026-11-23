@@ -99,7 +99,8 @@ The native CLI uses its own app-scoped launch grants. Its `home-cli` grant for
 these two operations selects `home-launch`; that grant can ask the gateway to
 launch or open content without browser provenance. For content
 open, the gateway gives the Runtime a `home-shell` projection grant bound to
-`home`; the Runtime accepts that grant only on its internal content-open hop.
+`home` only when the caller's context has a proof binding; the Runtime accepts
+that grant only on its internal content-open hop.
 `elastos home --cli-launch-token` asks the Home on this computer for one
 exported grant. The command creates a fresh secret, registers a bound request,
 and waits. While it waits, its error output prints `Approve terminal request
@@ -140,10 +141,12 @@ public journey smoke requires `ELASTOS_CLI_LAUNCH_TOKEN` from the operator.
 The device key issues a launch token for two shells: `home` and `home-cli`. A
 standalone summary read for one of those shells uses that token. A standalone
 write for another app stops. The gateway-owned environment route mints a token
-only when its proof-binding variable is set and the live grant matches that
-binding, the session, and the person. With no proof binding, that route mints
-nothing and the command uses the device mint, which accepts only `home` and
-`home-cli`. A proofless device token for another app is refused. This closed
+only when its proof-binding variable is set, the live grant matches that
+binding, the session, and the person, and that grant names `home`. With no
+proof binding, that route mints nothing and the command uses the device mint,
+which accepts only `home` and `home-cli`. A proofless device token for another
+app is refused. Content open signs its `home-shell` projection only for a
+context that has a proof binding. This closed
 result for a standalone write on behalf of another app is the boundary
 recorded in #1817.
 

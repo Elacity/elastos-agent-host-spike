@@ -665,7 +665,7 @@ pub(crate) mod tests {
     fn principal_launch_accepts_home_launch_grant() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "chat-wasm");
-        let context = gateway::local_home_launch_token_context(dir.path()).unwrap();
+        let context = gateway::bind_device_session_grant(dir.path(), &["chat-wasm"]).unwrap();
         let grant =
             gateway::issue_home_launch_token_with_context(dir.path(), "chat-wasm", &context)
                 .unwrap();
@@ -704,7 +704,7 @@ pub(crate) mod tests {
     fn principal_launch_rejects_wrong_app_grant() {
         let dir = tempfile::tempdir().unwrap();
         let capsule_dir = write_test_capsule(dir.path(), "chat-wasm");
-        let context = gateway::local_home_launch_token_context(dir.path()).unwrap();
+        let context = gateway::bind_device_session_grant(dir.path(), &["system"]).unwrap();
         let grant =
             gateway::issue_home_launch_token_with_context(dir.path(), "system", &context).unwrap();
 
@@ -1264,7 +1264,11 @@ pub(crate) mod tests {
         ) -> Self {
             let data_dir = temp.path().join("data");
             std::fs::create_dir_all(&data_dir).unwrap();
-            let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
+            let context = gateway::bind_device_session_grant(
+                &data_dir,
+                &[gateway::HOME_CAPSULE_ID, PROBE_HOST],
+            )
+            .unwrap();
             let owner = context.principal_id().to_string();
             crate::auth::store_test_principal_root_protection(&data_dir, &owner);
             make_admin(&data_dir, &owner);
@@ -6001,7 +6005,9 @@ pub(crate) mod tests {
             .unwrap();
         let audit_log = Arc::new(AuditLog::new());
 
-        let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
+        let context =
+            gateway::bind_device_session_grant(&data_dir, &[gateway::HOME_CAPSULE_ID, PROBE_HOST])
+                .unwrap();
         let owner = context.principal_id().to_string();
         crate::auth::store_test_principal_root_protection(&data_dir, &owner);
         make_admin(&data_dir, &owner);
@@ -6126,7 +6132,8 @@ pub(crate) mod tests {
         }
         let home = ProbeLaunch::new(&["a"]).await;
         let agent = home.agents.first().expect("one agent").clone();
-        let context = gateway::local_home_launch_token_context(&home.data_dir).unwrap();
+        let context =
+            gateway::bind_device_session_grant(&home.data_dir, &["another-capsule"]).unwrap();
         let grant = gateway::issue_home_launch_token_with_context(
             &home.data_dir,
             "another-capsule",
@@ -6238,7 +6245,7 @@ pub(crate) mod tests {
             .expect("the slot stages");
 
         // The shell session's launch token for this folder's capsule.
-        let context = gateway::local_home_launch_token_context(&data_dir).unwrap();
+        let context = gateway::bind_device_session_grant(&data_dir, &[name]).unwrap();
         let owner = context.principal_id().to_string();
         crate::auth::store_test_principal_root_protection(&data_dir, &owner);
         make_admin(&data_dir, &owner);

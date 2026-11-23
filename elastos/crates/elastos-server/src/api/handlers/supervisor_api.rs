@@ -440,7 +440,8 @@ mod tests {
     #[test]
     fn supervisor_launch_accepts_signed_launch_grant() {
         let dir = tempfile::tempdir().unwrap();
-        let context = crate::api::gateway::local_home_launch_token_context(dir.path()).unwrap();
+        let context =
+            crate::api::gateway::bind_device_session_grant(dir.path(), &["chat"]).unwrap();
         let grant =
             crate::api::gateway::issue_home_launch_token_with_context(dir.path(), "chat", &context)
                 .unwrap();
@@ -464,7 +465,8 @@ mod tests {
     #[test]
     fn supervisor_launch_rejects_wrong_app_grant() {
         let dir = tempfile::tempdir().unwrap();
-        let context = crate::api::gateway::local_home_launch_token_context(dir.path()).unwrap();
+        let context =
+            crate::api::gateway::bind_device_session_grant(dir.path(), &["documents"]).unwrap();
         let grant = crate::api::gateway::issue_home_launch_token_with_context(
             dir.path(),
             "documents",

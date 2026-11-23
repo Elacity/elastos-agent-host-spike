@@ -880,7 +880,7 @@ fn walkdir_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 async fn viewer_storage_whitespace_root_cannot_reach_the_agents_area() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(library_test_state(dir.path()).await);
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap();
     let viewer_token = issue_home_launch_token(dir.path(), GBA_EMULATOR_CAPSULE_ID).unwrap();
     let content_token = issue_home_projection_launch_token_with_context(
         dir.path(),
