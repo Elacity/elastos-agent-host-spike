@@ -326,7 +326,7 @@ mod tests {
             .validate(token, session, Action::Write, &resource, None)
             .await
     }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn settle_and_revoke_settles_only_the_named_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -365,7 +365,7 @@ mod tests {
         let b_check = validate(&state, "session-b", &b_token).await;
         assert_eq!(b_check, Ok(()), "B token still live");
     }
-
+    #[cfg(unix)]
     /// A3-R S3 fix 2 row 1. A revoke whose save fails is returned to the
     /// caller; the token is refused in this process, its request still
     /// settles, and its id is kept in the pending revocation list. The saved
@@ -421,7 +421,7 @@ mod tests {
             );
         }
     }
-
+    #[cfg(unix)]
     /// A3-R S3 fix 2 row 2. A start applies the pending list and keeps it
     /// while the store still cannot save; the first start whose saves
     /// succeed clears it. From then the saved store alone refuses the token,
@@ -584,7 +584,7 @@ mod tests {
             Err(_) => assert_eq!(left, vec![*token.id()], "an unsaved one stays"),
         }
     }
-
+    #[cfg(unix)]
     /// A3-R S3 fix 3 row 2. The pending list holds at most [`PENDING_CAP`]
     /// ids, each once. An id already listed takes no room. An end whose ids
     /// do not fit is reported as not settled and leaves the list as it was,
@@ -646,7 +646,7 @@ mod tests {
             assert!(saved.is_token_revoked(id).await, "the store saved {id}");
         }
     }
-
+    #[cfg(unix)]
     /// A3-R S3 fix 3 row 3. A start applies the list in one pass. An id the
     /// saved store already holds costs no store save and leaves the list; an
     /// id listed twice is applied once, and it stays listed while its save

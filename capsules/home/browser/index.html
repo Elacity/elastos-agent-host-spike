@@ -129,6 +129,29 @@
       </section>
 
       <section
+        id="home-cli-mint-prompt"
+        class="home-prompt"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="home-cli-mint-title"
+        aria-describedby="home-cli-mint-copy"
+        aria-hidden="true"
+        hidden
+      >
+        <div class="home-prompt-card">
+          <p class="home-prompt-eyebrow">Terminal</p>
+          <h1 id="home-cli-mint-title">Allow this terminal</h1>
+          <p id="home-cli-mint-copy">A terminal is waiting for permission to launch Home apps. Use your passkey to allow it. This permission lasts 5 minutes.</p>
+          <div id="home-cli-mint-choices" class="home-cli-mint-choices" hidden></div>
+          <p id="home-cli-mint-status" role="status" hidden></p>
+          <div class="home-prompt-actions">
+            <button id="home-cli-mint-approve" class="home-prompt-button" type="button">Use passkey</button>
+            <button id="home-cli-mint-cancel" class="home-prompt-button home-prompt-button-secondary" type="button">Cancel</button>
+          </div>
+        </div>
+      </section>
+
+      <section
         id="home-clipboard-prompt"
         class="home-prompt"
         role="dialog"

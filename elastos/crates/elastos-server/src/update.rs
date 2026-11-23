@@ -386,6 +386,7 @@ pub fn evict_changed_capsule_cache(data_dir: &std::path::Path, changed_capsules:
 }
 
 /// The owned probe lives beside the installed binary and closes before migration.
+#[cfg(unix)]
 async fn verify_candidate_before_migration(
     transaction: &InstallTransaction,
     bytes: &[u8],
@@ -414,6 +415,20 @@ async fn verify_candidate_before_migration(
     verify_installed_binary_version(&path, version, installed_binary_version_timeout()).await
 }
 
+#[cfg(windows)]
+async fn verify_candidate_before_migration(
+    _transaction: &InstallTransaction,
+    _bytes: &[u8],
+    _version: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "update candidate executable custody is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
 async fn verify_installed_binary_version(
     bin_path: &Path,
     expected_version: &str,
@@ -474,6 +489,18 @@ async fn verify_installed_binary_version(
         }
     };
     verify_installed_binary_version_output(bin_path, expected_version, status.success(), &out, &err)
+}
+
+#[cfg(windows)]
+async fn verify_installed_binary_version(
+    _bin_path: &Path,
+    _expected_version: &str,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "update executable process tree custody is unsupported on Windows",
+    )
+    .into())
 }
 
 fn verify_installed_binary_version_output(
@@ -2180,6 +2207,7 @@ fn support_paths_snapshot(
     Ok(hex::encode(digest.finalize()))
 }
 
+#[cfg(unix)]
 fn fingerprint_support_tree(
     path: &Path,
     excluded: &std::collections::BTreeSet<PathBuf>,
@@ -2251,6 +2279,19 @@ fn fingerprint_support_tree(
     Ok(())
 }
 
+#[cfg(windows)]
+fn fingerprint_support_tree(
+    _path: &Path,
+    _excluded: &std::collections::BTreeSet<PathBuf>,
+    _digest: &mut sha2::Sha256,
+) -> anyhow::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "update support tree no-follow fingerprint is unsupported on Windows",
+    )
+    .into())
+}
+
 fn optional_release_object_cid(head: &serde_json::Value) -> anyhow::Result<Option<&str>> {
     let Some(cid) = head["payload"]["release_object_cid"].as_str() else {
         return Ok(None);
@@ -2268,6 +2309,7 @@ fn optional_release_object_cid(head: &serde_json::Value) -> anyhow::Result<Optio
     Ok(Some(cid))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;

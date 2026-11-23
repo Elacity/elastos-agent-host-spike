@@ -72,6 +72,7 @@ pub(super) fn validate_entries(tx: &InstallTransaction, entries: &[Entry]) -> an
 
 // The digest frames names, types, modes, lengths and link targets, independent of
 // the tree's stage/live/rollback location. Open regular files without following links.
+#[cfg(unix)]
 fn state(path: &Path) -> anyhow::Result<Option<String>> {
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -120,7 +121,16 @@ fn state(path: &Path) -> anyhow::Result<Option<String>> {
     Ok(Some(hex::encode(digest.finalize())))
 }
 
+#[cfg(windows)]
+fn state(_path: &Path) -> anyhow::Result<Option<String>> {
+    Err(unsupported_windows(
+        "installation support tree identity and ownership",
+    ))
+}
+
+#[cfg(unix)]
 struct HashWriter<'a>(&'a mut Sha256);
+#[cfg(unix)]
 impl Write for HashWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.update(bytes);
@@ -131,6 +141,7 @@ impl Write for HashWriter<'_> {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn copy_tree(source: &Path, dest: &Path) -> anyhow::Result<()> {
     let meta = fs::symlink_metadata(source)?;
     if meta.file_type().is_symlink() {
@@ -194,6 +205,11 @@ pub(super) fn copy_tree(source: &Path, dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub(super) fn copy_tree(_source: &Path, _dest: &Path) -> anyhow::Result<()> {
+    Err(unsupported_windows("installation support tree copy"))
+}
+
 fn remove(path: &Path) -> anyhow::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => fs::remove_dir_all(path)?,
@@ -241,7 +257,7 @@ pub(super) fn prepare(tx: &InstallTransaction, paths: &[(PathBuf, PathBuf)]) -> 
     journal.phase = Phase::Staging;
     tx.write_journal(&journal)?;
     let result = (|| {
-        fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        create_private_directory(&directory)?;
         sync_directory(&tx.data_dir)?;
         for (index, entry) in journal.support.iter().enumerate() {
             if entry.candidate.is_some() {
@@ -385,6 +401,7 @@ pub(super) fn activate(tx: &InstallTransaction, entries: &[Entry]) -> anyhow::Re
 // This is a repair plan, never a replacement digest. Every source file, mode,
 // and link must still match a journal-bound copy. Only regular Python cache
 // files with a recorded source can be replaced or removed before exact hashing.
+#[cfg(unix)]
 fn cache_drift_only(current: &Path, recorded: &Path) -> anyhow::Result<bool> {
     if state(current)? == state(recorded)? {
         return Ok(true);
@@ -444,6 +461,11 @@ fn cache_drift_only(current: &Path, recorded: &Path) -> anyhow::Result<bool> {
         }
         _ => Ok(false),
     }
+}
+
+#[cfg(windows)]
+fn cache_drift_only(_current: &Path, _recorded: &Path) -> anyhow::Result<bool> {
+    Err(unsupported_windows("installation support cache identity"))
 }
 
 fn has_recorded_cache_repair(

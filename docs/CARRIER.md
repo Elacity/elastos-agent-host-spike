@@ -191,7 +191,9 @@ See [CONTENT_AVAILABILITY.md](CONTENT_AVAILABILITY.md).
 
 ### Where HTTP fits
 
-HTTP is not Carrier. In this repo it plays three supporting roles:
+HTTP alone does not define Carrier. HTTPS may be one Carrier backend's wire;
+HTTP semantics never reach capsules or receipts. Today HTTP also plays three
+supporting roles:
 
 1. **Node-local control API**
    - `elastos-server` exposes an HTTP API for capability requests, provider dispatch, session handling, and orchestration.
@@ -466,7 +468,8 @@ use ElastOS Bus; web projections and microVMs use their documented narrow
 adapters. HTTP, `postMessage`, stdio, vsock, serial, and local IPC are host
 plumbing, not Carrier or the capsule contract.
 
-HTTP here is a control-plane protocol. It is not the Carrier substrate.
+HTTP here supports the control plane. HTTPS may also carry a Carrier backend's
+sealed envelopes; HTTP semantics never reach capsules or receipts.
 
 ### 2. Carrier network and content plane (node to world)
 

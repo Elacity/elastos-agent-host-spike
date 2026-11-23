@@ -78,6 +78,10 @@ pub(crate) mod page_launch;
 pub mod protected_content_config;
 pub mod protected_content_runtime;
 pub mod provider_resource;
+#[cfg(unix)]
+pub mod release_publication;
+#[cfg(windows)]
+#[path = "release_publication_windows.rs"]
 pub mod release_publication;
 pub mod resource_bridge;
 pub mod room_service;
@@ -87,11 +91,17 @@ pub mod setup;
 pub mod shares;
 pub mod sources;
 pub mod stage_cmd;
+#[cfg(unix)]
 pub mod supervisor;
+#[cfg(windows)]
+#[path = "supervisor_windows.rs"]
+pub mod supervisor;
+mod supervisor_protocol;
 #[cfg(test)]
 mod test_clock;
 #[cfg(all(test, unix))]
 mod test_support;
 pub mod update;
 pub mod update_controller;
+#[cfg(unix)]
 pub mod vm_provider;

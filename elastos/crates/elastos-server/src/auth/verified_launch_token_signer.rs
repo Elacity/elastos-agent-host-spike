@@ -63,7 +63,7 @@ mod tests {
             "localhost://Users/af179fa6924299eea2520df3"
         );
     }
-
+    #[cfg(unix)]
     #[test]
     fn verified_device_object_binding_uses_typed_root() {
         use crate::auth::{

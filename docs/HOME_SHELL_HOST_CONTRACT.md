@@ -100,19 +100,42 @@ these two operations selects `home-launch`; that grant can ask the gateway to
 launch or open content without browser provenance. For content
 open, the gateway gives the Runtime a `home-shell` projection grant bound to
 `home`; the Runtime accepts that grant only on its internal content-open hop.
-Today, `home_cmd::run` calls the CLI grant issuer only when an
-`elastos home --cli-launch-token` process has the gateway-owned terminal
-auth environment.
-The gateway supplies that environment to its `elastos home` TUI child; the TUI
-does not offer a host shell or a grant-mint action. The owner therefore has no
-reachable product action to mint this grant. This is a known gap for the CTO.
-An isolated harness can run the command with that environment; the issuer then
-checks the live session grant and admin passkey binding before signing. The
-public journey smoke attempts this command when `ELASTOS_CLI_LAUNCH_TOKEN` is
-absent, so that auto-mint path needs such a harness. The issuer trusts the
-process environment and the local auth store as a same-user authority boundary:
-a same-user process with those values and auth-store access can mint the bearer
-grant, and its holder can replay it on the two headless launch operations.
+`elastos home --cli-launch-token` asks the Home on this computer for one
+exported grant. The command creates a fresh secret, registers a bound request,
+and waits. While it waits, its error output prints `Approve terminal request
+ABCD-EFGH in Home`. That code is the first eight hex characters of the request
+id, in upper case, with a hyphen after the fourth character. It is not the
+secret. Home shows that same code to the signed-in human admin. When one
+request is waiting, Home asks for a fresh passkey for that request. When more
+than one request is waiting, Home shows each code and asks the admin to choose.
+Home does not open a passkey prompt for one of those requests by itself, and an
+open prompt stays on the request it opened for. Home begins the chosen request
+and then sends the passkey assertion. Home does not approve a request it has
+not begun. When the admin approves, the command prints the grant once. When the
+admin refuses the passkey or dismisses it, the command prints no grant and
+stops as refused or cancelled. When the admin cancels before the claim commits,
+the request times out, or the request does not match, the command prints no
+grant and stops with a non-zero status. A cancel that arrives after the claim
+has committed is refused. If the signer then succeeds, the command still prints
+that one grant. If the signer then fails, the command prints no grant. If Home
+cannot be reached before a request is registered, the command says Home is not
+running and the admin can request the grant again. If the command loses Home's
+reply after a claim may have been delivered, it does not ask the admin to
+approve again. The gateway keeps the approval in its own memory. It signs
+only when that memory record is approved and the request, the
+secret, the owner, the session, the proof, the grant, and the operation match.
+It marks the record delivered in that same memory before returning the grant.
+The grant lasts 5 minutes from the signature. A stolen grant still reaches only
+`POST /api/apps/home/launch` and `POST /api/home/launch/content`, and only until
+that grant expires or the admin session is revoked. A file in the data
+directory is not an approval and cannot deliver a grant. A restart drops a
+request that is still waiting. `Origin: null` cannot register a request or
+claim a grant, including when the caller presents a launch token. The command
+does not mint from the process environment.
+The gateway still gives its `elastos home` TUI
+child the terminal environment. That child uses the environment for an internal
+projection token. The TUI has no host shell and no export-mint action. The
+public journey smoke requires `ELASTOS_CLI_LAUNCH_TOKEN` from the operator.
 
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers
@@ -304,7 +327,14 @@ Home origin.
 
 Only approved first-party targets may ask Home for fresh passkey authority.
 Home binds that proof to the requesting capsule, operation, and request before
-returning a new target-scoped token to the same source and origin.
+returning a new target-scoped token to the same source and origin. Home also
+asks for a fresh passkey when a terminal is waiting for an exported Home CLI
+grant. That prompt shows the same request code the terminal printed. When
+several requests are waiting, Home asks the admin to choose one code before
+the passkey prompt. The prompt begins the chosen request and then approves it.
+The passkey result stays in Home. The waiting command receives the grant. A
+cancel after the claim has committed does not take a delivered grant back. The
+admin signs out to revoke a grant the terminal already received.
 
 Both shells can sign out. Browser `home-cli` sign-out is a launch-token-bound
 terminal host intent; `home-gui` uses the same host message contract. Neither

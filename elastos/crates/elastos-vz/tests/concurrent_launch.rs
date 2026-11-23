@@ -1,4 +1,5 @@
 //! concurrent-launch stress for the Vz backend.
+#![cfg(unix)]
 //!
 //! Three concerns are exercised here:
 //!

@@ -23,6 +23,7 @@ fn readiness(dir: &std::path::Path, ctx: &HomeLaunchTokenContext) -> String {
     format!("{} {}", field("status"), field("reason"))
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
 fn r8c_child_recovery_readiness_with_a_profile_under_the_protected_parent_root() {
@@ -48,6 +49,7 @@ fn r8c_child_recovery_readiness_with_a_profile_under_the_protected_parent_root()
     steps.finish();
 }
 
+#[cfg(unix)]
 #[test]
 fn r8c_control_recovery_readiness_is_answered_for_the_stored_person() {
     let control = control(PEOPLE_CAPSULE_ID);

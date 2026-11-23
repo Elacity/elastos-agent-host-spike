@@ -1,6 +1,7 @@
 //! The owner's agent routes: turn agents on or off for this Home, create,
-//! list, rename, retire, and turn one agent on or off. No route here runs an
-//! agent.
+//! list, rename, retire, turn one agent on or off, and start or stop one agent.
+//! Start and Stop ask the Home Runtime to run or end the host. This route
+//! does not admit the guest itself.
 //!
 //! Every route makes the same owner check as the System guest-registration
 //! route: a Home launch token for System, on a proof binding that is stored,
@@ -176,4 +177,164 @@ pub(super) async fn agents_activate(
             now_ts(),
         )
     }))
+}
+
+/// The passkey step-up operation for one Start. The ceremony and the route
+/// both name it, so a token minted for another action cannot start an agent.
+const AGENT_START_OPERATION: &str = "agent.start";
+/// How recently the passkey step must have finished. The token itself can
+/// live 180 seconds, and wallet and other callers still allow that. Begin
+/// and complete run immediately before Start, and this route has no caller
+/// that needs the extra minute, so a Start older than two minutes is refused.
+const AGENT_START_STEP_UP_MAX_AGE_SECS: u64 = 120;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentLaunchRequest {
+    agent_id: String,
+    step_up_token: String,
+}
+
+#[derive(Serialize)]
+struct AgentLaunchResponse {
+    agent_id: String,
+    capsule_id: String,
+    session_id: String,
+    status: String,
+}
+
+pub(super) async fn agents_launch(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    agents_response(start_agent(&state, &headers, &body).await)
+}
+
+/// Owner check, then consume the one-use step-up for this agent, then mint
+/// the short grant, then ask the Runtime to start the host. A missing,
+/// replayed, expired, other-agent, or other-owner step-up returns before the
+/// grant is minted and starts no guest.
+async fn start_agent(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> anyhow::Result<AgentLaunchResponse> {
+    let owner = agents_owner(state, headers)?;
+    let request: AgentLaunchRequest = agents_request(body)?;
+    let launch = require_home_launch_token_binding(&state.data_dir, headers, &[SYSTEM_CAPSULE_ID])?;
+    consume_passkey_step_up_token(
+        &state.data_dir,
+        request.step_up_token.trim(),
+        &launch,
+        AGENT_START_STEP_UP_MAX_AGE_SECS,
+        AGENT_START_OPERATION,
+        &serde_json::json!({ "agent_id": request.agent_id }),
+    )?;
+    let stored = crate::agents::stored_agent(
+        &state.data_dir,
+        &owner.principal.principal_id,
+        &request.agent_id,
+    )?;
+    let host_name = stored
+        .record
+        .agent_host_package
+        .as_ref()
+        .map(|package| package.name.clone())
+        .ok_or_else(|| anyhow::anyhow!("agent has no host package"))?;
+    let host = crate::agent_admission::verify_agent_host(&state.data_dir, &host_name)?;
+    let grant = issue_home_agent_launch_token_with_context(
+        &state.data_dir,
+        &request.agent_id,
+        host.package().name.as_str(),
+        &owner.context,
+    )?;
+    let started =
+        launch_runtime_agent(&state.data_dir, host.directory(), &request.agent_id, &grant).await?;
+    Ok(AgentLaunchResponse {
+        agent_id: request.agent_id,
+        capsule_id: started.capsule_id,
+        session_id: started.session_id,
+        status: started.status,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentStopRequest {
+    agent_id: String,
+}
+
+#[derive(Serialize)]
+struct AgentStoppedSession {
+    session_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct AgentStopResponse {
+    agent_id: String,
+    stopped: Vec<AgentStoppedSession>,
+}
+
+pub(super) async fn agents_stop(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    agents_response(stop_agent(&state, &headers, &body).await)
+}
+
+/// The owner gate. With no agent id this is the admin check, and it runs
+/// before the body is read. With an agent id it is that check plus "this
+/// owner owns this agent". The agent may be off or retired, and the Home may
+/// have turned agents off. A guest fails the admin check. Another owner fails
+/// the ownership check. Either refusal happens before the Runtime is asked
+/// to stop anything.
+fn owner_may_stop(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    agent_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let owner = agents_owner(state, headers)?;
+    if let Some(agent_id) = agent_id {
+        crate::agents::stored_agent_for_stop(
+            &state.data_dir,
+            &owner.principal.principal_id,
+            agent_id,
+        )?;
+    }
+    Ok(())
+}
+
+/// Owner check, then ask the Runtime to stop the live row whose principal is
+/// this agent. The request carries the agent id and no capsule name.
+async fn stop_agent(
+    state: &GatewayState,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> anyhow::Result<AgentStopResponse> {
+    owner_may_stop(state, headers, None)?;
+    let request: AgentStopRequest = agents_request(body)?;
+    owner_may_stop(state, headers, Some(&request.agent_id))?;
+    let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
+    if outcome.stopped.is_empty() {
+        let message = match outcome.already.as_deref() {
+            Some("stopping") => "this agent is already stopping",
+            Some("stopped") => "this agent is already stopped",
+            _ => "this agent has no running session",
+        };
+        return Err(Refused(message.to_string()).into());
+    }
+    Ok(AgentStopResponse {
+        agent_id: request.agent_id,
+        stopped: outcome
+            .stopped
+            .into_iter()
+            .map(|session| AgentStoppedSession {
+                session_id: session.session_id,
+                status: session.status,
+            })
+            .collect(),
+    })
 }

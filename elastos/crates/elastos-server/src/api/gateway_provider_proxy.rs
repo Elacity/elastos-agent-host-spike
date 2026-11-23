@@ -4435,6 +4435,7 @@ fn library_events_sse_event(payload: serde_json::Value) -> SseEvent {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     #[test]
     fn r4_buyer_profile_uses_stored_root() {
         use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};

@@ -617,7 +617,7 @@ mod tests {
 
         assert!(err.contains("invalid WebAuthn host authority"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn direct_identity_registration_respects_guest_gate() {
         let data_dir = tempfile::tempdir().unwrap();

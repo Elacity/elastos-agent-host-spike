@@ -741,6 +741,16 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-server/src/server_infra.rs",
+            function: "start_wallet_provider",
+            call: concat!("ProviderBridge::spawn", "_confined"),
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBridge::", "spawn_confined("].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
             function: "spawn_browser_local_exit",
             call: "command",
             class: "other",
@@ -1578,6 +1588,12 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             ["ProviderBridge::", "spawn(&path, wallet_config)"].concat(),
+            0,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "start_wallet_provider",
+            ["ProviderBridge::", "spawn_confined("].concat(),
             1,
         ),
     ] {
@@ -1625,8 +1641,8 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 104);
-    assert_eq!(classes.get("n/a"), Some(&55));
+    assert_eq!(columns.len(), 105);
+    assert_eq!(classes.get("n/a"), Some(&56));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1635,9 +1651,9 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("none"), Some(&56));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&24));
+    assert_eq!(roots.get("release-signature"), Some(&25));
     assert_eq!(roots.get("staged-cid"), Some(&8));
-    assert_eq!(times.get("at-every-start"), Some(&31));
+    assert_eq!(times.get("at-every-start"), Some(&32));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
     assert_eq!(times.get("never"), Some(&56));

@@ -46,6 +46,7 @@ fn gate_decisions() -> BTreeMap<&'static str, (bool, &'static str)> {
             (false, "home-shell actor only"),
         ),
         ("require_internal_shell_launch_grant_principal", (true, "")),
+        ("require_internal_shell_agent_launch_grant", (true, "")),
         ("require_internal_shell_projection_context", (true, "")),
         ("require_launch_bound_token", (true, "")),
         ("require_home_token", (true, "")),
@@ -220,6 +221,7 @@ fn rows() -> Vec<AuthorityRow> {
     const SHARED: &str = "elastos-server/src/api/gateway_home_shared_content.rs";
     const HOME_SYSTEM: &str = "elastos-server/src/api/gateway_home_system.rs";
     const STEP_UP: &str = "elastos-server/src/api/gateway_passkey_step_up.rs";
+    const CLI_MINT: &str = "elastos-server/src/api/gateway_home_cli_mint.rs";
     const ROOM: &str = "elastos-server/src/api/gateway_room.rs";
     const ROUTES: &str = "elastos-server/src/api/routes.rs";
     const VIEWER: &str = "elastos-server/src/api/viewer_gateway.rs";
@@ -431,11 +433,25 @@ fn rows() -> Vec<AuthorityRow> {
             "runtime-admin:claim_pending+complete_authentication",
         ),
         row(
+            CLI_MINT,
+            "home_admin_context",
+            "require_home_token_context",
+            1,
+            "runtime-admin:human admin passkey before cli mint begin, approve, cancel, or waiting",
+        ),
+        row(
             ROUTES,
             "principal_from_capsule_name",
             "require_internal_shell_launch_grant_principal",
             1,
             "app-grant:walked manifest name binds grant; admits Home only when the walked name is home",
+        ),
+        row(
+            ROUTES,
+            "agent_launch_grant",
+            "require_internal_shell_agent_launch_grant",
+            1,
+            "app-grant:owner's internal-shell grant names one Agent and the walked host actor, lasts at most 60 seconds, and is consumed once by Runtime",
         ),
         row(
             ROUTES,
@@ -1279,6 +1295,7 @@ fn viewer_launch_read_starts_with_its_bound_gate_and_existing_rows_remain() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_session_cannot_open_a_launch_bound_viewer_page() {
     let dir = tempfile::tempdir().unwrap();
@@ -1296,6 +1313,7 @@ async fn home_session_cannot_open_a_launch_bound_viewer_page() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_session_cannot_pass_an_app_only_gate() {
     let dir = tempfile::tempdir().unwrap();
@@ -1335,6 +1353,7 @@ impl Provider for CountedDocumentsProvider {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn home_session_cannot_invoke_an_app_only_documents_operation() {
     let dir = tempfile::tempdir().unwrap();

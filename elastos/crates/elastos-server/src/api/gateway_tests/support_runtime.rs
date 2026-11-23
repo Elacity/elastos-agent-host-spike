@@ -1074,6 +1074,10 @@ async fn fake_runtime_launch_capsule(
             cid: None,
             trust_level: elastos_runtime::primitives::audit::TrustLevel::Untrusted,
             signer_did: None,
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
         },
     );
     AxumJson(json!({

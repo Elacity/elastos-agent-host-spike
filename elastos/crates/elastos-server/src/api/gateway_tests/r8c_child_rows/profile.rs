@@ -35,6 +35,7 @@ fn load_steps(
     }
 }
 
+#[cfg(unix)]
 #[test]
 #[ignore = "R8c: refused for a parent-signed device on a child Runtime"]
 fn r8c_child_profile_load_reads_the_profile_under_the_parent_root() {
@@ -64,6 +65,7 @@ fn r8c_child_profile_load_reads_the_profile_under_the_parent_root() {
     steps.finish();
 }
 
+#[cfg(unix)]
 #[test]
 fn r8c_control_profile_load_reads_the_stored_persons_profile() {
     let control = control(PEOPLE_CAPSULE_ID);

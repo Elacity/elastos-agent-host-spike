@@ -51,7 +51,7 @@ use crate::auth::{
 };
 use crate::host_lock::FileLock;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests;
 
 pub(crate) const AGENT_RECORDS_SCHEMA: &str = "elastos.agent.records/v1";
@@ -91,11 +91,11 @@ pub(crate) fn build_allows() -> bool {
 
 fn build_allows_for_home(data_dir: &Path) -> bool {
     build_allows() || {
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         {
             tests::dispatch_fixture_enabled(data_dir)
         }
-        #[cfg(not(test))]
+        #[cfg(not(all(test, unix)))]
         {
             let _ = data_dir;
             false
@@ -198,6 +198,8 @@ fn load(data_dir: &Path, owner_file: &[PrincipalRecord]) -> anyhow::Result<Agent
 /// file. Refuses a path that is not a regular file under regular
 /// directories, and a file anyone but its owner can read or write.
 fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
+    #[cfg(windows)]
+    Err::<(), _>("agent file custody is unsupported on Windows")?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(_) => return Err(NOT_REGULAR),
@@ -1110,6 +1112,37 @@ pub(crate) fn stored_agent(
     if !agent.active {
         return refused(NOT_ACTIVE);
     }
+    Ok(agent.clone())
+}
+
+/// One stored agent of `owner_id`, for a Stop. The owner must own the record.
+/// The agent may be off or retired, and the Home may have turned agents off:
+/// a running guest stays stoppable by that owner. Another owner's agent is
+/// refused, the same way a launch lookup refuses it.
+pub(crate) fn stored_agent_for_stop(
+    data_dir: &Path,
+    owner_id: &str,
+    agent_id: &str,
+) -> anyhow::Result<StoredAgent> {
+    if !build_allows_for_home(data_dir) {
+        return refused(FEATURE_OFF);
+    }
+    let opened = open(data_dir, false)?;
+    let Some(owner) = opened
+        .owner_file
+        .iter()
+        .find(|record| record.principal_id == owner_id && is_person(record))
+    else {
+        return refused(NOT_A_PERSON);
+    };
+    let Some(agent) = opened
+        .file
+        .agents
+        .iter()
+        .find(|agent| agent.record.principal_id == agent_id && owned_by(agent, owner))
+    else {
+        return refused(NO_SUCH_AGENT);
+    };
     Ok(agent.clone())
 }
 

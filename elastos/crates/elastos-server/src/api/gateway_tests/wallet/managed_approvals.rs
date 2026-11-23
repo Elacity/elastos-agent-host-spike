@@ -1,5 +1,6 @@
 use super::super::*;
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_can_select_default_wallet_without_exposing_connector_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -49,6 +50,7 @@ async fn test_system_can_select_default_wallet_without_exposing_connector_author
     assert_eq!(json["default_accounts"][0]["intent"], "transaction_intent");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_approves_managed_wallet_request_and_executes_signature() {
     let dir = tempfile::tempdir().unwrap();
@@ -146,6 +148,7 @@ async fn test_system_approves_managed_wallet_request_and_executes_signature() {
         .await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn test_system_does_not_approve_external_wallet_request() {
     let dir = tempfile::tempdir().unwrap();

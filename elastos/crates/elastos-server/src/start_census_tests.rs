@@ -352,7 +352,7 @@ fn places() -> Vec<Place> {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             spawn.clone(),
-            16,
+            15,
             P2_2,
         ),
         place(
@@ -382,6 +382,13 @@ fn places() -> Vec<Place> {
             spawn.clone(),
             1,
             P2_2,
+        ),
+        place(
+            "elastos-server/src/server_infra.rs",
+            "start_wallet_provider",
+            [spawn.as_str(), "_confined"].concat(),
+            1,
+            "Wallet: admitted binary, OS gate, confined storage",
         ),
         place(
             "elastos-server/src/protected_content_runtime.rs",

@@ -17,7 +17,7 @@ pub fn checked_native_provider(path: &Path) -> CheckedExecutable {
 pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> CheckedExecutable {
     // Library tests start isolated fixture executables that live outside the
     // Home they run against; an executable inside the Home is always admitted.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     if path.is_file() && !path.starts_with(data_dir) {
         return crate::test_support::fixture_executable(path).with_home_data_dir(data_dir);
     }
@@ -409,7 +409,7 @@ mod tests {
             "provides": provides
         })
     }
-
+    #[cfg(unix)]
     #[test]
     fn resolve_verified_native_provider_binary_rejects_unstamped_external_binary() {
         let temp = tempfile::tempdir().unwrap();
@@ -442,7 +442,7 @@ mod tests {
 
         assert!(result.is_none());
     }
-
+    #[cfg(unix)]
     #[test]
     fn resolve_verified_native_provider_binary_rejects_missing_runtime_contract() {
         let temp = tempfile::tempdir().unwrap();
@@ -475,7 +475,7 @@ mod tests {
         assert!(error.to_string().contains("invalid"));
         assert!(error.to_string().contains("components.json"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn resolve_verified_native_provider_binary_rejects_noncanonical_install_path() {
         let temp = tempfile::tempdir().unwrap();
@@ -508,7 +508,7 @@ mod tests {
             .to_string()
             .contains("native provider install_path must be 'bin/did-provider'"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn resolve_verified_native_provider_binary_rejects_checksum_mismatch() {
         let temp = tempfile::tempdir().unwrap();
@@ -527,7 +527,7 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("failed checksum verification"));
     }
-
+    #[cfg(unix)]
     #[test]
     fn resolve_verified_native_provider_binary_accepts_stamped_installed_binary() {
         let temp = tempfile::tempdir().unwrap();
@@ -550,7 +550,7 @@ mod tests {
                 .unwrap();
         assert_eq!(resolved.as_deref(), Some(path.as_path()));
     }
-
+    #[cfg(unix)]
     #[test]
     fn subordinate_runtime_accepts_only_verified_provider_from_parent_bin() {
         let temp = tempfile::tempdir().unwrap();
@@ -669,7 +669,7 @@ mod tests {
     ) -> anyhow::Result<Option<AdmittedProvider>> {
         AdmittedProvider::admit_with_bin_dir(data_dir, "did-provider", None, signers)
     }
-
+    #[cfg(unix)]
     /// R1 ADMIT.
     #[test]
     fn admit_returns_the_verified_row_and_the_manifest_authority() {
@@ -685,7 +685,7 @@ mod tests {
         assert_eq!(admitted.authority().rights.len(), 1);
         assert_eq!(admitted.authority().rights[0].id, "storage");
     }
-
+    #[cfg(unix)]
     /// R2 ADMIT-MISMATCH.
     #[test]
     fn admit_refuses_a_manifest_that_is_not_the_rows_component() {
@@ -715,7 +715,7 @@ mod tests {
             "{error}"
         );
     }
-
+    #[cfg(unix)]
     /// R3 ADMIT-NO-MANIFEST: a resolved row without its manifest is a refusal,
     /// not `Ok(None)`.
     #[test]
@@ -725,7 +725,7 @@ mod tests {
         let error = admit(&data_dir, &BTreeMap::new()).err().expect("refused");
         assert!(error.to_string().contains("capsule.json"), "{error}");
     }
-
+    #[cfg(unix)]
     /// R4 ADMIT-BAD-CHECKSUM stays the resolver's row.
     #[test]
     fn admit_refuses_bytes_that_differ_from_the_row() {
@@ -737,7 +737,7 @@ mod tests {
             "{error}"
         );
     }
-
+    #[cfg(unix)]
     /// R5 SIGNER.
     #[test]
     fn admit_reports_the_signer_of_the_rows_record() {
@@ -783,7 +783,7 @@ mod tests {
         // The struct head and the impl head; any other site is a second literal.
         assert_eq!(sites, BTreeMap::from([("src/binaries.rs".into(), 2)]));
 
-        let source = include_str!("binaries.rs");
+        let source = include_str!("binaries.rs").replace("\r\n", "\n");
         let struct_head = ["struct Admitted", "Provider {"].concat();
         let impl_head = ["impl Admitted", "Provider {"].concat();
         assert_eq!(source.matches(&struct_head).count(), 1);
@@ -840,7 +840,7 @@ mod tests {
             "a Self literal outside the maker"
         );
     }
-
+    #[cfg(unix)]
     /// R7 VALIDATE: a manifest that `validate()` refuses is not admitted.
     #[test]
     fn admit_refuses_a_manifest_that_does_not_validate() {
@@ -851,7 +851,7 @@ mod tests {
         let error = admit(&data_dir, &BTreeMap::new()).err().expect("refused");
         assert!(error.to_string().contains("path traversal"), "{error}");
     }
-
+    #[cfg(unix)]
     /// R8 SIGNER-READ: a Home whose signed release cannot be read is refused.
     #[test]
     fn admit_refuses_a_home_whose_release_cannot_be_read() {
