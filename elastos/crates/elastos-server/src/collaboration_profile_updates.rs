@@ -145,7 +145,7 @@ impl CollaborationProfileUpdateService {
         Ok(ordering)
     }
 
-    #[cfg(all(unix, test))]
+    #[cfg(test)]
     pub(crate) fn context_snapshot_for_test(&self) -> serde_json::Value {
         let Ok(contexts) = self.inner.contexts.lock() else {
             return serde_json::Value::String("poisoned".to_string());
