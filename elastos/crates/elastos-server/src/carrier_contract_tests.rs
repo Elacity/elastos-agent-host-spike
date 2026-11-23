@@ -49,6 +49,7 @@ struct FileObservation {
 
 // The four verbs are addressed by DID or topic. Backend coordinates stay inside
 // the implementation. A second real backend later adds one impl and one call.
+#[cfg(unix)]
 #[async_trait]
 trait CarrierUnderTest: Send + Sync {
     async fn request_reply(
@@ -514,6 +515,7 @@ fn assert_no_topology(answer: &Value, carrier: &dyn CarrierUnderTest) {
 }
 
 // Remote key-service traffic is planned over Carrier (PRINCIPLES 15). This verb carries opaque bytes.
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContractRow {
     R1,
