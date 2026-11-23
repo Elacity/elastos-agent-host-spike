@@ -2831,6 +2831,109 @@ def cli_copy(root, manifest, mapping, destination):
             temporary.unlink(missing_ok=True)
 
 
+def cli_release_binds_holder(root, manifest, name, binary_sha, components_sha):
+    """True when this publication is the signed pair for the holder's own files."""
+    publication = manifest["publications"][name]
+    files = manifest["files"]
+    release = cli_json(cli_path(root, publication["release"]))
+    head = cli_json(cli_path(root, publication["head"]))
+    payload = release.get("payload") if isinstance(release, dict) else None
+    head_payload = head.get("payload") if isinstance(head, dict) else None
+    signer = manifest["signer_did"]
+    if release.get("signer_did") != signer or head.get("signer_did") != signer:
+        return False
+    if not isinstance(payload, dict) or not isinstance(head_payload, dict):
+        return False
+    if payload.get("channel") != manifest["channel"] or head_payload.get("channel") != manifest["channel"]:
+        return False
+    if payload.get("version") != head_payload.get("version"):
+        return False
+    if head_payload.get("release_sha256") != files[publication["release"]]["sha256"]:
+        return False
+    platforms = payload.get("platforms")
+    info = platforms.get(manifest["platform"]) if isinstance(platforms, dict) else None
+    if not isinstance(info, dict):
+        return False
+    binary = info.get("binary") if isinstance(info.get("binary"), dict) else {}
+    components = info.get("components") if isinstance(info.get("components"), dict) else {}
+    if binary.get("sha256") != binary_sha or components.get("sha256") != components_sha:
+        return False
+    return (files[publication["binary"]]["sha256"] == binary_sha
+            and files[publication["components"]]["sha256"] == components_sha)
+
+
+def cli_holder_ipfs_matches(holder, components_path, release_platform):
+    """The served ipfs-provider bytes must be the digest named by the signed components."""
+    document = json.loads(components_path.read_bytes())
+    external = document.get("external")
+    if not isinstance(external, dict) or "ipfs-provider" not in external:
+        return
+    row = external["ipfs-provider"]
+    need(isinstance(row, dict), "holder ipfs-provider row is malformed")
+    platforms = row.get("platforms")
+    need(isinstance(platforms, dict), "holder ipfs-provider has no platform map")
+    info = platforms.get(cli_component_platform(release_platform))
+    need(isinstance(info, dict), "holder ipfs-provider has no signed digest for this platform")
+    relative = info.get("install_path") or row.get("install_path")
+    need(isinstance(relative, str) and Path(relative).parts[:1] == ("bin",)
+         and ".." not in Path(relative).parts, "holder ipfs-provider install path differs")
+    provider = holder / CLI_DATA / relative
+    need(provider.is_file() and not provider.is_symlink(), "holder ipfs-provider file is missing")
+    need(info.get("checksum") == "sha256:" + digest(provider),
+         "holder ipfs-provider bytes differ from the signed components digest")
+
+
+def cli_write_private(path, data):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            need(written > 0, "private release write stalled")
+            view = view[written:]
+        os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
+def cli_install_holder_signed_release(holder, root, manifest):
+    """Admit the signed release whose Runtime and components the holder is serving.
+
+    v2.0.1 setup fetches those bytes from this gateway. ipfs-provider starts only
+    from that signed digest (verify_installed_component_start). The hop already
+    signed the pair. sources.json is live trust state, so it stays out of the
+    public holder file mapping.
+    """
+    binary = holder / ".local/bin/elastos"
+    data = holder / CLI_DATA
+    components = data / "components.json"
+    need(binary.is_file() and not binary.is_symlink(), "holder Runtime is not a regular file")
+    need(components.is_file() and not components.is_symlink(), "holder components are not a regular file")
+    publications = manifest["publications"]
+    need("new" in publications and "old" in publications, "holder publications are incomplete")
+    binary_sha, components_sha = digest(binary), digest(components)
+    names = ("new", "old", *[name for name in publications if name not in ("new", "old")])
+    chosen = next((name for name in names
+                   if cli_release_binds_holder(root, manifest, name, binary_sha, components_sha)), None)
+    need(chosen is not None, "holder has no signed release for the Runtime and components it serves")
+    publication = publications[chosen]
+    cli_holder_ipfs_matches(holder, components, manifest["platform"])
+    installation = data / "installation"
+    sources_path = data / "sources.json"
+    need(not installation.exists() and not sources_path.exists(), "holder already has a trusted release")
+    installation.mkdir(mode=0o700)
+    installation.chmod(0o700)
+    cli_write_private(installation / "release.json", cli_path(root, publication["release"]).read_bytes())
+    cli_write_private(installation / "release-head.json", cli_path(root, publication["head"]).read_bytes())
+    payload = cli_json(installation / "release.json")["payload"]
+    head_cid = manifest["files"][publication["head"]]["cid"]
+    need(isinstance(head_cid, str) and head_cid, "holder release head has no CID")
+    write(sources_path, {"schema": "elastos.trusted-sources/v1", "default_source": "holder", "sources": [{
+        "name": "holder", "publisher_dids": [manifest["signer_did"]], "channel": payload["channel"],
+        "install_path": str(binary.resolve()), "installed_version": payload["version"], "head_cid": head_cid}]})
+    sources_path.chmod(0o600)
+
+
 def cli_coordination(home_path, required=True):
     path, original = cli_copy_target(home_path, CLI_DATA + "/host-process.lock")
     if original is None:
@@ -3732,6 +3835,7 @@ def cli_run(config, output, local_rehearsal=None):
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         installer_bootstrap = CliBootstrap(root, manifest)
+        cli_install_holder_signed_release(holder, root, manifest)
         phase("old")
         consumer = output / "homes/cli"
         consumer.mkdir(mode=0o700)
