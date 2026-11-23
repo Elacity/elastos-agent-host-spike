@@ -816,8 +816,10 @@ pub(super) fn production_sources() -> BTreeMap<String, String> {
         if sources.contains_key(&file) {
             continue;
         }
-        let raw =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        // A Windows checkout may use CRLF line endings; the census needles are LF.
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+            .replace("\r\n", "\n");
         let text = without_test_items(&raw);
         queue.extend(children(&path, &text));
         sources.insert(file, text);
