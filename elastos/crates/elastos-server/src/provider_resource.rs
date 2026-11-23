@@ -89,14 +89,15 @@ pub fn build_capability_resource(
             op,
             &["status", "metadata_index", "read_bytes", "write_bytes"],
         ),
+        // A Message grant does not name connect, remember_peer, or get_ticket.
+        // Those operations carry a Carrier socket address. Startup and the
+        // operator store keep the crate-private Carrier handlers. The action
+        // map below does not classify them as Message.
         "peer" => simple_elastos_resource(
             "peer",
             op,
             &[
                 "init",
-                "connect",
-                "remember_peer",
-                "get_ticket",
                 "get_node_id",
                 "list_peers",
                 "list_topics",
@@ -181,10 +182,12 @@ pub fn provider_operation_action(scheme: &str, op: &str) -> Option<Action> {
             "write_bytes" => Some(Action::Write),
             _ => None,
         },
+        // connect, remember_peer, and get_ticket stay off this map. They are
+        // crate-private Carrier handlers, not Message grants.
         "peer" => match op {
-            "init" | "connect" | "remember_peer" | "gossip_join" | "gossip_leave"
-            | "gossip_send" | "get_ticket" | "get_node_id" | "list_peers" | "list_topics"
-            | "list_topic_peers" | "gossip_join_peers" | "gossip_recv" => Some(Action::Message),
+            "init" | "gossip_join" | "gossip_leave" | "gossip_send" | "get_node_id"
+            | "list_peers" | "list_topics" | "list_topic_peers" | "gossip_join_peers"
+            | "gossip_recv" => Some(Action::Message),
             _ => None,
         },
         "tunnel" => {
@@ -1498,8 +1501,8 @@ mod tests {
             "elastos://did/get_did"
         );
         assert_eq!(
-            build_capability_resource("peer", "connect", &request).unwrap(),
-            "elastos://peer/connect"
+            build_capability_resource("peer", "list_peers", &request).unwrap(),
+            "elastos://peer/list_peers"
         );
         assert_eq!(
             build_capability_resource("peer", "gossip_join", &request).unwrap(),
@@ -1511,6 +1514,96 @@ mod tests {
         );
         assert!(build_capability_resource("did", "raw_secret", &request).is_err());
         assert!(build_capability_resource("peer", "raw_socket", &request).is_err());
+    }
+
+    /// The Message grant list is the `peer` array passed to
+    /// `simple_elastos_resource` in `build_capability_resource`. Putting
+    /// `get_ticket` back on that array fails this source assertion.
+    #[test]
+    fn peer_grant_list_omits_address_operations() {
+        let names = peer_grant_operation_names();
+        for op in ["get_ticket", "connect", "remember_peer"] {
+            assert!(
+                !names.contains(op),
+                "peer grant list names {op}, which carries a Carrier socket address"
+            );
+        }
+        assert!(names.contains("list_peers"));
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            vec![
+                "get_node_id",
+                "gossip_join",
+                "gossip_join_peers",
+                "gossip_leave",
+                "gossip_recv",
+                "gossip_send",
+                "init",
+                "list_peers",
+                "list_topic_peers",
+                "list_topics",
+            ]
+        );
+    }
+
+    /// An app grant is a capability resource. These three operations are how a
+    /// grant would see (`get_ticket`) or choose (`connect`, `remember_peer`) a
+    /// Carrier socket address. `list_peers` stays, and the Carrier handler
+    /// returns endpoint keys.
+    #[test]
+    fn app_grant_cannot_name_a_carrier_socket_address() {
+        let request = serde_json::json!({});
+        for op in ["get_ticket", "connect", "remember_peer"] {
+            let err = build_capability_resource("peer", op, &request).unwrap_err();
+            assert!(
+                err.starts_with("Unsupported peer provider operation:"),
+                "{op}: {err}"
+            );
+            assert!(!err.contains("://"), "{op} named a grant resource: {err}");
+        }
+        assert_eq!(
+            build_capability_resource("peer", "list_peers", &request).unwrap(),
+            "elastos://peer/list_peers"
+        );
+    }
+
+    #[test]
+    fn peer_address_operations_are_not_message_actions() {
+        for op in ["get_ticket", "connect", "remember_peer"] {
+            assert_eq!(
+                provider_operation_action("peer", op),
+                None,
+                "{op} is still a Message action"
+            );
+        }
+        assert_eq!(
+            provider_operation_action("peer", "list_peers"),
+            Some(Action::Message)
+        );
+    }
+
+    fn peer_grant_operation_names() -> std::collections::BTreeSet<String> {
+        let source = include_str!("provider_resource.rs").replace("\r\n", "\n");
+        let prod = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production source");
+        let marker = "\"peer\" => simple_elastos_resource(";
+        let start = prod.find(marker).expect("peer grant list");
+        let rest = &prod[start + marker.len()..];
+        let open = rest.find('[').expect("peer grant array");
+        let close = rest[open..].find(']').expect("peer grant array end");
+        let body = &rest[open + 1..open + close];
+        let mut names = std::collections::BTreeSet::new();
+        let mut rest = body;
+        while let Some(quote) = rest.find('"') {
+            let after = &rest[quote + 1..];
+            let end = after.find('"').expect("closing quote");
+            names.insert(after[..end].to_string());
+            rest = &after[end + 1..];
+        }
+        assert!(!names.is_empty(), "peer grant list was not read");
+        names
     }
 
     #[test]

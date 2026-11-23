@@ -86,6 +86,12 @@ pub async fn provider_proxy(
         ));
     }
 
+    // These three operations carry a Carrier socket address. An app grant
+    // cannot name them. A shell session on this process reaches the handler.
+    if scheme == "peer" && crate::carrier::is_private_carrier_address_op(&op) {
+        return dispatch_private_carrier(&state, &session, &headers, &op, &request).await;
+    }
+
     // Build capability resource
     let resource = build_capability_resource(&scheme, &op, &request)
         .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
@@ -144,6 +150,88 @@ pub async fn provider_proxy(
     };
 
     Ok(Json(response))
+}
+
+async fn dispatch_private_carrier(
+    state: &ProviderProxyState,
+    session: &Session,
+    headers: &HeaderMap,
+    op: &str,
+    request: &Value,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    if !session.is_shell()
+        || headers.contains_key("X-Elastos-Capsule-Id")
+        || headers.contains_key("X-Capability-Token")
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Carrier address operations stay on the private handler".to_string(),
+        ));
+    }
+    let forwarded = private_carrier_forward_body(op, request)?;
+    let response = match state.registry.send_raw("peer", &forwarded).await {
+        Ok(value) => value,
+        Err(err) => serde_json::json!({
+            "status": "error",
+            "code": "provider_error",
+            "message": err.to_string(),
+        }),
+    };
+    Ok(Json(response))
+}
+
+fn private_carrier_forward_body(op: &str, request: &Value) -> Result<Value, (StatusCode, String)> {
+    let rejected = || {
+        (
+            StatusCode::BAD_REQUEST,
+            "private Carrier request is not accepted".to_string(),
+        )
+    };
+    let Some(object) = request.as_object() else {
+        return Err(rejected());
+    };
+    let mut forwarded = serde_json::Map::new();
+    forwarded.insert("op".to_string(), Value::String(op.to_string()));
+    match op {
+        "get_ticket" => {
+            for (key, value) in object {
+                if key == "op" {
+                    continue;
+                }
+                if key == "exported" && value.as_bool() == Some(true) {
+                    forwarded.insert("exported".to_string(), Value::Bool(true));
+                    continue;
+                }
+                return Err(rejected());
+            }
+        }
+        "connect" | "remember_peer" => {
+            let mut ticket = None;
+            for (key, value) in object {
+                if key == "op" {
+                    continue;
+                }
+                if key != "ticket" || ticket.is_some() {
+                    return Err(rejected());
+                }
+                let Some(text) = value.as_str() else {
+                    return Err(rejected());
+                };
+                let text = text.trim();
+                if text.is_empty() || text.len() > crate::carrier::PRIVATE_CARRIER_TICKET_MAX_BYTES
+                {
+                    return Err(rejected());
+                }
+                ticket = Some(text.to_string());
+            }
+            let Some(ticket) = ticket else {
+                return Err(rejected());
+            };
+            forwarded.insert("ticket".to_string(), Value::String(ticket));
+        }
+        _ => return Err(rejected()),
+    }
+    Ok(Value::Object(forwarded))
 }
 
 fn attach_localhost_provider_wire_token(
@@ -743,6 +831,72 @@ mod tests {
         )
         .await;
         (provider, result)
+    }
+
+    #[tokio::test]
+    async fn shell_session_reaches_private_carrier_handler_and_a_client_does_not() {
+        let (provider, result) = proxy_as_shell("peer", "get_ticket", HeaderMap::new(), "{}").await;
+        let body = result.expect("shell reaches the private handler");
+        assert_eq!(body.0["status"], "ok");
+        assert_eq!(
+            provider.requests.lock().await.clone(),
+            vec![serde_json::json!({"op": "get_ticket"})]
+        );
+
+        let (provider, result) =
+            proxy_as_shell("peer", "connect", HeaderMap::new(), r#"{"ticket":"abc"}"#).await;
+        assert!(result.is_ok());
+        assert_eq!(
+            provider.requests.lock().await.clone(),
+            vec![serde_json::json!({"op": "connect", "ticket": "abc"})]
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Capability-Token", HeaderValue::from_static("app-grant"));
+        let (provider, result) = proxy_as_shell("peer", "get_ticket", headers, "{}").await;
+        let message = result.expect_err("a capability token is an app grant").1;
+        assert_eq!(
+            message,
+            "Carrier address operations stay on the private handler"
+        );
+        assert!(!message.contains("app-grant"));
+        assert!(provider.requests.lock().await.is_empty());
+
+        let registry = Arc::new(ProviderRegistry::new());
+        let provider = Arc::new(CapturingSchemeProvider::new("peer"));
+        registry
+            .register_sub_provider("peer", provider.clone())
+            .await
+            .unwrap();
+        let refused = provider_proxy(
+            State(ProviderProxyState {
+                registry,
+                capability_manager: None,
+            }),
+            Extension(Session::new(SessionType::Capsule, None)),
+            Path(("peer".to_string(), "get_ticket".to_string())),
+            HeaderMap::new(),
+            "{}".to_string(),
+        )
+        .await
+        .expect_err("a capsule session is not the private handler");
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        assert!(!refused.1.contains("get_ticket"));
+        assert!(provider.requests.lock().await.is_empty());
+
+        let (provider, result) = proxy_as_shell(
+            "peer",
+            "remember_peer",
+            HeaderMap::new(),
+            r#"{"ticket":"abc","exported":true}"#,
+        )
+        .await;
+        let message = result
+            .expect_err("extra fields stay off the private handler")
+            .1;
+        assert_eq!(message, "private Carrier request is not accepted");
+        assert!(!message.contains("abc"));
+        assert!(provider.requests.lock().await.is_empty());
     }
 
     /// The provider proxy is the route every attached caller uses to reach the
