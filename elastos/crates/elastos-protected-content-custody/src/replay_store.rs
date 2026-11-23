@@ -1162,7 +1162,7 @@ fn windows_store_refuses_node_contribution_claims_with_unsupported_on_windows() 
     let envelope = provisioned_envelope();
     let operation =
         authenticated_runtime_release_operation_for_envelope_and_recipient_seed(&envelope, 0xaa);
-    let node = node_public_key(0x11);
+    let node = node_public_key(1);
     let node_share = NodeLocalStoredShareV1::extract_from_envelope(&envelope, node).unwrap();
     let temp = tempfile::tempdir().unwrap();
     let mut store = DurableReplayClaimStoreV1::new(node, temp.path().join("replay"));
