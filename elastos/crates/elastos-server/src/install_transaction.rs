@@ -228,6 +228,7 @@ fn journal_layout(journal: &Journal) -> anyhow::Result<ReleaseLayout> {
     }
 }
 
+#[cfg(unix)]
 fn read_journal_file(path: &Path) -> anyhow::Result<Option<Journal>> {
     let file = match open_read(path) {
         Ok(file) => file,
@@ -252,6 +253,18 @@ fn read_journal_file(path: &Path) -> anyhow::Result<Option<Journal>> {
     let journal: Journal = serde_json::from_slice(&bytes)?;
     journal_layout(&journal)?;
     Ok(Some(journal))
+}
+
+/// A missing journal is no journal. `symlink_metadata` does not follow the final
+/// reparse point: `NotFound` is absence, and anything already at the path is the
+/// no-follow custody error. The bytes are not read.
+#[cfg(windows)]
+fn read_journal_file(path: &Path) -> anyhow::Result<Option<Journal>> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+        Ok(_) => Err(unsupported_windows("installation no-follow file reads")),
+    }
 }
 
 /// Ordinary installed writers use the persisted binary location, so replacing source
@@ -2056,6 +2069,188 @@ fn windows_refuses_installation_writer_before_file_creation() {
         Some(std::io::ErrorKind::Unsupported)
     );
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[cfg(test)]
+mod host_start_journal {
+    use super::{authorize_host_start, JOURNAL};
+
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct Layout {
+        _root: tempfile::TempDir,
+        data: PathBuf,
+        binary: PathBuf,
+        journal: PathBuf,
+    }
+
+    impl Layout {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path().join("data");
+            fs::create_dir(&data).unwrap();
+            let bin = root.path().join("bin");
+            fs::create_dir(&bin).unwrap();
+            Self {
+                binary: bin.join("elastos"),
+                journal: bin.join(JOURNAL),
+                data,
+                _root: root,
+            }
+        }
+
+        fn data_stays_empty(&self) {
+            assert_eq!(fs::read_dir(&self.data).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn missing_journal_authorizes_host_start_and_creates_nothing() {
+        let layout = Layout::new();
+        authorize_host_start(&layout.data, &layout.binary).unwrap();
+        layout.data_stays_empty();
+        assert_eq!(
+            fs::symlink_metadata(&layout.journal).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        fs::create_dir(&data).unwrap();
+        let binary = root.path().join("missing-bin").join("elastos");
+        authorize_host_start(&data, &binary).unwrap();
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
+        assert_eq!(
+            fs::symlink_metadata(binary.parent().unwrap())
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn normal_file_at_journal_name_is_custody_and_bytes_stay() {
+        let layout = Layout::new();
+        let bytes = b"kept-journal-bytes";
+        fs::write(&layout.journal, bytes).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&layout.journal, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let error = authorize_host_start(&layout.data, &layout.binary).unwrap_err();
+        #[cfg(windows)]
+        {
+            let io = error.downcast_ref::<std::io::Error>().unwrap();
+            assert_eq!(io.kind(), std::io::ErrorKind::Unsupported);
+            assert_eq!(
+                io.to_string(),
+                "installation no-follow file reads is unsupported on Windows"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let message = error.to_string();
+            assert!(message.contains("installation file is unsafe"), "{message}");
+            assert!(message.contains("chmod go-rwx"), "{message}");
+            assert_eq!(
+                fs::symlink_metadata(&layout.journal).unwrap().mode() & 0o777,
+                0o644
+            );
+        }
+        assert_eq!(fs::read(&layout.journal).unwrap(), bytes);
+        assert!(fs::symlink_metadata(&layout.journal).unwrap().is_file());
+        layout.data_stays_empty();
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+mod host_start_journal_unix {
+    use super::{authorize_host_start, JOURNAL};
+
+    use std::fs;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn symlink_at_journal_name_is_custody_and_bytes_stay() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        fs::create_dir(&data).unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let binary = bin.join("elastos");
+        let journal = bin.join(JOURNAL);
+        let payload = root.path().join("payload");
+        let bytes = b"symlink-target-bytes";
+        fs::write(&payload, bytes).unwrap();
+        symlink(&payload, &journal).unwrap();
+        let error = authorize_host_start(&data, &binary).unwrap_err();
+        let io = error.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(io.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(fs::read(&payload).unwrap(), bytes);
+        assert_eq!(fs::read_link(&journal).unwrap(), payload);
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
+    }
+}
+
+#[cfg(windows)]
+#[cfg(test)]
+mod host_start_journal_windows {
+    use super::{authorize_host_start, JOURNAL};
+
+    use std::fs;
+    use std::path::PathBuf;
+
+    struct RemoveJunction(PathBuf);
+
+    impl Drop for RemoveJunction {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn junction_at_journal_name_is_custody_and_bytes_stay() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        fs::create_dir(&data).unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let binary = bin.join("elastos");
+        let journal = bin.join(JOURNAL);
+        let target = root.path().join("target");
+        fs::create_dir(&target).unwrap();
+        let payload = target.join("kept.txt");
+        let bytes = b"junction-target-bytes";
+        fs::write(&payload, bytes).unwrap();
+        let output = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&journal)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _junction = RemoveJunction(journal.clone());
+        let error = authorize_host_start(&data, &binary).unwrap_err();
+        let io = error.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(io.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(
+            io.to_string(),
+            "installation no-follow file reads is unsupported on Windows"
+        );
+        assert_eq!(fs::read(&payload).unwrap(), bytes);
+        assert!(fs::symlink_metadata(&journal).unwrap().is_dir());
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
+    }
 }
 
 /// Blocking form for synchronous callers; see [`TEXT_FILE_BUSY_WAITS_MS`].
