@@ -618,11 +618,6 @@ impl IdentityStore {
         result
     }
 
-    /// Return the device key as a hex string (for passing to providers).
-    pub fn device_key_hex(&self) -> String {
-        hex::encode(self.device_key.as_ref())
-    }
-
     /// Access the underlying identity data (if loaded).
     pub fn data(&self) -> Option<&IdentityData> {
         self.data.as_ref()

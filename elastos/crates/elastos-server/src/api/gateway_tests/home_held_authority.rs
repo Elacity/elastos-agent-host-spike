@@ -1377,7 +1377,7 @@ fn rows() -> Vec<HeldRow> {
         "register_chain_provider_plane",
         "load_or_create_device_key",
         1,
-        mark("narrowed", "runtime issuer", "chain provider", "the child config carries the Ed25519 verifying key of `derive_did(device_key)`, which `RuntimeOperationIssuerKeyV1` accepts only as a public key. The private key is not in the config."),
+        mark("narrowed", "runtime issuer", "chain provider", "the child config carries the Ed25519 verifying key of `derive_did(device_key)`, which `RuntimeOperationIssuerKeyV1` accepts only as a public key. The private key is not in the config. The child is an unconfined same-user process."),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1391,7 +1391,7 @@ fn rows() -> Vec<HeldRow> {
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "localhost and object providers", "Home hands the device private key to the localhost provider. The object config no longer carries the device key; the process is an unconfined child and `base_path` is the data directory, so it can open `identity/device.key`."),
+        mark("open", "device private key", "localhost provider", "Home hands the device private key to the localhost provider. The object config no longer carries the device key; the process is an unconfined child and `base_path` is the data directory, so it can open `identity/device.key`."),
     ),
     row(
         "elastos-server/src/server_infra.rs",

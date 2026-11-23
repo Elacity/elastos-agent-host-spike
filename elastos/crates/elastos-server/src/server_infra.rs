@@ -467,7 +467,10 @@ fn object_provider_bridge_config(data_dir: &Path) -> provider::BridgeProviderCon
 ///
 /// Wallet files use the random `wallet-key.hex` in the wallet directory.
 /// They were never encrypted under Home's device key. The local below is
-/// empty; its name is the authority-census needle for this field.
+/// empty. It is not a device key. Its name is the authority-census needle
+/// for the row `elastos-server/src/server_infra.rs` /
+/// `wallet_provider_bridge_config` / `encryption_key: device_key_hex`
+/// in `home_held_authority`.
 fn wallet_provider_bridge_config(data_dir: &Path) -> provider::BridgeProviderConfig {
     let device_key_hex = String::new();
     provider::BridgeProviderConfig {
