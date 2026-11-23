@@ -1,6 +1,8 @@
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+#[cfg(unix)]
+use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -3434,10 +3436,18 @@ pub(crate) mod tests {
         let renderer = temp.path().join("capsules/home-cli/bin/home-cli");
         fs::create_dir_all(renderer.parent().unwrap()).unwrap();
         fs::copy(std::env::current_exe().unwrap(), &renderer).unwrap();
+        #[cfg(unix)]
         assert_eq!(
             resolve_home_cli_renderer_program(temp.path()).unwrap(),
             renderer
         );
+        // Home runs only an ELF or Mach-O renderer. A Windows executable is
+        // refused as an invalid native executable until a Windows renderer ships.
+        #[cfg(not(unix))]
+        assert!(resolve_home_cli_renderer_program(temp.path())
+            .unwrap_err()
+            .to_string()
+            .contains("invalid native executable"));
     }
 
     #[cfg(unix)]
@@ -3625,11 +3635,8 @@ pub(crate) mod tests {
     /// production store API in the data dir the guarded call reads, so
     /// `ResolvedPrincipalRoot::resolve` reads a real record instead of refusing
     /// "has no stored record". The caller passes a `data_dir` inside its own
-    /// temp dir: either `default_data_dir()` after scoping HOME/XDG_DATA_HOME to
-    /// that temp dir, or `temp.path()` directly. Every caller that derives it
-    /// from `default_data_dir()` asserts it is under the temp dir before its
-    /// first write, so this writes nothing outside the temp tree.
-    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
+    /// temp dir, so this writes nothing outside the temp tree.
+    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) -> anyhow::Result<()> {
         fs::create_dir_all(data_dir).unwrap();
         let now = elastos_server::auth::now_ts();
         let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
@@ -3652,15 +3659,42 @@ pub(crate) mod tests {
             elastos_server::auth::RuntimePrincipalRole::Guest,
             None,
             now,
-        )
-        .expect("fixture principal must be stored through the production store");
+        )?;
         assert_eq!(stored.principal_id, principal_id);
+        Ok(())
     }
 
+    /// The principal store is owner-only and has no Windows path yet, so every
+    /// fixture that needs a stored record refuses there instead of writing a
+    /// weaker one. The gateway-owned snapshot rows run on Unix until it lands.
+    #[cfg(windows)]
+    #[test]
+    fn home_cmd_principal_store_refuses_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = store_home_cmd_test_principal(temp.path(), "principal-a")
+            .expect_err("the owner-only principal store must refuse on Windows");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Unsupported)
+        );
+        assert!(
+            error.to_string().contains("unsupported on this platform"),
+            "{error}"
+        );
+    }
+
+    /// The principal store this fixture needs is owner-only and has no Windows
+    /// path yet (`home_cmd_principal_store_refuses_on_windows`), so the row
+    /// runs on Unix.
+    #[cfg(unix)]
     #[test]
     fn gateway_owned_home_cli_authority_helper_reads_gateway_env() {
         let _guard = HOME_CMD_ENV_LOCK.blocking_lock();
         let temp = tempfile::tempdir().unwrap();
+        // The guarded helpers read the data dir the same way `main` does, so the
+        // fixture selects it through HOME/XDG_DATA_HOME, which only Unix honours.
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let data_dir = default_data_dir();
@@ -3669,7 +3703,8 @@ pub(crate) mod tests {
             "fixture data_dir {} escapes the test temp dir",
             data_dir.display()
         );
-        store_home_cmd_test_principal(&data_dir, "principal-a");
+        store_home_cmd_test_principal(&data_dir, "principal-a")
+            .expect("fixture principal must be stored through the production store");
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         let _principal = ScopedEnvVar::set(
@@ -3751,6 +3786,9 @@ pub(crate) mod tests {
         assert!(err.contains("missing gateway API URL"));
     }
 
+    /// The guarded call resolves the fixture principal through the owner-only
+    /// store, which refuses on Windows.
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_owned_home_summary_projection_fails_on_gateway_http_error() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
@@ -3758,7 +3796,8 @@ pub(crate) mod tests {
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         // Stored in the data dir the call passes, so record and token agree.
-        store_home_cmd_test_principal(temp.path(), "person:test-home-cli");
+        store_home_cmd_test_principal(temp.path(), "person:test-home-cli")
+            .expect("fixture principal must be stored through the production store");
         let _coords = ScopedEnvVar::set(
             "ELASTOS_RUNTIME_COORDS_FILE",
             temp.path().join("missing-runtime-coords.json"),
@@ -3859,10 +3898,15 @@ pub(crate) mod tests {
         assert!(projection.is_none());
     }
 
+    /// The principal store this fixture needs is owner-only and refuses on
+    /// Windows, so the row runs on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_owned_home_snapshot_uses_admitted_summary_shared_facts() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        // The snapshot session reads the data dir the same way `main` does, so
+        // the fixture selects it through HOME/XDG_DATA_HOME on Unix.
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
@@ -3875,7 +3919,8 @@ pub(crate) mod tests {
             "fixture data_dir {} escapes the test temp dir",
             data_dir.display()
         );
-        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin")
+            .expect("fixture principal must be stored through the production store");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3974,10 +4019,15 @@ pub(crate) mod tests {
         );
     }
 
+    /// The principal store this fixture needs is owner-only and refuses on
+    /// Windows, so the row runs on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_owned_home_snapshot_rejects_unsigned_summary_authority() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        // The guarded helper reads the data dir the same way `main` does, so the
+        // fixture selects it through HOME/XDG_DATA_HOME on Unix.
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
@@ -3990,7 +4040,8 @@ pub(crate) mod tests {
             "fixture data_dir {} escapes the test temp dir",
             data_dir.display()
         );
-        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin")
+            .expect("fixture principal must be stored through the production store");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -4048,10 +4099,15 @@ pub(crate) mod tests {
         assert!(err.contains("missing admitted authority"));
     }
 
+    /// The principal store this fixture needs is owner-only and refuses on
+    /// Windows, so the row runs on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_owned_home_snapshot_rejects_mismatched_summary_authority() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
+        // The guarded helper reads the data dir the same way `main` does, so the
+        // fixture selects it through HOME/XDG_DATA_HOME on Unix.
         let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
         let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
@@ -4064,7 +4120,8 @@ pub(crate) mod tests {
             "fixture data_dir {} escapes the test temp dir",
             data_dir.display()
         );
-        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        store_home_cmd_test_principal(&data_dir, "person:v07-admin")
+            .expect("fixture principal must be stored through the production store");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -4182,6 +4239,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn write_home_cmd_test_capsule(
         data_dir: &Path,
         name: &str,
@@ -4215,6 +4273,7 @@ pub(crate) mod tests {
         .unwrap();
     }
 
+    #[cfg(unix)]
     fn activate_home_cmd_test_capsule(data_dir: &Path, name: &str) {
         fs::create_dir_all(data_dir).unwrap();
         let path = data_dir.join("components.json");
@@ -4235,6 +4294,7 @@ pub(crate) mod tests {
         fs::write(path, serde_json::to_vec_pretty(&components).unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
     fn write_home_cmd_active_shell_state(data_dir: &Path, principal_id: &str, active: &str) {
         use sha2::Digest;
         let digest = sha2::Sha256::digest(principal_id.as_bytes());
@@ -4256,6 +4316,10 @@ pub(crate) mod tests {
         .unwrap();
     }
 
+    /// `gather_snapshot` reads the Home's data dir from the profile, which
+    /// HOME/XDG_DATA_HOME select only on Unix; the fixture cannot point it at
+    /// its temp dir on Windows.
+    #[cfg(unix)]
     #[tokio::test]
     async fn home_snapshot_uses_native_shell_catalog_and_interface_facts() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;

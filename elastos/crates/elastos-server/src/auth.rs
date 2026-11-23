@@ -81,6 +81,7 @@ pub(crate) mod principal_object_io {
         RAW_READS.lock().unwrap().push(path.to_path_buf());
     }
 
+    #[cfg(unix)]
     pub(crate) fn reads(data_dir: &Path) -> Vec<PathBuf> {
         let mut reads = OPS
             .lock()
@@ -99,6 +100,7 @@ pub(crate) mod principal_object_io {
         reads
     }
 
+    #[cfg(unix)]
     pub(crate) fn writes(data_dir: &Path) -> Vec<PathBuf> {
         OPS.lock()
             .unwrap()
@@ -146,6 +148,7 @@ const PRINCIPAL_ROOT_MIGRATION_RECEIPT_FILE: &str = "receipt.json";
 const PRINCIPAL_ROOT_UPGRADE_RECEIPT_FILE: &str = "upgrade-receipt.json";
 const PRINCIPAL_ROOT_MIGRATION_CLEANUP_SCHEMA: &str = "elastos.principal-root.migration-cleanup/v1";
 const PRINCIPAL_ROOT_MIGRATION_CLEANUP_DIR: &str = "principal-root-migration-cleanup";
+#[cfg(unix)]
 const PRINCIPAL_ROOT_LIFECYCLE_LOCK_FILE: &str = "principal-root-lifecycle.lock";
 const MAX_MIGRATION_CLEANUP_RECORDS: usize = 128;
 const MAX_PRINCIPAL_ROOT_INVENTORY_DECLARATIONS: usize = 128;
@@ -197,6 +200,7 @@ fn record_principal_root_scan_probe(
     record(probes.entry(data_dir.to_path_buf()).or_default());
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn principal_root_scan_probes(data_dir: &Path) -> PrincipalRootScanProbes {
     PRINCIPAL_ROOT_SCAN_PROBES
@@ -213,6 +217,7 @@ pub(crate) fn principal_root_scan_probes(data_dir: &Path) -> PrincipalRootScanPr
 static PRINCIPAL_ROOT_OBJECT_OPENS: std::sync::LazyLock<Mutex<HashMap<PathBuf, Vec<String>>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn principal_root_object_opens(data_dir: &Path) -> Vec<String> {
     PRINCIPAL_ROOT_OBJECT_OPENS
@@ -225,14 +230,17 @@ pub(crate) fn principal_root_object_opens(data_dir: &Path) -> Vec<String> {
 
 /// Test hook: replace one selected object's bytes after preflight, just
 /// before migration prepare reads it.
+#[cfg(unix)]
 #[cfg(test)]
 type PrincipalRootPrepareSwap = (String, Vec<u8>);
 
+#[cfg(unix)]
 #[cfg(test)]
 static PRINCIPAL_ROOT_PREPARE_SWAP_HOOKS: std::sync::LazyLock<
     Mutex<HashMap<PathBuf, PrincipalRootPrepareSwap>>,
 > = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn inject_principal_root_prepare_swap(
     data_dir: &Path,
@@ -245,6 +253,7 @@ pub(crate) fn inject_principal_root_prepare_swap(
         .insert(data_dir.to_path_buf(), (object_uri.to_string(), bytes));
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn run_principal_root_prepare_swap_hook(
     data_dir: &Path,
@@ -299,6 +308,7 @@ struct VerifiedAuthStateCacheEntry {
     state: AuthState,
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PrincipalRootMigrationTestFault {
@@ -311,6 +321,7 @@ pub(crate) enum PrincipalRootMigrationTestFault {
     CrashAfterCommit(usize),
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 static PRINCIPAL_ROOT_MIGRATION_TEST_FAULTS: OnceLock<
     Mutex<HashMap<PathBuf, PrincipalRootMigrationTestFault>>,
@@ -331,6 +342,7 @@ static RECOVERY_REASSIGNMENT_TEST_FAULTS: OnceLock<
     Mutex<HashMap<PathBuf, RecoveryReassignmentTestFault>>,
 > = OnceLock::new();
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn inject_recovery_reassignment_test_fault(
     data_dir: &Path,
@@ -359,6 +371,7 @@ pub(crate) fn consume_recovery_reassignment_test_fault(
     Ok(())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn inject_principal_root_migration_test_fault(
     data_dir: &Path,
@@ -371,6 +384,7 @@ pub(crate) fn inject_principal_root_migration_test_fault(
         .insert(data_dir.to_path_buf(), fault);
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn consume_principal_root_migration_test_fault(
     data_dir: &Path,
@@ -390,6 +404,7 @@ fn consume_principal_root_migration_test_fault(
     Ok(())
 }
 
+#[cfg(unix)]
 fn maybe_inject_principal_root_migration_indexed_fault(
     data_dir: &Path,
     stage: PrincipalRootMigrationIndexedFaultStage,
@@ -482,6 +497,7 @@ fn principal_root_object_mutation_lock(data_dir: &Path) -> &'static Mutex<()> {
     home_mutex(&PRINCIPAL_ROOT_OBJECT_LOCKS, data_dir)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn hold_principal_root_lock_for_test(
     data_dir: &Path,
@@ -670,6 +686,7 @@ fn invalidate_verified_auth_state_cache(data_dir: &Path) {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn invalidate_verified_auth_state_cache_for_test(data_dir: &Path) {
     invalidate_verified_auth_state_cache(data_dir);
@@ -739,6 +756,7 @@ fn run_auth_state_write_hook(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 static AUDIT_SIGNATURE_VERIFICATIONS: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
 
+#[cfg(unix)]
 #[cfg(test)]
 fn audit_signature_count(data_dir: &Path) -> usize {
     *AUDIT_SIGNATURE_VERIFICATIONS
@@ -760,6 +778,7 @@ fn record_audit_signature(data_dir: &Path) {
 }
 
 /// Releases the cache lock before the caller asserts, so a failed assertion cannot poison it.
+#[cfg(unix)]
 #[cfg(test)]
 fn verified_auth_state_cache_contains(data_dir: &Path) -> bool {
     verified_auth_state_cache()
@@ -768,6 +787,7 @@ fn verified_auth_state_cache_contains(data_dir: &Path) -> bool {
         .contains_key(&auth_state_cache_key(data_dir))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn verify_audit_chain_call_count(data_dir: &Path) -> usize {
     let key = auth_state_cache_key(data_dir);
@@ -790,6 +810,7 @@ fn record_verify_audit_chain_call(data_dir: &Path) {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn install_verified_auth_state_cache_fill_hook(
     data_dir: &Path,
@@ -831,6 +852,7 @@ fn run_verified_auth_state_cache_fill_hook(data_dir: &Path) -> anyhow::Result<()
     Ok(())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn install_verified_auth_state_cache_hit_hook(
     data_dir: &Path,
@@ -1047,6 +1069,7 @@ struct PrincipalRootMigrationCleanupV1 {
     backup_inode: u64,
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct PreparedPrincipalRootMigrationObject {
     journal: PrincipalRootMigrationJournalObjectV1,
@@ -1054,6 +1077,7 @@ struct PreparedPrincipalRootMigrationObject {
     encrypted: Vec<u8>,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 enum PrincipalRootMigrationIndexedFaultStage {
     Backup,
@@ -2710,6 +2734,7 @@ thread_local! {
     static OWNER_ENROLLMENT_TEST_FAULT: std::cell::RefCell<Option<(PathBuf, OwnerEnrollmentTestFault)>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn fail_owner_enrollment_once_for_test(
     data_dir: &Path,
@@ -2775,6 +2800,7 @@ pub(crate) fn passkey_attestation_with_id_for_test(
     serde_json::from_value(serde_json::json!({"id": URL_SAFE_NO_PAD.encode(id), "rawId": URL_SAFE_NO_PAD.encode(id), "type": "public-key", "response": {"clientDataJson": URL_SAFE_NO_PAD.encode(serde_json::json!({"type": "webauthn.create", "challenge": challenge, "origin": origin, "crossOrigin": false}).to_string()), "attestationObject": URL_SAFE_NO_PAD.encode(attestation)}})).unwrap()
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod guest_registration_tests {
     use super::*;
@@ -3209,6 +3235,7 @@ mod guest_registration_tests {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod owner_recovery_tests {
     use super::*;
@@ -3625,6 +3652,7 @@ mod owner_recovery_tests {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod owner_enrollment_tests {
     use super::*;
@@ -5033,6 +5061,7 @@ fn with_audit_chain_activation_lock<T>(
     Ok(value)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn load_audit_chain_activation(data_dir: &Path) -> anyhow::Result<Option<AuditChainActivationV2>> {
     with_audit_chain_activation_lock(data_dir, || load_audit_chain_activation_unlocked(data_dir))
@@ -5931,6 +5960,7 @@ fn note_quarantined_agent(principal_id: &str, reason: &'static str) {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn plant_principal_kind(
     data_dir: &Path,
@@ -5955,6 +5985,7 @@ fn plant_principal_kind(
     invalidate_verified_auth_state_cache(data_dir);
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn edit_malformed_agent(agent: &mut PrincipalRecord, case: usize) -> &'static str {
     match case {
@@ -6015,6 +6046,7 @@ fn edit_malformed_agent(agent: &mut PrincipalRecord, case: usize) -> &'static st
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 const MALFORMED_AGENT_CASES: usize = 10;
 
@@ -11459,6 +11491,7 @@ fn validate_principal_root_migration_plan(
     Ok(())
 }
 
+#[cfg(unix)]
 fn encrypt_principal_root_object_bytes(
     principal_id: &str,
     localhost_root: &str,
@@ -11561,6 +11594,7 @@ fn decrypt_migration_backup(
     )
 }
 
+#[cfg(unix)]
 fn verify_plaintext_migration_target(
     data_dir: &Path,
     object: &PreparedPrincipalRootMigrationObject,
@@ -11581,6 +11615,7 @@ fn principal_root_migration_journal_path(data_dir: &Path) -> anyhow::Result<Path
     Ok(auth_state.with_file_name(PRINCIPAL_ROOT_MIGRATION_JOURNAL_FILE))
 }
 
+#[cfg(unix)]
 fn write_principal_root_migration_journal(
     data_dir: &Path,
     journal: &PrincipalRootMigrationJournalV1,
@@ -12574,7 +12609,10 @@ fn open_migration_backup_directory(path: &Path) -> anyhow::Result<File> {
         anyhow::bail!("migration backup directory must be a real owner-only directory");
     }
     #[cfg(not(unix))]
-    anyhow::bail!("migration backup cleanup requires directory-relative filesystem support");
+    {
+        let _ = file;
+        anyhow::bail!("migration backup cleanup requires directory-relative filesystem support");
+    }
     #[allow(unreachable_code)]
     Ok(file)
 }
@@ -12587,7 +12625,10 @@ fn migration_file_identity(file: &File) -> anyhow::Result<(u64, u64)> {
         Ok((metadata.dev(), metadata.ino()))
     }
     #[cfg(not(unix))]
-    anyhow::bail!("migration backup identity requires directory-relative filesystem support")
+    {
+        let _ = file;
+        anyhow::bail!("migration backup identity requires directory-relative filesystem support")
+    }
 }
 
 fn read_migration_cleanup_file(
@@ -13034,6 +13075,7 @@ pub(crate) fn store_test_principal_root_protection(
 
 /// Forgets every protection the sign-in file stores, as a Home whose owner
 /// lost the key. Agent-file protections stay where they are. Test-only.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn clear_test_principal_root_protections(data_dir: &Path) {
     mutate_auth_state(data_dir, |state| {
@@ -13114,6 +13156,7 @@ pub(crate) mod valid_agent {
     /// Hand SHA-256 of `ID`, first 12 bytes, under `UsersAI`.
     pub const ROOT: &str = "localhost://UsersAI/ba287e12925d9408db0f24e3";
     /// The same digest under `Users`. This is the id rule for `ID`.
+    #[cfg(unix)]
     pub const USERS_ROOT: &str = "localhost://Users/ba287e12925d9408db0f24e3";
     pub const OWNER_ID: &str = "person:local:owner";
 
@@ -13163,6 +13206,7 @@ fn insert_principal_into_auth_file(data_dir: &Path, record: &PrincipalRecord) {
     write_auth_state_value(data_dir, &value);
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn admit_passkey_principal_as_agent(
     data_dir: &Path,
@@ -13199,6 +13243,7 @@ fn admit_passkey_principal_as_agent(
     write_auth_state_value(data_dir, &value);
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn test_person_record(principal_id: &str) -> PrincipalRecord {
     PrincipalRecord {
@@ -13220,12 +13265,14 @@ fn test_person_record(principal_id: &str) -> PrincipalRecord {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn insert_test_agent(data_dir: &Path) {
     store_test_human_principal(data_dir, "person:local:owner");
     insert_principal_into_auth_file(data_dir, &test_agent_record(TEST_AGENT_ID));
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn auth_state_file_bytes(data_dir: &Path) -> Vec<u8> {
     std::fs::read(auth_state_path(data_dir).unwrap()).unwrap()
@@ -13239,6 +13286,7 @@ pub(crate) mod r4_fixture {
     pub const AGENT_ID: &str = super::valid_agent::ID;
     pub const AGENT_ROOT: &str = super::valid_agent::ROOT;
     /// Id-rule root of `AGENT_ID`. A decoy placed here shows the stored root was used.
+    #[cfg(unix)]
     pub const USERS_ROOT: &str = super::valid_agent::USERS_ROOT;
 
     pub fn principal_id(kind: PrincipalKind) -> &'static str {
@@ -13260,6 +13308,7 @@ pub(crate) mod r4_fixture {
         }
     }
 
+    #[cfg(unix)]
     pub fn remove(data_dir: &Path, principal_id: &str) {
         let path = super::auth_state_path(data_dir).unwrap();
         let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -13272,6 +13321,7 @@ pub(crate) mod r4_fixture {
         super::invalidate_verified_auth_state_cache(data_dir);
     }
 
+    #[cfg(unix)]
     pub fn set_kind(data_dir: &Path, principal_id: &str, kind: PrincipalKind, root: &str) {
         // Rewrites kind and root on a record that is already stored. Kind Agent
         // here has no admission binding, so load quarantines it. A stored-root
@@ -13426,10 +13476,12 @@ pub(crate) fn store_test_principal_root_protection_for(
     protection
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 #[path = "auth/object_class_tests.rs"]
 mod object_class_tests;
 
+#[cfg(unix)]
 #[cfg(test)]
 #[path = "auth/scan_tests.rs"]
 mod scan_tests;
@@ -14050,6 +14102,7 @@ pub(crate) mod tests {
         assert!(!error.to_string().is_empty());
     }
 
+    #[cfg(unix)]
     fn test_audit_event(index: u64) -> RuntimeAuditEventV1 {
         RuntimeAuditEventV1 {
             schema: RuntimeAuditEventV1::SCHEMA.to_string(),
@@ -14068,6 +14121,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn refresh_audit(grant: &AuthSessionGrantV1, index: u64) -> RuntimeAuditEventV1 {
         RuntimeAuditEventV1 {
             event_type: "auth.session.refreshed".into(),
@@ -14080,6 +14134,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn refresh_fixture(data_dir: &Path, events: u64) -> AuthSessionGrantV1 {
         let now = now_ts();
         let principal =
@@ -14125,6 +14180,7 @@ pub(crate) mod tests {
         grant
     }
 
+    #[cfg(unix)]
     fn refresh_persisted_bytes(data_dir: &Path) -> (Vec<u8>, Vec<u8>) {
         (
             std::fs::read(auth_state_path(data_dir).unwrap()).unwrap(),
@@ -14132,6 +14188,7 @@ pub(crate) mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn assert_own_write_cache_matches_disk(data: &Path) {
         assert!(
             verified_auth_state_cache_contains(data),
@@ -14638,10 +14695,12 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn passkey_binding(sign_count: u32, created_at: u64, last_used_at: u64) -> ProofBinding {
         passkey_binding_with_credential("credential-1", sign_count, created_at, last_used_at)
     }
 
+    #[cfg(unix)]
     fn passkey_binding_with_credential(
         credential_id: &str,
         sign_count: u32,
@@ -14661,6 +14720,7 @@ pub(crate) mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn recovered_root_reassignment_fixture(
         data_dir: &Path,
     ) -> (
@@ -17138,6 +17198,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct OfflineMigrationFixture {
         data_dir: tempfile::TempDir,
         operator_dir: tempfile::TempDir,
@@ -17150,6 +17211,7 @@ pub(crate) mod tests {
         backup_dir: PathBuf,
     }
 
+    #[cfg(unix)]
     impl OfflineMigrationFixture {
         fn new(object_count: usize) -> Self {
             let data_dir = tempfile::tempdir().unwrap();
@@ -17300,6 +17362,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn fill_migration_cleanup_slots(data_dir: &Path, count: usize) -> Vec<PathBuf> {
         let directory = principal_root_migration_cleanup_dir(data_dir).unwrap();
         ensure_regular_auth_parent(data_dir, directory.parent().unwrap()).unwrap();
@@ -18978,6 +19041,7 @@ pub(crate) mod tests {
     /// owner, and package stay as they were, so the record is quarantined
     /// unless that id was already a valid agent. Stored-root fixtures call
     /// `valid_agent::plant`.
+    #[cfg(unix)]
     pub(crate) fn mint_agent_record(
         data_dir: &Path,
         principal_id: &str,
@@ -20322,6 +20386,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn install_older_device_key(data_dir: &Path) {
         let identity = data_dir.join("identity");
         std::fs::create_dir_all(&identity).unwrap();
@@ -20335,6 +20400,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn person_record_bytes(state: &AuthState) -> Vec<Vec<u8>> {
         state
             .principals
@@ -20410,6 +20476,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn passkey_credential() -> elastos_identity::StoredCredential {
         elastos_identity::StoredCredential {
             credential_id: "credential-1".to_string(),
@@ -20419,6 +20486,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn sign_in_passkey(data_dir: &std::path::Path) -> anyhow::Result<AuthSessionGrantV1> {
         let credential = passkey_credential();
         grant_passkey_session(
@@ -20435,6 +20503,7 @@ pub(crate) mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn seeded_passkey_agent(role: RuntimePrincipalRole) -> tempfile::TempDir {
         let data_dir = tempfile::tempdir().unwrap();
         let now = now_ts();
@@ -20454,6 +20523,7 @@ pub(crate) mod tests {
         data_dir
     }
 
+    #[cfg(unix)]
     fn assert_auth_change_refused(
         data_dir: &std::path::Path,
         before: &[u8],
@@ -20553,6 +20623,7 @@ pub(crate) mod tests {
         assert_eq!(auth_state_file_bytes(data_dir.path()), before);
     }
 
+    #[cfg(unix)]
     fn every_agent_permit() -> [Option<AgentAdmissionOperation>; 6] {
         [
             None,
@@ -20564,6 +20635,7 @@ pub(crate) mod tests {
         ]
     }
 
+    #[cfg(unix)]
     fn bare_protection(
         principal_id: &str,
         root: &str,
@@ -20581,6 +20653,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn human_person_id_and_root(state: &AuthState) -> (String, String) {
         let human = state
             .principals
@@ -20590,6 +20663,7 @@ pub(crate) mod tests {
         (human.principal_id.clone(), human.localhost_root.clone())
     }
 
+    #[cfg(unix)]
     fn owner_root_in_sign_in_file_protection(
         principal_id: &str,
         root: &str,
@@ -20611,6 +20685,7 @@ pub(crate) mod tests {
         protection
     }
 
+    #[cfg(unix)]
     fn bare_session(principal_id: &str, session_id: &str) -> StoredAuthSession {
         let now = now_ts();
         StoredAuthSession {
@@ -20628,6 +20703,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn agent_root_in(state: &AuthState) -> String {
         state
             .principals
@@ -20928,6 +21004,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn person_file_with_agent() -> tempfile::TempDir {
         let data_dir = tempfile::tempdir().unwrap();
         let now = now_ts();
@@ -20941,6 +21018,7 @@ pub(crate) mod tests {
         data_dir
     }
 
+    #[cfg(unix)]
     fn refuse_agent_field_edit(label: &str, reason: &str, edit: impl FnOnce(&mut PrincipalRecord)) {
         let data_dir = person_file_with_agent();
         let before = auth_state_file_bytes(data_dir.path());
@@ -21046,6 +21124,7 @@ pub(crate) mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn assert_invalid_agent_refused(reason: &str, edit: impl FnOnce(&mut PrincipalRecord)) {
         let data_dir = tempfile::tempdir().unwrap();
         store_test_human_principal(data_dir.path(), "person:local:owner");
@@ -21253,6 +21332,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn refuse_duplicate_agent_records(
         label: &str,
         reason: &str,
@@ -21443,6 +21523,7 @@ pub(crate) mod tests {
     }
 
     /// A signer proved by a real signature over a Home launch-token envelope.
+    #[cfg(unix)]
     fn verified_device_signer_for_tests(
         seed: [u8; 32],
     ) -> super::verified_launch_token_signer::VerifiedLaunchTokenSigner {
@@ -21464,6 +21545,7 @@ pub(crate) mod tests {
 
     /// Each of the three held-root write functions, on its own path under
     /// `root`, with the address and path it wrote or tried to write.
+    #[cfg(unix)]
     fn held_root_write_results(
         data_dir: &Path,
         root: &ResolvedPrincipalRoot,
@@ -21520,6 +21602,7 @@ pub(crate) mod tests {
 
     /// A data directory with the owner-only permissions a protected write
     /// requires of its own root.
+    #[cfg(unix)]
     fn owner_only_tempdir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         #[cfg(unix)]

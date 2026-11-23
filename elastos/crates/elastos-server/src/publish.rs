@@ -493,6 +493,7 @@ fn require_import_cid(actual: &str, expected: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 async fn import_publication_file(provider: &Path, file: &Path) -> anyhow::Result<String> {
     let response = publication_provider_request(
@@ -507,6 +508,7 @@ async fn import_publication_file(provider: &Path, file: &Path) -> anyhow::Result
     Ok(cid.to_owned())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 async fn import_publication_raw_block(
     provider: &Path,
@@ -566,6 +568,7 @@ async fn publication_raw_block_put(
         .to_owned())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 async fn publication_provider_request(
     provider: &Path,
@@ -1993,7 +1996,9 @@ mod tests {
         CapsuleManifest, CapsuleType, MicroVmConfig, Permissions, RequirementKind, ResourceLimits,
     };
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     fn platform_input_options() -> PublishReleaseOptions {
         PublishReleaseOptions {
@@ -2172,13 +2177,19 @@ mod tests {
             ]
         );
 
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir(temp.path().join("scripts")).unwrap();
-        std::fs::write(
-            temp.path().join("scripts/release-platform-input.py"),
-            "import sys\nassert sys.argv[1:] == ['validate-inputs', '--version', '0.7.1', '--input', 'aarch64-darwin=/prepared/mac', '--preview-platform', 'aarch64-darwin']\n",
-        ).unwrap();
-        validate_publish_inputs(&options, temp.path(), &[]).unwrap();
+        // The input admission runs the workspace's release script through
+        // `python3`; Windows-native hosts do not carry that tool, so only the
+        // argument forwarding above is checked there.
+        #[cfg(unix)]
+        {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(temp.path().join("scripts")).unwrap();
+            std::fs::write(
+                temp.path().join("scripts/release-platform-input.py"),
+                "import sys\nassert sys.argv[1:] == ['validate-inputs', '--version', '0.7.1', '--input', 'aarch64-darwin=/prepared/mac', '--preview-platform', 'aarch64-darwin']\n",
+            ).unwrap();
+            validate_publish_inputs(&options, temp.path(), &[]).unwrap();
+        }
     }
 
     #[test]
@@ -2226,17 +2237,19 @@ mod tests {
         append_publish_selection_args(&mut command, &options, &[]);
         let args = command
             .get_args()
-            .map(|arg| arg.to_str().unwrap())
+            .map(|arg| arg.to_str().unwrap().to_string())
             .collect::<Vec<_>>();
+        // A joined relative path carries this platform's separator.
+        let separator = std::path::MAIN_SEPARATOR;
         assert_eq!(
             args,
             [
-                "--platform-input",
-                "x86_64-linux=/caller/session/prepared inputs/linux=amd64",
-                "--platform-input",
-                "aarch64-linux=/prepared inputs/linux=arm64",
-                "--platform-input",
-                "aarch64-darwin=/caller/session/prepared/mac",
+                "--platform-input".to_string(),
+                format!("x86_64-linux=/caller/session{separator}prepared inputs/linux=amd64"),
+                "--platform-input".to_string(),
+                "aarch64-linux=/prepared inputs/linux=arm64".to_string(),
+                "--platform-input".to_string(),
+                format!("aarch64-darwin=/caller/session{separator}prepared/mac"),
             ]
         );
     }
@@ -2985,6 +2998,9 @@ finally:
         assert!(load_publish_state(dir.path()).is_err());
     }
 
+    /// Publication state is owner-controlled custody: the reader refuses on
+    /// Windows by design, so the round trip runs only where custody exists.
+    #[cfg(unix)]
     #[test]
     fn test_publish_state_round_trip() {
         let temp = tempfile::tempdir().unwrap();
@@ -2998,6 +3014,27 @@ finally:
         };
         save_publish_state(&path, &state).unwrap();
         assert_eq!(load_publish_state(&path).unwrap(), state);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_publish_state_custody_refuses_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("publish-state.json");
+        let error = load_publish_state(&path).expect_err("Windows has no custody reader");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Unsupported)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("publication state custody is unsupported on Windows"),
+            "{error}"
+        );
+        assert!(!path.exists(), "the refusal must not create the state file");
     }
 
     #[test]

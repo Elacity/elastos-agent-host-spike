@@ -23,16 +23,22 @@ use crate::runtime::tests::{
 };
 use crate::runtime::Runtime;
 use crate::stage_cmd::{bundle_cid, run_staged_folder, stage_bundle};
+#[cfg(unix)]
 use axum::body::Body;
-use axum::http::{header::AUTHORIZATION, Request, StatusCode};
+#[cfg(unix)]
+use axum::http::header::AUTHORIZATION;
+#[cfg(unix)]
+use axum::http::{Request, StatusCode};
 use elastos_bundle_identity::Budget;
 use elastos_runtime::capability::pending::{GrantDuration, PendingRequestStore};
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityStore, TokenConstraints};
 use elastos_runtime::primitives::audit::AuditLog;
 use elastos_runtime::primitives::metrics::MetricsManager;
 use elastos_runtime::provider::ProviderRegistry;
+#[cfg(unix)]
 use elastos_runtime::session::{SessionRegistry, SessionType};
 use std::time::Duration;
+#[cfg(unix)]
 use tower::ServiceExt;
 
 /// One call a component made to the bridge: the capsule's id, the principal
@@ -213,6 +219,7 @@ struct RealBridge {
     dir: tempfile::TempDir,
     pending: Arc<PendingRequestStore>,
     capabilities: Arc<CapabilityManager>,
+    #[cfg(unix)]
     store: Arc<CapabilityStore>,
     provider: Arc<BusConformanceProvider>,
 }
@@ -259,17 +266,21 @@ impl RealBridge {
             .configure_capsule_admission(dir.path(), &keys, false)
             .await
             .unwrap();
+        #[cfg(not(unix))]
+        let _ = store;
         RealBridge {
             runtime,
             dir,
             pending,
             capabilities,
+            #[cfg(unix)]
             store,
             provider,
         }
     }
 
     /// Stage a bundle whose entrypoint is `bytes`, signed by `key`.
+    #[cfg(unix)]
     async fn staged_bytes(
         &self,
         name: &str,
@@ -512,6 +523,7 @@ fn calling_component() -> Vec<u8> {
 /// One read of [`PROBE`], then the invoke of that read, for whatever principal
 /// the launch bound. The bus fixture returns before it calls unless it runs
 /// as [`PERSON`], and a Home token names this Home's device.
+#[cfg(unix)]
 fn probe_component() -> Vec<u8> {
     // The model guest already asks and invokes once. Its resource is 22 bytes
     // and its invoke names `offers_list`; the probe is 24 bytes and the read
@@ -1917,6 +1929,79 @@ async fn a_pinned_bundle_that_is_not_in_the_store_refuses_the_start() {
 /// held to, at this start, in the same order. Each row starts from a root
 /// that pins one staged bundle signed by another publisher and starts (the
 /// control), then changes one thing about the pinned bundle.
+#[tokio::test]
+async fn slice_4a_valid_signed_component_closure_launches() {
+    let signer = key(93);
+    let home = Home::trusting(&[&signer]).await;
+    let member = home
+        .staged("needed", &manifest("needed"), &quiet_component(), &signer)
+        .await;
+    let root = home
+        .staged(
+            "root",
+            &manifest_pinning("root", &[("needed", &member)]),
+            &quiet_component(),
+            &signer,
+        )
+        .await;
+    assert_eq!(home.run(&root, None).await.unwrap().0, "root");
+}
+
+#[tokio::test]
+async fn slice_4a_unsigned_dependency_refuses_before_load() {
+    let signer = key(94);
+    let home = Home::trusting(&[&signer]).await;
+    let member = home
+        .staged("needed", &manifest("needed"), &quiet_component(), &signer)
+        .await;
+    let root = home
+        .staged(
+            "root",
+            &manifest_pinning("root", &[("needed", &member)]),
+            &quiet_component(),
+            &signer,
+        )
+        .await;
+    std::fs::remove_file(bundle_signature_path(
+        &home.data(),
+        &member.parse().unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        home.run(&root, None).await.unwrap_err(),
+        under("needed", BundleRefusal::Unsigned)
+    );
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
+#[tokio::test]
+async fn slice_4a_changed_dependency_refuses_before_load() {
+    let signer = key(95);
+    let home = Home::trusting(&[&signer]).await;
+    let bytes = quiet_component();
+    let member = home
+        .staged("needed", &manifest("needed"), &bytes, &signer)
+        .await;
+    let root = home
+        .staged(
+            "root",
+            &manifest_pinning("root", &[("needed", &member)]),
+            &bytes,
+            &signer,
+        )
+        .await;
+    let mut changed = bytes;
+    *changed.last_mut().unwrap() ^= 1;
+    home.overwrite(&member, ENTRYPOINT, &changed);
+    let refusal = home.run(&root, None).await.unwrap_err();
+    assert_eq!(refusal.code(), "bundle_cid_mismatch");
+    assert!(
+        refusal.to_string().contains("requirement needed"),
+        "{refusal}"
+    );
+    assert!(home.runtime.list_capsules().await.is_empty());
+}
+
 #[tokio::test]
 async fn a_pinned_bundle_is_held_to_every_check_the_asked_one_is() {
     let (publisher, other) = (key(63), key(64));
@@ -4296,6 +4381,7 @@ async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tamper
 }
 
 /// One request to the router `elastos serve` builds.
+#[cfg(unix)]
 async fn http(
     app: &axum::Router,
     shell: &str,
@@ -4330,6 +4416,7 @@ async fn http(
 /// `events` from `GET /api/audit?type=capability_grant`, kept when they name
 /// `session`. An empty session keeps every one: a grant with no pending
 /// request still has to show up here.
+#[cfg(unix)]
 fn grants_for(events: &[serde_json::Value], session: &str) -> Vec<serde_json::Value> {
     events
         .iter()
@@ -4340,6 +4427,7 @@ fn grants_for(events: &[serde_json::Value], session: &str) -> Vec<serde_json::Va
 
 /// The real bridge, a shell session, and the router `elastos serve` builds
 /// from those same stores, with the person's Home token.
+#[cfg(unix)]
 struct ServerHome {
     bridge: RealBridge,
     app: axum::Router,
@@ -4348,6 +4436,7 @@ struct ServerHome {
     open_grant: String,
 }
 
+#[cfg(unix)]
 impl ServerHome {
     async fn trusting(key: &SigningKey) -> ServerHome {
         let bridge = RealBridge::trusting(&[key]).await;
@@ -4424,6 +4513,7 @@ impl ServerHome {
 }
 
 /// Content whose core is `component` under `manifest`, signed by `key`.
+#[cfg(unix)]
 async fn stage_content(
     bridge: &RealBridge,
     key: &SigningKey,
@@ -4444,6 +4534,7 @@ async fn stage_content(
         .await
 }
 
+#[cfg(unix)]
 async fn wait_for_request(
     home: &ServerHome,
     open: &tokio::task::JoinHandle<(StatusCode, String)>,

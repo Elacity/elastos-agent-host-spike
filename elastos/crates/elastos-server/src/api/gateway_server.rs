@@ -353,7 +353,9 @@ fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()> + S
 mod trusted_gateway_tests {
     use super::*;
     use std::sync::Mutex;
+    #[cfg(unix)]
     use std::time::Duration;
+    #[cfg(unix)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::oneshot;
 

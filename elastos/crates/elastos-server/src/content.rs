@@ -104,6 +104,11 @@ pub(crate) const LOCAL_PIN_AVAILABILITY_POLICY: &str = "local_pin";
 const AVAILABILITY_DASHBOARD_REMOTE_ROW_LIMIT: usize = 10;
 const OBJECT_MANIFEST_SCHEMA: &str = "elastos.content.object.manifest/v1";
 const OBJECT_MANIFEST_PATH: &str = "_elastos_object.json";
+/// Startup restore found complete local objects and did not re-import them.
+/// The default log filter shows errors. A debug skip used to look like success.
+#[cfg(windows)]
+const LOCAL_OBJECT_RESTORE_UNSUPPORTED_ON_WINDOWS: &str =
+    "local object restore is unsupported on Windows";
 const SEALED_OBJECT_PATH: &str = "sealed.json";
 
 pub const CONTENT_OBJECT_MANIFEST_PATH: &str = OBJECT_MANIFEST_PATH;
@@ -2784,6 +2789,7 @@ pub async fn publish_bytes_via_provider(
     content_response_cid(&response)
 }
 
+#[cfg(any(unix, test))]
 const MODEL_PREPARATION_SOURCE: &str = "runtime-model-preparation";
 
 /// One preparation's read route for its package parts. Parts come from the
@@ -2792,11 +2798,13 @@ const MODEL_PREPARATION_SOURCE: &str = "runtime-model-preparation";
 /// miss instead of one per 64 KiB part. Reads take `&self` so preparation can
 /// keep several parts in flight. Preparation still checks each file's SHA-256
 /// and the package CID, whichever route served the bytes.
+#[cfg(any(unix, test))]
 #[derive(Debug, Default)]
 pub(crate) struct ModelPartReads {
     holders_only: std::sync::atomic::AtomicBool,
 }
 
+#[cfg(any(unix, test))]
 impl ModelPartReads {
     /// Complete one bounded model read. Preparation owns aggregate accounting,
     /// ordering, integrity and settlement.
@@ -2886,6 +2894,7 @@ impl ModelPartReads {
 }
 
 /// One part through the local Content path only; a miss never reaches Carrier.
+#[cfg(any(unix, test))]
 async fn read_local_model_part(
     registry: &ProviderRegistry,
     request: Value,
@@ -2908,6 +2917,7 @@ async fn read_local_model_part(
     Ok(stream.drain_to_vec()?)
 }
 
+#[cfg(any(unix, test))]
 fn checked_model_part(
     bytes: Vec<u8>,
     limit: u64,
@@ -4769,6 +4779,9 @@ impl ContentProvider {
                 return;
             }
         };
+        // One named refusal for the whole restore. Further objects hit the same gate.
+        #[cfg(windows)]
+        let mut named_windows_refusal = false;
         for dir in complete_local_object_dirs(&self.data_dir) {
             match self.import_local_object_dir(&registry, &dir).await {
                 Ok(cid) if !held.contains(&cid) => tracing::warn!(
@@ -4797,11 +4810,24 @@ impl ContentProvider {
                         "content: restore local object replica failed"
                     ),
                 },
-                Err(err) => tracing::debug!(
-                    dir = %dir.display(),
-                    error = %err,
-                    "content: restore local object import skipped"
-                ),
+                Err(err) => {
+                    // checked_local_root requires a leading '/'. A Windows path
+                    // never reaches the provider. The owner-only, no-reparse
+                    // open that would replace that check is not on this branch.
+                    #[cfg(windows)]
+                    if local_object_preparation_unavailable(&err) {
+                        if !named_windows_refusal {
+                            named_windows_refusal = true;
+                            tracing::error!("{LOCAL_OBJECT_RESTORE_UNSUPPORTED_ON_WINDOWS}");
+                        }
+                        continue;
+                    }
+                    tracing::debug!(
+                        dir = %dir.display(),
+                        error = %err,
+                        "content: restore local object import skipped"
+                    );
+                }
             }
         }
     }
@@ -9783,6 +9809,7 @@ fn file_cid_from_leaves(mut level: Vec<FileCidNode>, version: cid::Version) -> c
     level.pop().expect("file has one root").cid
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
     let level: Vec<FileCidNode> = if bytes.is_empty() {
@@ -9965,6 +9992,17 @@ fn validate_content_path(path: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `add_local_ipfs_object` returns this when the root is not a slash path,
+/// and again when the host is not Linux or macOS. On Windows the slash check
+/// is the one that runs.
+#[cfg(windows)]
+fn local_object_preparation_unavailable(err: &ProviderError) -> bool {
+    matches!(
+        err,
+        ProviderError::Provider(message) if message == "local content preparation unavailable"
+    )
 }
 
 fn complete_local_object_dirs(data_dir: &Path) -> Vec<PathBuf> {
@@ -11075,6 +11113,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn requester_bound_mock_answer(mut body: Value, data_dir: &Path) -> Value {
         let (_, requester_did) = elastos_identity::load_or_create_did(data_dir).unwrap();
         body["__test_requester_did"] = json!(requester_did);
@@ -11769,6 +11808,7 @@ mod tests {
         assert!(matches!(err, ProviderError::Io(_)));
     }
 
+    #[cfg(unix)]
     fn fixture_file_cid(bytes: &[u8]) -> String {
         file_cid(bytes, cid::Version::V1, true).to_string()
     }
@@ -11945,6 +11985,7 @@ mod tests {
         assert!(!text.contains(local.as_str()), "{text}");
     }
 
+    #[cfg(unix)]
     async fn content_fetch_against_bridge(
         body: Value,
     ) -> (
@@ -11955,6 +11996,7 @@ mod tests {
         content_fetch_against_bridge_for_cid(TEST_CID, body).await
     }
 
+    #[cfg(unix)]
     async fn content_fetch_against_bridge_for_cid(
         cid: &str,
         body: Value,
@@ -12051,6 +12093,7 @@ mod tests {
     /// One verified receipt on a distinct-holders error. `with_required_one`
     /// puts `1` in the answer's required-count field; otherwise that field is
     /// absent. `distinct_holders` stays `1` and is not the signed requirement.
+    #[cfg(unix)]
     fn distinct_holder_error_answer(with_required_one: bool) -> Value {
         let mut data = json!({
             "distinct_holders": 1,
@@ -12069,6 +12112,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     async fn assert_availability_error_signs_the_callers_two(body: Value) {
         let (data_dir, availability, response) = content_fetch_against_bridge(body).await;
         let sent = availability.requests.lock().await.clone();
@@ -12630,6 +12674,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn carrier_import_exact_invocation() -> Value {
         json!({
             "schema": "elastos.provider.invocation/v1",
@@ -12675,6 +12720,7 @@ mod tests {
             .await
     }
 
+    #[cfg(unix)]
     async fn registry_with_content_and_ipfs_with_federated_alert_exchange_config(
         federated_operator_alert_exchange_config: Option<Value>,
     ) -> (
@@ -12714,6 +12760,7 @@ mod tests {
         .await
     }
 
+    #[cfg(unix)]
     async fn registry_with_content_and_ipfs_with_quota_ledger_exchange_config(
         federated_quota_ledger_exchange_config: Option<Value>,
     ) -> (
@@ -12733,6 +12780,7 @@ mod tests {
         .await
     }
 
+    #[cfg(unix)]
     async fn registry_with_content_and_ipfs_with_abuse_control_exchange_config(
         federated_abuse_control_exchange_config: Option<Value>,
     ) -> (
@@ -12805,6 +12853,7 @@ mod tests {
         (data_dir, registry, ipfs, content)
     }
 
+    #[cfg(unix)]
     fn spawn_operator_alert_sink() -> (String, std::thread::JoinHandle<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -12832,6 +12881,7 @@ mod tests {
         (format!("http://{addr}/content-alerts"), handle)
     }
 
+    #[cfg(unix)]
     fn spawn_federated_operator_alert_exchange(
         response: Value,
     ) -> (String, std::thread::JoinHandle<String>) {
@@ -12863,6 +12913,7 @@ mod tests {
         (format!("http://{addr}/alerts/exchange"), handle)
     }
 
+    #[cfg(unix)]
     fn signed_federated_quota_ledger_exchange_receipt(
         accepted: bool,
         reason: Option<&str>,
@@ -12892,6 +12943,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn spawn_federated_quota_ledger_exchange_endpoint(
         response: Value,
     ) -> (String, std::thread::JoinHandle<String>) {
@@ -12923,6 +12975,7 @@ mod tests {
         (format!("http://{addr}/quota/exchange"), handle)
     }
 
+    #[cfg(unix)]
     fn signed_federated_abuse_control_exchange_receipt(
         accepted: bool,
         reason: Option<&str>,
@@ -12957,6 +13010,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn spawn_federated_abuse_control_exchange_endpoint(
         response: Value,
     ) -> (String, std::thread::JoinHandle<String>) {
@@ -13069,6 +13123,7 @@ mod tests {
         request.len() >= header_end + 4 + content_length
     }
 
+    #[cfg(unix)]
     async fn invoke_content_repair_worker(
         registry: &Arc<ProviderRegistry>,
         request: Value,
@@ -15042,6 +15097,91 @@ mod tests {
         content.restore_complete_local_objects().await;
         assert!(ipfs.pinned.lock().await.is_empty());
     }
+
+    /// The import contract stays in
+    /// `restore_and_repair_stream_large_objects_and_skip_model_packages`.
+    /// That test is not gated: Windows still fails it until object files open
+    /// under the owner-only, no-reparse rule. This test pins the refusal.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn windows_local_object_restore_names_its_refusal() {
+        use std::io::Write;
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+        #[derive(Clone)]
+        struct LogWriter(StdArc<StdMutex<Vec<u8>>>);
+        impl Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (data_dir, _registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let log = StdArc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::ERROR)
+            .with_writer({
+                let log = log.clone();
+                move || LogWriter(log.clone())
+            })
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        content.restore_complete_local_objects().await;
+        let quiet = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert!(
+            !quiet.contains(LOCAL_OBJECT_RESTORE_UNSUPPORTED_ON_WINDOWS),
+            "{quiet}"
+        );
+        assert!(ipfs.added_directories.lock().await.is_empty());
+
+        for name in ["held-object", "media-object"] {
+            let body = format!("hello {name}").into_bytes();
+            let digest = format!("{:x}", sha2::Sha256::digest(&body));
+            let object_dir = data_dir.path().join(name);
+            std::fs::create_dir_all(&object_dir).unwrap();
+            std::fs::write(object_dir.join("index.md"), &body).unwrap();
+            std::fs::write(
+                object_dir.join(OBJECT_MANIFEST_PATH),
+                serde_json::to_vec(&json!({
+                    "schema": OBJECT_MANIFEST_SCHEMA,
+                    "kind": "directory",
+                    "content_digest": format!("sha256:{digest}"),
+                    "files": [{
+                        "path": "index.md",
+                        "sha256": digest,
+                        "size": body.len() as u64
+                    }],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        log.lock().unwrap().clear();
+        content.restore_complete_local_objects().await;
+        let output = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            output
+                .matches(LOCAL_OBJECT_RESTORE_UNSUPPORTED_ON_WINDOWS)
+                .count(),
+            1,
+            "{output}"
+        );
+        assert!(ipfs.added_directories.lock().await.is_empty());
+        assert!(ipfs
+            .requests
+            .lock()
+            .await
+            .iter()
+            .all(|request| request["op"] != "runtime_add_local_object"));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn content_publish_file_wraps_ipfs_bytes_with_receipt() {
