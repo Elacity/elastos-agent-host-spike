@@ -37,10 +37,14 @@ const HOME_TERMINAL_EVENT_KEEPALIVE_SECS: u64 = 15;
 const HOME_TERMINAL_POLICY_CHECK_INTERVAL_SECS: u64 = 1;
 const HOME_TERMINAL_EVENT_DISCONNECT_GRACE_SECS: u64 = 3;
 const HOME_TERMINAL_PENDING_ATTACH_TIMEOUT_SECS: u64 = 20;
+#[cfg(unix)]
 const HOME_TERMINAL_EXIT_AUTH_GRACE_MS: u64 = 2_000;
 const HOME_TERMINAL_REPLAY_RETENTION_SECS: u64 = 30;
+#[cfg(unix)]
 const HOME_TERMINAL_MAX_ACTIVE_SESSIONS: usize = 8;
+#[cfg(unix)]
 const HOME_TERMINAL_MAX_SESSIONS_PER_PRINCIPAL: usize = 4;
+#[cfg(unix)]
 const HOME_TERMINAL_MAX_SESSIONS_PER_AUTH_SESSION: usize = 1;
 const HOME_TERMINAL_REPLAY_MAX_EVENTS: usize = 64;
 const HOME_TERMINAL_REPLAY_MAX_BYTES: usize = 64 * 1024;
@@ -49,7 +53,9 @@ const HOME_TERMINAL_ARCHIVED_REPLAY_MAX_BYTES: usize = HOME_TERMINAL_REPLAY_MAX_
 const HOME_TERMINAL_INBOX_REVIEW_ACTION_PREFIX: &str = "inbox-review-notification:";
 pub(super) const HOME_TERMINAL_INPUT_MAX_BYTES: usize = 16 * 1024;
 pub(super) const HOME_TERMINAL_INTENT_MAX_BYTES: usize = 8 * 1024;
+#[cfg(unix)]
 const HOME_TERMINAL_PROGRAM_ENV: &str = "ELASTOS_HOME_CLI_TERMINAL_PROGRAM";
+#[cfg(unix)]
 const HOME_TERMINAL_ARGS_ENV: &str = "ELASTOS_HOME_CLI_TERMINAL_ARGS_JSON";
 const HOME_TERMINAL_DEFAULT_COLS: u16 = 100;
 const HOME_TERMINAL_DEFAULT_ROWS: u16 = 32;
@@ -221,6 +227,7 @@ struct HomeTerminalEndpoint {
     auth: &'static str,
 }
 
+#[cfg(unix)]
 #[derive(Clone)]
 struct HomeTerminalCommand {
     program: String,
@@ -245,7 +252,9 @@ struct HomeTerminalSession {
     replay: StdMutex<HomeTerminalReplayLog>,
     event_stream_generation: AtomicU64,
     input_stream_generation: AtomicU64,
+    #[cfg(unix)]
     pty_reader_drained: AtomicBool,
+    #[cfg(unix)]
     pty_reader_drained_notify: Notify,
 }
 
@@ -256,6 +265,7 @@ enum HomeTerminalInput {
     Unsupported,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy)]
 struct HomeTerminalSessionLimits {
     total: usize,
@@ -273,6 +283,7 @@ struct HomeTerminalSessionLifecycle {
     event_stream_generation: u64,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HomeTerminalStartPlan {
     stale_session_ids: Vec<String>,
@@ -955,7 +966,11 @@ fn open_home_terminal_pty(size: HomeTerminalSize) -> anyhow::Result<HomeTerminal
 }
 
 impl HomeTerminalInput {
-    async fn write_all(&mut self, mut data: &[u8], closed: &watch::Sender<bool>) -> io::Result<()> {
+    async fn write_all(
+        &mut self,
+        mut _data: &[u8],
+        _closed: &watch::Sender<bool>,
+    ) -> io::Result<()> {
         match self {
             #[cfg(windows)]
             HomeTerminalInput::Unsupported => Err(io::Error::new(
@@ -964,8 +979,8 @@ impl HomeTerminalInput {
             )),
             #[cfg(unix)]
             HomeTerminalInput::Pty(file) => {
-                let mut closed = closed.subscribe();
-                while !data.is_empty() {
+                let mut closed = _closed.subscribe();
+                while !_data.is_empty() {
                     let mut ready = tokio::select! {
                         biased;
                         _ = closed.wait_for(|closed| *closed) => {
@@ -973,9 +988,9 @@ impl HomeTerminalInput {
                         }
                         ready = file.writable() => ready?,
                     };
-                    match ready.try_io(|file| file.get_ref().write(data)) {
+                    match ready.try_io(|file| file.get_ref().write(_data)) {
                         Ok(Ok(0)) => return Err(io::ErrorKind::WriteZero.into()),
-                        Ok(Ok(written)) => data = &data[written..],
+                        Ok(Ok(written)) => _data = &_data[written..],
                         Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
                         Ok(Err(err)) => return Err(err),
                         Err(_) => continue,
@@ -986,7 +1001,7 @@ impl HomeTerminalInput {
         }
     }
 
-    fn resize(&mut self, size: HomeTerminalSize) -> io::Result<()> {
+    fn resize(&mut self, _size: HomeTerminalSize) -> io::Result<()> {
         match self {
             #[cfg(windows)]
             HomeTerminalInput::Unsupported => Err(io::Error::new(
@@ -996,8 +1011,8 @@ impl HomeTerminalInput {
             #[cfg(unix)]
             HomeTerminalInput::Pty(file) => {
                 let winsize = libc::winsize {
-                    ws_row: size.rows,
-                    ws_col: size.cols,
+                    ws_row: _size.rows,
+                    ws_col: _size.cols,
                     ws_xpixel: 0,
                     ws_ypixel: 0,
                 };
@@ -1043,6 +1058,7 @@ fn terminal_size_from_parts(cols: Option<u16>, rows: Option<u16>) -> HomeTermina
     }
 }
 
+#[cfg(unix)]
 fn home_terminal_command() -> anyhow::Result<HomeTerminalCommand> {
     if let Ok(program) = std::env::var(HOME_TERMINAL_PROGRAM_ENV) {
         let program = program.trim().to_string();
@@ -1117,16 +1133,19 @@ fn spawn_home_terminal_pty_reader(session: Arc<HomeTerminalSession>, reader: Asy
     });
 }
 
+#[cfg(unix)]
 fn mark_home_terminal_pty_reader_drained(session: &HomeTerminalSession) {
     session.pty_reader_drained.store(true, Ordering::SeqCst);
     session.pty_reader_drained_notify.notify_waiters();
 }
 
+#[cfg(unix)]
 #[derive(Default)]
 struct HomeTerminalUtf8Decoder {
     pending: Vec<u8>,
 }
 
+#[cfg(unix)]
 impl HomeTerminalUtf8Decoder {
     fn push(&mut self, bytes: &[u8]) -> Option<String> {
         self.pending.extend_from_slice(bytes);
@@ -1172,6 +1191,7 @@ impl HomeTerminalUtf8Decoder {
     }
 }
 
+#[cfg(unix)]
 fn send_home_terminal_stdout(session: &HomeTerminalSession, data: String) {
     emit_home_terminal_event(
         session,
@@ -1186,6 +1206,7 @@ fn send_home_terminal_stdout(session: &HomeTerminalSession, data: String) {
     );
 }
 
+#[cfg(unix)]
 fn spawn_home_terminal_waiter(session: Arc<HomeTerminalSession>) {
     tokio::spawn(async move {
         let status = session.child.lock().await.wait().await;
@@ -1235,6 +1256,7 @@ fn spawn_home_terminal_policy_watchdog(session_id: String, data_dir: PathBuf) {
     });
 }
 
+#[cfg(unix)]
 async fn wait_home_terminal_pty_reader_drained(session: &HomeTerminalSession) {
     if session.pty_reader_drained.load(Ordering::SeqCst) {
         return;
@@ -1247,6 +1269,7 @@ async fn wait_home_terminal_pty_reader_drained(session: &HomeTerminalSession) {
     }
 }
 
+#[cfg(unix)]
 fn spawn_home_terminal_attach_watchdog(session: Arc<HomeTerminalSession>) {
     let session_id = session.session_id.clone();
     let created_at_ms = session.created_at_ms;
@@ -1300,6 +1323,7 @@ impl Drop for HomeTerminalEventStreamGuard {
     }
 }
 
+#[cfg(unix)]
 async fn prepare_home_terminal_start(
     context: &HomeLaunchTokenContext,
     now_ms: u64,
@@ -1373,6 +1397,7 @@ async fn close_home_terminal_cleanup_targets(targets: Vec<HomeTerminalCleanupTar
     }
 }
 
+#[cfg(unix)]
 fn home_terminal_session_limits() -> HomeTerminalSessionLimits {
     HomeTerminalSessionLimits {
         total: HOME_TERMINAL_MAX_ACTIVE_SESSIONS,
@@ -1381,6 +1406,7 @@ fn home_terminal_session_limits() -> HomeTerminalSessionLimits {
     }
 }
 
+#[cfg(unix)]
 fn home_terminal_start_plan(
     sessions: &[HomeTerminalSessionLifecycle],
     context: &HomeLaunchTokenContext,
@@ -1501,6 +1527,7 @@ fn home_terminal_sessions() -> &'static Mutex<HashMap<String, Arc<HomeTerminalSe
     HOME_TERMINAL_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(unix)]
 async fn insert_home_terminal_session(session: Arc<HomeTerminalSession>) {
     home_terminal_sessions()
         .lock()
@@ -1516,7 +1543,7 @@ async fn home_terminal_session(session_id: &str) -> Option<Arc<HomeTerminalSessi
         .cloned()
 }
 
-#[cfg(test)]
+#[cfg(all(unix, test))]
 pub(super) async fn home_terminal_process_id(session_id: &str) -> Option<u32> {
     home_terminal_session(session_id).await?.child_pid
 }
@@ -1761,12 +1788,12 @@ fn home_terminal_sse_response(mut response: Response) -> Response {
 }
 
 fn kill_home_terminal_process(child_pid: Option<u32>) {
-    let Some(pid) = child_pid else {
+    let Some(_pid) = child_pid else {
         return;
     };
     #[cfg(unix)]
     unsafe {
-        let pid = pid as i32;
+        let pid = _pid as i32;
         let _ = libc::kill(-pid, libc::SIGKILL);
         let _ = libc::kill(pid, libc::SIGKILL);
     }
@@ -1776,12 +1803,14 @@ async fn remove_home_terminal_session(session_id: &str) -> Option<Arc<HomeTermin
     home_terminal_sessions().lock().await.remove(session_id)
 }
 
+#[cfg(unix)]
 fn random_hex_token() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
+#[cfg(unix)]
 fn home_terminal_authority_env(context: &HomeLaunchTokenContext) -> Vec<(&'static str, String)> {
     let mut env = vec![
         (
