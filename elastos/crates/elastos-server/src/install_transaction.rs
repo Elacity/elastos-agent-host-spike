@@ -457,6 +457,24 @@ impl InstallTransaction {
         Ok(tx)
     }
 
+    /// Points at `path` and writes nothing. `acquire` on Windows returns an
+    /// earlier custody refusal, so the candidate-custody test cannot obtain a
+    /// transaction that way. The Windows candidate refusal returns before it
+    /// reads this value.
+    #[cfg(all(test, windows))]
+    pub(crate) fn at_path_for_windows_refusal_test(path: &Path) -> Self {
+        Self {
+            _guard: InstallationGuard {
+                _lock: crate::host_lock::FileLock::without_file_for_test(),
+                binary_parent: path.to_path_buf(),
+            },
+            data_dir: path.to_path_buf(),
+            binary: path.join("elastos"),
+            destinations: BTreeMap::new(),
+            layout: ReleaseLayout::Consumed,
+        }
+    }
+
     #[cfg(unix)]
     fn check_metadata_custody(&self, id: ReleaseFile) -> anyhow::Result<()> {
         if self.uses_consumed_layout()

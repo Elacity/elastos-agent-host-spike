@@ -675,3 +675,110 @@ mod tests {
         update_cleanup_case(Reply::ClosedFirstConnection).await;
     }
 }
+
+#[cfg(test)]
+#[cfg(windows)]
+mod windows_update_check_tests {
+    use super::run_update_command_for_data_dir;
+
+    #[tokio::test]
+    async fn windows_update_check_on_empty_data_dir_refuses_no_trusted_source_and_writes_nothing() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let before = tree_record(data.path());
+        assert_eq!(
+            before.entries.len(),
+            0,
+            "the empty data directory must start with no entries"
+        );
+
+        let error =
+            run_update_command_for_data_dir(data.path(), true, None, false, None, false, "0.0.0")
+                .await
+                .expect_err("an empty data directory has no trusted source");
+
+        assert_eq!(
+            error.to_string(),
+            "No trusted source configured",
+            "{error:#}"
+        );
+        assert_eq!(before, tree_record(data.path()));
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct TreeRecord {
+        root_modified: std::time::SystemTime,
+        root_len: u64,
+        root_readonly: bool,
+        entries: Vec<EntryRecord>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct EntryRecord {
+        relative: String,
+        kind: &'static str,
+        modified: std::time::SystemTime,
+        len: u64,
+        readonly: bool,
+        body: Vec<u8>,
+    }
+
+    fn tree_record(root: &std::path::Path) -> TreeRecord {
+        let meta = std::fs::symlink_metadata(root).expect("root metadata");
+        let mut entries = Vec::new();
+        collect_entries(root, root, &mut entries);
+        entries.sort_by(|left, right| left.relative.cmp(&right.relative));
+        TreeRecord {
+            root_modified: meta.modified().expect("root mtime"),
+            root_len: meta.len(),
+            root_readonly: meta.permissions().readonly(),
+            entries,
+        }
+    }
+
+    fn collect_entries(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        entries: &mut Vec<EntryRecord>,
+    ) {
+        let mut children = std::fs::read_dir(dir)
+            .expect("read directory")
+            .map(|entry| entry.expect("directory entry").path())
+            .collect::<Vec<_>>();
+        children.sort();
+        for path in children {
+            let meta = std::fs::symlink_metadata(&path).expect("entry metadata");
+            let file_type = meta.file_type();
+            let (kind, body) = if file_type.is_symlink() {
+                (
+                    "symlink",
+                    std::fs::read_link(&path)
+                        .expect("link target")
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .to_vec(),
+                )
+            } else if file_type.is_file() {
+                ("file", std::fs::read(&path).expect("file bytes"))
+            } else if file_type.is_dir() {
+                ("dir", Vec::new())
+            } else {
+                ("other", Vec::new())
+            };
+            entries.push(EntryRecord {
+                relative: path
+                    .strip_prefix(root)
+                    .expect("entry stays under the data directory")
+                    .to_string_lossy()
+                    .into_owned(),
+                kind,
+                modified: meta.modified().expect("entry mtime"),
+                len: meta.len(),
+                readonly: meta.permissions().readonly(),
+                body,
+            });
+            if file_type.is_dir() {
+                collect_entries(root, &path, entries);
+            }
+        }
+    }
+}

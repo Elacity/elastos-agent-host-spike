@@ -6353,3 +6353,160 @@ mod tests {
         assert!(!InstallTransaction::has_pending_recovery(&binary));
     }
 }
+
+#[cfg(test)]
+#[cfg(windows)]
+mod windows_install_path_refusal_tests {
+    use super::{
+        fingerprint_support_tree, verify_candidate_before_migration,
+        verify_installed_binary_version,
+    };
+    use crate::install_transaction::InstallTransaction;
+    use sha2::Digest;
+
+    const CANDIDATE_CUSTODY: &str = "update candidate executable custody is unsupported on Windows";
+    const PROCESS_TREE_CUSTODY: &str =
+        "update executable process tree custody is unsupported on Windows";
+    const SUPPORT_FINGERPRINT: &str =
+        "update support tree no-follow fingerprint is unsupported on Windows";
+
+    #[tokio::test]
+    async fn windows_candidate_executable_custody_refuses_by_name_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp path");
+        let before = tree_record(dir.path());
+        assert_eq!(before.entries.len(), 0, "temp path must start empty");
+        let transaction = InstallTransaction::at_path_for_windows_refusal_test(dir.path());
+        assert_eq!(
+            before,
+            tree_record(dir.path()),
+            "the call value must not write"
+        );
+
+        let error = verify_candidate_before_migration(&transaction, b"candidate-bytes", "9.9.9")
+            .await
+            .expect_err("candidate custody refusal");
+
+        assert_named_io(&error, CANDIDATE_CUSTODY);
+        assert_eq!(before, tree_record(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn windows_executable_process_tree_custody_refuses_by_name_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp path");
+        let binary = dir.path().join("elastos");
+        let before = tree_record(dir.path());
+        assert_eq!(before.entries.len(), 0, "temp path must start empty");
+
+        let error = verify_installed_binary_version(&binary, "9.9.9")
+            .await
+            .expect_err("process tree custody refusal");
+
+        assert_named_io(&error, PROCESS_TREE_CUSTODY);
+        assert_eq!(before, tree_record(dir.path()));
+        assert!(!binary.exists());
+    }
+
+    #[test]
+    fn windows_support_tree_fingerprint_refuses_by_name_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("temp path");
+        let before = tree_record(dir.path());
+        assert_eq!(before.entries.len(), 0, "temp path must start empty");
+        let mut digest = sha2::Sha256::new();
+        let digest_before = digest.clone().finalize();
+        let excluded = std::collections::BTreeSet::new();
+
+        let error = fingerprint_support_tree(dir.path(), &excluded, &mut digest)
+            .expect_err("support fingerprint refusal");
+
+        assert_named_io(&error, SUPPORT_FINGERPRINT);
+        assert_eq!(digest.finalize(), digest_before);
+        assert_eq!(before, tree_record(dir.path()));
+    }
+
+    fn assert_named_io(error: &anyhow::Error, sentence: &str) {
+        let io_error = error
+            .downcast_ref::<std::io::Error>()
+            .unwrap_or_else(|| panic!("expected an io refusal, got {error:#}"));
+        assert_eq!(io_error.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(io_error.to_string(), sentence);
+        assert_eq!(error.to_string(), sentence, "{error:#}");
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct TreeRecord {
+        root_modified: std::time::SystemTime,
+        root_len: u64,
+        root_readonly: bool,
+        entries: Vec<EntryRecord>,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct EntryRecord {
+        relative: String,
+        kind: &'static str,
+        modified: std::time::SystemTime,
+        len: u64,
+        readonly: bool,
+        body: Vec<u8>,
+    }
+
+    fn tree_record(root: &std::path::Path) -> TreeRecord {
+        let meta = std::fs::symlink_metadata(root).expect("root metadata");
+        let mut entries = Vec::new();
+        collect_entries(root, root, &mut entries);
+        entries.sort_by(|left, right| left.relative.cmp(&right.relative));
+        TreeRecord {
+            root_modified: meta.modified().expect("root mtime"),
+            root_len: meta.len(),
+            root_readonly: meta.permissions().readonly(),
+            entries,
+        }
+    }
+
+    fn collect_entries(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        entries: &mut Vec<EntryRecord>,
+    ) {
+        let mut children = std::fs::read_dir(dir)
+            .expect("read directory")
+            .map(|entry| entry.expect("directory entry").path())
+            .collect::<Vec<_>>();
+        children.sort();
+        for path in children {
+            let meta = std::fs::symlink_metadata(&path).expect("entry metadata");
+            let file_type = meta.file_type();
+            let (kind, body) = if file_type.is_symlink() {
+                (
+                    "symlink",
+                    std::fs::read_link(&path)
+                        .expect("link target")
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .to_vec(),
+                )
+            } else if file_type.is_file() {
+                ("file", std::fs::read(&path).expect("file bytes"))
+            } else if file_type.is_dir() {
+                ("dir", Vec::new())
+            } else {
+                ("other", Vec::new())
+            };
+            entries.push(EntryRecord {
+                relative: path
+                    .strip_prefix(root)
+                    .expect("entry stays under the temp path")
+                    .to_string_lossy()
+                    .into_owned(),
+                kind,
+                modified: meta.modified().expect("entry mtime"),
+                len: meta.len(),
+                readonly: meta.permissions().readonly(),
+                body,
+            });
+            if file_type.is_dir() {
+                collect_entries(root, &path, entries);
+            }
+        }
+    }
+}

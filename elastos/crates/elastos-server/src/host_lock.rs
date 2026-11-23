@@ -41,6 +41,13 @@ impl FileLock {
     pub(crate) fn release(mut self) -> std::io::Result<()> {
         self.0.take().map_or(Ok(()), |file| file.unlock())
     }
+
+    /// No open file and no lock. The Windows update-refusal tests need a guard
+    /// value the refusal returns before reading. Drop closes nothing.
+    #[cfg(all(test, windows))]
+    pub(crate) fn without_file_for_test() -> Self {
+        Self(None)
+    }
 }
 
 impl std::ops::Deref for FileLock {
