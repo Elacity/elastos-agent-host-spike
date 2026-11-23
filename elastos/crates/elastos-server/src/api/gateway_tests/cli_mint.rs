@@ -753,6 +753,7 @@ async fn request_refuses_a_capsule_token_with_a_null_origin() {
     assert!(!dir.path().join("home-cli-mint").exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_after_approve_returns_a_grant_that_verifies() {
     let _mint = mint_test_guard().await;
@@ -784,6 +785,7 @@ async fn claim_after_approve_returns_a_grant_that_verifies() {
     assert!(!dir.path().join("home-cli-mint").exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn second_claim_fails() {
     let _mint = mint_test_guard().await;
@@ -800,6 +802,7 @@ async fn second_claim_fails() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_refuses_a_wrong_secret() {
     let _mint = mint_test_guard().await;
@@ -816,6 +819,7 @@ async fn claim_refuses_a_wrong_secret() {
     assert_eq!(record["state"], "approved");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_refuses_a_mismatched_session() {
     let _mint = mint_test_guard().await;
@@ -837,6 +841,7 @@ async fn claim_refuses_a_mismatched_session() {
     assert_eq!(record["state"], "approved");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_before_approve_fails() {
     let _mint = mint_test_guard().await;
@@ -866,6 +871,7 @@ async fn claim_before_approve_fails() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn grant_older_than_five_minutes_fails_the_existing_expiry_check() {
     let _mint = mint_test_guard().await;
@@ -888,6 +894,7 @@ async fn grant_older_than_five_minutes_fails_the_existing_expiry_check() {
     assert_eq!(error.to_string(), "home launch token expired");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn cancel_then_claim_fails() {
     let _mint = mint_test_guard().await;
@@ -909,6 +916,7 @@ async fn cancel_then_claim_fails() {
     assert!(record.contains("cancelled") && !record.contains(LAUNCH_TOKEN));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_refuses_an_expired_request() {
     let _mint = mint_test_guard().await;
@@ -926,6 +934,7 @@ async fn claim_refuses_an_expired_request() {
     assert_eq!(record["state"], "approved");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_refuses_a_mismatched_principal_proof_or_grant() {
     let _mint = mint_test_guard().await;
@@ -965,6 +974,7 @@ async fn claim_refuses_a_mismatched_principal_proof_or_grant() {
     }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_checks_the_secret_before_the_state() {
     let _mint = mint_test_guard().await;
@@ -994,6 +1004,7 @@ async fn claim_checks_the_secret_before_the_state() {
     assert_eq!(signature_calls(dir.path()), before);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn cancel_by_another_admin_session_is_refused() {
     let _mint = mint_test_guard().await;
@@ -1024,6 +1035,7 @@ async fn cancel_by_another_admin_session_is_refused() {
     assert_eq!(record["state"], "begun");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn claim_refuses_a_null_origin_with_a_launch_token() {
     let _mint = mint_test_guard().await;
@@ -1054,6 +1066,7 @@ async fn claim_refuses_a_null_origin_with_a_launch_token() {
     assert_eq!(record["state"], "approved");
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_concurrent_claims_sign_once() {
     let _mint = mint_test_guard().await;
