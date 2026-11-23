@@ -338,6 +338,7 @@ fn release_platform_for(os: &str, arch: &str) -> &'static str {
         ("linux", "aarch64") => "aarch64-linux",
         ("macos", "x86_64") => "x86_64-darwin",
         ("macos", "aarch64") => "aarch64-darwin",
+        ("windows", "x86_64") => "x86_64-windows",
         _ => "unknown",
     }
 }
@@ -2556,6 +2557,7 @@ mod tests {
             ("linux", "aarch64", "aarch64-linux"),
             ("macos", "x86_64", "x86_64-darwin"),
             ("macos", "aarch64", "aarch64-darwin"),
+            ("windows", "x86_64", "x86_64-windows"),
             ("windows", "aarch64", "unknown"),
             ("linux", "riscv64", "unknown"),
         ] {

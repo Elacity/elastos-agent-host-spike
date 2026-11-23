@@ -1067,24 +1067,29 @@ fn set_local_copy_permissions(_source: &Path, _dest: &Path) -> anyhow::Result<()
 
 // ── Platform detection ──────────────────────────────────────────────
 
+/// Spelling record (owner unanswered): the release id is `x86_64-windows`
+/// (update.rs release table) and the component id is `windows-amd64` (here);
+/// this pair is the stricter choice, so the signer and release scripts stay
+/// unchanged and a manifest without a `windows-amd64` row still fails closed.
 pub fn detect_platform() -> String {
-    let os = if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "macos") {
-        "darwin"
-    } else {
-        "unknown"
-    };
+    component_platform_for(std::env::consts::OS, std::env::consts::ARCH)
+}
 
-    let arch = if cfg!(target_arch = "x86_64") {
-        "amd64"
-    } else if cfg!(target_arch = "aarch64") {
-        "arm64"
-    } else {
-        "unknown"
+/// Setup component ids spell the host `<os>-<arch>`, with setup's own names
+/// (`darwin`, separate from the release table's `x86_64-darwin`-style ids).
+fn component_platform_for(os: &str, arch: &str) -> String {
+    let os = match os {
+        "linux" => "linux",
+        "macos" => "darwin",
+        "windows" => "windows",
+        _ => "unknown",
     };
-
-    format!("{}-{}", os, arch)
+    let arch = match arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => "unknown",
+    };
+    format!("{os}-{arch}")
 }
 
 struct InstalledComponentEntry {
@@ -5834,7 +5839,10 @@ pub(crate) mod tests {
     fn test_detect_platform() {
         let p = detect_platform();
         assert!(
-            p.contains("linux") || p.contains("darwin") || p.contains("unknown"),
+            p.contains("linux")
+                || p.contains("darwin")
+                || p.contains("windows")
+                || p.contains("unknown"),
             "Platform should contain os: {}",
             p
         );
@@ -10939,5 +10947,42 @@ pub(crate) mod tests {
             install_signed_model_catalog(&data_dir, &manifest, &source_dir.join("components.json"))
                 .unwrap_err();
         assert!(err.to_string().contains("does not match the pinned"));
+    }
+}
+
+/// Platform-neutral checks for the Windows component id: they run on every
+/// host OS, need no network, and write no files. Unix-only tests stay in the
+/// `#[cfg(unix)]` module above.
+#[cfg(test)]
+mod component_platform_tests {
+    use super::*;
+
+    #[test]
+    fn detect_platform_names_windows_x86_64_windows_amd64() {
+        assert_eq!(component_platform_for("windows", "x86_64"), "windows-amd64");
+    }
+
+    #[test]
+    fn a_linux_amd64_only_manifest_refuses_a_windows_host_before_any_download() {
+        // A manifest that only names linux-amd64 has no windows-amd64 row:
+        // setup's pre-download component lookup (setup::run's exact host-row
+        // check) refuses, and the general row lookup finds no row, so no
+        // fetch or file write can start.
+        let manifest: ComponentsManifest = serde_json::from_value(serde_json::json!({
+            "external": {"browser-vm-image": {
+                "install_path": "browser-vm/image-set",
+                "platforms": {"linux-amd64": {
+                    "release_path": "browser-vm/linux-amd64.tar.gz",
+                    "install_path": "browser-vm/image-set",
+                    "extract_path": "browser-vm-image",
+                    "strategy": "browser-vm-image"
+                }}
+            }},
+            "profiles": {}
+        }))
+        .unwrap();
+        assert!(browser_vm_image::component_info(&manifest, "windows-amd64").is_err());
+        let component = &manifest.external["browser-vm-image"];
+        assert!(resolve_platform_info(component, "windows-amd64").is_none());
     }
 }
