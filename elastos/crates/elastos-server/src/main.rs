@@ -1321,7 +1321,7 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run())
+        .block_on(Box::pin(run()))
 }
 
 async fn run() -> anyhow::Result<()> {

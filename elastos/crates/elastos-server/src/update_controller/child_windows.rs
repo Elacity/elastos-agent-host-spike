@@ -48,9 +48,10 @@ pub(crate) fn generation_gone(_pid: u32, _start: &str) -> Result<bool> {
 /// Same name as `elastos_common::process_lifetime::PARENT_PIPE_ENV`, which is Unix-only.
 const PARENT_PIPE_ENV: &str = "ELASTOS_UPDATE_PARENT_PIPE";
 
-/// As on Unix, only an update child started with the parent-pipe marker has a parent to watch;
-/// every other command runs. An update child still refuses, because Windows has no owned
-/// parent pipe yet.
+/// Windows refuses whenever the parent-pipe marker is present, because it has no owned
+/// parent pipe yet. Unix goes further than marker presence: it also checks the marker's
+/// pipe fd identity, so a stale or reused descriptor runs without a watcher instead of
+/// refusing.
 pub(crate) fn watch_parent() -> Result<()> {
     if std::env::var_os(PARENT_PIPE_ENV).is_none() {
         return Ok(());
