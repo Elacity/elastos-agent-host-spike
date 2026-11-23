@@ -10,6 +10,9 @@
 //! already uses: `elastos-server` and `elastos-runtime` crate roots, with
 //! every `#[cfg(test)]` item removed. This file is reached only from the test
 //! module. Needles are joined at run time, so this file does not count itself.
+//!
+//! The row key is the file, the function name, and the mechanism. Two
+//! functions with the same name in one file are one row, and their calls add.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -106,6 +109,21 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "start_wallet_provider",
         "encryption_key: device_key_hex",
     ),
+    (
+        "elastos-server/src/api/gateway.rs",
+        "home_launch_token_context_from_parts",
+        "HomeLaunchTokenContext::resolved",
+    ),
+    (
+        "elastos-server/src/api/gateway.rs",
+        "issue_gateway_owned_home_cli_launch_token",
+        "issue_home_projection_launch_token_with_context",
+    ),
+    (
+        "elastos-server/src/home_cmd.rs",
+        "issue_capsule_launch_token",
+        "issue_gateway_owned_home_cli_launch_token",
+    ),
 ];
 
 fn rows() -> Vec<HeldRow> {
@@ -123,6 +141,13 @@ fn rows() -> Vec<HeldRow> {
         "SigningKey::generate",
         1,
         mark("runtime-own", "capability signing key", "Runtime", "Runtime rotates its capability signing key"),
+    ),
+    row(
+        "elastos-runtime/src/capability/manager.rs",
+        "delegate",
+        "capability_manager.grant",
+        1,
+        mark("runtime-own", "child capability", "child capsule", "Runtime grants a non-delegatable child token from a parent capability"),
     ),
     row(
         "elastos-runtime/src/capability/manager.rs",
@@ -248,14 +273,14 @@ fn rows() -> Vec<HeldRow> {
         "home_launch_token_context_from_parts",
         "HomeLaunchTokenContext::resolved",
         1,
-        mark("delegated", "checked session grant", "CLI", "The CLI context is built only after the session grant matches"),
+        mark("open", "env launch context", "CLI", "With no proof binding the context is built from env parts and the live grant is not checked"),
     ),
     row(
         "elastos-server/src/api/gateway.rs",
         "issue_gateway_owned_home_cli_launch_token",
         "issue_home_projection_launch_token_with_context",
         1,
-        mark("delegated", "env-bound CLI grant", "CLI", "The gateway-owned CLI path mints from the approved grant"),
+        mark("open", "device-signed app token", "any app", "This mints for any app from the env context, including when no proof binding is set"),
     ),
     row(
         "elastos-server/src/api/gateway.rs",
@@ -263,6 +288,13 @@ fn rows() -> Vec<HeldRow> {
         "issue_local_runtime_home_launch_token",
         1,
         mark("narrowed", "public device mint", "home and home-cli", "The public wrapper forwards to the device mint, which accepts only home and home-cli"),
+    ),
+    row(
+        "elastos-server/src/api/gateway.rs",
+        "load_existing_gateway_runtime_did",
+        "load_existing_did",
+        1,
+        mark("home-own", "device DID", "Home", "The gateway reads this device's DID when no trusted signer DID is set"),
     ),
     row(
         "elastos-server/src/api/gateway_agents.rs",
@@ -343,6 +375,13 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/api/gateway_browser_internet.rs",
+        "answer",
+        "capability_manager.grant",
+        1,
+        mark("delegated", "internet execute capability", "browser", "A Browser internet answer mints an execute capability after passkey step-up"),
+    ),
+    row(
+        "elastos-server/src/api/gateway_browser_internet.rs",
         "summary",
         "require_runtime_wallet_authority",
         1,
@@ -354,6 +393,13 @@ fn rows() -> Vec<HeldRow> {
         "require_runtime_wallet_authority",
         1,
         mark("delegated", "browser launch token", "browser", "Admission approval requires the Browser launch token"),
+    ),
+    row(
+        "elastos-server/src/api/gateway_browser_operator.rs",
+        "approve_admission",
+        "capability_manager.grant",
+        1,
+        mark("delegated", "operator write capability", "browser operator", "Approving an operator admission mints a bounded write capability"),
     ),
     row(
         "elastos-server/src/api/gateway_browser_operator.rs",
@@ -375,6 +421,13 @@ fn rows() -> Vec<HeldRow> {
         "require_runtime_wallet_authority",
         1,
         mark("delegated", "browser launch token", "browser", "Revoking an admission requires the Browser launch token"),
+    ),
+    row(
+        "elastos-server/src/api/gateway_browser_operator_client.rs",
+        "grant_inspection",
+        "capability_manager.grant",
+        1,
+        mark("delegated", "operator inspect capability", "browser operator", "Inspection mints a bounded read capability when the admission includes it"),
     ),
     row(
         "elastos-server/src/api/gateway_browser_wallet.rs",
@@ -938,6 +991,13 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/auth.rs",
+        "observe_runtime_device_key_file_identity",
+        "device_key_path",
+        1,
+        mark("home-own", "device key file", "Home", "Home watches the device key file so a changed key drops the cached auth state"),
+    ),
+    row(
+        "elastos-server/src/auth.rs",
         "persist_audit_chain_activation_unlocked",
         "load_or_create_did",
         1,
@@ -991,6 +1051,13 @@ fn rows() -> Vec<HeldRow> {
         "load_existing_device_signing_key",
         1,
         mark("home-own", "Home network identity", "Home", "Carrier exit signs with this device"),
+    ),
+    row(
+        "elastos-server/src/collaboration_presence_grant.rs",
+        "set_presence_grant",
+        "capability_manager.grant",
+        1,
+        mark("delegated", "presence capability", "person", "A presence answer mints a capability for that person"),
     ),
     row(
         "elastos-server/src/collaboration_profile_authority.rs",
@@ -1078,6 +1145,13 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/home_cmd.rs",
+        "gather_snapshot_from_parts",
+        "load_existing_did",
+        1,
+        mark("home-own", "device DID", "Home CLI", "The CLI snapshot reads this device's DID when no projection names one"),
+    ),
+    row(
+        "elastos-server/src/home_cmd.rs",
         "home_cli_invoke_principal",
         "load_or_create_did",
         1,
@@ -1088,7 +1162,7 @@ fn rows() -> Vec<HeldRow> {
         "issue_capsule_launch_token",
         "issue_gateway_owned_home_cli_launch_token",
         1,
-        mark("delegated", "gateway-owned CLI token", "CLI", "The CLI uses the gateway-owned grant when that grant is present"),
+        mark("open", "gateway-owned env token", "any app", "The CLI tries the gateway-owned env path first, which can mint for any app with no proof binding"),
     ),
     row(
         "elastos-server/src/home_cmd.rs",
@@ -1159,6 +1233,13 @@ fn rows() -> Vec<HeldRow> {
         "require_isolated_provider",
         1,
         mark("dkm", "custody isolation", "custody provider", "Provisioning a custody node asks for an isolated provider"),
+    ),
+    row(
+        "elastos-server/src/protected_content_config.rs",
+        "run_protected_content_config_command_with_writer",
+        "device_key_path",
+        1,
+        mark("dkm", "device key file", "custody", "Showing the Runtime issuer locates this device key file"),
     ),
     row(
         "elastos-server/src/protected_content_config.rs",
@@ -1399,6 +1480,7 @@ fn needles() -> Vec<(String, String)> {
         call(&["issue_", "step_up_token"]),
         call(&["local_home_", "launch_token_context"]),
         call(&["HomeLaunchTokenContext::", "resolved"]),
+        text(&["HomeLaunchTokenContext", " {"]),
         text(&["Runtime", "CreateBinding {"]),
         text(&["Runtime", "AccessBinding {"]),
         call(&["require_carried_", "home_launch_token"]),
@@ -1414,15 +1496,24 @@ fn needles() -> Vec<(String, String)> {
         call(&["require_", "isolated_provider"]),
         call(&["invoke_", "decrypt_provider"]),
         call(&["CapabilityManager::", "load_or_generate"]),
-        call(&["capability_manager", ".grant"]),
+        (
+            ["capability_manager", ".grant"].concat(),
+            [".grant", "("].concat(),
+        ),
         call(&["encode_bridge_", "capability_token"]),
         call(&["LaunchHeld::", "new"]),
         call(&["take_", "place"]),
         call(&["read_kept_", "launch"]),
         call(&["read_kept_", "page_file"]),
         call(&["load_or_", "create_did"]),
+        call(&["load_existing_", "did"]),
         call(&["load_existing_", "device_signing_key"]),
         call(&["load_or_", "create_device_key"]),
+        call(&["device_key_", "path"]),
+        (
+            ["*", "_with_device_key"].concat(),
+            ["_with_device_key", "("].concat(),
+        ),
     ]
 }
 
@@ -1444,11 +1535,17 @@ fn sources() -> &'static BTreeMap<String, String> {
 fn device_key_labels() -> BTreeSet<String> {
     [
         ["load_or_", "create_did"].concat(),
+        ["load_existing_", "did"].concat(),
         ["load_existing_", "device_signing_key"].concat(),
         ["load_or_", "create_device_key"].concat(),
+        ["device_key_", "path"].concat(),
     ]
     .into_iter()
     .collect()
+}
+
+fn is_device_key_mechanism(label: &str) -> bool {
+    device_key_labels().contains(label) || label.ends_with("_with_device_key")
 }
 
 struct FnBody {
@@ -1562,6 +1659,125 @@ fn counts_as_site(code: &str, at: usize) -> bool {
     !(at >= 3 && &code[at - 3..at] == "fn ")
 }
 
+fn add_site(
+    found: &mut BTreeMap<(String, String, String), usize>,
+    file: &str,
+    bodies: &[FnBody],
+    at: usize,
+    label: &str,
+) {
+    let function = enclosing_function(bodies, at);
+    *found
+        .entry((file.to_string(), function.to_string(), label.to_string()))
+        .or_default() += 1;
+}
+
+fn capability_grant_label() -> String {
+    ["capability_manager", ".grant"].concat()
+}
+
+fn device_key_family_needle() -> String {
+    ["_with_device_key", "("].concat()
+}
+
+fn context_literal_label() -> String {
+    ["HomeLaunchTokenContext", " {"].concat()
+}
+
+fn preceded_by_arrow(code: &str, at: usize) -> bool {
+    let bytes = code.as_bytes();
+    let mut end = at;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    end >= 2 && &code[end - 2..end] == "->"
+}
+
+/// A capability grant is any `.grant(` with arguments. The receiver name and
+/// a line break before the dot do not matter. A zero-argument `.grant()` is
+/// a getter, not this grant.
+fn record_capability_grants(
+    found: &mut BTreeMap<(String, String, String), usize>,
+    file: &str,
+    code: &str,
+    bodies: &[FnBody],
+    label: &str,
+) {
+    let needle = [".grant", "("].concat();
+    let mut from = 0;
+    while let Some(rel) = code[from..].find(&needle) {
+        let dot = from + rel;
+        let after = dot + needle.len();
+        from = after;
+        if source::receiver_before(code, dot).is_empty() {
+            continue;
+        }
+        if code[after..].trim_start().starts_with(')') {
+            continue;
+        }
+        add_site(found, file, bodies, dot, label);
+    }
+}
+
+/// Every call whose name ends in `_with_device_key`. The mechanism is that
+/// full name, so a new function in the family is its own row.
+fn record_device_key_family(
+    found: &mut BTreeMap<(String, String, String), usize>,
+    file: &str,
+    code: &str,
+    bodies: &[FnBody],
+) {
+    let marker = device_key_family_needle();
+    let suffix_len = ["_with_device_key"].concat().len();
+    let bytes = code.as_bytes();
+    for (at, _) in code.match_indices(&marker) {
+        let mut start = at;
+        while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+            start -= 1;
+        }
+        if !counts_as_site(code, start) {
+            continue;
+        }
+        add_site(found, file, bodies, start, &code[start..at + suffix_len]);
+    }
+}
+
+/// A `HomeLaunchTokenContext { ... }` value. A struct or impl declaration,
+/// and a function whose return type is that name, are not constructions.
+fn record_context_literals(
+    found: &mut BTreeMap<(String, String, String), usize>,
+    file: &str,
+    code: &str,
+    bodies: &[FnBody],
+    label: &str,
+) {
+    let name = label.trim_end_matches([' ', '{']);
+    let bytes = code.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = code[from..].find(name) {
+        let at = from + rel;
+        let after = at + name.len();
+        from = after;
+        if bytes
+            .get(after)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            continue;
+        }
+        if !counts_as_site(code, at) {
+            continue;
+        }
+        if !code[after..].trim_start().starts_with('{') {
+            continue;
+        }
+        let before = source::receiver_before(code, at);
+        if matches!(before, "struct" | "impl" | "enum" | "trait") || preceded_by_arrow(code, at) {
+            continue;
+        }
+        add_site(found, file, bodies, at, label);
+    }
+}
+
 fn sites_in(
     file: &str,
     raw: &str,
@@ -1570,15 +1786,27 @@ fn sites_in(
     let code = source::code_only(raw);
     let bodies = function_bodies(&code);
     let mut found = BTreeMap::new();
+    let grant_label = capability_grant_label();
+    let family_needle = device_key_family_needle();
+    let literal_label = context_literal_label();
     for (label, needle) in needles {
-        for (at, _) in code.match_indices(needle) {
+        if label == &grant_label {
+            record_capability_grants(&mut found, file, &code, &bodies, label);
+            continue;
+        }
+        if needle == &family_needle {
+            record_device_key_family(&mut found, file, &code, &bodies);
+            continue;
+        }
+        if label == &literal_label {
+            record_context_literals(&mut found, file, &code, &bodies, label);
+            continue;
+        }
+        for (at, _) in code.match_indices(needle.as_str()) {
             if !counts_as_site(&code, at) {
                 continue;
             }
-            let function = enclosing_function(&bodies, at);
-            *found
-                .entry((file.to_string(), function.to_string(), label.clone()))
-                .or_default() += 1;
+            add_site(&mut found, file, &bodies, at, label);
         }
     }
     found
@@ -1685,14 +1913,13 @@ fn every_held_authority_site_has_a_row() {
 
 #[test]
 fn every_device_key_signing_site_names_its_authority() {
-    let labels = device_key_labels();
     let needles: Vec<_> = needles()
         .into_iter()
-        .filter(|(label, _)| labels.contains(label))
+        .filter(|(label, _)| is_device_key_mechanism(label))
         .collect();
     let found = found_sites(&needles);
     let mut listed = row_map();
-    listed.retain(|key, _| labels.contains(&key.2));
+    listed.retain(|key, _| is_device_key_mechanism(&key.2));
     let (missing, stale) = diff_sites(&found, &listed);
     assert!(
         missing.is_empty() && stale.is_empty(),
@@ -1701,7 +1928,7 @@ fn every_device_key_signing_site_names_its_authority() {
         stale.join("\n")
     );
     for row in rows() {
-        if labels.contains(row.mechanism) {
+        if is_device_key_mechanism(row.mechanism) {
             assert!(!row.authority.is_empty(), "{}", row.function);
             assert!(!row.behalf.is_empty(), "{}", row.function);
             assert!(!row.reason.is_empty(), "{}", row.function);
@@ -1919,4 +2146,67 @@ fn scanner_keeps_a_call_inside_an_array_return_type() {
         mint,
     );
     assert_eq!(found.get(&key).copied(), Some(1), "{found:?}");
+}
+
+#[test]
+fn scanner_counts_a_capability_grant_with_any_receiver() {
+    let source = "fn issue() {\n    manager.grant(a, b, c, d, e);\n    self.capability_manager\n        .grant(a, b, c, d, e);\n}\nfn read() {\n    let _ = held.grant();\n}\n";
+    let found = sites_in("elastos-server/src/fixture.rs", source, &needles());
+    let grant = capability_grant_label();
+    let key = (
+        "elastos-server/src/fixture.rs".to_string(),
+        "issue".to_string(),
+        grant,
+    );
+    assert_eq!(found.get(&key).copied(), Some(2), "{found:?}");
+    assert!(found.keys().all(|key| key.1 != "read"), "{found:?}");
+}
+
+#[test]
+fn scanner_counts_device_key_calls_and_a_context_literal() {
+    let existing = ["load_existing_", "did"].concat();
+    let path = ["device_key_", "path"].concat();
+    let family = ["save_nickname", "_with_device_key"].concat();
+    let literal = context_literal_label();
+    let context = ["HomeLaunch", "TokenContext"].concat();
+    let resolved = ["HomeLaunchTokenContext::", "resolved"].concat();
+    let source = format!(
+        "fn use_key(data: &Path) {{\n    {existing}(data);\n    let _ = {path}(data);\n    {family}(data, key, name);\n    let _ = {context} {{ session_id: id }};\n}}\nfn {existing}(data: &Path) {{}}\nfn make() -> {context} {{\n    {resolved}(a, b, c, d)\n}}\nstruct {context} {{ session_id: String }}\nimpl {context} {{ fn id(&self) {{}} }}\n"
+    );
+    let found = sites_in("elastos-server/src/fixture.rs", &source, &needles());
+    let file = "elastos-server/src/fixture.rs";
+    let hit = |function: &str, mechanism: &str| {
+        (
+            file.to_string(),
+            function.to_string(),
+            mechanism.to_string(),
+        )
+    };
+    assert_eq!(
+        found.get(&hit("use_key", &existing)).copied(),
+        Some(1),
+        "{found:?}"
+    );
+    assert_eq!(
+        found.get(&hit("use_key", &path)).copied(),
+        Some(1),
+        "{found:?}"
+    );
+    assert_eq!(
+        found.get(&hit("use_key", &family)).copied(),
+        Some(1),
+        "{found:?}"
+    );
+    assert_eq!(
+        found.get(&hit("use_key", &literal)).copied(),
+        Some(1),
+        "{found:?}"
+    );
+    assert_eq!(
+        found.get(&hit("make", &resolved)).copied(),
+        Some(1),
+        "{found:?}"
+    );
+    assert!(found.keys().all(|key| !key.1.is_empty()), "{found:?}");
+    assert_eq!(found.len(), 5, "{found:?}");
 }
