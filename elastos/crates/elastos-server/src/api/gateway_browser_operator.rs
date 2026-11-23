@@ -60,6 +60,7 @@ struct Admission {
 #[cfg(test)]
 impl BrowserOperatorService {
     /// An admission's request record, and how its token validates now.
+    #[cfg(unix)]
     pub(crate) async fn admission_for_test(
         &self,
         id: &str,
@@ -83,6 +84,7 @@ impl BrowserOperatorService {
     /// expired, each used once: records whose tokens can no longer validate.
     /// Each record is for the page's `input` and its token is minted for the
     /// operator resource, as `approve_admission` mints it.
+    #[cfg(unix)]
     pub(crate) async fn seed_spent_grants_for_test(&self, count: usize) {
         use elastos_runtime::capability::pending::MAX_PENDING_PER_SESSION;
         for n in 0..count {
@@ -117,11 +119,13 @@ impl BrowserOperatorService {
     }
 
     /// The service's request store (test-only).
+    #[cfg(unix)]
     pub(crate) fn pending_for_test(&self) -> &PendingRequestStore {
         &self.pending
     }
 
     /// The service's capability manager (test-only).
+    #[cfg(unix)]
     pub(crate) fn capabilities_for_test(&self) -> &CapabilityManager {
         &self.capabilities
     }
@@ -129,6 +133,7 @@ impl BrowserOperatorService {
     /// A production-shaped live grant: the record is for the page's `input`,
     /// the token is minted for `.../operator/{id}` in the same session and
     /// unused, as `approve_admission` mints it. Returns the record id and token.
+    #[cfg(unix)]
     pub(crate) async fn seed_live_grant_for_test(
         &self,
         session: &str,

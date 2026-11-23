@@ -1281,6 +1281,7 @@ mod tests {
         assert!(!browser_vz_transport_ready(root.path()));
     }
 
+    #[cfg(unix)]
     fn effect_receipt(authority: &serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "schema": "elastos.browser.vz-transport-effect-receipt/v1",
@@ -1306,6 +1307,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn viewer_engine_page(authority: &serde_json::Value) -> serde_json::Value {
         serde_json::json!({
             "schema": "elastos.browser.engine.page/v1",

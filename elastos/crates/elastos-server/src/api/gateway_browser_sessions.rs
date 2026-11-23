@@ -14,6 +14,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::atomic::AtomicU64;
 #[cfg(unix)]
 use std::sync::atomic::Ordering;

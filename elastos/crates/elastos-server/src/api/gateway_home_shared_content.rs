@@ -81,6 +81,7 @@ fn redeem_check(
 
 /// Moves one open check `secs` closer to its expiry, as if that much time had
 /// passed since `check` issued it.
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn age_shared_content_check_for_test(check_id: &str, secs: u64) {
     let mut checks = open_checks().lock().unwrap_or_else(|err| err.into_inner());

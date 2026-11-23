@@ -1028,6 +1028,7 @@ mod tests {
     }
 
     use crate::collaboration_profile_authority::signed_profile_document_for_test;
+    #[cfg(unix)]
     use ed25519_dalek::SigningKey;
     use elastos_runtime::signature::generate_keypair;
 
@@ -1140,6 +1141,7 @@ mod tests {
         .expect("a Runtime-built presence announcement binds like a browser's");
     }
 
+    #[cfg(unix)]
     fn presence_test_network_profile(
         signing_key: &SigningKey,
         network_id: &str,
@@ -1443,6 +1445,7 @@ mod tests {
     }
 
     /// A stored passkey principal with a signed Profile, plus its GatewayState.
+    #[cfg(unix)]
     fn stored_presence_fixture(
         temp: &std::path::Path,
     ) -> (GatewayState, crate::auth::PrincipalRecord) {

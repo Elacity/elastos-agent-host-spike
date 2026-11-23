@@ -267,8 +267,6 @@ struct HomeTerminalSession {
 enum HomeTerminalInput {
     #[cfg(unix)]
     Pty(AsyncFd<File>),
-    #[cfg(windows)]
-    Unsupported,
 }
 
 #[cfg(unix)]
@@ -296,6 +294,7 @@ struct HomeTerminalStartPlan {
     replaced_session_ids: Vec<String>,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct HomeTerminalCapacityError {
     message: String,
@@ -307,8 +306,11 @@ struct HomeTerminalCleanupTarget {
 }
 
 enum HomeTerminalStartError {
+    #[cfg(unix)]
     PolicyRefused,
+    #[cfg(unix)]
     GuestRefused,
+    #[cfg(unix)]
     Capacity(HomeTerminalCapacityError),
     Runtime(anyhow::Error),
 }
@@ -535,8 +537,11 @@ pub(super) async fn home_cli_terminal_start(
         }))
             .into_response()
         }
+        #[cfg(unix)]
         Err(HomeTerminalStartError::PolicyRefused) => home_terminal_policy_refusal(),
+        #[cfg(unix)]
         Err(HomeTerminalStartError::GuestRefused) => home_terminal_guest_refusal(),
+        #[cfg(unix)]
         Err(HomeTerminalStartError::Capacity(err)) => home_terminal_capacity_response(err),
         Err(HomeTerminalStartError::Runtime(err)) => home_error_response(err),
     }
@@ -972,17 +977,18 @@ fn open_home_terminal_pty(size: HomeTerminalSize) -> anyhow::Result<HomeTerminal
 }
 
 impl HomeTerminalInput {
+    #[cfg(not(unix))]
+    async fn write_all(&mut self, data: &[u8], closed: &watch::Sender<bool>) -> io::Result<()> {
+        let _ = (self, data, closed);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Home terminal input is unsupported on Windows",
+        ))
+    }
+
+    #[cfg(unix)]
     async fn write_all(&mut self, data: &[u8], closed: &watch::Sender<bool>) -> io::Result<()> {
         match self {
-            #[cfg(windows)]
-            HomeTerminalInput::Unsupported => {
-                let _ = (data, closed);
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Home terminal input is unsupported on Windows",
-                ))
-            }
-            #[cfg(unix)]
             HomeTerminalInput::Pty(file) => {
                 let mut data = data;
                 let mut closed = closed.subscribe();
@@ -1007,17 +1013,18 @@ impl HomeTerminalInput {
         }
     }
 
+    #[cfg(not(unix))]
+    fn resize(&mut self, size: HomeTerminalSize) -> io::Result<()> {
+        let _ = (self, size);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Home terminal resize is unsupported on Windows",
+        ))
+    }
+
+    #[cfg(unix)]
     fn resize(&mut self, size: HomeTerminalSize) -> io::Result<()> {
         match self {
-            #[cfg(windows)]
-            HomeTerminalInput::Unsupported => {
-                let _ = size;
-                Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Home terminal resize is unsupported on Windows",
-                ))
-            }
-            #[cfg(unix)]
             HomeTerminalInput::Pty(file) => {
                 let winsize = libc::winsize {
                     ws_row: size.rows,
@@ -1510,6 +1517,7 @@ fn home_terminal_session_lifecycle(session: &HomeTerminalSession) -> HomeTermina
     }
 }
 
+#[cfg(unix)]
 fn home_terminal_capacity_response(err: HomeTerminalCapacityError) -> Response {
     (StatusCode::TOO_MANY_REQUESTS, err.message).into_response()
 }
@@ -1798,15 +1806,17 @@ fn home_terminal_sse_response(mut response: Response) -> Response {
 }
 
 fn kill_home_terminal_process(child_pid: Option<u32>) {
-    let Some(_pid) = child_pid else {
+    let Some(pid) = child_pid else {
         return;
     };
     #[cfg(unix)]
     unsafe {
-        let pid = _pid as i32;
+        let pid = pid as i32;
         let _ = libc::kill(-pid, libc::SIGKILL);
         let _ = libc::kill(pid, libc::SIGKILL);
     }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 async fn remove_home_terminal_session(session_id: &str) -> Option<Arc<HomeTerminalSession>> {

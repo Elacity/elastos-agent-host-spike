@@ -384,8 +384,10 @@ mod r8d_passkey_rows {
     use super::super::gateway_tests::r8d_passkey_rows::{
         kept_elsewhere_refusal, passkey_person, PasskeyPerson, KEPT_ELSEWHERE,
     };
+    #[cfg(unix)]
     use super::*;
 
+    #[cfg(unix)]
     fn put_request() -> HomeAgentWorkspacePutRequest {
         serde_json::from_value(serde_json::json!({
             "schema": HOME_AGENT_WORKSPACE_SCHEMA,

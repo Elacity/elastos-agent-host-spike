@@ -1507,6 +1507,7 @@ fn room_transport_view(state: &GatewayState) -> crate::room_service::RoomTranspo
 /// cards (the signed-profile projection recorded at admission — the source a
 /// guest session can verify against). Presence heartbeats are deliberately
 /// not a name source: they prove liveness, not identity.
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn room_profile_attribution_names(
     contact_authority: Option<&gateway_home_system::ConfiguredContactAuthority>,
@@ -2745,6 +2746,7 @@ pub(super) fn room_service_join_error_response(err: tokio::task::JoinError) -> R
 mod stored_root_tests {
     use super::*;
 
+    #[cfg(unix)]
     fn stored_context(data_dir: &std::path::Path, principal_id: &str) -> HomeLaunchTokenContext {
         let root =
             crate::auth::ResolvedPrincipalRoot::resolve(data_dir, data_dir, principal_id).unwrap();

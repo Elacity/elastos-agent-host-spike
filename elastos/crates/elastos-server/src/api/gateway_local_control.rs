@@ -28,6 +28,7 @@ pub(crate) struct GatewayLocalControl {
     _browser_operators: Arc<super::gateway::BrowserOperatorService>,
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) async fn start_gateway_local_control(
     data_dir: &Path,
@@ -181,13 +182,17 @@ async fn peer_get_ticket(
 mod tests {
     #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
+    #[cfg(unix)]
     use std::sync::Mutex;
 
+    #[cfg(unix)]
     struct TicketProvider {
         requests: Mutex<Vec<serde_json::Value>>,
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Provider for TicketProvider {
         async fn handle(

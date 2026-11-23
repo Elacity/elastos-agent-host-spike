@@ -1075,10 +1075,12 @@ pub(crate) struct CreateRaceBarrierGuard {
 
 #[cfg(test)]
 impl CreateRaceBarrierGuard {
+    #[cfg(unix)]
     pub(crate) async fn wait_prepared(&self) {
         self.barrier.prepared.wait().await;
     }
 
+    #[cfg(unix)]
     pub(crate) fn release(&self) {
         let _ = self.barrier.release.send(true);
     }

@@ -207,6 +207,7 @@ pub(in crate::api::gateway) struct RemoteAdmissionPause {
 type AdmissionPauses = BTreeMap<(PathBuf, String, String), Arc<RemoteAdmissionPause>>;
 #[cfg(test)]
 static ADMISSION_PAUSES: OnceLock<Mutex<AdmissionPauses>> = OnceLock::new();
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) async fn hold_remote_admission_for_test(
     root: &FsPath,
@@ -1495,6 +1496,7 @@ pub(in crate::api::gateway) fn consumer_binding_for_wallet_forward_test(
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) fn write_consumer_binding_for_test(
     data_dir: &FsPath,
@@ -2217,6 +2219,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn pending_binding(serial: usize, principal: &str) -> ConsumerBinding {
         ConsumerBinding {
             grant: json!({"peer_did":"runtime-b"}),

@@ -126,6 +126,7 @@ pub(super) async fn append_inbox_requests(
 
 /// Test-only: the entries `append_inbox_requests` gives `principal_id` on a
 /// Home with no ports, as (id, kind, body).
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) async fn inbox_request_entries_for_test(
     data_dir: &std::path::Path,

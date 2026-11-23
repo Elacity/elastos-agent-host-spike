@@ -352,15 +352,19 @@ fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()> + S
 #[cfg(test)]
 mod trusted_gateway_tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::Mutex;
     #[cfg(unix)]
     use std::time::Duration;
     #[cfg(unix)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[cfg(unix)]
     use tokio::sync::oneshot;
 
+    #[cfg(unix)]
     static READY_URL: Mutex<Option<oneshot::Sender<String>>> = Mutex::new(None);
 
+    #[cfg(unix)]
     fn record_ready(url: &str) {
         let parsed = url::Url::parse(url).unwrap();
         // The callback must run after a listener exists, even before HTTP is polled.
@@ -374,10 +378,12 @@ mod trusted_gateway_tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
     fn unexpected_ready(_: &str) {
         panic!("failed gateway startup must not open Home");
     }
 
+    #[cfg(unix)]
     fn unused_localhost_address() -> String {
         let listener = std::net::TcpListener::bind("localhost:0").unwrap();
         format!("localhost:{}", listener.local_addr().unwrap().port())

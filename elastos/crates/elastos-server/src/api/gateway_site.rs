@@ -27,6 +27,7 @@ pub(super) struct ReleaseReadGate {
     #[cfg(unix)]
     cache: Arc<std::sync::Mutex<Option<CachedPublication>>>,
     pub(super) max_http_artifact_bytes: u64,
+    #[cfg(unix)]
     #[cfg(test)]
     pub(super) admissions: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -38,6 +39,7 @@ impl ReleaseReadGate {
             #[cfg(unix)]
             cache: Arc::new(std::sync::Mutex::new(None)),
             max_http_artifact_bytes: 200 * 1024 * 1024,
+            #[cfg(unix)]
             #[cfg(test)]
             admissions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }

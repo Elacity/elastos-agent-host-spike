@@ -3961,6 +3961,7 @@ async fn runtime_custody_publish_creator_tail_from_facts(
     Ok(facts)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) async fn runtime_custody_publish_creator_tail_for_test(
     state: &GatewayState,

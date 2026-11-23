@@ -1999,6 +1999,7 @@ struct BrowserLifecycleSweepObserver {
 
 #[cfg(test)]
 impl BrowserLifecycleSweepObserver {
+    #[cfg(unix)]
     fn new() -> Self {
         let (completed_tx, _) = watch::channel(0);
         let (backoffs_armed_tx, _) = watch::channel(0);
@@ -2108,6 +2109,7 @@ pub(in crate::api::gateway) fn start_browser_lifecycle_reconciler(
     )
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) fn start_controlled_browser_lifecycle_reconciler(
     state: GatewayState,

@@ -426,6 +426,7 @@ mod tests {
 
     // These routes have no principal-bound provider entrance for a launched
     // agent. The same-root checks therefore assert closure on this route.
+    #[cfg(unix)]
     async fn s5_launched_agent() -> (
         crate::api::routes::tests::ProbeLaunch,
         String,
@@ -447,6 +448,7 @@ mod tests {
         (home, vm_id, x_root, y_root)
     }
 
+    #[cfg(unix)]
     fn s5_y_file_unchanged(home: &crate::api::routes::tests::ProbeLaunch, y_root: &str) {
         let y_file = home
             .data_dir
@@ -455,6 +457,7 @@ mod tests {
         assert_eq!(std::fs::read(y_file).unwrap(), b"Y private bytes");
     }
 
+    #[cfg(unix)]
     async fn s5_proxy_request(
         scheme: &'static str,
         op: &str,

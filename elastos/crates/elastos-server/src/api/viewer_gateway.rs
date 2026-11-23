@@ -873,6 +873,7 @@ fn principal_scoped_storage_uri(storage: &str, context: &HomeLaunchTokenContext)
     principal_scoped_storage_uri_for_root(storage, context.root().localhost_root())
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn viewer_target_root(context: &HomeLaunchTokenContext) -> String {
     context.root().localhost_root().to_string()
@@ -1458,18 +1459,23 @@ mod r4_root_tests {
 /// root; the first row then calls `viewer_storage_write` (line 695).
 #[cfg(test)]
 mod r8d_passkey_rows {
+    #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
     use crate::api::gateway::gateway_tests::r8d_passkey_rows::{
         kept_elsewhere_refusal, passkey_person, KEPT_ELSEWHERE, ROOT,
     };
 
+    #[cfg(unix)]
     const GBA_VIEWER: &str = "gba-emulator";
+    #[cfg(unix)]
     const DOCUMENTS: &str = "documents";
+    #[cfg(unix)]
     const GBA_RELATIVE: &str = ".AppData/LocalHost/GBA/r8d-note.gba";
 
     /// The `gba-emulator` viewer: the name, role and storage grant that
     /// `capsules/gba-emulator/capsule.json` ships. No capsule bytes run.
+    #[cfg(unix)]
     fn gba_viewer(data_dir: &FsPath) {
         let capsule = data_dir.join("capsules/gba-emulator");
         std::fs::create_dir_all(capsule.join("browser")).unwrap();
@@ -1498,6 +1504,7 @@ mod r8d_passkey_rows {
     /// The `documents` viewer as `capsules/documents/capsule.json` ships it:
     /// a viewer whose manifest declares no storage grant. No capsule bytes
     /// run.
+    #[cfg(unix)]
     fn documents_viewer(data_dir: &FsPath) {
         let capsule = data_dir.join("capsules/documents");
         std::fs::create_dir_all(capsule.join("browser")).unwrap();

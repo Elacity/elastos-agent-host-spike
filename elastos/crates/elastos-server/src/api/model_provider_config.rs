@@ -350,7 +350,8 @@ fn load_hosted_validate_fixtures_unlocked(
 }
 
 /// Load owner-scoped validate fixtures. An absent file keeps the public HTTPS pins.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(unix)]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn load_hosted_validate_fixtures(
     data_dir: &Path,
 ) -> anyhow::Result<Option<HostedValidateFixtures>> {
@@ -625,7 +626,8 @@ fn hosted_offer(
     })
 }
 
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(unix)]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn offer_uses_connection_authority(
     data_dir: &Path,
     offer_id: &str,
@@ -935,6 +937,7 @@ fn read_staged_hosted_key(
     Ok(Some(staged))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn staged_hosted_key_present(data_dir: &Path, offer_id: &str) -> bool {
     read_staged_hosted_key(data_dir, offer_id)
@@ -1680,6 +1683,7 @@ pub(crate) async fn save_hosted_offer(
     ai_provider_status(data_dir)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) async fn remove_hosted_offer(
     data_dir: &Path,
@@ -1725,6 +1729,7 @@ pub(super) async fn finish_hosted_offer_removal(
     ai_provider_status(data_dir)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn seed_model_provider_operator_offers_for_test(
     data_dir: &Path,

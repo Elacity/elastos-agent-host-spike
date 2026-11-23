@@ -2202,9 +2202,11 @@ mod tests {
         person.assert_child_holds_only(&[relative.as_str()]);
     }
 
+    #[cfg(unix)]
     #[derive(Clone)]
     struct LaunchWarningWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
+    #[cfg(unix)]
     impl std::io::Write for LaunchWarningWriter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(bytes);
@@ -2217,6 +2219,7 @@ mod tests {
     }
 
     /// Collects the warnings one test emits, on this test's own thread.
+    #[cfg(unix)]
     fn capture_launch_warnings() -> (
         std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
         tracing::subscriber::DefaultGuard,

@@ -6577,6 +6577,7 @@ pub(super) fn home_room_profile_card_projection(
     })
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn home_profile_authority_path(
     data_dir: &std::path::Path,
@@ -10603,10 +10604,12 @@ mod stored_root_tests {
 mod r8c_child_rows {
     #[cfg(unix)]
     use super::super::r3_stored_root_tests::verified_parent_device_context;
+    #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
     use elastos_runtime::auth::{PasskeyWebAuthnBinding, ProofBinding};
 
+    #[cfg(unix)]
     fn update(
         dir: &std::path::Path,
         context: &HomeLaunchTokenContext,

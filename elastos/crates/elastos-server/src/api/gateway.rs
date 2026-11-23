@@ -51,6 +51,7 @@ mod gateway_assistant_workspace_v2;
 mod gateway_browser;
 #[path = "gateway_browser_internet.rs"]
 mod gateway_browser_internet;
+#[cfg(unix)]
 #[cfg(test)]
 #[path = "gateway_r3_stored_root_tests.rs"]
 pub(in crate::api) mod r3_stored_root_tests;

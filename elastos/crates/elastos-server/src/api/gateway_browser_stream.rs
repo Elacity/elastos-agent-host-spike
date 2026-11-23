@@ -1488,9 +1488,27 @@ pub(in crate::api::gateway) async fn close_browser_runtime_stream_listener(
 #[cfg(not(unix))]
 async fn spawn_browser_runtime_stream_listener(
     _path: &FsPath,
-    _target: BrowserRuntimeStreamTarget,
+    target: BrowserRuntimeStreamTarget,
     _internet: Option<gateway_browser_internet::BrowserInternetEffect>,
 ) -> anyhow::Result<()> {
+    match target {
+        BrowserRuntimeStreamTarget::LocalRelay(relay) => {
+            if let Some(relay) = relay {
+                let _ = relay.path;
+            }
+        }
+        BrowserRuntimeStreamTarget::Carrier { route, endpoint } => {
+            let _ = (
+                route.connect_ticket,
+                route.peer_did,
+                route.carrier_service,
+                route.grant_id,
+                route.principal_id,
+                route.reason,
+                endpoint,
+            );
+        }
+    }
     anyhow::bail!("Browser runtime stream sockets require a Unix host adapter");
 }
 

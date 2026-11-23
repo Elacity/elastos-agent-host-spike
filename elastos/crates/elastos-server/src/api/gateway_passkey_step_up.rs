@@ -1440,9 +1440,12 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use elastos_identity::AuthenticatorAssertionResponse;
+    #[cfg(unix)]
     use elastos_identity::{IdentityStore, StoredCredential};
+    #[cfg(unix)]
     use elastos_runtime::auth::{AuthSessionGrantV1, ProofBinding};
 
+    #[cfg(unix)]
     struct StepUpFixture {
         data_dir: tempfile::TempDir,
         state: GatewayState,
@@ -1453,6 +1456,7 @@ mod tests {
         credential_id: String,
     }
 
+    #[cfg(unix)]
     fn fixture() -> StepUpFixture {
         let data_dir = tempfile::tempdir().unwrap();
         let now = now_ts();
@@ -1556,6 +1560,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn begin_request(fixture: &StepUpFixture) -> PasskeyStepUpBeginRequest {
         PasskeyStepUpBeginRequest {
             schema: PASSKEY_STEP_UP_BEGIN_REQUEST_SCHEMA.to_string(),
@@ -1565,6 +1570,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn pending_for(
         fixture: &StepUpFixture,
         ceremony_id: String,
@@ -1616,6 +1622,7 @@ mod tests {
         assert_eq!(completed.expires_at, grant.expires_at);
     }
 
+    #[cfg(unix)]
     fn consumed_for(
         fixture: &StepUpFixture,
         step_up_id: String,

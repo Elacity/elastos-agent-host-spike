@@ -178,6 +178,7 @@ thread_local! {
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) enum OpenRouterModelsDouble {
+    #[cfg(unix)]
     InvalidKey,
     Models(Vec<String>),
     #[cfg(unix)]
@@ -187,7 +188,9 @@ pub(crate) enum OpenRouterModelsDouble {
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) enum VeniceAuthDouble {
+    #[cfg(unix)]
     InvalidKey,
+    #[cfg(unix)]
     Denied,
     Permitted,
 }
@@ -451,6 +454,7 @@ async fn fetch_openrouter_models(
         let _ = api_key;
         let double = OPENROUTER_MODELS_DOUBLE.with(|slot| slot.borrow().clone());
         match double {
+            #[cfg(unix)]
             Some(OpenRouterModelsDouble::InvalidKey) => {
                 Err(ai_provider_request_error("invalid OpenRouter key"))
             }
@@ -509,9 +513,11 @@ async fn fetch_venice_access(
         let _ = (data_dir, connection_id);
         let _ = api_key;
         VENICE_AUTH_DOUBLE.with(|slot| match slot.borrow().as_ref() {
+            #[cfg(unix)]
             Some(VeniceAuthDouble::InvalidKey) => {
                 Err(ai_provider_request_error("invalid Venice key"))
             }
+            #[cfg(unix)]
             Some(VeniceAuthDouble::Denied) => Ok(false),
             Some(VeniceAuthDouble::Permitted) => Ok(true),
             None => Err(anyhow::anyhow!("Venice validation transport unset")),

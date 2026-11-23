@@ -1133,6 +1133,7 @@ pub(crate) mod tests {
         /// The fixture's own folders. `None` when the probe shares a Home
         /// that another fixture owns; its folders then live under that Home.
         _temp: Option<tempfile::TempDir>,
+        #[cfg(unix)]
         fixture_root: std::path::PathBuf,
         pub(crate) data_dir: std::path::PathBuf,
         runtime: Arc<Runtime>,
@@ -1140,10 +1141,13 @@ pub(crate) mod tests {
         pub(crate) pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         capability_manager: Arc<elastos_runtime::capability::CapabilityManager>,
         /// The same token store the manager holds: the live view's own input.
+        #[cfg(unix)]
         capability_store: Arc<elastos_runtime::capability::CapabilityStore>,
         /// The provider registry the bridge dispatches through, so a row can
         /// make a late call under the context the end left.
+        #[cfg(unix)]
         registry: Arc<elastos_runtime::provider::ProviderRegistry>,
+        #[cfg(unix)]
         provider: Arc<CapturingLocalhostProvider>,
         capsule_dir: std::path::PathBuf,
         context: gateway::HomeLaunchTokenContext,
@@ -1152,6 +1156,7 @@ pub(crate) mod tests {
         /// `agents::create` records in each agent's `owner`.
         owner: String,
         /// Where the revoke list is saved, for a probe that saves it.
+        #[cfg(unix)]
         tokens: Option<std::path::PathBuf>,
     }
 
@@ -1493,21 +1498,28 @@ pub(crate) mod tests {
             for id in &agents {
                 agents::set_active(&data_dir, &caller, id, true, 1).unwrap();
             }
+            #[cfg(not(unix))]
+            let _ = &capability_store;
             Self {
                 _temp: temp,
+                #[cfg(unix)]
                 fixture_root,
                 data_dir,
                 runtime,
                 audit_log,
                 pending_store,
                 capability_manager,
+                #[cfg(unix)]
                 capability_store,
+                #[cfg(unix)]
                 registry,
+                #[cfg(unix)]
                 provider,
                 capsule_dir,
                 context: context.clone(),
                 agents,
                 owner: owner.to_string(),
+                #[cfg(unix)]
                 tokens: None,
             }
         }
@@ -1673,6 +1685,7 @@ pub(crate) mod tests {
             launched
         }
 
+        #[cfg(unix)]
         pub(crate) async fn launched_instance_id(&self, agent_id: &str) -> String {
             let launched = self.launch_with_grants(agent_id).await.unwrap().0;
             assert_eq!(launched.status, crate::runtime::CAPSULE_STARTING);
@@ -8234,6 +8247,7 @@ pub(crate) mod kept_launch_test_tokens {
             .unwrap()
     }
 
+    #[cfg(unix)]
     pub(crate) fn shell(data_dir: &std::path::Path) -> String {
         let context = super::super::gateway::local_home_launch_token_context(data_dir).unwrap();
         super::super::gateway::issue_home_projection_launch_token_with_context(

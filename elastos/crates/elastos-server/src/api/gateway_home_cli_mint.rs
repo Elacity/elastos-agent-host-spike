@@ -610,11 +610,13 @@ fn apply_signature_skew(data_dir: &Path, now: u64) -> u64 {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) struct CliMintSignatureSkewGuard {
     data_dir: PathBuf,
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 impl Drop for CliMintSignatureSkewGuard {
     fn drop(&mut self) {
@@ -624,6 +626,7 @@ impl Drop for CliMintSignatureSkewGuard {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn set_cli_mint_signature_skew_for_test(
     data_dir: &Path,
@@ -986,9 +989,11 @@ static OVERLAP: Mutex<Option<OverlapGate>> = Mutex::new(None);
 #[cfg(test)]
 static OVERLAP_CV: Condvar = Condvar::new();
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) struct CliMintOverlapGuard;
 
+#[cfg(unix)]
 #[cfg(test)]
 impl Drop for CliMintOverlapGuard {
     fn drop(&mut self) {
@@ -1002,6 +1007,7 @@ impl Drop for CliMintOverlapGuard {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn arm_cli_mint_overlap_for_test(request_id: &str) -> CliMintOverlapGuard {
     let mut guard = OVERLAP
@@ -1015,6 +1021,7 @@ pub(super) fn arm_cli_mint_overlap_for_test(request_id: &str) -> CliMintOverlapG
     CliMintOverlapGuard
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn cli_mint_overlap_arrived_for_test() -> usize {
     OVERLAP
@@ -1025,6 +1032,7 @@ pub(super) fn cli_mint_overlap_arrived_for_test() -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn release_cli_mint_overlap_for_test() {
     let mut guard = OVERLAP
