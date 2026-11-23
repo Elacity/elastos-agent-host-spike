@@ -1,5 +1,21 @@
 //! The Windows handle boundary: one-component opens and enumeration of that handle.
-//! Names here come from a checked directory listing, never from a caller path.
+//! The caller supplies a name from a validated root or checked listing. This
+//! crate also rejects separators, streams and dot components before the open.
+//!
+//! Safety of each unsafe block:
+//! 1. `NtCreateFile` gets live object attributes, name storage, status storage,
+//!    and a borrowed parent handle for one synchronous call.
+//! 2. `RtlNtStatusToDosErrorNoTeb` accepts the returned NTSTATUS value.
+//! 3. `OwnedHandle::from_raw_handle` takes sole ownership after a successful
+//!    open that returned a non-null handle.
+//! 4. `GetFileInformationByHandleEx` gets a live, writable, aligned buffer
+//!    and its actual byte length for one synchronous call.
+//! 5. `read_unaligned` reads a directory record only after its full range is
+//!    checked inside the initialized buffer.
+//! 6. `from_raw_parts` reads a UTF-16 name only after its even length and
+//!    bounds are checked; the buffer stays immutable while the slice lives.
+#![cfg(windows)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -20,13 +36,17 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, IO_STATUS_BLOCK_0};
 
-pub(super) fn open_child(
-    parent: &File,
-    name: &OsStr,
-    directory: bool,
-    share: u32,
-) -> io::Result<File> {
+pub fn open_child(parent: &File, name: &OsStr, directory: bool, share: u32) -> io::Result<File> {
     let mut wide: Vec<u16> = name.encode_wide().collect();
+    if wide.is_empty()
+        || matches!(wide.as_slice(), [46] | [46, 46])
+        || wide.iter().any(|&unit| matches!(unit, 0 | 47 | 58 | 92))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "child name is not one component",
+        ));
+    }
     let bytes = wide
         .len()
         .checked_mul(2)
@@ -51,7 +71,7 @@ pub(super) fn open_child(
         Information: 0,
     };
     // SAFETY: all pointers remain live for this synchronous call; RootDirectory
-    // is the held parent, and the name is one component from its listing.
+    // is the held parent, and the caller supplies one path component.
     let status = unsafe {
         NtCreateFile(
             &mut raw,
@@ -86,7 +106,7 @@ pub(super) fn open_child(
     Ok(File::from(unsafe { OwnedHandle::from_raw_handle(raw) }))
 }
 
-pub(super) fn list(handle: &File) -> io::Result<Vec<(OsString, u32)>> {
+pub fn list(handle: &File) -> io::Result<Vec<(OsString, u32)>> {
     let mut entries = Vec::new();
     let mut buffer = [0u64; 8192];
     let bytes = size_of_val(&buffer);
@@ -127,7 +147,7 @@ pub(super) fn list(handle: &File) -> io::Result<Vec<(OsString, u32)>> {
                     .read_unaligned()
             };
             let len = info.FileNameLength as usize;
-            if len % 2 != 0 || len > bytes - offset - name_at {
+            if !len.is_multiple_of(2) || len > bytes - offset - name_at {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid directory name",
@@ -152,7 +172,10 @@ pub(super) fn list(handle: &File) -> io::Result<Vec<(OsString, u32)>> {
             if next == 0 {
                 break;
             }
-            if next < size_of::<FILE_ID_BOTH_DIR_INFO>() || next > bytes - offset || next % 2 != 0 {
+            if next < size_of::<FILE_ID_BOTH_DIR_INFO>()
+                || next > bytes - offset
+                || !next.is_multiple_of(2)
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid directory offset",

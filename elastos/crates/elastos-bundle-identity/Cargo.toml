@@ -13,6 +13,7 @@ sha2 = "0.10"
 rustix = { version = "=1.1.4", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
+elastos-bundle-identity-windows-handle = { path = "../elastos-bundle-identity-windows-handle" }
 windows-sys = { version = "=0.61.2", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [features]

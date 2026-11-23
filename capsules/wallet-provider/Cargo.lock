@@ -521,9 +521,17 @@ dependencies = [
 name = "elastos-bundle-identity"
 version = "2.0.1"
 dependencies = [
+ "elastos-bundle-identity-windows-handle",
  "elastos-common",
  "rustix",
  "sha2",
+ "windows-sys",
+]
+
+[[package]]
+name = "elastos-bundle-identity-windows-handle"
+version = "2.0.1"
+dependencies = [
  "windows-sys",
 ]
 

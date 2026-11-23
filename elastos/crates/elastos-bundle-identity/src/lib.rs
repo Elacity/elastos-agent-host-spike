@@ -2,7 +2,7 @@
 //!
 //! Moved text for text from `lab/capsule-identity` (M2 part B, slice E1), so that production code
 //! can call the one implementation. It names a bundle or refuses; it admits and launches nothing.
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 #[cfg(unix)]
 use std::ffi::CString;
@@ -27,14 +27,10 @@ use rustix::fs::{fstat, openat, Dir, FileType, Mode, OFlags, CWD};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};
 #[cfg(windows)]
-use std::fs::Metadata;
+use std::os::windows::fs::MetadataExt;
 
 #[cfg(windows)]
 mod windows_walk;
-// NtCreateFile and handle-based enumeration need a narrow, audited FFI boundary.
-#[cfg(windows)]
-#[allow(unsafe_code)]
-mod windows_handle;
 #[cfg(windows)]
 use windows_walk::collect_entries;
 
@@ -1083,32 +1079,35 @@ fn put_varint(out: &mut Vec<u8>, mut value: u64) {
     out.push(value as u8);
 }
 
-/// The kind of one entry. Unix uses its file type; Windows uses metadata so
-/// every reparse tag is visible. Only directories and regular files are named.
-#[cfg(unix)]
-pub fn entry_kind(file_type: FileType) -> EntryKind {
-    if file_type.is_dir() {
-        EntryKind::Directory
-    } else if file_type.is_file() {
-        EntryKind::RegularFile
-    } else {
-        EntryKind::Special(special_name(file_type))
+/// The kind of one entry. Windows checks every reparse tag through the opened
+/// file's attributes. Only directories and regular files are named.
+pub fn entry_kind(
+    #[cfg(unix)] file_type: FileType,
+    #[cfg(windows)] file_info: &std::fs::Metadata,
+) -> EntryKind {
+    #[cfg(unix)]
+    {
+        if file_type.is_dir() {
+            EntryKind::Directory
+        } else if file_type.is_file() {
+            EntryKind::RegularFile
+        } else {
+            EntryKind::Special(special_name(file_type))
+        }
     }
-}
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
 
-#[cfg(windows)]
-pub fn entry_kind(metadata: &Metadata) -> EntryKind {
-    use std::os::windows::fs::MetadataExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-
-    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        EntryKind::Special("reparse point")
-    } else if metadata.is_dir() {
-        EntryKind::Directory
-    } else if metadata.is_file() {
-        EntryKind::RegularFile
-    } else {
-        EntryKind::Special("special file")
+        if file_info.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            EntryKind::Special("reparse point")
+        } else if file_info.is_dir() {
+            EntryKind::Directory
+        } else if file_info.is_file() {
+            EntryKind::RegularFile
+        } else {
+            EntryKind::Special("special file")
+        }
     }
 }
 

@@ -6,14 +6,15 @@ use std::io::Read;
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 
+use elastos_bundle_identity_windows_handle as windows_handle;
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
 use super::{
-    entry_kind, entry_path, shown, unreadable, windows_handle, Budget, BundleEntry, EntryKind,
-    Moment, Refusal, Tally,
+    entry_kind, entry_path, shown, unreadable, Budget, BundleEntry, EntryKind, Moment, Refusal,
+    Tally,
 };
 
 struct Listed {
