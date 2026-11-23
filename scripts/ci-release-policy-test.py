@@ -51,7 +51,7 @@ POST_MERGE_GUARD = "${{ github.event_name == 'push' || github.event_name == 'sch
 # Every job the required check sums up: all but itself and cancel-on-failure.
 REQUIRED_NEEDS = ("source-gate", "fork-gate", "pr-substance", "test-behaviour", "cargo-audit", "core-size", "engine-llama-amd64",
                   "engine-llama-arm64",
-                  "lint", "lab-standin", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
+                  "lint", "lab-gates", "lab-standin", "lab-operator-effects-macos", "lab-wasm-capsule", "test-elastos", "test-capsules", "custody-harness-smoke", "release-upstream-paths",
                   "release-upstream-assets", "installed-app-paths", "source-home-linux", "source-home-linux-arm64",
                   "source-home-macos", "update-hop-linux")
 # Read the fixed job/step indentation used here; actionlint checks YAML syntax.
@@ -306,16 +306,26 @@ def cargo_configs(directory):
 
 
 def capsule_inputs(crate):
-    """A capsule crate is wholly an input, with every crate it names by path, transitively."""
-    found, queue, seen = set(), [crate], set()
+    """A release build reads dev manifests but compiles only normal and build dependencies."""
+    found, queue, seen = set(), [(crate, True)], set()
     while queue:
-        crate = queue.pop()
-        if crate in seen:
+        crate, compiled = queue.pop()
+        if (crate, compiled) in seen:
             continue
-        seen.add(crate)
-        found |= tracked_under(crate)
-        queue += [os.path.normpath(f"{crate}/{dependency}")
-                  for dependency in PATH_DEPENDENCY.findall((REPO / crate / "Cargo.toml").read_text())]
+        seen.add((crate, compiled))
+        if compiled:
+            found |= tracked_under(crate)
+        else:
+            found |= tracked_under(crate + "/Cargo.toml")
+        table = ""
+        for line in (REPO / crate / "Cargo.toml").read_text().splitlines():
+            header = re.fullmatch(r"\s*\[([^]]+)\]\s*", line)
+            if header:
+                table = header[1]
+            for dependency in PATH_DEPENDENCY.findall(line):
+                path = os.path.normpath(f"{crate}/{dependency}")
+                is_dev = table == "dev-dependencies" or table.endswith(".dev-dependencies")
+                queue.append((path, compiled and not is_dev))
     return found
 
 
@@ -2073,8 +2083,11 @@ class ReleasePolicyTests(unittest.TestCase):
             "update-hop-linux": ("update-hop-linux", "ubuntu-24.04"),
             # Anders decides whether this becomes a required check (#311 D2).
             "cargo-audit": ("cargo-audit", "ubuntu-24.04"),
+            "lab-gates": ("lab-gates", "macos-15"),
             # Sash decides whether this becomes a required check (lab stand-in contract).
             "lab-standin": ("lab-standin", "ubuntu-24.04"),
+            "lab-operator-effects-macos": ("lab-operator-effects-macos", "macos-15"),
+            "lab-wasm-capsule": ("lab-wasm-capsule", "macos-15"),
             # Sash decides whether this becomes a required check (Runtime core size budget).
             "core-size": ("core-size", "ubuntu-24.04"),
         }
@@ -2128,14 +2141,14 @@ class ReleasePolicyTests(unittest.TestCase):
         expected = {
             "source-gate": None, "fork-gate": None, "pr-substance": None, "cargo-audit": None, "core-size": None, "test-behaviour": "source-gate",
             "engine-llama-amd64": "fork-gate", "engine-llama-arm64": "fork-gate", "lint": "fork-gate",
-            "lab-standin": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
+            "lab-gates": "fork-gate", "lab-standin": "fork-gate", "lab-operator-effects-macos": "fork-gate", "lab-wasm-capsule": "fork-gate", "test-elastos": "fork-gate", "test-capsules": "fork-gate",
             "custody-harness-smoke": "fork-gate",
             "release-upstream-paths": None, "release-upstream-assets": "[release-upstream-paths, engine-llama-arm64]",
             "installed-app-paths": None, "source-home-linux": "[installed-app-paths, engine-llama-amd64]",
             "source-home-linux-arm64": "[installed-app-paths, engine-llama-arm64]",
             "source-home-macos": "source-gate", "update-hop-linux": "[installed-app-paths, fork-gate]", "cancel-on-failure": None,
             "required": "[source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, "
-                        "lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
+                        "lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, "
                         "release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, "
                         "update-hop-linux]",
         }
@@ -2409,6 +2422,9 @@ class ReleasePolicyTests(unittest.TestCase):
             inputs = job_inputs(WORKFLOW, SOURCE, job)
             self.assertIn("scripts/setup-source-home.sh", inputs, job)
             self.assertIn("capsules/model-provider/Cargo.toml", inputs, job)
+            if job.startswith("source-home-"):
+                self.assertIn("lab/agent-conformance/Cargo.toml", inputs, job)
+            self.assertNotIn("lab/agent-conformance/standin-runtime/provider_launcher.rs", inputs, job)
             self.assertEqual(sorted(path for path in inputs if rule.is_notes_or_lab(path)), [], job)
         # Capsule folders are inputs whole, so a README.md inside one is no notes path.
         self.assertIn("capsules/home/README.md", inputs)

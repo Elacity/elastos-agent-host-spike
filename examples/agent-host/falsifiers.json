@@ -1509,8 +1509,8 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\", \"read\"]\n    }",
-     "new": "    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\", \"read\"]\n    },\n    {\n      \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\"]\n    }"
+     "old": "    {\n      \"resource\": \"localhost://UsersAI/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\", \"read\"]\n    }",
+     "new": "    {\n      \"resource\": \"localhost://UsersAI/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\", \"read\"]\n    },\n    {\n      \"resource\": \"localhost://UsersAI/self/.AppData/Agents/agent-host/*\",\n      \"actions\": [\"write\"]\n    }"
     }
    ],
    "tests": [
@@ -1576,8 +1576,8 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
-     "new": "localhost://Users/self/.AppData/Agents/*"
+     "old": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://UsersAI/self/.AppData/Agents/*"
     }
    ],
    "tests": [
@@ -1592,8 +1592,8 @@
    "edits": [
     {
      "file": "src/lib.rs",
-     "old": "const JOURNAL_ROOT: &str = \"localhost://Users/self/.AppData/Agents/\";",
-     "new": "const JOURNAL_ROOT: &str = \"localhost://Users/other/.AppData/Agents/\";"
+     "old": "const JOURNAL_ROOT: &str = \"localhost://UsersAI/self/.AppData/Agents/\";",
+     "new": "const JOURNAL_ROOT: &str = \"localhost://UsersAI/other/.AppData/Agents/\";"
     }
    ],
    "tests": [
@@ -1656,7 +1656,7 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "old": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
      "new": "https://api.example.com/"
     }
    ],
@@ -1672,8 +1672,8 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
-     "new": "localhost://Users/self/.AppData/Agents/agent-host/sk-live-abc/*"
+     "old": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://UsersAI/self/.AppData/Agents/agent-host/sk-live-abc/*"
     }
    ],
    "tests": [
@@ -1688,8 +1688,8 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
-     "new": "localhost://Users/other/.AppData/Agents/agent-host/*"
+     "old": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
+     "new": "localhost://UsersAI/other/.AppData/Agents/agent-host/*"
     }
    ],
    "tests": [
@@ -1704,7 +1704,7 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "old": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
      "new": "/tmp/projects/"
     }
    ],
@@ -1720,8 +1720,8 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "\"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\"",
-     "new": "\"resource\": \"https://example.invalid/\", \"resource\": \"localhost://Users/self/.AppData/Agents/agent-host/*\""
+     "old": "\"resource\": \"localhost://UsersAI/self/.AppData/Agents/agent-host/*\"",
+     "new": "\"resource\": \"https://example.invalid/\", \"resource\": \"localhost://UsersAI/self/.AppData/Agents/agent-host/*\""
     }
    ],
    "tests": [
@@ -2121,7 +2121,7 @@
     {
      "file": "src/lib.rs",
      "old": "        let resource = resource.as_str().ok_or(\"asks resource type\")?;",
-     "new": "        let resource = resource.as_str().unwrap_or(\"localhost://Users/self/.AppData/Agents/agent-host/*\");"
+     "new": "        let resource = resource.as_str().unwrap_or(\"localhost://UsersAI/self/.AppData/Agents/agent-host/*\");"
     }
    ],
    "tests": [
@@ -2280,7 +2280,7 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "old": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
      "new": "file:/tmp/"
     }
    ],
@@ -2296,7 +2296,7 @@
    "edits": [
     {
      "file": "capsule.json",
-     "old": "localhost://Users/self/.AppData/Agents/agent-host/*",
+     "old": "localhost://UsersAI/self/.AppData/Agents/agent-host/*",
      "new": "data:text/plain,x/"
     }
    ],

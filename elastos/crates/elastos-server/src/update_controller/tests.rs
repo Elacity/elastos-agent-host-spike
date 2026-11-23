@@ -727,6 +727,48 @@ fn fresh_source_persistence_keeps_an_uninstalled_binary_parent_uncreated() {
     assert!(!binary.parent().unwrap().exists());
 }
 
+/// A retained controller receipt whose source pins no publisher admits no
+/// signed release, whoever signed it.
+#[test]
+fn retained_receipt_with_empty_publisher_pins_is_refused() {
+    let fixture = PrivateFixture::new();
+    let expected = digest(b"signed fixture Runtime");
+    let mut release: Value = serde_json::from_slice(&signed_release(&expected)).unwrap();
+    let other = ed25519_dalek::SigningKey::from_bytes(&[77; 32]);
+    let payload = serde_json::to_vec(&release["payload"]).unwrap();
+    let (signature, signer) =
+        crate::crypto::domain_separated_sign(&other, "elastos.release.v1", &payload);
+    release["signature"] = json!(signature);
+    release["signer_did"] = json!(signer);
+    let launch = LaunchPlan {
+        args: Vec::new(),
+        environment: Vec::new(),
+        cwd: BASE64.encode(fixture.data.as_os_str().as_bytes()),
+    };
+    let mut receipt = Receipt {
+        schema: "elastos.update-controller/v1".into(),
+        data_dir: fixture.data.clone(),
+        binary: fixture.binary.clone(),
+        controller: fixture.controller(),
+        controller_sha256: expected,
+        signed_controller_release: BASE64.encode(serde_json::to_vec(&release).unwrap()),
+        trusted_source: TrustedSource {
+            publisher_dids: vec![signer],
+            ..test_source()
+        },
+        launch_sha256: launch.sha256().unwrap(),
+        launch,
+    };
+    validate_retained_receipt_record(&receipt).unwrap();
+    receipt.trusted_source.publisher_dids = Vec::new();
+    let refused = validate_retained_receipt_record(&receipt)
+        .expect_err("a receipt with empty publisher pins must be refused");
+    assert_eq!(
+        refused.to_string(),
+        "Signed envelope has no trusted signer DID"
+    );
+}
+
 #[test]
 fn installed_controller_admission_binds_signature_channel_version_platform_and_binary() {
     let fixture = PrivateFixture::new();
@@ -4054,6 +4096,15 @@ async fn restart_home_fixture() {
     child::watch_parent().unwrap();
     crate::install_transaction::authorize_host_start(&data, &data.join("installed-runtime"))
         .unwrap();
+    // DID admission reads release signers while the update journal still owns
+    // this Home. This restart fixture has no DID row, so it starts no helper.
+    if restarting {
+        assert!(
+            crate::binaries::AdmittedProvider::admit(&data, "did-provider")
+                .unwrap()
+                .is_none()
+        );
+    }
     // The signed shell wrapper execs this test harness. Hold the real host lock using
     // the wrapper's admitted identity and this child's PID, rather than current_exe.
     let mut host_lock = OpenOptions::new()
@@ -4467,6 +4518,207 @@ async fn home_launch_and_browser_paths_refuse_a_release_whose_record_differs_bef
     assert!(crate::install_transaction::acquire_installed_writer(&fixture.data).is_err());
     drop(admitted);
     assert!(crate::install_transaction::acquire_installed_writer(&fixture.data).is_ok());
+}
+
+#[test]
+fn host_start_signed_reader_refuses_unclaimed_or_invalid_installations() {
+    let fixture = PrivateFixture::new();
+    let source = fixture.publish_installed_release();
+    // A normal signed start has no journal. That absence never admits a
+    // different executable under the host-start reader.
+    crate::installed_release::read_signed_release(
+        &fixture.data,
+        &fixture.binary,
+        &source,
+        false,
+        true,
+    )
+    .unwrap();
+    let other_binary = fixture.data.join("other-runtime");
+    fixture.file(&other_binary, b"other Runtime", 0o755);
+    let error = crate::installed_release::read_signed_release(
+        &fixture.data,
+        &other_binary,
+        &source,
+        false,
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("Installed source binary path differs from its writer"),
+        "{error:#}"
+    );
+
+    let writer = prepare_host_fence_release(&fixture, &fixture.binary, false);
+    let error = crate::installed_release::read_signed_release(
+        &fixture.data,
+        &fixture.binary,
+        &source,
+        false,
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("Run `elastos update` again"),
+        "{error:#}"
+    );
+    assert!(crate::setup::installed_release_signers(&fixture.data).is_err());
+    drop(writer);
+
+    let fixture = PrivateFixture::new();
+    let source = fixture.publish_installed_release();
+    let writer = prepare_host_fence_release(&fixture, &fixture.binary, true);
+    writer.commit_checked(|| Ok(())).unwrap();
+    let claim = writer.claim_start(false).unwrap();
+    let wrong_generation = "00000000000000000000000000000000";
+    assert_ne!(claim.generation, wrong_generation);
+    assert!(
+        crate::install_transaction::authorize_host_start_with_generation(
+            &fixture.data,
+            &fixture.binary,
+            Some(wrong_generation),
+            std::process::id(),
+        )
+        .is_err()
+    );
+    let other_binary = fixture.data.join("alternate-bin/installed-runtime");
+    fs::create_dir(other_binary.parent().unwrap()).unwrap();
+    fixture.file(&other_binary, b"candidate fixture Runtime", 0o755);
+    let error = crate::install_transaction::authorize_host_start_with_generation(
+        &fixture.data,
+        &other_binary,
+        Some(&claim.generation),
+        std::process::id(),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("differs from the installation retained for recovery"),
+        "{error:#}"
+    );
+    assert_ne!(
+        std::env::var("ELASTOS_UPDATE_GENERATION").ok().as_deref(),
+        Some(claim.generation.as_str()),
+        "this test needs an unclaimed process"
+    );
+    let error = crate::installed_release::read_signed_release(
+        &fixture.data,
+        &fixture.binary,
+        &source,
+        false,
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("claimed generation"),
+        "{error:#}"
+    );
+    let error = crate::setup::installed_release_signers(&fixture.data).unwrap_err();
+    assert!(
+        error.to_string().contains("claimed generation"),
+        "{error:#}"
+    );
+    let error = crate::installed_release::read_signed_release(
+        &fixture.data,
+        &other_binary,
+        &source,
+        false,
+        true,
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("differs from the installation retained for recovery"),
+        "{error:#}"
+    );
+}
+
+/// A claimed update restart reads its signed pair while that update's own
+/// private scratch folders still sit beside it in `installation/`. Nothing
+/// else is admitted there, and without a claimed restart the folders refuse.
+#[tokio::test]
+async fn host_start_reader_admits_only_the_claimed_updates_private_scratch_folders() {
+    let installation = |fixture: &PrivateFixture| fixture.data.join("installation");
+    let read = |fixture: &PrivateFixture, generation: Option<&str>, pid: u32| {
+        let source = crate::setup::installed_release_source(&fixture.data)
+            .unwrap()
+            .unwrap();
+        crate::installed_release::read_signed_release_for_host_start_with_generation(
+            &fixture.data,
+            &fixture.binary,
+            &source,
+            false,
+            generation,
+            pid,
+        )
+    };
+    let refused = |result: Result<(Vec<u8>, Vec<u8>)>| {
+        let error = format!("{:#}", result.unwrap_err());
+        assert!(
+            error.contains("Installed release inputs require repair"),
+            "{error}"
+        );
+    };
+
+    // (b) No journal: the update folders are not installed inputs.
+    let fixture = PrivateFixture::new();
+    fixture.publish_installed_release();
+    read(&fixture, None, std::process::id()).unwrap();
+    for name in [".elastos.update-stage", ".elastos.update-rollback"] {
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(installation(&fixture).join(name))
+            .unwrap();
+        refused(read(&fixture, None, std::process::id()));
+    }
+
+    // (a) The real update's restart hop leaves both folders until finalize.
+    let (fixture, _) = dead_previous_start().await;
+    let record = InstallTransaction::acquire(&fixture.data, &fixture.binary)
+        .unwrap()
+        .restart_record()
+        .unwrap();
+    let stage = installation(&fixture).join(".elastos.update-stage");
+    let rollback = installation(&fixture).join(".elastos.update-rollback");
+    assert!(stage.is_dir() && rollback.is_dir());
+    let pid = record.pid.unwrap();
+    let claimed = || read(&fixture, Some(&record.generation), pid);
+    let (release, _) = claimed().unwrap();
+    assert_eq!(
+        release,
+        fs::read(installation_release_manifest_path(&fixture.data)).unwrap()
+    );
+    // An unclaimed start still meets the pending journal's fence.
+    assert!(read(&fixture, None, pid).is_err());
+
+    // (c) Each folder must pass the strict private directory check.
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o755)).unwrap();
+    refused(claimed());
+    fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
+    claimed().unwrap();
+    let held = fixture.data.join("held-stage");
+    fs::rename(&stage, &held).unwrap();
+    symlink(&held, &stage).unwrap();
+    refused(claimed());
+    fs::remove_file(&stage).unwrap();
+    fs::rename(&held, &stage).unwrap();
+    claimed().unwrap();
+
+    // (d) Any other entry is still refused, even a private folder.
+    for name in [
+        ".elastos.update-journal.json",
+        ".elastos.update-stage2",
+        "extra",
+    ] {
+        let extra = installation(&fixture).join(name);
+        fs::DirBuilder::new().mode(0o700).create(&extra).unwrap();
+        refused(claimed());
+        fs::remove_dir(&extra).unwrap();
+    }
+    fixture.file(&installation(&fixture).join("extra"), b"extra", 0o600);
+    refused(claimed());
 }
 
 #[test]

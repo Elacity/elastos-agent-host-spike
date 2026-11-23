@@ -748,12 +748,14 @@ struct FakeRuntimeState {
     pending_capabilities: Arc<TokioMutex<HashMap<String, String>>>,
     capabilities_start_pending: bool,
     kept_launch_reads: Arc<TokioMutex<Vec<serde_json::Value>>>,
+    readable_launch_id: Arc<TokioMutex<Option<String>>>,
 }
 
 struct FakeRuntimeHandle {
     _task: tokio::task::JoinHandle<()>,
     launch_requests: Arc<TokioMutex<Vec<serde_json::Value>>>,
     kept_launch_reads: Arc<TokioMutex<Vec<serde_json::Value>>>,
+    readable_launch_id: Arc<TokioMutex<Option<String>>>,
 }
 
 fn verifying_key_from_did(did: &str) -> Option<ed25519_dalek::VerifyingKey> {
@@ -778,6 +780,7 @@ async fn start_fake_runtime_configured(
     let (signing_key, did) = elastos_identity::load_or_create_did(identity_dir).unwrap();
     let launch_requests = Arc::new(TokioMutex::new(Vec::new()));
     let provider_requests = Arc::new(TokioMutex::new(Vec::new()));
+    let readable_launch_id = Arc::new(TokioMutex::new(None));
     let state = FakeRuntimeState {
         did,
         signing_key,
@@ -795,6 +798,7 @@ async fn start_fake_runtime_configured(
         pending_capabilities: Arc::new(TokioMutex::new(HashMap::new())),
         capabilities_start_pending,
         kept_launch_reads: Arc::new(TokioMutex::new(Vec::new())),
+        readable_launch_id: readable_launch_id.clone(),
     };
     let kept_launch_reads = state.kept_launch_reads.clone();
     let app = Router::new()
@@ -845,6 +849,7 @@ async fn start_fake_runtime_configured(
         _task: task,
         launch_requests,
         kept_launch_reads,
+        readable_launch_id,
     }
 }
 
@@ -872,30 +877,48 @@ async fn fake_runtime_open_launch(
         Some("bafy-good") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image-viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/index.html",
         }))
         .into_response(),
         Some("bafy-odd") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image-viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/my page#1.html",
         }))
         .into_response(),
         Some("bafy-badid") => AxumJson(json!({
             "id": format!("{}zz", "ab".repeat(15)),
             "page": "image-viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/index.html",
         }))
         .into_response(),
         Some("bafy-badentry") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image-viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/../index.html",
         }))
         .into_response(),
         Some("bafy-badpage") => AxumJson(json!({
             "id": "ab".repeat(16),
             "page": "image/viewer",
+            "content_name": "photo-set",
+            "binding": "cd".repeat(16),
+            "entrypoint": "browser/index.html",
+        }))
+        .into_response(),
+        Some("bafy-dotdotname") | Some("bafy-slashname") => AxumJson(json!({
+            "id": "ab".repeat(16),
+            "page": "image-viewer",
+            "content_name": if body["cid"] == "bafy-dotdotname" { "photo..set" } else { "photo/set" },
+            "binding": "cd".repeat(16),
             "entrypoint": "browser/index.html",
         }))
         .into_response(),
@@ -942,6 +965,15 @@ async fn fake_runtime_kept_launch_read(
         "origin": header("origin"),
     }));
     let path = uri.path();
+    if let Some(expected) = state.readable_launch_id.lock().await.as_deref() {
+        let id = path
+            .strip_prefix("/api/launch/")
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(id, _)| id);
+        if id != Some(expected) {
+            return (StatusCode::NOT_FOUND, "not_found").into_response();
+        }
+    }
     if path.ends_with("/output/playlist.json") {
         return (StatusCode::OK, b"[1]".to_vec()).into_response();
     }
@@ -1042,6 +1074,10 @@ async fn fake_runtime_launch_capsule(
             cid: None,
             trust_level: elastos_runtime::primitives::audit::TrustLevel::Untrusted,
             signer_did: None,
+            agent_id: None,
+            owner: None,
+            launch_id: None,
+            session_id: None,
         },
     );
     AxumJson(json!({

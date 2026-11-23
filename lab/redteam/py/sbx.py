@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
+import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -35,6 +36,19 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # provider-specific fourth. A probe that bound a different name would be
 # testing a profile the Runtime never launches.
 CANONICAL_PARAMS = ("PROVIDER_EXECUTABLE", "STORAGE_ROOT", "STORAGE_PARENT")
+
+# M1a: the model profile alone also names these measured inputs
+# (capsules/wallet-provider/tests/confine.rs, measured_model_form). An unbound
+# ``(param ...)`` is #f and sandbox-exec exits 65, so every run binds each to a
+# path under the empty, root-owned /private/var/empty that no probe can create:
+# the grant is inert and each probe sees denials at least as strict as the
+# Runtime's. Profiles that do not name them ignore the extra ``-D``.
+MODEL_ONLY_PARAMS = (
+    ("MODEL", "ENGINE", "ENGINE_BUNDLE")
+    + tuple(f"MODEL_ANCESTOR_{i}" for i in range(19))
+    + tuple(f"{kind}_SOCKET_{i}" for i in range(64) for kind in ("BROKER", "ENGINE"))
+)
+INERT_PARAM_ROOT = "/private/var/empty/elastos-redteam-unbound"
 
 # ``python3 -I`` runs the gate, so the current directory is neither importable
 # nor reliable: find the repo and the profile under test from this file alone.
@@ -48,6 +62,7 @@ WALLET_CONFINE_SB = REPO_ROOT / "capsules" / "wallet-provider" / "confine.sb"
 # (error "...") form. A blocked exec, and a sandbox_apply refused inside an
 # outer sandbox, exit 71 instead, so this code never stands for a deny.
 PROFILE_ERROR_EXIT = 65
+SANDBOX_APPLY_REFUSAL = "sandbox-exec: sandbox_apply: Operation not permitted"
 
 
 def sandbox_exec_available() -> bool:
@@ -100,6 +115,25 @@ def profile_error(result) -> str | None:
             f"program, so nothing was denied")
 
 
+def outer_sandbox_reason(result) -> str | None:
+    """Skip only when a separate permissive stock launch has the same refusal.
+
+    A profile-specific launch failure remains a harness error if the canary
+    runs. The canary uses no provider profile or test fixture.
+    """
+    if (result.exit_code != 71 or result.stdout or
+            result.stderr.strip() != SANDBOX_APPLY_REFUSAL):
+        return None
+    canary = subprocess.run(
+        [SANDBOX_EXEC, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if (canary.returncode == 71 and not canary.stdout and
+            canary.stderr.strip() == SANDBOX_APPLY_REFUSAL):
+        return "outer sandbox prevents sandbox-exec from applying even a permissive stock profile"
+    return None
+
+
 def run(
     *,
     pinned_exe,
@@ -129,6 +163,7 @@ def run(
         f"STORAGE_ROOT={os.fspath(storage_root)}",
         "-D",
         f"STORAGE_PARENT={os.fspath(storage_parent)}",
+        *[a for n in MODEL_ONLY_PARAMS for a in ("-D", f"{n}={INERT_PARAM_ROOT}/{n}")],
         "-f",
         os.fspath(profile),
         os.fspath(launch_exe),
@@ -141,9 +176,13 @@ def run(
         text=True,
         timeout=timeout,
     )
-    return Result(
+    result = Result(
         exit_code=completed.returncode,
         stdout=completed.stdout,
         stderr=completed.stderr,
         argv=argv,
     )
+    reason = outer_sandbox_reason(result)
+    if reason is not None:
+        raise unittest.SkipTest(reason)
+    return result

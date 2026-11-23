@@ -28,7 +28,12 @@ use sha2::Digest;
 
 const AVAILABILITY_RECEIPT_SCHEMA: &str = "elastos.content.availability.receipt/v1";
 const AVAILABILITY_RECEIPT_DOMAIN: &str = "elastos.content.availability.receipt.v1";
+const HOLDER_SERVE_RECEIPT_SCHEMA: &str = "elastos.content.serve.receipt/v1";
+const HOLDER_SERVE_RECEIPT_DOMAIN: &str = "elastos.content.serve.receipt.v1";
 pub const MAX_FETCH_RECEIPT_ATTEMPTS: u8 = 8;
+const FETCH_RECEIPT_SET_SCHEMA: &str = "elastos.content.fetch.receipt-set/v2";
+const FETCH_RECEIPT_SET_DOMAIN: &str = "elastos.content.fetch.receipt-set.v2";
+pub(crate) const FETCH_RECEIPT_SET_ATTESTATION: &str = "requester-signed-holder-countersigned";
 const AVAILABILITY_DASHBOARD_SCHEMA: &str = "elastos.content.availability.dashboard/v1";
 const CONTENT_ADMISSION_DOMAIN: &str = "elastos.content.admission.v1";
 const CONTENT_ACCOUNTING_SCHEMA: &str = "elastos.content.accounting/v1";
@@ -219,6 +224,75 @@ struct ContentFetchResult {
 enum ContentFetchPayload {
     Bytes(String),
     Stream(Value),
+}
+
+/// The availability fallback's answer for one content fetch. A distinct-holder
+/// refusal keeps its code and receipts, so the caller reports what was and was
+/// not proven instead of a bare error.
+enum AvailabilityFallback {
+    Fetched(ContentFetchResult),
+    Unavailable,
+    Refused {
+        code: String,
+        message: String,
+        data: Value,
+    },
+}
+
+/// The content boundary's decision for one distinct-holder success answer.
+/// The count comes from the receipts, not from a field on that answer.
+enum DistinctHolderGate {
+    /// The receipts name this CID and show enough distinct verified holders.
+    Proven,
+    /// At least one receipt was signed, and it does not prove the request.
+    Refused { message: String, data: Value },
+    /// Nothing signable was observed, so the bytes stay unreturned.
+    Unproven,
+}
+
+fn distinct_holder_boundary_fallback(boundary: DistinctHolderGate) -> AvailabilityFallback {
+    match boundary {
+        DistinctHolderGate::Refused { message, data } => AvailabilityFallback::Refused {
+            code: "carrier_fetch_distinct_holders".to_string(),
+            message,
+            data,
+        },
+        DistinctHolderGate::Unproven | DistinctHolderGate::Proven => {
+            AvailabilityFallback::Unavailable
+        }
+    }
+}
+
+/// The caller's `min_distinct_holders`, when it is a count this mode can
+/// prove. Absent and malformed values are `None`. The availability answer's
+/// copy of the count is not consulted.
+fn required_distinct_holders_from_caller(value: &Option<Value>) -> Option<u8> {
+    let count = value.as_ref()?.as_u64()?;
+    if (1..=u64::from(MAX_FETCH_RECEIPT_ATTEMPTS)).contains(&count) {
+        u8::try_from(count).ok()
+    } else {
+        None
+    }
+}
+
+fn distinct_holder_signer_dir(signer_data_dir: Option<&Path>) -> Result<&Path, ProviderError> {
+    signer_data_dir.ok_or_else(|| {
+        ProviderError::Provider("distinct-holder answers require the requester node key".into())
+    })
+}
+
+/// Decode the receipt rows on an availability answer. A missing field, a
+/// value that is not an array, or rows that are not receipts is `None`:
+/// there is then nothing to sign.
+fn decode_fetch_receipts(value: Option<&Value>) -> Option<Vec<FetchReceipt>> {
+    let value = value?;
+    if !value.is_array() {
+        return None;
+    }
+    if value.as_array().is_some_and(|rows| rows.is_empty()) {
+        return Some(Vec::new());
+    }
+    serde_json::from_value(value.clone()).ok()
 }
 
 #[derive(Debug, Clone)]
@@ -2774,6 +2848,7 @@ impl ModelPartReads {
             whole_max_bytes: None,
         };
         let fetched = ContentProvider::fetch_from_availability_provider(
+            None,
             registry,
             MODEL_PREPARATION_SOURCE,
             cid,
@@ -2784,14 +2859,22 @@ impl ModelPartReads {
         .await;
         if index_read {
             let outcome = match &fetched {
-                Ok(Some(_)) => "completed",
-                Ok(None) => "unavailable",
-                Err(_) => "failed",
+                Ok(AvailabilityFallback::Fetched(_)) => "completed",
+                Ok(AvailabilityFallback::Unavailable) => "unavailable",
+                Ok(AvailabilityFallback::Refused { .. }) | Err(_) => "failed",
             };
             tracing::warn!(target: "elastos::model_index_read", stage = "availability_fallback",
                 outcome, "model index read fallback settled");
         }
-        let ContentFetchPayload::Bytes(data) = fetched?
+        let fetched = match fetched {
+            Ok(AvailabilityFallback::Fetched(result)) => Some(result),
+            Ok(AvailabilityFallback::Unavailable) => None,
+            Ok(AvailabilityFallback::Refused { code, message, .. }) => {
+                anyhow::bail!("availability fetch refused ({code}): {message}")
+            }
+            Err(err) => return Err(err.into()),
+        };
+        let ContentFetchPayload::Bytes(data) = fetched
             .ok_or_else(|| anyhow::anyhow!("Carrier availability is unavailable"))?
             .payload
         else {
@@ -3391,6 +3474,9 @@ impl ContentProvider {
         let registry = self.registry()?;
         let transfer = ContentFetchTransfer::from_request(request)?;
         let local_only = request.get("local_only").and_then(|value| value.as_bool()) == Some(true);
+        let min_distinct_holders = request.get("min_distinct_holders").cloned();
+        // The field's presence is the mode. A local hit does not satisfy it.
+        let distinct_holders = min_distinct_holders.is_some();
         let model_index = path == CONTENT_OBJECT_MANIFEST_PATH
             && transfer.bounded_read
             && transfer.max_bytes.is_some();
@@ -3402,7 +3488,15 @@ impl ContentProvider {
                 "model index read substage failed");
         }
         let result = match local {
-            Ok(result) => result,
+            Ok(result) if !distinct_holders => result,
+            // local_only stays on this machine. The same error is true when the
+            // local backend has the bytes and when it does not: neither case
+            // is a distinct-holder answer, and availability is not called.
+            _ if distinct_holders && local_only => {
+                return Err(ProviderError::Provider(
+                    "a local-only fetch does not answer a distinct-holder request".into(),
+                ));
+            }
             Err(local_err) if local_only => {
                 if local_backend_needs_prepare(&local_err)
                     && registry.prepare_local_ipfs_backend().await.is_ok()
@@ -3418,32 +3512,54 @@ impl ContentProvider {
                     return Err(local_err);
                 }
             }
-            Err(local_err) => {
+            local_outcome => {
                 let fallback = Self::fetch_from_availability_provider(
+                    Some(&self.data_dir),
                     &registry,
                     self.name(),
                     cid,
                     path,
                     &transfer,
-                    request.get("min_distinct_holders").cloned(),
+                    min_distinct_holders,
                 )
                 .await;
-                if model_index {
+                if model_index && local_outcome.is_err() {
                     let outcome = match &fallback {
-                        Ok(Some(_)) => "completed",
-                        Ok(None) => "unavailable",
-                        Err(_) => "failed",
+                        Ok(AvailabilityFallback::Fetched(_)) => "completed",
+                        Ok(AvailabilityFallback::Unavailable) => "unavailable",
+                        Ok(AvailabilityFallback::Refused { .. }) | Err(_) => "failed",
                     };
                     tracing::warn!(target: "elastos::model_index_read", stage = "availability_fallback",
                         outcome, "model index read fallback settled");
                 }
                 match fallback {
-                    Ok(Some(result)) => result,
-                    Ok(None) => return Err(local_err),
+                    Ok(AvailabilityFallback::Fetched(result)) => result,
+                    Ok(AvailabilityFallback::Unavailable) => {
+                        return Err(match local_outcome {
+                            Err(local_err) => local_err,
+                            Ok(_) => ProviderError::Provider(
+                                "availability fetch failed (carrier_fetch_unavailable): no availability provider is available for this CID".into(),
+                            ),
+                        });
+                    }
+                    Ok(AvailabilityFallback::Refused {
+                        code,
+                        message,
+                        data,
+                    }) => {
+                        let mut response = provider_error(&code, &message);
+                        response["data"] = data;
+                        return Ok(response);
+                    }
                     Err(availability_err) => {
-                        return Err(ProviderError::Provider(format!(
-                            "{local_err}; availability fetch failed: {availability_err}"
-                        )))
+                        return Err(match local_outcome {
+                            Err(local_err) => ProviderError::Provider(format!(
+                                "{local_err}; availability fetch failed: {availability_err}"
+                            )),
+                            Ok(_) => ProviderError::Provider(format!(
+                                "local copy does not satisfy a distinct-holder fetch; availability fetch failed: {availability_err}"
+                            )),
+                        });
                     }
                 }
             }
@@ -3526,13 +3642,14 @@ impl ContentProvider {
     /// Read through the availability plane only. Content uses this after a
     /// local miss; model preparation uses it for a package its backend lacks.
     async fn fetch_from_availability_provider(
+        signer_data_dir: Option<&Path>,
         registry: &ProviderRegistry,
         source: &str,
         cid: &str,
         path: &str,
         transfer: &ContentFetchTransfer,
         min_distinct_holders: Option<Value>,
-    ) -> Result<Option<ContentFetchResult>, ProviderError> {
+    ) -> Result<AvailabilityFallback, ProviderError> {
         let mut request = json!({
             "op": "fetch",
             "cid": cid,
@@ -3544,8 +3661,15 @@ impl ContentProvider {
         // The ordinary Get omits this field. When the caller set it, forward
         // the value unchanged so a string, a negative, or a fraction is the
         // availability provider's refusal and not a silent ordinary Get.
-        if let Some(required) = min_distinct_holders {
-            request["min_distinct_holders"] = required;
+        if let Some(required) = &min_distinct_holders {
+            request["min_distinct_holders"] = required.clone();
+        }
+        let request_nonce = min_distinct_holders
+            .as_ref()
+            .and_then(|value| required_distinct_holders_from_caller(&Some(value.clone())))
+            .map(|_| fresh_serve_request_nonce());
+        if let Some(nonce) = &request_nonce {
+            request["serve_request_nonce"] = json!(nonce);
         }
         // A bounded read travels as its own request so the holder applies the
         // exact range or metadata bound once and returns only those bytes.
@@ -3563,7 +3687,7 @@ impl ContentProvider {
             hop.progress = None;
         }
 
-        let response = match registry
+        let mut response = match registry
             .invoke_provider(ProviderInvocation {
                 source: source.to_string(),
                 target: "availability".to_string(),
@@ -3577,7 +3701,7 @@ impl ContentProvider {
             .await
         {
             Ok(response) => response,
-            Err(ProviderError::NoProvider(_)) => return Ok(None),
+            Err(ProviderError::NoProvider(_)) => return Ok(AvailabilityFallback::Unavailable),
             Err(err) => return Err(err),
         };
         if response.get("status").and_then(|status| status.as_str()) == Some("error") {
@@ -3589,6 +3713,36 @@ impl ContentProvider {
                 .get("message")
                 .and_then(|value| value.as_str())
                 .unwrap_or("Carrier availability fetch failed");
+            // A distinct-holder refusal carries its receipts. Sign them with
+            // this requester's node key and the caller's required count. The
+            // availability answer's holder-count fields are not read. A
+            // caller value this mode cannot prove is not replaced from the
+            // answer. Answers without rows keep the existing error shapes.
+            if let Some(required) = required_distinct_holders_from_caller(&min_distinct_holders) {
+                let mut data = response
+                    .get("data")
+                    .cloned()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({}));
+                let signer_data_dir = signer_data_dir.ok_or_else(|| {
+                    ProviderError::Provider(
+                        "distinct-holder answers require the requester node key".into(),
+                    )
+                })?;
+                if Self::attach_signed_fetch_receipt_set(
+                    signer_data_dir,
+                    cid,
+                    required,
+                    request_nonce.as_deref().unwrap(),
+                    &mut data,
+                )? {
+                    return Ok(AvailabilityFallback::Refused {
+                        code: code.to_string(),
+                        message: message.to_string(),
+                        data,
+                    });
+                }
+            }
             let message = format!("availability fetch failed ({code}): {message}");
             // Only failures in transit stay typed as I/O, so a bounded reader
             // can repeat them; refusals and bad answers stay provider errors.
@@ -3601,19 +3755,35 @@ impl ContentProvider {
         if transfer.bounded_read {
             check_bounded_availability_payload(&response, transfer)?;
         }
-        let payload = provider_response_payload(&response, "availability provider", transfer)?;
         let whole_object = path.is_empty() && !transfer.bounded_read && transfer.range.is_none();
         if whole_object {
-            let bytes = match &payload {
-                ContentFetchPayload::Bytes(data) => base64::engine::general_purpose::STANDARD
-                    .decode(data)
-                    .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?,
-                ContentFetchPayload::Stream(stream) => provider_stream_payload_bytes(stream)?,
+            let verified = match transfer.transfer {
+                ProviderTransfer::Stream => verify_carrier_content_cid_stream(
+                    cid,
+                    response.pointer("/data/stream").ok_or_else(|| {
+                        ProviderError::Provider(
+                            "availability response missing stream payload".into(),
+                        )
+                    })?,
+                )?,
+                _ => verify_carrier_content_cid_base64(
+                    cid,
+                    response
+                        .pointer("/data/data")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            ProviderError::Provider(
+                                "availability response missing base64 data".into(),
+                            )
+                        })?,
+                )?,
             };
-            if !verify_exact_content_cid(registry, cid, &bytes).await? {
+            if !verified {
                 return Err(ProviderError::Provider("availability CID mismatch".into()));
             }
         }
+        let payload =
+            provider_response_payload_owned(&mut response, "availability provider", transfer)?;
         let mut availability = response
             .get("data")
             .and_then(|data| data.get("availability"))
@@ -3621,11 +3791,191 @@ impl ContentProvider {
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({}));
         availability["cid_verified"] = Value::Bool(whole_object);
-        Ok(Some(ContentFetchResult {
+        if let Some(required) = required_distinct_holders_from_caller(&min_distinct_holders) {
+            let boundary = Self::settle_distinct_holder_success(
+                signer_data_dir,
+                cid,
+                required,
+                request_nonce.as_deref().unwrap(),
+                &mut availability,
+            )?;
+            // Bytes leave only when the receipts themselves prove the caller's
+            // count. The availability answer's count fields are not read.
+            if !matches!(boundary, DistinctHolderGate::Proven) {
+                return Ok(distinct_holder_boundary_fallback(boundary));
+            }
+        } else if min_distinct_holders.is_some() {
+            // The field is set, and it is not a count this mode can prove.
+            // A bridge that still answers success does not return the bytes.
+            return Ok(AvailabilityFallback::Unavailable);
+        }
+        Ok(AvailabilityFallback::Fetched(ContentFetchResult {
             payload,
             availability: Some(availability),
             transfer: provider_transfer_value(&response),
         }))
+    }
+
+    /// Count distinct verified holder DIDs from the receipts and sign that
+    /// observation. A success answer becomes bytes only when those receipts
+    /// name the requested CID and meet the caller's count. Count fields on
+    /// the availability answer are not read.
+    fn settle_distinct_holder_success(
+        signer_data_dir: Option<&Path>,
+        requested_cid: &str,
+        required: u8,
+        request_nonce: &str,
+        availability: &mut Value,
+    ) -> Result<DistinctHolderGate, ProviderError> {
+        let Some(receipts) = decode_fetch_receipts(availability.get("receipts")) else {
+            return Ok(DistinctHolderGate::Unproven);
+        };
+        if receipts.is_empty() {
+            return Ok(DistinctHolderGate::Unproven);
+        }
+        let mut for_request = Vec::new();
+        for receipt in &receipts {
+            if receipt.requested_cid == requested_cid {
+                for_request.push(receipt.clone());
+            }
+        }
+        if for_request.is_empty() {
+            return Ok(DistinctHolderGate::Unproven);
+        }
+        // The content boundary owns the final byte release. Check the holder
+        // proofs against this Home's DID before a provider row can count.
+        let data_dir = distinct_holder_signer_dir(signer_data_dir)?;
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir)
+            .map_err(|_| ProviderError::Provider("content receipt signer unavailable".into()))?;
+        if for_request.iter().any(|receipt| {
+            receipt.verified
+                && serve_attempt_nonce(request_nonce, receipt.attempt)
+                    .as_deref()
+                    .zip(receipt.serve_nonce.as_deref())
+                    .zip(receipt.countersignature.as_ref())
+                    .is_none_or(|((issued, row_nonce), signed)| {
+                        if issued != row_nonce {
+                            return true;
+                        }
+                        verify_holder_serve_receipt(
+                            signed,
+                            &receipt.peer_did,
+                            &receipt.requested_cid,
+                            &requester_did,
+                            receipt.bytes_received,
+                            issued,
+                        )
+                        .is_err()
+                    })
+        }) {
+            return Ok(DistinctHolderGate::Unproven);
+        }
+        let observed = fetch_receipt_distinct_holders(&for_request);
+        let names_another = for_request.len() != receipts.len();
+        if !names_another && observed >= usize::from(required) {
+            Self::attach_signed_rows(
+                data_dir,
+                requested_cid,
+                required,
+                request_nonce,
+                receipts,
+                availability,
+            )?;
+            return Ok(DistinctHolderGate::Proven);
+        }
+        // Only rows for this request can enter its refusal set.
+        let mut data = json!({});
+        Self::attach_signed_rows(
+            data_dir,
+            requested_cid,
+            required,
+            request_nonce,
+            for_request,
+            &mut data,
+        )?;
+        let message = format!(
+            "content fetch verified {observed} distinct holder(s) for the requested CID; {required} required"
+        );
+        Ok(DistinctHolderGate::Refused { message, data })
+    }
+
+    /// Attach one signed set and drop the unsigned copies of the counts and
+    /// receipts. Readers use the verified payload.
+    fn attach_signed_rows(
+        data_dir: &Path,
+        cid: &str,
+        required: u8,
+        request_nonce: &str,
+        receipts: Vec<FetchReceipt>,
+        answer: &mut Value,
+    ) -> Result<(), ProviderError> {
+        let (signing_key, _) = elastos_identity::load_or_create_did(data_dir).map_err(|err| {
+            ProviderError::Provider(format!("content receipt signer unavailable: {err}"))
+        })?;
+        let signed = sign_fetch_receipt_set(&signing_key, cid, required, request_nonce, receipts)?;
+        answer["receipt_set"] = serde_json::to_value(&signed).map_err(|err| {
+            ProviderError::Provider(format!("fetch receipt set encode failed: {err}"))
+        })?;
+        answer["receipt_attestation"] = json!(FETCH_RECEIPT_SET_ATTESTATION);
+        if let Some(object) = answer.as_object_mut() {
+            object.remove("receipts");
+            object.remove("distinct_holders");
+            object.remove("required_distinct_holders");
+        }
+        Ok(())
+    }
+
+    /// Sign one distinct-holder refusal and attach that set. `required` is the
+    /// caller's count on this path, as on a success. The availability answer's
+    /// holder-count fields are not read. Unsigned copies of the counts and
+    /// receipts are dropped: readers use the verified payload. An answer
+    /// without rows is left unchanged.
+    fn attach_signed_fetch_receipt_set(
+        data_dir: &Path,
+        cid: &str,
+        required: u8,
+        request_nonce: &str,
+        answer: &mut Value,
+    ) -> Result<bool, ProviderError> {
+        let Some(receipts) = answer.get("receipts").filter(|value| value.is_array()) else {
+            return Ok(false);
+        };
+        let receipts: Vec<FetchReceipt> =
+            serde_json::from_value(receipts.clone()).map_err(|err| {
+                ProviderError::Provider(format!("fetch receipt set decode failed: {err}"))
+            })?;
+        let for_request: Vec<FetchReceipt> = receipts
+            .into_iter()
+            .filter(|receipt| receipt.requested_cid == cid)
+            .collect();
+        if for_request.is_empty() {
+            return Ok(false);
+        }
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir)
+            .map_err(|_| ProviderError::Provider("content receipt signer unavailable".into()))?;
+        if for_request.iter().any(|receipt| {
+            receipt.verified
+                && serve_attempt_nonce(request_nonce, receipt.attempt)
+                    .as_deref()
+                    .zip(receipt.serve_nonce.as_deref())
+                    .zip(receipt.countersignature.as_ref())
+                    .is_none_or(|((issued, row_nonce), signed)| {
+                        issued != row_nonce
+                            || verify_holder_serve_receipt(
+                                signed,
+                                &receipt.peer_did,
+                                &receipt.requested_cid,
+                                &requester_did,
+                                receipt.bytes_received,
+                                issued,
+                            )
+                            .is_err()
+                    })
+        }) {
+            return Ok(false);
+        }
+        Self::attach_signed_rows(data_dir, cid, required, request_nonce, for_request, answer)?;
+        Ok(true)
     }
 
     async fn publish(&self, request: &Value) -> Result<Value, ProviderError> {
@@ -5961,6 +6311,128 @@ pub struct SignedAvailabilityReceipt {
     pub signer_did: String,
 }
 
+/// The holder's statement about the complete bytes served to one requester.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HolderServeReceipt {
+    pub schema: String,
+    pub cid: String,
+    pub requester_did: String,
+    pub bytes: u64,
+    pub nonce: String,
+    pub time: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedHolderServeReceipt {
+    pub payload: HolderServeReceipt,
+    pub signature: String,
+    pub signer_did: String,
+}
+
+/// The holder node key signs a canonical payload in the serve-receipt domain.
+pub(crate) fn sign_holder_serve_receipt(
+    signing_key: &ed25519_dalek::SigningKey,
+    cid: &str,
+    requester_did: &str,
+    bytes: u64,
+    nonce: &str,
+    time: u64,
+) -> Result<SignedHolderServeReceipt, ProviderError> {
+    let payload = HolderServeReceipt {
+        schema: HOLDER_SERVE_RECEIPT_SCHEMA.into(),
+        cid: cid.into(),
+        requester_did: requester_did.into(),
+        bytes,
+        nonce: nonce.into(),
+        time,
+    };
+    require_fetch_receipt_cid(cid).map_err(ProviderError::Provider)?;
+    if elastos_identity::decode_did_key(requester_did).is_err()
+        || !valid_serve_nonce(nonce)
+        || time == 0
+    {
+        return Err(ProviderError::Provider(
+            "invalid holder serve receipt fields".into(),
+        ));
+    }
+    let canonical = serde_json::to_string(
+        &serde_json::to_value(&payload)
+            .map_err(|_| ProviderError::Provider("holder serve receipt encode failed".into()))?,
+    )
+    .map_err(|_| ProviderError::Provider("holder serve receipt encode failed".into()))?;
+    let (signature, signer_did) = crate::crypto::domain_separated_sign(
+        signing_key,
+        HOLDER_SERVE_RECEIPT_DOMAIN,
+        canonical.as_bytes(),
+    );
+    Ok(SignedHolderServeReceipt {
+        payload,
+        signature,
+        signer_did,
+    })
+}
+
+fn valid_serve_nonce(nonce: &str) -> bool {
+    nonce.len() == 32
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn fresh_serve_request_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).expect("OS entropy source unavailable for serve nonce");
+    hex::encode(bytes)
+}
+
+/// A request nonce is private to Content until it invokes availability. The
+/// attempt number gives each holder fetch a separate challenge.
+pub(crate) fn serve_attempt_nonce(request_nonce: &str, attempt: u8) -> Option<String> {
+    if !valid_serve_nonce(request_nonce) || !(1..=MAX_FETCH_RECEIPT_ATTEMPTS).contains(&attempt) {
+        return None;
+    }
+    let mut hash = sha2::Sha256::new();
+    hash.update(b"elastos.content.serve.attempt.v1");
+    hash.update(request_nonce.as_bytes());
+    hash.update([attempt]);
+    Some(hex::encode(&hash.finalize()[..16]))
+}
+
+/// The expected holder and request facts come from the authenticated transfer.
+pub(crate) fn verify_holder_serve_receipt(
+    signed: &SignedHolderServeReceipt,
+    holder_did: &str,
+    cid: &str,
+    requester_did: &str,
+    bytes: u64,
+    nonce: &str,
+) -> Result<(), ProviderError> {
+    let payload = &signed.payload;
+    if payload.schema != HOLDER_SERVE_RECEIPT_SCHEMA
+        || payload.cid != cid
+        || payload.requester_did != requester_did
+        || payload.bytes != bytes
+        || payload.nonce != nonce
+        || !valid_serve_nonce(&payload.nonce)
+        || payload.time == 0
+    {
+        return Err(ProviderError::Provider(
+            "holder serve receipt fields mismatch".into(),
+        ));
+    }
+    let envelope = serde_json::to_vec(signed)
+        .map_err(|_| ProviderError::Provider("holder serve receipt encode failed".into()))?;
+    crate::crypto::verify_signed_json_envelope_against_dids(
+        &envelope,
+        HOLDER_SERVE_RECEIPT_DOMAIN,
+        &[holder_did.to_string()],
+    )
+    .map_err(|_| ProviderError::Provider("holder serve receipt verification failed".into()))?;
+    Ok(())
+}
+
 /// One bounded attempt to fetch the requested CID from an authenticated peer.
 /// The caller records `verified` only after checking the received bytes against
 /// that CID. `time` is Unix time in seconds. This type carries facts, not the
@@ -5974,6 +6446,11 @@ pub struct FetchReceipt {
     result: FetchResult,
     attempt: u8,
     time: u64,
+    /// Nonce issued by the requester collector for this holder attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    serve_nonce: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    countersignature: Option<SignedHolderServeReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5994,6 +6471,7 @@ pub enum FetchFailureReason {
     Transport,
     InvalidResponse,
     ResponseTooLarge,
+    NoCountersignature,
 }
 
 #[derive(Deserialize)]
@@ -6006,6 +6484,10 @@ struct FetchReceiptWire {
     result: FetchResult,
     attempt: u8,
     time: u64,
+    #[serde(default)]
+    serve_nonce: Option<String>,
+    #[serde(default)]
+    countersignature: Option<SignedHolderServeReceipt>,
 }
 
 /// The only CID shape a fetch receipt may name: canonical and SHA2-256.
@@ -6024,6 +6506,7 @@ pub(crate) fn require_fetch_receipt_cid(requested_cid: &str) -> Result<(), Strin
 }
 
 impl FetchReceipt {
+    /// Construct an uncountersigned receipt for tests of invalid or failed rows.
     pub fn new(
         requested_cid: &str,
         peer_did: &str,
@@ -6033,6 +6516,31 @@ impl FetchReceipt {
         attempt: u8,
         time: u64,
     ) -> Result<Self, String> {
+        Self::new_with(
+            requested_cid,
+            peer_did,
+            bytes_received,
+            verified,
+            result,
+            attempt,
+            time,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with(
+        requested_cid: &str,
+        peer_did: &str,
+        bytes_received: u64,
+        verified: bool,
+        result: FetchResult,
+        attempt: u8,
+        time: u64,
+        serve_nonce: Option<&str>,
+        countersignature: Option<SignedHolderServeReceipt>,
+    ) -> Result<Self, String> {
         require_fetch_receipt_cid(requested_cid)?;
         elastos_identity::decode_did_key(peer_did)
             .map_err(|_| "fetch receipt requires a valid peer DID".to_string())?;
@@ -6041,6 +6549,9 @@ impl FetchReceipt {
         }
         if time == 0 {
             return Err("fetch receipt requires a time".into());
+        }
+        if serve_nonce.is_some_and(|nonce| !valid_serve_nonce(nonce)) {
+            return Err("fetch receipt requires a valid serve nonce".into());
         }
         match &result {
             FetchResult::Ok if !verified || bytes_received == 0 => {
@@ -6054,6 +6565,16 @@ impl FetchReceipt {
             }
             _ => {}
         }
+        if let Some(signed) = &countersignature {
+            if !verified
+                || signed.signer_did != peer_did
+                || signed.payload.cid != requested_cid
+                || signed.payload.bytes != bytes_received
+                || !valid_serve_nonce(&signed.payload.nonce)
+            {
+                return Err("fetch receipt countersignature fields mismatch".into());
+            }
+        }
         Ok(Self {
             requested_cid: requested_cid.into(),
             peer_did: peer_did.into(),
@@ -6062,6 +6583,8 @@ impl FetchReceipt {
             result,
             attempt,
             time,
+            serve_nonce: serve_nonce.map(str::to_owned),
+            countersignature,
         })
     }
 
@@ -6072,6 +6595,19 @@ impl FetchReceipt {
         self.verified.then_some(self.peer_did.as_str())
     }
 
+    /// A counted row carries a holder statement for this CID and byte count.
+    /// The signed set verifier checks its cryptographic and requester binding.
+    pub(crate) fn counted_holder_did(&self) -> Option<&str> {
+        let signed = self.countersignature.as_ref()?;
+        let nonce = self.serve_nonce.as_deref()?;
+        (self.verified
+            && signed.signer_did == self.peer_did
+            && signed.payload.cid == self.requested_cid
+            && signed.payload.bytes == self.bytes_received
+            && signed.payload.nonce == nonce)
+            .then_some(self.peer_did.as_str())
+    }
+
     pub fn encode_canonical(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec(self)
     }
@@ -6079,7 +6615,7 @@ impl FetchReceipt {
     pub fn decode_canonical(encoded: &[u8]) -> Result<Self, String> {
         let wire: FetchReceiptWire = serde_json::from_slice(encoded)
             .map_err(|_| "fetch receipt contains invalid JSON or fields".to_string())?;
-        let receipt = Self::new(
+        let receipt = Self::new_with(
             &wire.requested_cid,
             &wire.peer_did,
             wire.bytes_received,
@@ -6087,12 +6623,208 @@ impl FetchReceipt {
             wire.result,
             wire.attempt,
             wire.time,
+            wire.serve_nonce.as_deref(),
+            wire.countersignature,
         )?;
         if receipt.encode_canonical().map_err(|err| err.to_string())? != encoded {
             return Err("fetch receipt is not canonically encoded".into());
         }
         Ok(receipt)
     }
+}
+
+impl<'de> Deserialize<'de> for FetchReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = FetchReceiptWire::deserialize(deserializer)?;
+        Self::new_with(
+            &wire.requested_cid,
+            &wire.peer_did,
+            wire.bytes_received,
+            wire.verified,
+            wire.result,
+            wire.attempt,
+            wire.time,
+            wire.serve_nonce.as_deref(),
+            wire.countersignature,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Peer DIDs, never addresses or tickets, with verified bytes for one CID.
+pub(crate) fn fetch_receipt_distinct_holders(receipts: &[FetchReceipt]) -> usize {
+    receipts
+        .iter()
+        .filter_map(FetchReceipt::counted_holder_did)
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+/// One distinct-holder answer: the CID this requester fetched, the required
+/// and observed holder counts, the time, and one receipt per holder answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FetchReceiptSet {
+    pub schema: String,
+    pub requested_cid: String,
+    pub required_distinct_holders: u8,
+    pub observed_distinct_holders: u32,
+    pub checked_at: u64,
+    pub serve_request_nonce: String,
+    pub receipts: Vec<FetchReceipt>,
+}
+
+/// The signed set. It states what this requester observed after its own CID
+/// check, with each holder's signed serve statement nested in its receipt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignedFetchReceiptSet {
+    pub payload: FetchReceiptSet,
+    pub signature: String,
+    pub signer_did: String,
+}
+
+/// Sign one distinct-holder answer with the requester's own node key, using the
+/// same signing helper as availability receipts. A receipt that names another
+/// CID is refused. The observed holder count is computed here from verified
+/// peer DIDs; the caller's required count is stored beside it and is not used
+/// as the observed count.
+pub(crate) fn sign_fetch_receipt_set(
+    signing_key: &ed25519_dalek::SigningKey,
+    cid: &str,
+    required_distinct_holders: u8,
+    request_nonce: &str,
+    receipts: Vec<FetchReceipt>,
+) -> Result<SignedFetchReceiptSet, ProviderError> {
+    require_fetch_receipt_cid(cid).map_err(ProviderError::Provider)?;
+    if !valid_serve_nonce(request_nonce) {
+        return Err(ProviderError::Provider(
+            "invalid Content serve request nonce".into(),
+        ));
+    }
+    if receipts.iter().any(|receipt| receipt.requested_cid != cid) {
+        return Err(ProviderError::Provider(
+            "fetch receipt set receipt names another CID".into(),
+        ));
+    }
+    // From the receipts. Not the required count the caller passed in.
+    let observed_distinct_holders = fetch_receipt_distinct_holders(&receipts) as u32;
+    let payload = FetchReceiptSet {
+        schema: FETCH_RECEIPT_SET_SCHEMA.to_string(),
+        requested_cid: cid.to_string(),
+        required_distinct_holders,
+        observed_distinct_holders,
+        checked_at: now_unix_secs(),
+        serve_request_nonce: request_nonce.to_string(),
+        receipts,
+    };
+    let payload_value = serde_json::to_value(&payload).map_err(|err| {
+        ProviderError::Provider(format!("fetch receipt set encode failed: {err}"))
+    })?;
+    let canonical = serde_json::to_string(&payload_value).map_err(|err| {
+        ProviderError::Provider(format!("fetch receipt set encode failed: {err}"))
+    })?;
+    let (signature, signer_did) = crate::crypto::domain_separated_sign(
+        signing_key,
+        FETCH_RECEIPT_SET_DOMAIN,
+        canonical.as_bytes(),
+    );
+    Ok(SignedFetchReceiptSet {
+        payload,
+        signature,
+        signer_did,
+    })
+}
+
+/// Verify one signed receipt set against the requester's DID and return its
+/// receipts. The signature covers the nested payload. After the signature and
+/// the DID pin, the set is refused when the schema is not
+/// `elastos.content.fetch.receipt-set/v2`, the requested CID is not a
+/// canonical SHA2-256 CID, the required holder count is outside 1 to 8, the
+/// receipt list is empty, the set has no time, a receipt names another CID,
+/// or the stated observed count differs from the distinct verified holder
+/// DIDs in the list. Each verified row also needs the holder's signature for
+/// this requester, CID, byte count and nonce.
+pub fn verify_signed_fetch_receipt_set(
+    signed: &SignedFetchReceiptSet,
+    requester_did: &str,
+) -> Result<Vec<FetchReceipt>, ProviderError> {
+    let envelope = serde_json::to_vec(signed).map_err(|err| {
+        ProviderError::Provider(format!("fetch receipt set encode failed: {err}"))
+    })?;
+    crate::crypto::verify_signed_json_envelope_against_dids(
+        &envelope,
+        FETCH_RECEIPT_SET_DOMAIN,
+        std::slice::from_ref(&requester_did.to_string()),
+    )
+    .map_err(|err| {
+        ProviderError::Provider(format!("fetch receipt set verification failed: {err}"))
+    })?;
+    let set = &signed.payload;
+    if set.schema != FETCH_RECEIPT_SET_SCHEMA {
+        return Err(ProviderError::Provider(
+            "fetch receipt set schema mismatch".into(),
+        ));
+    }
+    require_fetch_receipt_cid(&set.requested_cid).map_err(ProviderError::Provider)?;
+    if !(1..=MAX_FETCH_RECEIPT_ATTEMPTS).contains(&set.required_distinct_holders) {
+        return Err(ProviderError::Provider(
+            "fetch receipt set required holder count is invalid".into(),
+        ));
+    }
+    if set.receipts.is_empty() || set.checked_at == 0 {
+        return Err(ProviderError::Provider(
+            "fetch receipt set requires receipts and a time".into(),
+        ));
+    }
+    if !valid_serve_nonce(&set.serve_request_nonce) {
+        return Err(ProviderError::Provider(
+            "fetch receipt set request nonce is invalid".into(),
+        ));
+    }
+    if set
+        .receipts
+        .iter()
+        .any(|receipt| receipt.requested_cid != set.requested_cid)
+    {
+        return Err(ProviderError::Provider(
+            "fetch receipt set receipt names another CID".into(),
+        ));
+    }
+    for receipt in &set.receipts {
+        if receipt.verified {
+            let signed = receipt.countersignature.as_ref().ok_or_else(|| {
+                ProviderError::Provider("verified fetch receipt requires a countersignature".into())
+            })?;
+            let nonce = serve_attempt_nonce(&set.serve_request_nonce, receipt.attempt).ok_or_else(
+                || ProviderError::Provider("fetch receipt attempt nonce is invalid".into()),
+            )?;
+            if receipt.serve_nonce.as_deref() != Some(nonce.as_str()) {
+                return Err(ProviderError::Provider(
+                    "fetch receipt nonce was not issued for this attempt".into(),
+                ));
+            }
+            verify_holder_serve_receipt(
+                signed,
+                &receipt.peer_did,
+                &receipt.requested_cid,
+                requester_did,
+                receipt.bytes_received,
+                &nonce,
+            )?;
+        }
+    }
+    if u64::from(set.observed_distinct_holders)
+        != fetch_receipt_distinct_holders(&set.receipts) as u64
+    {
+        return Err(ProviderError::Provider(
+            "fetch receipt set observed holder count does not match its receipts".into(),
+        ));
+    }
+    Ok(set.receipts.clone())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8775,12 +9507,293 @@ fn provider_response_ok(response: &Value, operation: &str) -> Result<(), Provide
     Ok(())
 }
 
-pub(crate) async fn verify_exact_content_cid(
-    registry: &ProviderRegistry,
+// Carrier-only Homes have no local IPFS provider. Check Kubo's legacy file
+// import profiles used by Content from the received bytes, before returning
+// them to the caller. A CID with another codec or import recipe fails closed.
+pub(crate) fn verify_carrier_content_cid(cid: &str, bytes: &[u8]) -> Result<bool, ProviderError> {
+    verify_carrier_content_cid_reader(cid, bytes)
+}
+
+fn verify_carrier_content_cid_base64(cid: &str, data: &str) -> Result<bool, ProviderError> {
+    let reader = base64::read::DecoderReader::new(
+        data.as_bytes(),
+        &base64::engine::general_purpose::STANDARD,
+    );
+    verify_carrier_content_cid_reader(cid, reader)
+}
+
+fn verify_carrier_content_cid_reader(
     cid: &str,
-    bytes: &[u8],
+    mut reader: impl Read,
 ) -> Result<bool, ProviderError> {
-    verify_exact_content_cid_with_filename(registry, cid, bytes, "content.bin").await
+    let requested = cid::Cid::try_from(cid)
+        .map_err(|err| ProviderError::Provider(format!("invalid content CID: {err}")))?;
+    if requested.to_string() != cid {
+        return Ok(false);
+    }
+    if requested.hash().code() != 0x12 || requested.hash().digest().len() != 32 {
+        return Ok(false);
+    }
+    if !matches!(
+        (requested.version(), requested.codec()),
+        (cid::Version::V1, 0x55) | (cid::Version::V0 | cid::Version::V1, 0x70)
+    ) {
+        return Ok(false);
+    }
+    let mut reducer = FileCidReducer::new(&requested);
+    feed_file_cid_reader(&mut reducer, &mut reader)?;
+    Ok(reducer.matches(&requested))
+}
+
+fn feed_file_cid_reader(
+    reducer: &mut FileCidReducer,
+    reader: &mut impl Read,
+) -> Result<u64, ProviderError> {
+    let mut buffer = [0u8; 32 * 1024];
+    let mut length = 0u64;
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|err| ProviderError::Provider(format!("availability data: {err}")))?;
+        if count == 0 {
+            return Ok(length);
+        }
+        length = length
+            .checked_add(count as u64)
+            .ok_or_else(|| ProviderError::Provider("availability data length overflow".into()))?;
+        reducer.push(&buffer[..count]);
+    }
+}
+
+fn verify_carrier_content_cid_stream(cid: &str, stream: &Value) -> Result<bool, ProviderError> {
+    let requested = cid::Cid::try_from(cid)
+        .map_err(|err| ProviderError::Provider(format!("invalid content CID: {err}")))?;
+    let invalid = |detail: &str| ProviderError::Provider(format!("availability stream {detail}"));
+    if requested.to_string() != cid
+        || requested.hash().code() != 0x12
+        || requested.hash().digest().len() != 32
+        || !matches!(
+            (requested.version(), requested.codec()),
+            (cid::Version::V1, 0x55) | (cid::Version::V0 | cid::Version::V1, 0x70)
+        )
+    {
+        return Ok(false);
+    }
+    if stream.get("schema").and_then(Value::as_str) != Some("elastos.provider.stream/v1")
+        || stream.get("encoding").and_then(Value::as_str) != Some("base64-chunks")
+        || stream.get("completed").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(invalid("has invalid header"));
+    }
+    let chunks = stream
+        .get("chunks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("requires chunks"))?;
+    let mut reducer = FileCidReducer::new(&requested);
+    let mut offset = 0u64;
+    for (index, chunk) in chunks.iter().enumerate() {
+        if chunk.get("index").and_then(Value::as_u64) != Some(index as u64)
+            || chunk.get("offset").and_then(Value::as_u64) != Some(offset)
+        {
+            return Err(invalid("chunk index or offset mismatch"));
+        }
+        let data = chunk
+            .get("data")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("chunk requires base64 data"))?;
+        let mut reader = base64::read::DecoderReader::new(
+            data.as_bytes(),
+            &base64::engine::general_purpose::STANDARD,
+        );
+        let length = feed_file_cid_reader(&mut reducer, &mut reader)?;
+        if chunk
+            .get("length")
+            .and_then(Value::as_u64)
+            .is_some_and(|v| v != length)
+        {
+            return Err(invalid("chunk length mismatch"));
+        }
+        offset = offset
+            .checked_add(length)
+            .ok_or_else(|| invalid("length overflow"))?;
+    }
+    if stream
+        .get("total_bytes")
+        .and_then(Value::as_u64)
+        .is_some_and(|v| v != offset)
+    {
+        return Err(invalid("total length mismatch"));
+    }
+    Ok(reducer.matches(&requested))
+}
+
+const UNIXFS_CHUNK_BYTES: usize = 262_144;
+const UNIXFS_FILE_LINKS: usize = 174;
+
+#[derive(Clone)]
+struct FileCidNode {
+    cid: cid::Cid,
+    file_size: u64,
+    dag_size: u64,
+}
+
+// Keep at most one partial UnixFS chunk plus compact leaf metadata. Base64
+// payloads are decoded through this reducer without a second whole-file copy.
+struct FileCidReducer {
+    version: cid::Version,
+    raw: Vec<FileCidNode>,
+    legacy: Vec<FileCidNode>,
+    partial: Vec<u8>,
+    raw_enabled: bool,
+    legacy_enabled: bool,
+}
+
+impl FileCidReducer {
+    fn new(requested: &cid::Cid) -> Self {
+        Self {
+            version: requested.version(),
+            raw: Vec::new(),
+            legacy: Vec::new(),
+            partial: Vec::with_capacity(UNIXFS_CHUNK_BYTES),
+            raw_enabled: requested.version() == cid::Version::V1,
+            legacy_enabled: requested.codec() == 0x70,
+        }
+    }
+
+    fn push(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let count = bytes.len().min(UNIXFS_CHUNK_BYTES - self.partial.len());
+            self.partial.extend_from_slice(&bytes[..count]);
+            bytes = &bytes[count..];
+            if self.partial.len() == UNIXFS_CHUNK_BYTES {
+                self.push_leaf();
+            }
+        }
+    }
+
+    fn push_leaf(&mut self) {
+        if self.raw_enabled {
+            self.raw
+                .push(file_leaf(&self.partial, cid::Version::V1, true));
+        }
+        if self.legacy_enabled {
+            self.legacy
+                .push(file_leaf(&self.partial, self.version, false));
+        }
+        self.partial.clear();
+    }
+
+    fn matches(mut self, requested: &cid::Cid) -> bool {
+        if !self.partial.is_empty() || (self.raw.is_empty() && self.legacy.is_empty()) {
+            self.push_leaf();
+        }
+        (self.raw_enabled && file_cid_from_leaves(self.raw, cid::Version::V1) == *requested)
+            || (self.legacy_enabled
+                && file_cid_from_leaves(self.legacy, self.version) == *requested)
+    }
+}
+
+fn pb_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 128 {
+        out.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn pb_number(out: &mut Vec<u8>, field: u64, value: u64) {
+    pb_varint(out, field << 3);
+    pb_varint(out, value);
+}
+
+fn pb_bytes(out: &mut Vec<u8>, field: u64, value: &[u8]) {
+    pb_varint(out, (field << 3) | 2);
+    pb_varint(out, value.len() as u64);
+    out.extend_from_slice(value);
+}
+
+fn hashed_cid(block: &[u8], version: cid::Version, codec: u64) -> cid::Cid {
+    let digest = sha2::Sha256::digest(block);
+    let hash = cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice())
+        .expect("SHA-256 fits a multihash");
+    match version {
+        cid::Version::V0 => cid::Cid::new_v0(hash).expect("CIDv0 uses dag-pb SHA-256"),
+        cid::Version::V1 => cid::Cid::new_v1(codec, hash),
+    }
+}
+
+fn file_leaf(chunk: &[u8], version: cid::Version, raw: bool) -> FileCidNode {
+    if raw {
+        return FileCidNode {
+            cid: hashed_cid(chunk, cid::Version::V1, 0x55),
+            file_size: chunk.len() as u64,
+            dag_size: chunk.len() as u64,
+        };
+    }
+    let mut unixfs = Vec::with_capacity(chunk.len() + 16);
+    pb_number(&mut unixfs, 1, 2); // UnixFS File
+    if !chunk.is_empty() {
+        pb_bytes(&mut unixfs, 2, chunk);
+    }
+    pb_number(&mut unixfs, 3, chunk.len() as u64);
+    let mut block = Vec::with_capacity(unixfs.len() + 8);
+    pb_bytes(&mut block, 1, &unixfs);
+    FileCidNode {
+        cid: hashed_cid(&block, version, 0x70),
+        file_size: chunk.len() as u64,
+        dag_size: block.len() as u64,
+    }
+}
+
+fn file_parent(children: &[FileCidNode], version: cid::Version) -> FileCidNode {
+    let file_size = children.iter().map(|node| node.file_size).sum();
+    let mut unixfs = Vec::with_capacity(children.len() * 5 + 16);
+    pb_number(&mut unixfs, 1, 2);
+    pb_number(&mut unixfs, 3, file_size);
+    for child in children {
+        pb_number(&mut unixfs, 4, child.file_size);
+    }
+    // Kubo's legacy PBNode field order is Links, then Data. An empty Name is
+    // serialized on each link, and Tsize is the child's cumulative DAG size.
+    let mut block = Vec::with_capacity(children.len() * 70 + unixfs.len());
+    for child in children {
+        let mut link = Vec::with_capacity(64);
+        pb_bytes(&mut link, 1, &child.cid.to_bytes());
+        pb_bytes(&mut link, 2, b"");
+        pb_number(&mut link, 3, child.dag_size);
+        pb_bytes(&mut block, 2, &link);
+    }
+    pb_bytes(&mut block, 1, &unixfs);
+    FileCidNode {
+        cid: hashed_cid(&block, version, 0x70),
+        file_size,
+        dag_size: block.len() as u64 + children.iter().map(|node| node.dag_size).sum::<u64>(),
+    }
+}
+
+fn file_cid_from_leaves(mut level: Vec<FileCidNode>, version: cid::Version) -> cid::Cid {
+    while level.len() > 1 {
+        // Kubo keeps one-link intermediate nodes when a balanced level opens;
+        // promoting a trailing singleton changes the file CID.
+        level = level
+            .chunks(UNIXFS_FILE_LINKS)
+            .map(|children| file_parent(children, version))
+            .collect();
+    }
+    level.pop().expect("file has one root").cid
+}
+
+#[cfg(test)]
+fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
+    let level: Vec<FileCidNode> = if bytes.is_empty() {
+        vec![file_leaf(bytes, version, raw)]
+    } else {
+        bytes
+            .chunks(UNIXFS_CHUNK_BYTES)
+            .map(|chunk| file_leaf(chunk, version, raw))
+            .collect()
+    };
+    file_cid_from_leaves(level, version)
 }
 
 async fn verify_exact_content_cid_with_filename(
@@ -8850,6 +9863,33 @@ fn provider_response_payload(
             response,
             provider_name,
         )?)),
+    }
+}
+
+fn provider_response_payload_owned(
+    response: &mut Value,
+    provider_name: &str,
+    transfer: &ContentFetchTransfer,
+) -> Result<ContentFetchPayload, ProviderError> {
+    let field = match transfer.transfer {
+        ProviderTransfer::Stream => "stream",
+        _ => "data",
+    };
+    let value = response
+        .get_mut("data")
+        .and_then(Value::as_object_mut)
+        .and_then(|data| data.remove(field))
+        .ok_or_else(|| {
+            ProviderError::Provider(format!("{provider_name} response missing {field} payload"))
+        })?;
+    match transfer.transfer {
+        ProviderTransfer::Stream => Ok(ContentFetchPayload::Stream(value)),
+        _ => match value {
+            Value::String(data) => Ok(ContentFetchPayload::Bytes(data)),
+            _ => Err(ProviderError::Provider(format!(
+                "{provider_name} response {field} is not a string"
+            ))),
+        },
     }
 }
 
@@ -9448,18 +10488,365 @@ mod tests {
 
     const TEST_CID: &str = "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi";
 
+    #[test]
+    fn carrier_cid_check_matches_isolated_kubo_file_imports() {
+        // Kubo 0.40.1 `add --only-hash`, using its legacy profile and the
+        // workflow's explicit CIDv1 option. These pins cover raw leaves,
+        // dag-pb parents, and the empty CIDv0 file special case.
+        let small = b"carrier provider bytes";
+        assert!(verify_carrier_content_cid(
+            "QmUbwMMFXd4fo4VuPz5NLSKA1e5NdNQ2Tdr6UYkdj8v7tp",
+            small,
+        )
+        .unwrap());
+        assert!(verify_carrier_content_cid(
+            "bafkreiermf3pekqicqpks77bbjoszjblcapl7vgvdaafl7qbn6enegjo5e",
+            small,
+        )
+        .unwrap());
+        assert!(
+            verify_carrier_content_cid("QmbFMke1KXqnYyBBWxB74N4c5SBnJMVAiMNRcGu6x1AwQH", b"",)
+                .unwrap()
+        );
+        let generic = [
+            sha2::Sha256::digest(b"issue89 generic file").repeat(65_536),
+            b"complete".to_vec(),
+        ]
+        .concat();
+        let generic_cid = "bafybeihkdt7gm3dap774urwmlqcnymhfvhtctkvnzb6vdcxmmad3cnbawy";
+        assert!(verify_carrier_content_cid(generic_cid, &generic).unwrap());
+        assert!(verify_carrier_content_cid(
+            "QmbBXPq7tPW63A7hTYFJXKVZaRxXd4u1TRtQRvr3mmd4LF",
+            &generic,
+        )
+        .unwrap());
+        let mut changed = generic;
+        changed[0] ^= 1;
+        assert!(!verify_carrier_content_cid(generic_cid, &changed).unwrap());
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_above_one_file_link_layer() {
+        let mut bytes = Vec::with_capacity(175 * UNIXFS_CHUNK_BYTES + 1);
+        for index in 0..175 {
+            bytes.extend(std::iter::repeat_n((index % 251) as u8, UNIXFS_CHUNK_BYTES));
+        }
+        bytes.push(b'X');
+        assert!(verify_carrier_content_cid(
+            "bafybeicxfrgbvn3264uulnvvg77cnxxobo3nggiylvggg66em3mvrdlmzu",
+            &bytes,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_zero_file_boundaries() {
+        // Generated with pinned Kubo 0.40.1 from an all-zero stream:
+        // `ipfs add --only-hash --quieter --pin=false --hash=sha2-256
+        // --chunker=size-262144 --max-file-links=174`, once with
+        // `--cid-version=0 --raw-leaves=false` and once with
+        // `--cid-version=1 --raw-leaves=true`.
+        let vectors = [
+            (
+                0,
+                "QmbFMke1KXqnYyBBWxB74N4c5SBnJMVAiMNRcGu6x1AwQH",
+                "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+            ),
+            (
+                1,
+                "QmS9JArPwa55ePgDnyg6TzX24mYTS1b1vLqWNebyVotKxQ",
+                "bafkreidogqfzz75tpkmjzjke425xqcrmpcib2p5tg44hnbirumdbpl5adu",
+            ),
+            (
+                UNIXFS_CHUNK_BYTES,
+                "QmRk1rduJvo5DfEYAaLobS2za9tDszk35hzaNSDCJ74DA7",
+                "bafkreiekhhjkxu4ztk3tyng3er3ijhg56mb44oe3gwbgquhzu4afrg2ksa",
+            ),
+            (
+                UNIXFS_CHUNK_BYTES + 1,
+                "QmbVuw4C4vcmVKqxoWtgDVobvcHrSn51qsmQmyxjk4sB2Q",
+                "bafybeigllfqgfpqydppr6cmv56g7ax4wyhruzswvcefv6j5kj77nzttfki",
+            ),
+            (
+                174 * UNIXFS_CHUNK_BYTES,
+                "QmY4HSz1oVGdUzb8poVYPLsoqBZjH6LZrtgnme9wWn2Qko",
+                "bafybeibxsa3ioclowpaq7b6gxl65gzqneopfr3fnhedak6sqr4bjz5lnyq",
+            ),
+            (
+                174 * UNIXFS_CHUNK_BYTES + 1,
+                "QmehMASWcBsX7VcEQqs6rpR5AHoBfKyBVEgmkJHjpPg8jq",
+                "bafybeihqwzd3o6q6v3pmwhzjy22vokhr767burokmqemg63hptx2nqd7ym",
+            ),
+            (
+                175 * UNIXFS_CHUNK_BYTES,
+                "QmaL1KiQRV8secNszpjjFPg722T53c77k2dz5UsNua59ZT",
+                "bafybeigfps5vzivfspwgm3uwsfyl5s6bn3ysh7uqidgauxgopw4yi66lse",
+            ),
+        ];
+        for (size, legacy_cid, raw_cid) in vectors {
+            let mut bytes = vec![0; size];
+            assert!(
+                verify_carrier_content_cid(legacy_cid, &bytes).unwrap(),
+                "legacy Kubo vector for {size} bytes"
+            );
+            assert!(
+                verify_carrier_content_cid(raw_cid, &bytes).unwrap(),
+                "raw-leaf Kubo vector for {size} bytes"
+            );
+            if size == 174 * UNIXFS_CHUNK_BYTES + 1 {
+                bytes[0] ^= 1;
+                assert!(!verify_carrier_content_cid(legacy_cid, &bytes).unwrap());
+                assert!(!verify_carrier_content_cid(raw_cid, &bytes).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn carrier_cid_check_streams_file_above_64_mib() {
+        use std::io::{Seek, SeekFrom};
+
+        // Kubo 0.42.0, with the same pinned recipe as the 0.40.1 vectors:
+        // `ipfs add --only-hash --quieter --pin=false --hash=sha2-256
+        //  --chunker=size-262144 --max-file-links=174 --cid-version=1
+        //  --raw-leaves=true` on a 67,108,865-byte all-zero file.
+        const SIZE: u64 = 64 * 1024 * 1024 + 1;
+        const CID: &str = "bafybeifky37h74hoftm3v3ecyfh5bg6ozwbplp7bavvbjf2ari2jbqtuyu";
+        let mut file = tempfile::tempfile().unwrap();
+        file.set_len(SIZE).unwrap();
+        assert!(verify_carrier_content_cid_reader(CID, &mut file).unwrap());
+
+        file.rewind().unwrap();
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = base64::write::EncoderWriter::new(
+                &mut encoded,
+                &base64::engine::general_purpose::STANDARD,
+            );
+            std::io::copy(&mut file, &mut encoder).unwrap();
+            encoder.finish().unwrap();
+        }
+        let encoded = String::from_utf8(encoded).unwrap();
+        assert!(verify_carrier_content_cid_base64(CID, &encoded).unwrap());
+        let mut stream = json!({
+            "schema": "elastos.provider.stream/v1",
+            "encoding": "base64-chunks",
+            "completed": true,
+            "total_bytes": SIZE,
+            "chunks": [{"index": 0, "offset": 0, "length": SIZE, "data": encoded}],
+        });
+        assert!(verify_carrier_content_cid_stream(CID, &stream).unwrap());
+        if let Value::String(data) = &mut stream["chunks"][0]["data"] {
+            data.replace_range(0..1, "B");
+        } else {
+            panic!("stream chunk data is a string");
+        }
+        assert!(!verify_carrier_content_cid_stream(CID, &stream).unwrap());
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[1]).unwrap();
+        file.rewind().unwrap();
+        assert!(!verify_carrier_content_cid_reader(CID, &mut file).unwrap());
+    }
+
+    #[test]
+    fn carrier_cid_check_matches_kubo_three_file_link_layers() {
+        // This represents a 7,936,933,888-byte all-zero file without allocating
+        // it. Kubo 0.40.1 computed both CIDs from the complete streamed input.
+        const CHUNKS: usize = 174 * 174 + 1;
+        let chunk = vec![0; UNIXFS_CHUNK_BYTES];
+        for (version, raw, expected) in [
+            (
+                cid::Version::V0,
+                false,
+                "QmaTv4QL4SrnRDVUXJ9C6FgK2eDzXm2nYEgaAxdtZHoWMf",
+            ),
+            (
+                cid::Version::V1,
+                true,
+                "bafybeibqr5nnenx3ea57tdg3kla3rkb7hvbv7meogyxrubwrc5vmicaw5u",
+            ),
+        ] {
+            let leaf = file_leaf(&chunk, version, raw);
+            let cid = file_cid_from_leaves(vec![leaf; CHUNKS], version);
+            assert_eq!(cid.to_string(), expected);
+        }
+    }
+
     fn fetch_receipt(result: FetchResult, verified: bool, attempt: u8) -> FetchReceipt {
+        fetch_receipt_for(TEST_CID, result, verified, attempt)
+    }
+
+    fn fetch_receipt_for(
+        cid: &str,
+        result: FetchResult,
+        verified: bool,
+        attempt: u8,
+    ) -> FetchReceipt {
         let (_, peer_did) = elastos_identity::derive_did(&[7; 32]);
-        FetchReceipt::new(
-            TEST_CID,
-            &peer_did,
+        FetchReceipt::new(cid, &peer_did, 42, verified, result, attempt, 1_700_000_000).unwrap()
+    }
+
+    const TEST_NONCE: &str = "0123456789abcdef0123456789abcdef";
+    const TEST_REQUEST_NONCE: &str = "fedcba9876543210fedcba9876543210";
+
+    fn served_receipt(
+        cid: &str,
+        holder_seed: [u8; 32],
+        requester_did: &str,
+        attempt: u8,
+        time: u64,
+    ) -> FetchReceipt {
+        let (holder_key, holder_did) = elastos_identity::derive_did(&holder_seed);
+        let nonce = serve_attempt_nonce(TEST_REQUEST_NONCE, attempt).unwrap();
+        let signed =
+            sign_holder_serve_receipt(&holder_key, cid, requester_did, 42, &nonce, time).unwrap();
+        FetchReceipt::new_with(
+            cid,
+            &holder_did,
             42,
-            verified,
-            result,
+            true,
+            FetchResult::Ok,
             attempt,
-            1_700_000_000,
+            time,
+            Some(&nonce),
+            Some(signed),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn holder_serve_receipt_round_trips_and_binds_every_field() {
+        let (holder_key, holder_did) = elastos_identity::derive_did(&[7; 32]);
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let signed = sign_holder_serve_receipt(
+            &holder_key,
+            TEST_CID,
+            &requester_did,
+            42,
+            TEST_NONCE,
+            1_700_000_000,
+        )
+        .unwrap();
+        let round_trip: SignedHolderServeReceipt =
+            serde_json::from_slice(&serde_json::to_vec(&signed).unwrap()).unwrap();
+        verify_holder_serve_receipt(
+            &round_trip,
+            &holder_did,
+            TEST_CID,
+            &requester_did,
+            42,
+            TEST_NONCE,
+        )
+        .unwrap();
+        for changed in [
+            {
+                let mut copy = signed.clone();
+                copy.payload.cid = OTHER_CID.into();
+                copy
+            },
+            {
+                let mut copy = signed.clone();
+                copy.payload.requester_did = holder_did.clone();
+                copy
+            },
+            {
+                let mut copy = signed.clone();
+                copy.payload.bytes = 43;
+                copy
+            },
+            {
+                let mut copy = signed.clone();
+                copy.payload.nonce = "f".repeat(32);
+                copy
+            },
+            {
+                let mut copy = signed.clone();
+                copy.signature = "00".repeat(64);
+                copy
+            },
+            {
+                let mut copy = signed.clone();
+                copy.signer_did = elastos_identity::derive_did(&[22; 32]).1;
+                copy
+            },
+        ] {
+            assert!(verify_holder_serve_receipt(
+                &changed,
+                &holder_did,
+                TEST_CID,
+                &requester_did,
+                42,
+                TEST_NONCE
+            )
+            .is_err());
+        }
+        assert!(verify_holder_serve_receipt(
+            &signed,
+            &holder_did,
+            TEST_CID,
+            &requester_did,
+            42,
+            "f".repeat(32).as_str()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn holder_serve_receipt_refuses_another_signer_and_zero_time() {
+        let (holder_key, holder_did) = elastos_identity::derive_did(&[7; 32]);
+        let (_, other_did) = elastos_identity::derive_did(&[22; 32]);
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let signed =
+            sign_holder_serve_receipt(&holder_key, TEST_CID, &requester_did, 42, TEST_NONCE, 1)
+                .unwrap();
+        assert!(verify_holder_serve_receipt(
+            &signed,
+            &other_did,
+            TEST_CID,
+            &requester_did,
+            42,
+            TEST_NONCE
+        )
+        .is_err());
+        let mut changed = signed.clone();
+        changed.payload.time = 0;
+        assert!(verify_holder_serve_receipt(
+            &changed,
+            &holder_did,
+            TEST_CID,
+            &requester_did,
+            42,
+            TEST_NONCE
+        )
+        .is_err());
+        assert!(sign_holder_serve_receipt(
+            &holder_key,
+            TEST_CID,
+            &requester_did,
+            42,
+            TEST_NONCE,
+            0
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn holder_serve_receipt_refuses_noncanonical_nonce() {
+        let (holder_key, _) = elastos_identity::derive_did(&[7; 32]);
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        assert!(
+            sign_holder_serve_receipt(&holder_key, TEST_CID, &requester_did, 42, "abc", 1,)
+                .is_err()
+        );
+        assert!(sign_holder_serve_receipt(
+            &holder_key,
+            TEST_CID,
+            &requester_did,
+            42,
+            &"A".repeat(32),
+            1,
+        )
+        .is_err());
     }
 
     #[test]
@@ -9628,6 +11015,1306 @@ mod tests {
         assert!(!safe
             .windows(token.len())
             .any(|window| window == token.as_bytes()));
+    }
+
+    fn two_verified_holder_receipts() -> Vec<FetchReceipt> {
+        two_verified_holder_receipts_for(TEST_CID)
+    }
+
+    fn two_verified_holder_receipts_for(cid: &str) -> Vec<FetchReceipt> {
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        vec![
+            served_receipt(cid, [7; 32], &requester_did, 1, 1_700_000_000),
+            served_receipt(cid, [22; 32], &requester_did, 2, 1_700_000_001),
+        ]
+    }
+
+    /// Existing mock answers use fixed holder keys. Act as the collector:
+    /// issue a nonce and bind holder rows to each isolated test Home's key.
+    fn bind_mock_holder_rows(value: &mut Value, requester_did: &str, request_nonce: &str) {
+        if let Some(rows) = value.as_array_mut() {
+            for row in rows {
+                bind_mock_holder_rows(row, requester_did, request_nonce);
+            }
+        } else if let Some(object) = value.as_object_mut() {
+            if object.get("verified") == Some(&json!(true)) {
+                if let (Some(cid), Some(peer_did), Some(bytes), Some(attempt), Some(time)) = (
+                    object.get("requested_cid").and_then(Value::as_str),
+                    object.get("peer_did").and_then(Value::as_str),
+                    object.get("bytes_received").and_then(Value::as_u64),
+                    object.get("attempt").and_then(Value::as_u64),
+                    object.get("time").and_then(Value::as_u64),
+                ) {
+                    for seed in [[7; 32], [22; 32]] {
+                        let (key, did) = elastos_identity::derive_did(&seed);
+                        if did == peer_did {
+                            let nonce = serve_attempt_nonce(request_nonce, attempt as u8).unwrap();
+                            let signed = sign_holder_serve_receipt(
+                                &key,
+                                cid,
+                                requester_did,
+                                bytes,
+                                &nonce,
+                                time,
+                            )
+                            .unwrap();
+                            object.insert("serve_nonce".into(), json!(nonce));
+                            object.insert(
+                                "countersignature".into(),
+                                serde_json::to_value(signed).unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+            } else {
+                for nested in object.values_mut() {
+                    bind_mock_holder_rows(nested, requester_did, request_nonce);
+                }
+            }
+        }
+    }
+
+    fn requester_bound_mock_answer(mut body: Value, data_dir: &Path) -> Value {
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir).unwrap();
+        body["__test_requester_did"] = json!(requester_did);
+        body
+    }
+
+    /// A valid CIDv0 that is not the set's CID.
+    const OTHER_CID: &str = "QmVQXWedLDxL2XRFTp62qxoHjP1hXNo9f9vCZgbhqCQ8d2";
+
+    fn signed_test_fetch_receipt_set() -> (SignedFetchReceiptSet, String) {
+        let (signing_key, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let signed = sign_fetch_receipt_set(
+            &signing_key,
+            TEST_CID,
+            2,
+            TEST_REQUEST_NONCE,
+            two_verified_holder_receipts(),
+        )
+        .unwrap();
+        (signed, requester_did)
+    }
+
+    #[test]
+    fn verified_receipt_without_countersignature_does_not_count() {
+        let unsigned = fetch_receipt(FetchResult::Ok, true, 1);
+        assert_eq!(
+            fetch_receipt_distinct_holders(std::slice::from_ref(&unsigned)),
+            0
+        );
+        assert!(unsigned.counted_holder_did().is_none());
+        assert!(unsigned.peer_did_verified().is_some());
+    }
+
+    #[test]
+    fn signed_set_v2_refuses_an_uncountersigned_verified_receipt() {
+        let (requester_key, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let signed = sign_fetch_receipt_set(
+            &requester_key,
+            TEST_CID,
+            1,
+            TEST_REQUEST_NONCE,
+            vec![fetch_receipt(FetchResult::Ok, true, 1)],
+        )
+        .unwrap();
+        assert_eq!(signed.payload.observed_distinct_holders, 0);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    #[test]
+    fn signed_set_v2_refuses_a_countersignature_for_another_requester() {
+        let (requester_key, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let (_, other_did) = elastos_identity::derive_did(&[23; 32]);
+        let receipt = served_receipt(TEST_CID, [7; 32], &other_did, 1, 1_700_000_000);
+        let signed = sign_fetch_receipt_set(
+            &requester_key,
+            TEST_CID,
+            1,
+            TEST_REQUEST_NONCE,
+            vec![receipt],
+        )
+        .unwrap();
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    #[test]
+    fn signed_set_v1_is_not_accepted_as_proof() {
+        let (requester_key, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let mut payload = consistent_receipt_set(two_verified_holder_receipts(), TEST_CID);
+        payload.schema = "elastos.content.fetch.receipt-set/v1".into();
+        let canonical = serde_json::to_string(&serde_json::to_value(&payload).unwrap()).unwrap();
+        let (signature, signer_did) = crate::crypto::domain_separated_sign(
+            &requester_key,
+            "elastos.content.fetch.receipt-set.v1",
+            canonical.as_bytes(),
+        );
+        let signed = SignedFetchReceiptSet {
+            payload,
+            signature,
+            signer_did,
+        };
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    #[test]
+    fn fetch_receipt_wire_rejects_mismatched_countersignature() {
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        let encoded = receipt.encode_canonical().unwrap();
+        assert_eq!(FetchReceipt::decode_canonical(&encoded).unwrap(), receipt);
+        let mut value = serde_json::to_value(receipt).unwrap();
+        value["countersignature"]["payload"]["bytes"] = json!(43);
+        assert!(serde_json::from_value::<FetchReceipt>(value.clone()).is_err());
+        assert!(FetchReceipt::decode_canonical(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn content_boundary_refuses_forged_holder_signature() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let mut rows = vec![
+            served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000),
+            served_receipt(TEST_CID, [22; 32], &requester_did, 2, 1_700_000_001),
+        ];
+        rows[0].countersignature.as_mut().unwrap().signature = "00".repeat(64);
+        let mut availability = json!({"receipts": rows});
+        let result = ContentProvider::settle_distinct_holder_success(
+            Some(data_dir.path()),
+            TEST_CID,
+            2,
+            TEST_REQUEST_NONCE,
+            &mut availability,
+        )
+        .unwrap();
+        assert!(matches!(result, DistinctHolderGate::Unproven));
+    }
+
+    #[test]
+    fn plant_boundary_refuses_old_signature_with_matching_row_nonce() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        let mut availability = json!({"receipts": [receipt]});
+        let result = ContentProvider::settle_distinct_holder_success(
+            Some(data_dir.path()),
+            TEST_CID,
+            1,
+            "abcdef0123456789abcdef0123456789",
+            &mut availability,
+        )
+        .unwrap();
+        assert!(matches!(result, DistinctHolderGate::Unproven));
+        eprintln!("P26B plant boundary replay: RED, old signed row refused");
+    }
+
+    #[test]
+    fn content_boundary_refuses_a_row_without_collector_nonce() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let mut receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        receipt.serve_nonce = None;
+        let mut availability = json!({"receipts": [receipt]});
+        let result = ContentProvider::settle_distinct_holder_success(
+            Some(data_dir.path()),
+            TEST_CID,
+            1,
+            TEST_REQUEST_NONCE,
+            &mut availability,
+        )
+        .unwrap();
+        assert!(matches!(result, DistinctHolderGate::Unproven));
+    }
+
+    #[test]
+    fn distinct_holder_refusal_does_not_sign_a_foreign_cid_row() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let mut answer = json!({
+            "receipts": [served_receipt(OTHER_CID, [7; 32], &requester_did, 1, 1_700_000_000)]
+        });
+        assert!(!ContentProvider::attach_signed_fetch_receipt_set(
+            data_dir.path(),
+            TEST_CID,
+            2,
+            TEST_REQUEST_NONCE,
+            &mut answer,
+        )
+        .unwrap());
+        assert!(answer.get("receipt_set").is_none());
+    }
+
+    #[test]
+    fn distinct_holder_refusal_signs_only_rows_for_the_requested_cid() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let mut answer = json!({
+            "receipts": [
+                served_receipt(OTHER_CID, [7; 32], &requester_did, 1, 1_700_000_000),
+                served_receipt(TEST_CID, [22; 32], &requester_did, 2, 1_700_000_001),
+            ]
+        });
+        assert!(ContentProvider::attach_signed_fetch_receipt_set(
+            data_dir.path(),
+            TEST_CID,
+            2,
+            TEST_REQUEST_NONCE,
+            &mut answer,
+        )
+        .unwrap());
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(answer["receipt_set"].clone()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(signed.payload.requested_cid, TEST_CID);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].requested_cid, TEST_CID);
+    }
+
+    #[test]
+    fn content_boundary_does_not_sign_only_foreign_cid_rows() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let mut availability = json!({
+            "receipts": [served_receipt(OTHER_CID, [7; 32], &requester_did, 1, 1_700_000_000)]
+        });
+        let result = ContentProvider::settle_distinct_holder_success(
+            Some(data_dir.path()),
+            TEST_CID,
+            2,
+            TEST_REQUEST_NONCE,
+            &mut availability,
+        )
+        .unwrap();
+        assert!(matches!(result, DistinctHolderGate::Unproven));
+        assert!(availability.get("receipt_set").is_none());
+    }
+
+    fn reparse_signed_set(value: Value) -> SignedFetchReceiptSet {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// The saved set round-trips through its JSON shape and verifies against
+    /// the requester's DID, returning the two verified holder receipts.
+    #[test]
+    fn signed_fetch_receipt_set_round_trip_verifies_for_the_requester() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let parsed: SignedFetchReceiptSet =
+            serde_json::from_str(&serde_json::to_string(&signed).unwrap()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&parsed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(parsed.payload.required_distinct_holders, 2);
+        assert_eq!(parsed.payload.observed_distinct_holders, 2);
+        assert_eq!(parsed.payload.requested_cid, TEST_CID);
+        assert_eq!(
+            parsed.payload.schema,
+            "elastos.content.fetch.receipt-set/v2"
+        );
+        assert_eq!(
+            FETCH_RECEIPT_SET_ATTESTATION,
+            "requester-signed-holder-countersigned"
+        );
+        assert_eq!(parsed.signer_did, requester_did);
+    }
+
+    #[test]
+    fn plant_set_verifier_refuses_old_signature_with_matching_row_nonce() {
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        let mut payload = consistent_receipt_set(vec![receipt], TEST_CID);
+        payload.serve_request_nonce = "abcdef0123456789abcdef0123456789".into();
+        let (signed, requester_did) = sign_payload_with_test_key(payload);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+        eprintln!("P26B plant set verifier replay: RED, old signed row refused");
+    }
+
+    #[test]
+    fn plant_fresh_honest_answer_passes_boundary_and_set_verifier() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        let mut availability = json!({"receipts": [receipt]});
+        let result = ContentProvider::settle_distinct_holder_success(
+            Some(data_dir.path()),
+            TEST_CID,
+            1,
+            TEST_REQUEST_NONCE,
+            &mut availability,
+        )
+        .unwrap();
+        assert!(matches!(result, DistinctHolderGate::Proven));
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(availability["receipt_set"].clone()).unwrap();
+        assert_eq!(
+            verify_signed_fetch_receipt_set(&signed, &requester_did)
+                .unwrap()
+                .len(),
+            1
+        );
+        eprintln!("P26B plant fresh honest answer: RED, valid signed row accepted");
+    }
+
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_row_without_collector_nonce() {
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let mut receipt = served_receipt(TEST_CID, [7; 32], &requester_did, 1, 1_700_000_000);
+        receipt.serve_nonce = None;
+        let payload = consistent_receipt_set(vec![receipt], TEST_CID);
+        let (signed, requester_did) = sign_payload_with_test_key(payload);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    /// A changed byte in one receipt refuses: the signature covers every row.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_changed_receipt() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["payload"]["receipts"][0]["bytes_received"] = json!(41);
+        value["payload"]["receipts"][0]["countersignature"]["payload"]["bytes"] = json!(41);
+        assert!(
+            verify_signed_fetch_receipt_set(&reparse_signed_set(value), &requester_did).is_err()
+        );
+    }
+
+    /// Relabelling the whole set to another CID refuses: the CID is signed.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_changed_cid() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["payload"]["requested_cid"] = json!(OTHER_CID);
+        for index in 0..2 {
+            value["payload"]["receipts"][index]["requested_cid"] = json!(OTHER_CID);
+            value["payload"]["receipts"][index]["countersignature"]["payload"]["cid"] =
+                json!(OTHER_CID);
+        }
+        assert!(
+            verify_signed_fetch_receipt_set(&reparse_signed_set(value), &requester_did).is_err()
+        );
+    }
+
+    /// The required and observed holder counts are signed facts.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_changed_count() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["payload"]["required_distinct_holders"] = json!(3);
+        assert!(verify_signed_fetch_receipt_set(
+            &reparse_signed_set(value.clone()),
+            &requester_did
+        )
+        .is_err());
+        value["payload"]["required_distinct_holders"] = json!(2);
+        value["payload"]["observed_distinct_holders"] = json!(3);
+        assert!(
+            verify_signed_fetch_receipt_set(&reparse_signed_set(value), &requester_did).is_err()
+        );
+    }
+
+    fn verified_receipt_for(cid: &str, seed: [u8; 32], attempt: u8, time: u64) -> FetchReceipt {
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        served_receipt(cid, seed, &requester_did, attempt, time)
+    }
+
+    fn consistent_receipt_set(receipts: Vec<FetchReceipt>, cid: &str) -> FetchReceiptSet {
+        FetchReceiptSet {
+            schema: FETCH_RECEIPT_SET_SCHEMA.to_string(),
+            requested_cid: cid.to_string(),
+            required_distinct_holders: 2,
+            observed_distinct_holders: fetch_receipt_distinct_holders(&receipts) as u32,
+            checked_at: 1_700_000_000,
+            serve_request_nonce: TEST_REQUEST_NONCE.into(),
+            receipts,
+        }
+    }
+
+    /// Sign a payload with the test key, including a payload `sign_fetch_receipt_set`
+    /// would refuse. The signature is valid; later checks decide the row.
+    fn sign_payload_with_test_key(payload: FetchReceiptSet) -> (SignedFetchReceiptSet, String) {
+        let (signing_key, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let canonical = serde_json::to_string(&serde_json::to_value(&payload).unwrap()).unwrap();
+        let (signature, signer_did) = crate::crypto::domain_separated_sign(
+            &signing_key,
+            FETCH_RECEIPT_SET_DOMAIN,
+            canonical.as_bytes(),
+        );
+        (
+            SignedFetchReceiptSet {
+                payload,
+                signature,
+                signer_did,
+            },
+            requester_did,
+        )
+    }
+
+    /// The observed count is the distinct verified DIDs, not the required
+    /// count the caller passed to sign.
+    #[test]
+    fn sign_fetch_receipt_set_counts_distinct_holders_from_the_receipts() {
+        let (signing_key, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let signed = sign_fetch_receipt_set(
+            &signing_key,
+            TEST_CID,
+            2,
+            TEST_REQUEST_NONCE,
+            vec![verified_receipt_for(TEST_CID, [7; 32], 1, 1_700_000_000)],
+        )
+        .unwrap();
+        assert_eq!(signed.payload.required_distinct_holders, 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 1);
+    }
+
+    /// Sign refuses a row that names a CID other than the set's.
+    #[test]
+    fn sign_fetch_receipt_set_refuses_a_receipt_for_another_cid() {
+        let (signing_key, _) = elastos_identity::derive_did(&[21; 32]);
+        let receipts = vec![
+            verified_receipt_for(TEST_CID, [7; 32], 1, 1_700_000_000),
+            verified_receipt_for(OTHER_CID, [22; 32], 2, 1_700_000_001),
+        ];
+        let err = sign_fetch_receipt_set(&signing_key, TEST_CID, 2, TEST_REQUEST_NONCE, receipts)
+            .unwrap_err();
+        assert!(err.to_string().contains("another CID"), "{err}");
+    }
+
+    /// A valid signature over a lied observed count is refused. The bytes were
+    /// not changed after signing.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_valid_signature_with_the_wrong_count() {
+        let payload = consistent_receipt_set(two_verified_holder_receipts(), TEST_CID);
+        let (signed, requester_did) = sign_payload_with_test_key(payload.clone());
+        verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        let mut lying = payload;
+        lying.observed_distinct_holders = 9;
+        let (signed, requester_did) = sign_payload_with_test_key(lying);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    /// A valid signature over receipts for another CID is refused. The
+    /// observed count matches those receipts, so the CID check is the refusal.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_valid_signature_for_another_cid() {
+        let receipts = vec![
+            verified_receipt_for(OTHER_CID, [7; 32], 1, 1_700_000_000),
+            verified_receipt_for(OTHER_CID, [22; 32], 2, 1_700_000_001),
+        ];
+        let payload = consistent_receipt_set(receipts, TEST_CID);
+        assert_eq!(payload.observed_distinct_holders, 2);
+        let (signed, requester_did) = sign_payload_with_test_key(payload);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    /// A valid signature over the wrong schema is refused.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_valid_signature_with_the_wrong_schema() {
+        let mut payload = consistent_receipt_set(two_verified_holder_receipts(), TEST_CID);
+        payload.schema = "elastos.content.fetch.receipt-set/v0".to_string();
+        let (signed, requester_did) = sign_payload_with_test_key(payload);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    /// An empty receipt list is refused even when the observed count is 0.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_an_empty_receipt_list() {
+        let payload = consistent_receipt_set(Vec::new(), TEST_CID);
+        assert_eq!(payload.observed_distinct_holders, 0);
+        let (signed, requester_did) = sign_payload_with_test_key(payload);
+        assert!(verify_signed_fetch_receipt_set(&signed, &requester_did).is_err());
+    }
+
+    /// A changed signature byte refuses.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_a_changed_signature() {
+        let (signed, requester_did) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        let signature = value["signature"].as_str().unwrap().to_string();
+        let mut bytes = signature.into_bytes();
+        bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
+        value["signature"] = json!(String::from_utf8(bytes).unwrap());
+        assert!(
+            verify_signed_fetch_receipt_set(&reparse_signed_set(value), &requester_did).is_err()
+        );
+    }
+
+    /// A set signed by another key is that key's statement, not this
+    /// requester's: the DID pin refuses it even though the signature is valid.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_another_keys_set_for_this_did() {
+        let (other_key, other_did) = elastos_identity::derive_did(&[23; 32]);
+        let (_, requester_did) = elastos_identity::derive_did(&[21; 32]);
+        let other = sign_fetch_receipt_set(
+            &other_key,
+            TEST_CID,
+            2,
+            TEST_REQUEST_NONCE,
+            vec![
+                served_receipt(TEST_CID, [7; 32], &other_did, 1, 1_700_000_000),
+                served_receipt(TEST_CID, [22; 32], &other_did, 2, 1_700_000_001),
+            ],
+        )
+        .unwrap();
+        verify_signed_fetch_receipt_set(&other, &other_did).unwrap();
+        assert_ne!(other_did, requester_did);
+        assert!(verify_signed_fetch_receipt_set(&other, &requester_did).is_err());
+    }
+
+    /// The ordinary Get keeps its answer shape: with the mode off nothing is
+    /// signed, and an answer without rows is left byte-for-byte unchanged.
+    #[tokio::test]
+    async fn ordinary_fetch_answer_is_unchanged_without_a_receipt_set() {
+        let (data_dir, _registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let mut answer = json!({
+            "status": "network_available",
+            "provider": "carrier-availability",
+            "policy": "carrier_provider_invoke",
+            "replicas": 1,
+            "cid_verified": true,
+            "checked_at": 1_700_000_000,
+        });
+        let before = answer.clone();
+        assert!(!ContentProvider::attach_signed_fetch_receipt_set(
+            data_dir.path(),
+            TEST_CID,
+            2,
+            TEST_REQUEST_NONCE,
+            &mut answer,
+        )
+        .unwrap());
+        assert_eq!(answer, before);
+    }
+
+    /// A distinct-holder answer gains the requester's signed set and the
+    /// honest attestation label, replacing the self-attested one.
+    #[tokio::test]
+    async fn distinct_holder_answer_carries_a_requester_signed_set() {
+        let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let cid = fixture_file_cid(b"carrier bytes");
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(requester_bound_mock_answer(
+                provider_ok(json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(b"carrier bytes"),
+                    "availability": {
+                        "status": "network_available",
+                        "provider": "carrier-availability",
+                        "policy": "carrier_provider_invoke_distinct_holders",
+                        "distinct_holders": 2,
+                        "required_distinct_holders": 2,
+                        "receipt_attestation": "self",
+                        "receipts": two_verified_holder_receipts_for(&cid),
+                    }
+                })),
+                data_dir.path(),
+            )),
+        });
+        registry.register(availability.clone()).await;
+        let transfer = ContentFetchTransfer {
+            transfer: ProviderTransfer::Bytes,
+            range: None,
+            progress: None,
+            bounded_read: false,
+            max_bytes: None,
+            whole_max_bytes: None,
+        };
+        let answer = ContentProvider::fetch_from_availability_provider(
+            Some(data_dir.path()),
+            &registry,
+            "content-provider",
+            &cid,
+            "",
+            &transfer,
+            Some(json!(2)),
+        )
+        .await
+        .unwrap();
+        let AvailabilityFallback::Fetched(result) = answer else {
+            panic!("expected a fetched answer");
+        };
+        let availability_payload = result.availability.unwrap();
+        assert_eq!(
+            availability_payload["receipt_attestation"],
+            FETCH_RECEIPT_SET_ATTESTATION
+        );
+        assert!(availability_payload.get("receipts").is_none());
+        assert!(availability_payload.get("distinct_holders").is_none());
+        assert!(availability_payload
+            .get("required_distinct_holders")
+            .is_none());
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(availability_payload["receipt_set"].clone()).unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 2);
+        let requests = availability.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        let issued = requests[0]["serve_request_nonce"].as_str().unwrap();
+        assert_eq!(signed.payload.serve_request_nonce, issued);
+        for receipt in receipts {
+            assert_eq!(
+                receipt.serve_nonce.as_deref(),
+                serve_attempt_nonce(issued, receipt.attempt).as_deref()
+            );
+        }
+    }
+
+    /// A distinct-holder refusal keeps its code and signed rows instead of
+    /// collapsing into an error string.
+    #[tokio::test]
+    async fn distinct_holder_refusal_answer_keeps_its_signed_set() {
+        let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(requester_bound_mock_answer(
+                json!({
+                    "status": "error",
+                    "code": "carrier_fetch_distinct_holders",
+                    "message": "Carrier content fetch verified 1 distinct holder(s); 2 required",
+                    "data": {
+                        "distinct_holders": 1,
+                        "required_distinct_holders": 2,
+                        "receipt_attestation": "self",
+                        "receipts": [verified_receipt_for(TEST_CID, [7; 32], 1, 1_700_000_000)],
+                    }
+                }),
+                data_dir.path(),
+            )),
+        });
+        registry.register(availability).await;
+        let transfer = ContentFetchTransfer {
+            transfer: ProviderTransfer::Bytes,
+            range: None,
+            progress: None,
+            bounded_read: false,
+            max_bytes: None,
+            whole_max_bytes: None,
+        };
+        let answer = ContentProvider::fetch_from_availability_provider(
+            Some(data_dir.path()),
+            &registry,
+            "content-provider",
+            TEST_CID,
+            "",
+            &transfer,
+            Some(json!(2)),
+        )
+        .await
+        .unwrap();
+        let AvailabilityFallback::Refused { code, data, .. } = answer else {
+            panic!("expected a refusal answer");
+        };
+        assert_eq!(code, "carrier_fetch_distinct_holders");
+        assert!(data.get("distinct_holders").is_none());
+        assert!(data.get("receipts").is_none());
+        assert!(data.get("required_distinct_holders").is_none());
+        assert_eq!(data["receipt_attestation"], FETCH_RECEIPT_SET_ATTESTATION);
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(data["receipt_set"].clone()).unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+    }
+
+    /// A refusal with no holder answer keeps the existing retryable error and
+    /// signs nothing.
+    #[tokio::test]
+    async fn refusal_without_receipts_keeps_the_existing_error_shape() {
+        let (data_dir, registry, _ipfs, _content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(json!({
+                "status": "error",
+                "code": crate::carrier::CARRIER_FETCH_IN_TRANSIT_CODE,
+                "message": "Carrier content fetch is in transit",
+                "data": null,
+            })),
+        });
+        registry.register(availability).await;
+        let transfer = ContentFetchTransfer {
+            transfer: ProviderTransfer::Bytes,
+            range: None,
+            progress: None,
+            bounded_read: false,
+            max_bytes: None,
+            whole_max_bytes: None,
+        };
+        let err = match ContentProvider::fetch_from_availability_provider(
+            Some(data_dir.path()),
+            &registry,
+            "content-provider",
+            TEST_CID,
+            "",
+            &transfer,
+            Some(json!(2)),
+        )
+        .await
+        {
+            Ok(_) => panic!("a refusal without receipts must stay an error"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, ProviderError::Io(_)));
+    }
+
+    fn fixture_file_cid(bytes: &[u8]) -> String {
+        file_cid(bytes, cid::Version::V1, true).to_string()
+    }
+
+    fn two_holder_availability_body(bytes: &[u8], cid: &str) -> Value {
+        provider_ok(json!({
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "availability": {
+                "status": "network_available",
+                "provider": "carrier-availability",
+                "policy": "carrier_provider_invoke_distinct_holders",
+                "distinct_holders": 2,
+                "required_distinct_holders": 2,
+                "receipt_attestation": "self",
+                "receipts": two_verified_holder_receipts_for(cid),
+            }
+        }))
+    }
+
+    /// A local copy does not answer a distinct-holder fetch. Two verified
+    /// holders still produce their receipts and the signed set.
+    #[tokio::test]
+    async fn local_copy_with_distinct_holders_returns_holder_receipts() {
+        let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let cid = fixture_file_cid(b"carrier bytes");
+        ipfs.cat_files
+            .lock()
+            .await
+            .insert(String::new(), b"carrier bytes".to_vec());
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(requester_bound_mock_answer(
+                two_holder_availability_body(b"carrier bytes", &cid),
+                data_dir.path(),
+            )),
+        });
+        registry.register(availability.clone()).await;
+        let response = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "ok", "{response}");
+        assert_eq!(
+            response["data"]["data"],
+            base64::engine::general_purpose::STANDARD.encode(b"carrier bytes")
+        );
+        let body = &response["data"]["availability"];
+        assert_eq!(body["receipt_attestation"], FETCH_RECEIPT_SET_ATTESTATION);
+        assert!(body.get("receipts").is_none());
+        assert!(body.get("distinct_holders").is_none());
+        assert!(body.get("required_distinct_holders").is_none());
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(body["receipt_set"].clone()).unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(signed.payload.required_distinct_holders, 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 2);
+        let sent = availability.requests.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["min_distinct_holders"], 2);
+    }
+
+    /// A local copy plus the mode and no verified holder is the refusal or the
+    /// existing unavailable error, never the local bytes.
+    #[tokio::test]
+    async fn local_copy_with_distinct_holders_and_no_holders_is_not_a_local_success() {
+        let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(json!({
+                "status": "error",
+                "code": "carrier_fetch_unavailable",
+                "message": "no Carrier availability announcement with a fetch ticket is available for this CID",
+            })),
+        });
+        registry.register(availability.clone()).await;
+        let err = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": TEST_CID,
+                "min_distinct_holders": 2,
+            }))
+            .await
+            .expect_err("a local copy must not satisfy a distinct-holder fetch");
+        let text = err.to_string();
+        assert!(text.contains("carrier_fetch_unavailable"), "{text}");
+        assert!(!text.contains("hello content"), "{text}");
+        assert_eq!(availability.requests.lock().await.len(), 1);
+    }
+
+    /// Mode off still returns the local copy and does not call availability.
+    /// The answer is the pre-mode shape, byte for byte.
+    #[tokio::test]
+    async fn ordinary_fetch_with_a_local_copy_keeps_todays_answer() {
+        let (_data_dir, registry, _ipfs, content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(two_holder_availability_body(b"carrier bytes", TEST_CID)),
+        });
+        registry.register(availability.clone()).await;
+        let response = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": TEST_CID,
+            }))
+            .await
+            .unwrap();
+        assert!(availability.requests.lock().await.is_empty());
+        let expected = json!({
+            "status": "ok",
+            "data": {
+                "cid": TEST_CID,
+                "uri": format!("elastos://{TEST_CID}"),
+                "path": "",
+                "availability": {
+                    "status": "unknown",
+                    "provider": "content-provider",
+                },
+                "data": base64::engine::general_purpose::STANDARD.encode(b"hello content"),
+                "transfer": {
+                    "schema": "elastos.provider.transfer/v1",
+                    "source": "content-provider",
+                    "target": "ipfs",
+                    "op": "cat",
+                    "capability": "provider:content-provider->ipfs:cat",
+                    "transport": "runtime-local-provider-plane",
+                    "carrier": null,
+                    "transfer": "bytes",
+                    "range": null,
+                    "progress": null,
+                    "abi": {
+                        "schema": "elastos.provider.transfer-abi/v1",
+                        "transfer": "bytes",
+                        "transport": "runtime-local-provider-plane",
+                        "range_supported": true,
+                        "progress_supported": false,
+                        "progress_mode": "none",
+                        "transport_native_stream": false,
+                        "backpressure": "not_applicable",
+                        "cancel_supported": false,
+                    },
+                    "status": "completed",
+                },
+            },
+        });
+        assert_eq!(
+            serde_json::to_vec(&response).unwrap(),
+            serde_json::to_vec(&expected).unwrap(),
+            "{response}"
+        );
+    }
+
+    const BRIDGE_BYTES: &[u8] = b"bridge-only-bytes";
+
+    fn bridge_success(availability: Value) -> Value {
+        provider_ok(json!({
+            "data": base64::engine::general_purpose::STANDARD.encode(BRIDGE_BYTES),
+            "availability": availability,
+        }))
+    }
+
+    fn assert_hides_bridge_and_local_bytes(text: &str) {
+        let bridge = base64::engine::general_purpose::STANDARD.encode(BRIDGE_BYTES);
+        let local = base64::engine::general_purpose::STANDARD.encode(b"hello content");
+        assert!(!text.contains("bridge-only-bytes"), "{text}");
+        assert!(!text.contains(bridge.as_str()), "{text}");
+        assert!(!text.contains("hello content"), "{text}");
+        assert!(!text.contains(local.as_str()), "{text}");
+    }
+
+    async fn content_fetch_against_bridge(
+        body: Value,
+    ) -> (
+        tempfile::TempDir,
+        Arc<MockAvailabilityProvider>,
+        Result<Value, ProviderError>,
+    ) {
+        content_fetch_against_bridge_for_cid(TEST_CID, body).await
+    }
+
+    async fn content_fetch_against_bridge_for_cid(
+        cid: &str,
+        body: Value,
+    ) -> (
+        tempfile::TempDir,
+        Arc<MockAvailabilityProvider>,
+        Result<Value, ProviderError>,
+    ) {
+        let (data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        if cid != TEST_CID {
+            ipfs.cat_files
+                .lock()
+                .await
+                .insert(String::new(), BRIDGE_BYTES.to_vec());
+        }
+        let body = requester_bound_mock_answer(body, data_dir.path());
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(body),
+        });
+        registry.register(availability.clone()).await;
+        let response = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": cid,
+                "min_distinct_holders": 2,
+            }))
+            .await;
+        (data_dir, availability, response)
+    }
+
+    /// A bridge that answers success with no receipts is refused. The bytes
+    /// stay unreturned, including the local copy.
+    #[tokio::test]
+    async fn availability_success_without_receipts_returns_no_bytes() {
+        let cid = fixture_file_cid(BRIDGE_BYTES);
+        let (_data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
+                "status": "network_available",
+                "provider": "bridge",
+                "distinct_holders": 9,
+                "required_distinct_holders": 2,
+            })),
+        )
+        .await;
+        assert_eq!(availability.requests.lock().await.len(), 1);
+        let err = response.expect_err("a success with no receipts must not return bytes");
+        let text = err.to_string();
+        assert!(text.contains("carrier_fetch_unavailable"), "{text}");
+        assert_hides_bridge_and_local_bytes(&text);
+    }
+
+    /// One verified receipt does not prove a request for two, even when the
+    /// answer's own count fields say the requirement is met.
+    #[tokio::test]
+    async fn availability_success_with_one_holder_when_two_are_required_is_refused() {
+        let cid = fixture_file_cid(BRIDGE_BYTES);
+        let (data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
+                "status": "network_available",
+                "provider": "bridge",
+                "distinct_holders": 9,
+                "required_distinct_holders": 1,
+                "receipts": [fetch_receipt_for(&cid, FetchResult::Ok, true, 1)],
+            })),
+        )
+        .await;
+        assert_eq!(availability.requests.lock().await.len(), 1);
+        let response = response.expect("the refusal is an error answer, not a transport failure");
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], "carrier_fetch_distinct_holders");
+        let rendered = serde_json::to_string(&response).unwrap();
+        assert_hides_bridge_and_local_bytes(&rendered);
+        let data = &response["data"];
+        assert!(data.get("data").is_none(), "{data}");
+        assert_eq!(data["receipt_attestation"], FETCH_RECEIPT_SET_ATTESTATION);
+        assert!(data.get("receipts").is_none());
+        assert!(data.get("distinct_holders").is_none());
+        assert!(data.get("required_distinct_holders").is_none());
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(data["receipt_set"].clone()).unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(signed.payload.requested_cid, cid);
+        assert_eq!(signed.payload.required_distinct_holders, 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+    }
+
+    /// One verified receipt on a distinct-holders error. `with_required_one`
+    /// puts `1` in the answer's required-count field; otherwise that field is
+    /// absent. `distinct_holders` stays `1` and is not the signed requirement.
+    fn distinct_holder_error_answer(with_required_one: bool) -> Value {
+        let mut data = json!({
+            "distinct_holders": 1,
+            "receipt_attestation": "self",
+            "receipts": [fetch_receipt(FetchResult::Ok, true, 1)],
+        });
+        if with_required_one {
+            let key = ["required_", "distinct_", "holders"].concat();
+            data.as_object_mut().unwrap().insert(key, json!(1));
+        }
+        json!({
+            "status": "error",
+            "code": "carrier_fetch_distinct_holders",
+            "message": "Carrier content fetch verified 1 distinct holder(s); 1 required",
+            "data": data,
+        })
+    }
+
+    async fn assert_availability_error_signs_the_callers_two(body: Value) {
+        let (data_dir, availability, response) = content_fetch_against_bridge(body).await;
+        let sent = availability.requests.lock().await.clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["min_distinct_holders"], 2);
+        let response = response.expect("the refusal is an error answer, not a transport failure");
+        assert_eq!(response["status"], "error", "{response}");
+        assert_eq!(response["code"], "carrier_fetch_distinct_holders");
+        let rendered = serde_json::to_string(&response).unwrap();
+        assert_hides_bridge_and_local_bytes(&rendered);
+        let data = &response["data"];
+        assert!(data.get("data").is_none(), "{data}");
+        assert_eq!(data["receipt_attestation"], FETCH_RECEIPT_SET_ATTESTATION);
+        assert!(data.get("receipts").is_none());
+        assert!(data.get("distinct_holders").is_none());
+        assert!(data.get("required_distinct_holders").is_none());
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(data["receipt_set"].clone()).unwrap();
+        let (_, requester_did) = elastos_identity::load_or_create_did(data_dir.path()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(signed.payload.requested_cid, TEST_CID);
+        assert_eq!(signed.payload.required_distinct_holders, 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+    }
+
+    /// An availability error with one verified receipt and a required count of
+    /// 1, while the caller asked for 2, is the refusal. The signed set says
+    /// required 2 and observed 1.
+    #[tokio::test]
+    async fn availability_error_with_required_one_signs_the_callers_two() {
+        assert_availability_error_signs_the_callers_two(distinct_holder_error_answer(true)).await;
+    }
+
+    /// The same error with the required-count field omitted is the same
+    /// refusal: required 2 and observed 1.
+    #[tokio::test]
+    async fn availability_error_without_required_count_signs_the_callers_two() {
+        assert_availability_error_signs_the_callers_two(distinct_holder_error_answer(false)).await;
+    }
+
+    /// Product code outside this module does not read a holder-count key from
+    /// an availability answer. The two `remove` calls drop the unsigned copies
+    /// and discard the values. The needles are joined at run time.
+    #[test]
+    fn content_product_source_does_not_read_availability_holder_count_keys() {
+        let source = include_str!("content.rs");
+        let product = source
+            .split_once("\nmod tests {\n")
+            .expect("content.rs tests module")
+            .0;
+        let keys = [
+            ["required_", "distinct_", "holders"].concat(),
+            ["distinct_", "holders"].concat(),
+        ];
+        for key in keys {
+            let quoted = ["\"", &key, "\""].concat();
+            let removal = ["object.remove(", &quoted, ");"].concat();
+            for (index, line) in product.lines().enumerate() {
+                if !line.contains(&quoted) {
+                    continue;
+                }
+                assert_eq!(
+                    line.trim(),
+                    removal,
+                    "line {} reads an availability holder-count key",
+                    index + 1
+                );
+            }
+        }
+    }
+
+    /// Two verified receipts for another CID do not prove this CID.
+    #[tokio::test]
+    async fn availability_success_for_another_cid_is_refused() {
+        let cid = fixture_file_cid(BRIDGE_BYTES);
+        let receipts = vec![
+            verified_receipt_for(OTHER_CID, [7; 32], 1, 1_700_000_000),
+            verified_receipt_for(OTHER_CID, [22; 32], 2, 1_700_000_001),
+        ];
+        let (_data_dir, availability, response) = content_fetch_against_bridge_for_cid(
+            &cid,
+            bridge_success(json!({
+                "status": "network_available",
+                "provider": "bridge",
+                "distinct_holders": 9,
+                "required_distinct_holders": 1,
+                "receipts": receipts,
+            })),
+        )
+        .await;
+        assert_eq!(availability.requests.lock().await.len(), 1);
+        let err = response.expect_err("another CID cannot prove this request");
+        assert_hides_bridge_and_local_bytes(&err.to_string());
+    }
+
+    /// `local_only` together with the field errors on a miss and on a hit,
+    /// and availability is not called. The message does not assume a copy.
+    #[tokio::test]
+    async fn local_only_with_distinct_holders_errors_on_a_miss_and_a_hit() {
+        let message = "a local-only fetch does not answer a distinct-holder request";
+        let (_data_dir, registry, ipfs, content) = registry_with_content_and_ipfs().await;
+        let availability = Arc::new(MockAvailabilityProvider {
+            requests: Mutex::new(Vec::new()),
+            response: Mutex::new(bridge_success(json!({
+                "status": "network_available",
+                "distinct_holders": 2,
+                "required_distinct_holders": 2,
+                "receipts": two_verified_holder_receipts(),
+            }))),
+        });
+        registry.register(availability.clone()).await;
+        let hit = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": TEST_CID,
+                "local_only": true,
+                "min_distinct_holders": 2,
+            }))
+            .await
+            .expect_err("a local hit is not a distinct-holder answer");
+        let hit_text = hit.to_string();
+        assert!(hit_text.contains(message), "{hit_text}");
+        assert_hides_bridge_and_local_bytes(&hit_text);
+
+        ipfs.missing_paths.lock().await.push(String::new());
+        let miss = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": TEST_CID,
+                "local_only": true,
+                "min_distinct_holders": 2,
+            }))
+            .await
+            .expect_err("a local miss is not a distinct-holder answer");
+        let miss_text = miss.to_string();
+        assert!(miss_text.contains(message), "{miss_text}");
+        assert_eq!(hit_text, miss_text);
+        assert!(availability.requests.lock().await.is_empty());
+    }
+
+    /// An extra field on the receipt set is refused, as on a fetch receipt.
+    #[test]
+    fn fetch_receipt_set_refuses_unknown_fields() {
+        let (signed, _) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed.payload).unwrap();
+        value["untrusted"] = json!(true);
+        let err = serde_json::from_value::<FetchReceiptSet>(value).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    /// An extra field beside the signed payload is refused.
+    #[test]
+    fn signed_fetch_receipt_set_refuses_unknown_fields() {
+        let (signed, _) = signed_test_fetch_receipt_set();
+        let mut value = serde_json::to_value(&signed).unwrap();
+        value["untrusted"] = json!(true);
+        let err = serde_json::from_value::<SignedFetchReceiptSet>(value).unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
+    }
+
+    /// Verify one saved lab run outside the runtime process. The run folder is
+    /// named by `ELASTOS_P26_RUN_DIR`; the script that writes it runs this with
+    /// `--ignored`. Every signature is checked against the DID the answer names.
+    #[test]
+    #[ignore = "reads a saved lab run folder from ELASTOS_P26_RUN_DIR"]
+    fn saved_lab_distinct_holder_run_verifies() {
+        let Some(run_dir) = std::env::var_os("ELASTOS_P26_RUN_DIR") else {
+            return;
+        };
+        let run_dir = PathBuf::from(run_dir);
+        let read_json = |name: &str| -> Value {
+            let path = run_dir.join(name);
+            serde_json::from_str(
+                &std::fs::read_to_string(&path)
+                    .unwrap_or_else(|err| panic!("{} unreadable: {err}", path.display())),
+            )
+            .unwrap_or_else(|err| panic!("{} is not JSON: {err}", path.display()))
+        };
+
+        let meta = read_json("meta.json");
+        let cid = meta["cid"].as_str().unwrap().to_string();
+        let requester_did = meta["requester_did"].as_str().unwrap().to_string();
+        let source_sha256 = meta["source_sha256"].as_str().unwrap().to_string();
+        let source_bytes = meta["source_bytes"].as_u64().unwrap();
+
+        // Each holder's signed availability receipt verifies against that
+        // holder's DID and names the fetched CID.
+        for holder in ["holder-a", "holder-b"] {
+            let signed: SignedAvailabilityReceipt = serde_json::from_str(
+                &std::fs::read_to_string(run_dir.join(format!("{holder}-receipt.json"))).unwrap(),
+            )
+            .unwrap();
+            let holder_did = meta[format!("{holder}_did")].as_str().unwrap().to_string();
+            crate::crypto::verify_signed_json_envelope_against_dids(
+                &serde_json::to_vec(&signed).unwrap(),
+                AVAILABILITY_RECEIPT_DOMAIN,
+                &[holder_did],
+            )
+            .unwrap();
+            assert_eq!(signed.payload.cid, cid);
+        }
+
+        // The fetch answer names the same CID, and the two receipts are two
+        // distinct verified holder DIDs with the source file's byte count.
+        let fetch = read_json("fetch.json");
+        assert_eq!(fetch["status"], "ok", "{fetch}");
+        let fetched = base64::engine::general_purpose::STANDARD
+            .decode(fetch["data"]["data"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(hex::encode(sha2::Sha256::digest(&fetched)), source_sha256);
+        let availability = &fetch["data"]["availability"];
+        assert_eq!(
+            availability["receipt_attestation"],
+            FETCH_RECEIPT_SET_ATTESTATION
+        );
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(availability["receipt_set"].clone()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(signed.payload.requested_cid, cid);
+        assert_eq!(signed.payload.required_distinct_holders, 2);
+        assert_eq!(signed.payload.observed_distinct_holders, 2);
+        let mut peers: Vec<&str> = receipts
+            .iter()
+            .filter_map(FetchReceipt::peer_did_verified)
+            .collect();
+        peers.sort_unstable();
+        let mut expected = vec![
+            meta["holder-a_did"].as_str().unwrap(),
+            meta["holder-b_did"].as_str().unwrap(),
+        ];
+        expected.sort_unstable();
+        assert_eq!(peers, expected);
+        assert!(receipts
+            .iter()
+            .all(|receipt| receipt.verified && receipt.bytes_received == source_bytes));
+        assert!(availability.get("receipts").is_none());
+        assert!(availability.get("distinct_holders").is_none());
+        assert!(availability.get("required_distinct_holders").is_none());
+
+        // The refusal run names the distinct-holder code and keeps its one
+        // verified receipt, signed by the same requester.
+        let refusal = read_json("refusal.json");
+        assert_eq!(refusal["status"], "error", "{refusal}");
+        assert_eq!(refusal["code"], "carrier_fetch_distinct_holders");
+        let data = &refusal["data"];
+        assert!(data.get("distinct_holders").is_none());
+        assert!(data.get("required_distinct_holders").is_none());
+        assert!(data.get("receipts").is_none());
+        assert_eq!(data["receipt_attestation"], FETCH_RECEIPT_SET_ATTESTATION);
+        let signed: SignedFetchReceiptSet =
+            serde_json::from_value(data["receipt_set"].clone()).unwrap();
+        let receipts = verify_signed_fetch_receipt_set(&signed, &requester_did).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(signed.payload.observed_distinct_holders, 1);
+        assert_eq!(receipts[0].requested_cid, signed.payload.requested_cid);
+        assert!(receipts[0].verified);
     }
 
     fn signed_test_availability_receipt(cid: &str, legacy: bool) -> Value {
@@ -9883,7 +12570,21 @@ mod tests {
 
         async fn send_raw(&self, request: &Value) -> Result<Value, ProviderError> {
             self.requests.lock().await.push(request.clone());
-            Ok(self.response.lock().await.clone())
+            let mut answer = self.response.lock().await.clone();
+            if let Some(requester_did) = answer
+                .get("__test_requester_did")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                if let Some(nonce) = request.get("serve_request_nonce").and_then(Value::as_str) {
+                    bind_mock_holder_rows(&mut answer, &requester_did, nonce);
+                }
+                answer
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("__test_requester_did");
+            }
+            Ok(answer)
         }
     }
 
@@ -12635,6 +15336,35 @@ mod tests {
         assert_eq!(requests[0]["uri"], format!("elastos://{cid}"));
         assert!(requests[0].get("path").is_none());
         assert_eq!(requests[1]["path"], "remote.md");
+    }
+
+    #[tokio::test]
+    async fn carrier_only_content_fetch_verifies_without_local_ipfs() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(ProviderRegistry::new());
+        let content =
+            ContentProvider::new(data_dir.path().to_path_buf(), Arc::downgrade(&registry));
+        registry
+            .register(Arc::new(MockAvailabilityProvider {
+                requests: Mutex::new(Vec::new()),
+                response: Mutex::new(provider_ok(json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(b"remote content"),
+                }))),
+            }))
+            .await;
+        let response = content
+            .send_raw(&json!({
+                "op": "fetch",
+                "cid": "QmTHps514SCRS6tLXYihTGabLYHoCBkpByQJg39J3Jpcdw",
+            }))
+            .await
+            .unwrap();
+        assert_eq!(response["status"], "ok");
+        assert_eq!(response["data"]["availability"]["cid_verified"], true);
+        assert_eq!(
+            response["data"]["data"],
+            base64::engine::general_purpose::STANDARD.encode(b"remote content")
+        );
     }
 
     #[tokio::test]

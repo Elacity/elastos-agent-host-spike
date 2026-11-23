@@ -76,7 +76,11 @@ pub fn exercise() {
         &[Launch {
             home: &home,
             program: &runtime.binary,
-            args: vec!["run", capsule.path.to_str().unwrap()],
+            args: vec![
+                "run",
+                "--dev-unsigned-component",
+                capsule.path.to_str().unwrap(),
+            ],
         }],
         Some(&home),
     )

@@ -59,8 +59,10 @@ function element(tag) {
 function matches(node, selector) {
   if (!node || typeof node !== "object") return false;
   if (selector.startsWith("#")) return node.id === selector.slice(1);
-  const attr = selector.match(/^\[data-agent-state="(.*)"\]$/);
-  return Boolean(attr && node.dataset && node.dataset.agentState === attr[1]);
+  const state = selector.match(/^\[data-agent-state="(.*)"\]$/);
+  if (state) return Boolean(node.dataset && node.dataset.agentState === state[1]);
+  const id = selector.match(/^\[data-agent-id="(.*)"\]$/);
+  return Boolean(id && node.dataset && node.dataset.agentId === id[1]);
 }
 
 function query(node, selector) {
@@ -89,7 +91,7 @@ function callOf(path, init = {}) {
   };
 }
 
-function mount(request) {
+function mount(request, confirmStepUp) {
   const nodes = {
     "#agents-list": element("div"),
     "#agents-status": element("p"),
@@ -106,7 +108,7 @@ function mount(request) {
     createElement: element,
     querySelector: (selector) => nodes[selector] || query({ children: Object.values(nodes) }, selector),
   };
-  const bound = bindAgents(doc, request);
+  const bound = bindAgents(doc, request, confirmStepUp);
   return {
     status: nodes["#agents-status"],
     name: nodes["#agent-name"],
@@ -119,6 +121,9 @@ function mount(request) {
     load: bound.load,
     state(id) {
       return doc.querySelector(`[data-agent-state="${id}"]`)?.textContent ?? "";
+    },
+    agentId(id) {
+      return query(nodes["#agents-list"], `[data-agent-id="${id}"]`)?.textContent ?? "";
     },
     button(label) {
       return findButton(nodes["#agents-list"], label);
@@ -433,6 +438,91 @@ test("a bad list or turn is refused without retry, and a real 502 still offers i
   assert.equal(real.status.textContent, "the gateway timed out");
   assert.equal(real.retry.hidden, false);
   assert.equal(real.name.value, "Helper");
+});
+
+test("start shows the agent id before the passkey, then posts the launch", async () => {
+  const calls = [];
+  const step = deferred();
+  const ui = mount((path, init = {}) => {
+    calls.push(callOf(path, init));
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({ agent_id: AGENT_ID, session_id: "session-1", status: "starting" });
+  }, () => step.promise.then(() => "step-token"));
+  await ui.load();
+  assert.equal(ui.button("Start") !== null, true);
+  ui.button("Start").click();
+  await flush();
+  assert.equal(ui.agentId(AGENT_ID), AGENT_ID, "the agent id is on the page before the passkey");
+  assert.equal(ui.state(AGENT_ID), `Start ${AGENT_ID}`);
+  assert.equal(calls.some((call) => call.path.endsWith("/launch")), false);
+  step.resolve();
+  await flush();
+  await flush();
+  const launch = calls.filter((call) => call.path.endsWith("/launch"));
+  assert.equal(launch.length, 1);
+  assert.deepEqual(launch[0].body, { agent_id: AGENT_ID, step_up_token: "step-token" });
+  assert.equal(calls[0].method, "GET");
+  assert.equal(calls[1].path, "/api/apps/system/agents/launch");
+});
+
+test("stop posts the agent id and does not ask for the passkey", async () => {
+  const calls = [];
+  let steps = 0;
+  const ui = mount((path, init = {}) => {
+    calls.push(callOf(path, init));
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+    });
+  }, () => {
+    steps += 1;
+    return Promise.resolve("step-token");
+  });
+  await ui.load();
+  assert.equal(ui.button("Stop") !== null, true);
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  const stopped = calls.filter((call) => call.path.endsWith("/stop"));
+  assert.equal(stopped.length, 1);
+  assert.deepEqual(stopped[0].body, { agent_id: AGENT_ID });
+  assert.equal(steps, 0);
+});
+
+test("an agent that is off has Stop and no Start", async () => {
+  const calls = [];
+  const ui = mount((path, init = {}) => {
+    calls.push(callOf(path, init));
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: false }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [{ session_id: "session-1", status: "stopped" }],
+    });
+  });
+  await ui.load();
+  assert.equal(ui.agentId(AGENT_ID), AGENT_ID);
+  assert.equal(ui.button("Start"), null);
+  assert.equal(ui.button("Turn on") !== null, true);
+  assert.equal(ui.button("Stop") !== null, true);
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  const stopped = calls.filter((call) => call.path.endsWith("/stop"));
+  assert.equal(stopped.length, 1);
+  assert.deepEqual(stopped[0].body, { agent_id: AGENT_ID });
 });
 
 test("the page's two refusal sentences are the server's", () => {

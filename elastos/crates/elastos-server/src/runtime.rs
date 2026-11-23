@@ -16,6 +16,8 @@ use elastos_compute::{CapsuleHandle, ComputeProvider};
 use elastos_storage::StorageProvider;
 
 use elastos_runtime::capsule::check_entrypoint_file;
+use elastos_runtime::primitives::audit::AuditEvent;
+use elastos_runtime::primitives::SecureTimestamp;
 use elastos_runtime::provider::ProviderRegistry;
 use elastos_runtime::signature::{hash_content, SignatureVerifier};
 
@@ -243,6 +245,11 @@ pub struct Runtime {
     /// activation's ending watcher so the entry it wrote at admission can be
     /// ended without the Runtime handle.
     running_capsules: Arc<RwLock<HashMap<String, RunningCapsuleInfo>>>,
+    /// Agent starts share this gate so a replay cannot pass between grant
+    /// consumption and registration of its running session. The activation's
+    /// end holds the same mutex: it puts the start tuple on the one stop
+    /// audit, then drops the record.
+    agent_launches: Arc<tokio::sync::Mutex<AgentLaunchState>>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
@@ -268,6 +275,34 @@ pub struct Runtime {
     /// Launches kept for their page after the program's start is over, by a
     /// launch id of their own (`page_launch.rs`). The bridge never reads them.
     pub(crate) page_launches: crate::page_launch::PageLaunches,
+}
+
+#[derive(Default)]
+struct AgentLaunchState {
+    used: HashMap<String, u64>,
+    /// The start record for an agent session, keyed by session id. The
+    /// session's one end removes it, whether the owner stopped the guest or
+    /// the guest ended on its own.
+    sessions: HashMap<String, AgentSessionRecord>,
+}
+
+/// The facts a Start keeps so the owner's Stop can write the same tuple.
+pub(crate) struct AgentStartFacts<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) owner: &'a str,
+    pub(crate) host_cid: &'a str,
+    pub(crate) launch_id: &'a str,
+    pub(crate) expires_at: u64,
+}
+
+/// One agent session's audit tuple, stored at Start and taken at Stop.
+#[derive(Clone)]
+pub(crate) struct AgentSessionRecord {
+    pub(crate) agent_id: String,
+    pub(crate) owner: String,
+    pub(crate) host_cid: String,
+    pub(crate) launch_id: String,
+    pub(crate) session_id: String,
 }
 
 /// One launch's content in the Runtime's table, for as long as this value
@@ -393,6 +428,9 @@ struct ActivationContextHeld {
     /// route hold.
     stop: Arc<ActivationStop>,
     authority: Option<InstanceAuthority>,
+    /// Start records for agent sessions. The one end reads the tuple onto
+    /// its stop audit, then removes the record once `ended_at` is visible.
+    agent_sessions: Arc<tokio::sync::Mutex<AgentLaunchState>>,
     /// How long the ended entry stays before the sweeper removes it:
     /// [`ENDED_CAPSULE_RETENTION`], which only a unit row shortens.
     retention: std::time::Duration,
@@ -435,6 +473,7 @@ impl ActivationContextHeld {
             launch_contents: runtime.launch_contents.clone(),
             stop,
             authority,
+            agent_sessions: runtime.agent_launches.clone(),
             armed: true,
             owed: OwedEnd::Task,
             settled: None,
@@ -520,10 +559,28 @@ impl ActivationContextHeld {
         };
         self.release().await;
         if let (Some(authority), false) = (&self.authority, self.audited) {
-            authority
-                .capability_manager
-                .audit_log()
-                .capsule_stop(&self.id.0, stop_reason(&status, &cause));
+            let record = self
+                .agent_sessions
+                .lock()
+                .await
+                .sessions
+                .get(&self.id.0)
+                .cloned();
+            let reason = stop_reason(&status, &cause);
+            let log = authority.capability_manager.audit_log();
+            match record {
+                Some(record) => log.emit(AuditEvent::CapsuleStop {
+                    timestamp: SecureTimestamp::now(),
+                    capsule_id: self.id.0.clone(),
+                    reason,
+                    agent_id: Some(record.agent_id),
+                    owner: Some(record.owner),
+                    cid: Some(record.host_cid),
+                    launch_id: Some(record.launch_id),
+                    session_id: Some(record.session_id),
+                }),
+                None => log.capsule_stop(&self.id.0, reason),
+            }
             self.audited = true;
         }
         let ended_at = std::time::Instant::now();
@@ -541,6 +598,11 @@ impl ActivationContextHeld {
             false
         };
         drop(capsules);
+
+        // The start record goes after `ended_at` is visible. A reader that
+        // finds no record also finds the session ended, so a second stop does
+        // not treat a live guest as a missing record.
+        self.agent_sessions.lock().await.sessions.remove(&self.id.0);
 
         // The stop request is taken away only after the entry records the
         // end, so a stop that finds the entry not ended also finds its
@@ -581,6 +643,7 @@ impl ActivationContextHeld {
             launch_contents: self.launch_contents.clone(),
             stop: self.stop.clone(),
             authority: self.authority.clone(),
+            agent_sessions: self.agent_sessions.clone(),
             armed: true,
             owed: self.owed,
             settled: self.settled.take(),
@@ -771,6 +834,7 @@ impl Runtime {
             unsigned_capsules: RwLock::new(UnsignedCapsules::Refused(None)),
             provider_registry: RwLock::new(None),
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
+            agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -795,6 +859,7 @@ impl Runtime {
             unsigned_capsules: RwLock::new(UnsignedCapsules::Refused(None)),
             provider_registry: RwLock::new(None),
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
+            agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -920,6 +985,15 @@ impl Runtime {
         }
     }
 
+    /// The admitted ceiling held for a running capsule. An attached bridge
+    /// uses this value so a folder selector cannot supply a different manifest.
+    pub fn bridge_bounds_for_capsule(&self, id: &str) -> Option<Vec<AuthorityBound>> {
+        self.bridge_manifest_capabilities
+            .read()
+            .ok()
+            .and_then(|bounds| bounds.get(id).cloned())
+    }
+
     /// Find a compute provider that supports the given capsule type
     fn get_provider(&self, capsule_type: &CapsuleType) -> Option<Arc<dyn ComputeProvider>> {
         self.compute_providers
@@ -1013,6 +1087,41 @@ impl Runtime {
     /// Load and run a capsule from a local directory
     pub async fn run_local(&self, path: &Path, args: Vec<String>) -> Result<CapsuleHandle> {
         self.run_local_with_principal(path, args, None).await
+    }
+
+    /// Explicit unsigned Component start for a source or CI Home. An installed
+    /// signed release never enters this mode, even if config.toml enables it.
+    pub async fn run_unsigned_development_component(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+    ) -> Result<CapsuleHandle> {
+        if !matches!(
+            *self.unsigned_capsules.read().await,
+            UnsignedCapsules::Allowed
+        ) {
+            return Err(ElastosError::InvalidManifest(
+                "--dev-unsigned-component requires a source Home with dev_mode = true; installed releases refuse it".into(),
+            ));
+        }
+        let manifest_bytes = tokio::fs::read(path.join("capsule.json"))
+            .await
+            .map_err(|error| ElastosError::InvalidManifest(error.to_string()))?;
+        let manifest: CapsuleManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| ElastosError::InvalidManifest(error.to_string()))?;
+        manifest.validate().map_err(ElastosError::InvalidManifest)?;
+        if !manifest.is_component_capsule() {
+            return Err(ElastosError::InvalidManifest(
+                "--dev-unsigned-component requires a Component manifest".into(),
+            ));
+        }
+        if manifest.signature.is_some() {
+            return Err(ElastosError::InvalidManifest(
+                "--dev-unsigned-component accepts only unsigned Components; stage a signed bundle"
+                    .into(),
+            ));
+        }
+        self.run_local(path, args).await
     }
 
     /// Load and run a capsule from a local directory with an optional runtime
@@ -1122,6 +1231,91 @@ impl Runtime {
     ) -> Result<(CapsuleHandle, Signer)> {
         self.run_local_admitted_mode(path, args, admission, LaunchMode::Detached)
             .await
+    }
+
+    /// Consume the short grant once. Distinct grants may start independent
+    /// sessions for the same Agent; the gate covers provider start and registry insertion.
+    /// The session record is written before this returns, under the same lock
+    /// as the one-use mark, so a Stop that sees the row can take the tuple.
+    pub(crate) async fn start_agent_once(
+        &self,
+        path: &Path,
+        admission: crate::agent_admission::AdmissionContext,
+        facts: AgentStartFacts<'_>,
+    ) -> Result<(CapsuleHandle, Signer)> {
+        let mut state = self.agent_launches.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        state.used.retain(|_, expiry| *expiry > now);
+        if facts.expires_at <= now {
+            return Err(ElastosError::InvalidManifest(
+                "agent launch grant expired".into(),
+            ));
+        }
+        if state.used.contains_key(facts.launch_id) {
+            return Err(ElastosError::InvalidManifest(
+                "agent launch grant was already used".into(),
+            ));
+        }
+        state
+            .used
+            .insert(facts.launch_id.to_string(), facts.expires_at);
+        let started = self.start_local_admitted(path, vec![], admission).await?;
+        let session_id = started.0.id.0.clone();
+        state.sessions.insert(
+            session_id.clone(),
+            AgentSessionRecord {
+                agent_id: facts.agent_id.to_string(),
+                owner: facts.owner.to_string(),
+                host_cid: facts.host_cid.to_string(),
+                launch_id: facts.launch_id.to_string(),
+                session_id,
+            },
+        );
+        Ok(started)
+    }
+
+    /// Live session ids whose principal is `agent_id`. The capsule name is
+    /// not read: two rows that share a host name stay distinct, and a row
+    /// with no principal is not this agent.
+    pub(crate) async fn live_sessions_for_agent(&self, agent_id: &str) -> Vec<String> {
+        let capsules = self.running_capsules.read().await;
+        let mut ids: Vec<String> = capsules
+            .values()
+            .filter(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id))
+            .map(|info| info.id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// The start record for this session, if Start stored one and the
+    /// session has not ended. Looking does not take the record: the session's
+    /// one end removes it after `ended_at` is visible.
+    pub(crate) async fn agent_session(&self, session_id: &str) -> Option<AgentSessionRecord> {
+        self.agent_launches
+            .lock()
+            .await
+            .sessions
+            .get(session_id)
+            .cloned()
+    }
+
+    /// Test only: plant a start record the launch route did not write.
+    ///
+    /// The caller lives in the agents build's launch tests. This allow keeps
+    /// the helper when that build is off, where those tests are not compiled.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) async fn insert_agent_session_for_test(&self, record: AgentSessionRecord) {
+        let session_id = record.session_id.clone();
+        self.agent_launches
+            .lock()
+            .await
+            .sessions
+            .insert(session_id, record);
     }
 
     /// Both admitted entries derive the same actor and ceiling from the
@@ -1618,6 +1812,7 @@ impl Runtime {
             }
             BundleKind::Program | BundleKind::Page => None,
         };
+        let content_name = launch.as_ref().map(|_| admitted.manifest().name.clone());
         let pins = admitted.take_pins();
         // Every bundle admitted so far, by its CID: the name it carries, the
         // deepest place a pin has reached it at, and its own pins. The
@@ -1763,6 +1958,7 @@ impl Runtime {
             accepted,
             launch,
             page: kept_page,
+            content_name,
         })
     }
 
@@ -3035,6 +3231,12 @@ pub(crate) mod tests {
             },
         );
 
+        assert_eq!(
+            runtime.bridge_bounds_for_capsule(&id),
+            Some(handle.manifest.resource_authority_bounds()),
+            "the attached bridge reads the active manifest ceiling"
+        );
+
         let held = ActivationContextHeld::new(&runtime, &handle, component);
         let mut filled = runtime.context_left_for_test(&id).await;
         filled.sort_unstable();
@@ -3055,6 +3257,7 @@ pub(crate) mod tests {
             Vec::<&str>::new(),
             "the one end leaves nothing"
         );
+        assert_eq!(runtime.bridge_bounds_for_capsule(&id), None);
     }
 
     /// The retention the sweeper rows give their activation. The sweeper runs
@@ -3404,6 +3607,40 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn explicit_unsigned_development_component_runs_only_in_source_home() {
+        let (runtime, temp_dir) = component_runtime().await;
+        let folder = temp_dir.path().join("development-component");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            component_manifest_json("development-component"),
+        )
+        .unwrap();
+        std::fs::write(folder.join("app.component.wasm"), quiet_component()).unwrap();
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], false)
+            .await
+            .unwrap();
+        let error = runtime
+            .run_unsigned_development_component(&folder, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("requires a source Home"),
+            "{error}"
+        );
+        runtime
+            .configure_capsule_admission(temp_dir.path(), &[], true)
+            .await
+            .unwrap();
+        let handle = runtime
+            .run_unsigned_development_component(&folder, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(handle.manifest.name, "development-component");
+    }
+
     /// An installed Home whose config.toml still says `dev_mode = true` (the
     /// earlier default) admits only its signed release's capsules and capsules
     /// signed by the release publisher.
@@ -3451,6 +3688,14 @@ pub(crate) mod tests {
             .configure_capsule_admission(&home.data, &[], true)
             .await
             .unwrap();
+        let error = runtime
+            .run_unsigned_development_component(&local_dir, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("installed releases refuse it"),
+            "{error}"
+        );
         // The installed signed release is named as such, not as a key or dev.
         assert_eq!(
             runtime
@@ -4393,20 +4638,51 @@ pub(crate) mod tests {
     }
 
     /// A Runtime with the component provider, the real resource bridge, and a
-    /// person whose root has principal-root protection, as on a Home.
+    /// stored Agent whose root has principal-root protection, as on a Home.
     struct AgentHostRuntime {
         runtime: Arc<Runtime>,
         capability_manager: Arc<CapabilityManager>,
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         audit_log: Arc<AuditLog>,
         data_dir: std::path::PathBuf,
+        agent_id: String,
+        folder: std::path::PathBuf,
+        _home: crate::agents::tests::Home,
         _temp: tempfile::TempDir,
     }
 
-    const AGENT_HOST_PERSON: &str = "person:local:agent-host-e2e";
-
     async fn agent_host_runtime() -> AgentHostRuntime {
+        use crate::bundle_admission::tests::key;
+        use crate::stage_cmd::bundle_cid;
         let temp = tempfile::tempdir().unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host");
+        let folder = temp.path().join("agent-host");
+        std::fs::create_dir_all(&folder).unwrap();
+        let component = std::fs::read(source.join("agent-host.component.wasm")).unwrap();
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(source.join("capsule.json")).unwrap()).unwrap();
+        assert_eq!(
+            manifest.agent.as_ref().map(|agent| agent.kind),
+            Some(elastos_common::AgentKind::Agent),
+        );
+        let publisher = key(108);
+        elastos_runtime::signature::sign_capsule(
+            &publisher,
+            &mut manifest,
+            &hash_content(&component),
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join("capsule.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(folder.join("agent-host.component.wasm"), component).unwrap();
+        let cid = bundle_cid(&folder).unwrap();
+        let (home, agents) = crate::agents::tests::home_with_agents_if_built(1, &cid)
+            .expect("Agent Host guest rows need agents built");
+        let agent_id = agents.into_iter().next().unwrap();
+        let data_dir = home.path().to_path_buf();
         let storage = Arc::new(
             LocalFSProvider::new(temp.path().join("storage"))
                 .await
@@ -4419,7 +4695,11 @@ pub(crate) mod tests {
             Some(component_provider),
         ));
         runtime
-            .configure_capsule_admission(temp.path(), &[], true)
+            .configure_capsule_admission(
+                &data_dir,
+                &[hex::encode(publisher.verifying_key().to_bytes())],
+                false,
+            )
             .await
             .unwrap();
         let audit_log = Arc::new(AuditLog::new());
@@ -4431,9 +4711,6 @@ pub(crate) mod tests {
         let pending_store = Arc::new(
             elastos_runtime::capability::pending::PendingRequestStore::new(audit_log.clone()),
         );
-        let data_dir = temp.path().join("runtime-data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-        crate::auth::store_test_principal_root_protection(&data_dir, AGENT_HOST_PERSON);
         runtime
             .set_provider_registry(
                 Arc::new(ProviderRegistry::new()),
@@ -4448,12 +4725,16 @@ pub(crate) mod tests {
             pending_store,
             audit_log,
             data_dir,
+            agent_id,
+            folder,
+            _home: home,
             _temp: temp,
         }
     }
 
-    fn agent_host_journal() -> (String, String) {
-        let root = crate::auth::principal_localhost_root(AGENT_HOST_PERSON);
+    fn agent_host_journal(fx: &AgentHostRuntime) -> (String, String) {
+        let root =
+            crate::auth::principal_stored_localhost_root(Some(&fx.data_dir), &fx.agent_id).unwrap();
         let journal = format!("{root}/.AppData/Agents/agent-host/tasks/demo/journal");
         (root, journal)
     }
@@ -4462,33 +4743,49 @@ pub(crate) mod tests {
         fx: &AgentHostRuntime,
     ) -> tokio::task::JoinHandle<elastos_common::Result<elastos_compute::CapsuleHandle>> {
         let runtime = fx.runtime.clone();
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples/agent-host");
+        let agent_id = fx.agent_id.clone();
+        let folder = fx.folder.clone();
+        let data_dir = fx.data_dir.clone();
         tokio::spawn(async move {
+            let admission = crate::agent_admission::admit_launch(
+                &data_dir,
+                &data_dir,
+                Some(crate::agents::tests::OWNER_ID),
+                Some(&agent_id),
+                crate::agent_admission::walk_launch(&folder).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
             runtime
-                .run_local_with_principal(
-                    &dir,
-                    Vec::new(),
-                    Some(crate::resource_bridge::BridgePrincipal::for_test(
-                        AGENT_HOST_PERSON,
-                    )),
-                )
+                .run_local_admitted(&folder, Vec::new(), admission)
                 .await
+                .map(|(handle, _)| handle)
         })
     }
 
     async fn next_pending(
         store: &elastos_runtime::capability::pending::PendingRequestStore,
+        launch: &mut tokio::task::JoinHandle<
+            elastos_common::Result<elastos_compute::CapsuleHandle>,
+        >,
     ) -> elastos_runtime::capability::pending::PendingCapabilityRequest {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if let Some(request) = store.list_pending().await.into_iter().next() {
                     break request;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                tokio::select! {
+                    result = &mut *launch => match result {
+                        Ok(Ok(_)) => panic!("the agent host finished before its grant ask"),
+                        Ok(Err(error)) => panic!("the agent host stopped before its grant ask: {error:#}"),
+                        Err(error) => panic!("the agent host launch task failed: {error}"),
+                    },
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
             }
         })
         .await
-        .expect("the agent host must ask for a journal grant")
+        .expect("the agent host must ask for a grant")
     }
 
     fn component_invoke_outcomes(audit_log: &AuditLog) -> Vec<(String, String)> {
@@ -4511,18 +4808,16 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// The whole S3 route in one process: the guest asks for its two grants,
-    /// the shell (this test) grants them, the guest writes its journal through
-    /// the real bridge with a revision precondition, and reads it back.
+    /// The guest journals its activation before asking to submit a plan.
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_writes_and_reads_its_journal_through_the_real_bridge() {
         let fx = agent_host_runtime().await;
-        let (root, journal) = agent_host_journal();
-        let launch = launch_agent_host(&fx);
+        let (root, journal) = agent_host_journal(&fx);
+        let mut launch = launch_agent_host(&fx);
         let mut asked = Vec::new();
-        for _ in 0..2 {
-            let pending = next_pending(&fx.pending_store).await;
+        for _ in 0..3 {
+            let pending = next_pending(&fx.pending_store, &mut launch).await;
             asked.push((pending.resource.as_str().to_string(), pending.action));
             let token = fx.capability_manager.grant(
                 pending.session_id.as_str(),
@@ -4546,6 +4841,10 @@ pub(crate) mod tests {
             vec![
                 (journal.clone(), elastos_runtime::capability::Action::Write),
                 (journal.clone(), elastos_runtime::capability::Action::Read),
+                (
+                    "elastos://inspect/submit_agent_plan".to_string(),
+                    elastos_runtime::capability::Action::Write,
+                ),
             ]
         );
         assert!(fx.pending_store.list_pending().await.is_empty());
@@ -4559,7 +4858,7 @@ pub(crate) mod tests {
         );
         let plain = crate::auth::read_principal_root_object(
             &fx.data_dir,
-            AGENT_HOST_PERSON,
+            &fx.agent_id,
             &root,
             &journal,
             &path,
@@ -4608,7 +4907,7 @@ pub(crate) mod tests {
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_refuses_a_format_1_journal_with_its_reason() {
         let fx = agent_host_runtime().await;
-        let (root, journal) = agent_host_journal();
+        let (root, journal) = agent_host_journal(&fx);
         let hex: String = AGENT_HOST_FORMAT_1_JOURNAL.concat();
         let old: Vec<u8> = (0..hex.len())
             .step_by(2)
@@ -4620,16 +4919,18 @@ pub(crate) mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         crate::auth::write_principal_root_object(
             &fx.data_dir,
-            AGENT_HOST_PERSON,
+            &fx.agent_id,
             &root,
             &journal,
             &path,
             &old,
         )
         .unwrap();
-        let launch = launch_agent_host(&fx);
+        let mut launch = launch_agent_host(&fx);
+        let mut asked = Vec::new();
         for _ in 0..2 {
-            let pending = next_pending(&fx.pending_store).await;
+            let pending = next_pending(&fx.pending_store, &mut launch).await;
+            asked.push((pending.resource.as_str().to_string(), pending.action));
             let token = fx.capability_manager.grant(
                 pending.session_id.as_str(),
                 pending.resource.clone(),
@@ -4642,6 +4943,14 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         }
+        assert_eq!(
+            asked,
+            vec![
+                (journal.clone(), elastos_runtime::capability::Action::Write),
+                (journal.clone(), elastos_runtime::capability::Action::Read),
+            ],
+            "a format 1 journal stops before the submit ask"
+        );
         let error = tokio::time::timeout(std::time::Duration::from_secs(10), launch)
             .await
             .expect("the agent host must finish")
@@ -4655,7 +4964,7 @@ pub(crate) mod tests {
         );
         let stored = crate::auth::read_principal_root_object(
             &fx.data_dir,
-            AGENT_HOST_PERSON,
+            &fx.agent_id,
             &root,
             &journal,
             &path,
@@ -4664,16 +4973,16 @@ pub(crate) mod tests {
         assert_eq!(stored, old, "the old object is not touched");
     }
 
-    /// The shell denies both requests: the guest finishes, sends no resource
-    /// call, and nothing is stored.
+    /// The shell denies both journal requests: the guest finishes before a
+    /// submit ask, sends no resource call, and stores nothing.
     #[tokio::test]
     #[ignore = "loads examples/agent-host/agent-host.component.wasm; run examples/agent-host/run-e2e.sh"]
     async fn the_agent_host_stores_nothing_when_its_journal_grants_are_denied() {
         let fx = agent_host_runtime().await;
-        let (_root, journal) = agent_host_journal();
-        let launch = launch_agent_host(&fx);
+        let (_root, journal) = agent_host_journal(&fx);
+        let mut launch = launch_agent_host(&fx);
         for _ in 0..2 {
-            let pending = next_pending(&fx.pending_store).await;
+            let pending = next_pending(&fx.pending_store, &mut launch).await;
             assert_eq!(pending.resource.as_str(), journal);
             fx.pending_store
                 .deny_request_by(pending.id.as_str(), "not now", Settler::Shell)
@@ -4688,6 +4997,7 @@ pub(crate) mod tests {
         let path =
             elastos_common::localhost::rooted_localhost_fs_path(&fx.data_dir, &journal).unwrap();
         assert!(!path.exists());
+        assert!(fx.pending_store.list_pending().await.is_empty());
         assert!(component_invoke_outcomes(&fx.audit_log).is_empty());
     }
 

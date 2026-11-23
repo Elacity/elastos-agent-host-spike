@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn test_marketplace_catalog_route_is_registered_and_auth_gated() {
+async fn test_marketplace_uses_canonical_catalog_and_alias_is_gone() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
 
@@ -55,7 +55,7 @@ async fn test_marketplace_catalog_route_is_registered_and_auth_gated() {
         )
         .await
         .unwrap();
-    assert_eq!(marketplace_scoped_response.status(), StatusCode::OK);
+    assert_eq!(marketplace_scoped_response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -83,11 +83,7 @@ async fn model_consumers_can_read_catalog_with_current_scoped_authority() {
             )
             .unwrap();
         let unrelated = app_token_for_authority(dir.path(), "documents", &authority);
-        for route in [
-            "/api/capsules/catalog",
-            "/api/capsules/interfaces",
-            "/api/apps/marketplace/catalog",
-        ] {
+        for route in ["/api/capsules/catalog", "/api/capsules/interfaces"] {
             for (candidate, origin, expected) in [
                 (Some(token.as_str()), "null", StatusCode::OK),
                 (

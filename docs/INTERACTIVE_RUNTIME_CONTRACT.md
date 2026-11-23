@@ -46,7 +46,8 @@ These are explicit operator or developer surfaces, not part of the boring front 
 
 | Path | Runtime owner | Status |
 |---|---|---|
-| `elastos run` (WASM / microVM) | operator runtime (`elastos serve`) | developer / operator-only |
+| `elastos run` (Component) | self-contained staged CID start, or explicit unsigned development start | developer / operator-only |
+| `elastos run` (microVM) | operator runtime (`elastos serve`) | developer / operator-only |
 | `elastos capsule ...` (non-interactive) | operator runtime (`elastos serve`) | operator-only |
 
 ## Runtime Ownership

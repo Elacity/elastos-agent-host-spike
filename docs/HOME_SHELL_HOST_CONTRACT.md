@@ -90,9 +90,42 @@ shell launch-grant transfer uses a separate non-browser validation path. Runtime
 rejects missing or conflicting provenance, v2, v3, mixed-shape, expired, and
 substituted tokens. A Home session cookie alone cannot mint an app token.
 
+The two Home launch operations, `POST /api/apps/home/launch` and
+`POST /api/home/launch/content`, accept the Home session only from the `/home/`
+document. These requests carry the exact destination `Origin`, a `/home/`
+`Referer`, and `Sec-Fetch-Site: same-origin`; another page receives
+`home_page_only`. The Home document sends its referrer only to its own origin.
+The native CLI uses its own app-scoped launch grants. Its `home-cli` grant for
+these two operations selects `home-launch`; that grant can ask the gateway to
+launch or open content without browser provenance. For content
+open, the gateway gives the Runtime a `home-shell` projection grant bound to
+`home`; the Runtime accepts that grant only on its internal content-open hop.
+`elastos home --cli-launch-token` does not mint a grant from the process
+environment. The command refuses. A terminal may register a bound request with
+`POST /api/home/cli-mint/request`. The signed-in human admin begins that request
+and approves it with a fresh passkey assertion. The gateway keeps that decision
+in its own memory and returns no launch grant. The waiting terminal claims one
+grant with `POST /api/home/cli-mint/claim`. The gateway signs only when that
+memory record is approved and the request, the secret, the owner, the session,
+the proof, the grant, and the operation match. It marks the record delivered in
+that same memory before returning the grant. The grant lasts 5 minutes. A file
+in the data directory is not an approval and cannot deliver a grant. A restart
+drops a request that is still waiting. `Origin: null` cannot register a request
+or claim a grant, including when the caller presents a launch token.
+The gateway still gives its `elastos home` TUI
+child the terminal environment. That child uses the environment for an internal
+projection token. The TUI has no host shell and no export-mint action. The
+public journey smoke requires `ELASTOS_CLI_LAUNCH_TOKEN` from the operator.
+
 The Home session cookie is `HttpOnly`, `SameSite=Strict`, and `Secure` on HTTPS.
 Capsule responses use CSP, referrer, content-type, and resource-policy headers
 appropriate to their document or asset role.
+
+Home reads its own facts from `GET /api/apps/home/summary`. Chat summary at
+`GET /api/apps/chat-room/summary` requires a signed Chat launch token; a Home
+session cookie does not give access to that route. Marketplace reads the shared
+`/api/capsules/catalog` and `/api/capsules/interfaces` routes with its scoped
+launch token. The old `/api/apps/marketplace/catalog` alias is absent.
 
 ## Host Responsibilities
 

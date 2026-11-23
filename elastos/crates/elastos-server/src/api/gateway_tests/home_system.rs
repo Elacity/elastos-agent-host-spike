@@ -2,7 +2,7 @@ use super::*;
 use elastos_runtime::signature::{generate_keypair, SigningKey};
 
 const HOME_CLI_CAPSULE_ID_FOR_TEST: &str = "home-cli";
-static HOME_GATEWAY_TEST_ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
+pub(super) static HOME_GATEWAY_TEST_ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
 struct EnvRestore {
     key: &'static str,
@@ -2317,6 +2317,7 @@ async fn services_contact_fixture(
             pending_capabilities: Arc::new(TokioMutex::new(HashMap::new())),
             capabilities_start_pending: false,
             kept_launch_reads: runtime.kept_launch_reads.clone(),
+            readable_launch_id: runtime.readable_launch_id.clone(),
         },
         send_failure: Arc::new(TokioMutex::new(String::new())),
     };
@@ -6760,6 +6761,7 @@ async fn test_people_profile_update_creates_signed_profile_under_passkey_princip
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", authority.home_token.as_str())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"chat-room"}"#))
@@ -6848,6 +6850,7 @@ async fn test_people_profile_update_uses_people_launch_token() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", authority.home_token.as_str())
                 .body(Body::empty())
                 .unwrap(),
@@ -7366,6 +7369,158 @@ async fn test_people_summary_requires_people_launch_token() {
 }
 
 #[tokio::test]
+async fn home_launch_gate_accepts_page_and_cli_then_checks_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let home = home_app_token(dir.path());
+    let page = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header("x-elastos-home-token", home.clone())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target":""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::BAD_REQUEST);
+
+    let headless = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header(HOST, "localhost:61180")
+                .header("x-elastos-home-token", home.clone())
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target":""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(headless.status(), StatusCode::FORBIDDEN);
+    let headless_body = axum::body::to_bytes(headless.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&headless_body).contains("home_page_only"),
+        "{}",
+        String::from_utf8_lossy(&headless_body)
+    );
+
+    let other_origin = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header(HOST, "localhost:61180")
+                .header("origin", "http://other.invalid")
+                .header("referer", "http://other.invalid/home/")
+                .header("sec-fetch-site", "cross-site")
+                .header("x-elastos-home-token", home)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target":""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(other_origin.status(), StatusCode::FORBIDDEN);
+    assert!(String::from_utf8_lossy(
+        &axum::body::to_bytes(other_origin.into_body(), usize::MAX)
+            .await
+            .unwrap()
+    )
+    .contains("home_page_only"));
+
+    let owner = passkey_authority(dir.path());
+    let cli = owner_cli_home_launch_grant(dir.path(), &owner);
+    let cli_launch = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header(HOST, "localhost:61180")
+                .header("x-elastos-home-token", cli)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target":""}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cli_launch.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn home_launch_refuses_agent_home_page_before_minting() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let response = app
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header("x-elastos-home-token", agent_home_token(dir.path()))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target":"library"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        body.as_ref(),
+        gateway_home_token::GATEWAY_AGENT_REFUSAL.as_bytes(),
+        "the response contains only the refusal, with no minted launch token"
+    );
+}
+
+#[tokio::test]
+async fn home_launch_routes_keep_cli_scope_refusal_on_wire() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = gateway_router(test_state(dir.path()));
+    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let wrong_cli = issue_home_projection_launch_token_with_context(
+        dir.path(),
+        "other-resource",
+        "home-cli",
+        &context,
+    )
+    .unwrap();
+    for (path, body) in [
+        ("/api/apps/home/launch", r#"{"target":"library"}"#),
+        ("/api/home/launch/content", r#"{"cid":"bafy-good"}"#),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header(HOST, "localhost:61180")
+                    .header("x-elastos-home-token", wrong_cli.as_str())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+        let wire = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(wire.as_ref(), b"home_cli_launch_grant_mismatch", "{path}");
+    }
+}
+
+#[tokio::test]
 async fn test_home_launch_validates_shell_targets() {
     let dir = tempfile::tempdir().unwrap();
     write_test_browser_capsule(
@@ -7445,6 +7600,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_token)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"chat-room"}"#))
@@ -7463,6 +7619,47 @@ async fn test_home_launch_validates_shell_targets() {
     assert_eq!(payload["capsule_id"], "wasm-chat-room-instance");
     assert_isolated_launch_route(payload["route"].as_str().unwrap(), "chat-room");
 
+    let other_page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header(HOST, "localhost:61180")
+                .header("origin", "http://localhost:61180")
+                .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/apps/system/")
+                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target":"chat-room"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(other_page.status(), StatusCode::FORBIDDEN);
+    let other_body = axum::body::to_bytes(other_page.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(other_body.as_ref(), b"home_page_only");
+
+    let owner = passkey_authority(dir.path());
+    let cli = owner_cli_home_launch_grant(dir.path(), &owner);
+    let cli_launch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/apps/home/launch")
+                .header(HOST, "localhost:61180")
+                .header("x-elastos-home-token", cli)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"target":"chat-room"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cli_launch.status(), StatusCode::OK);
+
     let library = app
         .clone()
         .oneshot(
@@ -7472,6 +7669,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"library"}"#))
@@ -7500,6 +7698,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"projection-app"}"#))
@@ -7526,6 +7725,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"wallet-metamask"}"#))
@@ -7551,6 +7751,7 @@ async fn test_home_launch_validates_shell_targets() {
                .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -7579,6 +7780,7 @@ async fn test_home_launch_validates_shell_targets() {
                .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -7616,6 +7818,7 @@ async fn test_home_launch_validates_shell_targets() {
                .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -7646,6 +7849,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"gba-ucity"}"#))
@@ -7678,6 +7882,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"missing-shell-target"}"#))
@@ -7773,6 +7978,7 @@ async fn test_window_policy_survives_discovery_catalog_and_home_launch() {
                         .header(HOST, "localhost:61180")
                         .header("origin", "http://localhost:61180")
                         .header("sec-fetch-site", "same-origin")
+                        .header("referer", "http://localhost:61180/home/")
                         .header("x-elastos-home-token", home_app_token(dir.path()))
                         .header(CONTENT_TYPE, "application/json")
                         .body(Body::from(json!({"target": target}).to_string()))
@@ -8025,6 +8231,7 @@ async fn test_home_active_shell_uses_catalog_shell_candidates() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", authority.home_token.as_str())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"home-cli"}"#))
@@ -8129,6 +8336,7 @@ async fn test_home_active_shell_uses_catalog_shell_candidates() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", authority.home_token.as_str())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"regular-app"}"#))
@@ -9432,6 +9640,7 @@ async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"system"}"#))
@@ -9495,6 +9704,7 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", authority.home_token.as_str())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"chat-room"}"#))
@@ -9523,13 +9733,13 @@ async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity(
         .expect("runtime launch request includes signed launch_grant");
     let mut headers = HeaderMap::new();
     headers.insert("x-elastos-home-token", launch_grant.parse().unwrap());
-    let grant_context = require_internal_shell_launch_grant_for_any_context(
+    let grant_context = require_internal_shell_launch_grant_principal(
         dir.path(),
         &headers,
         &[CHAT_ROOM_CAPSULE_ID],
     )
     .expect("runtime launch grant validates for chat-room");
-    assert_eq!(grant_context.principal_id(), authority.principal_id);
+    assert_eq!(grant_context.principal_str(), authority.principal_id);
 
     let summary = app
         .clone()
@@ -9631,6 +9841,7 @@ async fn test_home_launch_rejects_source_wasi_materialization() {
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"test-wasm-viewer"}"#))
@@ -9674,6 +9885,7 @@ async fn test_home_launch_reports_system_launch_failure_when_runtime_cannot_star
                 .header(HOST, "localhost:61180")
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
+                .header("referer", "http://localhost:61180/home/")
                 .header("x-elastos-home-token", home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"system"}"#))

@@ -156,7 +156,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "        if is_network_allow(form) {\n            return Err(format!(\n                \"{name} must not grant network access; a network allow is refused: {form}\"\n            ));\n        }",
+          "old": "        if is_network_allow(form) && !(name == MODEL_PROVIDER && measured_model_form(form)) {\n            return Err(format!(\n                \"{name} must not grant network access; a network allow is refused: {form}\"\n            ));\n        }",
           "new": "        // falsifier: the check no longer refuses a network allow"
         }
       ],
@@ -322,7 +322,7 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "            if !CANONICAL_PARAMS.contains(&token) {\n                return Err(format!(\n                    \"{name} declares the non-canonical parameter token {token}; \\\n                     every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE\"\n                ));\n            }",
+          "old": "            if !(CANONICAL_PARAMS.contains(&token)\n                || (name == MODEL_PROVIDER && measured_model_form(form)))\n            {\n                return Err(format!(\n                    \"{name} declares the non-canonical parameter token {token}; \\\n                     every file profile binds STORAGE_ROOT, STORAGE_PARENT and PROVIDER_EXECUTABLE\"\n                ));\n            }",
           "new": "            // falsifier: the check no longer refuses a non-canonical parameter token"
         }
       ],
@@ -2378,8 +2378,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "        else {\n            return Err(format!(\n                \"{name} seccomp allow list refuses the allow form {form}: \\\n                 the mapping table has no syscall row for it, so no filter is built\"\n            ));\n        };",
-          "new": "        else {\n            continue;\n        };"
+          "old": "        if row.is_none() && !(name == MODEL_PROVIDER && measured_model_form(&form)) {\n            return Err(format!(\n                \"{name} seccomp allow list refuses the allow form {form}: \\\n                 the mapping table has no syscall row for it, so no filter is built\"\n            ));\n        }",
+          "new": "        // falsifier: an allow form with no syscall row passes"
         }
       ],
       "tests": [
@@ -3696,8 +3696,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"epoll_create1\",",
-          "new": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    \"ptrace\",\n    \"epoll_create1\","
+          "old": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    // M1a Linux probe rows, excluding unscoped kill.\n    \"accept4\",",
+          "new": "const MODEL_RUNTIME_ESSENTIALS: &[&str] = &[\n    // M1a Linux probe rows, excluding unscoped kill.\n    \"ptrace\",\n    \"accept4\","
         }
       ],
       "tests": [
@@ -3765,8 +3765,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"fcntl\"), 0, 5),\n        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),\n",
-          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"fcntl\"), 0, 6),\n        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 2, 2, 0),\n"
+          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"fcntl\"), 0, 7),\n        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFD, 3, 0),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_DUPFD_CLOEXEC, 2, 0),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFL, 1, 0),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_SETFL, 0, 1),\n        allow,\n        deny,",
+          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"fcntl\"), 0, 8),\n        SeccompInstruction::stmt(SECCOMP_BPF_LD_W_ABS, SECCOMP_ARG1_LOW),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFD, 4, 0),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_DUPFD_CLOEXEC, 3, 0),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_GETFL, 2, 0),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, LINUX_F_SETFL, 1, 0),\n        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, 2, 0, 1),\n        allow,\n        deny,"
         }
       ],
       "tests": [
@@ -3813,8 +3813,8 @@
       "edits": [
         {
           "file": "../../capsules/wallet-provider/tests/confine.rs",
-          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"clone\"), 0, 4),",
-          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"clone\"), 0, 2),"
+          "old": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"clone\"), 0, 6),",
+          "new": "        SeccompInstruction::jump(SECCOMP_BPF_JEQ_K, number(\"clone\"), 0, 4),"
         }
       ],
       "tests": [

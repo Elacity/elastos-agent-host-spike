@@ -2,7 +2,11 @@
 
 `confine.sb` is the one oracle for the model provider's confinement profile
 (one file, P10): the profile the Runtime generates for this provider must match
-it. That Runtime half is not built. It starts with `(version 1)`, then
+it. Runtime source renders the model profile. The production model start does
+not use that profile: `spawn_confined_model_with_engine_bundle` in
+`provider/bridge.rs` applies the bridge's own inline Seatbelt policy. Installed Mac
+engine acceptance is tracked under B3-R. The file starts
+with `(version 1)`, then
 `(deny default)`, then `(deny network*)`. The provider reads line-delimited
 JSON on stdin and writes one JSON answer per line on stdout. The profile
 grants it no socket and no listener. Every operation that no rule grants is
@@ -12,7 +16,8 @@ refused (P3, P11).
 
 This file uses only the three parameter tokens every file profile binds. The
 generated profile binds the same three, and the tests pass them with
-`sandbox-exec -D`. The Runtime half that binds them is not built.
+`sandbox-exec -D`. The Runtime renders the profile; the production model start
+uses the bridge's inline policy instead (see "Runtime source" below).
 
 - `PROVIDER_EXECUTABLE`: the canonical path of the provider binary.
 - `STORAGE_ROOT`: the model journal root. That is
@@ -20,8 +25,8 @@ generated profile binds the same three, and the tests pass them with
   `journal_dir`.
 - `STORAGE_PARENT`: the parent of `STORAGE_ROOT`. The tests create it before
   launch. `model_provider_ops_under_profile` shows the provider then creates
-  `STORAGE_ROOT` itself at its first `init`. The Runtime half does the same
-  before launch and is not built.
+  `STORAGE_ROOT` itself at its first `init`. The production model start uses
+  the bridge's inline policy, and this lab test does not prove an installed start.
 
 All three are resolved paths. The sandbox matches the resolved path, so a
 path through a link (macOS `/var` is `/private/var`) would match nothing.
@@ -63,10 +68,14 @@ stand-in counts zero connections, and this is not the Runtime's refusal.
 generated text, `Launch::Profile` applies that file, and `init` answers
 `journal_access_denied`. This is not the Runtime's refusal.
 `model_declared_rights_read_on_the_did_and_wallet_template` reads this oracle
-and this declared-rights file. The Runtime's own generator and its comparison
-are not built and stay in `elastos/`, outside this lane. The model provider
-needs nothing from the Runtime beyond that one generator and that comparing
-test, and there is no separate Runtime proposal for the model provider (P10).
+and this declared-rights file. Runtime profile rendering and comparison source
+live in `elastos/crates/elastos-runtime/src/provider/macos_profile.rs`; the
+generic macOS entry in `provider/os_entry.rs` can start a provider under a
+rendered profile through `/usr/bin/sandbox-exec`, but no production caller
+starts the model through it. The model's production launch is
+`spawn_confined_model_with_engine_bundle` in `provider/bridge.rs`, which applies
+the bridge's own inline Seatbelt policy; installed Mac engine behavior is
+assessed under B3-R.
 The `sandbox-exec -f confine.sb` launch is the tests' launch (see "Tests"),
 not the Runtime's.
 
@@ -83,11 +92,35 @@ They are Runtime platform baseline,
 technical OS permissions with no user approval prompt, not approved rights.
 The file is a lab stand-in for the Runtime generator's input, not a manifest
 field. The lab generator is test code.
-The Runtime's own generator is not built (Anders).
+The Runtime's own generator has source checks in `macos_profile.rs`.
 
 `platform_baseline_rules_stay_narrow` fails if `startup-root-directory`
 widens in path or operation, including an added file write, or if
 `startup-sysctl` widens in operation or sysctl name.
+
+## M1 B3 lab summary
+
+`standin_b3_journey_matches_the_oracle_from_declared_rights_to_the_suite`
+in `../wallet-provider/tests/confine.rs` starts did, wallet and model through
+the shared lab launcher at
+`lab/agent-conformance/standin-runtime/provider_launcher.rs`, which calls the
+planted launch body in `../wallet-provider/tests/confine.rs`. Each leg reads
+its declared rights and compares the launched generated profile with its own
+committed `confine.sb`. The model leg compares 17 named permitted and denied
+cases, including startup refusal for an unbound executable, with a second run
+under the committed oracle. `standin_journeys_keep_the_shared_launcher_path`
+checks that the B3 and C0 legs still use the shared launcher. Its one-line
+bypass plant is recorded with the close-out evidence.
+
+`standin_c0_journey_starts_confined_or_refuses_each_unconfinable_host` includes
+model in its host and process matrix.
+`model_standin_refuses_unconfinable_hosts_before_start` runs four model host
+refusals without a sandbox process and checks that they create no profile or
+storage root. `standin_refuses_a_start_it_cannot_apply` also checks the model's
+missing-rights and malformed-profile refusals. These
+are lab checks. A missing `sandbox-exec` returns early from the applicable
+host and suite legs, so their passing result on such a host is limited.
+Installed Mac engine acceptance belongs to B3-R.
 
 ## What the profile allows
 
@@ -308,15 +341,17 @@ The launcher starts the provider no other way, as F-cc19a shows. The reason
 reaches the test through the launcher's stderr channel, as F-cc19b shows.
 For the Runtime's refusal of such a start, see "The Runtime bridge change"
 in `../did-provider/CONFINEMENT.md`. The lab writer in that did section is
-test code, and the Runtime half that generates and enforces the profile is
-not built and stays in `elastos/`, outside this lane.
+test code. Runtime source for profile rendering, the generic macOS entry and
+the model's inline launch policy lives in `elastos/crates/elastos-runtime/src/provider/`; installed acceptance
+is B3-R.
 
 `standin_refuses_a_start_it_cannot_apply` refuses a declared value with no
 rights list and starts nothing, and a generated profile whose last `)` is
 removed exits 65 through `assert_startup_is_refused`. The value is
 `json!({})`, so the `rights` key is absent;
 `generated_model_profile_matches_the_oracle` already refuses a present value
-that is not a list, on the same line. The Runtime's own refusal is not built.
+that is not a list, on the same line. The Runtime's installed refusal is a
+separate B3-R check.
 
 `generated_profile_refuses_an_unbound_root` writes the stand-in file and
 starts it with `STORAGE_ROOT` unbound. The launch exits 65 through
@@ -601,8 +636,8 @@ profile does not grant".
   - a later normal `init` on `STORAGE_ROOT` passes `assert_serving` and
     creates `runs/`;
   - `shutdown` exits cleanly.
-  The evidence is the lab launcher's. It makes no claim that the Runtime
-  enforced the profile or that B3 is complete.
+  The evidence is the lab launcher's. It is a focused lab check. The shared 17-case B3 comparison is in
+  `../wallet-provider/tests/confine.rs`; installed Runtime acceptance is B3-R.
 - `redirect_journal_materializes_outside_when_unconfined`: the control. The
   same fixture and the same request, without the profile, answer `status: ok`
   and create the journal (`outside/inner/runs`) under the outside sibling.

@@ -1,0 +1,22 @@
+id: waiting
+file: lab/third-party-standin/fixtures/rows.json
+test: hook_network_right_is_waiting
+--- old
+    {
+      "id": "declared-limits",
+      "state": "open",
+      "owner": "the P2-10 hook slices",
+      "title": "declared limits are descriptive today"
+    },
+    {
+      "id": "network-right",
+      "state": "waiting"
+    }
+--- new
+    {
+      "id": "declared-limits",
+      "state": "open",
+      "owner": "the P2-10 hook slices",
+      "title": "declared limits are descriptive today"
+    }
+--- end

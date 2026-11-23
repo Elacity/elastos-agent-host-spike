@@ -93,16 +93,22 @@ fn load_capsule_manifest(
     manifest
         .validate()
         .map_err(|e| anyhow!("Invalid capsule manifest for '{}': {}", name, e))?;
+    if manifest.name != name {
+        bail!(
+            "launch_name_not_walked: requested '{name}', walked '{}'",
+            manifest.name
+        );
+    }
     Ok(manifest)
 }
 
-struct ScopedTerminalEnv {
+pub(crate) struct ScopedTerminalEnv {
     cols_prev: Option<std::ffi::OsString>,
     rows_prev: Option<std::ffi::OsString>,
 }
 
 impl ScopedTerminalEnv {
-    fn capture() -> Self {
+    pub(crate) fn capture() -> Self {
         let cols_prev = std::env::var_os("ELASTOS_TERM_COLS");
         let rows_prev = std::env::var_os("ELASTOS_TERM_ROWS");
 
@@ -311,6 +317,22 @@ pub async fn run_capsule(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capsule_launch_uses_only_the_walked_manifest_name() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("capsule.json"), r#"{"schema":"elastos.capsule/v1","name":"walked-app","version":"0.1.0","role":"app","type":"microvm","entrypoint":"rootfs.ext4"}"#).unwrap();
+        assert_eq!(
+            load_capsule_manifest(directory.path(), "walked-app")
+                .unwrap()
+                .name,
+            "walked-app"
+        );
+        assert!(load_capsule_manifest(directory.path(), "typed-app")
+            .unwrap_err()
+            .to_string()
+            .contains("launch_name_not_walked"));
+    }
 
     const PINNED: &str = r#"{"schema":"elastos.capsule/v1","name":"pinned-fixture","version":"0.1.0","role":"app","type":"wasm","entrypoint":"app.wasm","requires":[{"name":"viewer","kind":"capsule","cid":"bafybeicesjf2ejdmnav65ijpbr3qq2blx4ldp6c5tdtczmv5bwim3ndbsy"}]}"#;
 

@@ -58,6 +58,7 @@ const REGISTER: &[&str] = &["register_", "capsule"];
 const LAUNCH: &[&str] = &["launch_", "capsule"];
 const SPAWN: &[&str] = &["Provider", "Bridge::spawn"];
 const COMMAND_SPAWN: &[&str] = &[".", "spa", "wn()"];
+const CONFINED_EXEC: &[&str] = &["libc::", "execve("];
 
 /// The gate of the paths that B1-R does not cover yet.
 const P2_2: &str = "P2-2 (not gated by B1-R yet)";
@@ -162,6 +163,20 @@ fn places() -> Vec<Place> {
             "spawn()".to_string(),
             1,
             P2_2,
+        ),
+        place(
+            "elastos-runtime/src/provider/os_entry.rs",
+            "macos_start",
+            "spawn()".to_string(),
+            1,
+            "admitted grant, checked storage, Seatbelt profile",
+        ),
+        place(
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
+            "libc::execve".to_string(),
+            1,
+            "B3 S10: admitted rights, checked root identity, bound executable",
         ),
         place(
             "elastos-server/src/carrier.rs",
@@ -322,8 +337,15 @@ fn places() -> Vec<Place> {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             spawn.clone(),
-            17,
+            15,
             P2_2,
+        ),
+        place(
+            "elastos-server/src/server_infra.rs",
+            "start_did_provider",
+            [spawn.as_str(), "_confined"].concat(),
+            1,
+            "DID: admitted binary and confined storage",
         ),
         place(
             "elastos-server/src/server_infra.rs",
@@ -345,6 +367,13 @@ fn places() -> Vec<Place> {
             spawn.clone(),
             1,
             P2_2,
+        ),
+        place(
+            "elastos-server/src/server_infra.rs",
+            "start_wallet_provider",
+            [spawn.as_str(), "_confined"].concat(),
+            1,
+            "Wallet: admitted binary, OS gate, confined storage",
         ),
         place(
             "elastos-server/src/protected_content_runtime.rs",
@@ -549,11 +578,21 @@ pub(super) fn sites(file: &str, text: &str) -> Vec<Site> {
         }
     }
     let spawn = joined(SPAWN);
+    let confined_spawn = [spawn.as_str(), "_confined"].concat();
     for (at, _) in code.match_indices(&spawn) {
+        let suffix = &code[at + spawn.len()..];
+        let label = if suffix
+            .strip_prefix("_confined")
+            .is_some_and(|tail| tail.trim_start().starts_with('('))
+        {
+            confined_spawn.clone()
+        } else {
+            spawn.clone()
+        };
         sites.push(Site {
             file: file.to_string(),
             function: enclosing_fn(&code, at),
-            label: spawn.clone(),
+            label,
         });
     }
     for at in zero_argument_spawns(&code) {
@@ -561,6 +600,13 @@ pub(super) fn sites(file: &str, text: &str) -> Vec<Site> {
             file: file.to_string(),
             function: enclosing_fn(&code, at),
             label: "spawn()".to_string(),
+        });
+    }
+    for (at, _) in code.match_indices(&joined(CONFINED_EXEC)) {
+        sites.push(Site {
+            file: file.to_string(),
+            function: enclosing_fn(&code, at),
+            label: "libc::execve".to_string(),
         });
     }
     sites

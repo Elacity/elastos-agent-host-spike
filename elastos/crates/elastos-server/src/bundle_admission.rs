@@ -441,6 +441,7 @@ pub fn walk_refusal(refusal: Refusal) -> BundleRefusal {
         Refusal::DirectoryOverBlockLimit { .. } => "bundle_walk_directory_over_block_limit",
         Refusal::Changed { .. } => "bundle_walk_changed",
         Refusal::Unreadable { .. } => "bundle_walk_unreadable",
+        Refusal::InvalidRootPath { .. } => "bundle_walk_invalid_root_path",
         Refusal::OverBudget { .. } => "bundle_walk_over_budget",
         Refusal::PinRefused { .. } => "bundle_walk_pin_refused",
         Refusal::NotALabCid { .. } => "bundle_walk_not_a_cid",

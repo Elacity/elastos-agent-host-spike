@@ -1,0 +1,145 @@
+{
+  "schema": "elastos.capsule/v1",
+  "version": "0.1.0",
+  "name": "standin-swap-app",
+  "description": "Lab stand-in for a third-party swap app.",
+  "author": "lab",
+  "role": "app",
+  "type": "wasm",
+  "runtime_abi": null,
+  "bus_contract": null,
+  "wit_world_sha256": null,
+  "execution": null,
+  "projections": [],
+  "entrypoint": "app-entry",
+  "requires": [],
+  "provides": null,
+  "authority": null,
+  "asks": [
+    {
+      "resource": "elastos://standin-swap/quote",
+      "actions": [
+        "read"
+      ]
+    },
+    {
+      "resource": "elastos://standin-swap/lock",
+      "actions": [
+        "write"
+      ]
+    },
+    {
+      "resource": "elastos://standin-swap/claim",
+      "actions": [
+        "write"
+      ]
+    },
+    {
+      "resource": "elastos://standin-swap/status",
+      "actions": [
+        "read"
+      ]
+    },
+    {
+      "resource": "elastos://wallet/personal_sign",
+      "actions": [
+        "execute"
+      ]
+    },
+    {
+      "resource": "elastos://wallet/eth_sendTransaction",
+      "actions": [
+        "execute"
+      ]
+    },
+    {
+      "resource": "elastos://chain/base/eth_call",
+      "actions": [
+        "read"
+      ]
+    },
+    {
+      "resource": "elastos://chain/base/eth_getLogs",
+      "actions": [
+        "read"
+      ]
+    },
+    {
+      "resource": "elastos://carrier/standin-swap-app/swap",
+      "actions": [
+        "message"
+      ]
+    }
+  ],
+  "capabilities": [],
+  "interfaces": [
+    {
+      "id": "lab.swap.app",
+      "version": "0.1.0",
+      "description": "Typed chain read and carrier topic facts. These are not grants.",
+      "methods": [
+        {
+          "id": "chain.logs",
+          "description": "Read logs on the named chain base for a closed block range.",
+          "risk": "read",
+          "approval": "runtime_policy",
+          "audit": "summary",
+          "resource": "elastos://chain/base/eth_getLogs",
+          "operation": "eth_getLogs",
+          "input_schema": {
+            "properties": {
+              "chain": {
+                "const": "base"
+              },
+              "from_block": {
+                "const": 1
+              },
+              "to_block": {
+                "const": 100
+              }
+            },
+            "type": "object"
+          },
+          "output_schema": null
+        },
+        {
+          "id": "carrier.topic",
+          "description": "One carrier topic pattern under this app name, with a message size limit.",
+          "risk": "write",
+          "approval": "runtime_policy",
+          "audit": "event",
+          "resource": "elastos://carrier/standin-swap-app/swap",
+          "operation": "publish",
+          "input_schema": {
+            "properties": {
+              "max_message_bytes": {
+                "const": 4096
+              },
+              "topic_pattern": {
+                "const": "standin-swap-app/swap"
+              }
+            },
+            "type": "object"
+          },
+          "output_schema": null
+        }
+      ]
+    }
+  ],
+  "resources": {
+    "memory_mb": 64,
+    "cpu_shares": 100,
+    "gpu": false
+  },
+  "permissions": {
+    "host_process": false,
+    "guest_network": false,
+    "storage": [],
+    "messaging": []
+  },
+  "microvm": null,
+  "providers": null,
+  "icon": null,
+  "viewer": null,
+  "signature": "rWoFOXHrQpL+9jbxWutoU6APkbcfwuCg0gsGEwPfja6XPXKdlm0vJkxxkDcAkb6OHqk7PwnGMwEICvzlqaztDA=="
+}

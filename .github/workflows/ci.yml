@@ -457,10 +457,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       # ring's C build has no FreeBSD headers here, so the unsupported dispatch
       # is compiled on the host with this cfg. The workflow's RUSTFLAGS already
-      # deny warnings; this step adds the cfg and keeps that denial.
+      # deny warnings; this step adds the cfg and keeps that denial. It also
+      # runs the elastos-server OS-refusal tests under the same cfg, with a
+      # separate --target-dir so the normal build cache stays untouched.
       - name: unsupported operating system arm
         working-directory: elastos
-        run: RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo check -p elastos-runtime --lib
+        run: |
+          RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo check -p elastos-runtime --lib
+          RUSTFLAGS="$RUSTFLAGS --cfg elastos_unsupported_os_check" cargo test -p elastos-server --bin elastos --target-dir target-unsupported -- os_refusal 2>&1 | tee unsupported-os-refusal.log
+          # The refusal tests live in the elastos binary (server_infra); a filter that matches nothing must fail.
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed; 0 failed;' unsupported-os-refusal.log
       - name: Rust compile cache statistics
         if: always() && env.RUSTC_WRAPPER == 'sccache'
         run: sccache --show-stats
@@ -488,6 +494,50 @@ jobs:
             exit 1
           fi
 
+  lab-gates:
+    name: lab-gates
+    runs-on: macos-15
+    timeout-minutes: 120
+    needs: fork-gate
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      - name: install wasm-capsule lab toolchain
+        run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+      - name: grant-binding gate
+        working-directory: lab/grant-binding
+        run: |
+          cargo fetch --locked
+          cargo fmt -- --check
+          cargo test --locked --offline
+      - name: capsule-identity gate
+        working-directory: lab/capsule-identity
+        run: |
+          cargo fetch --locked
+          cargo fmt -- --check
+          RUST_TEST_THREADS=2 cargo test --locked --offline
+      - name: fetch Runtime componentize dependencies for offline lab tests
+        run: cargo +1.91.0 fetch --locked --manifest-path elastos/tools/componentize/Cargo.toml
+      - name: wasm-capsule gate
+        working-directory: lab/wasm-capsule
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
+      - name: bus-v2-proposal gate
+        working-directory: lab/bus-v2-proposal
+        run: |
+          python3 -I check.py
+          python3 -I -m unittest discover -s tests
+      - name: fetch agent-host dependencies for offline red-team probes
+        run: cargo fetch --locked --manifest-path examples/agent-host/Cargo.toml
+      - name: full red-team suite
+        working-directory: lab/redteam
+        run: |
+          python3 -I -m unittest discover -s py
+
   # The lab stand-in is a separate cargo project, outside the elastos workspace.
   # Without this job, tests/standin_contract.rs can stop compiling without a red check.
   lab-standin:
@@ -500,11 +550,18 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
       - name: stand-in contract journeys
         working-directory: lab/agent-conformance
         run: |
           cargo test --locked --lib
           cargo test --locked --test standin_contract
+      - name: prepare stand-in probe component
+        run: |
+          bash scripts/build-component-capsule.sh lab/agent-conformance/probe
+          # The effects rows build the elastos binary offline; fetch its workspace first.
+          cargo fetch --locked --manifest-path elastos/Cargo.toml
       # Rong's re-check gate (CI-LS1, 29 Oct): the stand-in effects journeys, plan approval,
       # and the model-provider process tests that include the stand-in must build on Linux.
       # The cleanup census runs the operator's lsof at /usr/sbin/lsof (src/census.rs); Ubuntu ships /usr/bin/lsof.
@@ -513,12 +570,89 @@ jobs:
       - name: stand-in effects journeys
         working-directory: lab/agent-conformance
         run: cargo test --locked --test effects standin_
+      - name: stand-in sibling rule falsifier rows
+        working-directory: lab/agent-conformance
+        run: |
+          set -euo pipefail
+          for name in \
+            grants::tests::overlap_sibling_read_must_be_new_in_its_session \
+            grants::tests::cancel_refuses_retries_and_unexpected_requests \
+            grants::tests::kill_sibling_read_must_be_new_in_its_session
+          do
+            log="${RUNNER_TEMP}/standin-${name//:/_}.log"
+            cargo test --locked --test effects "$name" -- --exact | tee "$log"
+            grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
+              || { echo "::error::${name} selected no test or failed"; exit 1; }
+          done
       - name: plan approval tests
         working-directory: lab/plan-approval
-        run: cargo test --locked
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
+          python3 -I falsify.py
       - name: model-provider process tests build
         working-directory: capsules/model-provider
         run: cargo test --locked --test process --no-run
+
+  lab-operator-effects-macos:
+    name: lab-operator-effects-macos
+    runs-on: macos-15
+    timeout-minutes: 45
+    needs: fork-gate
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - name: prepare operator probe and offline Runtime inputs
+        run: |
+          bash scripts/build-component-capsule.sh lab/agent-conformance/probe
+          cargo fetch --locked --manifest-path elastos/Cargo.toml
+      - name: operator effects journeys
+        working-directory: lab/agent-conformance
+        run: |
+          set -euo pipefail
+          for name in \
+            cancelled_instance_settles_with_reason_sibling_completes \
+            killed_worker_settlement_recorded_without_retry \
+            two_instances_overlap_with_separate_grants
+          do
+            log="${RUNNER_TEMP}/operator-effects-${name}.log"
+            cargo test --locked --test effects "$name" -- --exact | tee "$log"
+            grep -Eq '^test result: ok\. 1 passed; 0 failed;' "$log" \
+              || { echo "::error::${name} selected no test, was skipped or failed"; exit 1; }
+            if grep -qF 'SKIPPED ' "$log"; then
+              echo "::error::${name} reported SKIPPED"
+              exit 1
+            fi
+          done
+
+  lab-wasm-capsule:
+    name: lab-wasm-capsule
+    # The byte pin is for an arm64 Mac with this lane's Rust 1.91 toolchain.
+    runs-on: macos-15
+    timeout-minutes: 60
+    needs: fork-gate
+    env:
+      RUST_TEST_THREADS: '2'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          toolchain: 1.91.0
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      - name: fetch Runtime componentize dependencies for offline lab tests
+        run: cargo +1.91.0 fetch --locked --manifest-path elastos/tools/componentize/Cargo.toml
+      - name: wasm capsule lab gate
+        working-directory: lab/wasm-capsule
+        run: |
+          cargo fmt -- --check
+          cargo test --locked
 
   test-elastos:
     name: test-elastos
@@ -534,6 +668,8 @@ jobs:
           # The B3 R-DIFF rows read the pinned lab reference with `git show d0dd5693:...`, so this job needs history.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
       - name: configure Rust compile cache
         if: env.CI_USE_CACHE == 'true'
         uses: ./.github/actions/rust-compile-cache
@@ -571,6 +707,10 @@ jobs:
           ELASTOS_TEST_DECRYPT_PROVIDER_BIN: ${{ github.workspace }}/capsules/protected-content-decrypt-provider/target/release/protected-content-decrypt-provider
           ELASTOS_TEST_CUSTODY_PROVIDER_BIN: ${{ github.workspace }}/capsules/custody-provider/target/release/custody-provider
         run: cargo test --locked -p elastos-server --lib --features prototype-agents
+      - name: Agent Host real guest and joined planner rows
+        env:
+          RUST_TEST_THREADS: '2'
+        run: ./examples/agent-host/run-e2e.sh
       # B4-R slice 4: the same named rows run here and in source-home-macos.
       # `--exact` plus the one-passed guard rejects a filter that selects nothing.
       - name: B4-R named localhost decision tests
@@ -1937,7 +2077,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-standin, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
     steps:
       - name: every job passed or was skipped by its own guard
         env:

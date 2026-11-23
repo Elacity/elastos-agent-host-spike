@@ -503,10 +503,29 @@ async fn test_chat_room_summary_requires_signed_launch_authority() {
 }
 
 #[tokio::test]
-async fn legacy_chat_room_summary_admits_only_chat_or_home() {
+async fn legacy_chat_room_summary_requires_chat_launch_even_with_home_cookie() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
+
+    // Handler proof: the front door admits this same-origin Home cookie.
+    let home = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/chat-room/summary")
+                .header(COOKIE, signed_home_cookie_for_room_test(&authority))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(home.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(home.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"chat_room_summary_requires_chat_launch");
+
     let capsule_summary = |token: String| {
         app.clone().oneshot(
             test_browser_request("localhost:61180", "null")
@@ -524,7 +543,7 @@ async fn legacy_chat_room_summary_admits_only_chat_or_home() {
     ))
     .await
     .unwrap();
-    assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(other.status(), StatusCode::FORBIDDEN);
     let body = axum::body::to_bytes(other.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -539,18 +558,31 @@ async fn legacy_chat_room_summary_admits_only_chat_or_home() {
     .unwrap();
     assert_eq!(chat.status(), StatusCode::OK);
 
-    let home = app
+    let home_page = app
         .clone()
         .oneshot(
             test_browser_request("localhost:61180", "http://localhost:61180")
-                .uri("/api/apps/chat-room/summary")
+                .uri("/api/apps/home/summary")
                 .header(COOKIE, signed_home_cookie_for_room_test(&authority))
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(home.status(), StatusCode::OK);
+    assert_eq!(home_page.status(), StatusCode::OK);
+
+    // Front-door check: an opaque Home token is refused before the Chat handler.
+    let opaque_home = app
+        .oneshot(
+            test_browser_request("localhost:61180", "null")
+                .uri("/api/apps/chat-room/summary")
+                .header("x-elastos-home-token", authority.home_token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(opaque_home.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -1544,8 +1576,8 @@ async fn test_chat_room_shell_can_kick_guest_without_exposing_session_token() {
     let summary = app
         .clone()
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .method("GET")
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
@@ -1578,8 +1610,8 @@ async fn test_chat_room_shell_can_kick_guest_without_exposing_session_token() {
 
     let summary = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .method("GET")
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
@@ -1775,8 +1807,8 @@ async fn test_chat_room_shell_can_approve_browser_access_request() {
     let summary = app
         .clone()
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &home_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1824,12 +1856,12 @@ async fn test_room_service_summary_omits_display_name_suggestion() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1896,12 +1928,12 @@ async fn test_room_service_summary_includes_hosted_guest_urls() {
     .unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -1939,12 +1971,12 @@ async fn test_room_service_summary_blocks_browser_access_when_seeded_room_has_no
     .unwrap();
     let app = gateway_router(test_state(dir.path()));
     let authority = passkey_authority(dir.path());
-    let home_cookie = signed_home_cookie_for_room_test(&authority);
+    let chat_token = app_token_for_authority(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
 
     let resp = app
         .oneshot(
-            test_browser_request("localhost:61180", "http://localhost:61180")
-                .header(COOKIE, &home_cookie)
+            test_browser_request("localhost:61180", "null")
+                .header("x-elastos-home-token", &chat_token)
                 .uri("/api/apps/chat-room/summary")
                 .body(Body::empty())
                 .unwrap(),
@@ -3102,6 +3134,7 @@ struct AttachFixture {
     content: Arc<RecordingPublishContent>,
     registry: Arc<ProviderRegistry>,
     port: crate::collaboration_product::CollaborationChatProductPort,
+    profile: crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
 }
 
 async fn attach_fixture() -> AttachFixture {
@@ -3126,6 +3159,7 @@ async fn attach_fixture() -> AttachFixture {
     let app = gateway_router(state);
     let token =
         projection_launch_token_for_authority_context(dir.path(), CHAT_ROOM_CAPSULE_ID, &authority);
+    let profile = load_profile_for_authority(dir.path(), &authority);
     AttachFixture {
         dir,
         app,
@@ -3134,6 +3168,7 @@ async fn attach_fixture() -> AttachFixture {
         content,
         registry,
         port,
+        profile,
     }
 }
 
@@ -3353,10 +3388,29 @@ async fn community_attach_keeps_the_publication_when_the_post_fails_and_retries_
     );
     assert_eq!(rename["status"], "ok", "{rename}");
     home.write("Documents/moved.txt", b"changed!");
-    tokio::time::sleep(std::time::Duration::from_secs(
-        crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS + 1,
-    ))
-    .await;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(
+            2 * crate::collaboration_rate_limit::COMMUNITY_RATE_WINDOW_SECS + 5,
+        );
+    loop {
+        match home
+            .port
+            .check_message_allowed(&home.profile, crate::auth::now_ts())
+        {
+            Ok(()) => break,
+            Err(error) => assert!(
+                error
+                    .downcast_ref::<crate::collaboration_rate_limit::CommunitySendRateLimited>()
+                    .is_some(),
+                "unexpected send-window error: {error}"
+            ),
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "send window did not roll over"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let (status, retried) = home
         .attach("Documents/report.txt", "chat-attach:report")
         .await;
