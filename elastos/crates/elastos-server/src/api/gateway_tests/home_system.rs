@@ -14341,7 +14341,7 @@ async fn a_published_file_is_served_only_to_the_publishers_contacts() {
             crate::carrier::admit_carrier_peer_content_fetch(
                 &dir,
                 network,
-                &source,
+                &crate::carrier::iroh_transport_observation(&source).unwrap(),
                 &json!({ "cid": cid }),
             )
             .await
@@ -14421,6 +14421,7 @@ fn an_unresolvable_principal_root_is_not_a_contact() {
         configured_discovery_network_profile_for_test(&trusted_key, "carrier-unresolved-root");
     let (source_key, _) = generate_keypair();
     let source = iroh::PublicKey::from_bytes(&source_key.verifying_key().to_bytes()).unwrap();
+    let sender_runtime_did = crate::carrier::public_key_to_did(&source).unwrap();
     let principals = std::collections::BTreeSet::from([principal_id]);
 
     // The record read must be the load that reuses the verified state.
@@ -14429,11 +14430,11 @@ fn an_unresolvable_principal_root_is_not_a_contact() {
         crate::auth::install_verified_auth_state_cache_hit_hook(dir.path());
     let data_dir = dir.path().to_path_buf();
     let loader = std::thread::spawn(move || {
-        crate::api::gateway::gateway_home_system::carrier_source_is_contact_of(
+        crate::api::gateway::gateway_home_system::carrier_sender_did_is_contact_of(
             &data_dir,
             &network,
             &principals,
-            &source,
+            &sender_runtime_did,
         )
     });
     hit_observed
