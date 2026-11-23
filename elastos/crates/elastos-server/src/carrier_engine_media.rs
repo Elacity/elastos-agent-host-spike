@@ -254,18 +254,34 @@ async fn warm_media_client(
         .as_str()
         .context("Engine peer missing")?
         .parse::<iroh::PublicKey>()?;
-    let addresses = super::decode_ticket_endpoints(
-        grant["connect_ticket"]
-            .as_str()
-            .context("Engine route missing")?,
-    );
-    for address in addresses.into_iter().filter(|a| a.id == peer) {
+    // P2-9 step 4: service grants carry only the peer DID. A legacy ticket,
+    // when present, is tried first; otherwise the stream dials the peer's key
+    // and Carrier's own address lookup finds the route (as the Engine call does).
+    let mut addresses: Vec<iroh::EndpointAddr> = match grant.get("connect_ticket") {
+        Some(value) => {
+            let ticket = value.as_str().context("Engine route is invalid")?;
+            if ticket.is_empty() {
+                Vec::new()
+            } else {
+                super::decode_ticket_endpoints(ticket)
+                    .into_iter()
+                    .filter(|a| a.id == peer)
+                    .collect()
+            }
+        }
+        None => Vec::new(),
+    };
+    addresses.push(iroh::EndpointAddr::from(peer));
+    for address in addresses {
         if let Ok(client) = super::CarrierClient::connect_known_endpoint(endpoint, address, 5).await
         {
             return Ok(client);
         }
     }
-    anyhow::bail!("Engine media route unavailable")
+    anyhow::bail!(
+        "{}: Engine media route unavailable",
+        super::SERVICE_PROVIDER_UNREACHABLE
+    )
 }
 
 async fn admit_opened_stream(
@@ -983,6 +999,72 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ticketless_engine_grant_dials_the_peer_key() {
+        // P2-9 step 4: service grants carry only the peer DID. The media
+        // stream dials the peer's key; with a known live path it connects,
+        // and an unreachable peer gives the named error.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let consumer_root = tempfile::tempdir().unwrap();
+            let engine_root = tempfile::tempdir().unwrap();
+            let consumer_key = ed25519_dalek::SigningKey::from_bytes(&[0xB6; 32]);
+            let engine_key = ed25519_dalek::SigningKey::from_bytes(&[0xB7; 32]);
+            let consumer_did =
+                super::super::public_key_to_did(&iroh::SecretKey::from_bytes(&[0xB6; 32]).public())
+                    .unwrap();
+            let engine_did =
+                super::super::public_key_to_did(&iroh::SecretKey::from_bytes(&[0xB7; 32]).public())
+                    .unwrap();
+            let consumer = super::super::start_isolated_carrier_node_with_registry(
+                &consumer_key,
+                &consumer_did,
+                consumer_root.path().into(),
+                None,
+            )
+            .await
+            .unwrap();
+            let engine = super::super::start_isolated_carrier_node_with_registry(
+                &engine_key,
+                &engine_did,
+                engine_root.path().into(),
+                None,
+            )
+            .await
+            .unwrap();
+            // One dial with the full address gives the consumer a live path,
+            // as Carrier's address lookup would in a real mesh.
+            let full = super::super::decode_ticket_endpoints(
+                &super::super::carrier_connect_ticket(&engine.endpoint),
+            )
+            .remove(0);
+            let _warm =
+                super::super::CarrierClient::connect_known_endpoint(&consumer.endpoint, full, 5)
+                    .await
+                    .unwrap();
+            let grant = json!({"peer_did": engine.endpoint.id().to_string()});
+            warm_media_client(&consumer.endpoint, &grant)
+                .await
+                .expect("a ticketless grant dials the engine by key");
+            let unknown = iroh::SecretKey::from_bytes(&[0xB8; 32]).public();
+            let err = warm_media_client(
+                &consumer.endpoint,
+                &json!({"peer_did": unknown.to_string()}),
+            )
+            .await
+            .err()
+            .expect("an unreachable engine is refused");
+            assert!(
+                err.to_string()
+                    .starts_with(super::super::SERVICE_PROVIDER_UNREACHABLE),
+                "{err}"
+            );
+            consumer.endpoint.close().await;
+            engine.endpoint.close().await;
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
