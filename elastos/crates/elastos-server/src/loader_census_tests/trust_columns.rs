@@ -42,11 +42,23 @@ fn columns() -> Vec<TrustColumn> {
         TrustColumn {
             file: "elastos-runtime/src/provider/failure_record.rs",
             function: "launch",
-            call: "libc::execve",
+            call: "libc::fexecve",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["libc::execve", "(path.as_ptr()"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["libc::fexecve", "(executable_fd"].concat(),
+            os_path: "",
+        },
+        // Installed-component start (slice 2): the held descriptor matched the
+        // signed release digest in VerifiedExecutable::prepare.
+        TrustColumn {
+            file: "elastos-server/src/setup/verified_executable.rs",
+            function: "attach_std",
+            call: "libc::fexecve",
+            class: "n/a",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["libc::fexecve", "(fd, argv_ptrs"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -54,9 +66,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_command",
             call: "spawn()",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["mut comman", "d: Command"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["prepared.configure_", "command(&mut command)"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -64,9 +76,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_confined_model_linux",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -74,8 +86,8 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_confined_model_with_engine_bundle",
             call: "command",
             class: "os-tool",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: ["Command::new(\"/usr", "/bin/sandbox-exec\")"].concat(),
             os_path: "/usr/bin/sandbox-exec",
         },
@@ -84,9 +96,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_with_owned_helpers",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -94,9 +106,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "spawn_with_timeouts",
             call: "command",
             class: "other",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::new", "(binary_path)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
         // The macOS confined start checks the storage root's identity and
@@ -332,6 +344,8 @@ fn columns() -> Vec<TrustColumn> {
             evidence: [".start_b", "y_bundle("].concat(),
             os_path: "",
         },
+        // Custody provisioning requires a signed digest before command
+        // creation; the source-Home dev_mode path is refused before spawn.
         TrustColumn {
             file: "elastos-server/src/protected_content_config.rs",
             function: "provision_custody_node_with_installed_provider",
@@ -702,15 +716,15 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
-        // AdmittedProvider::admit checks the binary's checksum against the
-        // data-dir components.json at each start. It reads the release
-        // signer but does not check the binary against it.
+        // start_did_provider admits the exact binary through
+        // verify_installed_component_start and pins that signed digest.
+        // A Home with no signed digest, including dev_mode, is refused.
         TrustColumn {
             file: "elastos-server/src/server_infra.rs",
             function: "start_did_provider",
             call: concat!("ProviderBridge::spawn", "_confined"),
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: ["ProviderBridge::", "spawn_confined("].concat(),
             os_path: "",
@@ -720,7 +734,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "start_wallet_provider",
             call: concat!("ProviderBridge::spawn", "_confined"),
             class: "n/a",
-            trust_root: "components-json-in-data-dir",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: ["ProviderBridge::", "spawn_confined("].concat(),
             os_path: "",
@@ -1546,7 +1560,13 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             ["ProviderBridge::", "spawn(&path, Default::default())"].concat(),
-            5,
+            1,
+        ),
+        (
+            "elastos-server/src/server_infra.rs",
+            "setup_server_infrastructure_impl",
+            ["&checked_native_provider", "(&path)"].concat(),
+            4,
         ),
         (
             "elastos-server/src/server_infra.rs",
@@ -1611,23 +1631,23 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 103);
-    assert_eq!(classes.get("n/a"), Some(&54));
+    assert_eq!(columns.len(), 104);
+    assert_eq!(classes.get("n/a"), Some(&55));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
-    assert_eq!(roots.get("components-json-in-data-dir"), Some(&13));
+    assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&62));
+    assert_eq!(roots.get("none"), Some(&56));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&16));
+    assert_eq!(roots.get("release-signature"), Some(&25));
     assert_eq!(roots.get("staged-cid"), Some(&7));
-    assert_eq!(times.get("at-every-start"), Some(&25));
+    assert_eq!(times.get("at-every-start"), Some(&32));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&8));
-    assert_eq!(times.get("never"), Some(&62));
-    assert_eq!(to_gate, 35);
+    assert_eq!(times.get("never"), Some(&56));
+    assert_eq!(to_gate, 31);
 }
 
 #[test]
@@ -1672,6 +1692,22 @@ fn installed_component_start_callers_keep_the_signed_gate() {
                 == "provision_custody_node_with_installed_provider"
         }),
         "custody start must admit the resolver's selected binary"
+    );
+    let custody_code = source::code_only(custody);
+    let guard = "prepared.signed_checksum()?;";
+    let guard_at = custody_code
+        .find(guard)
+        .expect("custody start lost signed-digest guard");
+    assert_eq!(
+        source::enclosing_fn(&custody_code, guard_at),
+        "provision_custody_node_with_installed_provider"
+    );
+    let spawn_at = custody_code
+        .find("let mut child = command")
+        .expect("custody spawn moved");
+    assert!(
+        guard_at < spawn_at,
+        "custody digest guard moved after spawn"
     );
 }
 

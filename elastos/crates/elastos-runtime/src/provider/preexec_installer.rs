@@ -144,25 +144,55 @@ pub(super) fn prepare(
 
 /// # Safety
 /// Call only in a forked child before exec. The caller owns fds 0–2, passes
-/// its open failure-record write descriptor (at least 3, with FD_CLOEXEC), and writes any
-/// returned failure to that descriptor before exiting the child.
-pub(super) unsafe fn install(prepared: &Prepared, keep: i32) -> Result<(), Failure> {
+/// its open failure-record write descriptor and the verified executable
+/// descriptor (both at least 3, with FD_CLOEXEC), and writes any returned
+/// failure to the report descriptor before exiting the child. Tests use -1
+/// when there is no executable descriptor.
+pub(super) unsafe fn install(
+    prepared: &Prepared,
+    keep: i32,
+    executable: i32,
+) -> Result<(), Failure> {
     let mut ruleset = -1;
     let result = sequence(prepared.plan.rules.len(), |step| {
         let answer = match step {
             Step::CloseRange => {
-                if keep < 3 {
+                if keep < 3 || (executable != -1 && (executable < 3 || executable == keep)) {
                     return Err(libc::EINVAL);
                 }
-                if keep > 3
+                let (first, second) = if executable == -1 || keep < executable {
+                    (keep, executable)
+                } else {
+                    (executable, keep)
+                };
+                if first > 3
                     && unsafe {
-                        libc::syscall(libc::SYS_close_range, 3u32, (keep as u32) - 1, 0u32)
+                        libc::syscall(libc::SYS_close_range, 3u32, (first - 1) as u32, 0u32)
                     } < 0
                 {
                     return Err(unsafe { *libc::__errno_location() });
                 }
-                if unsafe {
-                    libc::syscall(libc::SYS_close_range, (keep as u32) + 1, u32::MAX, 0u32)
+                if second != -1 {
+                    if second > first + 1
+                        && unsafe {
+                            libc::syscall(
+                                libc::SYS_close_range,
+                                (first + 1) as u32,
+                                (second - 1) as u32,
+                                0u32,
+                            )
+                        } < 0
+                    {
+                        return Err(unsafe { *libc::__errno_location() });
+                    }
+                    if unsafe {
+                        libc::syscall(libc::SYS_close_range, (second + 1) as u32, u32::MAX, 0u32)
+                    } < 0
+                    {
+                        return Err(unsafe { *libc::__errno_location() });
+                    }
+                } else if unsafe {
+                    libc::syscall(libc::SYS_close_range, (first + 1) as u32, u32::MAX, 0u32)
                 } < 0
                 {
                     return Err(unsafe { *libc::__errno_location() });
@@ -320,7 +350,7 @@ mod tests {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0);
         if pid == 0 {
-            if unsafe { install(&prepared, report.as_raw_fd()) }.is_err() {
+            if unsafe { install(&prepared, report.as_raw_fd(), -1) }.is_err() {
                 unsafe { libc::_exit(80) };
             }
             let kept_open = unsafe { libc::close(report.as_raw_fd()) } == 0;

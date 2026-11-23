@@ -896,7 +896,8 @@ class PrepareWorkerTest(unittest.TestCase):
         source = (SOURCE / "scripts/home-frontdoor-smoke.sh").read_text()
         stage = source.index('"$ROOT/elastos/target/release/shell" "$SOURCE_RUNTIME_DATA_DIR/bin/shell"')
         opt_in = source.index('printf \'dev_mode = true\\n\' > "$SOURCE_RUNTIME_DATA_DIR/config.toml"')
-        start = source.index('"$ROOT/elastos/target/debug/elastos" serve --addr')
+        # P2-8 (#1802): the source Home serves its installed, signed Runtime, not the debug build.
+        start = source.index('"$SOURCE_RUNTIME_DATA_DIR/bin/elastos" serve --addr')
         check = source.index("grep -Fq 'Spawned shell capsule' \"$SOURCE_RUNTIME_LOG\"")
         self.assertLess(stage, start)
         self.assertLess(opt_in, start)

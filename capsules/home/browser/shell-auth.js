@@ -3,6 +3,8 @@ import {
   fetchJson,
   setHomeAuthorityToken,
 } from "./shell-core.js?v=home-wallpaper-20261030b";
+
+export { setHomeAuthorityToken };
 import { ownerRecoveryCommand } from "./owner-recovery-command.js?v=home-update-20261003a";
 
 const unlockPanel = document.querySelector("#home-unlock");
@@ -20,6 +22,13 @@ const unlockSecondary = document.querySelector("#home-unlock-secondary");
 const unlockCreate = document.querySelector("#home-unlock-create");
 const unlockStatus = document.querySelector("#home-unlock-status");
 const unlockFaceStatus = document.querySelector("#home-unlock-face-status");
+const cliMintPrompt = document.querySelector("#home-cli-mint-prompt");
+const cliMintCopy = document.querySelector("#home-cli-mint-copy");
+const cliMintStatus = document.querySelector("#home-cli-mint-status");
+const cliMintApprove = document.querySelector("#home-cli-mint-approve");
+const cliMintCancel = document.querySelector("#home-cli-mint-cancel");
+const cliMintChoices = document.querySelector("#home-cli-mint-choices");
+const cliMintTitle = document.querySelector("#home-cli-mint-title");
 const unlockName = document.querySelector("#home-unlock-name");
 const ownerToken = document.querySelector("#home-owner-token");
 const ownerTokenLabel = document.querySelector("#home-owner-token-label");
@@ -265,6 +274,7 @@ export function refreshHomeSession({ signal } = {}) {
 }
 
 export async function signOutHome() {
+  stopHomeCliMintWatch();
   try {
     const response = await fetch("/api/auth/sessions/sign-out", {
       method: "POST",
@@ -335,6 +345,335 @@ export async function requestPasskeyStepUp(appToken, operation, request) {
       }).catch(() => {});
     }
     throw error;
+  }
+}
+
+const CLI_MINT_WAITING = "/api/home/cli-mint/waiting";
+const CLI_MINT_BEGIN = "/api/home/cli-mint/begin";
+const CLI_MINT_APPROVE = "/api/home/cli-mint/approve";
+const CLI_MINT_CANCEL = "/api/home/cli-mint/cancel";
+const CLI_MINT_WAITING_SCHEMA = "elastos.home.cli-mint.waiting/v1";
+const CLI_MINT_WAITING_RESULT = "elastos.home.cli-mint.waiting.result/v1";
+const CLI_MINT_BEGIN_SCHEMA = "elastos.home.cli-mint.begin/v1";
+const CLI_MINT_BEGIN_RESULT = "elastos.home.cli-mint.begin.result/v1";
+const CLI_MINT_APPROVE_SCHEMA = "elastos.home.cli-mint.approve/v1";
+const CLI_MINT_APPROVE_RESULT = "elastos.home.cli-mint.approve.result/v1";
+const CLI_MINT_CANCEL_SCHEMA = "elastos.home.cli-mint.cancel/v1";
+let cliMintTimer = 0;
+let cliMintBusy = false;
+let cliMintBound = false;
+
+// The terminal prints this same code. It is the first eight hex characters of
+// the request id, in upper case, with a hyphen in the middle. It is not the secret.
+export function terminalRequestCode(requestId) {
+  const id = String(requestId || "");
+  if (!/^[0-9a-f]{32}$/.test(id)) return "";
+  const head = id.slice(0, 8).toUpperCase();
+  return `${head.slice(0, 4)}-${head.slice(4)}`;
+}
+
+function bindHomeCliMintPrompt() {
+  if (cliMintBound || !cliMintApprove || !cliMintCancel) return;
+  cliMintBound = true;
+  cliMintApprove.addEventListener("click", () => {
+    approveHomeCliMintRequest().catch((error) => setCliMintStatus(cliMintFailure(error), "error"));
+  });
+  cliMintCancel.addEventListener("click", () => {
+    cancelShownHomeCliMint().catch((error) => setCliMintStatus(cliMintFailure(error), "error"));
+  });
+}
+
+function setCliMintStatus(message, tone) {
+  if (!cliMintStatus) return;
+  cliMintStatus.textContent = message || "";
+  cliMintStatus.hidden = !message;
+  cliMintStatus.dataset.tone = tone || "muted";
+}
+
+function clearCliMintChoices() {
+  if (!cliMintChoices) return;
+  while (cliMintChoices.firstChild) {
+    cliMintChoices.removeChild(cliMintChoices.firstChild);
+  }
+  cliMintChoices.hidden = true;
+}
+
+function setCliMintActionsVisible(visible) {
+  if (cliMintApprove) cliMintApprove.hidden = !visible;
+  if (cliMintCancel) cliMintCancel.hidden = !visible;
+}
+
+function hideHomeCliMintPrompt() {
+  if (!cliMintPrompt) return;
+  cliMintPrompt.hidden = true;
+  cliMintPrompt.setAttribute("aria-hidden", "true");
+  delete cliMintPrompt.dataset.requestId;
+  delete cliMintPrompt.dataset.mode;
+  delete cliMintPrompt.dataset.choiceKey;
+  clearCliMintChoices();
+  setCliMintActionsVisible(true);
+  if (cliMintTitle) cliMintTitle.textContent = "Allow this terminal";
+  setCliMintStatus("", "muted");
+}
+
+function showHomeCliMintPrompt(request) {
+  if (!cliMintPrompt) return;
+  bindHomeCliMintPrompt();
+  const requestId = readText(request && request.request_id);
+  const code = terminalRequestCode(requestId);
+  if (!code) return;
+  cliMintPrompt.dataset.mode = "approve";
+  cliMintPrompt.dataset.requestId = requestId;
+  delete cliMintPrompt.dataset.choiceKey;
+  clearCliMintChoices();
+  setCliMintActionsVisible(true);
+  if (cliMintTitle) cliMintTitle.textContent = "Allow this terminal";
+  if (cliMintCopy) {
+    cliMintCopy.textContent = `Terminal request ${code} is waiting for permission to launch Home apps. Use your passkey to allow it. This permission lasts 5 minutes.`;
+  }
+  cliMintPrompt.hidden = false;
+  cliMintPrompt.setAttribute("aria-hidden", "false");
+}
+
+function showCliMintPicker(requests) {
+  if (!cliMintPrompt) return;
+  bindHomeCliMintPrompt();
+  clearCliMintChoices();
+  const rows = [];
+  for (const request of requests) {
+    const requestId = readText(request && request.request_id);
+    const code = terminalRequestCode(requestId);
+    if (!code) continue;
+    rows.push({ request, requestId, code });
+  }
+  cliMintPrompt.dataset.mode = "pick";
+  delete cliMintPrompt.dataset.requestId;
+  cliMintPrompt.dataset.choiceKey = rows.map((row) => row.requestId).join(",");
+  if (cliMintTitle) cliMintTitle.textContent = "Choose a terminal";
+  if (cliMintCopy) {
+    const codes = rows.map((row) => row.code).join(", ");
+    cliMintCopy.textContent = rows.length > 1
+      ? `More than one terminal is waiting. Choose the code that matches your terminal: ${codes}.`
+      : `Choose this terminal only if its code matches yours: ${codes}.`;
+  }
+  if (cliMintChoices && document.createElement) {
+    for (const row of rows) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "home-prompt-button home-cli-mint-choice";
+      button.textContent = row.code;
+      button.dataset.requestId = row.requestId;
+      button.addEventListener("click", () => {
+        showHomeCliMintPrompt(row.request);
+      });
+      cliMintChoices.appendChild(button);
+    }
+    cliMintChoices.hidden = rows.length === 0;
+  }
+  setCliMintActionsVisible(false);
+  cliMintPrompt.hidden = false;
+  cliMintPrompt.setAttribute("aria-hidden", "false");
+}
+
+function showWaitingRequests(pending, preferPicker) {
+  if (pending.length > 1 || preferPicker) {
+    showCliMintPicker(pending);
+    return;
+  }
+  showHomeCliMintPrompt(pending[0]);
+}
+
+function boundRequestId() {
+  if (!cliMintPrompt || cliMintPrompt.hidden || cliMintPrompt.dataset.mode === "pick") return "";
+  return readText(cliMintPrompt.dataset.requestId);
+}
+
+function noteOtherWaitingRequests(bound, pending) {
+  if (!pending || pending.length < 2) return;
+  if (cliMintStatus && cliMintStatus.dataset.tone === "error") return;
+  const others = pending.length - 1;
+  const code = terminalRequestCode(bound);
+  const lead = others === 1
+    ? "Another terminal is also waiting"
+    : `${others} other terminals are also waiting`;
+  const message = `${lead}. This prompt stays ${code}.`;
+  if (cliMintStatus && cliMintStatus.textContent === message) return;
+  setCliMintStatus(message, "muted");
+}
+
+export function stopHomeCliMintWatch() {
+  window.clearInterval(cliMintTimer);
+  cliMintTimer = 0;
+  hideHomeCliMintPrompt();
+}
+
+export function startHomeCliMintWatch() {
+  if (cliMintTimer) return;
+  refreshHomeCliMintPrompt().catch(() => {});
+  cliMintTimer = window.setInterval(() => {
+    refreshHomeCliMintPrompt().catch(() => {});
+  }, 2000);
+}
+
+export async function refreshHomeCliMintPrompt() {
+  if (cliMintBusy || !cliMintPrompt) return;
+  let waiting;
+  try {
+    waiting = await fetchJson(CLI_MINT_WAITING, {
+      method: "POST",
+      body: JSON.stringify({ schema: CLI_MINT_WAITING_SCHEMA }),
+    });
+  } catch (error) {
+    if (isHomeAuthError(error)) {
+      stopHomeCliMintWatch();
+    }
+    return;
+  }
+  if (waiting?.schema !== CLI_MINT_WAITING_RESULT || !Array.isArray(waiting.requests)) return;
+  const pending = waiting.requests.filter((item) => item
+    && item.status === "pending"
+    && terminalRequestCode(readText(item.request_id)));
+  const bound = boundRequestId();
+  if (bound && pending.some((item) => readText(item.request_id) === bound)) {
+    noteOtherWaitingRequests(bound, pending);
+    return;
+  }
+  if (bound) {
+    hideHomeCliMintPrompt();
+    return;
+  }
+  if (pending.length === 0) {
+    hideHomeCliMintPrompt();
+    return;
+  }
+  const picking = cliMintPrompt.dataset.mode === "pick" && !cliMintPrompt.hidden;
+  const choiceKey = pending.map((item) => readText(item.request_id)).join(",");
+  if (picking && cliMintPrompt.dataset.choiceKey === choiceKey) return;
+  showWaitingRequests(pending, picking);
+}
+
+function cliMintFailure(error) {
+  const name = String(error && error.name || "");
+  const message = String(error && error.message || "");
+  if (name === "NotAllowedError" || name === "AbortError") {
+    return "No passkey was used. The terminal was not approved.";
+  }
+  if (!Number(error && error.status) && error instanceof TypeError) {
+    if (error.cliMintBegun) {
+      return "Home is not responding. Run the command again to request a new grant.";
+    }
+    return "Home is not responding. Check that ElastOS is running, then try again.";
+  }
+  if (/already waiting for approval/.test(message)) {
+    return "This request has already started. Select Cancel, then run the command again.";
+  }
+  if (/already decided|was refused|was cancelled/.test(message) || error.cliMintBegun) {
+    return "Home did not approve the terminal. Run the command again to request a new grant.";
+  }
+  return "Home did not approve the terminal. Select Use passkey to try again.";
+}
+
+function markCliMintBegun(error) {
+  if (error && typeof error === "object") error.cliMintBegun = true;
+  return error;
+}
+
+async function cancelCliMintRequest(requestId) {
+  await fetchJson(CLI_MINT_CANCEL, {
+    method: "POST",
+    body: JSON.stringify({
+      schema: CLI_MINT_CANCEL_SCHEMA,
+      request_id: requestId,
+    }),
+  });
+}
+
+export async function cancelShownHomeCliMint() {
+  const requestId = readText(cliMintPrompt && cliMintPrompt.dataset.requestId);
+  if (!requestId || cliMintBusy || (cliMintPrompt && cliMintPrompt.dataset.mode === "pick")) return;
+  cliMintBusy = true;
+  try {
+    await cancelCliMintRequest(requestId);
+    hideHomeCliMintPrompt();
+  } catch (error) {
+    const message = String(error && error.message || "");
+    if (/already decided/.test(message)) {
+      setCliMintStatus(
+        "Too late to cancel. If the terminal received the grant, sign out to revoke it.",
+        "error",
+      );
+    } else if (!Number(error && error.status) && error instanceof TypeError) {
+      setCliMintStatus("Home is not responding. Check that ElastOS is running, then try again.", "error");
+    } else {
+      setCliMintStatus("Home could not cancel this terminal request.", "error");
+    }
+  } finally {
+    cliMintBusy = false;
+  }
+}
+
+// Begin the waiting request, then ask for the passkey, then approve.
+// Approve is not called unless begin returned a challenge.
+export async function approveHomeCliMintRequest() {
+  if (!window.PublicKeyCredential) {
+    throw new Error("Passkeys are not available in this browser.");
+  }
+  const requestId = readText(cliMintPrompt && cliMintPrompt.dataset.requestId);
+  if (!requestId || cliMintBusy || (cliMintPrompt && cliMintPrompt.dataset.mode === "pick")) return;
+  cliMintBusy = true;
+  if (cliMintApprove) cliMintApprove.disabled = true;
+  if (cliMintCancel) cliMintCancel.disabled = true;
+  let begun = false;
+  try {
+    const begin = await fetchJson(CLI_MINT_BEGIN, {
+      method: "POST",
+      body: JSON.stringify({
+        schema: CLI_MINT_BEGIN_SCHEMA,
+        request_id: requestId,
+      }),
+    });
+    if (begin?.schema !== CLI_MINT_BEGIN_RESULT || !begin.options || begin.request_id !== requestId) {
+      throw new Error("Home could not start the terminal approval.");
+    }
+    begun = true;
+    let credential;
+    try {
+      credential = await navigator.credentials.get(toRequestOptions(begin.options));
+    } catch (error) {
+      throw markCliMintBegun(error);
+    }
+    if (!credential) {
+      await cancelCliMintRequest(requestId).catch(() => {});
+      hideHomeCliMintPrompt();
+      return;
+    }
+    let approved;
+    try {
+      approved = await fetchJson(CLI_MINT_APPROVE, {
+        method: "POST",
+        body: JSON.stringify({
+          schema: CLI_MINT_APPROVE_SCHEMA,
+          request_id: requestId,
+          response: serializeAssertionCredential(credential),
+        }),
+      });
+    } catch (error) {
+      throw markCliMintBegun(error);
+    }
+    if (approved?.schema !== CLI_MINT_APPROVE_RESULT || approved.status !== "approved" || approved.request_id !== requestId) {
+      throw markCliMintBegun(new Error("Home did not approve the terminal."));
+    }
+    hideHomeCliMintPrompt();
+  } catch (error) {
+    if (begun) {
+      await cancelCliMintRequest(requestId).catch(() => {});
+    }
+    setCliMintStatus(cliMintFailure(error), "error");
+    throw error;
+  } finally {
+    cliMintBusy = false;
+    if (cliMintApprove) cliMintApprove.disabled = false;
+    if (cliMintCancel) cliMintCancel.disabled = false;
   }
 }
 

@@ -18,6 +18,10 @@ pub struct VerifiedExecutable {
     #[cfg(target_os = "macos")]
     _private_dir: tempfile::TempDir,
     exec_path: PathBuf,
+    /// The signed release digest these held bytes matched (none for a source
+    /// Home's `dev_mode = true` start). A native provider start pins its
+    /// spawn-time check to this same digest.
+    checksum: Option<String>,
 }
 
 impl VerifiedExecutable {
@@ -57,6 +61,7 @@ impl VerifiedExecutable {
             Ok(Self {
                 file: unsafe { File::from_raw_fd(fd) },
                 exec_path: format!("/proc/self/fd/{fd}").into(),
+                checksum: checksum.map(str::to_owned),
             })
         }
         #[cfg(target_os = "macos")]
@@ -87,6 +92,7 @@ impl VerifiedExecutable {
                 // Future macOS helpers must not resolve resources from current_exe().
                 _private_dir: private_dir,
                 exec_path,
+                checksum: checksum.map(str::to_owned),
             })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -95,6 +101,14 @@ impl VerifiedExecutable {
 
     pub fn exec_path(&self) -> &Path {
         &self.exec_path
+    }
+
+    /// Native providers require a signed digest even in a source Home's
+    /// `dev_mode`; refuse an unchecked executable before process creation.
+    pub fn signed_checksum(&self) -> Result<&str> {
+        self.checksum.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("no signed release digest (dev_mode start is unchecked)")
+        })
     }
 
     /// Attach after the caller has set all arguments and environment changes.

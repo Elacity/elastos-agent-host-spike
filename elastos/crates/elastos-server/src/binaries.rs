@@ -2,8 +2,45 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use elastos_common::{CapsuleManifest, ProviderAuthority};
+use elastos_runtime::provider::CheckedExecutable;
 
 use crate::{setup, sources::default_data_dir};
+
+/// Bind a native provider start to the current publisher-signed release.
+/// A failed admission stays a refused executable until the bridge reports it.
+pub fn checked_native_provider(path: &Path) -> CheckedExecutable {
+    checked_native_provider_with_data_dir(&default_data_dir(), path)
+}
+
+/// Admit a native provider against the signed release of the Home at
+/// `data_dir`, the Home whose state the provider will serve.
+pub fn checked_native_provider_with_data_dir(data_dir: &Path, path: &Path) -> CheckedExecutable {
+    // Library tests start isolated fixture executables that live outside the
+    // Home they run against; an executable inside the Home is always admitted.
+    #[cfg(all(test, unix))]
+    if path.is_file() && !path.starts_with(data_dir) {
+        return crate::test_support::fixture_executable(path).with_home_data_dir(data_dir);
+    }
+    let admitted = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("native provider name is invalid"))
+        .and_then(|name| setup::verify_installed_component_start(data_dir, name, path))
+        // Admission holds the signed bytes; the bridge re-checks the same
+        // digest at spawn and runs the bytes it checked (CheckedExecutable).
+        .and_then(|verified| {
+            let checksum = verified.signed_checksum()?;
+            CheckedExecutable::pinned(path, checksum)
+                .map(|checked| checked.with_home_data_dir(data_dir))
+                .map_err(anyhow::Error::msg)
+        });
+    admitted.unwrap_or_else(|error| {
+        CheckedExecutable::refused(
+            path,
+            format!("provider signed release admission refused: {error}"),
+        )
+    })
+}
 
 /// Find a provider binary from an operator override or installed runtime paths.
 pub fn find_installed_provider_binary(name: &str) -> Option<PathBuf> {
@@ -92,11 +129,11 @@ pub fn verify_component_binary(name: &str, path: &Path) -> anyhow::Result<()> {
 pub fn resolve_verified_provider_binary(
     name: &str,
     missing_guidance: &str,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<CheckedExecutable> {
     let path = find_installed_provider_binary(name)
         .ok_or_else(|| anyhow::anyhow!("{}", missing_guidance))?;
     verify_component_binary(name, &path)?;
-    Ok(path)
+    Ok(checked_native_provider(&path))
 }
 
 pub fn resolve_verified_native_provider_binary_with_data_dir(
@@ -203,9 +240,14 @@ fn resolve_verified_native_row_with_bin_dir(
     }))
 }
 
-pub fn resolve_verified_native_provider_binary(name: &str) -> anyhow::Result<Option<PathBuf>> {
+pub fn resolve_verified_native_provider_binary(
+    name: &str,
+) -> anyhow::Result<Option<CheckedExecutable>> {
     let data_dir = default_data_dir();
-    resolve_verified_native_provider_binary_with_data_dir(&data_dir, name)
+    Ok(
+        resolve_verified_native_provider_binary_with_data_dir(&data_dir, name)?
+            .map(|path| checked_native_provider_with_data_dir(&data_dir, &path)),
+    )
 }
 
 /// A native provider whose executable, manifest and authority the resolver
@@ -275,6 +317,26 @@ impl AdmittedProvider {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The admitted bytes as the bridge's spawn-time check. The exact path is
+    /// admitted through the signed release; the signed digest is pinned here
+    /// and re-checked when the provider starts. A Home with no signed digest,
+    /// including `dev_mode`, is refused.
+    pub fn checked_executable(&self, data_dir: &Path) -> Result<CheckedExecutable, String> {
+        let verified = setup::verify_installed_component_start(data_dir, &self.key, &self.path)
+            .map_err(|error| format!("provider signed release admission refused: {error}"))?;
+        let signed = verified
+            .signed_checksum()
+            .map_err(|error| format!("provider signed release admission refused: {error}"))?;
+        if signed != self.checksum {
+            return Err(
+                "provider signed release admission refused: signed digest differs from the admitted row"
+                    .to_string(),
+            );
+        }
+        CheckedExecutable::pinned(&self.path, signed)
+            .map(|checked| checked.with_home_data_dir(data_dir))
     }
 
     #[allow(dead_code)]

@@ -165,11 +165,12 @@ impl ProviderPlane {
                     binary_path,
                     server_infra::availability_provider_config_from_env()
                         .unwrap_or(serde_json::Value::Null),
+                    data_dir,
                 )
                 .await
             }
             ProviderPlane::Ipfs => {
-                server_infra::register_ipfs_provider_plane(registry, binary_path).await
+                server_infra::register_ipfs_provider_plane(registry, binary_path, data_dir).await
             }
             ProviderPlane::Chain => {
                 server_infra::register_chain_provider_plane(registry, binary_path, data_dir).await

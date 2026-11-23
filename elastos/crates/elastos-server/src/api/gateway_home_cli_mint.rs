@@ -1,26 +1,37 @@
 //! Bound request, passkey approval, and one-time delivery of an exported Home CLI grant.
 //!
-//! A terminal registers a request. The signed-in human admin approves it with
-//! a fresh passkey assertion. The waiting terminal claims the grant once.
-//! The claim signs only after that approved record matches the request id,
-//! the secret hash, the bound owner, session, proof, grant, and operation.
+//! `elastos home --cli-launch-token` registers a request with a fresh secret and
+//! polls the claim route. While it waits, it prints a request code on stderr.
+//! That code is the first eight hex characters of the request id. Home shows the
+//! same code to the signed-in human admin and, when several requests are waiting,
+//! asks the admin to choose. Home begins the chosen request and then sends a
+//! fresh passkey assertion. The claim signs only after that approved record
+//! matches the request id, the secret hash, the bound owner, session, proof,
+//! grant, and operation. A refused passkey and a cancelled request stop the wait.
 //!
 //! The request table lives only in this process. A same-user process can write
 //! the data directory, so a file there is not an approval and cannot deliver a
 //! grant. A gateway restart drops every waiting request. The table holds 32
 //! live requests for 120 seconds. The claim compares the secret before it
 //! reports the request state, and it does not hold the table lock while it
-//! reads the session or signs.
+//! reads the session or signs. Each claim hold carries a nonce. A refused cancel
+//! leaves that hold in place, and a claim drops only the hold with its own nonce.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 #[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
 use std::sync::Condvar;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
+use base64::Engine;
 use elastos_identity::{AuthenticationResponse, CredentialDescriptor, RequestOptions};
 use sha2::{Digest, Sha256};
 
@@ -31,12 +42,14 @@ const BEGIN_SCHEMA: &str = "elastos.home.cli-mint.begin/v1";
 const APPROVE_SCHEMA: &str = "elastos.home.cli-mint.approve/v1";
 const CLAIM_SCHEMA: &str = "elastos.home.cli-mint.claim/v1";
 const CANCEL_SCHEMA: &str = "elastos.home.cli-mint.cancel/v1";
+const WAITING_SCHEMA: &str = "elastos.home.cli-mint.waiting/v1";
 const RECORD_SCHEMA: &str = "elastos.home.cli-mint.record/v1";
 const REQUEST_RESULT_SCHEMA: &str = "elastos.home.cli-mint.request.result/v1";
 const BEGIN_RESULT_SCHEMA: &str = "elastos.home.cli-mint.begin.result/v1";
 const APPROVE_RESULT_SCHEMA: &str = "elastos.home.cli-mint.approve.result/v1";
 const CLAIM_RESULT_SCHEMA: &str = "elastos.home.cli-mint.claim.result/v1";
 const CANCEL_RESULT_SCHEMA: &str = "elastos.home.cli-mint.cancel.result/v1";
+const WAITING_RESULT_SCHEMA: &str = "elastos.home.cli-mint.waiting.result/v1";
 const OPERATION: &str = "home-cli.export-grant";
 const REQUEST_TTL_SECS: u64 = 120;
 /// Exported grant lifetime, measured from the signature.
@@ -57,6 +70,7 @@ const ALREADY_WAITING: &str = "cli mint request is already waiting for approval"
 const NOT_APPROVED: &str = "cli mint request is not approved";
 const ALREADY_DELIVERED: &str = "cli mint grant was already delivered";
 const CANCELLED: &str = "cli mint request was cancelled";
+const REFUSED: &str = "cli mint request was refused";
 const SECRET_MISMATCH: &str = "cli mint requester secret does not match";
 const EXPIRED: &str = "cli mint request expired";
 const MISMATCH: &str = "cli mint request mismatch";
@@ -65,11 +79,27 @@ const REQUEST_ORIGIN_REFUSED: &str = "cli mint request origin is refused";
 const CREDENTIAL_UNAVAILABLE: &str = "cli mint passkey credential is unavailable";
 const DIFFERENT_PASSKEY: &str = "cli mint used a different registered passkey";
 const CAPACITY_ERROR: &str = "cli mint request capacity";
+const WAIT_POLL: Duration = Duration::from_secs(1);
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+const WAIT_DEADLINE_SLACK_SECS: u64 = 180;
+const WAIT_TIMEOUT: &str = "cli mint request timed out";
+const WAIT_UNAVAILABLE: &str =
+    "Home is not running. Start Home, then request the terminal grant again.";
+const WAIT_UNANSWERED: &str = "Home did not answer. Request the terminal grant again.";
+const WAIT_LOST_REPLY: &str = "Home did not answer the terminal. A grant may already have been delivered. Do not approve again.";
+const WAIT_NOTICE_PREFIX: &str = "Approve terminal request ";
+const WAIT_NOTICE_SUFFIX: &str = " in Home";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ClaimHold {
+enum ClaimPhase {
     Checking,
     Committed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClaimHold {
+    phase: ClaimPhase,
+    nonce: u64,
 }
 
 struct MintTable {
@@ -130,7 +160,8 @@ pub(super) struct ClaimBody {
     requester_secret: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ClaimResult {
     schema: String,
     request_id: String,
@@ -152,6 +183,26 @@ struct CancelResult {
     status: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WaitingBody {
+    schema: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WaitingRequest {
+    request_id: String,
+    operation: String,
+    expires_at: u64,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WaitingResult {
+    schema: String,
+    requests: Vec<WaitingRequest>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MintRecord {
@@ -167,6 +218,8 @@ struct MintRecord {
     grant_id: Option<String>,
     ceremony_id: Option<String>,
     state: String,
+    #[serde(default)]
+    pending_cancel: bool,
 }
 
 pub(super) async fn home_cli_mint_request(
@@ -226,6 +279,17 @@ pub(super) async fn home_cli_mint_cancel(
     }
 }
 
+pub(super) async fn home_cli_mint_waiting(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Json(input): Json<WaitingBody>,
+) -> Response {
+    match list_waiting(&state.data_dir, &headers, input) {
+        Ok(body) => Json(body).into_response(),
+        Err(err) => mint_error(err),
+    }
+}
+
 fn home_admin_context(
     data_dir: &Path,
     headers: &HeaderMap,
@@ -263,6 +327,7 @@ fn create_request(input: RequestBody) -> anyhow::Result<RequestResult> {
         grant_id: None,
         ceremony_id: None,
         state: STATE_PENDING.to_string(),
+        pending_cancel: false,
     };
     let expires_at = record.expires_at;
     table.records.insert(request_id.clone(), record);
@@ -426,14 +491,15 @@ fn claim_request(
     }
     valid_secret(&input.requester_secret)?;
     valid_request_id(&input.request_id)?;
-    let record = {
+    let (record, nonce) = {
         let mut table = mint_table()?;
         reserve_claim(&mut table, &input, now_ts())?
     };
-    let mut ticket = ClaimTicket::arm(record.request_id.clone());
-    bound_export_matches(data_dir, &record)?;
-    let context = signing_context(data_dir, &record)?;
-    commit_claim(&record, &input.requester_secret)?;
+    let mut ticket = ClaimTicket::arm(record.request_id.clone(), nonce);
+    #[cfg(test)]
+    pause_while_checking(&record.request_id);
+    let context = bound_export_matches(data_dir, &record)?;
+    commit_claim(&record, &input.requester_secret, nonce)?;
     #[cfg(test)]
     {
         assert!(
@@ -441,6 +507,9 @@ fn claim_request(
             "claim holds the table lock across the signer"
         );
         overlap_before_sign(&record.request_id);
+    }
+    if let Some(message) = signer_failure() {
+        anyhow::bail!(message);
     }
     let issued_at = signature_issued_at(data_dir);
     // The existing signer stays after the approved-state, secret, request-id,
@@ -452,7 +521,7 @@ fn claim_request(
         issued_at,
         Some(issued_at.saturating_add(EXPORT_TTL_SECS)),
     )?;
-    let request_id = mark_delivered(&record.request_id)?;
+    let request_id = mark_delivered(&record.request_id, nonce)?;
     ticket.disarm();
     Ok(ClaimResult {
         schema: CLAIM_RESULT_SCHEMA.to_string(),
@@ -472,16 +541,19 @@ fn cancel_request(
     }
     let context = home_admin_context(data_dir, headers)?;
     let mut table = mint_table()?;
-    if table.claim_held.get(&input.request_id) == Some(&ClaimHold::Committed) {
-        anyhow::bail!(ALREADY_DECIDED);
-    }
-    table.claim_held.remove(&input.request_id);
     let now = now_ts();
     let mut record = load_record(&table, &input.request_id, now)?;
     if matches!(record.state.as_str(), STATE_BEGUN | STATE_APPROVED)
         && !binding_matches_context(&record, &context)
     {
         anyhow::bail!(SESSION_MISMATCH);
+    }
+    let hold = table.claim_held.get(&input.request_id).copied();
+    if hold.is_some_and(|held| held.phase == ClaimPhase::Committed) {
+        record.pending_cancel = true;
+        let request_id = record.request_id.clone();
+        table.records.insert(request_id, record);
+        anyhow::bail!(ALREADY_DECIDED);
     }
     if !matches!(
         record.state.as_str(),
@@ -490,8 +562,12 @@ fn cancel_request(
         anyhow::bail!(ALREADY_DECIDED);
     }
     record.state = STATE_CANCELLED.to_string();
+    record.pending_cancel = false;
     let request_id = record.request_id.clone();
     table.records.insert(request_id.clone(), record);
+    if hold.is_some_and(|held| held.phase == ClaimPhase::Checking) {
+        table.claim_held.remove(&request_id);
+    }
     Ok(CancelResult {
         schema: CANCEL_RESULT_SCHEMA.to_string(),
         request_id,
@@ -499,10 +575,40 @@ fn cancel_request(
     })
 }
 
+fn list_waiting(
+    data_dir: &Path,
+    headers: &HeaderMap,
+    input: WaitingBody,
+) -> anyhow::Result<WaitingResult> {
+    if input.schema != WAITING_SCHEMA {
+        anyhow::bail!("unsupported cli mint waiting schema");
+    }
+    let _admin = home_admin_context(data_dir, headers)?;
+    let table = mint_table()?;
+    let now = now_ts();
+    let mut requests: Vec<WaitingRequest> = table
+        .records
+        .values()
+        .filter(|record| record.state == STATE_PENDING && now < record.expires_at)
+        .map(|record| WaitingRequest {
+            request_id: record.request_id.clone(),
+            operation: record.operation.clone(),
+            expires_at: record.expires_at,
+            status: record.state.clone(),
+        })
+        .collect();
+    requests.sort_by(|left, right| left.request_id.cmp(&right.request_id));
+    Ok(WaitingResult {
+        schema: WAITING_RESULT_SCHEMA.to_string(),
+        requests,
+    })
+}
+
 fn claim_state_error(state: &str) -> &'static str {
     match state {
         STATE_DELIVERED => ALREADY_DELIVERED,
         STATE_CANCELLED => CANCELLED,
+        STATE_REFUSED => REFUSED,
         _ => NOT_APPROVED,
     }
 }
@@ -523,7 +629,10 @@ fn mark_refused(table: &mut MintTable, record: &mut MintRecord) {
 
 /// The bound owner, session, proof, grant, and operation still name one live
 /// admin session. This is the match that stays in front of the signer.
-fn bound_export_matches(data_dir: &Path, record: &MintRecord) -> anyhow::Result<()> {
+fn bound_export_matches(
+    data_dir: &Path,
+    record: &MintRecord,
+) -> anyhow::Result<HomeLaunchTokenContext> {
     if record.operation != OPERATION {
         anyhow::bail!(MISMATCH);
     }
@@ -551,7 +660,7 @@ fn bound_export_matches(data_dir: &Path, record: &MintRecord) -> anyhow::Result<
     if live.grant_id != context.grant_id() {
         anyhow::bail!(SESSION_MISMATCH);
     }
-    Ok(())
+    Ok(context)
 }
 
 fn signing_context(data_dir: &Path, record: &MintRecord) -> anyhow::Result<HomeLaunchTokenContext> {
@@ -560,6 +669,8 @@ fn signing_context(data_dir: &Path, record: &MintRecord) -> anyhow::Result<HomeL
     let grant_id = required_bound(record.grant_id.as_deref())?;
     let proof = required_bound(record.proof_binding_id.as_deref())?;
     let auth_data_dir = home_launch_auth_data_dir(data_dir);
+    #[cfg(test)]
+    note_principal_root_read();
     let root = crate::auth::ResolvedPrincipalRoot::resolve(data_dir, &auth_data_dir, principal_id)?;
     Ok(HomeLaunchTokenContext::resolved(
         root,
@@ -590,6 +701,22 @@ fn signature_issued_at(data_dir: &Path) -> u64 {
 
 #[cfg(test)]
 static SIGNATURE_SKEW: Mutex<Vec<(PathBuf, i64)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static PRINCIPAL_ROOT_READS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn note_principal_root_read() {
+    PRINCIPAL_ROOT_READS.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(super) fn principal_root_reads_for_test() -> u64 {
+    PRINCIPAL_ROOT_READS.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+static FAIL_SIGNER: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 fn apply_signature_skew(data_dir: &Path, now: u64) -> u64 {
@@ -693,7 +820,11 @@ fn load_record(table: &MintTable, request_id: &str, now: u64) -> anyhow::Result<
     Ok(record)
 }
 
-fn reserve_claim(table: &mut MintTable, input: &ClaimBody, now: u64) -> anyhow::Result<MintRecord> {
+fn reserve_claim(
+    table: &mut MintTable,
+    input: &ClaimBody,
+    now: u64,
+) -> anyhow::Result<(MintRecord, u64)> {
     let Some(record) = table.records.get(&input.request_id).cloned() else {
         anyhow::bail!(NOT_WAITING);
     };
@@ -713,18 +844,27 @@ fn reserve_claim(table: &mut MintTable, input: &ClaimBody, now: u64) -> anyhow::
     if table.claim_held.contains_key(&record.request_id) {
         anyhow::bail!(ALREADY_DELIVERED);
     }
-    table
-        .claim_held
-        .insert(record.request_id.clone(), ClaimHold::Checking);
-    Ok(record)
+    let nonce = next_claim_nonce();
+    table.claim_held.insert(
+        record.request_id.clone(),
+        ClaimHold {
+            phase: ClaimPhase::Checking,
+            nonce,
+        },
+    );
+    Ok((record, nonce))
 }
 
-fn commit_claim(expected: &MintRecord, secret: &str) -> anyhow::Result<()> {
+fn commit_claim(expected: &MintRecord, secret: &str, nonce: u64) -> anyhow::Result<()> {
     let mut table = mint_table()?;
     let Some(live) = table.records.get(&expected.request_id).cloned() else {
         anyhow::bail!(NOT_WAITING);
     };
-    if table.claim_held.get(&expected.request_id) != Some(&ClaimHold::Checking) {
+    let own = ClaimHold {
+        phase: ClaimPhase::Checking,
+        nonce,
+    };
+    if table.claim_held.get(&expected.request_id) != Some(&own) {
         if live.state == STATE_CANCELLED {
             anyhow::bail!(CANCELLED);
         }
@@ -743,26 +883,37 @@ fn commit_claim(expected: &MintRecord, secret: &str) -> anyhow::Result<()> {
     {
         anyhow::bail!(SESSION_MISMATCH);
     }
-    table
-        .claim_held
-        .insert(expected.request_id.clone(), ClaimHold::Committed);
+    table.claim_held.insert(
+        expected.request_id.clone(),
+        ClaimHold {
+            phase: ClaimPhase::Committed,
+            nonce,
+        },
+    );
     Ok(())
 }
 
-fn mark_delivered(request_id: &str) -> anyhow::Result<String> {
+fn mark_delivered(request_id: &str, nonce: u64) -> anyhow::Result<String> {
     let mut table = mint_table()?;
     let hold = table.claim_held.get(request_id).copied();
     let Some(mut record) = table.records.get(request_id).cloned() else {
         anyhow::bail!(NOT_WAITING);
     };
-    if hold != Some(ClaimHold::Committed) || record.state != STATE_APPROVED {
-        table.claim_held.remove(request_id);
+    let own = ClaimHold {
+        phase: ClaimPhase::Committed,
+        nonce,
+    };
+    if hold != Some(own) || record.state != STATE_APPROVED {
+        if hold.is_some_and(|held| held.nonce == nonce) {
+            table.claim_held.remove(request_id);
+        }
         if record.state == STATE_CANCELLED {
             anyhow::bail!(CANCELLED);
         }
         anyhow::bail!(claim_state_error(&record.state));
     }
     record.state = STATE_DELIVERED.to_string();
+    record.pending_cancel = false;
     let id = record.request_id.clone();
     table.records.insert(id.clone(), record);
     table.claim_held.remove(request_id);
@@ -815,13 +966,15 @@ fn secret_hash_matches(secret: &str, stored_hex: &str) -> bool {
 
 struct ClaimTicket {
     request_id: String,
+    nonce: u64,
     armed: bool,
 }
 
 impl ClaimTicket {
-    fn arm(request_id: String) -> Self {
+    fn arm(request_id: String, nonce: u64) -> Self {
         Self {
             request_id,
+            nonce,
             armed: true,
         }
     }
@@ -836,16 +989,51 @@ impl Drop for ClaimTicket {
         if !self.armed {
             return;
         }
-        if let Ok(mut table) = mint_table() {
-            table.claim_held.remove(&self.request_id);
+        let Ok(mut table) = mint_table() else {
+            return;
+        };
+        let matches = table
+            .claim_held
+            .get(&self.request_id)
+            .is_some_and(|held| held.nonce == self.nonce);
+        if !matches {
+            return;
+        }
+        table.claim_held.remove(&self.request_id);
+        if let Some(record) = table.records.get_mut(&self.request_id) {
+            if record.pending_cancel && record.state == STATE_APPROVED {
+                record.state = STATE_CANCELLED.to_string();
+                record.pending_cancel = false;
+            }
         }
     }
+}
+
+fn next_claim_nonce() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    loop {
+        let nonce = NEXT.fetch_add(1, Ordering::Relaxed);
+        if nonce != 0 {
+            return nonce;
+        }
+    }
+}
+
+fn signer_failure() -> Option<&'static str> {
+    #[cfg(test)]
+    {
+        if FAIL_SIGNER.swap(false, Ordering::SeqCst) {
+            return Some("cli mint signer failed");
+        }
+    }
+    None
 }
 
 struct TableGuard {
     guard: std::sync::MutexGuard<'static, MintTable>,
 }
 
+#[cfg(test)]
 impl Drop for TableGuard {
     fn drop(&mut self) {
         if let Ok(mut owner) = TABLE_OWNER.lock() {
@@ -868,6 +1056,7 @@ impl DerefMut for TableGuard {
     }
 }
 
+#[cfg(test)]
 static TABLE_OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
 
 #[cfg(test)]
@@ -890,6 +1079,7 @@ fn mint_table() -> anyhow::Result<TableGuard> {
         })
         .lock()
         .map_err(|_| anyhow::anyhow!("cli mint state lock is poisoned"))?;
+    #[cfg(test)]
     if let Ok(mut owner) = TABLE_OWNER.lock() {
         *owner = Some(std::thread::current().id());
     }
@@ -935,11 +1125,412 @@ fn mint_error(err: anyhow::Error) -> Response {
     (status, text).into_response()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitKind {
+    Cancelled,
+    Timeout,
+    Mismatch,
+    Unavailable,
+    Unanswered,
+    LostReply,
+    Refused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CliMintWaitError {
+    kind: WaitKind,
+}
+
+impl CliMintWaitError {
+    fn cancelled() -> Self {
+        Self {
+            kind: WaitKind::Cancelled,
+        }
+    }
+
+    fn timeout() -> Self {
+        Self {
+            kind: WaitKind::Timeout,
+        }
+    }
+
+    fn mismatch() -> Self {
+        Self {
+            kind: WaitKind::Mismatch,
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            kind: WaitKind::Unavailable,
+        }
+    }
+
+    fn unanswered() -> Self {
+        Self {
+            kind: WaitKind::Unanswered,
+        }
+    }
+
+    fn lost_reply() -> Self {
+        Self {
+            kind: WaitKind::LostReply,
+        }
+    }
+
+    fn refused() -> Self {
+        Self {
+            kind: WaitKind::Refused,
+        }
+    }
+}
+
+impl std::fmt::Display for CliMintWaitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self.kind {
+            WaitKind::Cancelled => CANCELLED,
+            WaitKind::Timeout => WAIT_TIMEOUT,
+            WaitKind::Mismatch => MISMATCH,
+            WaitKind::Unavailable => WAIT_UNAVAILABLE,
+            WaitKind::Unanswered => WAIT_UNANSWERED,
+            WaitKind::LostReply => WAIT_LOST_REPLY,
+            WaitKind::Refused => REFUSED,
+        })
+    }
+}
+
+impl std::error::Error for CliMintWaitError {}
+
+enum ClaimPoll {
+    Grant(String),
+    Pending,
+    Cancel,
+    Timeout,
+    Mismatch,
+    Refused,
+}
+
+/// The code Home shows for this request. Eight hex characters, upper case,
+/// grouped as `ABCD-EFGH`. It is not the requester secret.
+pub(super) fn terminal_request_code(request_id: &str) -> Option<String> {
+    if valid_request_id(request_id).is_err() {
+        return None;
+    }
+    let head = request_id[..8].to_ascii_uppercase();
+    Some(format!("{}-{}", &head[..4], &head[4..8]))
+}
+
+fn write_wait_notice(request_id: &str, notice: &mut dyn Write) -> Result<(), CliMintWaitError> {
+    let code = terminal_request_code(request_id).ok_or_else(CliMintWaitError::mismatch)?;
+    writeln!(notice, "{WAIT_NOTICE_PREFIX}{code}{WAIT_NOTICE_SUFFIX}")
+        .map_err(|_| CliMintWaitError::mismatch())
+}
+
+fn fresh_requester_secret() -> Result<String, CliMintWaitError> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|_| CliMintWaitError::unavailable())?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn printable_grant(grant: &str) -> bool {
+    !grant.is_empty()
+        && grant.len() <= 16 * 1024
+        && grant
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn outcome_from_claim(status: StatusCode, body: &str, request_id: &str) -> ClaimPoll {
+    if status == StatusCode::OK {
+        let Ok(parsed) = serde_json::from_str::<ClaimResult>(body) else {
+            return ClaimPoll::Mismatch;
+        };
+        if parsed.schema == CLAIM_RESULT_SCHEMA
+            && parsed.status == STATE_DELIVERED
+            && parsed.request_id == request_id
+            && printable_grant(&parsed.grant)
+        {
+            return ClaimPoll::Grant(parsed.grant);
+        }
+        return ClaimPoll::Mismatch;
+    }
+    match body.trim() {
+        CANCELLED => ClaimPoll::Cancel,
+        EXPIRED => ClaimPoll::Timeout,
+        NOT_APPROVED => ClaimPoll::Pending,
+        REFUSED => ClaimPoll::Refused,
+        _ => ClaimPoll::Mismatch,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TransportClass {
+    /// The attempt never connected, so this attempt delivered nothing.
+    Unreachable,
+    /// The attempt connected or the reply was lost. A grant may already exist.
+    Interrupted,
+}
+
+fn transport_class(err: &reqwest::Error) -> TransportClass {
+    if err.is_connect() {
+        TransportClass::Unreachable
+    } else {
+        TransportClass::Interrupted
+    }
+}
+
+async fn post_mint(
+    client: &reqwest::Client,
+    url: &str,
+    body: serde_json::Value,
+) -> Result<(StatusCode, String), TransportClass> {
+    let response = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|err| transport_class(&err))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|err| transport_class(&err))?;
+    Ok((status, text))
+}
+
+fn deadline_without_grant(
+    possible_delivery: bool,
+    saw_reply: bool,
+    saw_unreachable: bool,
+) -> CliMintWaitError {
+    if possible_delivery {
+        CliMintWaitError::lost_reply()
+    } else if saw_unreachable && !saw_reply {
+        CliMintWaitError::unavailable()
+    } else {
+        CliMintWaitError::timeout()
+    }
+}
+
+async fn request_and_wait<F, Fut, W>(
+    api_url: &str,
+    poll: Duration,
+    http_timeout: Duration,
+    notice: &mut W,
+    on_registered: F,
+) -> Result<String, CliMintWaitError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+    W: Write + Send,
+{
+    let api_url = api_url.trim().trim_end_matches('/');
+    crate::local_http::LoopbackHttpBaseUrl::parse(api_url)
+        .map_err(|_| CliMintWaitError::mismatch())?;
+    let secret = fresh_requester_secret()?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(http_timeout)
+        .build()
+        .map_err(|_| CliMintWaitError::unavailable())?;
+    let (status, body) = match post_mint(
+        &client,
+        &format!("{api_url}/api/home/cli-mint/request"),
+        serde_json::json!({
+            "schema": REQUEST_SCHEMA,
+            "requester_secret": secret,
+        }),
+    )
+    .await
+    {
+        Ok(response) => response,
+        // No claim has been sent, so no grant was received.
+        Err(TransportClass::Unreachable) => return Err(CliMintWaitError::unavailable()),
+        Err(TransportClass::Interrupted) => return Err(CliMintWaitError::unanswered()),
+    };
+    if body.contains(&secret) || status != StatusCode::OK {
+        return Err(CliMintWaitError::mismatch());
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|_| CliMintWaitError::mismatch())?;
+    if parsed["schema"] != REQUEST_RESULT_SCHEMA || parsed["status"] != STATE_PENDING {
+        return Err(CliMintWaitError::mismatch());
+    }
+    let request_id = parsed["request_id"]
+        .as_str()
+        .filter(|value| valid_request_id(value).is_ok())
+        .ok_or_else(CliMintWaitError::mismatch)?
+        .to_string();
+    let expires_at = parsed["expires_at"]
+        .as_u64()
+        .ok_or_else(CliMintWaitError::mismatch)?;
+    let now = now_ts();
+    if expires_at <= now {
+        return Err(CliMintWaitError::timeout());
+    }
+    if expires_at > now.saturating_add(WAIT_DEADLINE_SLACK_SECS) {
+        return Err(CliMintWaitError::mismatch());
+    }
+    write_wait_notice(&request_id, notice)?;
+    on_registered(request_id.clone()).await;
+    let mut possible_delivery = false;
+    let mut saw_reply = false;
+    let mut saw_unreachable = false;
+    loop {
+        if now_ts() >= expires_at {
+            return Err(deadline_without_grant(
+                possible_delivery,
+                saw_reply,
+                saw_unreachable,
+            ));
+        }
+        match post_mint(
+            &client,
+            &format!("{api_url}/api/home/cli-mint/claim"),
+            serde_json::json!({
+                "schema": CLAIM_SCHEMA,
+                "request_id": request_id,
+                "requester_secret": secret,
+            }),
+        )
+        .await
+        {
+            Ok((status, body)) => {
+                if body.contains(&secret) {
+                    return Err(CliMintWaitError::mismatch());
+                }
+                match outcome_from_claim(status, &body, &request_id) {
+                    ClaimPoll::Grant(grant) => return Ok(grant),
+                    ClaimPoll::Pending => {
+                        saw_reply = true;
+                        possible_delivery = false;
+                        tokio::time::sleep(poll).await;
+                    }
+                    ClaimPoll::Cancel => return Err(CliMintWaitError::cancelled()),
+                    ClaimPoll::Timeout => return Err(CliMintWaitError::timeout()),
+                    ClaimPoll::Mismatch => return Err(CliMintWaitError::mismatch()),
+                    ClaimPoll::Refused => return Err(CliMintWaitError::refused()),
+                }
+            }
+            Err(TransportClass::Unreachable) => {
+                saw_unreachable = true;
+                tokio::time::sleep(poll).await;
+            }
+            Err(TransportClass::Interrupted) => {
+                possible_delivery = true;
+                tokio::time::sleep(poll).await;
+            }
+        }
+    }
+}
+
+pub(super) fn cli_mint_api_url(data_dir: &Path) -> Result<String, CliMintWaitError> {
+    let path = crate::runtime_control::runtime_coord_path(data_dir);
+    let bytes = std::fs::read(&path).map_err(|_| CliMintWaitError::unavailable())?;
+    let coords: crate::runtime_control::RuntimeCoords =
+        serde_json::from_slice(&bytes).map_err(|_| CliMintWaitError::unavailable())?;
+    let base = crate::local_http::LoopbackHttpBaseUrl::parse(&coords.api_url)
+        .map_err(|_| CliMintWaitError::mismatch())?;
+    let url = base.as_str().trim_end_matches('/').to_string();
+    if url.is_empty() {
+        return Err(CliMintWaitError::unavailable());
+    }
+    Ok(url)
+}
+
+pub async fn request_and_wait_for_exported_home_cli_grant(
+    api_url: &str,
+) -> Result<String, CliMintWaitError> {
+    let mut stderr = std::io::stderr();
+    request_and_wait(api_url, WAIT_POLL, CLIENT_TIMEOUT, &mut stderr, |_| async {
+    })
+    .await
+}
+
+pub fn write_cli_launch_token_command(
+    result: Result<String, CliMintWaitError>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match result {
+        Ok(grant) if printable_grant(&grant) => {
+            if writeln!(stdout, "{grant}").is_err() {
+                return 1;
+            }
+            0
+        }
+        Ok(_) => {
+            let _ = writeln!(stderr, "{MISMATCH}");
+            1
+        }
+        Err(err) => {
+            let _ = writeln!(stderr, "{err}");
+            1
+        }
+    }
+}
+
+pub fn finish_cli_launch_token_command(
+    result: Result<String, CliMintWaitError>,
+) -> anyhow::Result<()> {
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let code = write_cli_launch_token_command(result, &mut stdout, &mut stderr);
+    if code == 0 {
+        std::io::stdout().write_all(&stdout)?;
+        return Ok(());
+    }
+    anyhow::bail!("{}", String::from_utf8_lossy(&stderr).trim_end())
+}
+
+pub async fn run_exported_home_cli_launch_grant(data_dir: &Path) -> anyhow::Result<()> {
+    let api_url = cli_mint_api_url(data_dir)?;
+    let waited = request_and_wait_for_exported_home_cli_grant(&api_url).await;
+    finish_cli_launch_token_command(waited)
+}
+
+#[cfg(test)]
+pub(super) async fn request_and_wait_for_exported_home_cli_grant_for_test<F, Fut>(
+    api_url: &str,
+    poll: Duration,
+    on_registered: F,
+) -> Result<String, CliMintWaitError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut notice = Vec::new();
+    request_and_wait(api_url, poll, CLIENT_TIMEOUT, &mut notice, on_registered).await
+}
+
+#[cfg(test)]
+pub(super) async fn request_and_wait_observed_for_test<F, Fut>(
+    api_url: &str,
+    poll: Duration,
+    http_timeout: Duration,
+    notice: &mut Vec<u8>,
+    on_registered: F,
+) -> Result<String, CliMintWaitError>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    request_and_wait(api_url, poll, http_timeout, notice, on_registered).await
+}
+
 #[cfg(test)]
 pub(super) fn clear_cli_mint_for_test() {
     let mut table = mint_table().expect("cli mint state lock");
     table.records.clear();
     table.claim_held.clear();
+}
+
+#[cfg(test)]
+pub(super) fn cli_mint_records_json_for_test() -> Vec<String> {
+    mint_table()
+        .expect("cli mint state lock")
+        .records
+        .values()
+        .map(|record| serde_json::to_string(record).expect("cli mint record json"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -1022,6 +1613,126 @@ pub(super) fn arm_cli_mint_overlap_for_test(request_id: &str) -> CliMintOverlapG
 }
 
 #[cfg(unix)]
+#[cfg(test)]
+pub(super) struct CliMintSignerFailGuard;
+
+#[cfg(test)]
+impl Drop for CliMintSignerFailGuard {
+    fn drop(&mut self) {
+        FAIL_SIGNER.store(false, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fail_next_cli_mint_signature_for_test() -> CliMintSignerFailGuard {
+    FAIL_SIGNER.store(true, Ordering::SeqCst);
+    CliMintSignerFailGuard
+}
+
+#[cfg(test)]
+pub(super) fn cli_mint_claim_hold_for_test(request_id: &str) -> Option<u64> {
+    mint_table()
+        .expect("cli mint state lock")
+        .claim_held
+        .get(request_id)
+        .map(|held| held.nonce)
+}
+
+#[cfg(test)]
+pub(super) fn drop_foreign_claim_ticket_for_test(request_id: &str) {
+    drop(ClaimTicket {
+        request_id: request_id.to_string(),
+        nonce: 0,
+        armed: true,
+    });
+}
+
+#[cfg(test)]
+struct CheckingPause {
+    request_id: String,
+    arrived: usize,
+    release: bool,
+}
+
+#[cfg(test)]
+static CHECKING_PAUSE: Mutex<Option<CheckingPause>> = Mutex::new(None);
+
+#[cfg(test)]
+static CHECKING_PAUSE_CV: Condvar = Condvar::new();
+
+#[cfg(test)]
+pub(super) struct CliMintCheckingPauseGuard;
+
+#[cfg(test)]
+impl Drop for CliMintCheckingPauseGuard {
+    fn drop(&mut self) {
+        let mut guard = CHECKING_PAUSE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(gate) = guard.as_mut() {
+            gate.release = true;
+        }
+        CHECKING_PAUSE_CV.notify_all();
+    }
+}
+
+#[cfg(test)]
+pub(super) fn arm_cli_mint_checking_pause_for_test(request_id: &str) -> CliMintCheckingPauseGuard {
+    let mut guard = CHECKING_PAUSE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(CheckingPause {
+        request_id: request_id.to_string(),
+        arrived: 0,
+        release: false,
+    });
+    CliMintCheckingPauseGuard
+}
+
+#[cfg(test)]
+pub(super) fn cli_mint_checking_pause_arrived_for_test() -> usize {
+    CHECKING_PAUSE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .map(|gate| gate.arrived)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub(super) fn release_cli_mint_checking_pause_for_test() {
+    let mut guard = CHECKING_PAUSE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(gate) = guard.as_mut() {
+        gate.release = true;
+    }
+    CHECKING_PAUSE_CV.notify_all();
+}
+
+#[cfg(test)]
+fn pause_while_checking(request_id: &str) {
+    let mut guard = CHECKING_PAUSE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut counted = false;
+    loop {
+        match guard.as_mut() {
+            Some(gate) if gate.request_id == request_id && !gate.release => {
+                if !counted {
+                    gate.arrived += 1;
+                    counted = true;
+                    CHECKING_PAUSE_CV.notify_all();
+                }
+            }
+            _ => return,
+        }
+        guard = CHECKING_PAUSE_CV
+            .wait(guard)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+}
+
 #[cfg(test)]
 pub(super) fn cli_mint_overlap_arrived_for_test() -> usize {
     OVERLAP
