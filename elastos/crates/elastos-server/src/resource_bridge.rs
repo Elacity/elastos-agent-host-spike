@@ -8923,6 +8923,7 @@ pub(crate) mod tests {
         owners: Mutex<std::collections::HashMap<String, (String, String)>>,
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Provider for OwnedRunsModelProvider {
         async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
