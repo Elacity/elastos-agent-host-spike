@@ -2487,7 +2487,11 @@ fn resolve_windows_cmd_exe(com_spec: Option<&str>, system_root: Option<&str>) ->
 /// on every OS.
 fn is_absolute_windows_path(path: &str) -> bool {
     let bytes = path.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && (bytes[1] == b'\\' || bytes[1] == b'/')
+    // A drive path is a letter, a colon, then a separator (C:\\...); C:foo is drive-relative.
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
     {
         return true;
     }
@@ -2704,7 +2708,14 @@ mod tests {
             super::resolve_windows_cmd_exe(Some("C:\\Tools\\CMD.EXE"), None).as_deref(),
             Some("C:\\Tools\\CMD.EXE")
         );
-        for com_spec in ["cmd", "cmd.exe", "System32\\cmd.exe", "C:\\Windows\\py.exe"] {
+        for com_spec in [
+            "cmd",
+            "cmd.exe",
+            "System32\\cmd.exe",
+            "C:\\Windows\\py.exe",
+            "C\\cmd.exe",
+            "C:cmd.exe",
+        ] {
             assert_eq!(
                 super::resolve_windows_cmd_exe(Some(com_spec), Some("C:\\Windows")).as_deref(),
                 Some("C:\\Windows\\System32\\cmd.exe"),
