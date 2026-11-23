@@ -241,10 +241,35 @@ impl CapabilityStore {
             }
             file.sync_all()?;
             fs::rename(&tmp_path, &revoked_path)?;
-            fs::File::open(path)?.sync_all()?;
+            sync_dir(path)?;
         }
         Ok(())
     }
+}
+
+/// Flush a directory so a rename inside it survives power loss before the
+/// caller reports success.
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+/// Windows opens a directory only with FILE_FLAG_BACKUP_SEMANTICS; a plain
+/// open fails with os error 5, which made every revocation write fail. With
+/// write access, FlushFileBuffers on the directory commits the rename on NTFS
+/// (the Home data folder's normal filesystem). On ReFS, FAT/exFAT or a network
+/// share the flush returns success without that guarantee, and std's rename is
+/// not write-through, so a power loss right after Ok can still lose the
+/// revocation there.
+#[cfg(windows)]
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .sync_all()
 }
 
 impl Default for CapabilityStore {
