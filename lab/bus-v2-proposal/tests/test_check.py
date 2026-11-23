@@ -4381,6 +4381,81 @@ class CitationCheckTests(unittest.TestCase):
         )
         self._assert_one(body, {}, expected)
 
+    def test_inline_comment_backtick_cannot_hide_a_fake_citation(self):
+        # Exact post-merge bypass: raw and visible spans used to pair differently.
+        body = "See <!-- ` --> `missing/fake.rs:999` and `verifier.reserve(4)`.\n"
+        self._assert_one(body, {}, "refuse: path does not exist: missing/fake.rs")
+
+    def test_indented_backtick_cannot_desynchronize_later_citations(self):
+        body = "    let tick = '`';\nSee `missing/fake.rs:999`.\n"
+        self._assert_one(body, {}, "refuse: path does not exist: missing/fake.rs")
+
+    def test_unclosed_tick_before_a_paragraph_cannot_hide_a_citation(self):
+        body = "See `unfinished.\n\nSee `missing/fake.rs:999`.\n"
+        self._assert_one(body, {}, "refuse: path does not exist: missing/fake.rs")
+
+    def test_unicode_separator_stays_on_one_markdown_line(self):
+        body = "The body uses `verifier.reserve(\u20284)` with no citation.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        self._assert_one(
+            body, {},
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `verifier.reserve(\u20284)`" % line,
+        )
+
+    def test_multiline_code_span_without_a_citation_is_refused(self):
+        body = "The body calls `verifier.reserve(\n4)` with no citation.\n"
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        self._assert_one(
+            body, {},
+            "refuse: line %d has a code-shaped span and no path:line "
+            "citation: `verifier.reserve( 4)`" % line,
+        )
+
+    def test_multiline_code_span_with_a_citation_passes(self):
+        body = "The body calls `verifier.reserve(\n4)` at `pkg/kept.rs:1`.\n"
+        self.assertEqual(check.problems(self._draft(body, {"pkg/kept.rs": b"one\n"})), [])
+
+    def test_missed_code_shapes_without_citations_are_refused(self):
+        shapes = (
+            "pub struct Handle",
+            "let mut count",
+            "record grant-handle",
+            "pub struct Handle { id: u64 }",
+            "return self.field;",
+            "if flag { break; }",
+            "let mut count;",
+            "record grant-handle { id: u64 }",
+            "Result<u64, Refuse>",
+            "a<b",
+            "self.0",
+            "!self.ready",
+            "self.resolve?",
+            "self.field;",
+        )
+        line = len(PROPOSAL_SKELETON.splitlines()) + 2
+        for span in shapes:
+            with self.subTest(span=span):
+                self._assert_one(
+                    "The body uses `%s`.\n" % span, {},
+                    "refuse: line %d has a code-shaped span and no path:line "
+                    "citation: `%s`" % (line, span),
+                )
+
+    def test_falsifier_code_span_refusals_is_caught(self):
+        self._caught(
+            "code_span_refusals", lambda text, spans=None: [],
+            self.test_code_shaped_span_without_a_citation_is_refused,
+            "refuse: line", "CAUGHT code-span-refusals",
+        )
+
+    def test_falsifier_span_parser_is_caught(self):
+        self._caught(
+            "_spans", lambda text, positions=False: [],
+            self.test_inline_comment_backtick_cannot_hide_a_fake_citation,
+            "refuse: path does not exist:", "CAUGHT span-parser",
+        )
+
     def test_double_backtick_code_span_without_a_citation_is_refused(self):
         body = "The body calls ``verifier.reserve(4)``.\n"
         line = len(PROPOSAL_SKELETON.splitlines()) + 2
