@@ -2250,7 +2250,10 @@ mod host_start_journal_windows {
         assert_eq!(fs::read(&payload).unwrap(), bytes);
         // Windows reports a directory junction as a reparse point (a symlink file type), not a
         // directory; the junction must still be there, untouched.
-        assert!(fs::symlink_metadata(&journal).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&journal)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read_dir(&data).unwrap().count(), 0);
     }
 }
