@@ -25,6 +25,7 @@ on:
       - elastos/crates/elastos-server/src/gateway_entry.rs
       - elastos/crates/elastos-server/src/gateway_cmd.rs
       - scripts/holder-idle-ci.py
+      - scripts/holder-canary-fixture.py
       - scripts/update-hop-compare.py
       - scripts/seed-kubo-cache.sh
       - scripts/release-upstream-input.py
@@ -98,6 +99,9 @@ jobs:
           spec = importlib.util.spec_from_file_location('observer', 'scripts/update-hop-compare.py')
           observer = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(observer)
+          fixture_spec = importlib.util.spec_from_file_location('holder_fixture', 'scripts/holder-canary-fixture.py')
+          holder_fixture = importlib.util.module_from_spec(fixture_spec)
+          fixture_spec.loader.exec_module(holder_fixture)
           output, accepted = Path(os.environ['HOLDER_OUTPUT']), Path(os.environ['HOLDER_BUILD'])
           processes = observer.CliProcesses(output)
           root = Path.home() / '.local/share/elastos-issue89-holder'
@@ -142,7 +146,7 @@ jobs:
                       'exe': os.readlink(path / 'exe')}
           def provider_identity(host, provider):
               matches = [row for row in observer.cli_census() if row['group'] == host.pid
-                         and row['command'].split(' ', 1)[0] == str(provider)]
+                         and holder_fixture.runs_provider(row, provider)]
               assert len(matches) == 1, 'exact single native provider generation required'
               return child_identity(matches[0]['pid'])
           def read(home, http_port, cid, expected, label):
@@ -296,6 +300,7 @@ jobs:
                   (data / 'config.toml').write_text('carrier_bind_addr = "127.0.0.1:' + str(carrier_port) + '"\n'
                       'gateway_public_publisher_bootstrap = true\ngateway_allowed_hosts = ["127.0.0.1"]\n')
                   (data / 'config.toml').chmod(0o600)
+                  holder_fixture.sign_install(home, data, runtime, env)
                   command(home, [str(runtime), 'node', 'info', '--json'], role + '-identity')
                   if role != 'consumer':
                       kubo_env = {**env(home), 'IPFS_PATH': str(data / 'ipfs-repo')}

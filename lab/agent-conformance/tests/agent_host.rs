@@ -87,7 +87,14 @@ fn no_journal(path: &Path) -> Result<(), String> {
 fn real_agent_host_gets_no_ungranted_authority() {
     let home = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
     let (bytes, manifest) = build_agent_host(&home);
-    let capsule = stage_probe(&home, &bytes, &manifest, "agent-host")
+    let client = ThrowawayHome::new().unwrap_or_else(|reason| probe::skipped(reason));
+    client.guard(client.home(), client.data()).unwrap();
+    fs::write(
+        client.data().join("config.toml"),
+        include_bytes!("../fixtures/operator-config.toml"),
+    )
+    .unwrap();
+    let capsule = stage_probe(&client, &bytes, &manifest, "agent-host")
         .expect("name the real capsule through the shared bundle stager");
     let runtime = runtime_under_test().unwrap_or_else(|reason| probe::skipped(reason));
     let mut operator = common::operator::Operator::start(&home)
@@ -105,7 +112,7 @@ fn real_agent_host_gets_no_ungranted_authority() {
         .cleanup_state()
         .expect("empty pending list before this run");
     let launches = [Launch {
-        home: &home,
+        home: &client,
         program: &runtime.binary,
         args: vec![
             "run",
@@ -193,6 +200,7 @@ fn real_agent_host_gets_no_ungranted_authority() {
         .check_journey(TEST, &observations, result.is_ok())
         .expect("printed lines, report and receipt exclude fixture credentials");
     result.expect("real agent-host deny journey");
+    client.finish().unwrap();
     home.finish().unwrap();
 }
 
