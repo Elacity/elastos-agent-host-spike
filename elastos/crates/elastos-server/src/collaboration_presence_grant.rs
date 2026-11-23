@@ -691,7 +691,9 @@ pub(crate) fn test_authority() -> Arc<PresenceAuthority> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use elastos_runtime::primitives::audit::AuditEvent;
 
     /// A5-S3c-0b: the presence grant file names the stored Agent root.

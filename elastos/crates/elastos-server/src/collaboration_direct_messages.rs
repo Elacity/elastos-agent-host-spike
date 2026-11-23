@@ -124,6 +124,7 @@ enum DirectContextAuthority {
     /// revoked, or revoking a stolen laptop's passkey would stop the tabs
     /// and leave the Runtime receiving.
     RuntimeOwned { proof_binding_id: String },
+    #[cfg(unix)]
     #[cfg(test)]
     VerifiedForTest,
 }
@@ -771,6 +772,7 @@ impl CollaborationDirectMessageService {
         Ok(ordering)
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn context_snapshot_for_test(&self) -> serde_json::Value {
         let Ok(contexts) = self.inner.contexts.lock() else {
@@ -912,6 +914,7 @@ impl CollaborationDirectMessageService {
         // every receive; browser sign-out only ends the sender's authority.
         if let Some(existing) = contexts.get_mut(&key) {
             Self::compare_registered_profile(&existing.profile, &profile)?;
+            #[cfg(unix)]
             #[cfg(test)]
             if matches!(existing.authority, DirectContextAuthority::VerifiedForTest) {
                 if profile.document().revision > existing.profile.document().revision {
@@ -936,6 +939,7 @@ impl CollaborationDirectMessageService {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn register_verified_context_for_test(
         &self,
@@ -974,6 +978,7 @@ impl CollaborationDirectMessageService {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn persist_outgoing_for_test(
         &self,
@@ -1003,6 +1008,7 @@ impl CollaborationDirectMessageService {
         Ok(envelope)
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn records_for_test(
         &self,
@@ -1014,6 +1020,7 @@ impl CollaborationDirectMessageService {
             .records()
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) async fn send_text(
         &self,
@@ -1378,6 +1385,7 @@ impl CollaborationDirectMessageService {
                 }
                 Ok(())
             }
+            #[cfg(unix)]
             #[cfg(test)]
             DirectContextAuthority::VerifiedForTest => Ok(()),
         }

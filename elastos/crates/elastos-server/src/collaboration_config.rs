@@ -546,12 +546,15 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use elastos_runtime::provider::ProviderRegistry;
+    #[cfg(unix)]
     use elastos_runtime::provider::{Provider, ProviderError, ResourceRequest, ResourceResponse};
     #[cfg(unix)]
     use std::sync::Arc;
 
+    #[cfg(unix)]
     struct BootstrapTicketProvider(CollaborationBootstrapPeer);
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Provider for BootstrapTicketProvider {
         async fn handle(
@@ -602,6 +605,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn write_owner_only(path: &Path, bytes: &[u8]) {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -615,10 +619,12 @@ mod tests {
         file.sync_all().unwrap();
     }
 
+    #[cfg(unix)]
     fn canonical_peer_bytes(peer: &CollaborationBootstrapPeer) -> Vec<u8> {
         serde_json::to_vec(&serde_json::to_value(peer).unwrap()).unwrap()
     }
 
+    #[cfg(unix)]
     fn assert_one_json_receipt(bytes: &[u8]) {
         let text = std::str::from_utf8(bytes).unwrap();
         assert!(text.ends_with('\n'));

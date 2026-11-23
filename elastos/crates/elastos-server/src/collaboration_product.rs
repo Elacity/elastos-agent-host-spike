@@ -82,6 +82,7 @@ impl CollaborationChatProductPort {
         })
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn test_shares_core_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.core, &other.core)
@@ -155,6 +156,7 @@ impl CollaborationChatProductPort {
             .store(exhausted, Ordering::Relaxed);
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn test_live_unresolved_outgoing(&self) -> anyhow::Result<usize> {
         Ok(self.core.summary()?.live_unresolved_outgoing)
@@ -830,21 +832,28 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
-    use elastos_runtime::signature::{generate_keypair, SigningKey};
+    use elastos_runtime::signature::generate_keypair;
+    #[cfg(unix)]
+    use elastos_runtime::signature::SigningKey;
     use sha2::{Digest, Sha256};
 
+    #[cfg(unix)]
+    use crate::collaboration_default_conversation::VerifiedDefaultConversationGrant;
     use crate::collaboration_default_conversation::{
         canonical_default_conversation_grant_bytes, verify_default_conversation_grant,
         DefaultConversationAdmissionPolicy, DefaultConversationGrant,
-        VerifiedDefaultConversationGrant, DEFAULT_CONVERSATION_GRANT_SCHEMA_V1,
+        DEFAULT_CONVERSATION_GRANT_SCHEMA_V1,
     };
+    #[cfg(unix)]
     use crate::collaboration_device_authority::DefaultConversationDeviceAuthority;
+    #[cfg(unix)]
+    use crate::collaboration_network::VerifiedCollaborationNetworkProfile;
     use crate::collaboration_network::{
         canonical_collaboration_network_profile_payload_bytes,
         validate_collaboration_network_profile, CollaborationNetworkProfile,
         CollaborationNetworkProfileMode, DefaultConversationGrantDescriptor,
-        SignedCollaborationNetworkProfile, VerifiedCollaborationNetworkProfile,
-        COLLABORATION_NETWORK_PROFILE_SCHEMA, COLLABORATION_NETWORK_PROFILE_SIGNATURE_DOMAIN,
+        SignedCollaborationNetworkProfile, COLLABORATION_NETWORK_PROFILE_SCHEMA,
+        COLLABORATION_NETWORK_PROFILE_SIGNATURE_DOMAIN,
     };
 
     const NETWORK: &str = "collaboration-product-test";
@@ -853,12 +862,18 @@ mod tests {
 
     struct Fixture {
         _temp: Option<tempfile::TempDir>,
+        #[cfg(unix)]
         data_root: std::path::PathBuf,
+        #[cfg(unix)]
         device_key: SigningKey,
+        #[cfg(unix)]
         profile: VerifiedCollaborationNetworkProfile,
+        #[cfg(unix)]
         grant: VerifiedDefaultConversationGrant,
+        #[cfg(unix)]
         person_profile:
             crate::collaboration_profile_authority::VerifiedCollaborationProfileDocument,
+        #[cfg(unix)]
         core: Arc<CollaborationCore>,
         port: CollaborationChatProductPort,
     }
@@ -951,18 +966,27 @@ mod tests {
             .unwrap(),
         );
         let port = CollaborationChatProductPort::new(core.clone()).unwrap();
+        #[cfg(not(unix))]
+        let _ = (&device_key, &profile, &grant, &person_profile, &core);
         Fixture {
+            #[cfg(unix)]
             data_root: data_root.to_path_buf(),
             _temp: None,
+            #[cfg(unix)]
             device_key,
+            #[cfg(unix)]
             profile,
+            #[cfg(unix)]
             grant,
+            #[cfg(unix)]
             person_profile,
+            #[cfg(unix)]
             core,
             port,
         }
     }
 
+    #[cfg(unix)]
     fn binding(fixture: &Fixture, request_id: &str, body: &str) -> EspRequestBinding {
         chat_message_request_binding(
             request_id,
@@ -1137,6 +1161,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
     fn remote_authority(
         fixture: &Fixture,
     ) -> (
@@ -1166,6 +1191,7 @@ mod tests {
         (authority, person_profile)
     }
 
+    #[cfg(unix)]
     fn delivery_poll(
         fixture: &Fixture,
         token: &str,

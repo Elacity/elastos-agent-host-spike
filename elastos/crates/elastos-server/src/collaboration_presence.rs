@@ -118,6 +118,7 @@ impl UsableOwnPresence {
     }
 
     /// Receiver tests build requests from arbitrary records.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn test_unchecked(envelope: String) -> Self {
         Self { envelope }
@@ -514,6 +515,7 @@ impl CollaborationPresenceProductPort {
         self.local_publication.lock().ok().and_then(|state| *state)
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn test_shares_core_with(&self, core: &Arc<CollaborationCore>) -> bool {
         Arc::ptr_eq(&self.core, core)
@@ -591,6 +593,7 @@ impl CollaborationPresenceProductPort {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn project_prepared_presence(
         &self,

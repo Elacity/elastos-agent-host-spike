@@ -713,6 +713,7 @@ impl CollaborationDiscoveryService {
         self.direct_messages.clone()
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn profile_update_service(
         &self,
@@ -968,6 +969,7 @@ impl CollaborationDiscoveryService {
         Ok(true)
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn registered_context_snapshot_for_test(&self) -> serde_json::Value {
         let sync = match self.sync_contexts.lock() {
@@ -1169,6 +1171,7 @@ impl CollaborationDiscoveryService {
         }
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) async fn status(
         &self,
@@ -1266,6 +1269,7 @@ impl CollaborationDiscoveryService {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn client_state_snapshot_for_test(&self) -> serde_json::Value {
         let Ok(states) = self.state.lock() else {
@@ -1609,6 +1613,7 @@ impl CollaborationDiscoveryService {
     }
 
     /// As if the Community node had refused the Profile-contact operations.
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn set_profile_relay_unsupported_for_test(&self) {
         self.profile_relay_support.store(
@@ -2742,6 +2747,7 @@ impl CollaborationDiscoveryStatus {
         self.expires_at
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn remote_visibility_may_remain(&self) -> bool {
         self.remote_visibility_may_remain_until.is_some()
@@ -2759,12 +2765,14 @@ impl CollaborationDiscoveryStatus {
         &self.incoming_requests
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn with_connecting_for_test(mut self) -> Self {
         self.connecting = true;
         self
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn test_new(
         available: bool,
@@ -2808,6 +2816,7 @@ impl DiscoveryVisiblePerson {
         self.last_seen_at
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn test_new(
         advertisement_id: impl Into<String>,

@@ -412,15 +412,21 @@ fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::collaboration_presence::presence_request_binding;
+    #[cfg(unix)]
     use crate::collaboration_presence_grant::{
         set_presence_grant, test_authority, PresenceAuthority, PresenceDecision,
     };
+    #[cfg(unix)]
     use crate::collaboration_product::{chat_message_request_binding, test_chat_product_port};
+    #[cfg(unix)]
     use elastos_runtime::provider::ProviderCarrierInvoker;
     #[cfg(unix)]
     use elastos_runtime::provider::ResourceAction;
+    #[cfg(unix)]
     use std::collections::BTreeMap;
 
     #[cfg(unix)]

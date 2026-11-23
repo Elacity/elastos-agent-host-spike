@@ -607,6 +607,7 @@ mod tests {
 
     use elastos_runtime::signature::{generate_keypair, SigningKey};
 
+    #[cfg(unix)]
     use crate::collaboration_default_conversation::{
         canonical_default_conversation_grant_bytes, DefaultConversationAdmissionPolicy,
         DefaultConversationGrant, DEFAULT_CONVERSATION_GRANT_SCHEMA_V1,

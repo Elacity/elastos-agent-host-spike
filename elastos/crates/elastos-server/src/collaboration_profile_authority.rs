@@ -1208,6 +1208,7 @@ fn is_device_label_placeholder(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use elastos_runtime::auth::{PasskeyWebAuthnBinding, ProofBinding};
 
     #[cfg(unix)]

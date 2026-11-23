@@ -170,6 +170,7 @@ pub(crate) struct OutgoingChatDeliveryEvidence {
 
 #[derive(Debug)]
 pub(crate) struct DurableIncomingAcceptance {
+    #[cfg(any(unix, not(test)))]
     authorized: AuthorizedDefaultConversationMessage,
     acceptance_receipt_bytes: Vec<u8>,
     product_handoff_pending: bool,
@@ -1937,6 +1938,7 @@ impl CollaborationCore {
             ensure_state_fits(state)?;
             Ok(Mutation {
                 value: DurableIncomingAcceptance {
+                    #[cfg(any(unix, not(test)))]
                     authorized: incoming,
                     acceptance_receipt_bytes: receipt_bytes,
                     product_handoff_pending: true,
@@ -2149,7 +2151,11 @@ impl CollaborationCore {
             .find(|entry| entry.envelope.as_bytes() == envelope_bytes)
         {
             let authorized = self.verify_incoming_record(entry)?;
+            #[cfg(not(unix))]
+            #[cfg(test)]
+            let _ = &authorized;
             return Ok(Some(DurableIncomingAcceptance {
+                #[cfg(any(unix, not(test)))]
                 authorized,
                 acceptance_receipt_bytes: entry.acceptance_receipt.as_bytes().to_vec(),
                 product_handoff_pending: true,
@@ -2160,6 +2166,7 @@ impl CollaborationCore {
                 let authorized = self.authorize_stored_product_message(envelope_bytes)?;
                 self.verify_receipt_for_message(receipt.as_bytes(), authorized.message())?;
                 return Ok(Some(DurableIncomingAcceptance {
+                    #[cfg(any(unix, not(test)))]
                     authorized,
                     acceptance_receipt_bytes: receipt.into_bytes(),
                     product_handoff_pending: false,
@@ -2185,6 +2192,7 @@ impl CollaborationCore {
                 authorized.message(),
             )?;
             return Ok(Some(DurableIncomingAcceptance {
+                #[cfg(any(unix, not(test)))]
                 authorized,
                 acceptance_receipt_bytes: entry.acceptance_receipt.as_bytes().to_vec(),
                 product_handoff_pending: false,
@@ -3565,12 +3573,16 @@ mod tests {
     #[cfg(unix)]
     use std::sync::Arc;
 
+    #[cfg(unix)]
     use elastos_common::collaboration_protocol::{
-        canonical_collaboration_acceptance_receipt_bytes, canonical_collaboration_message_bytes,
-        canonical_signed_collaboration_acceptance_receipt_bytes,
-        canonical_signed_collaboration_message_bytes, CollaborationAcceptanceReceipt,
-        CollaborationMessage, SignedCollaborationAcceptanceReceipt, SignedCollaborationMessage,
+        canonical_collaboration_acceptance_receipt_bytes, CollaborationAcceptanceReceipt,
         COLLABORATION_ACCEPTANCE_RECEIPT_SIGNATURE_DOMAIN_V1,
+    };
+    use elastos_common::collaboration_protocol::{
+        canonical_collaboration_message_bytes,
+        canonical_signed_collaboration_acceptance_receipt_bytes,
+        canonical_signed_collaboration_message_bytes, CollaborationMessage,
+        SignedCollaborationAcceptanceReceipt, SignedCollaborationMessage,
         COLLABORATION_MESSAGE_SIGNATURE_DOMAIN_V1,
     };
     use elastos_runtime::signature::generate_keypair;

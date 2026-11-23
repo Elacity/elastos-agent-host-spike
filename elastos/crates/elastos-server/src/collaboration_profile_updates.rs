@@ -99,6 +99,7 @@ enum ProfileUpdateContextAuthority {
     /// Carries its proof binding so this authority stays revocable: it
     /// outlives every session, so nothing else would ever end it.
     RuntimeOwned { proof_binding_id: String },
+    #[cfg(unix)]
     #[cfg(test)]
     VerifiedForTest,
 }
@@ -145,6 +146,7 @@ impl CollaborationProfileUpdateService {
         Ok(ordering)
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn context_snapshot_for_test(&self) -> serde_json::Value {
         let Ok(contexts) = self.inner.contexts.lock() else {
@@ -511,6 +513,7 @@ impl CollaborationProfileUpdateService {
                 }
                 Ok(())
             }
+            #[cfg(unix)]
             #[cfg(test)]
             ProfileUpdateContextAuthority::VerifiedForTest => Ok(()),
         }
@@ -549,6 +552,7 @@ impl CollaborationProfileUpdateService {
                         return Ok(());
                     }
                 }
+                #[cfg(unix)]
                 #[cfg(test)]
                 ProfileUpdateContextAuthority::VerifiedForTest => {
                     if ordering == std::cmp::Ordering::Greater {
