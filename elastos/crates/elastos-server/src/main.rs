@@ -1318,10 +1318,25 @@ fn main() -> anyhow::Result<()> {
     let nofile = raise_nofile_soft_limit();
     #[cfg(unix)]
     NOFILE_RAISE.set(nofile).ok();
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(Box::pin(run()))
+    // Debug builds still need a deep stack while polling the start-up future: boxing
+    // run() was not enough (seen on the Windows machine, 23 Nov 2026), and the linker
+    // /STACK flag only sizes the main thread. Poll it from a thread with the same 8 MB
+    // stack Unix gives the main thread. Exit codes and panics propagate through main().
+    let result = std::thread::Builder::new()
+        .name("elastos-main".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(Box::pin(run()))
+        })
+        .map_err(|err| anyhow::anyhow!("failed to spawn elastos-main thread: {err}"))?
+        .join();
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 async fn run() -> anyhow::Result<()> {
