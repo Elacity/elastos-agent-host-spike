@@ -2389,7 +2389,10 @@ pub(crate) fn open_browser(url: &str) {
             .spawn();
     }
     if cfg!(windows) {
-        if let Some(argv) = windows_browser_argv(url) {
+        let com_spec = std::env::var("ComSpec").ok();
+        let system_root = std::env::var("SystemRoot").ok();
+        let cmd_exe = resolve_windows_cmd_exe(com_spec.as_deref(), system_root.as_deref());
+        if let Some(argv) = windows_browser_argv(url, cmd_exe.as_deref()) {
             let _ = std::process::Command::new(&argv[0])
                 .args(&argv[1..])
                 .stdout(std::process::Stdio::null())
@@ -2400,14 +2403,18 @@ pub(crate) fn open_browser(url: &str) {
 }
 
 /// Pure seam for the Windows branch of [`open_browser`]: the argv that starts
-/// the default browser, or `None` when the URL is refused. `cmd /C start ""
-/// <url>` makes cmd.exe re-parse the URL, so after the loopback host check
-/// the whole URL must match a strict allow-list: `http://`, host `127.0.0.1`
-/// or `localhost`, an optional `:` + 1-5 digit port, then a path made only
-/// of `[A-Za-z0-9/._~-]` — no query, no fragment, no percent signs, and none
-/// of the cmd.exe metacharacters (`& | ^ < > % ! "`, space). Compiled on
-/// every OS so the seam test runs everywhere.
-fn windows_browser_argv(url: &str) -> Option<Vec<String>> {
+/// the default browser, or `None` when no cmd.exe was resolved or the URL is
+/// refused. `cmd /C start "" <url>` makes cmd.exe re-parse the URL, so after
+/// the loopback host check the whole URL must match a strict allow-list:
+/// `http://`, host `127.0.0.1` or `localhost`, an optional `:` + 1-5 digit
+/// port, then a path made only of `[A-Za-z0-9/._~-]` — no query, no fragment,
+/// no percent signs, and none of the cmd.exe metacharacters (`& | ^ < > % ! "`,
+/// space). The host comparison is case-sensitive on purpose, the stricter
+/// reading: an uppercase host such as `LOCALHOST` is refused even though DNS
+/// would treat it as the same name. Compiled on every OS so the seam test runs
+/// everywhere.
+fn windows_browser_argv(url: &str, cmd_exe: Option<&str>) -> Option<Vec<String>> {
+    let cmd_exe = cmd_exe?;
     let rest = url.strip_prefix("http://")?;
     let host_end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
     if !matches!(&rest[..host_end], "127.0.0.1" | "localhost") {
@@ -2444,12 +2451,47 @@ fn windows_browser_argv(url: &str) -> Option<Vec<String>> {
         return None;
     }
     Some(vec![
-        "cmd".to_string(),
+        cmd_exe.to_string(),
         "/C".to_string(),
         "start".to_string(),
         String::new(),
         url.to_string(),
     ])
+}
+
+/// Resolves the full path to cmd.exe for the Windows branch of
+/// [`open_browser`]. A bare `cmd` would be found through the current
+/// directory and the OS app-dir search order, so the `ComSpec` value is
+/// trusted only when it is an absolute Windows path ending in `cmd.exe`
+/// (case-insensitive); otherwise the launcher falls back to
+/// `%SystemRoot%\System32\cmd.exe`, and launches nothing when that root is
+/// missing or empty too. Pure so it can be tested on every OS with injected
+/// environment values.
+fn resolve_windows_cmd_exe(com_spec: Option<&str>, system_root: Option<&str>) -> Option<String> {
+    if let Some(spec) = com_spec {
+        let file_name = spec.rsplit(['\\', '/']).next().unwrap_or("");
+        if is_absolute_windows_path(spec) && file_name.eq_ignore_ascii_case("cmd.exe") {
+            return Some(spec.to_string());
+        }
+    }
+    let root = system_root?;
+    if !is_absolute_windows_path(root) {
+        return None;
+    }
+    Some(format!("{root}\\System32\\cmd.exe"))
+}
+
+/// True only for a drive-rooted (`C:\…`) or UNC (`\\…`) Windows path, so a
+/// bare name or a drive-relative path can never be mistaken for an absolute
+/// one. Hand-rolled instead of `Path::is_absolute` because the seam test runs
+/// on every OS.
+fn is_absolute_windows_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && (bytes[1] == b'\\' || bytes[1] == b'/')
+    {
+        return true;
+    }
+    path.starts_with("\\\\") || path.starts_with("//")
 }
 
 pub(crate) async fn create_runtime(
@@ -2507,19 +2549,39 @@ pub(crate) async fn create_runtime(
 #[cfg(test)]
 mod tests {
     use super::verify_component_binary_with_data_dir;
+    /// The resolved cmd.exe the Windows branch runs `start` through; the
+    /// tests inject it so the seam stays pure on every OS.
+    const TEST_CMD: &str = "C:\\Windows\\System32\\cmd.exe";
+
     /// Seam test for the Windows branch of [`crate::open_browser`]: the argv
     /// it would run for a loopback URL, checked on every OS.
     #[test]
     fn open_browser_windows_argv_starts_the_default_browser() {
-        let argv = super::windows_browser_argv("http://127.0.0.1:8080/home/").unwrap();
+        let argv =
+            super::windows_browser_argv("http://127.0.0.1:8080/home/", Some(TEST_CMD)).unwrap();
         assert_eq!(
             argv,
-            ["cmd", "/C", "start", "", "http://127.0.0.1:8080/home/"]
+            [TEST_CMD, "/C", "start", "", "http://127.0.0.1:8080/home/"]
         );
         assert_eq!(
-            super::windows_browser_argv("http://localhost:4173/home/").unwrap(),
-            ["cmd", "/C", "start", "", "http://localhost:4173/home/"]
+            super::windows_browser_argv("http://localhost:4173/home/", Some(TEST_CMD)).unwrap(),
+            [TEST_CMD, "/C", "start", "", "http://localhost:4173/home/"]
         );
+    }
+
+    /// The URL the serve flow actually opens is built as
+    /// `format!("http://{}", addr)` with no trailing slash, so the no-slash
+    /// forms are the accepted production shapes; a non-loopback bind address
+    /// such as `0.0.0.0` fails closed.
+    #[test]
+    fn open_browser_windows_accepts_the_production_serve_url() {
+        for accepted in ["http://127.0.0.1:8090", "http://localhost:8090"] {
+            assert_eq!(
+                super::windows_browser_argv(accepted, Some(TEST_CMD)).unwrap(),
+                [TEST_CMD, "/C", "start", "", accepted]
+            );
+        }
+        assert!(super::windows_browser_argv("http://0.0.0.0:8090", Some(TEST_CMD)).is_none());
     }
 
     /// The Windows branch refuses to launch anything whose URL is not a
@@ -2535,11 +2597,34 @@ mod tests {
             "not a url",
         ] {
             assert!(
-                super::windows_browser_argv(refused).is_none(),
+                super::windows_browser_argv(refused, Some(TEST_CMD)).is_none(),
                 "{refused} must be refused"
             );
         }
     }
+
+    /// Refusal boundaries around the loopback allow-list: an empty URL, a
+    /// scheme with no host, an empty port, a six-digit port, a backslash path
+    /// cmd.exe would treat as a separator, and an uppercase host. The
+    /// uppercase case is refused on purpose — the stricter reading, pinned by
+    /// the case-sensitive host comparison in [`super::windows_browser_argv`].
+    #[test]
+    fn open_browser_windows_refusal_boundaries() {
+        for refused in [
+            "",
+            "http://",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:123456/",
+            "http://127.0.0.1:8080\\calc.exe",
+            "http://LOCALHOST:8080/",
+        ] {
+            assert!(
+                super::windows_browser_argv(refused, Some(TEST_CMD)).is_none(),
+                "{refused} must be refused"
+            );
+        }
+    }
+
     /// The Windows branch refuses URLs that cmd.exe could re-parse after
     /// `cmd /C start ""`: cmd metacharacters, a double quote, a space, a
     /// query string, a fragment, or a port followed by letters.
@@ -2560,10 +2645,84 @@ mod tests {
             "http://127.0.0.1:8080abc/",
         ] {
             assert!(
-                super::windows_browser_argv(refused).is_none(),
+                super::windows_browser_argv(refused, Some(TEST_CMD)).is_none(),
                 "{refused} must be refused"
             );
         }
+    }
+
+    /// Review follow-up: an `&` alone in the path (not only next to `?` and
+    /// `=`), Unicode lookalike hosts (fullwidth `１`, Cyrillic `о`), an
+    /// uppercase scheme, a seven-digit port, parentheses and a newline in the
+    /// path. Every one of them must be refused.
+    #[test]
+    fn open_browser_windows_refuses_lookalike_hosts_and_path_injections() {
+        for refused in [
+            "http://127.0.0.1:8090/home/&",
+            "http://1２7.0.0.1/",
+            "http://lоcalhost/",
+            "HTTP://127.0.0.1/",
+            "http://127.0.0.1:1234567/",
+            "http://127.0.0.1:8090/(calc)",
+            "http://127.0.0.1:8090/home/a)b",
+            "http://127.0.0.1:8090/home/\n",
+        ] {
+            assert!(
+                super::windows_browser_argv(refused, Some(TEST_CMD)).is_none(),
+                "{refused} must be refused"
+            );
+        }
+    }
+
+    /// Without a resolved cmd.exe the Windows branch launches nothing, even
+    /// for a URL the allow-list would otherwise accept.
+    #[test]
+    fn open_browser_windows_launches_nothing_without_a_resolved_cmd_exe() {
+        assert_eq!(
+            super::windows_browser_argv("http://127.0.0.1:8090/", None),
+            None
+        );
+    }
+
+    /// The cmd.exe resolver is pure and takes injected environment values so
+    /// it can be checked on every OS: an absolute ComSpec ending in cmd.exe
+    /// is trusted as-is, any other ComSpec value (a bare name, a relative or
+    /// drive-relative path, a different executable) falls back to
+    /// `%SystemRoot%\System32\cmd.exe`, and with no usable input nothing is
+    /// launched.
+    #[test]
+    fn windows_cmd_exe_resolver_trusts_only_an_absolute_comspec_ending_in_cmd_exe() {
+        assert_eq!(
+            super::resolve_windows_cmd_exe(
+                Some("C:\\Windows\\System32\\cmd.exe"),
+                Some("D:\\Fallback"),
+            )
+            .as_deref(),
+            Some("C:\\Windows\\System32\\cmd.exe")
+        );
+        assert_eq!(
+            super::resolve_windows_cmd_exe(Some("C:\\Tools\\CMD.EXE"), None).as_deref(),
+            Some("C:\\Tools\\CMD.EXE")
+        );
+        for com_spec in ["cmd", "cmd.exe", "System32\\cmd.exe", "C:\\Windows\\py.exe"] {
+            assert_eq!(
+                super::resolve_windows_cmd_exe(Some(com_spec), Some("C:\\Windows")).as_deref(),
+                Some("C:\\Windows\\System32\\cmd.exe"),
+                "{com_spec} must not be trusted"
+            );
+        }
+        assert_eq!(
+            super::resolve_windows_cmd_exe(None, Some("C:\\Windows")).as_deref(),
+            Some("C:\\Windows\\System32\\cmd.exe")
+        );
+        assert_eq!(super::resolve_windows_cmd_exe(None, None), None);
+        assert_eq!(super::resolve_windows_cmd_exe(Some("cmd"), None), None);
+        assert_eq!(
+            super::resolve_windows_cmd_exe(Some("C:\\evil\\notcmd.exe"), None),
+            None
+        );
+        assert_eq!(super::resolve_windows_cmd_exe(None, Some("Windows")), None);
+        assert_eq!(super::resolve_windows_cmd_exe(None, Some("")), None);
     }
 
     /// `run --bundle <cid>` is its own path: it takes the CID and nothing

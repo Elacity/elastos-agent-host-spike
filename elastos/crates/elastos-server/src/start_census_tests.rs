@@ -232,7 +232,7 @@ fn places() -> Vec<Place> {
             "elastos-server/src/main.rs",
             "open_browser",
             "spawn()".to_string(),
-            2,
+            3,
             "OS URL opener; no capsule starts",
         ),
         place(

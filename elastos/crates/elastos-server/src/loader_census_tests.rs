@@ -301,7 +301,7 @@ fn rows() -> Vec<Row> {
             "host process",
             "none",
             "P2-8",
-            2,
+            3,
         ),
         row(
             "elastos-server/src/main.rs",
@@ -310,7 +310,7 @@ fn rows() -> Vec<Row> {
             "host process",
             "none",
             "P2-8",
-            2,
+            3,
         ),
         row(
             "elastos-server/src/main.rs",
