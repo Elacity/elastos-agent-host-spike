@@ -23,6 +23,9 @@ pub enum CustodyError {
     },
     /// Whole sentence, house style: "… is unsupported on Windows".
     Unsupported(&'static str),
+    /// The new bytes are already at the destination, and the directory flush
+    /// did not finish. Callers say which replacement this was.
+    DurabilityIndeterminate,
     Io(io::Error),
 }
 
@@ -46,6 +49,7 @@ impl fmt::Display for CustodyError {
                 write!(f, "{earlier}; cleanup failed: {cleanup}")
             }
             Self::Unsupported(sentence) => f.write_str(sentence),
+            Self::DurabilityIndeterminate => f.write_str("replacement durability indeterminate"),
             Self::Io(error) => write!(f, "{error}"),
         }
     }
@@ -87,6 +91,10 @@ mod tests {
             "owner-only files are unsupported on Windows"
         );
         assert!(unsupported.source().is_none());
+        assert_eq!(
+            CustodyError::DurabilityIndeterminate.to_string(),
+            "replacement durability indeterminate"
+        );
         let io = CustodyError::Io(io::Error::new(io::ErrorKind::NotFound, "missing"));
         assert_eq!(io.to_string(), "missing");
         assert!(io.source().is_some());

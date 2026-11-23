@@ -500,13 +500,15 @@ fn same_file(left: &File, right: &File) -> std::io::Result<bool> {
 mod device_key {
     use std::ffi::{CStr, OsStr};
     use std::fs::File;
-    use std::io::{Read, Write};
+    use std::io::Read;
+    #[cfg(test)]
+    use std::io::Write;
     use std::path::{Path, PathBuf};
 
     use elastos_win_custody::{
-        create_owner_dir, discard_owner_file, one_component_name, open_owner_dir, open_owner_file,
-        refuse_other_writers, rename_owner_file, reopen_owner_file, CustodyError, Disp,
-        READ_EXISTING, READ_WRITE,
+        create_owner_dir, flush_accepted_directory, one_component_name, open_owner_dir,
+        open_owner_file, refuse_other_writers, reopen_owner_file, replace_owner_file, CustodyError,
+        Disp, ReplaceStep, READ_EXISTING, READ_WRITE,
     };
 
     // Visible in `crate::store` only. That is the same reach as the Unix
@@ -546,7 +548,13 @@ mod device_key {
 
         pub(in crate::store) fn sync(&self) -> anyhow::Result<()> {
             self.admit()?;
-            flush_identity_dir(&self.directory)
+            match flush_accepted_directory(&self.directory) {
+                Ok(()) => Ok(()),
+                Err(CustodyError::DurabilityIndeterminate) => Err(anyhow::anyhow!(
+                    "identity replacement durability indeterminate"
+                )),
+                Err(error) => Err(error.into()),
+            }
         }
 
         pub(in crate::store) fn read(&self, name: &CStr) -> anyhow::Result<Option<Vec<u8>>> {
@@ -573,10 +581,10 @@ mod device_key {
             Ok(Some(std::mem::take(&mut *bytes)))
         }
 
-        /// Creates `device.key` when it is absent. The bytes are written to a
-        /// temporary file in the identity directory, flushed, and renamed onto
-        /// `device.key`. An existing key is left as it is. Any other name stays
-        /// refused.
+        /// Creates `device.key` when it is absent. The shared helper writes the
+        /// bytes to a temporary file in the identity directory, flushes them,
+        /// and renames them onto `device.key`. An existing key is left as it
+        /// is. Any other name stays refused.
         pub(in crate::store) fn replace(
             &self,
             name: &CStr,
@@ -597,39 +605,46 @@ mod device_key {
                 Err(error) if io_kind(&error) == Some(std::io::ErrorKind::NotFound) => {}
                 Err(error) => return Err(error.into()),
             }
-            let temp_name = format!(".identity-{}.tmp", uuid::Uuid::new_v4());
-            let temp_path = self.directory.join(&temp_name);
-            let mut file = open_owner_file(&temp_path, READ_WRITE, Disp::CreateNew)?;
-            let mut renamed = false;
-            let result = (|| -> anyhow::Result<()> {
-                #[cfg(test)]
-                if fault == Some(super::SaveFault::PartialWrite) {
-                    let prefix = if bytes.is_empty() { bytes } else { &bytes[..1] };
-                    file.write_all(prefix)?;
-                    anyhow::bail!("injected partial write");
+            // The helper owns the write, flush, rename, discard, and directory
+            // flush. These steps keep the identity directory owner-only and the
+            // same injected failures as before.
+            let result = replace_owner_file(&path, bytes, false, |step| match step {
+                ReplaceStep::Prepare(file) => {
+                    #[cfg(test)]
+                    if fault == Some(super::SaveFault::PartialWrite) {
+                        let prefix = if bytes.is_empty() { bytes } else { &bytes[..1] };
+                        file.write_all(prefix).map_err(CustodyError::Io)?;
+                        return Err(injected("injected partial write"));
+                    }
+                    let _ = file;
+                    Ok(())
                 }
-                file.write_all(bytes)?;
-                file.sync_all()?;
-                #[cfg(test)]
-                if fault == Some(super::SaveFault::BeforeReplace) {
-                    anyhow::bail!("injected pre-replacement failure");
+                ReplaceStep::AfterFileSync => {
+                    #[cfg(test)]
+                    if fault == Some(super::SaveFault::BeforeReplace) {
+                        return Err(injected("injected pre-replacement failure"));
+                    }
+                    self.admit()
+                        .map_err(|error| CustodyError::Io(std::io::Error::other(error.to_string())))
                 }
-                self.admit()?;
-                rename_owner_file(&self.directory, &file, &temp_path, OsStr::new(name), false)?;
-                renamed = true;
-                #[cfg(test)]
-                if fault == Some(super::SaveFault::AfterReplace) {
-                    anyhow::bail!("identity replacement durability indeterminate (injected)");
+                ReplaceStep::AfterRename => {
+                    #[cfg(test)]
+                    if fault == Some(super::SaveFault::AfterReplace) {
+                        return Err(injected(
+                            "identity replacement durability indeterminate (injected)",
+                        ));
+                    }
+                    self.admit()
+                        .map_err(|_| injected("identity replacement durability indeterminate"))
                 }
-                self.sync().map_err(|_| {
-                    anyhow::anyhow!("identity replacement durability indeterminate")
-                })?;
-                Ok(())
-            })();
-            if result.is_err() && !renamed {
-                let _ = discard_owner_file(&file, &temp_path);
+            });
+            match result {
+                Ok(()) => Ok(()),
+                Err(CustodyError::DurabilityIndeterminate) => Err(anyhow::anyhow!(
+                    "identity replacement durability indeterminate"
+                )),
+                Err(error) => Err(error.into()),
             }
-            result
         }
 
         fn admit(&self) -> anyhow::Result<()> {
@@ -678,29 +693,8 @@ mod device_key {
         Ok(())
     }
 
-    /// Flush the identity directory so the `device.key` rename survives power
-    /// loss on NTFS.
-    ///
-    /// Win32 opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`. With
-    /// write access, `File::sync_all` is `FlushFileBuffers` and NTFS commits
-    /// the directory entry. On ReFS, FAT, exFAT, or a network share the flush
-    /// can return success without that guarantee.
-    fn flush_identity_dir(path: &Path) -> anyhow::Result<()> {
-        use std::os::windows::fs::OpenOptionsExt;
-        // Win32 CreateFile flags. `FILE_FLAG_BACKUP_SEMANTICS` is not the
-        // access mask `MAXIMUM_ALLOWED`, even though the number matches.
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        // Refuse a junction before the flush. The flush itself is the capability
-        // store's write plus `FILE_FLAG_BACKUP_SEMANTICS`, plus the reparse flag
-        // so this open does not follow a junction planted in between.
-        drop(open_owner_dir(path)?);
-        std::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)
-            .and_then(|file| file.sync_all())
-            .map_err(|_| anyhow::anyhow!("identity replacement durability indeterminate"))
+    fn injected(message: &'static str) -> CustodyError {
+        CustodyError::Io(std::io::Error::other(message))
     }
 
     fn ensure_identity(root: &Path, create: bool) -> anyhow::Result<PathBuf> {
@@ -1007,7 +1001,7 @@ mod device_key {
             assert!(
                 identity_names(&data)
                     .iter()
-                    .all(|name| !name.ends_with(".tmp")),
+                    .all(|name| { !name.ends_with(".tmp") && !name.contains(".tmp-") }),
                 "a temporary key file remains"
             );
         }

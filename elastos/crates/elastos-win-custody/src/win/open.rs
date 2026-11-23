@@ -3,7 +3,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
@@ -97,24 +97,19 @@ pub fn open_owner_dir(path: &Path) -> Result<File, CustodyError> {
 /// A directory Home creates still uses [`create_owner_dir`]. This check is only
 /// for a directory that already existed, such as the operator data root.
 pub fn refuse_other_writers(path: &Path) -> Result<(), CustodyError> {
-    let file = open_at(
-        path,
-        FILE_GENERIC_READ,
-        Disp::OpenExisting,
-        true,
-        false,
-        false,
-    )?;
-    verify_not_writable_by_others(&file, path)
+    drop(open_accepted_directory(path, FILE_GENERIC_READ)?);
+    Ok(())
 }
 
 /// Rename the open file `source` to `dest_name` inside `directory`.
 ///
-/// The directory open is handle-relative. A reparse point on the directory,
+/// The directory open is handle-relative. The directory must pass the
+/// accepted-root rule: the current user owns it, and write is granted only to
+/// that user, SYSTEM, and Administrators. A reparse point on the directory,
 /// on `source`, or on `dest_name` is refused. `dest_name` is one component.
 /// The file keeps the security descriptor it already has; this call does not
-/// write a new DACL. When `replace_existing` is false, an existing destination
-/// is left in place.
+/// write a new DACL. An existing destination file must already be owner-only.
+/// When `replace_existing` is false, an existing destination is left in place.
 ///
 /// `source` must be a handle from [`open_owner_file`] with [`Disp::CreateNew`]:
 /// that open includes `DELETE`, which the rename requires. A later slice can
@@ -136,14 +131,7 @@ pub fn rename_owner_file(
         return Err(reparse_at(source_path));
     }
     verify_owner_only(source, source_path)?;
-    let dir = open_at(
-        directory,
-        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
-        Disp::OpenExisting,
-        true,
-        true,
-        false,
-    )?;
+    let dir = open_accepted_directory(directory, FILE_GENERIC_READ | FILE_GENERIC_WRITE)?;
     let dest_path = directory.join(dest_name);
     match open_any(&dir, dest_name) {
         Ok(found) => {
@@ -166,6 +154,10 @@ pub fn rename_owner_file(
             }
             let existing = open_existing(&dir, dest_name, FILE_GENERIC_READ, false, false)
                 .map_err(|error| io_at(&dest_path, error))?;
+            // A pre-existing file stays on the owner-only rule. An inherited
+            // or shared DACL is refused. The published bytes keep the
+            // temporary file's owner-only descriptor; the rename does not copy
+            // the old DACL.
             verify_owner_only(&existing, &dest_path)?;
             drop(existing);
         }
@@ -182,6 +174,135 @@ pub fn rename_owner_file(
 /// The delete is the open handle, not a path lookup.
 pub fn discard_owner_file(file: &File, path: &Path) -> Result<(), CustodyError> {
     delete_new(file).map_err(|error| io_at(path, error))
+}
+
+/// Where [`replace_owner_file`] lets the caller stop or re-check.
+pub enum ReplaceStep<'a> {
+    /// The temporary file exists and is empty. Return an error to stop before
+    /// the body is written. A test may write a prefix and then stop.
+    Prepare(&'a mut File),
+    /// The body is flushed. The destination name is unchanged.
+    AfterFileSync,
+    /// The destination name has the new file. The directory is not flushed yet.
+    AfterRename,
+}
+
+/// Publish `bytes` at `dest`.
+///
+/// The parent directory must already exist and pass the accepted-root rule.
+/// The temporary file is created in that directory with the owner-only DACL,
+/// flushed, and renamed onto `dest`. When `replace_existing` is false, an
+/// existing destination is left in place. Any error before the rename removes
+/// the temporary file. After the rename, the directory is flushed.
+///
+/// `on_step` runs at the three points in [`ReplaceStep`]. An error from
+/// `Prepare` or `AfterFileSync` removes the temporary file. An error from
+/// `AfterRename` leaves the published file in place.
+pub fn replace_owner_file<F>(
+    dest: &Path,
+    bytes: &[u8],
+    replace_existing: bool,
+    mut on_step: F,
+) -> Result<(), CustodyError>
+where
+    F: FnMut(ReplaceStep<'_>) -> Result<(), CustodyError>,
+{
+    let parent = dest
+        .parent()
+        .filter(|path| path.parent().is_some())
+        .ok_or_else(|| invalid(dest, "destination has no parent"))?;
+    let name = dest
+        .file_name()
+        .ok_or_else(|| invalid(dest, "destination has no file name"))?;
+    if !one_component_name(name) {
+        return Err(invalid(dest, "destination file name is not one component"));
+    }
+    // Refuse a folder others can write before a temporary file exists.
+    drop(open_accepted_directory(parent, FILE_GENERIC_READ)?);
+    let temp_name = sibling_owner_temp_name(dest, name)?;
+    let temp_path = parent.join(&temp_name);
+    let mut file = open_owner_file(&temp_path, READ_WRITE, Disp::CreateNew)?;
+    let mut renamed = false;
+    let result = (|| -> Result<(), CustodyError> {
+        on_step(ReplaceStep::Prepare(&mut file))?;
+        file.write_all(bytes)
+            .map_err(|error| io_at(&temp_path, error))?;
+        file.sync_all().map_err(|error| io_at(&temp_path, error))?;
+        on_step(ReplaceStep::AfterFileSync)?;
+        rename_owner_file(parent, &file, &temp_path, name, replace_existing)?;
+        renamed = true;
+        on_step(ReplaceStep::AfterRename)?;
+        flush_accepted_directory(parent)
+    })();
+    if let Err(error) = result {
+        if !renamed {
+            if let Err(cleanup) = discard_owner_file(&file, &temp_path) {
+                let cleanup = match cleanup {
+                    CustodyError::Io(inner) => inner,
+                    other => io::Error::other(other.to_string()),
+                };
+                drop(file);
+                return Err(error.with_failed_cleanup(cleanup));
+            }
+        }
+        drop(file);
+        return Err(error);
+    }
+    drop(file);
+    Ok(())
+}
+
+/// Flush `directory` so a replaced file's directory entry survives power loss
+/// on NTFS.
+///
+/// The directory must pass the accepted-root rule. Win32 opens a directory
+/// only with `FILE_FLAG_BACKUP_SEMANTICS`. With write access, `File::sync_all`
+/// is `FlushFileBuffers` and NTFS commits the directory entry. On ReFS, FAT,
+/// exFAT, or a network share the flush can return success without that
+/// guarantee. The flush open uses `FILE_FLAG_OPEN_REPARSE_POINT`, so a junction
+/// planted after the check is not followed.
+pub fn flush_accepted_directory(directory: &Path) -> Result<(), CustodyError> {
+    drop(open_accepted_directory(directory, FILE_GENERIC_READ)?);
+    // `FILE_FLAG_BACKUP_SEMANTICS` is not the access mask `MAXIMUM_ALLOWED`,
+    // even though the number matches.
+    let flushed = OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(directory)
+        .and_then(|file| file.sync_all());
+    match flushed {
+        Ok(()) => Ok(()),
+        Err(_) => Err(CustodyError::DurabilityIndeterminate),
+    }
+}
+
+/// Open a directory the helper may write into.
+///
+/// The current user owns it. Write is granted only to that user, SYSTEM, and
+/// Administrators. A reparse point is refused. A directory Home creates still
+/// uses [`create_owner_dir`] and [`open_owner_dir`].
+fn open_accepted_directory(path: &Path, access: u32) -> Result<File, CustodyError> {
+    let file = open_at(path, access, Disp::OpenExisting, true, false, false)?;
+    verify_not_writable_by_others(&file, path)?;
+    Ok(file)
+}
+
+fn sibling_owner_temp_name(dest: &Path, name: &OsStr) -> Result<std::ffi::OsString, CustodyError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let mut temp = std::ffi::OsString::from(".");
+    temp.push(name);
+    temp.push(format!(".tmp-{}-{nanos}-{seq}", std::process::id()));
+    if !one_component_name(&temp) || temp.encode_wide().count() > 255 {
+        return Err(invalid(dest, "temporary file name is not one component"));
+    }
+    Ok(temp)
 }
 
 fn open_at(

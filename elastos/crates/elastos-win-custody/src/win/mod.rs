@@ -11,8 +11,9 @@ use std::io;
 use std::path::Path;
 
 pub use open::{
-    create_owner_dir, discard_owner_file, open_owner_dir, open_owner_file, refuse_other_writers,
-    rename_owner_file, reopen_owner_file, Disp, READ_EXISTING, READ_WRITE,
+    create_owner_dir, discard_owner_file, flush_accepted_directory, open_owner_dir,
+    open_owner_file, refuse_other_writers, rename_owner_file, reopen_owner_file,
+    replace_owner_file, Disp, ReplaceStep, READ_EXISTING, READ_WRITE,
 };
 pub use sd::verify_owner_only;
 
