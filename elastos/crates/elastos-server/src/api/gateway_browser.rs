@@ -5276,8 +5276,11 @@ mod browser_open_outcome_tests {
 
 #[cfg(test)]
 mod r4_root_tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+    #[cfg(unix)]
     use crate::auth::PrincipalKind;
     #[cfg(unix)]
     #[test]

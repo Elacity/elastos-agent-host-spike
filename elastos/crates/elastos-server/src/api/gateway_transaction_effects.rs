@@ -4602,10 +4602,12 @@ mod approved_request_resume_tests {
 /// verified authority carries, as lines 601-603 and 699 do.
 #[cfg(test)]
 mod r8c_child_rows {
+    #[cfg(unix)]
     use super::super::gateway_home_token::{
         issue_home_launch_token_for_auth_grant,
         require_home_launch_token_value_from_expected_did_for_test as verify,
     };
+    #[cfg(unix)]
     use super::super::r3_stored_root_tests::verified_parent_device_context;
     use super::*;
 
@@ -4719,7 +4721,9 @@ mod r8c_child_rows {
 /// routes. Its control is the R8c control row above.
 #[cfg(test)]
 mod r8d_passkey_rows {
+    #[cfg(unix)]
     use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, PERSON, ROOT};
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

@@ -10601,8 +10601,10 @@ mod stored_root_tests {
 /// `proof-bound passkey session required` today, before any write.
 #[cfg(test)]
 mod r8c_child_rows {
+    #[cfg(unix)]
     use super::super::r3_stored_root_tests::verified_parent_device_context;
     use super::*;
+    #[cfg(unix)]
     use elastos_runtime::auth::{PasskeyWebAuthnBinding, ProofBinding};
 
     fn update(
@@ -10699,10 +10701,13 @@ mod r8c_child_rows {
 /// Its control is the R8c control row above.
 #[cfg(test)]
 mod r8d_passkey_rows {
+    #[cfg(unix)]
     use super::super::gateway_tests::r8d_passkey_rows::{
         kept_elsewhere_refusal, passkey_person, refusal, KEPT_ELSEWHERE, PERSON, ROOT,
     };
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::collaboration_profile_authority as authority;
 
     #[cfg(unix)]
