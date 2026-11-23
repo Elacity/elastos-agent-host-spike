@@ -2761,6 +2761,9 @@ mod tests {
         );
     }
 
+    // Like operator_stream_audits_verified_requests_only: the accepted request
+    // writes the owner-only audit file, which Windows refuses until P2-11 W2.
+    #[cfg(unix)]
     #[tokio::test]
     async fn operator_request_over_a_short_lived_dial_is_decided_by_its_signature() {
         // The product dial binds a short-lived random key, so the receiver
