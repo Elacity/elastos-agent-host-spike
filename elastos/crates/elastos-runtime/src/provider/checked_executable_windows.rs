@@ -127,14 +127,12 @@ mod tests {
             super::super::bridge::ProviderConfig::default(),
         )
         .await;
-        let Err(spawned) = spawned else {
-            panic!("spawn must refuse");
-        };
         match spawned {
-            super::super::bridge::BridgeError::Refused(reason) => {
+            Err(super::super::bridge::BridgeError::Refused(reason)) => {
                 assert_eq!(reason, WINDOWS_CHECKED_PROVIDER);
             }
-            other => panic!("spawn must refuse, got {other:?}"),
+            Err(other) => panic!("spawn must refuse, got {other:?}"),
+            Ok(_) => panic!("spawn must refuse, but it started a provider"),
         }
         assert_eq!(std::fs::read(&path).expect("read"), bytes);
         assert!(recover_verified_copies(home.path()).is_ok());
