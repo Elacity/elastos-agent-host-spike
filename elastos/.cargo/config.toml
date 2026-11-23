@@ -1,2 +1,10 @@
 [build]
 # Default target dir (override with CARGO_TARGET_DIR if needed)
+
+# Windows gives the main thread a 1 MB stack (Unix: 8 MB); elastos overflowed it before parsing
+# arguments (seen on the Windows machine, 23 Nov 2026). Ask the linker for 8 MB, as on Unix.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]
