@@ -1269,32 +1269,11 @@ enum TransportClass {
 }
 
 fn transport_class(err: &reqwest::Error) -> TransportClass {
-    if err.is_connect() || source_chain_reports_closed_local_endpoint(err) {
+    if err.is_connect() {
         TransportClass::Unreachable
     } else {
         TransportClass::Interrupted
     }
-}
-
-/// `reqwest::Error::is_connect` recognises the refused errno that Unix reports
-/// for a closed loopback endpoint. Windows reports that endpoint with the WSA
-/// raw error WSAECONNREFUSED (10061) instead, so the source chain is searched
-/// for that raw error too. The CLI reaches Home over loopback TCP, so a
-/// missing named-pipe endpoint needs no separate case here.
-pub(super) fn source_chain_reports_closed_local_endpoint(
-    err: &(dyn std::error::Error + 'static),
-) -> bool {
-    const WSAECONNREFUSED: i32 = 10061;
-    let mut current = Some(err);
-    while let Some(error) = current {
-        if let Some(io) = error.downcast_ref::<std::io::Error>() {
-            if io.raw_os_error() == Some(WSAECONNREFUSED) {
-                return true;
-            }
-        }
-        current = std::error::Error::source(error);
-    }
-    false
 }
 
 async fn post_mint(
@@ -1313,7 +1292,7 @@ async fn post_mint(
     Ok((status, text))
 }
 
-pub(super) fn deadline_without_grant(
+fn deadline_without_grant(
     possible_delivery: bool,
     saw_reply: bool,
     saw_unreachable: bool,
