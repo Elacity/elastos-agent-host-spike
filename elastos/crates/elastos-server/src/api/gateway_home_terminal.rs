@@ -966,21 +966,21 @@ fn open_home_terminal_pty(size: HomeTerminalSize) -> anyhow::Result<HomeTerminal
 }
 
 impl HomeTerminalInput {
-    async fn write_all(
-        &mut self,
-        mut _data: &[u8],
-        _closed: &watch::Sender<bool>,
-    ) -> io::Result<()> {
+    async fn write_all(&mut self, data: &[u8], closed: &watch::Sender<bool>) -> io::Result<()> {
         match self {
             #[cfg(windows)]
-            HomeTerminalInput::Unsupported => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Home terminal input is unsupported on Windows",
-            )),
+            HomeTerminalInput::Unsupported => {
+                let _ = (data, closed);
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Home terminal input is unsupported on Windows",
+                ))
+            }
             #[cfg(unix)]
             HomeTerminalInput::Pty(file) => {
-                let mut closed = _closed.subscribe();
-                while !_data.is_empty() {
+                let mut data = data;
+                let mut closed = closed.subscribe();
+                while !data.is_empty() {
                     let mut ready = tokio::select! {
                         biased;
                         _ = closed.wait_for(|closed| *closed) => {
@@ -988,9 +988,9 @@ impl HomeTerminalInput {
                         }
                         ready = file.writable() => ready?,
                     };
-                    match ready.try_io(|file| file.get_ref().write(_data)) {
+                    match ready.try_io(|file| file.get_ref().write(data)) {
                         Ok(Ok(0)) => return Err(io::ErrorKind::WriteZero.into()),
-                        Ok(Ok(written)) => _data = &_data[written..],
+                        Ok(Ok(written)) => data = &data[written..],
                         Ok(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
                         Ok(Err(err)) => return Err(err),
                         Err(_) => continue,
@@ -1001,18 +1001,21 @@ impl HomeTerminalInput {
         }
     }
 
-    fn resize(&mut self, _size: HomeTerminalSize) -> io::Result<()> {
+    fn resize(&mut self, size: HomeTerminalSize) -> io::Result<()> {
         match self {
             #[cfg(windows)]
-            HomeTerminalInput::Unsupported => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Home terminal resize is unsupported on Windows",
-            )),
+            HomeTerminalInput::Unsupported => {
+                let _ = size;
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Home terminal resize is unsupported on Windows",
+                ))
+            }
             #[cfg(unix)]
             HomeTerminalInput::Pty(file) => {
                 let winsize = libc::winsize {
-                    ws_row: _size.rows,
-                    ws_col: _size.cols,
+                    ws_row: size.rows,
+                    ws_col: size.cols,
                     ws_xpixel: 0,
                     ws_ypixel: 0,
                 };
