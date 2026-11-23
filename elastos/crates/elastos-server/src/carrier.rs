@@ -45,7 +45,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 #[cfg(unix)]
 use tokio::io;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader};
+#[cfg(unix)]
+use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt as _, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;

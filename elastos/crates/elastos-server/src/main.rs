@@ -28,6 +28,7 @@ mod webspace_cmd;
 
 use clap::{Parser, Subcommand};
 use security_cmd::{EmergencyCommand, TlsCommand};
+#[cfg(unix)]
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

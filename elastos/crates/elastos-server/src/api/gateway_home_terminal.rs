@@ -1,7 +1,9 @@
 use super::*;
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

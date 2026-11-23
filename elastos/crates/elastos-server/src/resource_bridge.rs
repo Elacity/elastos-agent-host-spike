@@ -31,6 +31,7 @@ use rand::RngCore;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use tokio::io::BufReader;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use elastos_runtime::auth::RuntimeAuditEventV1;

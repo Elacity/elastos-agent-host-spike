@@ -1993,7 +1993,9 @@ mod tests {
         CapsuleManifest, CapsuleType, MicroVmConfig, Permissions, RequirementKind, ResourceLimits,
     };
     use std::collections::BTreeMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     fn platform_input_options() -> PublishReleaseOptions {
         PublishReleaseOptions {

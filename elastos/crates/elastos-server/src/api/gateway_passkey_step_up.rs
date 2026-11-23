@@ -1436,7 +1436,9 @@ fn passkey_step_up_error_response(err: anyhow::Error) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use elastos_identity::{AuthenticatorAssertionResponse, IdentityStore, StoredCredential};
+    #[cfg(unix)]
+    use elastos_identity::AuthenticatorAssertionResponse;
+    use elastos_identity::{IdentityStore, StoredCredential};
     use elastos_runtime::auth::{AuthSessionGrantV1, ProofBinding};
 
     struct StepUpFixture {

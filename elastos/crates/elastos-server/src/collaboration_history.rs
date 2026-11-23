@@ -418,7 +418,9 @@ mod tests {
         set_presence_grant, test_authority, PresenceAuthority, PresenceDecision,
     };
     use crate::collaboration_product::{chat_message_request_binding, test_chat_product_port};
-    use elastos_runtime::provider::{ProviderCarrierInvoker, ResourceAction};
+    use elastos_runtime::provider::ProviderCarrierInvoker;
+    #[cfg(unix)]
+    use elastos_runtime::provider::ResourceAction;
     use std::collections::BTreeMap;
 
     const PRINCIPAL: &str = "test-principal";
