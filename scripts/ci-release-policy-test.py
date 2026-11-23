@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check CI release/cache decisions without builds, Docker, or publication."""
 import base64
+import errno
 import os
 import hashlib
 import importlib.util
@@ -3366,6 +3367,175 @@ class InstalledJourneyTests(unittest.TestCase):
             self.assertEqual(journey["cleanup_runtime"](child, data)["status"], "passed")
             groups.assert_not_called()
             kill.assert_not_called()
+
+    def owned_with_proc_exe(self, journey, data, rows, executables, runtime_pid, seen=None):
+        """Census rows whose /proc/<pid>/exe the test supplies. Other readlinks stay real."""
+        real_readlink = os.readlink
+
+        def readlink(path, *args, **kwargs):
+            proc = Path(os.fspath(path))
+            if len(proc.parts) == 4 and proc.parts[:2] == ("/", "proc") and proc.name == "exe":
+                pid = int(proc.parts[2])
+                if seen is not None:
+                    seen.append(pid)
+                result = executables.get(pid, OSError(errno.ENOENT, "gone"))
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+            return real_readlink(path, *args, **kwargs)
+
+        with mock.patch.object(os, "readlink", side_effect=readlink):
+            return journey["owned_processes"](rows, runtime_pid, data)
+
+    def test_census_counts_checked_fd_model_provider_by_executable(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data = root / "data"
+            (data / "bin").mkdir(parents=True)
+            (data / "libexec").mkdir()
+            (data / "links").mkdir()
+            runtime = data / "bin/elastos"
+            provider = data / "bin/model-provider"
+            runtime.write_bytes(b"runtime")
+            provider.write_bytes(b"model-provider")
+            checked = data / "links/checked-provider"
+            checked.symlink_to(provider)
+            engine = data / "libexec/llama-server"
+            engine.write_bytes(b"engine")
+            outside = root / "outside-tool"
+            outside.write_bytes(b"outside")
+            self.assertEqual(os.path.realpath(checked), os.path.realpath(provider))
+            self.assertNotEqual(str(checked), str(provider))
+
+            def row(parent, command):
+                return {"ppid": parent, "command": command, "start": "original"}
+
+            rows = {
+                100: row(1, str(runtime) + " gateway"),
+                101: row(100, "/proc/self/fd/9 --model"),
+                104: row(100, "/proc/self/fd/10 --model"),
+                108: row(100, str(provider) + " --serve"),
+                102: row(101, str(provider) + " --internal-local-llama-guard"),
+                105: row(101, "/proc/self/fd/12 --internal-local-llama-guard"),
+                103: row(102, str(engine) + " -m model"),
+            }
+            executables = {100: str(runtime), 101: str(provider), 104: str(checked),
+                           103: str(engine), 105: str(provider), 108: str(outside)}
+            seen = []
+            owned = self.owned_with_proc_exe(journey, data, rows, executables, 100, seen)
+            prior = self.owned_with_proc_exe(journey, data, rows, executables, -1)
+            with self.subTest("checked descriptor"):
+                self.assertEqual(owned[101]["role"], "model_provider")
+            with self.subTest("symlink descriptor"):
+                self.assertEqual(owned[104]["role"], "model_provider")
+            with self.subTest("argv path"):
+                self.assertEqual(owned[108]["role"], "model_provider")
+            with self.subTest("guard stays guard"):
+                self.assertEqual(owned[102]["role"], "guard")
+                self.assertEqual(owned[105]["role"], "guard")
+            with self.subTest("engine"):
+                self.assertEqual(owned[100]["role"], "runtime")
+                self.assertEqual(owned[103]["role"], "llama_server")
+            with self.subTest("counts"):
+                self.assertEqual(journey["process_counts"](owned), {
+                    "runtime": 1, "model_provider": 3, "guard": 2, "llama_server": 1, "other": 0})
+            with self.subTest("prelaunch ownership"):
+                self.assertEqual(prior.get(101, {}).get("role"), "model_provider")
+                self.assertEqual(prior.get(104, {}).get("role"), "model_provider")
+                self.assertEqual(prior[108]["role"], "model_provider")
+                self.assertEqual(prior[105]["role"], "guard")
+                self.assertEqual(journey["process_counts"](prior)["model_provider"], 3)
+            self.assertIn(101, seen)
+            self.assertIn(104, seen)
+            self.assertNotIn(108, seen)
+
+    def test_census_does_not_count_executable_that_resolves_elsewhere(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data = root / "data"
+            (data / "bin").mkdir(parents=True)
+            runtime = data / "bin/elastos"
+            provider = data / "bin/model-provider"
+            decoy = data / "bin/model-provider-extra"
+            runtime.write_bytes(b"runtime")
+            provider.write_bytes(b"model-provider")
+            decoy.write_bytes(b"not the provider")
+            outside = root / "outside-tool"
+            outside.write_bytes(b"outside")
+            self.assertTrue(str(decoy).startswith(str(provider)))
+            self.assertNotEqual(os.path.realpath(decoy), os.path.realpath(provider))
+
+            def row(parent, command):
+                return {"ppid": parent, "command": command, "start": "original"}
+
+            rows = {
+                100: row(1, str(runtime) + " gateway"),
+                101: row(100, str(provider) + " --serve"),
+                102: row(100, "/proc/self/fd/9 --model"),
+                103: row(100, "/proc/self/fd/8"),
+                104: row(1, "/proc/self/fd/7"),
+            }
+            executables = {102: str(decoy), 103: str(outside), 104: str(outside)}
+            seen = []
+            owned = self.owned_with_proc_exe(journey, data, rows, executables, 100, seen)
+            prior = self.owned_with_proc_exe(journey, data, rows, executables, -1)
+            self.assertEqual(owned[101]["role"], "model_provider")
+            self.assertEqual(owned[102]["role"], "other")
+            self.assertEqual(owned[103]["role"], "other")
+            self.assertNotIn(104, owned)
+            self.assertEqual(journey["process_counts"](owned)["model_provider"], 1)
+            self.assertNotIn(102, prior)
+            self.assertNotIn(103, prior)
+            self.assertNotIn(104, prior)
+            self.assertEqual(prior[101]["role"], "model_provider")
+            self.assertIn(102, seen)
+            self.assertIn(103, seen)
+            self.assertIn(104, seen)
+
+    def test_census_vanished_pid_does_not_raise(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        data = Path("/isolated/census/data")
+        provider = str(data / "bin/model-provider")
+
+        def row(parent, command):
+            return {"ppid": parent, "command": command, "start": "original"}
+
+        rows = {
+            100: row(1, str(data / "bin/elastos") + " gateway"),
+            101: row(100, "/proc/self/fd/9 --model"),
+            106: row(100, provider + " --serve"),
+        }
+        for number in (errno.ENOENT, errno.ESRCH):
+            with self.subTest(errno=number):
+                gone = OSError(number, "gone")
+                executables = {100: gone, 101: gone}
+                seen = []
+                owned = self.owned_with_proc_exe(journey, data, rows, executables, 100, seen)
+                self.assertEqual(owned[101]["role"], "other")
+                self.assertEqual(owned[106]["role"], "model_provider")
+                self.assertEqual(journey["process_counts"](owned)["model_provider"], 1)
+                prior = self.owned_with_proc_exe(journey, data, rows, executables, -1)
+                self.assertNotIn(101, prior)
+                self.assertEqual(prior[106]["role"], "model_provider")
+                self.assertIn(101, seen)
+
+    def test_census_other_proc_oserror_is_raised(self):
+        journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
+        data = Path("/isolated/census/data")
+
+        def row(parent, command):
+            return {"ppid": parent, "command": command, "start": "original"}
+
+        rows = {100: row(1, str(data / "bin/elastos") + " gateway"),
+                101: row(100, "/proc/self/fd/9 --model")}
+        for number in (errno.EACCES, errno.EPERM):
+            with self.subTest(errno=number):
+                denied = OSError(number, "denied")
+                with self.assertRaises(OSError) as raised:
+                    self.owned_with_proc_exe(journey, data, rows, {100: denied, 101: denied}, 100)
+                self.assertEqual(raised.exception.errno, number)
 
     def test_early_exit_reports_its_status_and_evidence_path(self):
         journey = runpy.run_path(str(WORKFLOW.parents[2] / "scripts/ci-installed-journeys.py"))
