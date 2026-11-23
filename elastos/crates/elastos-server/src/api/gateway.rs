@@ -161,12 +161,14 @@ pub(crate) use gateway_home_system::{
     authorize_home_service_exit, carrier_source_is_contact_of, sync_runtime_services_mailboxes,
 };
 use gateway_home_terminal::*;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(super) use gateway_home_token::agent_launch_grants_minted_for_test;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
 #[cfg(test)]
 pub(super) use gateway_home_token::issue_home_agent_launch_token_at_for_test;
-#[cfg(test)]
 pub(super) use gateway_home_token::issue_home_agent_launch_token_with_context;
 #[cfg(test)]
 pub(super) use gateway_home_token::issue_home_launch_token_with_context;
@@ -199,7 +201,10 @@ pub(super) use gateway_home_system_ai_provider::{
     install_venice_validate_double, OpenRouterModelsDouble, VeniceAuthDouble,
 };
 
-use gateway_home_cli_mint::{home_cli_mint_approve, home_cli_mint_begin, home_cli_mint_request};
+use gateway_home_cli_mint::{
+    home_cli_mint_approve, home_cli_mint_begin, home_cli_mint_cancel, home_cli_mint_claim,
+    home_cli_mint_request,
+};
 #[cfg(test)]
 pub(in crate::api) use gateway_home_token::{
     issue_expired_home_launch_token_with_context, issue_home_launch_token,
@@ -757,6 +762,14 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
             post(home_cli_mint_approve).layer(DefaultBodyLimit::max(96 * 1024)),
         )
         .route(
+            "/api/home/cli-mint/claim",
+            post(home_cli_mint_claim).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
+            "/api/home/cli-mint/cancel",
+            post(home_cli_mint_cancel).layer(DefaultBodyLimit::max(8 * 1024)),
+        )
+        .route(
             "/api/browser/session/request",
             post(super::browser_sessions::browser_session_request),
         )
@@ -880,6 +893,8 @@ fn gateway_router_with_api_url(state: GatewayState, gateway_api_url: String) -> 
         .route("/api/apps/system/agents/retire", post(agents_retire))
         .route("/api/apps/system/agents/rename", post(agents_rename))
         .route("/api/apps/system/agents/activate", post(agents_activate))
+        .route("/api/apps/system/agents/launch", post(agents_launch))
+        .route("/api/apps/system/agents/stop", post(agents_stop))
         .route(
             "/api/apps/system/community",
             get(system_community_membership_get).post(system_community_membership_update),

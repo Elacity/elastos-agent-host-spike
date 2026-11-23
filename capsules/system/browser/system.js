@@ -213,7 +213,7 @@ async function boot() {
   loadAgents = bindAgents(document, (path, init = {}) => fetchJson(path, {
     ...init,
     headers: shellHeaders(init.body ? { "content-type": "application/json" } : {}),
-  })).load;
+  }), (agent) => requestPasskeyStepUp("agent.start", { agent_id: agent.agent_id })).load;
   if (document.querySelector('.settings-content[data-settings="agents"].active')) loadAgents();
   configureAppearanceEditor();
   configureAppearancePreferences();

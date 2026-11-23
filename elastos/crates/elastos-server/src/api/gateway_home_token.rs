@@ -105,7 +105,7 @@ impl HomeLaunchContext {
         }
     }
 
-    fn projection(selected_resource: &str, executable_actor: &str) -> Self {
+    pub(in crate::api) fn projection(selected_resource: &str, executable_actor: &str) -> Self {
         Self {
             schema: HOME_LAUNCH_CONTEXT_SCHEMA.to_string(),
             selected_resource: selected_resource.to_string(),
@@ -426,9 +426,10 @@ pub(in crate::api) fn issue_home_projection_launch_token_with_context(
     )
 }
 
-/// A fresh fixture grant for one Agent Host start. The System issuer follows
-/// in the next slice; these router tests exercise Runtime admission now.
-#[cfg(test)]
+/// The internal grant for one Agent Host start. The resource is that agent,
+/// the executable is the host `verify_agent_host` named, and the lifetime is
+/// at most 60 seconds. The System route calls this only after it has consumed
+/// the one-use passkey step-up for the same agent.
 pub(in crate::api) fn issue_home_agent_launch_token_with_context(
     data_dir: &std::path::Path,
     agent_id: &str,
@@ -437,13 +438,43 @@ pub(in crate::api) fn issue_home_agent_launch_token_with_context(
 ) -> anyhow::Result<String> {
     let issued_at = now_ts();
     let expiry = grant_bound_token_expiry(data_dir, context, issued_at, 60)?;
-    issue_home_launch_token_at(
+    let token = issue_home_launch_token_at(
         data_dir,
         &HomeLaunchContext::projection(&format!("elastos://agent/{agent_id}"), executable_actor),
         context,
         issued_at,
         Some(expiry),
-    )
+    )?;
+    #[cfg(test)]
+    note_agent_launch_grant_minted(data_dir);
+    Ok(token)
+}
+
+/// Counts grants this process minted for one Home. A refused Start stays at
+/// zero, including a refusal that happens before the guest is asked to run.
+#[cfg(test)]
+static AGENT_LAUNCH_GRANTS_MINTED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn note_agent_launch_grant_minted(data_dir: &std::path::Path) {
+    *AGENT_LAUNCH_GRANTS_MINTED
+        .lock()
+        .expect("agent launch mint counter")
+        .entry(data_dir.to_path_buf())
+        .or_insert(0) += 1;
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(in crate::api) fn agent_launch_grants_minted_for_test(data_dir: &std::path::Path) -> u64 {
+    AGENT_LAUNCH_GRANTS_MINTED
+        .lock()
+        .expect("agent launch mint counter")
+        .get(data_dir)
+        .copied()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -484,13 +515,42 @@ pub(crate) fn issue_home_projection_launch_token_with_context_at(
     )
 }
 
-fn issue_home_launch_token_at(
+#[cfg(test)]
+static HOME_LAUNCH_SIGNATURE_CALLS: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn note_home_launch_signature_for_test(data_dir: &std::path::Path) {
+    let mut guard = HOME_LAUNCH_SIGNATURE_CALLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = guard.iter_mut().find(|(path, _)| path == data_dir) {
+        entry.1 = entry.1.saturating_add(1);
+    } else {
+        guard.push((data_dir.to_path_buf(), 1));
+    }
+}
+
+#[cfg(test)]
+pub(super) fn home_launch_signature_calls_for_test(data_dir: &std::path::Path) -> u64 {
+    HOME_LAUNCH_SIGNATURE_CALLS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .find(|(path, _)| path == data_dir)
+        .map(|(_, count)| *count)
+        .unwrap_or(0)
+}
+
+pub(in crate::api) fn issue_home_launch_token_at(
     data_dir: &std::path::Path,
     launch_context: &HomeLaunchContext,
     context: &HomeLaunchTokenContext,
     issued_at: u64,
     grant_expires_at: Option<u64>,
 ) -> anyhow::Result<String> {
+    #[cfg(test)]
+    note_home_launch_signature_for_test(data_dir);
     launch_context.validate()?;
     if context.principal_id().trim().is_empty()
         || context.session_id().trim().is_empty()

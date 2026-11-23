@@ -9168,14 +9168,24 @@ pub async fn production_after() {
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("issue_home_launch_token_at("),
-            expected_counts(&[("elastos-server/src/api/gateway_home_token.rs", 4)]),
-            "the one signing issuer's callers"
+            expected_counts(&[
+                ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
+                ("elastos-server/src/api/gateway_home_token.rs", 5),
+            ]),
+            "the one signing issuer's callers, including the agent start grant"
+        );
+        assert_eq!(
+            production_counts_ignoring_cfg_test("issue_home_agent_launch_token_with_context("),
+            expected_counts(&[("elastos-server/src/api/gateway_agents.rs", 1)]),
+            "agent start grant issuer callers"
         );
         assert_eq!(
             production_counts_ignoring_cfg_test("HomeLaunchTokenContext::resolved("),
             expected_counts(&[
                 ("elastos-server/src/api/auth_gateway.rs", 2),
                 ("elastos-server/src/api/gateway.rs", 1),
+                // The claim rebuilds the approved binding, then the existing signer uses it.
+                ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
                 ("elastos-server/src/api/gateway_home_system.rs", 2),
                 ("elastos-server/src/api/gateway_home_token.rs", 4),
                 ("elastos-server/src/api/gateway_model_service.rs", 1),

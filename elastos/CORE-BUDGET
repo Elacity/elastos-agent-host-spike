@@ -18,6 +18,8 @@
 # before this PR, recorded here so the budget matches reality.
 # +173 more after main merged #1750 (B3 S1: the macOS DID helper starts confined under
 # Seatbelt, os_entry.rs macos_start) without a budget change; measured on the merged tree
-# 22 Nov 2026 and recorded so the budget matches reality. This PR adds no core lines beyond
+# 22 Nov 2026 and recorded so the budget matches reality. Slice 1 adds no core lines beyond
 # its +12.
-12305
+# +15 lines for the owner's Stop audit on CapsuleStop (A15-R slice 3): agent id, owner,
+# host bundle CID, launch id, and session. Measured 22 Nov 2026.
+12320

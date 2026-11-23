@@ -13585,12 +13585,46 @@ pub(crate) mod tests {
         let metadata_from_real_holder = metadata == index;
 
         // The real holder saw only bounded reads, one per piece, none whole-file.
-        let served = holder_requests.lock().unwrap().clone();
-        assert_eq!(
-            served.len(),
-            4 + 1 + 1 + usize::from(metadata_from_real_holder),
-            "{served:#?}"
-        );
+        // A busy machine can push the real holder's answer past the consumer's
+        // 5 s Carrier timeout; the consumer then fails over to the next holder,
+        // and the abandoned read still lands in this log a moment later. Wait,
+        // bounded, for the log to settle before counting it.
+        let settle_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let served = loop {
+            let served = holder_requests.lock().unwrap().clone();
+            let weight_read_count = served
+                .iter()
+                .filter(|request| request["path"] == "weights.gguf")
+                .count();
+            let manifest_read_count = served.len() - weight_read_count;
+            // Every exact read is logged before its answer reaches the consumer.
+            // The metadata read is logged once the real holder has answered it;
+            // after a timeout fail-over its abandoned read lands a moment later,
+            // so wait for that record and accept its absence only once the wait
+            // is spent.
+            let settled = weight_read_count == 4 + 1 + 1
+                && (manifest_read_count == 1
+                    || (!metadata_from_real_holder
+                        && tokio::time::Instant::now() >= settle_deadline));
+            if settled {
+                break served;
+            }
+            assert!(
+                tokio::time::Instant::now() < settle_deadline,
+                "holder request log did not settle within 30 seconds: {served:#?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        };
+        let weight_read_count = served
+            .iter()
+            .filter(|request| request["path"] == "weights.gguf")
+            .count();
+        let manifest_read_count = served.len() - weight_read_count;
+        assert_eq!(weight_read_count, 4 + 1 + 1, "{served:#?}");
+        assert!(manifest_read_count <= 1, "{served:#?}");
+        if metadata_from_real_holder {
+            assert_eq!(manifest_read_count, 1, "{served:#?}");
+        }
         for request in &served {
             assert_eq!(request["op"], "cat");
             assert_eq!(request["bounded_read"], true);
@@ -13874,6 +13908,56 @@ pub(crate) mod tests {
             }}))
         }
     }
+
+    /// Waits until `endpoint` has a verified direct route to `addr` and the
+    /// invoker holds a live client for it.
+    ///
+    /// A bounded PeerDid fetch that starts before that registration fails
+    /// closed with "no verified Carrier route" instead of the answer deadline.
+    /// This wait has its own bound. It does not change the route budget the
+    /// caller is measuring.
+    async fn wait_for_verified_peer_route(
+        invoker: &CarrierProviderInvoker,
+        endpoint: &Endpoint,
+        addr: &iroh::EndpointAddr,
+    ) {
+        const BOUND: Duration = Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + BOUND;
+        let mut last_error = String::from("the peer has no verified Carrier route");
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                panic!(
+                    "verified Carrier route to {} was not registered within {BOUND:?}: {last_error}",
+                    addr.id
+                );
+            }
+            let attempt = remaining.min(Duration::from_secs(3));
+            let timeout_secs = attempt.as_secs().max(1);
+            match tokio::time::timeout(
+                attempt,
+                invoker.connected_client(endpoint, addr.clone(), timeout_secs),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
+                    let registered = endpoint.remote_info(addr.id).await.is_some_and(|info| {
+                        info.addrs()
+                            .any(|item| matches!(item.addr(), iroh::TransportAddr::Ip(_)))
+                    });
+                    if registered {
+                        return;
+                    }
+                    last_error = "dial succeeded before the endpoint registered a direct address"
+                        .to_string();
+                }
+                Ok(Err(err)) => last_error = err.to_string(),
+                Err(_) => last_error = format!("dial exceeded {attempt:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_response_deadline_applies_only_to_bounded_content_fetch() {
@@ -13888,13 +13972,12 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+        let local_invoker = Arc::new(CarrierProviderInvoker::with_carrier_endpoint_and_registry(
+            local_node.endpoint.clone(),
+            Arc::downgrade(&local_registry),
+        ));
         local_registry
-            .set_carrier_invoker(Arc::new(
-                CarrierProviderInvoker::with_carrier_endpoint_and_registry(
-                    local_node.endpoint.clone(),
-                    Arc::downgrade(&local_registry),
-                ),
-            ))
+            .set_carrier_invoker(local_invoker.clone())
             .await;
         let slow = start_holder_runtime(
             88,
@@ -13977,6 +14060,9 @@ pub(crate) mod tests {
                 });
             invocation
         };
+        // The ticket fetch's answer deadline dropped the live client. PeerDid
+        // resolves the peer id, so these calls start once that route is back.
+        wait_for_verified_peer_route(&local_invoker, &local_node.endpoint, &slow.addr).await;
         let response = local_registry
             .invoke_provider(by_did(
                 "import_exact",
@@ -14025,6 +14111,9 @@ pub(crate) mod tests {
         {
             *reply_wait_ms = Some(1_500);
         }
+        // The peer-DID fetch above drops the client when its answer deadline
+        // fires. Remembering the ticket does not open the route.
+        wait_for_verified_peer_route(&local_invoker, &local_node.endpoint, &slow.addr).await;
         let err = local_registry
             .invoke_provider(bounded_with_longer_reply_wait)
             .await

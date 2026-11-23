@@ -159,10 +159,20 @@ pub async fn launch_capsule(
     // the status and cause when the guest ends.
     let started = match admission {
         Some(admission) => {
-            let (_, _, _, launch_id, expires_at) =
+            let (agent_id, owner, host_cid, launch_id, expires_at) =
                 agent_audit.as_ref().expect("agent admission has a grant");
             runtime
-                .start_agent_once(path, admission, launch_id, *expires_at)
+                .start_agent_once(
+                    path,
+                    admission,
+                    crate::runtime::AgentStartFacts {
+                        agent_id,
+                        owner,
+                        host_cid,
+                        launch_id,
+                        expires_at: *expires_at,
+                    },
+                )
                 .await
         }
         None => {
@@ -414,6 +424,132 @@ pub async fn stop_capsule(
         )
             .into_response(),
     }
+}
+
+/// Body of `POST /api/capsules/stop-agent`. The only selector is the agent
+/// id, which is the principal on the Runtime row. A capsule name is not a
+/// field: an unknown field is refused and nothing is stopped.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopAgentRequest {
+    agent_id: String,
+}
+
+#[derive(Serialize)]
+struct StoppedAgentBody {
+    session_id: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct StopAgentResponse {
+    stopped: Vec<StoppedAgentBody>,
+    /// `stopping` or `stopped` when this call found the sessions already
+    /// ending and did not stop a further row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    already: Option<String>,
+}
+
+/// Stops every live row whose principal is this agent. The start record is
+/// checked before the row is stopped: a missing record, or one that names
+/// another agent, is refused and that row stays up. The session's one end
+/// writes the one audit, with the reason of that end, and then drops the
+/// record. This route does not write a second one. A row is chosen by the
+/// principal. The host's capsule name is not read.
+pub async fn stop_agent_session(
+    Extension(runtime): Extension<Arc<Runtime>>,
+    Extension(_audit_log): Extension<Arc<AuditLog>>,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let request = match serde_json::from_slice::<StopAgentRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            let refusal =
+                serde_json::json!({"error": "invalid_stop_request", "detail": error.to_string()});
+            return (StatusCode::BAD_REQUEST, Json(refusal)).into_response();
+        }
+    };
+    let agent_id = request.agent_id;
+    if agent_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "an agent stop needs an agent id".to_string(),
+        )
+            .into_response();
+    }
+    let ids = runtime.live_sessions_for_agent(&agent_id).await;
+    if ids.is_empty() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("agent {agent_id} has no running session"),
+        )
+            .into_response();
+    }
+    let mut ready = Vec::new();
+    let mut refusal: Option<&'static str> = None;
+    for id in &ids {
+        let Some(info) = runtime.get_capsule(id).await else {
+            continue;
+        };
+        if info.ended_at.is_some() {
+            continue;
+        }
+        match runtime.agent_session(id).await {
+            Some(record) if record.agent_id == agent_id => ready.push(id.clone()),
+            Some(_) => {
+                refusal = Some("agent session record names a different agent");
+            }
+            None => {
+                refusal = Some("agent session has no start record");
+            }
+        }
+    }
+    if ready.is_empty() {
+        if let Some(reason) = refusal {
+            return (StatusCode::CONFLICT, reason.to_string()).into_response();
+        }
+        return (
+            StatusCode::OK,
+            Json(StopAgentResponse {
+                stopped: Vec::new(),
+                already: Some("stopped".to_string()),
+            }),
+        )
+            .into_response();
+    }
+    let mut stopped = Vec::with_capacity(ready.len());
+    for id in ready {
+        let matches = runtime
+            .agent_session(&id)
+            .await
+            .is_some_and(|record| record.agent_id == agent_id);
+        if !matches {
+            if let Some(info) = runtime.get_capsule(&id).await {
+                stopped.push(StoppedAgentBody {
+                    session_id: info.session_id,
+                    status: info.status,
+                });
+            }
+            continue;
+        }
+        let info = match runtime.stop_capsule_with_reason(&id, "owner").await {
+            Ok(Some(info)) => info,
+            Ok(None) => continue,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to stop agent session: {error}"),
+                )
+                    .into_response();
+            }
+        };
+        stopped.push(StoppedAgentBody {
+            session_id: info.session_id,
+            status: info.status,
+        });
+    }
+    let already = stopped.is_empty().then(|| "stopped".to_string());
+    (StatusCode::OK, Json(StopAgentResponse { stopped, already })).into_response()
 }
 
 #[cfg(test)]
@@ -7519,7 +7655,17 @@ pub(crate) mod tests {
         }
         let err = home
             .runtime
-            .start_agent_once(&home.capsule_dir, admission, &launch_id, verified_exp)
+            .start_agent_once(
+                &home.capsule_dir,
+                admission,
+                crate::runtime::AgentStartFacts {
+                    agent_id: agent,
+                    owner: principal.as_str(),
+                    host_cid: "cid",
+                    launch_id: &launch_id,
+                    expires_at: verified_exp,
+                },
+            )
             .await
             .expect_err("the runtime gate refuses the expired grant");
         match err {
@@ -7621,6 +7767,184 @@ pub(crate) mod tests {
         home.wait_ended(answer["session_id"].as_str().unwrap())
             .await;
         grants.abort();
+    }
+
+    #[tokio::test]
+    async fn agent_launch_end_records_the_real_reason_and_drops_the_session() {
+        use elastos_runtime::primitives::audit::{AuditEvent, StopReason};
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["a"]).await;
+        let agent = &home.agents[0];
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        let (status, body) = post_agent_grant(&home, agent, &grant).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let session = answer["session_id"].as_str().unwrap().to_string();
+        home.wait_pending(&session).await;
+        assert!(
+            home.runtime.agent_session(&session).await.is_some(),
+            "the running guest has no start record"
+        );
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let ended = home.wait_ended(&session).await;
+        grants.abort();
+        assert_eq!(ended.cause.as_deref(), Some("completed"));
+        // `ended_at` is published before the start record is removed, so the
+        // wait can return in that gap. The record is gone once the end returns.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if home.runtime.agent_session(&session).await.is_none() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a guest that ended on its own kept its start record");
+        let stops: Vec<_> = home
+            .audit_log
+            .recent_events(usize::MAX)
+            .into_iter()
+            .filter_map(|event| match event {
+                AuditEvent::CapsuleStop {
+                    capsule_id,
+                    reason,
+                    agent_id,
+                    owner,
+                    cid,
+                    launch_id,
+                    session_id,
+                    ..
+                } if capsule_id == session => {
+                    Some((reason, agent_id, owner, cid, launch_id, session_id))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stops.len(),
+            1,
+            "the guest's own end wrote one stop: {stops:?}"
+        );
+        assert!(
+            matches!(stops[0].0, StopReason::Completed),
+            "a guest that ended on its own was audited as requested: {stops:?}"
+        );
+        assert_eq!(stops[0].1.as_deref(), Some(agent.as_str()));
+        assert_eq!(stops[0].2.as_deref(), Some(home.owner.as_str()));
+        assert!(stops[0].3.as_ref().is_some_and(|cid| !cid.is_empty()));
+        assert!(stops[0]
+            .4
+            .as_ref()
+            .is_some_and(|id| id.starts_with("launch:")));
+        assert_eq!(stops[0].5.as_deref(), Some(session.as_str()));
+        let response = stop_agent_session(
+            Extension(home.runtime.clone()),
+            Extension(home.audit_log.clone()),
+            axum::body::Bytes::from(serde_json::json!({ "agent_id": agent }).to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let again = home.audit_log.recent_events(usize::MAX).into_iter().filter(|event| {
+            matches!(event, AuditEvent::CapsuleStop { capsule_id, .. } if capsule_id == &session)
+        }).count();
+        assert_eq!(
+            again, 1,
+            "a stop after the guest ended wrote another record"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_launch_stop_route_follows_the_build() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use elastos_runtime::capability::{
+            CapabilityManager, CapabilityStore, PendingRequestStore,
+        };
+        use elastos_runtime::primitives::metrics::MetricsManager;
+        use elastos_runtime::session::SessionRegistry;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"))
+                .await
+                .unwrap(),
+        );
+        let runtime = Arc::new(Runtime::with_providers_and_component(
+            storage,
+            Vec::new(),
+            None,
+        ));
+        let audit = Arc::new(AuditLog::new());
+        let sessions = Arc::new(SessionRegistry::new(audit.clone()));
+        let shell = sessions
+            .create_session(elastos_runtime::session::SessionType::Shell, None)
+            .await;
+        let store = Arc::new(CapabilityStore::new());
+        let manager = Arc::new(CapabilityManager::new(
+            store.clone(),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit));
+        let app = crate::api::server::tests::test_server(
+            runtime,
+            sessions,
+            manager,
+            store,
+            pending,
+            Some(dir.path().to_path_buf()),
+        );
+        // A shell session gets past the router's auth. An empty body then
+        // reaches the stop handler only when that route is mounted. An
+        // unmatched path on this router is 404, or 405 where `/:id` is the
+        // only capsules path.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/capsules/stop-agent")
+                    .header("content-type", "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {}", shell.token),
+                    )
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        if crate::agents::build_allows() {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+            assert!(
+                text.contains("invalid_stop_request"),
+                "the agents build did not run the stop handler: {status} {text}"
+            );
+        } else {
+            assert!(
+                status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED,
+                "a build without agents mounted stop-agent: {status} {text}"
+            );
+            assert!(
+                !text.contains("invalid_stop_request"),
+                "a build without agents ran the stop handler: {text}"
+            );
+        }
     }
 
     #[tokio::test]

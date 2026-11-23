@@ -372,6 +372,7 @@ dependencies = [
  "elastos-common",
  "rustix",
  "sha2",
+ "windows-sys",
 ]
 
 [[package]]

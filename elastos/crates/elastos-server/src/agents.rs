@@ -1115,6 +1115,37 @@ pub(crate) fn stored_agent(
     Ok(agent.clone())
 }
 
+/// One stored agent of `owner_id`, for a Stop. The owner must own the record.
+/// The agent may be off or retired, and the Home may have turned agents off:
+/// a running guest stays stoppable by that owner. Another owner's agent is
+/// refused, the same way a launch lookup refuses it.
+pub(crate) fn stored_agent_for_stop(
+    data_dir: &Path,
+    owner_id: &str,
+    agent_id: &str,
+) -> anyhow::Result<StoredAgent> {
+    if !build_allows_for_home(data_dir) {
+        return refused(FEATURE_OFF);
+    }
+    let opened = open(data_dir, false)?;
+    let Some(owner) = opened
+        .owner_file
+        .iter()
+        .find(|record| record.principal_id == owner_id && is_person(record))
+    else {
+        return refused(NOT_A_PERSON);
+    };
+    let Some(agent) = opened
+        .file
+        .agents
+        .iter()
+        .find(|agent| agent.record.principal_id == agent_id && owned_by(agent, owner))
+    else {
+        return refused(NO_SUCH_AGENT);
+    };
+    Ok(agent.clone())
+}
+
 /// The agent file's record for one principal and root, while agents are on for
 /// this Home. `None` in a build without the feature, while they are off, and
 /// for any id or root the file does not hold.
