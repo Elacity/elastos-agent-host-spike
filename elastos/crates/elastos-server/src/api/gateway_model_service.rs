@@ -973,6 +973,7 @@ async fn read_authority(
     source: iroh::PublicKey,
     grant_id: &str,
     requester_principal_id: &str,
+    now: u64,
 ) -> anyhow::Result<ModelServiceGrant> {
     let data_dir = data_dir.to_path_buf();
     let network = network.clone();
@@ -980,16 +981,16 @@ async fn read_authority(
     let requester_principal_id = requester_principal_id.to_string();
     match tokio::time::timeout(
         AUTHORITY_DEADLINE,
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(crate::operation_clock::inherit_readings(move || {
             super::gateway_home_system::authorize_home_service_model(
                 &data_dir,
                 &network,
                 &source,
                 &grant_id,
                 &requester_principal_id,
-                crate::auth::now_ts(),
+                now,
             )
-        }),
+        })),
     )
     .await
     {
@@ -1017,7 +1018,16 @@ async fn check_authority(
     requester_principal_id: &str,
     now: u64,
 ) -> AuthorityCheck {
-    match read_authority(data_dir, network, source, grant_id, requester_principal_id).await {
+    match read_authority(
+        data_dir,
+        network,
+        source,
+        grant_id,
+        requester_principal_id,
+        now,
+    )
+    .await
+    {
         Ok(grant) => match grant.validate(&source, requester_principal_id, now) {
             Ok(()) => AuthorityCheck::Active(grant),
             Err(err) => {
@@ -1322,7 +1332,7 @@ pub(crate) async fn invoke(
         Ok(did) => did,
         Err(_) => return denied("denied", "model requester identity is invalid"),
     };
-    let now = crate::auth::now_ts();
+    let now = crate::operation_clock::now_ts();
 
     // A fresh local request: only the fields the typed contract accepts. The
     // normalizer takes the operation as a parameter and sets `op` itself.
@@ -1948,6 +1958,85 @@ mod tests {
         assert_eq!(id, model_grant_id("request-1"));
         assert!(id.starts_with("services-remote-model-grant-"));
         assert_ne!(id, crate::carrier::engine_grant_id("request-1"));
+    }
+
+    /// A signed profile for one test network, as a Home's configured profile.
+    fn verified_network_profile_for_test(
+        signing_key: &elastos_runtime::signature::SigningKey,
+    ) -> crate::collaboration_network::VerifiedCollaborationNetworkProfile {
+        use crate::collaboration_network::{
+            canonical_collaboration_network_profile_payload_bytes, CollaborationNetworkProfile,
+            CollaborationNetworkProfileMode, SignedCollaborationNetworkProfile,
+            COLLABORATION_NETWORK_PROFILE_SCHEMA, COLLABORATION_NETWORK_PROFILE_SIGNATURE_DOMAIN,
+        };
+        let network_id = "clockprod2-network";
+        let signer_did = crate::crypto::encode_signing_key_did(signing_key);
+        let payload = CollaborationNetworkProfile {
+            schema: COLLABORATION_NETWORK_PROFILE_SCHEMA.to_string(),
+            network_id: network_id.to_string(),
+            revision: 1,
+            previous_profile_sha256: None,
+            signer_did: signer_did.clone(),
+            bootstrap_peers: Vec::new(),
+            default_conversation: None,
+        };
+        let payload_bytes =
+            canonical_collaboration_network_profile_payload_bytes(&payload).unwrap();
+        let (signature, envelope_signer_did) = crate::crypto::domain_separated_sign(
+            signing_key,
+            COLLABORATION_NETWORK_PROFILE_SIGNATURE_DOMAIN,
+            &payload_bytes,
+        );
+        let envelope = SignedCollaborationNetworkProfile {
+            payload,
+            signature,
+            signer_did: envelope_signer_did,
+        };
+        let bytes = serde_json::to_vec(&serde_json::to_value(envelope).unwrap()).unwrap();
+        match crate::collaboration_network::validate_collaboration_network_profile(
+            Some(&bytes),
+            network_id,
+            &[signer_did],
+            None,
+        )
+        .unwrap()
+        {
+            CollaborationNetworkProfileMode::Configured(profile) => profile,
+            CollaborationNetworkProfileMode::Isolated => {
+                panic!("expected a configured collaboration network")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn model_authority_check_takes_one_reading_under_a_backward_step() {
+        let (signing_key, _) = elastos_runtime::signature::generate_keypair();
+        let network = verified_network_profile_for_test(&signing_key);
+        let source = iroh::SecretKey::from_bytes(&[74; 32]).public();
+        let data_dir = tempfile::tempdir().unwrap();
+        let now = crate::auth::now_ts();
+        let _armed = crate::operation_clock::arm(now, now.saturating_sub(120));
+        // The operation's one reading; the authority read and the grant
+        // validation of the same check must both use it.
+        let operation_now = crate::operation_clock::now_ts();
+        let check = check_authority(
+            data_dir.path(),
+            &network,
+            source,
+            "clockprod2-grant",
+            "clockprod2-principal",
+            operation_now,
+        )
+        .await;
+        assert!(
+            matches!(check, AuthorityCheck::Inactive),
+            "an empty Home issues no model grant"
+        );
+        assert_eq!(
+            crate::operation_clock::reads(),
+            1,
+            "one model authority check must take one clock reading"
+        );
     }
 
     #[test]
