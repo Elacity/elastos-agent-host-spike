@@ -23,6 +23,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_GENERIC_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, WRITE_DAC,
     WRITE_OWNER,
 };
+use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::{foreign, io_at};
@@ -31,6 +32,9 @@ use crate::CustodyError;
 pub(super) const OWNER_USE: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
 
 /// Write rights that let another user add, replace, or retarget a child.
+///
+/// `MAXIMUM_ALLOWED` asks for every access right the caller can hold. An allow
+/// ACE with that bit can write, so it counts here.
 const OTHER_WRITE: u32 = FILE_WRITE_DATA
     | FILE_APPEND_DATA
     | FILE_WRITE_EA
@@ -41,7 +45,7 @@ const OTHER_WRITE: u32 = FILE_WRITE_DATA
     | WRITE_OWNER
     | GENERIC_WRITE
     | GENERIC_ALL
-    | 0x0200_0000;
+    | MAXIMUM_ALLOWED;
 
 pub(super) struct BuiltSd {
     pub(super) acl: Vec<u64>,

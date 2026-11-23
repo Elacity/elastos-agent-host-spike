@@ -4,6 +4,7 @@
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -20,18 +21,19 @@ use windows_sys::Win32::Security::{
     PSID,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FileAttributeTagInfo, FileDispositionInfoEx, GetFileInformationByHandleEx,
+    FileAttributeTagInfo, FileDispositionInfoEx, FileRenameInfo, GetFileInformationByHandleEx,
     SetFileInformationByHandle, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_INFO_EX,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE,
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC, WRITE_OWNER,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_RENAME_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, READ_CONTROL, SYNCHRONIZE, WRITE_DAC,
+    WRITE_OWNER,
 };
 
 use super::sd::{build_sd, current_user_sid, verify_not_writable_by_others, verify_owner_only};
 use super::{invalid, io_at, reparse_at};
-use crate::name::absolute_local_disk;
+use crate::name::{absolute_local_disk, one_component_name};
 use crate::CustodyError;
 
 /// How the final component is opened.
@@ -53,7 +55,16 @@ pub const READ_WRITE: u32 = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
 /// Open or create `path` as a file. The returned handle has `access` plus the
 /// rights used to read the DACL. A missing parent is an error.
 pub fn open_owner_file(path: &Path, access: u32, disp: Disp) -> Result<File, CustodyError> {
-    open_at(path, access, disp, false, true)
+    open_at(path, access, disp, false, true, false)
+}
+
+/// Read an existing owner-only file while this process already holds it open.
+///
+/// Create opens the handle with `DELETE`. A later [`open_owner_file`] does not
+/// share delete, so it cannot open that same name until the first handle
+/// closes. The lock re-check uses this open.
+pub fn reopen_owner_file(path: &Path) -> Result<File, CustodyError> {
+    open_at(path, READ_EXISTING, Disp::OpenExisting, false, true, true)
 }
 
 /// Create `path` as a directory with the owner-only DACL. The parent must exist.
@@ -64,12 +75,20 @@ pub fn create_owner_dir(path: &Path) -> Result<File, CustodyError> {
         Disp::CreateNew,
         true,
         true,
+        false,
     )
 }
 
 /// Open an existing directory and require the owner-only DACL.
 pub fn open_owner_dir(path: &Path) -> Result<File, CustodyError> {
-    open_at(path, FILE_GENERIC_READ, Disp::OpenExisting, true, true)
+    open_at(
+        path,
+        FILE_GENERIC_READ,
+        Disp::OpenExisting,
+        true,
+        true,
+        false,
+    )
 }
 
 /// The directory is not a reparse point. The current user owns it. No ACE grants
@@ -78,8 +97,91 @@ pub fn open_owner_dir(path: &Path) -> Result<File, CustodyError> {
 /// A directory Home creates still uses [`create_owner_dir`]. This check is only
 /// for a directory that already existed, such as the operator data root.
 pub fn refuse_other_writers(path: &Path) -> Result<(), CustodyError> {
-    let file = open_at(path, FILE_GENERIC_READ, Disp::OpenExisting, true, false)?;
+    let file = open_at(
+        path,
+        FILE_GENERIC_READ,
+        Disp::OpenExisting,
+        true,
+        false,
+        false,
+    )?;
     verify_not_writable_by_others(&file, path)
+}
+
+/// Rename the open file `source` to `dest_name` inside `directory`.
+///
+/// The directory open is handle-relative. A reparse point on the directory,
+/// on `source`, or on `dest_name` is refused. `dest_name` is one component.
+/// The file keeps the security descriptor it already has; this call does not
+/// write a new DACL. When `replace_existing` is false, an existing destination
+/// is left in place.
+///
+/// `source` must be a handle from [`open_owner_file`] with [`Disp::CreateNew`]:
+/// that open includes `DELETE`, which the rename requires. A later slice can
+/// use `replace_existing` for an owner-only file in the same directory.
+pub fn rename_owner_file(
+    directory: &Path,
+    source: &File,
+    source_path: &Path,
+    dest_name: &OsStr,
+    replace_existing: bool,
+) -> Result<(), CustodyError> {
+    if !one_component_name(dest_name) {
+        return Err(invalid(
+            &directory.join(dest_name),
+            "child name is not one component",
+        ));
+    }
+    if is_reparse(source).map_err(|error| io_at(source_path, error))? {
+        return Err(reparse_at(source_path));
+    }
+    verify_owner_only(source, source_path)?;
+    let dir = open_at(
+        directory,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        Disp::OpenExisting,
+        true,
+        true,
+        false,
+    )?;
+    let dest_path = directory.join(dest_name);
+    match open_any(&dir, dest_name) {
+        Ok(found) => {
+            let (reparse, is_dir) = flags(&found).map_err(|error| io_at(&dest_path, error))?;
+            drop(found);
+            if reparse {
+                return Err(reparse_at(&dest_path));
+            }
+            if is_dir {
+                return Err(io_at(
+                    &dest_path,
+                    io::Error::new(io::ErrorKind::IsADirectory, "owner-only rename destination"),
+                ));
+            }
+            if !replace_existing {
+                return Err(io_at(
+                    &dest_path,
+                    io::Error::new(io::ErrorKind::AlreadyExists, "already exists"),
+                ));
+            }
+            let existing = open_existing(&dir, dest_name, FILE_GENERIC_READ, false, false)
+                .map_err(|error| io_at(&dest_path, error))?;
+            verify_owner_only(&existing, &dest_path)?;
+            drop(existing);
+        }
+        Err(error) if missing(&error) => {}
+        Err(error) => return Err(io_at(&dest_path, error)),
+    }
+    rename_handle(&dir, source, dest_name, replace_existing)
+        .map_err(|error| io_at(&dest_path, error))
+}
+
+/// Mark `file` for deletion. The name is removed when its last handle closes.
+///
+/// `file` must have been opened with `DELETE`, which an owner-only create is.
+/// The delete is the open handle, not a path lookup.
+pub fn discard_owner_file(file: &File, path: &Path) -> Result<(), CustodyError> {
+    delete_new(file).map_err(|error| io_at(path, error))
 }
 
 fn open_at(
@@ -88,6 +190,7 @@ fn open_at(
     disp: Disp,
     directory: bool,
     owner_only: bool,
+    share_delete: bool,
 ) -> Result<File, CustodyError> {
     let (drive, names) = local_names(path)?;
     let (leaf, parents) = names
@@ -117,20 +220,43 @@ fn open_at(
         let child = open_parent(&current, name, parent_add, &walked)?;
         kept.push(std::mem::replace(&mut current, child));
     }
-    let file = open_leaf(&current, leaf, path, access, disp, directory, owner_only)?;
+    let file = open_leaf(
+        &current,
+        leaf,
+        path,
+        LeafOpen {
+            access,
+            disp,
+            directory,
+            owner_only,
+            share_delete,
+        },
+    )?;
     drop(kept);
     Ok(file)
+}
+
+struct LeafOpen {
+    access: u32,
+    disp: Disp,
+    directory: bool,
+    owner_only: bool,
+    share_delete: bool,
 }
 
 fn open_leaf(
     parent: &File,
     name: &OsStr,
     path: &Path,
-    access: u32,
-    disp: Disp,
-    directory: bool,
-    owner_only: bool,
+    leaf: LeafOpen,
 ) -> Result<File, CustodyError> {
+    let LeafOpen {
+        access,
+        disp,
+        directory,
+        owner_only,
+        share_delete,
+    } = leaf;
     match open_any(parent, name) {
         Ok(found) => {
             let (reparse, is_dir) = flags(&found).map_err(|error| io_at(path, error))?;
@@ -152,7 +278,7 @@ fn open_leaf(
                     io::Error::new(io::ErrorKind::AlreadyExists, "already exists"),
                 ));
             }
-            let file = open_existing(parent, name, access, directory)
+            let file = open_existing(parent, name, access, directory, share_delete)
                 .map_err(|error| io_at(path, error))?;
             if is_reparse(&file).map_err(|error| io_at(path, error))? {
                 return Err(reparse_at(path));
@@ -345,7 +471,14 @@ fn open_any(parent: &File, name: &OsStr) -> io::Result<File> {
     }
 }
 
-fn open_existing(parent: &File, name: &OsStr, access: u32, directory: bool) -> io::Result<File> {
+fn open_existing(
+    parent: &File,
+    name: &OsStr,
+    access: u32,
+    directory: bool,
+    share_delete: bool,
+) -> io::Result<File> {
+    let share = SHARE_DIR | if share_delete { FILE_SHARE_DELETE } else { 0 };
     // SAFETY: `security` is null. The kernel reads no security descriptor.
     unsafe {
         windows_handle::open_relative(
@@ -353,13 +486,66 @@ fn open_existing(parent: &File, name: &OsStr, access: u32, directory: bool) -> i
             name,
             windows_handle::RelativeOpen {
                 access: access | READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-                share: SHARE_DIR,
+                share,
                 disposition: FILE_OPEN,
                 options: leaf_options(directory),
                 attributes: 0,
                 security: std::ptr::null(),
             },
         )
+    }
+}
+
+fn rename_handle(
+    directory: &File,
+    source: &File,
+    dest_name: &OsStr,
+    replace_existing: bool,
+) -> io::Result<()> {
+    let mut wide: Vec<u16> = dest_name.encode_wide().collect();
+    if wide.is_empty() || wide.len() > 255 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "child name is not one component",
+        ));
+    }
+    // FileName is a NUL-terminated wide string. FileNameLength excludes the NUL.
+    wide.push(0);
+    let name_bytes = ((wide.len() - 1) * 2) as u32;
+    const REPLACE_AT: usize = std::mem::offset_of!(FILE_RENAME_INFO, Anonymous);
+    const ROOT_AT: usize = std::mem::offset_of!(FILE_RENAME_INFO, RootDirectory);
+    const LEN_AT: usize = std::mem::offset_of!(FILE_RENAME_INFO, FileNameLength);
+    const NAME_AT: usize = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    const ROOT_LEN: usize = std::mem::size_of::<usize>();
+    const _: () = assert!(REPLACE_AT + 4 <= ROOT_AT);
+    const _: () = assert!(ROOT_AT + ROOT_LEN <= LEN_AT);
+    const _: () = assert!(LEN_AT + 4 <= NAME_AT);
+    let total = NAME_AT + wide.len() * 2;
+    let mut storage = vec![0u64; total.div_ceil(std::mem::size_of::<u64>())];
+    // SAFETY: `storage` is zeroed, 8-byte aligned, and at least `total` bytes.
+    // The slice is that prefix. Field offsets come from `FILE_RENAME_INFO`, whose
+    // alignment is 8. Bytes are copied into those offsets; the name occupies the
+    // flexible `FileName` tail, including its NUL. Both handles stay live for the
+    // one `SetFileInformationByHandle` call.
+    let renamed = unsafe {
+        let buf = std::slice::from_raw_parts_mut(storage.as_mut_ptr().cast::<u8>(), total);
+        buf[REPLACE_AT..REPLACE_AT + 4].copy_from_slice(&u32::from(replace_existing).to_ne_bytes());
+        let root = directory.as_raw_handle() as usize;
+        buf[ROOT_AT..ROOT_AT + ROOT_LEN].copy_from_slice(&root.to_ne_bytes());
+        buf[LEN_AT..LEN_AT + 4].copy_from_slice(&name_bytes.to_ne_bytes());
+        let name = std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
+        buf[NAME_AT..NAME_AT + name.len()].copy_from_slice(name);
+        SetFileInformationByHandle(
+            source.as_raw_handle(),
+            FileRenameInfo,
+            storage.as_ptr().cast(),
+            total as u32,
+        )
+    };
+    if renamed == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 

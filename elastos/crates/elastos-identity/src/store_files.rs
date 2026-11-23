@@ -1,10 +1,12 @@
 //! Identity files below the operator-selected, trusted Runtime data root.
-//! Unix uses descriptor-bound paths. On Windows the device key is created and
-//! read through the owner-only helper: the current user owns it, the DACL does
-//! not inherit, a reparse point is refused, and the open is handle-relative.
-//! Credential writes stay refused on Windows. The stable identity lock orders
-//! key creation and credential mutations. Callers must release it before taking
-//! an auth-state lock, or acquire auth before identity.
+//! Unix uses descriptor-bound paths. On Windows `load_or_create_device_key`
+//! creates and reads the device key through the owner-only helper: the current
+//! user owns it, the DACL does not inherit, a reparse point is refused, and the
+//! open is handle-relative. The key bytes go to a temporary file in the identity
+//! directory and are renamed onto `device.key`. Credential writes stay refused
+//! on Windows. The stable identity lock orders key creation and credential
+//! mutations. Callers must release it before taking an auth-state lock, or
+//! acquire auth before identity.
 
 #[cfg(unix)]
 use anyhow::Context;
@@ -200,6 +202,9 @@ impl IdentityFiles {
 pub(super) enum SaveFault {
     BeforeReplace,
     AfterReplace,
+    /// One byte reaches the temporary file, then the replace stops.
+    #[cfg(windows)]
+    PartialWrite,
 }
 
 // Unix tests keep this path adapter. Windows device-key opens are `device_key`.
@@ -499,43 +504,35 @@ mod device_key {
     use std::path::{Path, PathBuf};
 
     use elastos_win_custody::{
-        create_owner_dir, one_component_name, open_owner_dir, open_owner_file,
-        refuse_other_writers, CustodyError, Disp, READ_EXISTING, READ_WRITE,
+        create_owner_dir, discard_owner_file, one_component_name, open_owner_dir, open_owner_file,
+        refuse_other_writers, rename_owner_file, reopen_owner_file, CustodyError, Disp,
+        READ_EXISTING, READ_WRITE,
     };
 
-    // `pub(in super::super)` matches the Unix `pub(super)` reach: the store
-    // module. A `pub(super)` item in this child cannot be re-exported there.
+    // Visible in `crate::store` only. That is the same reach as the Unix
+    // `pub(super)` type in `store::files`: `store` can use it, and the rest of
+    // the crate cannot. `pub(super)` on this struct would stop at `store::files`,
+    // so the re-export above could not name the type in `store`.
     #[derive(Debug)]
-    pub(in super::super) struct IdentityFiles {
+    pub(in crate::store) struct IdentityFiles {
         root: PathBuf,
         directory: PathBuf,
         _lock: File,
     }
 
     impl IdentityFiles {
-        pub(in super::super) fn open(data_dir: &Path) -> anyhow::Result<Self> {
+        pub(in crate::store) fn open(data_dir: &Path) -> anyhow::Result<Self> {
             Self::open_mode(data_dir, true)
         }
 
-        pub(in super::super) fn open_existing(data_dir: &Path) -> anyhow::Result<Self> {
+        pub(in crate::store) fn open_existing(data_dir: &Path) -> anyhow::Result<Self> {
             Self::open_mode(data_dir, false)
         }
 
         fn open_mode(data_dir: &Path, create: bool) -> anyhow::Result<Self> {
             let root = data_dir.to_path_buf();
             if create {
-                match std::fs::symlink_metadata(&root) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        match create_owner_dir(&root) {
-                            Ok(created) => created.sync_all()?,
-                            Err(error)
-                                if io_kind(&error) == Some(std::io::ErrorKind::AlreadyExists) => {}
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
-                    Err(error) => return Err(error.into()),
-                    Ok(_) => {}
-                }
+                create_missing_owner_dirs(&root)?;
             }
             refuse_other_writers(&root)?;
             let directory = ensure_identity(&root, create)?;
@@ -547,15 +544,12 @@ mod device_key {
             })
         }
 
-        pub(in super::super) fn sync(&self) -> anyhow::Result<()> {
+        pub(in crate::store) fn sync(&self) -> anyhow::Result<()> {
             self.admit()?;
-            self._lock
-                .sync_all()
-                .map_err(|_| anyhow::anyhow!("identity replacement durability indeterminate"))?;
-            Ok(())
+            flush_identity_dir(&self.directory)
         }
 
-        pub(in super::super) fn read(&self, name: &CStr) -> anyhow::Result<Option<Vec<u8>>> {
+        pub(in crate::store) fn read(&self, name: &CStr) -> anyhow::Result<Option<Vec<u8>>> {
             self.admit()?;
             let name = one_component(name)?;
             let mut file = match open_owner_file(
@@ -579,9 +573,11 @@ mod device_key {
             Ok(Some(std::mem::take(&mut *bytes)))
         }
 
-        /// Creates `device.key` when it is absent. An existing key is left as it
-        /// is: this slice has no atomic replace. Any other name stays refused.
-        pub(in super::super) fn replace(
+        /// Creates `device.key` when it is absent. The bytes are written to a
+        /// temporary file in the identity directory, flushed, and renamed onto
+        /// `device.key`. An existing key is left as it is. Any other name stays
+        /// refused.
+        pub(in crate::store) fn replace(
             &self,
             name: &CStr,
             bytes: &[u8],
@@ -592,36 +588,119 @@ mod device_key {
             if name != "device.key" {
                 return Err(unsupported_other_identity_file());
             }
-            #[cfg(test)]
-            if fault == Some(super::SaveFault::BeforeReplace) {
-                anyhow::bail!("injected pre-replacement failure");
-            }
             let path = self.directory.join(name);
-            let mut file = match open_owner_file(&path, READ_WRITE, Disp::OpenExisting) {
-                Err(error) if io_kind(&error) == Some(std::io::ErrorKind::NotFound) => {
-                    open_owner_file(&path, READ_WRITE, Disp::CreateNew)?
-                }
+            match open_owner_file(&path, READ_EXISTING, Disp::OpenExisting) {
                 Ok(existing) => {
                     drop(existing);
                     anyhow::bail!("identity device.key already exists");
                 }
+                Err(error) if io_kind(&error) == Some(std::io::ErrorKind::NotFound) => {}
                 Err(error) => return Err(error.into()),
-            };
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            #[cfg(test)]
-            if fault == Some(super::SaveFault::AfterReplace) {
-                anyhow::bail!("identity replacement durability indeterminate (injected)");
             }
-            self.admit()?;
-            Ok(())
+            let temp_name = format!(".identity-{}.tmp", uuid::Uuid::new_v4());
+            let temp_path = self.directory.join(&temp_name);
+            let mut file = open_owner_file(&temp_path, READ_WRITE, Disp::CreateNew)?;
+            let mut renamed = false;
+            let result = (|| -> anyhow::Result<()> {
+                #[cfg(test)]
+                if fault == Some(super::SaveFault::PartialWrite) {
+                    let prefix = if bytes.is_empty() { bytes } else { &bytes[..1] };
+                    file.write_all(prefix)?;
+                    anyhow::bail!("injected partial write");
+                }
+                file.write_all(bytes)?;
+                file.sync_all()?;
+                #[cfg(test)]
+                if fault == Some(super::SaveFault::BeforeReplace) {
+                    anyhow::bail!("injected pre-replacement failure");
+                }
+                self.admit()?;
+                rename_owner_file(&self.directory, &file, &temp_path, OsStr::new(name), false)?;
+                renamed = true;
+                #[cfg(test)]
+                if fault == Some(super::SaveFault::AfterReplace) {
+                    anyhow::bail!("identity replacement durability indeterminate (injected)");
+                }
+                self.sync().map_err(|_| {
+                    anyhow::anyhow!("identity replacement durability indeterminate")
+                })?;
+                Ok(())
+            })();
+            if result.is_err() && !renamed {
+                let _ = discard_owner_file(&file, &temp_path);
+            }
+            result
         }
 
         fn admit(&self) -> anyhow::Result<()> {
             refuse_other_writers(&self.root)?;
             drop(open_owner_dir(&self.directory)?);
+            // The lock handle is already held. Re-open the name so a replaced
+            // lock file cannot keep a foreign DACL. Unix compares the lock inode
+            // after acquire; this is that check for the DACL.
+            drop(reopen_owner_file(&self.directory.join("identity.lock"))?);
             Ok(())
         }
+    }
+
+    /// Create each missing directory from the first existing ancestor down to
+    /// `path`. Each new directory uses the owner-only helper. An existing path
+    /// is left unchanged; the caller checks the data root.
+    fn create_missing_owner_dirs(path: &Path) -> anyhow::Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let mut missing = vec![path.to_path_buf()];
+        loop {
+            let parent = missing
+                .last()
+                .and_then(|dir| dir.parent())
+                .map(Path::to_path_buf)
+                .filter(|dir| !dir.as_os_str().is_empty());
+            let Some(parent) = parent else {
+                anyhow::bail!("absolute local disk path required");
+            };
+            match std::fs::symlink_metadata(&parent) {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing.push(parent),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        for dir in missing.iter().rev() {
+            match create_owner_dir(dir) {
+                Ok(created) => created.sync_all()?,
+                Err(error) if io_kind(&error) == Some(std::io::ErrorKind::AlreadyExists) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Flush the identity directory so the `device.key` rename survives power
+    /// loss on NTFS.
+    ///
+    /// Win32 opens a directory only with `FILE_FLAG_BACKUP_SEMANTICS`. With
+    /// write access, `File::sync_all` is `FlushFileBuffers` and NTFS commits
+    /// the directory entry. On ReFS, FAT, exFAT, or a network share the flush
+    /// can return success without that guarantee.
+    fn flush_identity_dir(path: &Path) -> anyhow::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Win32 CreateFile flags. `FILE_FLAG_BACKUP_SEMANTICS` is not the
+        // access mask `MAXIMUM_ALLOWED`, even though the number matches.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        // Refuse a junction before the flush. The flush itself is the capability
+        // store's write plus `FILE_FLAG_BACKUP_SEMANTICS`, plus the reparse flag
+        // so this open does not follow a junction planted in between.
+        drop(open_owner_dir(path)?);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|_| anyhow::anyhow!("identity replacement durability indeterminate"))
     }
 
     fn ensure_identity(root: &Path, create: bool) -> anyhow::Result<PathBuf> {
@@ -654,6 +733,9 @@ mod device_key {
             open_owner_file(&path, READ_WRITE, Disp::OpenExisting)?
         };
         file.lock()?;
+        // Unix re-checks the lock inode after acquire. Re-open this name and
+        // require the owner-only DACL on whatever the directory now has.
+        drop(reopen_owner_file(&path)?);
         Ok(file)
     }
 
@@ -688,6 +770,7 @@ mod device_key {
         use std::process::Command;
 
         use super::super::super::load_or_create_device_key;
+        use super::super::SaveFault;
         use super::IdentityFiles;
 
         const MARKER: &[u8] = b"target-bytes-stay";
@@ -809,6 +892,152 @@ mod device_key {
                 "{err}"
             );
             assert!(!data.join("identity").join("credentials.json").exists());
+        }
+
+        fn current_user_ace() -> String {
+            let output = Command::new("whoami")
+                .args(["/user", "/fo", "csv", "/nh"])
+                .output()
+                .expect("whoami");
+            assert!(
+                output.status.success(),
+                "whoami /user\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8_lossy(&output.stdout);
+            let sid = text
+                .lines()
+                .next()
+                .and_then(|line| line.split(',').nth(1))
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"');
+            assert!(
+                sid.starts_with("S-1-"),
+                "whoami did not print a SID: {text}"
+            );
+            format!("*{sid}:(OI)(CI)(F)")
+        }
+
+        /// Explicit user, SYSTEM, and Administrators full control, with inherited
+        /// ACEs removed. `extra` is appended before that removal, so a Users or
+        /// Everyone grant stays explicit.
+        fn grant_profile_aces(dir: &Path, extra: &[&str]) {
+            let path = dir.display().to_string();
+            let mut aces = vec![
+                current_user_ace(),
+                "*S-1-5-18:(OI)(CI)(F)".to_string(),
+                "*S-1-5-32-544:(OI)(CI)(F)".to_string(),
+            ];
+            aces.extend(extra.iter().map(|ace| (*ace).to_string()));
+            for ace in &aces {
+                icacls(&[&path, "/grant", ace]);
+            }
+            icacls(&[&path, "/inheritance:r"]);
+        }
+
+        fn identity_names(data: &Path) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(data.join("identity"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        }
+
+        /// Plan check: `load_or_create_device_key` on an empty data directory that
+        /// already exists. The directory is not a missing child this code creates.
+        /// Its DACL is the accepted profile shape (user, SYSTEM, Administrators).
+        /// A raw temp directory can also grant Users, and that grant stays refused.
+        #[test]
+        fn preexisting_empty_data_root_with_system_and_administrators_is_accepted() {
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path().join("empty-data");
+            std::fs::create_dir(&data).unwrap();
+            assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
+            grant_profile_aces(&data, &[]);
+            let first = load_or_create_device_key(&data).unwrap();
+            let second = load_or_create_device_key(&data).unwrap();
+            assert_eq!(first.as_slice(), second.as_slice());
+            assert_eq!(first.len(), 32);
+            assert_ne!(first.as_slice(), &[0u8; 32]);
+            assert_eq!(
+                std::fs::read(data.join("identity").join("device.key")).unwrap(),
+                first.as_slice()
+            );
+        }
+
+        #[test]
+        fn preexisting_data_root_writable_by_users_or_everyone_is_refused() {
+            for sid in ["*S-1-5-32-545:(OI)(CI)(F)", "*S-1-1-0:(OI)(CI)(F)"] {
+                let root = tempfile::tempdir().unwrap();
+                let data = root.path().join("empty-data");
+                std::fs::create_dir(&data).unwrap();
+                grant_profile_aces(&data, &[sid]);
+                let opened = IdentityFiles::open(&data).unwrap_err();
+                assert!(
+                    opened.to_string().contains("DACL is not owner-only"),
+                    "{sid}: {opened}"
+                );
+                assert!(!data.join("identity").exists());
+                assert!(!data.join("identity").join("device.key").exists());
+            }
+        }
+
+        #[test]
+        fn partial_device_key_write_leaves_no_device_key_and_the_next_start_creates_one() {
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path().join("data");
+            let files = IdentityFiles::open(&data).unwrap();
+            let err = files
+                .replace(c"device.key", &[7; 32], Some(SaveFault::PartialWrite))
+                .unwrap_err();
+            assert!(err.to_string().contains("injected partial write"), "{err}");
+            drop(files);
+            assert!(!data.join("identity").join("device.key").exists());
+            assert_eq!(identity_names(&data), vec!["identity.lock".to_string()]);
+            let key = load_or_create_device_key(&data).unwrap();
+            assert_eq!(key.len(), 32);
+            assert_ne!(key.as_slice(), &[0u8; 32]);
+            assert_eq!(
+                std::fs::read(data.join("identity").join("device.key")).unwrap(),
+                key.as_slice()
+            );
+            assert!(
+                identity_names(&data)
+                    .iter()
+                    .all(|name| !name.ends_with(".tmp")),
+                "a temporary key file remains"
+            );
+        }
+
+        #[test]
+        fn missing_intermediate_directories_are_created_owner_only() {
+            let root = tempfile::tempdir().unwrap();
+            let data = root.path().join("a").join("b").join("data");
+            assert!(IdentityFiles::open_existing(&data).is_err());
+            assert!(!root.path().join("a").exists());
+            let first = load_or_create_device_key(&data).unwrap();
+            let second = load_or_create_device_key(&data).unwrap();
+            assert_eq!(first.as_slice(), second.as_slice());
+            assert_eq!(first.len(), 32);
+            assert_ne!(first.as_slice(), &[0u8; 32]);
+            for dir in [
+                root.path().join("a"),
+                root.path().join("a").join("b"),
+                data.clone(),
+                data.join("identity"),
+            ] {
+                elastos_win_custody::open_owner_dir(&dir)
+                    .unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
+            }
+            elastos_win_custody::open_owner_file(
+                &data.join("identity").join("device.key"),
+                elastos_win_custody::READ_EXISTING,
+                elastos_win_custody::Disp::OpenExisting,
+            )
+            .unwrap();
         }
     }
 }
