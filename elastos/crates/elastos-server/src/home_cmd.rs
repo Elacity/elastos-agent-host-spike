@@ -621,13 +621,11 @@ impl Drop for LoggingSuppressionGuard {
 }
 
 pub(crate) async fn run(status: bool, json: bool, cli_launch_token: bool) -> anyhow::Result<()> {
+    let data_dir = default_data_dir();
     if cli_launch_token {
-        return elastos_server::api::gateway::run_exported_home_cli_launch_grant(
-            &default_data_dir(),
-        )
-        .await;
+        return elastos_server::api::gateway::run_exported_home_cli_launch_grant(&data_dir).await;
     }
-    let snapshot = gather_snapshot().await?;
+    let snapshot = gather_snapshot(&data_dir).await?;
 
     if json {
         let mut stdout = std::io::stdout().lock();
@@ -677,13 +675,14 @@ async fn run_managed_dashboard() -> anyhow::Result<()> {
     let mut notice = None;
 
     loop {
-        let mut snapshot = gather_snapshot().await?;
+        let mut snapshot = gather_snapshot(&data_dir).await?;
         snapshot.notice = notice.take();
         write_snapshot(&access, &session, &snapshot).await?;
         clear_intent(&access, &session).await?;
         let updater_access = access.clone();
         let updater_session = session.clone();
         let updater_notice = snapshot.notice.clone();
+        let updater_data_dir = data_dir.clone();
         let (stop_tx, mut stop_rx) = watch::channel(false);
         let updater = tokio::spawn(async move {
             loop {
@@ -692,7 +691,7 @@ async fn run_managed_dashboard() -> anyhow::Result<()> {
                     _ = sleep(Duration::from_millis(300)) => {}
                 }
 
-                let mut next_snapshot = match gather_snapshot().await {
+                let mut next_snapshot = match gather_snapshot(&updater_data_dir).await {
                     Ok(snapshot) => snapshot,
                     Err(_) => continue,
                 };
@@ -1086,15 +1085,14 @@ fn format_home_cli_invoke_notice(body: &serde_json::Value, invoke: &HomeInvokeIn
     )
 }
 
-async fn gather_snapshot() -> anyhow::Result<HomeSnapshot> {
-    let data_dir = default_data_dir();
+async fn gather_snapshot(data_dir: &Path) -> anyhow::Result<HomeSnapshot> {
     let gateway_owned = gateway_owned_home_terminal();
-    let source = load_default_source(&data_dir)?;
-    let local_runtime = gather_runtime_status(&data_dir).await;
+    let source = load_default_source(data_dir)?;
+    let local_runtime = gather_runtime_status(data_dir).await;
     let home_summary_projection =
-        gather_home_summary_projection(&data_dir, local_runtime.api_url.as_deref()).await?;
+        gather_home_summary_projection(data_dir, local_runtime.api_url.as_deref()).await?;
     gather_snapshot_from_parts(
-        &data_dir,
+        data_dir,
         gateway_owned,
         source,
         local_runtime,
@@ -1110,7 +1108,7 @@ async fn gather_snapshot_from_parts(
     local_runtime: RuntimeStatus,
     home_summary_projection: Option<HomeSummaryFactsProjection>,
 ) -> anyhow::Result<HomeSnapshot> {
-    let session = gather_home_cli_session_status();
+    let session = gather_home_cli_session_status(data_dir);
     let runtime = home_summary_projection
         .as_ref()
         .and_then(|projection| projection.runtime.clone())
@@ -1559,11 +1557,10 @@ fn home_target_title(target: &str) -> String {
         .join(" ")
 }
 
-fn gather_home_cli_session_status() -> HomeCliSessionStatus {
+fn gather_home_cli_session_status(data_dir: &Path) -> HomeCliSessionStatus {
     if gateway_owned_home_terminal() {
-        let data_dir = default_data_dir();
         let passkey_state =
-            if elastos_server::api::gateway::gateway_owned_home_cli_authority_available(&data_dir) {
+            if elastos_server::api::gateway::gateway_owned_home_cli_authority_available(data_dir) {
                 "launch-token authorized browser Home session"
             } else {
                 "browser Home terminal missing launch authority"
@@ -3627,11 +3624,8 @@ pub(crate) mod tests {
     /// production store API in the data dir the guarded call reads, so
     /// `ResolvedPrincipalRoot::resolve` reads a real record instead of refusing
     /// "has no stored record". The caller passes a `data_dir` inside its own
-    /// temp dir: either `default_data_dir()` after scoping HOME/XDG_DATA_HOME to
-    /// that temp dir, or `temp.path()` directly. Every caller that derives it
-    /// from `default_data_dir()` asserts it is under the temp dir before its
-    /// first write, so this writes nothing outside the temp tree.
-    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
+    /// temp dir, so this writes nothing outside the temp tree.
+    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) -> anyhow::Result<()> {
         fs::create_dir_all(data_dir).unwrap();
         let now = elastos_server::auth::now_ts();
         let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
@@ -3654,24 +3648,44 @@ pub(crate) mod tests {
             elastos_server::auth::RuntimePrincipalRole::Guest,
             None,
             now,
-        )
-        .expect("fixture principal must be stored through the production store");
+        )?;
         assert_eq!(stored.principal_id, principal_id);
+        Ok(())
     }
 
+    /// The principal store is owner-only and has no Windows path yet, so every
+    /// fixture that needs a stored record refuses there instead of writing a
+    /// weaker one. The gateway-owned snapshot rows run on Unix until it lands.
+    #[cfg(windows)]
+    #[test]
+    fn home_cmd_principal_store_refuses_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = store_home_cmd_test_principal(temp.path(), "principal-a")
+            .expect_err("the owner-only principal store must refuse on Windows");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::Unsupported)
+        );
+        assert!(
+            error.to_string().contains("unsupported on this platform"),
+            "{error}"
+        );
+    }
+
+    /// The guarded helper reads the data dir its caller passes, so the fixture
+    /// points it at the temp dir directly on every OS. The principal store this
+    /// fixture needs is owner-only and refuses on Windows
+    /// (`home_cmd_principal_store_refuses_on_windows`), so the row runs on Unix.
+    #[cfg(unix)]
     #[test]
     fn gateway_owned_home_cli_authority_helper_reads_gateway_env() {
         let _guard = HOME_CMD_ENV_LOCK.blocking_lock();
         let temp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
-        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
-        let data_dir = default_data_dir();
-        assert!(
-            data_dir.starts_with(temp.path()),
-            "fixture data_dir {} escapes the test temp dir",
-            data_dir.display()
-        );
-        store_home_cmd_test_principal(&data_dir, "principal-a");
+        let data_dir = temp.path();
+        store_home_cmd_test_principal(data_dir, "principal-a")
+            .expect("fixture principal must be stored through the production store");
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         let _principal = ScopedEnvVar::set(
@@ -3695,10 +3709,8 @@ pub(crate) mod tests {
             "http://localhost:61180/",
         );
 
-        assert!(
-            elastos_server::api::gateway::gateway_owned_home_cli_authority_available(&data_dir)
-        );
-        let status = gather_home_cli_session_status();
+        assert!(elastos_server::api::gateway::gateway_owned_home_cli_authority_available(data_dir));
+        let status = gather_home_cli_session_status(data_dir);
         assert_eq!(status.mode, "browser_pty");
         assert_eq!(
             status.passkey_state,
@@ -3734,8 +3746,6 @@ pub(crate) mod tests {
     async fn gateway_owned_home_snapshot_propagates_summary_failure() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
-        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _coords = ScopedEnvVar::set(
             "ELASTOS_RUNTIME_COORDS_FILE",
             temp.path().join("missing-runtime-coords.json"),
@@ -3747,20 +3757,24 @@ pub(crate) mod tests {
             "",
         );
 
-        let err = gather_snapshot().await.unwrap_err().to_string();
+        let err = gather_snapshot(temp.path()).await.unwrap_err().to_string();
 
         assert!(err.contains("gateway-owned Home CLI summary unavailable"));
         assert!(err.contains("missing gateway API URL"));
     }
 
+    /// The data dir is passed directly, so no platform selects it from the
+    /// environment. The principal store this fixture needs is owner-only and
+    /// refuses on Windows (`home_cmd_principal_store_refuses_on_windows`), so
+    /// the row runs on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_owned_home_summary_projection_fails_on_gateway_http_error() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
-        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         // Stored in the data dir the call passes, so record and token agree.
-        store_home_cmd_test_principal(temp.path(), "person:test-home-cli");
+        store_home_cmd_test_principal(temp.path(), "person:test-home-cli")
+            .expect("fixture principal must be stored through the production store");
         let _coords = ScopedEnvVar::set(
             "ELASTOS_RUNTIME_COORDS_FILE",
             temp.path().join("missing-runtime-coords.json"),
@@ -3861,23 +3875,22 @@ pub(crate) mod tests {
         assert!(projection.is_none());
     }
 
+    /// The data dir is passed directly, so no platform selects it from the
+    /// environment. The principal store this fixture needs is owner-only and
+    /// refuses on Windows (`home_cmd_principal_store_refuses_on_windows`), so
+    /// the row runs on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_owned_home_snapshot_uses_admitted_summary_shared_facts() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
-        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
-        let data_dir = default_data_dir();
-        assert!(
-            data_dir.starts_with(temp.path()),
-            "fixture data_dir {} escapes the test temp dir",
-            data_dir.display()
-        );
-        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        let data_dir = temp.path();
+        store_home_cmd_test_principal(data_dir, "person:v07-admin")
+            .expect("fixture principal must be stored through the production store");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3894,9 +3907,9 @@ pub(crate) mod tests {
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
             "grant-v07-admin",
         );
-        write_home_cmd_test_capsule(&data_dir, "home-gui", "shell", Vec::new());
-        write_home_cmd_test_capsule(&data_dir, "home-cli", "shell", Vec::new());
-        write_home_cmd_active_shell_state(&data_dir, "person:v07-admin", "home-gui");
+        write_home_cmd_test_capsule(data_dir, "home-gui", "shell", Vec::new());
+        write_home_cmd_test_capsule(data_dir, "home-cli", "shell", Vec::new());
+        write_home_cmd_active_shell_state(data_dir, "person:v07-admin", "home-gui");
 
         let projection: HomeSummaryFactsProjection = serde_json::from_value(serde_json::json!({
             "runtime": {
@@ -3948,7 +3961,7 @@ pub(crate) mod tests {
         }))
         .unwrap();
         let snapshot = gather_snapshot_from_parts(
-            &data_dir,
+            data_dir,
             true,
             None,
             RuntimeStatus::default(),
@@ -3976,23 +3989,22 @@ pub(crate) mod tests {
         );
     }
 
+    /// The data dir is passed directly, so no platform selects it from the
+    /// environment. The principal store this fixture needs is owner-only and
+    /// refuses on Windows (`home_cmd_principal_store_refuses_on_windows`), so
+    /// the row runs on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_owned_home_snapshot_rejects_unsigned_summary_authority() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
-        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
-        let data_dir = default_data_dir();
-        assert!(
-            data_dir.starts_with(temp.path()),
-            "fixture data_dir {} escapes the test temp dir",
-            data_dir.display()
-        );
-        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        let data_dir = temp.path();
+        store_home_cmd_test_principal(data_dir, "person:v07-admin")
+            .expect("fixture principal must be stored through the production store");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -4036,7 +4048,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let err = gather_snapshot_from_parts(
-            &data_dir,
+            data_dir,
             true,
             None,
             RuntimeStatus::default(),
@@ -4050,23 +4062,22 @@ pub(crate) mod tests {
         assert!(err.contains("missing admitted authority"));
     }
 
+    /// The data dir is passed directly, so no platform selects it from the
+    /// environment. The principal store this fixture needs is owner-only and
+    /// refuses on Windows (`home_cmd_principal_store_refuses_on_windows`), so
+    /// the row runs on Unix.
+    #[cfg(unix)]
     #[tokio::test]
     async fn gateway_owned_home_snapshot_rejects_mismatched_summary_authority() {
         let _guard = HOME_CMD_ENV_LOCK.lock().await;
         let temp = tempfile::tempdir().unwrap();
-        let _home = ScopedEnvVar::set("HOME", temp.path().join("home"));
-        let _xdg_data_home = ScopedEnvVar::set("XDG_DATA_HOME", temp.path().join("xdg"));
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         // The env names the principal the store holds: a failure here leaves the
         // test without a stored record, rather than with a poisoned env.
-        let data_dir = default_data_dir();
-        assert!(
-            data_dir.starts_with(temp.path()),
-            "fixture data_dir {} escapes the test temp dir",
-            data_dir.display()
-        );
-        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        let data_dir = temp.path();
+        store_home_cmd_test_principal(data_dir, "person:v07-admin")
+            .expect("fixture principal must be stored through the production store");
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -4110,7 +4121,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let err = gather_snapshot_from_parts(
-            &data_dir,
+            data_dir,
             true,
             None,
             RuntimeStatus::default(),
@@ -4274,15 +4285,12 @@ pub(crate) mod tests {
             elastos_server::api::gateway::HOME_CLI_GATEWAY_API_URL_ENV,
             "",
         );
-        let data_dir = default_data_dir();
-        assert!(
-            data_dir.starts_with(temp.path()),
-            "fixture data_dir {} escapes the test temp dir",
-            data_dir.display()
-        );
-        write_home_cmd_test_capsule(&data_dir, "home-gui", "shell", Vec::new());
+        // The data dir is passed directly, so no platform selects it from the
+        // environment and the row runs on Windows too.
+        let data_dir = temp.path();
+        write_home_cmd_test_capsule(data_dir, "home-gui", "shell", Vec::new());
         write_home_cmd_test_capsule(
-            &data_dir,
+            data_dir,
             "home-cli",
             "shell",
             vec![serde_json::json!({
@@ -4299,9 +4307,9 @@ pub(crate) mod tests {
             })],
         );
         std::fs::write(data_dir.join("config.toml"), "developer_mode = true\n").unwrap();
-        write_home_cmd_active_shell_state(&data_dir, "person:test-home-cli", "home-cli");
+        write_home_cmd_active_shell_state(data_dir, "person:test-home-cli", "home-cli");
 
-        let snapshot = gather_snapshot().await.unwrap();
+        let snapshot = gather_snapshot(data_dir).await.unwrap();
 
         assert_eq!(
             snapshot.active_shell["schema"],
