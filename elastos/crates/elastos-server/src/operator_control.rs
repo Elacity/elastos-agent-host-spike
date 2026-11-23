@@ -1869,6 +1869,20 @@ impl OperatorClient {
                 anyhow::bail!("operator peer '{}' has an invalid connect ticket", peer.did);
             }
 
+            // The ticket names the addresses the request is written to; every
+            // one of them must be the peer the record names, or the request
+            // could be handed to a different key.
+            let peer_key = public_key_from_did(&peer.did)?;
+            if ticket_endpoints
+                .iter()
+                .any(|endpoint| endpoint.id != peer_key)
+            {
+                anyhow::bail!(
+                    "operator connect ticket endpoint does not match the peer DID '{}'",
+                    peer.did
+                );
+            }
+
             let mut ticket_errors = Vec::new();
             for endpoint in ticket_endpoints {
                 match Self::connect_endpoint_addr(endpoint, timeout_secs).await {
@@ -2713,6 +2727,88 @@ mod tests {
                 ("req-check-1".to_string(), false),
             ]
         );
+    }
+    #[tokio::test]
+    async fn operator_mismatched_ticket_dial_is_refused_before_any_write() {
+        // A ticket that names another node must be refused before any
+        // connection, so a request is never written to a key other than
+        // the configured peer's DID.
+        let dir = tempfile::tempdir().unwrap();
+        let other_key = [17u8; 32];
+        let (other_sk, other_did) = elastos_identity::derive_did(&other_key);
+        let other_node = start_carrier_node(&other_sk, &other_did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let other_ticket = local_endpoint_ticket(&other_node.endpoint).unwrap();
+
+        let (_, peer_did) = elastos_identity::derive_did(&[18u8; 32]);
+        let peer = OperatorPeer {
+            did: peer_did,
+            label: "peer".to_string(),
+            connect_ticket: other_ticket,
+            allow: Vec::new(),
+        };
+        let err = match OperatorClient::connect(&peer, 10).await {
+            Ok(_) => panic!("a ticket naming another node must be refused before any write"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "operator connect ticket endpoint does not match the peer DID '{}'",
+                peer.did
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn operator_request_over_a_short_lived_dial_is_decided_by_its_signature() {
+        // The product dial binds a short-lived random key, so the receiver
+        // decides on the signed envelope (a configured requester, this Home as
+        // target, no replay), never on the connection key. Requiring the
+        // connection key to be the signer would refuse every real operator
+        // request (CTO decision, P2-9 step 6, 24 Nov).
+        let dir = tempfile::tempdir().unwrap();
+        let key = [21u8; 32];
+        write_test_device_key(dir.path(), &key);
+        let (sk, did) = elastos_identity::derive_did(&key);
+        let node = start_carrier_node(&sk, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let ticket = local_endpoint_ticket(&node.endpoint).unwrap();
+        let addr = decode_ticket_endpoints(&ticket).remove(0);
+        // The product dial binds a short-lived ephemeral key, so the
+        // connection's key differs from the configured signer below.
+        let client = OperatorClient::connect_endpoint_addr(addr, 10)
+            .await
+            .unwrap();
+
+        let (signer_sk, signer_did) = elastos_identity::derive_did(&[22u8; 32]);
+        upsert_peer(
+            dir.path(),
+            OperatorPeer {
+                did: signer_did.clone(),
+                label: "signer".to_string(),
+                connect_ticket: String::new(),
+                allow: vec![OPERATOR_ACTION_STATUS_READ.to_string()],
+            },
+        )
+        .unwrap();
+
+        let request = OperatorRequestPayload {
+            version: 1,
+            request_id: "req-short-lived-dial-1".to_string(),
+            requester_did: signer_did,
+            target_did: did.clone(),
+            ts: now_ts(),
+            action: OPERATOR_ACTION_STATUS_READ.to_string(),
+            args: serde_json::Value::Null,
+        };
+        let signed = sign_envelope(&signer_sk, OPERATOR_REQUEST_DOMAIN, &request).unwrap();
+        let answer = client.send_request(&signed).await.unwrap();
+        let accepted = verify_response_envelope(&answer, &did).unwrap();
+        assert!(accepted.accepted, "{:?}", accepted.error);
+        assert!(dir.path().join(OPERATOR_AUDIT_FILE).exists());
     }
 
     #[tokio::test]
