@@ -1206,8 +1206,11 @@ jobs:
         if: env.CI_USE_CACHE == 'true'
         with:
           workspaces: elastos
-          # The action appends the runner platform, so ARM and x64 stay separate.
+          # The shared key replaces the action's automatic job-id key, so both
+          # x64 journeys resolve one cache entry; the action still appends the
+          # runner OS and CPU architecture, so the ARM entry stays separate.
           prefix-key: source-home-registry
+          shared-key: journey
           # Cache Cargo inputs; journey artifacts start fresh.
           cache-targets: false
           cache-directories: ${{ env.SCCACHE_DIR }}
@@ -1871,8 +1874,11 @@ jobs:
         if: env.CI_USE_CACHE == 'true'
         with:
           workspaces: elastos
-          # The action appends the runner platform, so ARM and x64 stay separate.
+          # The shared key replaces the action's automatic job-id key, so both
+          # x64 journeys resolve one cache entry; the action still appends the
+          # runner OS and CPU architecture, so the ARM entry stays separate.
           prefix-key: source-home-registry
+          shared-key: journey
           # Cache Cargo inputs; journey artifacts start fresh.
           cache-targets: false
           cache-directories: ${{ env.SCCACHE_DIR }}
@@ -2078,6 +2084,9 @@ jobs:
     if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     timeout-minutes: 45
     needs: [installed-app-paths, fork-gate]
+    env:
+      # musl-tools is the only host package the musl release check needs.
+      CI_APT_PACKAGES: musl-tools
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -2091,8 +2100,10 @@ jobs:
           echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
       - name: install the musl toolchain
+        # The journey host-prerequisites path retries and switches Ubuntu
+        # mirrors; a bare apt-get here fails the merge queue on one mirror error.
         timeout-minutes: 10
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+        run: bash scripts/ci-apt-prerequisites.sh
       - name: check native musl release crates
         timeout-minutes: 30
         run: bash scripts/check-release-musl.sh x86_64-unknown-linux-musl
@@ -2104,6 +2115,9 @@ jobs:
     if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
     timeout-minutes: 45
     needs: [installed-app-paths, fork-gate]
+    env:
+      # musl-tools is the only host package the musl release check needs.
+      CI_APT_PACKAGES: musl-tools
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -2117,8 +2131,10 @@ jobs:
           echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
           echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
       - name: install the musl toolchain
+        # The journey host-prerequisites path retries and switches Ubuntu
+        # mirrors; a bare apt-get here fails the merge queue on one mirror error.
         timeout-minutes: 10
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+        run: bash scripts/ci-apt-prerequisites.sh
       - name: check native musl release crates
         timeout-minutes: 30
         run: bash scripts/check-release-musl.sh aarch64-unknown-linux-musl

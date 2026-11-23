@@ -246,6 +246,9 @@ NON_WRITER_CASES = [
 NIGHTLY_PR_PROFILE_JOBS = {"source-home-linux", "source-home-linux-arm64", "update-hop-linux",
                            "musl-check-linux", "musl-check-linux-arm64"}
 RUST_CACHE_KEY = "-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}"
+# The shared-key input both x64 journey Swatinem caches set, replacing the action's
+# automatic job-id key so they resolve one cache entry.
+JOURNEY_SHARED_KEY = "journey"
 # rustsec/rustsec release cargo-audit/v0.22.2, x86_64-unknown-linux-musl archive.
 AUDIT_ARCHIVE_SHA256 = "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
 # A restored non-Rust input and the step that checks it against its pinned hash.
@@ -550,7 +553,8 @@ def validate_cache_credential_scope(source, action):
 
 
 def save_sites(source):
-    """Every step that can write the Actions cache, with the guard that decides it."""
+    """Every step that can write the Actions cache, with the guard that decides it
+    and whether the step is a Swatinem journey compile cache."""
     workflow_jobs = jobs(source)
     sites = []
     for job in workflow_jobs:
@@ -559,7 +563,8 @@ def save_sites(source):
                 raise AssertionError(f"{job} uses actions/cache, which saves on every run")
             if "actions/cache/save@" in step or "Swatinem/rust-cache@" in step:
                 guard = field(step, "save-if" if "Swatinem/rust-cache@" in step else "if")
-                sites.append((job, guard.removeprefix("${{").removesuffix("}}").strip()))
+                sites.append((job, guard.removeprefix("${{").removesuffix("}}").strip(),
+                              "Swatinem/rust-cache@" in step))
     if not sites:
         raise AssertionError("missing cache writers")
     return sites
@@ -574,15 +579,20 @@ def adversarial_contexts(guard, context):
 
 def validate_cache_writers(source):
     """Only CACHE_WRITERS runs write any shared cache, decided by github context alone.
-    The journey compile caches narrow this further: they save on the nightly alone,
-    and a guard naming another job leaves an aliased site restore-only."""
+    The journey compile caches narrow this further: only their Swatinem sites save on
+    the nightly alone, a guard naming another job leaves an aliased site restore-only,
+    and every other save site keeps the trusted writer condition."""
     if re.search(r"type=gha|cache-to", source):
         raise AssertionError("BuildKit layers bypass pinned-hash checks; no remote layer cache")
     nightly_guard = re.compile(r"^\((?P<guard>" + re.escape(NIGHTLY_WRITER) + r")\) && github\.job == '(?P<job>[\w-]+)'$")
-    for job, guard in save_sites(source):
+    for job, guard, rust_cache in save_sites(source):
         # A step can set env through GITHUB_ENV; only github context is fixed for the run.
         if re.search(r"\b(?:env|inputs|vars|needs|matrix)\.", guard):
             raise AssertionError(f"save guard in {job} reads context a step or input can change: {guard}")
+        if (guard == NIGHTLY_WRITER or nightly_guard.fullmatch(guard)) \
+                and not (rust_cache and job in JOURNEY_CACHE_JOBS):
+            raise AssertionError(
+                f"nightly-only save guard outside the journey compile caches in {job}: {guard}")
         if guard != TRUSTED_WRITER and not (guard.startswith(f"({TRUSTED_WRITER}) && ")
                                             and "||" not in guard[len(TRUSTED_WRITER) + 2:]) \
                 and guard != NIGHTLY_WRITER and not nightly_guard.fullmatch(guard):
@@ -614,7 +624,7 @@ def validate_pull_requests_restore_only(source):
     its own steps write to GITHUB_ENV or their outputs."""
     for head_ref in ("feature", "spark/lane", "batch/20261108"):
         context = event_context("pull_request", "refs/pull/7/merge", "branch", "", head_ref)
-        for job, guard in save_sites(source):
+        for job, guard, _ in save_sites(source):
             context["github.job"] = job
             if any(evaluate(guard, values) for values in adversarial_contexts(guard, context)):
                 raise AssertionError(f"a pull_request run saves a cache: {job} ({head_ref})")
@@ -682,12 +692,21 @@ def validate_rust_cache_keys(source):
             # action's own platform suffix keeps the ARM entry separate.
             if field(step, "prefix-key") != "source-home-registry":
                 raise AssertionError(f"{job} Rust cache must share the journey namespace")
-        # rust-cache's fallback restore key is prefix-key, job, OS and the rustc
-        # environment hash; its lockfile hash covers only the named workspace.
+            # The shared key replaces the action's automatic job-id key, so the x64
+            # journeys resolve one cache entry.
+            shared = re.search(r"(?m)^\s+shared-key: (\S+)$", step)
+            if not shared or shared[1] != JOURNEY_SHARED_KEY:
+                raise AssertionError(f"{job} Rust cache must pin the shared journey key")
+        # rust-cache's fallback restore key is prefix-key, the shared or job key, the
+        # runner OS and CPU architecture, and the rustc environment hash; its lockfile
+        # hash covers only the named workspace.
         elif not field(step, "prefix-key").endswith(RUST_CACHE_KEY):
             raise AssertionError(f"{job} Rust cache prefix lacks every lockfile and the toolchain")
-        if re.search(r"(?m)^\s+(?:add-rust-environment-hash-key|add-job-id-key|key|shared-key):", step):
-            raise AssertionError(f"{job} Rust cache key must keep its compiler and job parts")
+        allowed = {"shared-key": JOURNEY_SHARED_KEY} if job in JOURNEY_CACHE_JOBS else {}
+        for name in ("add-rust-environment-hash-key", "add-job-id-key", "key", "shared-key"):
+            match = re.search(rf"(?m)^\s+{re.escape(name)}:(?:\s+(\S+))?\s*$", step)
+            if match and allowed.get(name) != (match[1] or ""):
+                raise AssertionError(f"{job} Rust cache key must keep its compiler and job parts")
 
 
 def validate_restores_are_verified(source):
@@ -2027,6 +2046,12 @@ class ReleasePolicyTests(unittest.TestCase):
                 f"if: ({TRUSTED_WRITER}) || steps.kubo-cache.outputs.cache-hit != 'true'", 1),
             "BuildKit restores remote layers": SOURCE.replace(
                 "            --load \\\n", "            --cache-from type=gha \\\n            --load \\\n", 1),
+            "the Kubo save goes nightly-only": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.kubo-cache.outputs.cache-hit != 'true'",
+                f"if: {NIGHTLY_WRITER}", 1),
+            "an engine apt save goes nightly-only": SOURCE.replace(
+                f"if: ({TRUSTED_WRITER}) && steps.apt-prerequisites.outputs.changed == 'true'",
+                f"if: {NIGHTLY_WRITER}", 1),
         }
         for name, changed in mutations.items():
             self.assertNotEqual(changed, SOURCE, name)
@@ -2065,6 +2090,10 @@ class ReleasePolicyTests(unittest.TestCase):
                                                            "hashFiles('elastos/Cargo.lock', 'rust-toolchain.toml')", 1),
             "the compiler leaves the key": SOURCE.replace(
                 "          cache-bin: false\n", "          cache-bin: false\n          add-rust-environment-hash-key: false\n", 1),
+            "a journey cache drops the shared key": SOURCE.replace("          shared-key: journey\n", "", 1),
+            "another job joins the shared key": SOURCE.replace(
+                "prefix-key: ${{ runner.os }}-elastos-bd" + RUST_CACHE_KEY,
+                "prefix-key: ${{ runner.os }}-elastos-bd" + RUST_CACHE_KEY + "\n          shared-key: journey", 1),
         }
         for name, changed in mutations.items():
             self.assertNotEqual(changed, SOURCE, name)
