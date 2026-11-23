@@ -126,8 +126,10 @@ mod tests {
             &checked,
             super::super::bridge::ProviderConfig::default(),
         )
-        .await
-        .expect_err("spawn must refuse");
+        .await;
+        let Err(spawned) = spawned else {
+            panic!("spawn must refuse");
+        };
         match spawned {
             super::super::bridge::BridgeError::Refused(reason) => {
                 assert_eq!(reason, WINDOWS_CHECKED_PROVIDER);
