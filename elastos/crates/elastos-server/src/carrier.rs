@@ -24097,7 +24097,9 @@ mod two_home_did_message_test {
             recorded[0].source_endpoint_did
         );
 
-        let unknown = elastos_identity::derive_did(&[0xD4; 32]).1;
+        // 0xD4 (212) is a live receiver in carrier_contract_tests; under the
+        // parallel test runner that Home answers, so this DID must be unused.
+        let unknown = elastos_identity::derive_did(&[0xE9; 32]).1;
         let refused = send_did_message(&local_registry, &unknown, b"no-delivery")
             .await
             .unwrap_err();
