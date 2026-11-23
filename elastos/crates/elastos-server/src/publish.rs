@@ -617,14 +617,23 @@ struct PublicationProvider {
 
 impl PublicationProvider {
     async fn start(provider: &Path, data_dir: &Path) -> anyhow::Result<Self> {
-        let mut child = tokio::process::Command::new(provider)
+        let prepared = elastos_server::setup::verify_installed_component_start(
+            data_dir,
+            "ipfs-provider",
+            provider,
+        )?;
+        prepared.signed_checksum()?;
+        let mut command = tokio::process::Command::new(prepared.exec_path());
+        command
             .env("ELASTOS_DATA_DIR", data_dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        prepared.attach_tokio(&mut command, false)?;
+        let mut child = command
             .spawn()
-            .context("Cannot start the qualified model import provider")?;
+            .context("Cannot start the qualified IPFS publication provider")?;
         let input = child.stdin.take().context("Model provider stdin missing")?;
         let output = tokio::io::BufReader::new(
             child
@@ -2424,17 +2433,97 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn sign_provider_fixture(data: &Path, provider: &Path) {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::PermissionsExt;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[71; 32]);
+        let signed = |payload: serde_json::Value, domain: &str| {
+            let (signature, signer_did) = elastos_server::crypto::domain_separated_sign(
+                &key,
+                domain,
+                &serde_json::to_vec(&payload).unwrap(),
+            );
+            serde_json::to_vec(&serde_json::json!({
+                "payload": payload, "signature": signature, "signer_did": signer_did
+            }))
+            .unwrap()
+        };
+        let descriptor = |bytes: &[u8]| {
+            serde_json::json!({
+                "cid": import_fixture_raw_cid(bytes),
+                "sha256": hex::encode(Sha256::digest(bytes)),
+                "size": bytes.len()
+            })
+        };
+        let runtime = data.join("runtime");
+        let runtime_bytes = b"installed signed runtime";
+        std::fs::write(&runtime, runtime_bytes).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let provider_bytes = std::fs::read(provider).unwrap();
+        let components = serde_json::to_vec(&serde_json::json!({
+            "schema": "elastos.components/v1",
+            "external": {"ipfs-provider": {
+                "install_path": "bin/ipfs-provider",
+                "platforms": {elastos_server::setup::detect_platform(): {
+                    "install_path": "bin/ipfs-provider",
+                    "checksum": format!("sha256:{}", hex::encode(Sha256::digest(&provider_bytes)))
+                }}
+            }},
+            "capsules": {}, "profiles": {}
+        }))
+        .unwrap();
+        std::fs::write(data.join("components.json"), &components).unwrap();
+        let release = signed(
+            serde_json::json!({
+                "schema": "elastos.release/v1", "version": "0.7.0", "channel": "stable",
+                "platforms": {elastos_server::update::detect_release_platform(): {
+                    "binary": descriptor(runtime_bytes), "components": descriptor(&components)
+                }}
+            }),
+            "elastos.release.v1",
+        );
+        let head = signed(
+            serde_json::json!({
+                "schema": "elastos.release.head/v1", "version": "0.7.0", "channel": "stable",
+                "latest_release_cid": import_fixture_raw_cid(&release),
+                "release_sha256": hex::encode(Sha256::digest(&release))
+            }),
+            "elastos.release.head.v1",
+        );
+        let publisher = elastos_common::localhost::publisher_root_path(data);
+        std::fs::create_dir_all(&publisher).unwrap();
+        std::fs::write(publisher.join("release.json"), release).unwrap();
+        std::fs::write(publisher.join("release-head.json"), &head).unwrap();
+        std::fs::write(
+            data.join("sources.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.trusted-sources/v1", "default_source": "fixture",
+                "sources": [{
+                    "name": "fixture",
+                    "publisher_dids": [elastos_server::crypto::encode_signing_key_did(&key)],
+                    "channel": "stable", "installed_version": "0.7.0",
+                    "install_path": runtime, "head_cid": import_fixture_raw_cid(&head)
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
     fn provider_session_fixture(root: &Path, mode: &str) -> (PathBuf, PathBuf, PathBuf) {
         let data = root.join("data");
         let artifacts = root.join("artifacts");
         std::fs::create_dir_all(data.join("ipfs-repo")).unwrap();
         std::fs::create_dir(&artifacts).unwrap();
-        let provider = root.join("publication-provider-fixture");
+        let provider = data.join("bin/ipfs-provider");
+        std::fs::create_dir(data.join("bin")).unwrap();
         let provider_program = r#"#!/usr/bin/env python3
 import base64, hashlib, http.server, json, os, pathlib, sys, threading
 cid = 'b' + base64.b32encode(b'\x01\x55\x12\x20' + hashlib.sha256(b'public model provider fixture').digest()).decode().lower().rstrip('=')
-with open(__file__ + '.starts', 'a') as sink: sink.write(str(os.getpid()) + '\n')
-repo = pathlib.Path(__file__).parent / 'data' / 'ipfs-repo'
+provider = pathlib.Path(os.environ['ELASTOS_DATA_DIR']) / 'bin/ipfs-provider'
+with open(str(provider) + '.starts', 'a') as sink: sink.write(str(os.getpid()) + '\n')
+repo = pathlib.Path(os.environ['ELASTOS_DATA_DIR']) / 'ipfs-repo'
 class API(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_POST(self):
@@ -2447,12 +2536,12 @@ class API(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 server = http.server.HTTPServer(('127.0.0.1', 0), API)
 endpoint = 'http://127.0.0.1:' + str(server.server_port)
-pathlib.Path(__file__ + '.api').write_text(endpoint + '/')
+pathlib.Path(str(provider) + '.api').write_text(endpoint + '/')
 worker = threading.Thread(target=server.serve_forever, daemon=True)
 worker.start()
 try:
     for line in sys.stdin:
-        with open(__file__ + '.requests', 'a') as sink: sink.write(line)
+        with open(str(provider) + '.requests', 'a') as sink: sink.write(line)
         request = json.loads(line)
         data = {}
         if request['op'] == 'add_path': data = {'cid':cid}
@@ -2469,7 +2558,75 @@ finally:
     server.server_close()
 "#.replace("__MODE__", &serde_json::to_string(mode).unwrap());
         crate::test_support::write_from_child(&provider, provider_program, 0o700);
+        sign_provider_fixture(&data, &provider);
         (provider, data, artifacts)
+    }
+
+    #[cfg(unix)]
+    fn provider_guard_fixture(root: &Path) -> (PathBuf, PathBuf) {
+        let data = root.join("data");
+        let provider = data.join("bin/ipfs-provider");
+        std::fs::create_dir_all(provider.parent().unwrap()).unwrap();
+        crate::test_support::write_from_child(
+            &provider,
+            b"#!/bin/sh\nprintf started > \"$ELASTOS_DATA_DIR/bin/ipfs-provider.starts\"\nread -r _\nprintf '{\"status\":\"ok\"}\\n'\n",
+            0o700,
+        );
+        sign_provider_fixture(&data, &provider);
+        (provider, data)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_provider_starts_signed_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (provider, data) = provider_guard_fixture(&root);
+        let session = super::PublicationProvider::start(&provider, &data)
+            .await
+            .unwrap();
+        assert!(provider.with_extension("starts").exists());
+        drop(session);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_provider_refuses_bytes_outside_signed_digest_before_spawn() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (provider, data) = provider_guard_fixture(&root);
+        let mut changed = std::fs::read(&provider).unwrap();
+        changed.extend_from_slice(b"\n# changed after signing\n");
+        std::fs::write(&provider, changed).unwrap();
+        let error = super::PublicationProvider::start(&provider, &data)
+            .await
+            .err()
+            .expect("changed provider must be refused");
+        assert!(
+            format!("{error:#}")
+                .contains("installed executable differs from signed release digest"),
+            "{error:#}"
+        );
+        assert!(!provider.with_extension("starts").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn publication_provider_refuses_unchecked_source_home_in_dev_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (provider, data) = provider_guard_fixture(&root);
+        std::fs::remove_file(data.join("sources.json")).unwrap();
+        std::fs::write(data.join("config.toml"), "dev_mode = true\n").unwrap();
+        let error = super::PublicationProvider::start(&provider, &data)
+            .await
+            .err()
+            .expect("unchecked source Home provider must be refused");
+        assert!(
+            format!("{error:#}").contains("no signed release digest"),
+            "{error:#}"
+        );
+        assert!(!provider.with_extension("starts").exists());
     }
 
     #[cfg(unix)]
