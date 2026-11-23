@@ -710,6 +710,7 @@ fn note_principal_root_read() {
     PRINCIPAL_ROOT_READS.fetch_add(1, Ordering::SeqCst);
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn principal_root_reads_for_test() -> u64 {
     PRINCIPAL_ROOT_READS.load(Ordering::SeqCst)
@@ -1487,6 +1488,7 @@ pub async fn run_exported_home_cli_launch_grant(data_dir: &Path) -> anyhow::Resu
     finish_cli_launch_token_command(waited)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) async fn request_and_wait_for_exported_home_cli_grant_for_test<F, Fut>(
     api_url: &str,
@@ -1523,6 +1525,7 @@ pub(super) fn clear_cli_mint_for_test() {
     table.claim_held.clear();
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn cli_mint_records_json_for_test() -> Vec<String> {
     mint_table()
@@ -1631,6 +1634,7 @@ pub(super) fn fail_next_cli_mint_signature_for_test() -> CliMintSignerFailGuard 
     CliMintSignerFailGuard
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn cli_mint_claim_hold_for_test(request_id: &str) -> Option<u64> {
     mint_table()
@@ -1640,6 +1644,7 @@ pub(super) fn cli_mint_claim_hold_for_test(request_id: &str) -> Option<u64> {
         .map(|held| held.nonce)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn drop_foreign_claim_ticket_for_test(request_id: &str) {
     drop(ClaimTicket {
@@ -1662,9 +1667,11 @@ static CHECKING_PAUSE: Mutex<Option<CheckingPause>> = Mutex::new(None);
 #[cfg(test)]
 static CHECKING_PAUSE_CV: Condvar = Condvar::new();
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) struct CliMintCheckingPauseGuard;
 
+#[cfg(unix)]
 #[cfg(test)]
 impl Drop for CliMintCheckingPauseGuard {
     fn drop(&mut self) {
@@ -1678,6 +1685,7 @@ impl Drop for CliMintCheckingPauseGuard {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn arm_cli_mint_checking_pause_for_test(request_id: &str) -> CliMintCheckingPauseGuard {
     let mut guard = CHECKING_PAUSE
@@ -1691,6 +1699,7 @@ pub(super) fn arm_cli_mint_checking_pause_for_test(request_id: &str) -> CliMintC
     CliMintCheckingPauseGuard
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn cli_mint_checking_pause_arrived_for_test() -> usize {
     CHECKING_PAUSE
@@ -1701,6 +1710,7 @@ pub(super) fn cli_mint_checking_pause_arrived_for_test() -> usize {
         .unwrap_or(0)
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn release_cli_mint_checking_pause_for_test() {
     let mut guard = CHECKING_PAUSE
@@ -1735,6 +1745,7 @@ fn pause_while_checking(request_id: &str) {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(super) fn cli_mint_overlap_arrived_for_test() -> usize {
     OVERLAP
