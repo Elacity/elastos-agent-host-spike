@@ -1,7 +1,7 @@
 //! Local Browser VM image admission requires Unix file identities and sockets.
 //! Windows refuses each entry point before any image file can be trusted.
 
-use super::{ComponentsManifest, FirstPartyCarrierContext, PlatformInfo};
+use super::{ComponentsManifest, PlatformInfo};
 use std::path::Path;
 
 pub(super) const NAME: &str = "browser-vm-image";
@@ -58,16 +58,6 @@ pub(super) fn verify_installed(
     _data: &Path,
     _info: &PlatformInfo,
     _platform: &str,
-) -> anyhow::Result<()> {
-    Err(unsupported())
-}
-
-pub(super) async fn install_via_carrier(
-    _data: &Path,
-    _row: &crate::capsule_record::AdmittedRow,
-    _dest: &Path,
-    _platform: &str,
-    _context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
     Err(unsupported())
 }

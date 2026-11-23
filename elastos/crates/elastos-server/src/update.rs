@@ -24,6 +24,7 @@ use crate::sources::{
 
 #[cfg(unix)]
 const INSTALLED_BINARY_VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+#[cfg(unix)]
 #[cfg(test)]
 const TEST_INSTALLED_BINARY_VERSION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
@@ -492,18 +493,6 @@ async fn verify_installed_binary_version(
         }
     };
     verify_installed_binary_version_output(bin_path, expected_version, status.success(), &out, &err)
-}
-
-#[cfg(windows)]
-async fn verify_installed_binary_version(
-    _bin_path: &Path,
-    _expected_version: &str,
-) -> anyhow::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "update executable process tree custody is unsupported on Windows",
-    )
-    .into())
 }
 
 #[cfg(unix)]
@@ -1218,6 +1207,7 @@ fn join_release_network(
 
 /// Execute upgrade from a verified release head.
 #[allow(clippy::too_many_arguments)]
+#[cfg(unix)]
 #[cfg(test)]
 async fn run_upgrade_from_head(
     fetch_fn: &FetchFn,

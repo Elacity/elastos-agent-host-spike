@@ -387,19 +387,6 @@ pub(crate) async fn remove_egress(
     .into())
 }
 
-#[cfg(windows)]
-pub(crate) async fn connect_egress(
-    _endpoint: &iroh::Endpoint,
-    _owner: &RemoteEngineOwner,
-    _stream_id: &str,
-) -> Result<crate::carrier::BrowserCarrierStream> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "Browser Engine egress is unsupported on Windows",
-    )
-    .into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

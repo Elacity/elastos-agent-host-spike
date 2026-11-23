@@ -80,12 +80,14 @@ impl Supervisor {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn test_collaboration_chat_product_port(
         &self,
     ) -> Option<&crate::collaboration_product::CollaborationChatProductPort> {
         self.collaboration_chat_product_port.as_ref()
     }
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn test_collaboration_presence_product_port(
         &self,
     ) -> Option<&crate::collaboration_presence::CollaborationPresenceProductPort> {

@@ -205,13 +205,12 @@ mod portable {
     use super::SaveFault;
     #[cfg(unix)]
     use std::io::{Read, Write};
-    use std::{
-        ffi::CStr,
-        fs::File,
-        path::{Path, PathBuf},
-    };
+    #[cfg(unix)]
+    use std::path::PathBuf;
+    use std::{ffi::CStr, fs::File, path::Path};
 
     pub(crate) struct IdentityFiles {
+        #[cfg(unix)]
         directory: PathBuf,
         _lock: File,
     }
@@ -413,6 +412,7 @@ mod portable {
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
 
         let files = IdentityFiles {
+            #[cfg(unix)]
             directory: root.path().to_path_buf(),
             _lock: File::create(root.path().join("lock")).unwrap(),
         };

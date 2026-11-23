@@ -193,6 +193,7 @@ impl ProviderPlane {
 #[derive(Clone, Debug)]
 struct HostedProvider {
     plane: ProviderPlane,
+    #[cfg(unix)]
     binary_path: PathBuf,
 }
 
@@ -201,8 +202,10 @@ struct HostedProvider {
 /// resolution failures left to handle.
 #[derive(Clone, Debug)]
 pub(crate) struct ProviderHostPlan {
+    #[cfg(unix)]
     data_dir: PathBuf,
     providers: Vec<HostedProvider>,
+    #[cfg(unix)]
     carrier_addr: Option<SocketAddr>,
 }
 
@@ -242,9 +245,13 @@ impl ProviderHostPlan {
             providers.push(resolved);
         }
 
+        #[cfg(not(unix))]
+        let _ = (&data_dir, &carrier_addr);
         Ok(Self {
+            #[cfg(unix)]
             data_dir,
             providers,
+            #[cfg(unix)]
             carrier_addr,
         })
     }
@@ -285,7 +292,13 @@ fn resolve_provider(name_or_path: &str) -> anyhow::Result<HostedProvider> {
         })?
     };
 
-    Ok(HostedProvider { plane, binary_path })
+    #[cfg(not(unix))]
+    let _ = &binary_path;
+    Ok(HostedProvider {
+        plane,
+        #[cfg(unix)]
+        binary_path,
+    })
 }
 
 fn looks_like_path(value: &str) -> bool {
@@ -520,8 +533,10 @@ mod tests {
     async fn windows_refuses_provider_host_before_side_effects() {
         let temp = tempfile::tempdir().unwrap();
         let plan = ProviderHostPlan {
+            #[cfg(unix)]
             data_dir: temp.path().to_path_buf(),
             providers: Vec::new(),
+            #[cfg(unix)]
             carrier_addr: None,
         };
         let error = compose(&plan).await.err().unwrap();

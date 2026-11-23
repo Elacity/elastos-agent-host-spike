@@ -33,6 +33,7 @@ pub(crate) struct ServerInfrastructure {
     pub(crate) provider_registry: Arc<provider::ProviderRegistry>,
     pub(crate) namespace_store: Arc<namespace::NamespaceStore>,
     pub(crate) identity_state: Option<api::handlers::identity::IdentityState>,
+    #[cfg(unix)]
     pub(crate) tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
     pub(crate) provider_cid: String,
     pub(crate) shell_cid: Option<String>,
@@ -1270,7 +1271,9 @@ async fn setup_server_infrastructure_impl(
     match binaries::resolve_verified_native_provider_binary("model-provider") {
         Ok(Some(path)) => {
             match model_provider_startup_config(&data_dir, &provider_registry).await {
-                Ok((mut model_config, worker)) => {
+                Ok((model_config, worker)) => {
+                    #[cfg(unix)]
+                    let mut model_config = model_config;
                     // Refuse before any spawn when this OS has no confinement backend.
                     let confinement = model_provider_confinement(std::env::consts::OS);
                     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1321,7 +1324,12 @@ async fn setup_server_infrastructure_impl(
                     };
                     match bridge_result {
                         Ok((bridge, local_sockets, confined_config, hosted_listener)) => {
-                            model_config = confined_config;
+                            #[cfg(unix)]
+                            {
+                                model_config = confined_config;
+                            }
+                            #[cfg(not(unix))]
+                            let _: provider::BridgeProviderConfig = confined_config;
                             #[cfg(any(target_os = "macos", target_os = "linux"))]
                             if let Some((sockets, vacant)) = local_sockets {
                                 provider_registry
@@ -1928,6 +1936,8 @@ async fn setup_server_infrastructure_impl(
         })
     });
 
+    #[cfg(not(unix))]
+    let _ = &tls_config;
     Ok(ServerInfrastructure {
         audit_log,
         session_registry,
@@ -1937,6 +1947,7 @@ async fn setup_server_infrastructure_impl(
         provider_registry,
         namespace_store,
         identity_state,
+        #[cfg(unix)]
         tls_config,
         provider_cid,
         shell_cid,

@@ -520,6 +520,7 @@ impl InstallTransaction {
         self.layout == ReleaseLayout::Consumed
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn staged_binary(&self) -> PathBuf {
         self.scratch(ReleaseFile::RuntimeBinary, STAGE)
@@ -903,6 +904,7 @@ impl InstallTransaction {
         self.recover()
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     fn commit(&self) -> anyhow::Result<()> {
         self.commit_with(|_| Ok(()), || Ok(()))
@@ -2013,13 +2015,6 @@ pub(crate) fn volume_space(path: &Path) -> anyhow::Result<(u64, u128)> {
     ))
 }
 
-#[cfg(windows)]
-pub(crate) fn volume_space(_path: &Path) -> anyhow::Result<(u64, u128)> {
-    Err(unsupported_windows(
-        "installation volume identity and capacity",
-    ))
-}
-
 /// Waits between attempts to start a binary that was just written. On Linux a
 /// concurrent fork can briefly inherit the closed writer descriptor, so exec
 /// reports ETXTBSY until that child execs. Only that error is retried (<2 s).
@@ -2034,11 +2029,6 @@ fn text_file_busy(error: &std::io::Error) -> bool {
         TEXT_FILE_BUSY_SEEN.with(|seen| seen.set(seen.get() + 1));
     }
     busy
-}
-
-#[cfg(windows)]
-fn text_file_busy(_error: &std::io::Error) -> bool {
-    false
 }
 
 #[cfg(all(test, unix))]

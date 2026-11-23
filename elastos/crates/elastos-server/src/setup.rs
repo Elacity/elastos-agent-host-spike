@@ -2375,9 +2375,11 @@ fn arm64_model_elf_compatible(header: &[u8]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LocalModelExecutionUnavailable {
     UnsupportedHost,
+    #[cfg(unix)]
     SourceEngineRequired,
     /// The admission is bound to an earlier catalogue head; one Use rebinds it
     /// to the current head without a new download.
+    #[cfg(unix)]
     CatalogUpdated,
 }
 
@@ -2396,7 +2398,9 @@ impl std::fmt::Display for LocalModelExecutionUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::UnsupportedHost => "admitted model host profile is unavailable",
+            #[cfg(unix)]
             Self::SourceEngineRequired => "This source-checkout Home has no local AI engine. On Linux, first build the qualified Ubuntu 22.04 bundle and set ELASTOS_LLAMA_AMD64_BUNDLE or ELASTOS_LLAMA_ARM64_BUNDLE to its archive. Then rerun scripts/setup-source-home.sh with SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER=1 to install it. The script prints the exact build command when the archive is missing.",
+            #[cfg(unix)]
             Self::CatalogUpdated => "catalog changed during preparation",
         })
     }
@@ -5275,11 +5279,6 @@ fn atomic_copy_dir(src: &Path, dest: &Path) -> anyhow::Result<()> {
     // Before the exchange the scratch holds the staged copy, after it the previous tree.
     let removed = remove_path(&scratch);
     swapped.and(removed)
-}
-
-#[cfg(windows)]
-fn atomic_copy_dir(_src: &Path, _dest: &Path) -> anyhow::Result<()> {
-    Err(windows_unsupported("setup directory replacement ownership"))
 }
 
 /// Every installed path this manifest names on `platform`.
