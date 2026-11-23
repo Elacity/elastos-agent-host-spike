@@ -1935,6 +1935,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "elastos-win-custody"
+version = "2.0.1"
+dependencies = [
+ "elastos-bundle-identity-windows-handle",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "elliptic-curve"
 version = "0.13.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

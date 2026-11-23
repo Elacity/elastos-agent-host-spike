@@ -1,0 +1,19 @@
+[package]
+name = "elastos-win-custody"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Owner-only file and directory opens for Windows"
+
+[target.'cfg(windows)'.dependencies]
+elastos-bundle-identity-windows-handle = { path = "../elastos-bundle-identity-windows-handle" }
+windows-sys = { version = "=0.61.2", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }

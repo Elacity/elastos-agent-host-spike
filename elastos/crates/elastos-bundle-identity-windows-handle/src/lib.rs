@@ -4,7 +4,8 @@
 //!
 //! Safety of each unsafe block:
 //! 1. `NtCreateFile` gets live object attributes, name storage, status storage,
-//!    and a borrowed parent handle for one synchronous call.
+//!    a borrowed parent handle, and a null or caller-owned security descriptor
+//!    for one synchronous call.
 //! 2. `RtlNtStatusToDosErrorNoTeb` accepts the returned NTSTATUS value.
 //! 3. `OwnedHandle::from_raw_handle` takes sole ownership after a successful
 //!    open that returned a non-null handle.
@@ -30,13 +31,46 @@ use windows_sys::Wdk::Storage::FileSystem::{
     FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
 };
 use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, UNICODE_STRING};
+use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
 use windows_sys::Win32::Storage::FileSystem::{
     FileIdBothDirectoryInfo, GetFileInformationByHandleEx, FILE_ID_BOTH_DIR_INFO,
     FILE_READ_ATTRIBUTES, FILE_READ_DATA, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, IO_STATUS_BLOCK_0};
 
+/// One handle-relative open. `security` is null, or an absolute security
+/// descriptor that stays live for this synchronous call. [`open_child`] passes null.
+pub struct RelativeOpen {
+    pub access: u32,
+    pub share: u32,
+    pub disposition: u32,
+    pub options: u32,
+    pub attributes: u32,
+    pub security: *const SECURITY_DESCRIPTOR,
+}
+
 pub fn open_child(parent: &File, name: &OsStr, directory: bool, share: u32) -> io::Result<File> {
+    open_relative(
+        parent,
+        name,
+        RelativeOpen {
+            access: FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            share,
+            disposition: FILE_OPEN,
+            options: FILE_SYNCHRONOUS_IO_NONALERT
+                | FILE_OPEN_REPARSE_POINT
+                | if directory {
+                    FILE_DIRECTORY_FILE
+                } else {
+                    FILE_NON_DIRECTORY_FILE
+                },
+            attributes: 0,
+            security: std::ptr::null(),
+        },
+    )
+}
+
+pub fn open_relative(parent: &File, name: &OsStr, open: RelativeOpen) -> io::Result<File> {
     let mut wide: Vec<u16> = name.encode_wide().collect();
     if wide.is_empty()
         || matches!(wide.as_slice(), [46] | [46, 46])
@@ -62,7 +96,7 @@ pub fn open_child(parent: &File, name: &OsStr, directory: bool, share: u32) -> i
         RootDirectory: parent.as_raw_handle(),
         ObjectName: &name,
         Attributes: 0, // Exact listed spelling also works in case-sensitive directories.
-        SecurityDescriptor: std::ptr::null(),
+        SecurityDescriptor: open.security,
         SecurityQualityOfService: std::ptr::null(),
     };
     let mut raw = std::ptr::null_mut();
@@ -71,24 +105,19 @@ pub fn open_child(parent: &File, name: &OsStr, directory: bool, share: u32) -> i
         Information: 0,
     };
     // SAFETY: all pointers remain live for this synchronous call; RootDirectory
-    // is the held parent, and the caller supplies one path component.
+    // is the held parent, and the caller supplies one path component. A non-null
+    // security descriptor is an absolute descriptor the caller keeps alive.
     let status = unsafe {
         NtCreateFile(
             &mut raw,
-            FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            open.access,
             &attrs,
             &mut iosb,
             std::ptr::null(),
-            0,
-            share,
-            FILE_OPEN,
-            FILE_SYNCHRONOUS_IO_NONALERT
-                | FILE_OPEN_REPARSE_POINT
-                | if directory {
-                    FILE_DIRECTORY_FILE
-                } else {
-                    FILE_NON_DIRECTORY_FILE
-                },
+            open.attributes,
+            open.share,
+            open.disposition,
+            open.options,
             std::ptr::null(),
             0,
         )
