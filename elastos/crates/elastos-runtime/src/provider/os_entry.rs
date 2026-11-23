@@ -97,6 +97,20 @@ pub(super) fn start_provider(
     dispatch(provider, &admitted, executable, checked, stdio)
 }
 
+/// Seatbelt text and Landlock plan for localhost, object, or chain.
+///
+/// Each provider gets its own file roots. The data directory is not a root:
+/// that directory contains `identity/device.key`. `start_provider` does not
+/// call this. `spawn_confined` still admits only the single-root providers.
+pub fn render_helper_confinement(
+    component_key: &str,
+    data_dir: &Path,
+    executable: &Path,
+    landlock_abi: u32,
+) -> Result<super::path_allow::HelperConfinement, String> {
+    super::path_allow::render(component_key, data_dir, executable, landlock_abi)
+}
+
 fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
     if admitted.rows().is_empty() {
         return Err("provider start is refused: the Runtime grant has no rights".to_string());

@@ -80,6 +80,39 @@ pub(super) fn render_macos_profile(
     rendered
 }
 
+/// Seatbelt text for a helper allow-list. Parameters are the file-root names.
+/// There is no `STORAGE_ROOT` and no `STORAGE_PARENT`: those parents would be
+/// the data directory, which contains `identity/device.key`.
+pub(super) fn render_path_allow_profile(roots: &[&str]) -> Result<String, String> {
+    if roots.is_empty() {
+        return Err("provider start is refused: the path allow-list has no file roots".to_string());
+    }
+    let mut lines = Vec::with_capacity(HEAD.len() + 3 + roots.len());
+    for line in HEAD {
+        lines.push((*line).to_string());
+    }
+    lines.push(r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#.to_string());
+    lines.push(r#"(allow file-read* (literal "/"))"#.to_string());
+    lines.push("(allow sysctl-read)".to_string());
+    for name in roots {
+        let plain = name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            && !name.is_empty();
+        if !plain || *name == "STORAGE_ROOT" || *name == "STORAGE_PARENT" || *name == "identity" {
+            return Err(format!(
+                "provider start is refused: {name} cannot be a Seatbelt allow-list parameter"
+            ));
+        }
+        lines.push(format!(
+            "(allow file-read* file-write* (subpath (param \"{name}\")))"
+        ));
+    }
+    let mut rendered = lines.join("\n");
+    rendered.push('\n');
+    Ok(rendered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

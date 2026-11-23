@@ -3,7 +3,10 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 // The lab's STORAGE_ROOT, executable, and ABI-5 handled masks (confine.rs:8560-8582, 8685).
 const STORAGE: u64 = 0x41be;
@@ -162,6 +165,51 @@ fn build_for_arch(
         rules,
         storage_dev: bindings.storage_dev,
         storage_ino: bindings.storage_ino,
+    })
+}
+
+/// Landlock rules for a helper allow-list. There is no single storage root.
+pub(super) struct PathAllowPlan {
+    pub abi: u32,
+    pub handled: u64,
+    pub rules: Vec<PathRule>,
+}
+
+pub(super) fn build_path_allow_plan(
+    roots: &[(&'static str, PathBuf)],
+    executable: &Path,
+    abi: u32,
+) -> Result<PathAllowPlan, String> {
+    let abi = require_abi(Ok(abi))?;
+    if roots.is_empty() {
+        return Err("provider start is refused: the path allow-list has no file roots".to_string());
+    }
+    let mut rules = Vec::with_capacity(roots.len() + 4);
+    for (name, path) in roots {
+        if !path.is_absolute() || *name == "STORAGE_ROOT" || *name == "STORAGE_PARENT" {
+            return Err(format!(
+                "provider start is refused: {name} cannot be a Landlock allow-list root"
+            ));
+        }
+        rules.push(PathRule(name, path.clone(), STORAGE));
+    }
+    if !executable.is_absolute() {
+        return Err(
+            "provider start is refused: the provider executable path is not absolute".to_string(),
+        );
+    }
+    rules.push(PathRule(
+        "PROVIDER_EXECUTABLE",
+        executable.to_path_buf(),
+        BINARY,
+    ));
+    for path in loader_paths(RuntimeProviderId::Did, LoaderArch::host()) {
+        rules.push(PathRule("LANDLOCK_LOADER_PATHS", path.into(), BINARY));
+    }
+    Ok(PathAllowPlan {
+        abi,
+        handled: HANDLED,
+        rules,
     })
 }
 

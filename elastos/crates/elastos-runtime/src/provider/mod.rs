@@ -28,6 +28,8 @@ mod local_model_broker;
 mod macos_profile;
 #[cfg(unix)]
 mod os_entry;
+#[cfg(unix)]
+mod path_allow;
 mod registry;
 #[cfg(unix)]
 mod rights;
@@ -44,6 +46,10 @@ pub use bridge::{
 #[cfg(any(windows, target_os = "macos"))]
 pub use checked_executable::recover_verified_copies;
 pub use checked_executable::CheckedExecutable;
+#[cfg(unix)]
+pub use os_entry::render_helper_confinement;
+#[cfg(unix)]
+pub use path_allow::{HelperConfinement, HelperLandlockRule};
 pub use registry::{
     decode_provider_stream_payload, EntryType, LocalIpfsCapacityObservation, Provider,
     ProviderByteRange, ProviderCarrierInvoker, ProviderCarrierRoute, ProviderError,
