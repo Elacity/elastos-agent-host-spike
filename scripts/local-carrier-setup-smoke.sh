@@ -409,7 +409,17 @@ PY
 
 echo "[local-carrier-setup] staged local artifacts into ${ARTIFACTS_DIR}"
 
-mkdir -p "${DATA_DIR}"
+PUBLISHED_COMPONENTS="${TEST_ROOT}/published-components.json"
+cp "${DATA_DIR}/components.json" "${PUBLISHED_COMPONENTS}"
+# This publisher starts with only its localhost provider. Keep the complete
+# catalogue for the consumer's Carrier setup, and sign the installed launch set.
+python3 "${REPO_ROOT}/scripts/holder-canary-fixture.py" restrict-components \
+    "${DATA_DIR}" "${PUBLISHED_COMPONENTS}" localhost-provider
+install -m 700 "${ELASTOS_BIN}" "${DATA_DIR}/bin/elastos"
+python3 "${REPO_ROOT}/scripts/holder-canary-fixture.py" sign-install \
+    "${TEST_ROOT}" "${DATA_DIR}" "${DATA_DIR}/bin/elastos"
+ELASTOS_BIN="${DATA_DIR}/bin/elastos"
+
 SERVE_PID="$(
     ELASTOS_ROOT="${ELASTOS_ROOT}" \
     ELASTOS_BIN="${ELASTOS_BIN}" \
@@ -527,7 +537,7 @@ mkdir -p "${DATA_DIR}/bin"
 # Home CLI renderer below) only with its owner's explicit dev_mode opt-in, as
 # setup-source-home.sh sets it.
 printf 'dev_mode = true\n' > "${DATA_DIR}/config.toml"
-cp "${PUBLISHER_DATA_DIR}/components.json" "${DATA_DIR}/components.json"
+cp "${PUBLISHED_COMPONENTS:-${PUBLISHER_DATA_DIR}/components.json}" "${DATA_DIR}/components.json"
 # A source setup reads the pinned signed model catalogue beside its manifest.
 if [[ -f "${REPO_ROOT}/model-catalog.json" ]]; then
     install -m 600 "${REPO_ROOT}/model-catalog.json" "${DATA_DIR}/model-catalog.json"
@@ -583,6 +593,11 @@ echo "[local-carrier-setup] running Carrier-only setup smoke"
 )
 
 stop_source_runtime
+
+# Setup has installed the consumer's final catalogue and native providers.
+# Keep its Carrier source while binding those bytes to a disposable release.
+python3 "${REPO_ROOT}/scripts/holder-canary-fixture.py" sign-install \
+    "${TEST_ROOT}" "${DATA_DIR}" "${ELASTOS_BIN}" --preserve-source
 
 for installed in \
     "${DATA_DIR}/bin/kubo" \

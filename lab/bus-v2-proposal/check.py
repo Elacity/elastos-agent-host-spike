@@ -20,12 +20,18 @@ CITATION = re.compile(
 
 DRAFT = Path("lab/bus-v2-proposal/CORE-CALLS-PROPOSAL.md")
 
-# A prose backtick span that looks like code is a claim: the same line must
-# hold a path:line citation. These marks, a dotted chain and a keyword are code
-# shapes. A plain identifier and a file name are not.
-CODE_MARKS = ("::", "->", "=", "(", ")", "[", "]", "+", "*", "&", "|", "%", "^")
+# A prose backtick span that looks like code is a claim: one of its lines must
+# hold a path:line citation. A plain identifier and a file name are not code.
+CODE_MARKS = ("::", "->", "=", "(", ")", "[", "]", "{", "}", "<", ">",
+              "+", "*", "&", "|", "%", "^", ";", "!", "?")
 SPACED_OPERATOR = re.compile(r"\s[-/<>]\s")
-DOTTED_CHAIN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
+DOTTED_CHAIN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+))+")
+CODE_KEYWORD = re.compile(
+    r"\b(?:pub|struct|enum|trait|impl|fn|let|mut|return|break|record|"
+    r"variant|resource|interface|world|func|type|const|static|match|if|"
+    r"else|while|loop|for|use|mod|async|await|unsafe|import|export|"
+    r"include|constructor)\b"
+)
 FILE_NAME = re.compile(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9]{1,8}")
 FILE_EXTENSIONS = frozenset(
     ("rs", "json", "toml", "md", "wit", "py", "js", "mjs", "html", "css", "txt",
@@ -445,8 +451,13 @@ def commit_exists(root, sha):
     return result.returncode == 0
 
 
-def _spans(text):
-    """Return CommonMark code span contents from matching backtick runs."""
+def _markdown_lines(text):
+    """Split only at Markdown line endings, preserving other Unicode spaces."""
+    return re.split(r"\r\n?|\n", text)
+
+
+def _spans(text, positions=False):
+    """Parse CommonMark backtick runs once; optionally retain their offsets."""
     spans = []
     runs = list(re.finditer(r"`+", text))
     opener = 0
@@ -460,9 +471,9 @@ def _spans(text):
         content = re.sub(r"\r\n?|\n", " ", text[runs[opener].end():runs[closer].start()])
         if content.startswith(" ") and content.endswith(" ") and not content.isspace():
             content = content[1:-1]
-        spans.append(content)
+        spans.append((content, runs[opener].start(), runs[closer].end()))
         opener = closer + 1
-    return spans
+    return spans if positions else [content for content, _, _ in spans]
 
 
 def _pinned_lines(root, sha, rel):
@@ -1294,7 +1305,7 @@ def proposal_refusals(text):
     its own reason, and a propose line outside section 0 is refused.
     """
     # Preserve Unicode whitespace within a Markdown line for the refusal guard.
-    lines = re.split(r"\r\n?|\n", text)
+    lines = _markdown_lines(text)
     try:
         records = classify_lines(lines)
     except ValueError as error:
@@ -1459,39 +1470,72 @@ def code_shaped(span):
         return False
     if DOTTED_CHAIN.fullmatch(span) is not None:
         return True
-    return span in CODE_WORDS
+    return span in CODE_WORDS or (bool(re.search(r"\s", span))
+                                  and CODE_KEYWORD.search(span) is not None)
 
 
-def code_span_refusals(text):
+def _document_spans(text):
+    """Parse visible prose once, keeping each span's first and last line.
+
+    Fences, comments, headings and indented source quotes end a prose run.
+    Inline comments retain their columns as spaces. Neither citation checking
+    nor the code-shape rule can see a different set of backtick pairs.
+    """
+    lines = _markdown_lines(text)
+    records = classify_lines(lines)
+    found = []
+    run = []
+    first_line = 0
+
+    def flush():
+        if not run:
+            return
+        prose = "\n".join(run)
+        newlines = [match.start() for match in re.finditer("\n", prose)]
+        for content, start, end in _spans(prose, positions=True):
+            found.append((content, first_line + bisect.bisect_left(newlines, start),
+                          first_line + bisect.bisect_left(newlines, end - 1)))
+        run.clear()
+
+    for number, ((kind, _, visible), line) in enumerate(zip(records, lines), 1):
+        if kind == TEXT and visible.strip() and _indent_width(line) <= 3:
+            if not run:
+                first_line = number
+            run.append(visible)
+        else:
+            flush()
+    flush()
+    return found
+
+
+def code_span_refusals(text, spans=None):
     """Return one refusal per code-shaped prose span with no line citation.
 
-    A prose line holds its own evidence: a code-shaped span on a line that also
-    holds a path:line citation is supported. An indented line quotes source and
+    A prose span holds its own evidence: a path:line citation on any line that
+    it occupies supports it. An indented line quotes source and
     is not prose, a fence and an HTML comment hold no prose, and a heading is
     not checked. A plain identifier and a file name are not code-shaped.
     """
+    if spans is None:
+        try:
+            spans = _document_spans(text)
+        except ValueError:
+            # The structural refusal owns a malformed draft; proposal_refusals
+            # reports that one reason.
+            return []
+    citations = {line for span, first, last in spans
+                 if (match := CITATION.fullmatch(span)) and match.group("start")
+                 for line in range(first, last + 1)}
     refusals = []
-    lines = text.splitlines()
-    try:
-        records = classify_lines(lines)
-    except ValueError:
-        # The structural refusal owns a malformed draft; proposal_refusals
-        # reports that one reason.
-        return refusals
-    for index, (kind, _, visible) in enumerate(records):
-        if kind != TEXT or _indent_width(lines[index]) > 3:
+    for span, first, last in spans:
+        if any(line in citations for line in range(first, last + 1)):
             continue
-        spans = _spans(visible)
-        if any((match := CITATION.fullmatch(span)) and match.group("start")
-               for span in spans):
-            continue
-        for span in spans:
-            match = CITATION.fullmatch(span)
-            if (match is None or match.group("start") is None) and code_shaped(span):
-                refusals.append(
-                    "refuse: line %d has a code-shaped span and no path:line "
-                    "citation: `%s`" % (index + 1, span)
-                )
+        match = CITATION.fullmatch(span)
+        if (match is None or match.group("start") is None) and code_shaped(span):
+            refusals.append(
+                "refuse: line %d has a code-shaped span and no path:line "
+                "citation: `%s`" % (first, span)
+            )
     return refusals
 
 
@@ -1519,7 +1563,11 @@ def problems(root):
             refusals.append("refuse: pinned commit is not a commit: " + sha)
     if pin_allows_structural_reads(pin_reason, pinned):
         refused_spans = set()
-        for span in _spans(text):
+        try:
+            spans = _document_spans(text)
+        except ValueError:
+            spans = []  # proposal_refusals owns the malformed-line refusal.
+        for span, _, _ in spans:
             match = CITATION.fullmatch(span)
             if match is None:
                 # Deliberate: only recognized backtick locations are checked.
@@ -1528,7 +1576,7 @@ def problems(root):
             if reason is not None:
                 refusals.append(reason)
                 refused_spans.add(span)
-        refusals.extend(code_span_refusals(text))
+        refusals.extend(code_span_refusals(text, spans))
         refusals.extend(_quote_refusals(root, text, sha, refused_spans))
         refusals.extend(a3_claim_refusals(text))
     refusals.extend(proposal_refusals(text))

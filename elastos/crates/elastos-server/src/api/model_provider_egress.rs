@@ -3632,9 +3632,12 @@ mod tests {
             ..Default::default()
         };
         let (bridge, _, _, confined_config, hosted_listener) =
-            ProviderBridge::spawn_confined_model(&script, config)
-                .await
-                .unwrap();
+            ProviderBridge::spawn_confined_model(
+                &crate::test_support::fixture_executable(&script),
+                config,
+            )
+            .await
+            .unwrap();
         let bridge = Arc::new(bridge);
         start(hosted_listener, bridge.clone(), dir.path().to_path_buf()).unwrap();
         bridge
@@ -3857,9 +3860,12 @@ mod tests {
             ..Default::default()
         };
         let (bridge, _, _, confined_config, hosted_listener) =
-            ProviderBridge::spawn_confined_model(&script, config)
-                .await
-                .unwrap();
+            ProviderBridge::spawn_confined_model(
+                &crate::test_support::fixture_executable(&script),
+                config,
+            )
+            .await
+            .unwrap();
         let bridge = Arc::new(bridge);
         start(hosted_listener, bridge.clone(), dir.path().to_path_buf()).unwrap();
         let sink_task = tokio::spawn(async move {

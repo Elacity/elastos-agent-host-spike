@@ -1158,14 +1158,16 @@ fn format_domain_hint(domain: &str) -> String {
     }
 }
 
-fn get_tunnel_binary() -> anyhow::Result<PathBuf> {
+fn get_tunnel_binary() -> anyhow::Result<elastos_runtime::provider::CheckedExecutable> {
+    // tunnel-provider finds the installed cloudflared beside its own path.
     crate::resolve_verified_provider_binary(
         "tunnel-provider",
         "tunnel-provider not found. Run:\n\n  elastos setup --with cloudflared,tunnel-provider",
     )
+    .map(|binary| binary.with_sibling("cloudflared"))
 }
 
-fn get_site_binary() -> anyhow::Result<PathBuf> {
+fn get_site_binary() -> anyhow::Result<elastos_runtime::provider::CheckedExecutable> {
     crate::resolve_verified_provider_binary(
         "site-provider",
         "site-provider not found. Run:\n\n  elastos setup --with site-provider",
