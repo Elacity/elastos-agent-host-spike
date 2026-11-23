@@ -3,6 +3,10 @@
 //! Linux opens with `O_PATH|O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY`. macOS has no
 //! `O_PATH`; the same open uses `O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY`. A symlink,
 //! or a directory whose device or inode differs, is `ESTALE`.
+//!
+//! On Linux, `open` of a symlink with `O_DIRECTORY` returns `ENOTDIR` and no
+//! descriptor. `statx` with `AT_SYMLINK_NOFOLLOW` is the identity check for
+//! that failure.
 
 use std::ffi::CStr;
 use std::mem::MaybeUninit;
@@ -35,7 +39,44 @@ fn stat_identity(info: &libc::stat) -> (u64, u64) {
     (dev, info.st_ino)
 }
 
-/// `lstat` the final component. A symlink is a different file from the pinned directory.
+/// The open failed. A symlink, or any other file that is not the pinned
+/// directory, is an identity mismatch.
+fn unpinned_after_open_failed(path: &CStr, dev: u64, ino: u64) -> bool {
+    // Linux open(O_DIRECTORY|O_NOFOLLOW) on a symlink returns ENOTDIR and no
+    // descriptor. statx with AT_SYMLINK_NOFOLLOW reads the symlink, so the
+    // mismatch is ESTALE rather than that open errno.
+    #[cfg(target_os = "linux")]
+    if let Some(unpinned) = linux_statx_unpinned(path, dev, ino) {
+        return unpinned;
+    }
+    symlink_is_not_pinned(path, dev, ino)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_statx_unpinned(path: &CStr, dev: u64, ino: u64) -> Option<bool> {
+    let mut info = MaybeUninit::<libc::statx>::zeroed();
+    let rc = unsafe {
+        libc::statx(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+            libc::STATX_BASIC_STATS,
+            info.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let kind = u32::from(info.stx_mode) & libc::S_IFMT;
+    if kind == libc::S_IFLNK {
+        return Some(true);
+    }
+    let found_dev = libc::makedev(info.stx_dev_major, info.stx_dev_minor);
+    Some(kind != libc::S_IFDIR || found_dev != dev || info.stx_ino != ino)
+}
+
+/// No-follow `fstatat` of the final component. A symlink is not the pinned directory.
 fn symlink_is_not_pinned(path: &CStr, dev: u64, ino: u64) -> bool {
     let mut info = MaybeUninit::<libc::stat>::uninit();
     let rc = unsafe {
@@ -69,7 +110,7 @@ pub(super) fn open_pinned_directory(
     let fd = unsafe { libc::open(path.as_ptr(), flags) };
     if fd < 0 {
         let err = last_errno();
-        if symlink_is_not_pinned(path, dev, ino) {
+        if unpinned_after_open_failed(path, dev, ino) {
             return Err(libc::ESTALE);
         }
         return Err(err);

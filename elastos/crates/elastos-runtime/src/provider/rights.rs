@@ -79,6 +79,20 @@ impl AdmittedRights {
     }
 }
 
+/// The full Runtime grant for `provider`: every row the single-root launcher
+/// installs when the manifest does not narrow the list.
+///
+/// Helper allow-lists install the Did grant. That filter is the storage and
+/// exec limits of the single-root path. The model grant allows more calls.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(super) fn runtime_grant(provider: RuntimeProviderId) -> AdmittedRights {
+    AdmittedRights::from_table(rights_table::resolve(provider, rights_table::RIGHTS))
+}
+
 /// The provider's Runtime grant. Tests that build a plan use this path.
 #[cfg(test)]
 pub(super) fn admit_runtime_grant(provider: RuntimeProviderId) -> AdmittedRights {

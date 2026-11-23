@@ -105,6 +105,32 @@ pub(super) struct Prepared {
     root_pins: Vec<RootPin>,
 }
 
+fn host_audit_arch() -> AuditArch {
+    if cfg!(target_arch = "x86_64") {
+        AuditArch::X86_64
+    } else {
+        AuditArch::Aarch64
+    }
+}
+
+fn to_sock_filters(instructions: Vec<[u32; 4]>) -> Result<Vec<libc::sock_filter>, String> {
+    if instructions.is_empty() {
+        return Err("seccomp install refused: the filter is empty".into());
+    }
+    if instructions.len() > 256 {
+        return Err("seccomp install refused: the filter is too long".into());
+    }
+    Ok(instructions
+        .into_iter()
+        .map(|[code, jt, jf, k]| libc::sock_filter {
+            code: code as u16,
+            jt: jt as u8,
+            jf: jf as u8,
+            k,
+        })
+        .collect())
+}
+
 pub(super) fn prepare(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
@@ -119,23 +145,11 @@ pub(super) fn prepare(
                 .map_err(|_| format!("Landlock path contains NUL: {}", rule.0))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let arch = if cfg!(target_arch = "x86_64") {
-        AuditArch::X86_64
-    } else {
-        AuditArch::Aarch64
-    };
-    let filters = seccomp_program::program(provider, admitted, arch)
-        .into_iter()
-        .map(|[code, jt, jf, k]| libc::sock_filter {
-            code: code as u16,
-            jt: jt as u8,
-            jf: jf as u8,
-            k,
-        })
-        .collect::<Vec<_>>();
-    if filters.len() > 256 {
-        return Err("seccomp install refused: the filter is too long".into());
-    }
+    let filters = to_sock_filters(seccomp_program::program(
+        provider,
+        admitted,
+        host_audit_arch(),
+    ))?;
     // The single-root plan has one directory root, named STORAGE_ROOT.
     // Allow-list plans pin every root in `prepare_path_allow`.
     let root_pins = plan
@@ -343,6 +357,15 @@ fn prepare_path_allow(plan: landlock_plan::PathAllowPlan) -> Result<Prepared, St
                 .map_err(|_| format!("Landlock path contains NUL: {}", rule.0))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // Step::Seccomp always runs, and a zero-length sock_fprog is EINVAL.
+    // Helpers install the Did Runtime grant: the single-root storage and
+    // exec filter, and the loader set this plan already pins to Did.
+    // The model filter allows more calls, so it is not the helper filter.
+    let filters = to_sock_filters(seccomp_program::program(
+        RuntimeProviderId::Did,
+        &super::super::rights::runtime_grant(RuntimeProviderId::Did),
+        host_audit_arch(),
+    ))?;
     let first = root_pins[0];
     Ok(Prepared {
         plan: landlock_plan::Plan {
@@ -353,7 +376,7 @@ fn prepare_path_allow(plan: landlock_plan::PathAllowPlan) -> Result<Prepared, St
             storage_ino: first.ino,
         },
         paths,
-        filters: Vec::new(),
+        filters,
         root_pins,
     })
 }
@@ -557,6 +580,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer() {
         landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
@@ -605,6 +629,121 @@ mod tests {
             status, 0,
             "a root swapped for a symlink must be refused by dev/ino mismatch (wait status {status}, exit {})",
             libc::WEXITSTATUS(status)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key() {
+        landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let identity = data.join("identity");
+        std::fs::create_dir(&identity).unwrap();
+        let key_path = identity.join("device.key");
+        std::fs::write(&key_path, b"secret").unwrap();
+        let root = data.join("chain-provider");
+        std::fs::create_dir(&root).unwrap();
+        let allowed_path = root.join("note");
+        std::fs::write(&allowed_path, b"ok").unwrap();
+        let executable = Path::new("/bin/true");
+        let (_confinement, plan) =
+            path_allow::render_with_plan("chain-provider", data, executable, 5)
+                .unwrap_or_else(|err| panic!("clean render: {err}"));
+        let prepared = prepare_path_allow(plan).unwrap();
+        let single = prepare(
+            RuntimeProviderId::Did,
+            &super::super::super::rights::admit_runtime_grant(RuntimeProviderId::Did),
+            &bindings_for(data, executable),
+        )
+        .unwrap_or_else(|err| panic!("single-root filter: {err}"));
+        assert!(
+            !prepared.filters.is_empty(),
+            "a clean plan installs a seccomp filter"
+        );
+        assert_eq!(prepared.filters.len(), single.filters.len());
+        for (index, (left, right)) in prepared
+            .filters
+            .iter()
+            .zip(single.filters.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                (left.code, left.jt, left.jf, left.k),
+                (right.code, right.jt, right.jf, right.k),
+                "allow-list instruction {index} must match the Did single-root filter"
+            );
+        }
+        assert!(prepared
+            .plan
+            .rules
+            .iter()
+            .any(|rule| rule.0 == "chain-provider"));
+        assert!(!prepared.plan.rules.iter().any(|rule| {
+            rule.0 == "STORAGE_ROOT" || rule.0 == "identity" || rule.1.ends_with("device.key")
+        }));
+        let allowed_c = CString::new(allowed_path.as_os_str().as_bytes()).unwrap();
+        let key_c = CString::new(key_path.as_os_str().as_bytes()).unwrap();
+        let report = std::fs::File::open("/dev/null").unwrap();
+        assert!(report.as_raw_fd() >= 3);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            if let Err(Failure(step, _)) = unsafe { install(&prepared, report.as_raw_fd(), -1) } {
+                let tag = match step {
+                    Step::CloseRange => 1,
+                    Step::Create => 2,
+                    Step::Add(_) => 3,
+                    Step::NoNewPrivileges => 4,
+                    Step::Restrict => 5,
+                    Step::Seccomp => 6,
+                };
+                unsafe { libc::_exit(160 + tag) };
+            }
+            let allowed = unsafe {
+                libc::syscall(
+                    libc::SYS_openat,
+                    libc::AT_FDCWD,
+                    allowed_c.as_ptr(),
+                    libc::O_RDONLY,
+                )
+            };
+            if allowed >= 0 {
+                unsafe { libc::close(allowed as i32) };
+            }
+            let key = unsafe {
+                libc::syscall(
+                    libc::SYS_openat,
+                    libc::AT_FDCWD,
+                    key_c.as_ptr(),
+                    libc::O_RDONLY,
+                )
+            };
+            let key_errno = unsafe { *libc::__errno_location() };
+            let code = if allowed < 0 {
+                81
+            } else if key >= 0 {
+                82
+            } else if key_errno == libc::EACCES {
+                0
+            } else if key_errno == 0 {
+                84
+            } else {
+                key_errno
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(
+            status, 0,
+            "a clean fence plan must install (wait status {status}, exit {}, signal {}): 81 allowed open failed, 82 device key was readable, 161 close_range, 162 create, 163 add, 164 no_new_privs, 165 restrict, 166 seccomp, any other exit is the device-key errno",
+            libc::WEXITSTATUS(status),
+            if libc::WIFSIGNALED(status) {
+                libc::WTERMSIG(status)
+            } else {
+                0
+            },
         );
     }
 }
