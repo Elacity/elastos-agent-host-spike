@@ -216,6 +216,7 @@ pub async fn settle_and_revoke(
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 mod tests {
     use super::*;

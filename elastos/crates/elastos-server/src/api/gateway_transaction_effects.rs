@@ -2693,6 +2693,7 @@ fn save_transaction_effect_store(
     })
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(in crate::api::gateway) fn transaction_effect_store_for_test(
     state: &GatewayState,
@@ -3130,22 +3131,30 @@ mod exact_signed_transaction_tests {
 
 #[cfg(test)]
 mod approved_request_resume_tests {
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
     use std::sync::{Arc, OnceLock};
 
+    #[cfg(unix)]
     use async_trait::async_trait;
+    #[cfg(unix)]
     use elastos_runtime::provider::{
         Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
     };
+    use elastos_wallet_contract::VerifiedWalletInvocationContext;
+    #[cfg(unix)]
     use elastos_wallet_contract::{
-        VerifiedWalletInvocationContext, WalletProviderOperationV2, WalletProviderRequestV2,
-        WalletProviderResponseV2, WalletResultV2,
+        WalletProviderOperationV2, WalletProviderRequestV2, WalletProviderResponseV2,
+        WalletResultV2,
     };
     use k256::ecdsa::SigningKey;
+    #[cfg(unix)]
     use tokio::sync::Mutex;
 
     use super::*;
 
+    #[cfg(unix)]
     struct MockApprovedWalletProvider {
         approvals: Mutex<Vec<Value>>,
         list_mode: ApprovalListMode,
@@ -3155,6 +3164,7 @@ mod approved_request_resume_tests {
         requests: Mutex<Vec<Value>>,
     }
 
+    #[cfg(unix)]
     #[derive(Clone, Copy)]
     enum ApprovalListMode {
         Stored,
@@ -3162,6 +3172,7 @@ mod approved_request_resume_tests {
         Malformed,
     }
 
+    #[cfg(unix)]
     impl MockApprovedWalletProvider {
         fn new(approvals: Vec<Value>) -> Self {
             Self {
@@ -3237,6 +3248,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl Provider for MockApprovedWalletProvider {
         async fn handle(
@@ -3355,6 +3367,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     struct MockBroadcastChainProvider {
         expected_network: String,
         expected_hash: String,
@@ -3362,6 +3375,7 @@ mod approved_request_resume_tests {
         requests: Mutex<Vec<Value>>,
     }
 
+    #[cfg(unix)]
     impl MockBroadcastChainProvider {
         fn new(expected_network: String, expected_hash: String) -> Self {
             Self {
@@ -3373,6 +3387,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl Provider for MockBroadcastChainProvider {
         async fn handle(
@@ -3434,6 +3449,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     struct MockPrepareChainProvider {
         expected_request: RuntimeTransactionRequest,
         intent: Value,
@@ -3441,6 +3457,7 @@ mod approved_request_resume_tests {
         requests: Mutex<Vec<Value>>,
     }
 
+    #[cfg(unix)]
     impl MockPrepareChainProvider {
         fn new(expected_request: RuntimeTransactionRequest, intent: Value) -> Self {
             Self {
@@ -3452,6 +3469,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl Provider for MockPrepareChainProvider {
         async fn handle(
@@ -3503,6 +3521,7 @@ mod approved_request_resume_tests {
         }
     }
 
+    #[cfg(unix)]
     fn test_gateway_state(
         root: &std::path::Path,
         provider_registry: Option<Arc<ProviderRegistry>>,
@@ -3818,6 +3837,7 @@ mod approved_request_resume_tests {
         (request, effect, approval, transaction_hash)
     }
 
+    #[cfg(unix)]
     fn exact_resume_fixture(
         authority: &RuntimeWalletAuthority,
     ) -> (
@@ -4600,12 +4620,15 @@ mod approved_request_resume_tests {
 /// `complete_runtime_transaction_effect` (line 984). The store is then loaded
 /// and saved by the private functions the wallet routes call, with the id the
 /// verified authority carries, as lines 601-603 and 699 do.
+#[cfg(unix)]
 #[cfg(test)]
 mod r8c_child_rows {
+    #[cfg(unix)]
     use super::super::gateway_home_token::{
         issue_home_launch_token_for_auth_grant,
         require_home_launch_token_value_from_expected_did_for_test as verify,
     };
+    #[cfg(unix)]
     use super::super::r3_stored_root_tests::verified_parent_device_context;
     use super::*;
 
@@ -4724,7 +4747,9 @@ mod r8c_child_rows {
 /// routes. Its control is the R8c control row above.
 #[cfg(test)]
 mod r8d_passkey_rows {
+    #[cfg(unix)]
     use super::super::gateway_tests::r8d_passkey_rows::{passkey_person, PERSON, ROOT};
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]

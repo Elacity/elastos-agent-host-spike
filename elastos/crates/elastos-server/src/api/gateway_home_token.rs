@@ -174,6 +174,7 @@ impl VerifiedLaunchGrant {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 impl VerifiedLaunchGrant {
     /// Test-only: the one test literal of `RequiredHomeLaunchToken` builds
@@ -538,6 +539,7 @@ pub(in crate::api) fn issue_home_agent_launch_token_at_for_test(
 /// Test seam: the same projection issuer with the issue time supplied, so a
 /// test can issue two tokens from one clock reading instead of racing the
 /// wall clock between them.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn issue_home_projection_launch_token_with_context_at(
     data_dir: &std::path::Path,
@@ -683,6 +685,7 @@ pub(super) fn grant_bound_expiry(
     Ok(expires_at.min(grant.expires_at))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn issue_expired_home_launch_token_with_context(
     data_dir: &std::path::Path,
@@ -1890,6 +1893,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn capsule_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("x-elastos-home-token", token.parse().unwrap());
@@ -1898,6 +1902,7 @@ mod tests {
         headers
     }
 
+    #[cfg(unix)]
     fn decode_launch_token(token: &str) -> HomeLaunchTokenEnvelope {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(token)
@@ -1905,6 +1910,7 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    #[cfg(unix)]
     fn sign_launch_token_for_test(
         data_dir: &std::path::Path,
         mut envelope: HomeLaunchTokenEnvelope,
@@ -1921,6 +1927,7 @@ mod tests {
             .encode(serde_json::to_vec(&envelope).unwrap())
     }
 
+    #[cfg(unix)]
     fn sign_context_for_test(
         data_dir: &std::path::Path,
         launch_context: HomeLaunchContext,
@@ -3135,6 +3142,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
     fn r1_unstored_grant(
         dir: &std::path::Path,
         principal_id: &str,
@@ -3235,12 +3243,14 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     const FENCE_AGENT_REFUSAL: &str = GATEWAY_AGENT_REFUSAL;
 
     /// The Home browser headers for one token. The cookie carrier carries a
     /// single well-formed Home session cookie; the header carrier carries the
     /// token header and two Cookie headers, so path 1 refuses at
     /// `single_cookie_value` and path 2 verifies the header token.
+    #[cfg(unix)]
     fn fence_home_headers(token: &str, cookie_carrier: bool) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("host", "localhost:61180".parse().unwrap());
@@ -3256,6 +3266,7 @@ mod tests {
         headers
     }
 
+    #[cfg(unix)]
     fn fence_agent_token(home: &std::path::Path) -> String {
         use elastos_runtime::auth::AuthSessionGrantV1;
 
@@ -3275,6 +3286,7 @@ mod tests {
         issue_home_launch_token_for_auth_grant(home, HOME_CAPSULE_ID, &grant).unwrap()
     }
 
+    #[cfg(unix)]
     fn fence_person_token(home: &std::path::Path) -> String {
         use elastos_runtime::auth::AuthSessionGrantV1;
 

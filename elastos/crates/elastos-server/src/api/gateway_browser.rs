@@ -572,9 +572,11 @@ fn browser_profile_reset_error_response(
 ) -> Response {
     use crate::api::browser_profile_reset::ProfileResetError;
     match error {
-        ProfileResetError::Busy
-        | ProfileResetError::Unsafe(_)
-        | ProfileResetError::UnsupportedHost => {
+        #[cfg(unix)]
+        ProfileResetError::Busy | ProfileResetError::Unsafe(_) => {
+            (StatusCode::CONFLICT, error.to_string()).into_response()
+        }
+        ProfileResetError::UnsupportedHost => {
             (StatusCode::CONFLICT, error.to_string()).into_response()
         }
         error => gateway_provider_error_response("browser", anyhow::anyhow!(error)),
@@ -5276,8 +5278,11 @@ mod browser_open_outcome_tests {
 
 #[cfg(test)]
 mod r4_root_tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::auth::r4_fixture::{store, AGENT_ROOT, HUMAN_ROOT, ID};
+    #[cfg(unix)]
     use crate::auth::PrincipalKind;
     #[cfg(unix)]
     #[test]

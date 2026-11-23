@@ -630,7 +630,7 @@ pub(super) async fn system_approval_lens_revoke(
         };
     #[cfg(not(unix))]
     {
-        let _ = &req;
+        let _ = &req.id;
         return system_error_response(
             std::io::Error::new(
                 std::io::ErrorKind::Unsupported,

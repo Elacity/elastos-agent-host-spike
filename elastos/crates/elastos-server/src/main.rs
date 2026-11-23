@@ -1,5 +1,7 @@
 //! ElastOS Runtime CLI
 
+use elastos_server::binaries::checked_native_provider;
+
 mod capsule_cmd;
 mod capsule_publish_cmd;
 mod chat_cmd;
@@ -28,6 +30,7 @@ mod webspace_cmd;
 
 use clap::{Parser, Subcommand};
 use security_cmd::{EmergencyCommand, TlsCommand};
+#[cfg(unix)]
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1412,7 +1415,8 @@ async fn run() -> anyhow::Result<()> {
         &command,
         Commands::Serve { .. } | Commands::Gateway { .. } | Commands::Home { browser: true, .. }
     ) {
-        elastos_server::host_lock::authorize_host_process_start(&sources::default_data_dir())?;
+        let data_dir = sources::default_data_dir();
+        elastos_server::host_lock::authorize_host_process_start(&data_dir)?;
     }
 
     match command {
@@ -1899,7 +1903,7 @@ async fn get_content_registry_with_local_ipfs_backend(
     Ok((registry, ipfs_bridge))
 }
 
-fn verified_ipfs_provider_binary() -> anyhow::Result<PathBuf> {
+fn verified_ipfs_provider_binary() -> anyhow::Result<elastos_runtime::provider::CheckedExecutable> {
     let binary = resolve_verified_native_provider_binary("ipfs-provider")?.ok_or_else(|| {
         anyhow::anyhow!(
             "ipfs-provider not found. Run: elastos setup --with kubo --with ipfs-provider"
@@ -1915,7 +1919,9 @@ async fn get_tunnel_bridge() -> anyhow::Result<TunnelBridge> {
         )
     })?;
     verify_component_binary("tunnel-provider", &binary)?;
-    let bridge = provider::ProviderBridge::spawn(&binary, Default::default())
+    // tunnel-provider finds the installed cloudflared beside its own path.
+    let checked = checked_native_provider(&binary).with_sibling("cloudflared");
+    let bridge = provider::ProviderBridge::spawn(&checked, Default::default())
         .await
         .map_err(|e| anyhow::anyhow!("Failed to spawn tunnel-provider: {}", e))?;
     Ok(TunnelBridge::new(Arc::new(bridge)))
@@ -2360,6 +2366,10 @@ fn find_free_local_addr() -> anyhow::Result<String> {
 
 /// Try to open a URL in the default browser.
 pub(crate) fn open_browser(url: &str) {
+    #[cfg(windows)]
+    {
+        let _ = url;
+    }
     #[cfg(target_os = "linux")]
     {
         // Try WSL browser opener first, then xdg-open
@@ -2396,9 +2406,11 @@ pub(crate) async fn create_runtime(
 
     // Components have a dedicated provider; host-specific VM providers remain
     // behind the same Runtime compute contract.
-    let mut compute_providers: Vec<Arc<dyn ComputeProvider>> = Vec::new();
+    let compute_providers: Vec<Arc<dyn ComputeProvider>> = Vec::new();
 
     // Add crosvm provider if KVM is available
+    #[cfg(unix)]
+    let mut compute_providers = compute_providers;
     #[cfg(unix)]
     if elastos_crosvm::is_supported() {
         match CrosvmProvider::new(CrosvmConfig::default()) {

@@ -21,6 +21,7 @@ pub(crate) struct VerifiedModelCatalogEntry {
     pub publisher_did: String,
     pub manifest: CapsuleManifest,
     pub size_bytes: u64,
+    #[cfg(unix)]
     pub object_manifest: Value,
 }
 
@@ -206,6 +207,7 @@ pub(crate) fn verify_model_catalog(
             publisher_did: signed.signer_did.clone(),
             manifest,
             size_bytes,
+            #[cfg(unix)]
             object_manifest: entry.object_manifest,
         });
     }

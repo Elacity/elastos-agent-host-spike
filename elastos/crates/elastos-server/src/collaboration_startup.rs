@@ -93,6 +93,7 @@ impl CollaborationStartupConfiguration {
 
 #[cfg(test)]
 impl CollaborationStartupConfiguration {
+    #[cfg(unix)]
     pub(crate) fn is_isolated_for_test(&self) -> bool {
         matches!(
             self.configuration,
@@ -111,8 +112,10 @@ pub struct CollaborationRuntimeService {
     product_port: Option<CollaborationChatProductPort>,
     presence_port: Option<CollaborationPresenceProductPort>,
     discovery_service: Option<CollaborationDiscoveryService>,
+    #[cfg(unix)]
     #[cfg(test)]
     worker_product_port: Option<CollaborationChatProductPort>,
+    #[cfg(unix)]
     #[cfg(test)]
     worker_presence_port: Option<CollaborationPresenceProductPort>,
 }
@@ -340,8 +343,10 @@ pub async fn start_collaboration_runtime_service(
         product_port: Some(product_port.clone()),
         presence_port: Some(presence_port.clone()),
         discovery_service: Some(discovery_service),
+        #[cfg(unix)]
         #[cfg(test)]
         worker_product_port: Some(product_port),
+        #[cfg(unix)]
         #[cfg(test)]
         worker_presence_port: Some(presence_port),
     }))
@@ -389,6 +394,7 @@ impl CollaborationRuntimeService {
         }
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     fn test_worker_shares_product_core(&self) -> bool {
         let port = self.product_port.as_ref().unwrap();
@@ -434,7 +440,11 @@ impl CollaborationRuntimeService {
             product_port: None,
             presence_port: None,
             discovery_service: None,
+            #[cfg(unix)]
+            #[cfg(test)]
             worker_product_port: None,
+            #[cfg(unix)]
+            #[cfg(test)]
             worker_presence_port: None,
         }
     }
@@ -903,6 +913,7 @@ async fn project_collaboration_handoffs(
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 async fn run_collaboration_worker_cycle_with_presence(
     driver: &CollaborationTransportDriver,
@@ -921,6 +932,7 @@ async fn run_collaboration_worker_cycle_with_presence(
     project_collaboration_handoffs(product_port, presence_port, data_root, now).await;
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 async fn run_collaboration_worker_cycle(
     driver: &CollaborationTransportDriver,
@@ -1062,39 +1074,55 @@ fn now_secs() -> u64 {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     use std::collections::VecDeque;
     use std::io::Write;
     use std::sync::Mutex;
+    #[cfg(unix)]
     use std::time::Instant;
 
+    #[cfg(unix)]
     use elastos_common::collaboration_protocol::collaboration_message_envelope_sha256;
-    use elastos_runtime::provider::{
-        ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
-    };
-    use elastos_runtime::signature::{generate_keypair, SigningKey};
+    #[cfg(unix)]
+    use elastos_runtime::provider::ProviderRegistry;
+    #[cfg(unix)]
+    use elastos_runtime::provider::{ProviderError, ResourceRequest, ResourceResponse};
+    use elastos_runtime::signature::generate_keypair;
+    #[cfg(unix)]
+    use elastos_runtime::signature::SigningKey;
     use sha2::{Digest, Sha256};
 
     use crate::collaboration_carrier::CommunityLinkHealth;
-    use crate::collaboration_core::{CollaborationCore, WriteFault};
+    #[cfg(unix)]
+    use crate::collaboration_core::CollaborationCore;
+    #[cfg(unix)]
+    use crate::collaboration_core::WriteFault;
     use crate::collaboration_default_conversation::{
         canonical_default_conversation_grant_bytes, DefaultConversationAdmissionPolicy,
         DefaultConversationGrant, DEFAULT_CONVERSATION_GRANT_SCHEMA_V1,
     };
+    #[cfg(unix)]
     use crate::collaboration_device_authority::DefaultConversationDeviceAuthority;
     use crate::collaboration_network::{
         canonical_collaboration_network_profile_payload_bytes, CollaborationNetworkProfile,
         DefaultConversationGrantDescriptor, SignedCollaborationNetworkProfile,
         COLLABORATION_NETWORK_PROFILE_SCHEMA, COLLABORATION_NETWORK_PROFILE_SIGNATURE_DOMAIN,
     };
+    #[cfg(unix)]
     use crate::collaboration_presence::presence_request_binding;
+    #[cfg(unix)]
     use crate::collaboration_product::chat_message_request_binding;
+    #[cfg(unix)]
     use crate::collaboration_transport::CollaborationTransportDriver;
+    #[cfg(unix)]
     use crate::esp_binding::esp_request_binding;
 
     const NETWORK: &str = "collaboration-startup-test";
     const CONVERSATION: &str = "default-conversation";
     const SERVICE: &str = "chat";
+    #[cfg(unix)]
     const NOW: u64 = 1_800_000_000;
+    #[cfg(unix)]
     const TTL: u64 = 300;
 
     #[test]
@@ -1120,6 +1148,7 @@ mod tests {
         assert!(!bounded.contains('\t'));
     }
 
+    #[cfg(unix)]
     fn profile_for_endpoint(
         endpoint_key: &SigningKey,
         display_name: &str,
@@ -1137,6 +1166,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     async fn grant_local_presence(
         data_dir: &Path,
         port: &CollaborationPresenceProductPort,
@@ -1199,6 +1229,7 @@ mod tests {
         grant_bytes: Option<Vec<u8>>,
     }
 
+    #[cfg(unix)]
     enum FakeReply {
         JoinEcho,
         Value(serde_json::Value),
@@ -1206,6 +1237,7 @@ mod tests {
         Pending,
     }
 
+    #[cfg(unix)]
     struct FakeCarrier {
         requests: Mutex<Vec<serde_json::Value>>,
         replies: Mutex<VecDeque<(Option<&'static str>, FakeReply)>>,
@@ -1213,6 +1245,7 @@ mod tests {
         pending_message: Mutex<Option<String>>,
     }
 
+    #[cfg(unix)]
     impl FakeCarrier {
         fn new(replies: impl IntoIterator<Item = FakeReply>) -> Arc<Self> {
             Arc::new(Self {
@@ -1242,6 +1275,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl Provider for FakeCarrier {
         async fn handle(
@@ -1404,6 +1438,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn configured_root(with_grant: bool) -> (tempfile::TempDir, ConfigMaterial) {
         let mut builder = tempfile::Builder::new();
         #[cfg(unix)]
@@ -1421,6 +1456,7 @@ mod tests {
         (temp, material)
     }
 
+    #[cfg(unix)]
     fn send_remote() -> FakeReply {
         FakeReply::Value(serde_json::json!({
             "status": "ok",
@@ -1428,6 +1464,7 @@ mod tests {
         }))
     }
 
+    #[cfg(unix)]
     fn gossip_frame(
         authority: &DefaultConversationDeviceAuthority,
         envelope_bytes: &[u8],
@@ -1438,6 +1475,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn gossip_envelope_hash(request: &serde_json::Value) -> String {
         let frame = crate::collaboration_protocol::verify_collaboration_transport_frame(
             request["message"].as_str().unwrap().as_bytes(),
@@ -1446,6 +1484,7 @@ mod tests {
         collaboration_message_envelope_sha256(frame.envelope_bytes())
     }
 
+    #[cfg(unix)]
     fn accept_shared(
         core: &CollaborationCore,
         authority: &DefaultConversationDeviceAuthority,
@@ -1456,6 +1495,7 @@ mod tests {
         core.accept_home_chat(&frame, &authority.local_device_did(), now)
     }
 
+    #[cfg(unix)]
     fn peek(cursor: u64, next_cursor: u64, messages: Vec<serde_json::Value>) -> FakeReply {
         let scanned = messages.len();
         FakeReply::Value(serde_json::json!({
@@ -1470,6 +1510,7 @@ mod tests {
         }))
     }
 
+    #[cfg(unix)]
     fn ack(cursor: u64, next_cursor: u64, advanced: bool) -> FakeReply {
         FakeReply::Value(serde_json::json!({
             "status": "ok",
@@ -1482,6 +1523,7 @@ mod tests {
     }
 
     // Delivery assertions exclude the read-only connection status queries.
+    #[cfg(unix)]
     fn request_ops(carrier: &FakeCarrier) -> Vec<String> {
         carrier
             .requests()
@@ -1491,6 +1533,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     async fn wait_for_requests(carrier: &FakeCarrier, count: usize) {
         tokio::time::timeout(Duration::from_secs(1), async {
             while request_ops(carrier).len() < count {
@@ -2650,10 +2693,12 @@ mod tests {
         assert!(!available);
     }
 
+    #[cfg(unix)]
     struct StalledHistoryInvoker {
         entered: Arc<tokio::sync::Notify>,
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl elastos_runtime::provider::ProviderCarrierInvoker for StalledHistoryInvoker {
         async fn invoke_carrier_provider(
