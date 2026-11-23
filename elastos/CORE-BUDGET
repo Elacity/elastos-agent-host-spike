@@ -28,4 +28,8 @@
 # #1827 (P2-11 Windows step 6: the Windows provider bridge and Windows refusals in the
 # Runtime) +110. None of the three raised this file; core-size is now part of the CTO's
 # merge guards so growth is raised in the same pull request again.
-12451
+# +666 for #1802 (P2-8 slice 3: native providers start only from a checked, held executable;
+# provider/checked_executable.rs with the macOS private verified copies, and its Windows refusal
+# twin), merged 23 Nov 2026 without a budget change; CTO decision under the delegated size
+# authority, noted in #1802's description. Measured on main after the merge.
+13117
