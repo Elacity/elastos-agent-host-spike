@@ -793,7 +793,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "ensure_browser_vm_image_in_context_for_platform",
             call: "component install",
             class: "n/a",
-            trust_root: "release-signature",
+            trust_root: "release-signature or source Home dev-pinned image",
             verified_when: "at-every-start",
             evidence: "admit_installed_components(data_dir, context)?".into(),
             os_path: "",
@@ -1692,7 +1692,11 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("none"), Some(&55));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&27));
+    assert_eq!(roots.get("release-signature"), Some(&26));
+    assert_eq!(
+        roots.get("release-signature or source Home dev-pinned image"),
+        Some(&1)
+    );
     assert_eq!(roots.get("staged-cid"), Some(&8));
     assert_eq!(times.get("at-every-start"), Some(&35));
     assert_eq!(times.get("at-install-only"), Some(&7));
