@@ -15,9 +15,11 @@ fn model_inputs() -> Vec<String> {
     let fixed = [
         "(allow process-fork)",
         r#"(allow file-read* (literal (param "MODEL")))"#,
+        r#"(allow file-read* (literal (param "MODEL_2")))"#,
         r#"(allow file-read* (literal "/dev/urandom"))"#,
         r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
         r#"(allow process-exec (literal (param "ENGINE")))"#,
+        r#"(allow process-exec (literal (param "ENGINE_2")))"#,
         r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
         r#"(allow file-read* (subpath "/usr/lib"))"#,
         r#"(allow network-outbound (literal (param "HOSTED_SOCKET")))"#,
@@ -68,7 +70,7 @@ pub(super) fn render_macos_profile(
     for row in admitted
         .rows()
         .iter()
-        .filter(|row| row.id != "bound-executable")
+        .filter(|row| row.id != "bound-executable" && row.id != "local-model-files")
     {
         forms.extend_from_slice(row.rules);
     }
@@ -164,7 +166,8 @@ mod tests {
             if name == "model-provider" {
                 let mut expected = shared.iter().copied().map(str::to_string).collect::<BTreeSet<_>>();
                 expected.extend(
-                    ["MODEL", "ENGINE", "ENGINE_BUNDLE", "HOSTED_SOCKET"].map(str::to_string),
+                    ["MODEL", "MODEL_2", "ENGINE", "ENGINE_2", "ENGINE_BUNDLE", "HOSTED_SOCKET"]
+                        .map(str::to_string),
                 );
                 for index in 0..19 {
                     expected.insert(format!("MODEL_ANCESTOR_{index}"));

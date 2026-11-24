@@ -319,7 +319,9 @@ fn canonical_bindings(storage: &Storage, executable: &Path) -> Vec<(&'static str
         ("STORAGE_ROOT", storage.root.clone()),
         ("STORAGE_PARENT", storage.parent.clone()),
         ("MODEL", executable.to_path_buf()),
+        ("MODEL_2", executable.to_path_buf()),
         ("ENGINE", executable.to_path_buf()),
+        ("ENGINE_2", executable.to_path_buf()),
         (
             "ENGINE_BUNDLE",
             executable
@@ -4836,6 +4838,7 @@ fn platform_baseline_rules_stay_narrow() {
         if [
             r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#,
             r#"(allow file-read* (literal (param "MODEL")))"#,
+            r#"(allow file-read* (literal (param "MODEL_2")))"#,
             r#"(allow file-read* (literal "/dev/urandom"))"#,
             r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
             r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,

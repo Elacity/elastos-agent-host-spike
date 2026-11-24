@@ -34,9 +34,11 @@
 ;; Probe X2 and proposal rows 2, 4 and 5: process and artifact inputs.
 (allow process-fork)
 (allow file-read* (literal (param "MODEL")))
+(allow file-read* (literal (param "MODEL_2")))
 (allow file-read* (literal "/dev/urandom"))
 (allow file-read* file-write-data (literal "/dev/null"))
 (allow process-exec (literal (param "ENGINE")))
+(allow process-exec (literal (param "ENGINE_2")))
 (allow file-read* (subpath (param "ENGINE_BUNDLE")))
 ;; macOS probe X4: /usr/lib is a launch input. It is not GPU access.
 (allow file-read* (subpath "/usr/lib"))

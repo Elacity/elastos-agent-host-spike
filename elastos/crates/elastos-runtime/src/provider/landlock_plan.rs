@@ -149,7 +149,14 @@ fn build_for_arch(
                 | r#"(allow iokit-open-user-client (iokit-user-client-class "AGXDeviceUserClient") (iokit-user-client-class "IOSurfaceRootUserClient"))"#
                 | r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#
                     if matches!(provider, RuntimeProviderId::Model) => {}
-                _ => return Err(format!("Landlock has no path decision for {form}")),
+                other => match elastos_common::model_landlock_files::grants_for(other) {
+                    Some(grants) => {
+                        for (label, path, mask) in grants {
+                            rules.push(PathRule(label, path, mask));
+                        }
+                    }
+                    None => return Err(format!("Landlock has no path decision for {other}")),
+                },
             }
         }
     }
@@ -481,7 +488,15 @@ mod tests {
     fn linux_model_plan_matches_the_reference_on_both_architectures() {
         let admitted = super::super::rights::admit_committed(RuntimeProviderId::Model);
         let ids: Vec<_> = admitted.rows().iter().map(|row| row.id).collect();
-        assert_eq!(ids, ["storage", "bound-executable", "model-gpu"]);
+        assert_eq!(
+            ids,
+            [
+                "storage",
+                "bound-executable",
+                "model-gpu",
+                "local-model-files"
+            ]
+        );
         let bindings = Bindings {
             storage_root: "/provider/model".into(),
             provider_executable: "/bin/model".into(),
@@ -536,5 +551,99 @@ mod tests {
             assert_eq!(plan.abi, 5, "{arch:?}");
             assert_eq!(plan.handled, reference.handled, "{arch:?} handled");
         }
+    }
+
+    #[test]
+    fn local_model_files_grant_the_admitted_paths_only() {
+        use elastos_common::model_landlock_files::{
+            install, LocalModelFiles, BINARY, READ_FILE, WRITE_FILE,
+        };
+        let _clear = elastos_common::model_landlock_files::clear_on_drop();
+        let model = PathBuf::from("/tmp/elastos-m5-model");
+        let other = PathBuf::from("/tmp/elastos-m5-other");
+        let engine = PathBuf::from("/tmp/elastos-m5-engine");
+        let not_engine = PathBuf::from("/tmp/elastos-m5-not-engine");
+        let library = PathBuf::from("/tmp/elastos-m5-lib.so");
+        let socket = PathBuf::from("/tmp/elastos-m5/0.sock");
+        let device = PathBuf::from("/tmp/elastos-m5/device.key");
+        install(LocalModelFiles {
+            models: vec![model.clone()],
+            engines: vec![engine.clone()],
+            libraries: vec![library.clone()],
+            sockets: vec![socket.clone()],
+        });
+        let admitted = super::super::rights::admit_committed(RuntimeProviderId::Model);
+        let bindings = Bindings {
+            storage_root: "/provider/model".into(),
+            provider_executable: "/bin/model".into(),
+            storage_dev: 7,
+            storage_ino: 9,
+        };
+        let plan = build_for_arch(
+            RuntimeProviderId::Model,
+            &admitted,
+            &bindings,
+            LoaderArch::X86_64,
+            5,
+        )
+        .unwrap();
+        let mask = |path: &std::path::Path| {
+            plan.rules
+                .iter()
+                .find(|rule| rule.1 == path)
+                .map(|rule| rule.2)
+        };
+        assert_eq!(mask(&model), Some(READ_FILE));
+        assert_eq!(mask(&engine), Some(BINARY));
+        assert_eq!(mask(&library), Some(READ_FILE));
+        assert_eq!(
+            mask(&library).unwrap() & 1,
+            0,
+            "a library is not executable"
+        );
+        assert_eq!(mask(&socket), Some(WRITE_FILE));
+        for path in [&other, &not_engine, &device] {
+            assert_eq!(mask(path), None, "{}", path.display());
+        }
+        let executable = plan
+            .rules
+            .iter()
+            .filter(|rule| rule.2 & 1 == 1)
+            .map(|rule| rule.1.clone())
+            .collect::<Vec<_>>();
+        assert!(executable.contains(&engine));
+        assert!(executable.contains(&PathBuf::from("/bin/model")));
+        assert!(executable
+            .iter()
+            .any(|path| path.ends_with("ld-linux-x86-64.so.2")));
+        assert!(!executable.contains(&not_engine));
+        assert!(!executable.contains(&library));
+        let path = format!(
+            "{}/../../../capsules/model-provider/capsule.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut manifest: elastos_common::CapsuleManifest =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut authority = manifest.authority.take().unwrap();
+        authority
+            .rights
+            .retain(|right| right.id != "local-model-files");
+        let narrowed = super::super::rights::check_rights_against_runtime_templates(
+            RuntimeProviderId::Model,
+            &authority,
+            super::super::rights_table::RIGHTS,
+        )
+        .unwrap();
+        let narrowed = build_for_arch(
+            RuntimeProviderId::Model,
+            &narrowed,
+            &bindings,
+            LoaderArch::X86_64,
+            5,
+        )
+        .unwrap();
+        assert!(narrowed.rules.iter().all(|rule| rule.0 != "MODEL"));
+        assert!(narrowed.rules.iter().all(|rule| rule.1 != model));
+        assert!(narrowed.rules.iter().all(|rule| rule.1 != engine));
     }
 }

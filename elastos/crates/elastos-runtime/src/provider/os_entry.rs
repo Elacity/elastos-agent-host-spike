@@ -421,6 +421,8 @@ fn extra_binding_value(path: &Path) -> Result<&str, String> {
 pub(super) struct ModelLaunch<'a> {
     pub engine: &'a Path,
     pub model: &'a Path,
+    pub engine_2: &'a Path,
+    pub model_2: &'a Path,
     pub bundle: &'a Path,
     pub hosted: &'a Path,
     pub brokers: &'a [std::path::PathBuf],
@@ -448,8 +450,10 @@ fn model_bindings(launch: &ModelLaunch<'_>) -> Result<Vec<(String, std::path::Pa
     }
     let engine = model_file(launch.engine, true)?;
     let model = model_file(launch.model, true)?;
+    let engine_2 = model_file(launch.engine_2, true)?;
+    let model_2 = model_file(launch.model_2, true)?;
     let bundle = model_file(launch.bundle, false)?;
-    if !engine.starts_with(&bundle) {
+    if !engine.starts_with(&bundle) || !engine_2.starts_with(&bundle) {
         return Err("model engine".into());
     }
     let mut ancestors: Vec<_> = model.ancestors().skip(1).map(Path::to_path_buf).collect();
@@ -464,7 +468,9 @@ fn model_bindings(launch: &ModelLaunch<'_>) -> Result<Vec<(String, std::path::Pa
     }
     let mut bindings = vec![
         ("MODEL".into(), model),
+        ("MODEL_2".into(), model_2),
         ("ENGINE".into(), engine),
+        ("ENGINE_2".into(), engine_2),
         ("ENGINE_BUNDLE".into(), bundle),
         ("HOSTED_SOCKET".into(), launch.hosted.to_path_buf()),
     ];
@@ -1190,6 +1196,8 @@ mod tests {
         let launch = ModelLaunch {
             engine: &engine,
             model: &model,
+            engine_2: &engine,
+            model_2: &model,
             bundle: &bundle,
             hosted: &hosted,
             brokers: &brokers,

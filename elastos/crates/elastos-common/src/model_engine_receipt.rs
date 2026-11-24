@@ -1,4 +1,4 @@
-//! The macOS engine receipt. The Runtime maps these results onto its start errors.
+//! The engine receipt. The Runtime maps these results onto its start errors.
 
 use std::io::Read as _;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};

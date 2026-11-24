@@ -3,7 +3,7 @@
 //! Manages stdin/stdout communication with a provider capsule process.
 //! The runtime sends ProviderRequests and receives ProviderResponses
 //! over line-delimited JSON.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::collections::BTreeMap;
 use std::path::Path;
 #[cfg(target_os = "macos")]
@@ -104,12 +104,12 @@ fn model_journal_for_sandbox(config: &ProviderConfig) -> Result<std::path::PathB
     Ok(journal)
 }
 
-#[cfg(target_os = "macos")]
-fn receipt_error(error: elastos_common::model_engine_receipt::ModelReceiptError) -> BridgeError {
-    use elastos_common::model_engine_receipt::ModelReceiptError;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn map_admit(error: elastos_common::model_landlock_files::AdmitError) -> BridgeError {
+    use elastos_common::model_landlock_files::AdmitError;
     match error {
-        ModelReceiptError::Io(error) => BridgeError::Spawn(error),
-        ModelReceiptError::Rejected(reason) => BridgeError::InitFailed(reason.into()),
+        AdmitError::Io(error) => BridgeError::Spawn(error),
+        AdmitError::Rejected(reason) => BridgeError::InitFailed(reason),
     }
 }
 
@@ -126,223 +126,28 @@ fn model_socket_text(path: &Path, reason: &'static str) -> Result<String, Bridge
         .ok_or_else(|| BridgeError::InitFailed(reason.into()))
 }
 
-#[cfg(target_os = "macos")]
-fn model_file_policy(
-    config: &ProviderConfig,
-    pinned_engine_bundle: Option<&Path>,
-) -> Result<(), BridgeError> {
-    use elastos_common::model_engine_receipt::{
-        model_engine_receipt_entries, model_engine_receipt_file_matches,
-    };
-    let base = Path::new(&config.base_path);
-    for offer in config.extra["offers"]
-        .as_array()
-        .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?
-    {
-        if offer
-            .pointer("/adapter/kind")
-            .and_then(serde_json::Value::as_str)
-            != Some("local_llama_cpp_text")
-        {
-            continue;
-        }
-        let engine = Path::new(
-            offer
-                .pointer("/adapter/engine/path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| BridgeError::InitFailed("model engine path unavailable".into()))?,
-        );
-        let model = Path::new(
-            offer
-                .pointer("/adapter/model/path")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| BridgeError::InitFailed("model weights path unavailable".into()))?,
-        );
-        for path in [engine, model] {
-            if !path.starts_with(base)
-                || std::fs::canonicalize(path).ok().as_deref() != Some(path)
-                || !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())
-            {
-                return Err(BridgeError::InitFailed("unsafe model artifact path".into()));
-            }
-        }
-        let engine_dir = engine
-            .parent()
-            .ok_or_else(|| BridgeError::InitFailed("model engine directory unavailable".into()))?;
-        let mut dylibs = Vec::new();
-        for entry in std::fs::read_dir(engine_dir).map_err(BridgeError::Spawn)? {
-            let path = entry.map_err(BridgeError::Spawn)?.path();
-            if path.extension().and_then(|value| value.to_str()) == Some("dylib") {
-                dylibs.push(path);
-            }
-        }
-        let receipt = if dylibs.is_empty() {
-            None
-        } else {
-            Some(model_engine_receipt_entries(base, engine).map_err(receipt_error)?)
-        };
-        for path in dylibs {
-            let (bundle, receipt_entries) = receipt.as_ref().unwrap();
-            let name = path
-                .strip_prefix(bundle)
-                .ok()
-                .and_then(|path| path.to_str())
-                .ok_or_else(|| BridgeError::InitFailed("invalid model engine file".into()))?;
-            let matching = receipt_entries
-                .iter()
-                .filter(|entry| entry["path"].as_str() == Some(name))
-                .collect::<Vec<_>>();
-            if matching.len() != 1 {
-                return Err(BridgeError::InitFailed("unlisted model engine file".into()));
-            }
-            let entry = matching[0];
-            let metadata = std::fs::symlink_metadata(&path).map_err(BridgeError::Spawn)?;
-            if metadata.file_type().is_symlink() {
-                let target = std::fs::read_link(&path).map_err(BridgeError::Spawn)?;
-                if entry["type"] != "symlink"
-                    || entry["target"].as_str() != target.to_str()
-                    || target.components().count() != 1
-                    || !target
-                        .components()
-                        .all(|part| matches!(part, std::path::Component::Normal(_)))
-                {
-                    return Err(BridgeError::InitFailed("changed model engine file".into()));
-                }
-            } else if !model_engine_receipt_file_matches(&path, entry).map_err(receipt_error)? {
-                return Err(BridgeError::InitFailed("changed model engine file".into()));
-            }
-            let canonical = std::fs::canonicalize(&path).map_err(BridgeError::Spawn)?;
-            if !canonical.starts_with(engine_dir)
-                || !std::fs::metadata(&canonical).is_ok_and(|metadata| metadata.is_file())
-            {
-                return Err(BridgeError::InitFailed("unsafe model engine file".into()));
-            }
-            if metadata.file_type().is_symlink() {
-                let target = canonical
-                    .strip_prefix(bundle)
-                    .ok()
-                    .and_then(|path| path.to_str())
-                    .ok_or_else(|| BridgeError::InitFailed("unsafe model engine file".into()))?;
-                let matching = receipt_entries
-                    .iter()
-                    .filter(|entry| entry["path"].as_str() == Some(target))
-                    .collect::<Vec<_>>();
-                if matching.len() != 1
-                    || !model_engine_receipt_file_matches(&canonical, matching[0])
-                        .map_err(receipt_error)?
-                {
-                    return Err(BridgeError::InitFailed("changed model engine file".into()));
-                }
-            }
-        }
-    }
-    if let Some(bundle) = pinned_engine_bundle {
-        let prefix = base.join("libexec/llama.cpp");
-        let relative = bundle
-            .strip_prefix(&prefix)
-            .map_err(|_| BridgeError::InitFailed("unsafe model engine bundle".into()))?;
-        if relative.components().count() != 2
-            || !relative
-                .components()
-                .all(|part| matches!(part, std::path::Component::Normal(_)))
-        {
-            return Err(BridgeError::InitFailed("unsafe model engine bundle".into()));
-        }
-    }
-    Ok(())
-}
-
-/// One local offer may name one weights file under `model-preparation/admitted-`
-/// and 64 hex digits. A second file in that directory, a second local offer,
-/// or an engine the receipt does not list is refused before a child exists.
+/// At most two local offers. Each weights file is one file under
+/// `model-preparation/admitted-` and 64 hex digits. A sidecar, a third offer,
+/// or a library the receipt names and cannot open is refused before a child exists.
 #[cfg(target_os = "macos")]
 fn admit_model_rights_inputs(
     config: &ProviderConfig,
     engine: &Path,
     model: &Path,
     bundle: &Path,
-) -> Result<(), BridgeError> {
+) -> Result<elastos_common::model_landlock_files::AdmittedLocal, BridgeError> {
     let offers = config
         .extra
         .get("offers")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?;
-    let local: Vec<_> = offers
-        .iter()
-        .filter(|offer| {
-            offer
-                .pointer("/adapter/kind")
-                .and_then(serde_json::Value::as_str)
-                == Some("local_llama_cpp_text")
-        })
-        .collect();
-    if local.len() > 1 {
-        return Err(BridgeError::InitFailed(
-            "too many local model offers".into(),
-        ));
-    }
-    let base = Path::new(&config.base_path);
-    let inside = |path: &Path, file: bool| {
-        path.starts_with(base)
-            && std::fs::canonicalize(path).ok().as_deref() == Some(path)
-            && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() == file)
-    };
-    if !inside(engine, true) || !inside(bundle, false) || !engine.starts_with(bundle) {
-        return Err(BridgeError::InitFailed("unsafe model artifact path".into()));
-    }
-    if local.is_empty() {
-        return inside(model, true)
-            .then_some(())
-            .ok_or_else(|| BridgeError::InitFailed("unsafe model artifact path".into()));
-    }
-    let offer_path = |pointer: &str| {
-        local[0]
-            .pointer(pointer)
-            .and_then(serde_json::Value::as_str)
-            .map(Path::new)
-            .ok_or_else(|| BridgeError::InitFailed("model engine path unavailable".into()))
-    };
-    if offer_path("/adapter/engine/path")? != engine || offer_path("/adapter/model/path")? != model
-    {
-        return Err(BridgeError::InitFailed(
-            "model offer paths differ from the admitted start".into(),
-        ));
-    }
-    let relative = model
-        .strip_prefix(base.join("model-preparation"))
-        .map_err(|_| BridgeError::InitFailed("model preparation path is not admitted".into()))?;
-    let mut parts = relative.components();
-    let admission = parts.next().and_then(|part| match part {
-        std::path::Component::Normal(name) => name.to_str()?.strip_prefix("admitted-"),
-        _ => None,
-    });
-    let file = matches!(parts.next(), Some(std::path::Component::Normal(_)));
-    if parts.next().is_some()
-        || !file
-        || !admission.is_some_and(|id| {
-            id.len() == 64
-                && id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
-    {
-        return Err(BridgeError::InitFailed(
-            "model preparation path is not admitted".into(),
-        ));
-    }
-    let name = model
-        .file_name()
-        .ok_or_else(|| BridgeError::InitFailed("model preparation path is not admitted".into()))?;
-    let parent = model
-        .parent()
-        .ok_or_else(|| BridgeError::InitFailed("model preparation path is not admitted".into()))?;
-    for entry in std::fs::read_dir(parent).map_err(BridgeError::Spawn)? {
-        if entry.map_err(BridgeError::Spawn)?.file_name() != name {
-            return Err(BridgeError::InitFailed("unlisted model sidecar".into()));
-        }
-    }
-    model_file_policy(config, Some(bundle))?;
-    Ok(())
+    elastos_common::model_landlock_files::admit_offers(
+        Path::new(&config.base_path),
+        offers,
+        "dylib",
+        Some((engine, model, bundle)),
+    )
+    .map_err(map_admit)
 }
 
 pub use super::bridge_protocol::{BridgeError, ProviderConfig, ProviderRequest, ProviderResponse};
@@ -418,6 +223,91 @@ impl Drop for BrokerTasks {
             task.abort();
         }
     }
+}
+
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+struct BoundBrokers {
+    brokers: BrokerTasks,
+    sockets: BTreeMap<String, String>,
+    pid: Arc<AtomicU32>,
+    birth: Arc<AtomicU64>,
+}
+
+/// Bind one broker socket per admitted offer under the Runtime private directory.
+/// The engine listen socket is not created: it does not exist yet, and a directory
+/// grant would be wider than one file.
+#[cfg(all(
+    not(elastos_unsupported_os_check),
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn bind_broker_sockets(base: &Path, ids: &[String]) -> Result<BoundBrokers, BridgeError> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
+    let pid = Arc::new(AtomicU32::new(0));
+    let birth = Arc::new(AtomicU64::new(0));
+    if ids.is_empty() {
+        return Ok(BoundBrokers {
+            brokers: BrokerTasks::default(),
+            sockets: BTreeMap::new(),
+            pid,
+            birth,
+        });
+    }
+    let dir = base.join("providers/model-provider/sockets");
+    std::fs::create_dir_all(&dir).map_err(BridgeError::Spawn)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(BridgeError::Spawn)?;
+    let meta = std::fs::symlink_metadata(&dir).map_err(BridgeError::Spawn)?;
+    if meta.file_type().is_symlink()
+        || !meta.is_dir()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.mode() & 0o077 != 0
+    {
+        return Err(BridgeError::InitFailed(
+            "unsafe model socket directory".into(),
+        ));
+    }
+    let mut brokers = BrokerTasks::default();
+    let mut sockets = BTreeMap::new();
+    for (index, id) in ids.iter().enumerate() {
+        let path = dir.join(format!("{index}.sock"));
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_socket() && !meta.file_type().is_symlink() => {
+                std::fs::remove_file(&path).map_err(BridgeError::Spawn)?;
+            }
+            Ok(_) => {
+                return Err(BridgeError::InitFailed(
+                    "model socket path is not a broker socket".into(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(BridgeError::Spawn(error)),
+        }
+        let text = path
+            .to_str()
+            .filter(|text| text.len() < 108)
+            .ok_or_else(|| BridgeError::InitFailed("invalid local socket path".into()))?;
+        brokers.0.push(
+            super::local_model_broker::start(
+                text,
+                dir.join(format!("{index}.engine.sock")),
+                pid.clone(),
+                birth.clone(),
+            )
+            .map_err(BridgeError::Spawn)?,
+        );
+        sockets.insert(id.clone(), text.to_string());
+    }
+    Ok(BoundBrokers {
+        brokers,
+        sockets,
+        pid,
+        birth,
+    })
 }
 
 /// A forked provider the Runtime owns. `status` resolves after the blocking
@@ -1625,6 +1515,11 @@ impl ProviderBridge {
         storage_root: &Path,
         config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
+        // The Linux model start installs exact files on this thread. Drop the
+        // guard before the first wait so another task on this thread cannot
+        // observe them. A child can only add Landlock and seccomp limits, so
+        // the provider and the engine it execs share this one plan.
+        let _files = elastos_common::model_landlock_files::clear_on_drop();
         let Some(provider) =
             super::rights_table::RuntimeProviderId::from_component_key(component_key)
         else {
@@ -1661,6 +1556,7 @@ impl ProviderBridge {
         let launched =
             super::os_entry::start_provider(provider, authority, binary_path, checked, stdio)
                 .map_err(BridgeError::Refused)?;
+        drop(_files);
         // The child holds its copies; these are the parent's, and must close
         // so the child sees EOF on stdin and the parent sees EOF on stdout.
         drop(stdin_read);
@@ -1779,12 +1675,12 @@ impl ProviderBridge {
                     .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if local_ids.len() > 1 {
+        if local_ids.len() > 2 {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
             ));
         }
-        admit_model_rights_inputs(&config, engine, model_file, bundle)?;
+        let admitted = admit_model_rights_inputs(&config, engine, model_file, bundle)?;
         let ipc_dir = tempfile::Builder::new()
             .prefix("em-")
             .tempdir()
@@ -1832,6 +1728,8 @@ impl ProviderBridge {
         let launch = super::os_entry::ModelLaunch {
             engine,
             model: model_file,
+            engine_2: &admitted.engine_2,
+            model_2: &admitted.model_2,
             bundle,
             hosted: &hosted,
             brokers: &broker_paths,
@@ -1903,7 +1801,15 @@ impl ProviderBridge {
         binary_path: &CheckedExecutable,
         storage_root: &Path,
         config: ProviderConfig,
-    ) -> Result<Confined, BridgeError> {
+    ) -> Result<
+        (
+            Confined,
+            BTreeMap<String, String>,
+            Vec<String>,
+            ProviderConfig,
+        ),
+        BridgeError,
+    > {
         Self::start_linux_model_from_rights(
             authority,
             binary_path,
@@ -1925,7 +1831,32 @@ impl ProviderBridge {
         storage_root: &Path,
         config: ProviderConfig,
         reported: std::io::Result<u32>,
-    ) -> Result<Confined, BridgeError> {
+    ) -> Result<
+        (
+            Confined,
+            BTreeMap<String, String>,
+            Vec<String>,
+            ProviderConfig,
+        ),
+        BridgeError,
+    > {
+        let base = Path::new(&config.base_path);
+        let offers = config
+            .extra
+            .get("offers")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let admitted =
+            elastos_common::model_landlock_files::admit_offers(base, &offers, "so", None)
+                .map_err(map_admit)?;
+        let mut files = admitted.files.clone();
+        files.sockets = elastos_common::model_landlock_files::broker_socket_paths(
+            base,
+            admitted.offer_ids.len(),
+        );
+        elastos_common::model_landlock_files::install(files.clone());
+        let _clear = elastos_common::model_landlock_files::clear_on_drop();
         let bindings = super::landlock_plan::Bindings {
             storage_root: storage_root.to_path_buf(),
             provider_executable: binary_path.path().to_path_buf(),
@@ -1950,14 +1881,50 @@ impl ProviderBridge {
                 "provider start is refused: the Landlock plan is not attached",
             ));
         }
-        Self::spawn_confined(
+        if !files.models.is_empty() && !plan.rules.iter().any(|rule| rule.0 == "MODEL") {
+            return Err(refused(
+                "provider start is refused: the local model files are not admitted",
+            ));
+        }
+        let bound = bind_broker_sockets(base, &admitted.offer_ids)?;
+        let mut config = config;
+        config.extra["runtime_local_sockets"] = serde_json::json!(bound.sockets);
+        let returned = config.clone();
+        let sockets = bound.sockets.clone();
+        // Spawn reads the slot, then clears it before its first wait. Forgetting
+        // this guard keeps that clear on the installing thread.
+        std::mem::forget(_clear);
+        let confined = Self::spawn_confined(
             "model-provider",
             authority,
             binary_path,
             storage_root,
             config,
         )
-        .await
+        .await?;
+        if !sockets.is_empty() {
+            let pid = confined
+                .bridge()
+                .fork
+                .lock()
+                .await
+                .as_ref()
+                .map(|child| child.pid)
+                .unwrap_or(0);
+            let birth = (pid > 0)
+                .then(|| super::local_model_broker::process_birth(pid as u32))
+                .flatten();
+            let Some(birth) = birth else {
+                let _ = confined.bridge().shutdown().await;
+                return Err(BridgeError::InitFailed(
+                    "model provider identity unavailable".into(),
+                ));
+            };
+            bound.pid.store(pid as u32, Ordering::Release);
+            bound.birth.store(birth, Ordering::Release);
+        }
+        *confined.bridge()._local_brokers.lock().await = bound.brokers;
+        Ok((confined, sockets, Vec::new(), returned))
     }
 
     #[cfg(target_os = "macos")]
@@ -4695,7 +4662,7 @@ int main(void) {
             ..Default::default()
         };
         let policy_config = config.clone();
-        model_file_policy(&config, Some(&engine_dir)).unwrap();
+        admit_model_rights_inputs(&config, &script, &model, &engine_dir).unwrap();
         let (bridge, sockets, vacant, confined_config, _hosted_listener) =
             start_admitted_model_for_test(
                 &CheckedExecutable::for_test(&script),
@@ -4764,7 +4731,7 @@ int main(void) {
         bridge.shutdown().await.unwrap();
         assert!(!Path::new(&sockets["fixture-local"]).exists());
         std::fs::write(&listed_library, b"changed fixture library").unwrap();
-        assert!(model_file_policy(&policy_config, None).is_err());
+        assert!(admit_model_rights_inputs(&policy_config, &script, &model, &engine_dir).is_err());
 
         // Keep one confined child through a zero-offer startup and files that
         // arrive later. The declared read namespace excludes mutable staging,
@@ -4855,7 +4822,7 @@ int main(void) {
             b"unlisted fixture library",
         )
         .unwrap();
-        assert!(model_file_policy(&policy_config, None).is_err());
+        assert!(admit_model_rights_inputs(&policy_config, &script, &model, &engine_dir).is_err());
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -5323,6 +5290,7 @@ int main(void) {
 #define SYS_getpid 39
 #define SYS_exit_group 231
 #define SYS_openat 257
+#define SYS_execve 59
 static long call0(long n) {
     long r;
     __asm__ volatile("syscall" : "=a"(r) : "a"(n) : "rcx", "r11", "memory");
@@ -5360,6 +5328,7 @@ __asm__(
 #define SYS_getpid 172
 #define SYS_exit_group 94
 #define SYS_openat 56
+#define SYS_execve 221
 static long call0(long n) {
     register long x8 __asm__("x8") = n;
     register long x0 __asm__("x0") = 0;
@@ -5456,6 +5425,49 @@ static int outside_errno(void) {
     }
     return (int)(-fd);
 }
+static int open_errno(const char *path) {
+    long fd = call4(SYS_openat, (long)AT_FDCWD, (long)path, 0, 0);
+    if (fd >= 0) { call1(SYS_close, fd); return 0; }
+    return (int)(-fd);
+}
+static int exec_errno(const char *path) {
+    const char *argv[2];
+    const char *envp[1];
+    argv[0] = path;
+    argv[1] = 0;
+    envp[0] = 0;
+    long ran = call3(SYS_execve, (long)path, (long)argv, (long)envp);
+    return ran < 0 ? (int)(-ran) : 0;
+}
+static void reply_named(const char *line) {
+    const char *key = "\"path\":\"";
+    const char *start = 0;
+    for (const char *p = line; *p; p++) {
+        const char *a = p;
+        const char *b = key;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) { start = a; break; }
+    }
+    char path[4096];
+    int n = 0;
+    if (start) {
+        while (start[n] && start[n] != '"' && n + 1 < (int)sizeof path) {
+            path[n] = start[n];
+            n++;
+        }
+    }
+    path[n] = 0;
+    int execing = path[0] == 'e' && path[1] == 'x' && path[2] == 'e' && path[3] == 'c' && path[4] == ':';
+    int err = execing ? exec_errno(path + 5) : open_errno(path);
+    char buf[160];
+    char *p = buf;
+    p = copy_text(p, "{\"status\":\"ok\",\"data\":{\"open_errno\":");
+    p = put_u(p, (unsigned)err);
+    p = copy_text(p, ",\"pid\":");
+    p = put_u(p, (unsigned)call0(SYS_getpid));
+    p = copy_text(p, "}}\n");
+    emit(buf, (long)(p - buf));
+}
 static void reply_ok(void) { emit("{\"status\":\"ok\"}\n", 16); }
 static void reply_outside(void) {
     char buf[160];
@@ -5484,6 +5496,8 @@ __attribute__((used)) void run(void) {
             call1(SYS_exit_group, 0);
         } else if (contains(line, "\"path\":\"outside\"")) {
             reply_outside();
+        } else if (contains(line, "\"op\":\"exists\"")) {
+            reply_named(line);
         } else {
             reply_ok();
         }
@@ -5606,7 +5620,7 @@ __attribute__((used)) void run(void) {
         std::fs::write(&outside, b"outside").unwrap();
         std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
         let binary = build_linux_model_probe(temp.path(), &outside);
-        let confined = ProviderBridge::spawn_confined_model_from_rights(
+        let (confined, _, _, _) = ProviderBridge::spawn_confined_model_from_rights(
             &committed_authority("model"),
             &CheckedExecutable::for_test(&binary),
             &root,
@@ -5650,6 +5664,105 @@ __attribute__((used)) void run(void) {
         };
         assert_eq!(field("Seccomp").as_deref(), Some("2"), "{status}");
         assert_eq!(field("NoNewPrivs").as_deref(), Some("1"), "{status}");
+        confined.bridge().shutdown().await.unwrap();
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[tokio::test]
+    async fn linux_local_model_open_and_exec_stay_on_the_admitted_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let reported = super::super::landlock_plan::query_abi();
+        if super::super::landlock_plan::require_abi(reported).is_err() {
+            return;
+        }
+        let outside = base.join("outside-proof");
+        std::fs::write(&outside, b"outside").unwrap();
+        let probe = build_linux_model_probe(&base, &outside);
+        let bundle = base.join("libexec/llama.cpp/test/platform");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let engine = bundle.join("llama-server");
+        std::fs::copy(&probe, &engine).unwrap();
+        std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let admitted = base.join(format!("model-preparation/admitted-{}", "ab".repeat(32)));
+        let other_dir = base.join(format!("model-preparation/admitted-{}", "cd".repeat(32)));
+        std::fs::create_dir_all(&admitted).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let model = admitted.join("weights.gguf");
+        let other = other_dir.join("other.gguf");
+        let device = base.join("device.key");
+        let another = base.join("another-users-file");
+        let not_engine = base.join("not-engine");
+        std::fs::write(&model, b"gguf").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        std::fs::write(&device, b"key").unwrap();
+        std::fs::write(&another, b"readable").unwrap();
+        std::fs::set_permissions(&another, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::copy(&probe, &not_engine).unwrap();
+        std::fs::set_permissions(&not_engine, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let parent = base.join("providers/model-provider");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config = ProviderConfig {
+            base_path: base.to_string_lossy().into_owned(),
+            extra: serde_json::json!({
+                "offers": [{
+                    "id": "one",
+                    "adapter": {
+                        "kind": "local_llama_cpp_text",
+                        "engine": {"path": engine},
+                        "model": {"path": model}
+                    }
+                }]
+            }),
+            ..ProviderConfig::default()
+        };
+        let (confined, sockets, vacant, _) = ProviderBridge::spawn_confined_model_from_rights(
+            &committed_authority("model"),
+            &CheckedExecutable::for_test(&probe),
+            &parent.join("journal"),
+            config,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("local model start: {error}"));
+        assert_eq!(sockets.len(), 1);
+        assert!(
+            vacant.is_empty(),
+            "only the admitted broker socket is bound"
+        );
+        let cases = [
+            (model.to_string_lossy().into_owned(), 0i64),
+            (other.to_string_lossy().into_owned(), libc::EACCES as i64),
+            (device.to_string_lossy().into_owned(), libc::EACCES as i64),
+            (another.to_string_lossy().into_owned(), libc::EACCES as i64),
+            (
+                format!("exec:{}", not_engine.to_string_lossy()),
+                libc::EACCES as i64,
+            ),
+        ];
+        for (path, expect) in cases {
+            let response = confined
+                .bridge()
+                .request(ProviderRequest::Exists {
+                    path: path.clone(),
+                    token: String::new(),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("open report for {path}: {error}"));
+            let ProviderResponse::Ok { data } = response else {
+                panic!("the probe reports {path}: {response:?}");
+            };
+            let errno = data.expect("errno")["open_errno"]
+                .as_i64()
+                .expect("open errno");
+            assert_eq!(errno, expect, "{path}");
+        }
         confined.bridge().shutdown().await.unwrap();
     }
 
@@ -6565,37 +6678,73 @@ __attribute__((used)) void run(void) {
     #[test]
     fn the_hand_written_model_policy_is_gone() {
         let source = include_str!("bridge.rs");
-        let start = source.find("fn model_file_policy(").unwrap();
-        let end = source[start..]
-            .find("fn admit_model_rights_inputs(")
-            .unwrap()
-            + start;
-        let body = &source[start..end];
-        assert!(!body.contains("(allow default)"));
-        assert!(body.contains("model_engine_receipt_file_matches"));
-        assert!(body.contains("unsafe model engine bundle"));
+        let needle = ["fn model_file_", "policy("].concat();
+        assert!(!source.contains(&needle));
+        let common = include_str!("../../../elastos-common/src/model_landlock_files.rs");
+        assert!(!common.contains("(allow default)"));
+        assert!(common.contains("model_engine_receipt_file_matches"));
+        assert!(common.contains("unsafe model engine bundle"));
     }
 
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
     #[test]
-    fn a_second_local_offer_is_refused_before_start() {
+    fn a_third_local_offer_is_refused_before_start() {
         let (_temp, base, engine, model, bundle) = rights_input_base();
         let config = ProviderConfig {
             base_path: base.to_string_lossy().into_owned(),
             extra: serde_json::json!({
                 "offers": [
                     {"id":"one","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}},
-                    {"id":"two","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}}
+                    {"id":"two","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}},
+                    {"id":"three","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}}
                 ]
             }),
             ..ProviderConfig::default()
         };
         let error = admit_model_rights_inputs(&config, &engine, &model, &bundle)
-            .expect_err("two local offers");
+            .expect_err("three local offers");
         assert!(
             matches!(error, BridgeError::InitFailed(ref reason) if reason == "too many local model offers"),
             "{error:?}"
         );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn a_second_local_offer_is_admitted() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let bundle = base.join("libexec/llama.cpp/test/platform");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let engine = bundle.join("llama-server");
+        let engine_2 = bundle.join("llama-server-b");
+        std::fs::write(&engine, b"engine").unwrap();
+        std::fs::write(&engine_2, b"engine").unwrap();
+        let admitted = base.join(format!("model-preparation/admitted-{}", "ab".repeat(32)));
+        let admitted_2 = base.join(format!("model-preparation/admitted-{}", "cd".repeat(32)));
+        std::fs::create_dir_all(&admitted).unwrap();
+        std::fs::create_dir_all(&admitted_2).unwrap();
+        let model = admitted.join("weights.gguf");
+        let model_2 = admitted_2.join("other.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        std::fs::write(&model_2, b"gguf").unwrap();
+        let config = ProviderConfig {
+            base_path: base.to_string_lossy().into_owned(),
+            extra: serde_json::json!({
+                "offers": [
+                    {"id":"one","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}},
+                    {"id":"two","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine_2},"model":{"path":model_2}}}
+                ]
+            }),
+            ..ProviderConfig::default()
+        };
+        let admitted = admit_model_rights_inputs(&config, &engine, &model, &bundle)
+            .expect("two admitted offers");
+        assert_eq!(admitted.engine_2, engine_2);
+        assert_eq!(admitted.model_2, model_2);
+        assert_eq!(admitted.files.models.len(), 2);
+        assert_eq!(admitted.files.engines.len(), 2);
     }
 
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]

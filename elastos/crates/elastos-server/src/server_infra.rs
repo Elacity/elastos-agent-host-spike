@@ -563,7 +563,7 @@ fn local_model_paths(
     Ok(local)
 }
 
-/// Linux has no admitted path for a local weights file or its engine.
+/// A third local offer is too many. One or two continue into the exact-file plan.
 #[cfg(any(
     test,
     all(
@@ -573,8 +573,7 @@ fn local_model_paths(
     )
 ))]
 fn linux_local_model_refusal(local_models: usize) -> Option<&'static str> {
-    (local_models > 0)
-        .then_some("provider start is refused: Linux admits no path for a local model")
+    (local_models > 2).then_some("too many local model offers")
 }
 
 #[cfg(target_os = "macos")]
@@ -609,7 +608,7 @@ fn macos_model_launch_paths(
 ) -> Result<(PathBuf, PathBuf, PathBuf), provider::bridge::BridgeError> {
     let refused = |reason: &str| provider::bridge::BridgeError::InitFailed(reason.to_owned());
     let local = local_model_paths(config).map_err(|reason| refused(&reason))?;
-    if local.len() > 1 {
+    if local.len() > 2 {
         return Err(refused("too many local model offers"));
     }
     let Some((engine, model)) = local.into_iter().next() else {
@@ -743,7 +742,7 @@ async fn launch_admitted_model(
         anyhow::bail!("{error}");
     }
     let local = local_model_paths(&model_config).map_err(anyhow::Error::msg)?;
-    if local.len() > 1 {
+    if local.len() > 2 {
         anyhow::bail!("too many local model offers");
     }
     #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
@@ -798,21 +797,22 @@ async fn launch_admitted_model(
             std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
                 .map_err(|error| anyhow::anyhow!("model journal: {error}"))?;
         }
-        let confined = provider::ProviderBridge::spawn_confined_model_from_rights(
-            admitted.authority(),
-            &checked,
-            &storage,
-            model_config.clone(),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let (confined, sockets, vacant, confined_config) =
+            provider::ProviderBridge::spawn_confined_model_from_rights(
+                admitted.authority(),
+                &checked,
+                &storage,
+                model_config,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         register_started_model(
             data_dir,
             provider_registry,
             admitted,
             confined,
-            &model_config,
-            None,
+            &confined_config,
+            Some((sockets, vacant)),
             worker,
         )
         .await
@@ -6044,9 +6044,12 @@ mod tests {
     #[test]
     fn linux_refuses_a_local_model_by_name() {
         assert_eq!(super::linux_local_model_refusal(0), None);
-        let reason = "provider start is refused: Linux admits no path for a local model";
-        assert_eq!(super::linux_local_model_refusal(1), Some(reason));
-        assert_eq!(super::linux_local_model_refusal(2), Some(reason));
+        assert_eq!(super::linux_local_model_refusal(1), None);
+        assert_eq!(super::linux_local_model_refusal(2), None);
+        assert_eq!(
+            super::linux_local_model_refusal(3),
+            Some("too many local model offers")
+        );
     }
 
     #[test]

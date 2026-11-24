@@ -26,7 +26,7 @@ mod landlock_plan;
     not(target_os = "macos")
 ))]
 mod linux_model_seccomp;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod local_model_broker;
 #[cfg(unix)]
 mod macos_profile;

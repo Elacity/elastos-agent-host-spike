@@ -6,7 +6,8 @@ use std::path::Path;
 pub(crate) const PROFILE_HEAD: [&str; 3] = ["(version 1)", "(deny default)", "(deny network*)"];
 /// The right ids the shared contract names. A declared-rights file may claim
 /// only these.
-pub(crate) const CONTRACT_RIGHTS: [&str; 3] = ["storage", "bound-executable", "model-gpu"];
+#[rustfmt::skip]
+pub(crate) const CONTRACT_RIGHTS: [&str; 4] = ["storage", "bound-executable", "model-gpu", "local-model-files"];
 /// The platform-baseline ids the shared contract names. A declared-rights file
 /// may claim only these under its platform baseline; they are the Runtime
 /// platform baseline for the provider executable on macOS, not approved rights.

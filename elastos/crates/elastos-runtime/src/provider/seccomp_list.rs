@@ -238,4 +238,33 @@ mod tests {
             }
         });
     }
+
+    /// The filter is installed before exec of the provider and inherited by the
+    /// engine. A child can only add restrictions, so these calls cannot be
+    /// allowed for the engine alone. `clone`, `clone3` and `futex` stay
+    /// argument-checked. `sched_yield`, `sched_getaffinity` and
+    /// `sched_setaffinity` are not in the program.
+    #[test]
+    fn engine_start_calls_stay_in_the_inherited_filter() {
+        let admitted = crate::provider::rights::admit_committed(RuntimeProviderId::Model);
+        for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+            let names = linux_seccomp_list(RuntimeProviderId::Model, &admitted, arch);
+            for call in ["execve", "mmap", "rseq"] {
+                assert!(names.contains(&call), "{arch:?} keeps {call}");
+            }
+            for call in [
+                "sched_yield",
+                "sched_getaffinity",
+                "sched_setaffinity",
+                "clone",
+                "clone3",
+                "futex",
+            ] {
+                assert!(
+                    !names.contains(&call),
+                    "{arch:?} would allow {call} for every process in the tree"
+                );
+            }
+        }
+    }
 }

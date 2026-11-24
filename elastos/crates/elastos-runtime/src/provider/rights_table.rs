@@ -38,11 +38,26 @@ pub(super) static RIGHTS: &[RightRow] = &[
         ],
         linux_syscalls: "",
     },
+    RightRow {
+        id: "local-model-files",
+        rules: &[
+            elastos_common::model_landlock_files::MODEL_RULE,
+            elastos_common::model_landlock_files::ENGINE_RULE,
+            elastos_common::model_landlock_files::LIBRARY_RULE,
+            elastos_common::model_landlock_files::SOCKET_RULE,
+        ],
+        linux_syscalls: "",
+    },
 ];
 
 const DID_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const WALLET_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
-const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable", "model-gpu"];
+const MODEL_RIGHT_IDS: &[&str] = &[
+    "storage",
+    "bound-executable",
+    "model-gpu",
+    "local-model-files",
+];
 
 /// The later caller derives this id from the Runtime's `components.json` key,
 /// never from the package manifest's `name`.

@@ -2098,8 +2098,11 @@ fn model_inert_bindings(name: &str) -> Vec<(String, PathBuf)> {
     }
     let mut names = vec![
         "MODEL".to_owned(),
+        "MODEL_2".to_owned(),
         "ENGINE".to_owned(),
+        "ENGINE_2".to_owned(),
         "ENGINE_BUNDLE".to_owned(),
+        "HOSTED_SOCKET".to_owned(),
     ];
     names.extend((0..19).map(|index| format!("MODEL_ANCESTOR_{index}")));
     for slot in 0..64 {
@@ -8242,9 +8245,12 @@ fn measured_model_form(form: &str) -> bool {
         r#"(allow mach-lookup (global-name "com.apple.MTLCompilerService"))"#,
         "(allow process-fork)",
         r#"(allow file-read* (literal (param "MODEL")))"#,
+        r#"(allow file-read* (literal (param "MODEL_2")))"#,
         r#"(allow file-read* (literal "/dev/urandom"))"#,
         r#"(allow file-read* file-write-data (literal "/dev/null"))"#,
         r#"(allow process-exec (literal (param "ENGINE")))"#,
+        r#"(allow process-exec (literal (param "ENGINE_2")))"#,
+        r#"(allow network-outbound (literal (param "HOSTED_SOCKET")))"#,
         r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
         r#"(allow file-read* (subpath "/usr/lib"))"#,
         "(allow signal (target children))",
@@ -8372,7 +8378,8 @@ fn check_profile_contract(name: &str, profile: &str) -> Result<(), String> {
         }
         if is_exec_allow(form)
             && !(name == MODEL_PROVIDER
-                && form == r#"(allow process-exec (literal (param "ENGINE")))"#)
+                && (form == r#"(allow process-exec (literal (param "ENGINE")))"#
+                    || form == r#"(allow process-exec (literal (param "ENGINE_2")))"#))
         {
             exec_allows.push(form.as_str());
         }
