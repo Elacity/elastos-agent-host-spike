@@ -1580,6 +1580,7 @@ function writeU3Receipt() {
       name: item.name,
       status: item.status,
       path: item.path || "",
+      ...(item.detail ? { detail: item.detail } : {}),
     })),
     stopped,
   };
@@ -1921,6 +1922,7 @@ async function runU3Create() {
   let activated;
   let createdId = "";
   let secondId = "";
+  let homeAsks = { ok: false, reason: "page did not send Allow, two Creates, and Turn on", counts: {} };
   try {
     await nameInput.fill(AGENT_NAME);
     await hostInput.fill("agent-host");
@@ -1972,7 +1974,7 @@ async function runU3Create() {
       state.systemToken = latestToken;
       frameTokens.push(latestToken);
     }
-    const homeAsks = judgeHomeAsks(pagePosts, frameTokens, state.homeToken);
+    homeAsks = judgeHomeAsks(pagePosts, frameTokens, state.homeToken);
     if (!homeAsks.ok) halt("u3_home_asks", homeAsks);
   } catch (error) {
     if (error instanceof Error && U3_NAMES.includes(error.message)) throw error;
@@ -2342,9 +2344,8 @@ if (invokedDirectly()) {
     stopped = clip(error && (error.detail || error.stack || error.message) || error);
   }).finally(async () => {
     const video = adminPage && typeof adminPage.video === "function" ? adminPage.video() : null;
-    if (browser) await browser.close().catch(() => {});
-    browser = undefined;
     if (video) {
+      await adminPage.close().catch(() => {});
       try {
         const file = path.join(out, "owner.webm");
         await video.saveAs(file);
@@ -2353,6 +2354,8 @@ if (invokedDirectly()) {
         screenshots.push({ name: "owner-video", status: "skipped", detail: clip(String(error)) });
       }
     }
+    if (browser) await browser.close().catch(() => {});
+    browser = undefined;
     const code = writeReceipt();
     process.exit(code);
   });
