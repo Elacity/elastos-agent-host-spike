@@ -282,6 +282,24 @@ impl ComponentProvider {
         self.frames.lock().expect("frames").get(id).cloned()
     }
 
+    /// Delivers `grant-revoked` on the guest's event stream. The next present
+    /// of that grant is denied. This uses the stream the guest is already reading.
+    pub async fn deliver_grant_revoked(&self, id: &CapsuleId, grant: &str) -> Result<()> {
+        let sender = self
+            .instances
+            .read()
+            .await
+            .get(id)
+            .and_then(|instance| instance.events.clone())
+            .ok_or_else(|| ElastosError::CapsuleNotFound(id.0.clone()))?;
+        sender
+            .send(v2::elastos::bus::types::Event::GrantRevoked(
+                grant.to_string(),
+            ))
+            .map_err(|_| ElastosError::Compute("the guest is not reading events".into()))?;
+        Ok(())
+    }
+
     pub async fn set_bridge_principal(&self, capsule_id: &CapsuleId, principal_id: Option<String>) {
         self.bridge_principals
             .write()
