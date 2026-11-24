@@ -3,8 +3,10 @@
 //! The local gateway starts it on the Home data folder. It binds loopback,
 //! keeps its own coordinates, and serves a stored-agent launch and stop.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -16,6 +18,46 @@ use crate::api::middleware::{auth_middleware, shell_only_middleware, ApiState};
 use crate::api::server::ServerConfig;
 
 const COORDS_FILE: &str = "agent-runtime-coords.json";
+/// What Home says when the agent Runtime's own task has ended.
+pub(crate) const TASK_ENDED: &str = "agent runtime task ended";
+
+static FAULTS: OnceLock<Mutex<HashMap<PathBuf, &'static str>>> = OnceLock::new();
+#[cfg(test)]
+static PLANT_TASK_PANIC: AtomicBool = AtomicBool::new(false);
+
+fn faults() -> &'static Mutex<HashMap<PathBuf, &'static str>> {
+    FAULTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The name Home gives when this data folder's agent Runtime task has ended.
+pub(crate) fn task_fault(data_dir: &Path) -> Option<&'static str> {
+    let Ok(map) = faults().lock() else {
+        return Some(TASK_ENDED);
+    };
+    map.get(data_dir).copied()
+}
+
+fn note_fault(data_dir: &Path, name: &'static str) {
+    if let Ok(mut map) = faults().lock() {
+        map.insert(data_dir.to_path_buf(), name);
+    }
+}
+
+fn clear_fault(data_dir: &Path) {
+    if let Ok(mut map) = faults().lock() {
+        map.remove(data_dir);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn plant_task_panic() {
+    PLANT_TASK_PANIC.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) fn dirs_lock_works() -> bool {
+    dirs().lock().is_ok()
+}
 #[cfg(unix)]
 const KIND: &str = "agent";
 #[cfg(unix)]
@@ -42,22 +84,25 @@ pub(crate) fn coords_path(data_dir: &Path) -> PathBuf {
 
 #[derive(Debug)]
 pub(crate) struct AgentPlane {
-    task: tokio::task::JoinHandle<()>,
+    server: tokio::task::AbortHandle,
+    watcher: tokio::task::JoinHandle<()>,
     coords_path: PathBuf,
     data_dir: PathBuf,
 }
 
 impl AgentPlane {
     pub(crate) async fn shutdown(mut self) {
-        self.task.abort();
-        let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.task).await;
+        self.server.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.watcher).await;
     }
 }
 
 impl Drop for AgentPlane {
     fn drop(&mut self) {
-        self.task.abort();
+        self.server.abort();
+        self.watcher.abort();
         let _ = std::fs::remove_file(&self.coords_path);
+        clear_fault(&self.data_dir);
         if let Ok(mut set) = dirs().lock() {
             set.remove(&self.data_dir);
         }
@@ -136,7 +181,16 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
                 }),
         );
     }
+    #[cfg(test)]
+    {
+        app = app.route("/api/test/plane-route-panic", get(planted_route_panic));
+    }
     Ok(app)
+}
+
+#[cfg(test)]
+async fn planted_route_panic() -> &'static str {
+    panic!("planted agent route panic")
 }
 
 #[cfg(unix)]
@@ -247,36 +301,89 @@ async fn listen(
             host_helpers: Vec::new(),
             agents_only: true,
         };
-        let mut task = tokio::spawn(async move {
-            if let Err(error) = crate::api::server::start_server_with_sessions(config).await {
-                tracing::info!(%error, "agent runtime stopped");
-            }
-        });
+        let mut running = spawn_agent_server(config, data_dir.clone());
         let ready = tokio::time::timeout(Duration::from_secs(5), async {
             tokio::select! {
                 result = ready_rx => result.is_ok(),
-                _ = &mut task => false,
+                _ = &mut running.watcher => false,
             }
         })
         .await;
         if ready.ok() == Some(true) && health(&format!("http://{addr}")).await {
             let api_url = format!("http://{addr}");
             if let Err(error) = write_coords(&coords_path(&data_dir), &api_url, &attach_secret) {
-                task.abort();
-                let _ = task.await;
+                running.stop().await;
                 return Err(error);
             }
+            clear_fault(&data_dir);
             return Ok(AgentPlane {
-                task,
+                server: running.server,
+                watcher: running.watcher,
                 coords_path: coords_path(&data_dir),
                 data_dir,
             });
         }
-        task.abort();
-        let _ = task.await;
+        running.stop().await;
         failure = Some(anyhow::anyhow!("agent runtime did not become ready"));
     }
     Err(failure.unwrap_or_else(|| anyhow::anyhow!("agent runtime did not bind")))
+}
+
+#[cfg(unix)]
+struct RunningServer {
+    server: tokio::task::AbortHandle,
+    watcher: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl RunningServer {
+    async fn stop(self) {
+        self.server.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.watcher).await;
+    }
+}
+
+#[cfg(unix)]
+fn spawn_agent_server(config: ServerConfig, data_dir: PathBuf) -> RunningServer {
+    let server = tokio::spawn(async move {
+        let serve = crate::api::server::start_server_with_sessions(config);
+        #[cfg(test)]
+        {
+            tokio::pin!(serve);
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut serve => {
+                        if let Err(error) = result {
+                            tracing::info!(%error, "agent runtime stopped");
+                        }
+                        break;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                        if PLANT_TASK_PANIC.swap(false, Ordering::AcqRel) {
+                            panic!("planted agent runtime task panic");
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(test))]
+        if let Err(error) = serve.await {
+            tracing::info!(%error, "agent runtime stopped");
+        }
+    });
+    let abort = server.abort_handle();
+    let watcher = tokio::spawn(async move {
+        if let Err(error) = server.await {
+            if error.is_panic() {
+                note_fault(&data_dir, TASK_ENDED);
+            }
+        }
+    });
+    RunningServer {
+        server: abort,
+        watcher,
+    }
 }
 
 #[cfg(unix)]

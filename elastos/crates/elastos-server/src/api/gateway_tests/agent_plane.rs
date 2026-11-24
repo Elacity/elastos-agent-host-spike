@@ -1,6 +1,7 @@
 //! The agent Runtime hosted in the gateway process.
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -752,4 +753,208 @@ async fn a_hung_guest_leaves_the_gateway_up() {
     assert!(!capsule_live(&gateway.agent_url, &gateway.secret, &session).await);
     gateway.health().await;
     gateway.shutdown().await;
+}
+
+fn reexec(test_name: &str) -> std::process::Output {
+    std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--test-threads=1", "--nocapture", test_name])
+        .env("AGENT_PLANE_PANIC_CHILD", "1")
+        .env("RUST_BACKTRACE", "1")
+        .output()
+        .unwrap()
+}
+
+fn measure(output: &std::process::Output) -> Value {
+    use std::os::unix::process::ExitStatusExt;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("MEASURE "))
+        .unwrap_or("");
+    serde_json::from_str(line.trim_start_matches("MEASURE ")).unwrap_or_else(|_| {
+        json!({
+            "status": output.status.code(),
+            "signal": output.status.signal(),
+            "stdout": text,
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        })
+    })
+}
+
+fn child_ran(output: &std::process::Output, kind: &str) -> Value {
+    let value = measure(output);
+    assert!(
+        output.status.success(),
+        "{kind} child did not stay up: status {:?} signal {:?} measure {value} stderr {}",
+        output.status.code(),
+        output.status.signal(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(value["kind"], kind, "{value}");
+    eprintln!("MEASURED {value}");
+    if let Ok(path) = std::env::var("AGENT_PLANE_MEASURE_LOG") {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{value}").unwrap();
+    }
+    value
+}
+
+/// A host call panics while the guest is inside it. The child records whether
+/// this process stays up, whether that session ends, and whether the next
+/// launch, stop and Home request still work.
+#[tokio::test]
+async fn a_panicking_host_call_leaves_the_session_and_home_up() {
+    if std::env::var("AGENT_PLANE_PANIC_CHILD").as_deref() == Ok("1") {
+        host_panic_child().await;
+        return;
+    }
+    let output = reexec("a_panicking_host_call_leaves_the_session_and_home_up");
+    let value = child_ran(&output, "host");
+    assert_eq!(value["session_ended"], true, "{value}");
+    assert_eq!(value["next_live"], true, "{value}");
+    assert_eq!(value["stop"], "ok", "{value}");
+    assert_eq!(value["home"], 200, "{value}");
+    assert_eq!(value["dirs_lock"], true, "{value}");
+}
+
+#[tokio::test]
+async fn a_panicking_agent_route_leaves_home_serving() {
+    if std::env::var("AGENT_PLANE_PANIC_CHILD").as_deref() == Ok("1") {
+        route_panic_child().await;
+        return;
+    }
+    let output = reexec("a_panicking_agent_route_leaves_home_serving");
+    let value = child_ran(&output, "route");
+    assert_eq!(value["home"], 200, "{value}");
+    assert_eq!(value["plane_health"], 200, "{value}");
+}
+
+#[tokio::test]
+async fn a_panicking_agent_runtime_task_is_named_and_home_keeps_serving() {
+    if std::env::var("AGENT_PLANE_PANIC_CHILD").as_deref() == Ok("1") {
+        task_panic_child().await;
+        return;
+    }
+    let output = reexec("a_panicking_agent_runtime_task_is_named_and_home_keeps_serving");
+    let value = child_ran(&output, "task");
+    assert_eq!(value["home"], 200, "{value}");
+    assert_eq!(
+        value["fault"],
+        crate::api::agent_plane::TASK_ENDED,
+        "{value}"
+    );
+    assert_eq!(
+        value["launch"],
+        crate::api::agent_plane::TASK_ENDED,
+        "{value}"
+    );
+}
+
+async fn host_panic_child() {
+    let home = Home::open();
+    let dir = home._temp.path().join("probe");
+    let cid = sign_probe(&dir);
+    let first = home.create_agent("Panic", &cid);
+    let second = home.create_agent("Next", &cid);
+    let gateway = Gateway::start(&home.data).await;
+    crate::runtime::plant_host_panic();
+    let session = home.launch(&first, &dir).await;
+    let cause = poll_cause(&gateway, &session).await;
+    let next = home.launch(&second, &dir).await;
+    let next_live = capsule_live(&gateway.agent_url, &gateway.secret, &next).await;
+    let stop = super::super::gateway_home_runtime::stop_runtime_agent(&home.data, &second).await;
+    let home_status = http_status(&format!("http://{}/healthz", gateway.addr)).await;
+    println!(
+        "MEASURE {}",
+        json!({
+            "kind": "host",
+            "cause": cause,
+            "session_ended": cause.is_some(),
+            "next_live": next_live,
+            "stop": stop.as_ref().map(|_| "ok").unwrap_or("err"),
+            "stop_error": stop.as_ref().err().map(|error| error.to_string()),
+            "home": home_status,
+            "dirs_lock": crate::api::agent_plane::dirs_lock_works(),
+        })
+    );
+    gateway.shutdown().await;
+}
+
+async fn route_panic_child() {
+    let home = Home::open();
+    let gateway = Gateway::start(&home.data).await;
+    let panic_status =
+        http_status(&format!("{}/api/test/plane-route-panic", gateway.agent_url)).await;
+    let plane_health = http_status(&format!("{}/api/health", gateway.agent_url)).await;
+    let home_status = http_status(&format!("http://{}/healthz", gateway.addr)).await;
+    println!(
+        "MEASURE {}",
+        json!({
+            "kind": "route",
+            "panic_status": panic_status,
+            "plane_health": plane_health,
+            "home": home_status,
+            "fault": crate::api::agent_plane::task_fault(&home.data),
+        })
+    );
+    gateway.shutdown().await;
+}
+
+async fn task_panic_child() {
+    let home = Home::open();
+    let gateway = Gateway::start(&home.data).await;
+    crate::api::agent_plane::plant_task_panic();
+    let mut fault = None;
+    for _ in 0..100 {
+        fault = crate::api::agent_plane::task_fault(&home.data);
+        if fault.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let launch = super::super::gateway_home_runtime::launch_runtime_agent(
+        &home.data,
+        std::path::Path::new("."),
+        "agent:absent",
+        "grant",
+    )
+    .await;
+    let home_status = http_status(&format!("http://{}/healthz", gateway.addr)).await;
+    println!(
+        "MEASURE {}",
+        json!({
+            "kind": "task",
+            "fault": fault,
+            "launch": launch.err().map(|error| error.to_string()),
+            "home": home_status,
+        })
+    );
+    gateway.shutdown().await;
+}
+
+async fn poll_cause(gateway: &Gateway, session: &str) -> Option<String> {
+    for _ in 0..200 {
+        if let Some(cause) = capsule_cause(&gateway.agent_url, &gateway.secret, session).await {
+            return Some(cause);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    None
+}
+
+async fn http_status(url: &str) -> u16 {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    match client.get(url).send().await {
+        Ok(response) => response.status().as_u16(),
+        Err(_) => 0,
+    }
 }
