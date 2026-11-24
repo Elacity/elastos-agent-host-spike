@@ -9399,7 +9399,9 @@ pub async fn production_after() {
                 ("elastos-server/src/api/auth_gateway.rs", 3),
                 ("elastos-server/src/api/gateway_home_external_link.rs", 1),
                 ("elastos-server/src/api/gateway_home_shared_content.rs", 2),
-                ("elastos-server/src/api/gateway_home_system.rs", 2),
+                // /api/apps/home/frame is the third caller. /api/residents/frame
+                // admits an attach shell and does not call this gate.
+                ("elastos-server/src/api/gateway_home_system.rs", 3),
                 ("elastos-server/src/api/gateway_home_token.rs", 3),
                 ("elastos-server/src/api/gateway_home_cli_mint.rs", 1),
                 ("elastos-server/src/api/gateway_passkey_step_up.rs", 3),
