@@ -6848,6 +6848,8 @@ async fn test_system_updates_home_background_image() {
 #[tokio::test]
 async fn test_home_runtime_ensure_reuses_running_runtime() {
     let dir = tempfile::tempdir().unwrap();
+    // A source Home starts again only through the named dev_mode opt-in.
+    std::fs::write(dir.path().join("config.toml"), "dev_mode = true\n").unwrap();
     let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
     let _runtime = start_fake_runtime(dir.path(), bus, "home-peer").await;
 
@@ -8231,6 +8233,8 @@ async fn home_launch_routes_keep_cli_scope_refusal_on_wire() {
 #[tokio::test]
 async fn test_home_launch_validates_shell_targets() {
     let dir = tempfile::tempdir().unwrap();
+    // A source Home starts again only through the named dev_mode opt-in.
+    std::fs::write(dir.path().join("config.toml"), "dev_mode = true\n").unwrap();
     write_test_browser_capsule(
         dir.path(),
         "projection-app",
@@ -10344,6 +10348,8 @@ async fn test_home_browser_state_defaults_preserve_protected_plaintext_and_refus
 #[tokio::test]
 async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
     let dir = tempfile::tempdir().unwrap();
+    // A source Home starts again only through the named dev_mode opt-in.
+    std::fs::write(dir.path().join("config.toml"), "dev_mode = true\n").unwrap();
     let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
     let _runtime = start_fake_runtime(dir.path(), bus, "system-peer").await;
     let app = gateway_router(test_state(dir.path()));
@@ -10409,6 +10415,8 @@ async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
 #[tokio::test]
 async fn test_home_launch_starts_chat_room_capsule_and_reports_runtime_activity() {
     let dir = tempfile::tempdir().unwrap();
+    // A source Home starts again only through the named dev_mode opt-in.
+    std::fs::write(dir.path().join("config.toml"), "dev_mode = true\n").unwrap();
     let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
     let runtime = start_fake_runtime(dir.path(), bus, "chat-room-peer").await;
     let app = gateway_router(test_state(dir.path()));
