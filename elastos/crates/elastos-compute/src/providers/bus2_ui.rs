@@ -122,6 +122,93 @@ pub fn check_document(media_type: &str, document: &[u8]) -> Result<Vec<Node>, St
     frame.iter().map(one_node).collect()
 }
 
+/// A grant the guest already holds. Present reads this record. It does not
+/// ask for a new grant.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GrantBook {
+    grants: Vec<HeldGrant>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HeldGrant {
+    id: String,
+    resource: String,
+    actions: Vec<String>,
+    revoked: bool,
+}
+
+impl GrantBook {
+    pub fn hold(&mut self, id: &str, resource: &str, action: &str) {
+        if self.grants.iter().any(|grant| grant.id == id) {
+            return;
+        }
+        self.grants.push(HeldGrant {
+            id: id.to_string(),
+            resource: resource.to_string(),
+            actions: vec![action.to_string()],
+            revoked: false,
+        });
+    }
+
+    pub fn revoke(&mut self, id: &str) {
+        if let Some(grant) = self.grants.iter_mut().find(|grant| grant.id == id) {
+            grant.revoked = true;
+        }
+    }
+}
+
+/// One frame. An image is a grant id and a resource name. It holds no bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub nodes: Vec<FrameNode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameNode {
+    Text(String),
+    Image { grant: String, resource: String },
+}
+
+#[derive(Debug)]
+pub enum PresentError {
+    Invalid(String),
+    Denied(String),
+}
+
+/// The slice 10 checker runs first. A grant that is unknown, revoked, or not
+/// read is denied and stores nothing.
+pub fn present_frame(
+    media: &str,
+    document: &[u8],
+    book: &GrantBook,
+) -> Result<Frame, PresentError> {
+    let nodes = check_document(media, document).map_err(PresentError::Invalid)?;
+    let mut out = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        out.push(match node {
+            Node::Text(text) => FrameNode::Text(text),
+            Node::Image { grant } => {
+                let Some(held) = book.grants.iter().find(|item| item.id == grant) else {
+                    return Err(PresentError::Denied(format!(
+                        "{grant} is not a grant this guest holds"
+                    )));
+                };
+                if held.revoked {
+                    return Err(PresentError::Denied(format!("{grant} was revoked")));
+                }
+                if !held.actions.iter().any(|action| action == "read") {
+                    return Err(PresentError::Denied(format!("{grant} does not allow read")));
+                }
+                FrameNode::Image {
+                    grant,
+                    resource: held.resource.clone(),
+                }
+            }
+        });
+    }
+    Ok(Frame { nodes: out })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,7 +6,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock,
 };
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -105,6 +105,10 @@ struct ComponentActivation {
     test_max_ticks: u64,
     #[cfg(test)]
     pending_read: Arc<AtomicBool>,
+    /// Grants this activation's guest already holds. `capabilities.request`
+    /// on the v1 seam and a successful v2 read record them. Present reads
+    /// the record and does not ask for a new grant.
+    grants: Arc<Mutex<super::bus2_ui::GrantBook>>,
 }
 
 /// Takes an activation's entry away when the run ends, including on unwind,
@@ -205,6 +209,9 @@ struct ComponentState {
     /// Set by the epoch callback when it interrupts *because* of a stop
     /// request, so a trap is named `stopped` only when the stop caused it.
     ended_by_stop: bool,
+    grants: Arc<Mutex<super::bus2_ui::GrantBook>>,
+    /// The one presented frame, keyed by capsule id. A second present replaces it.
+    frames: Arc<Mutex<HashMap<String, super::bus2_ui::Frame>>>,
 }
 
 /// Component compute provider.
@@ -218,6 +225,7 @@ pub struct ComponentProvider {
     endings: Arc<RwLock<HashMap<CapsuleId, String>>>,
     bus_hostcall: std::sync::RwLock<Option<BridgeHostcall>>,
     bridge_principals: Arc<RwLock<HashMap<CapsuleId, Option<String>>>>,
+    frames: Arc<Mutex<HashMap<String, super::bus2_ui::Frame>>>,
     compile_slot: Arc<Semaphore>,
     /// Test only: holds the next compile job just after its worker has taken
     /// the compile slot, so a test can act while a compile is in progress.
@@ -235,6 +243,7 @@ impl ComponentProvider {
             endings: Arc::new(RwLock::new(HashMap::new())),
             bus_hostcall: std::sync::RwLock::new(None),
             bridge_principals: Arc::new(RwLock::new(HashMap::new())),
+            frames: Arc::new(Mutex::new(HashMap::new())),
             // One compile at a time: a burst of loads queues instead of
             // starting competing compiler jobs.
             compile_slot: Arc::new(Semaphore::new(1)),
@@ -479,6 +488,7 @@ impl ComponentProvider {
                 test_max_ticks: V2_TEST_EPOCH_TICKS,
                 #[cfg(test)]
                 pending_read: Arc::new(AtomicBool::new(false)),
+                grants: Arc::new(Mutex::new(super::bus2_ui::GrantBook::default())),
             },
         );
 
@@ -677,6 +687,7 @@ impl ComponentProvider {
         control: V2RunControl,
         ready: tokio::sync::oneshot::Sender<Result<()>>,
     ) -> Result<&'static str> {
+        let grants = state.grants.clone();
         let mut store = Store::new(&engine, state);
         store.limiter(|state| &mut state.limits);
         // Yield each slice. The tick refills the reserve the next slice reads.
@@ -726,6 +737,7 @@ impl ComponentProvider {
             V2EventFeed(
                 receiver,
                 ticks,
+                grants,
                 #[cfg(test)]
                 control.pending_read.clone(),
             ),
@@ -754,6 +766,7 @@ impl ComponentProvider {
 struct V2EventFeed(
     mpsc::UnboundedReceiver<v2::elastos::bus::types::Event>,
     Arc<AtomicU64>,
+    Arc<Mutex<super::bus2_ui::GrantBook>>,
     #[cfg(test)] Arc<AtomicBool>,
 );
 
@@ -770,6 +783,7 @@ impl<D> StreamProducer<D> for V2EventFeed {
     ) -> Poll<wasmtime::Result<StreamResult>> {
         match self.0.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
+                note_delivered_event(&self.2, &event);
                 self.1.store(0, Ordering::Release);
                 destination.set_buffer(Some(event));
                 Poll::Ready(Ok(StreamResult::Completed))
@@ -778,7 +792,7 @@ impl<D> StreamProducer<D> for V2EventFeed {
             Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
             Poll::Pending => {
                 #[cfg(test)]
-                self.2.store(true, Ordering::Release);
+                self.3.store(true, Ordering::Release);
                 Poll::Pending
             }
         }
@@ -858,6 +872,7 @@ impl ComputeProvider for ComponentProvider {
             #[cfg(test)]
             let endings = self.endings.clone();
             let id = handle.id.clone();
+            let frames = self.frames.clone();
             let mut entries = self.instances.write().await;
             let instance = entries
                 .get_mut(&handle.id)
@@ -869,6 +884,8 @@ impl ComputeProvider for ComponentProvider {
             }
             let state = ComponentState {
                 sealed: instance.sealed,
+                grants: instance.grants.clone(),
+                frames,
                 ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
             };
             let (engine, component) = (instance.engine.clone(), instance.component.clone());
@@ -1091,6 +1108,8 @@ impl ComponentState {
             in_bus: Duration::ZERO,
             stop_requested: Arc::new(AtomicBool::new(false)),
             ended_by_stop: false,
+            grants: Arc::new(Mutex::new(super::bus2_ui::GrantBook::default())),
+            frames: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1176,7 +1195,27 @@ impl ComponentState {
             }
             super::bus2_stream::CapFail::Window(err) => err,
         })?;
+        self.grants
+            .lock()
+            .expect("grant book")
+            .hold(&grant, &resource, "read");
         Ok(super::bus2_stream::PreparedRead { bytes, audit })
+    }
+
+    /// Checker first, then a grant this guest already holds. One frame, replaced.
+    fn present_document(&mut self, media: &str, document: &[u8]) -> V2Result<()> {
+        if self.sealed {
+            return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
+        }
+        let frame = {
+            let book = self.grants.lock().expect("grant book");
+            super::bus2_ui::present_frame(media, document, &book).map_err(present_error)?
+        };
+        self.frames
+            .lock()
+            .expect("frames")
+            .insert(self.capsule_id.clone(), frame);
+        Ok(())
     }
 
     fn bridge_window(
@@ -1265,6 +1304,10 @@ impl elastos::bus::capabilities::Host for ComponentState {
             RuntimeResponse::CapabilityToken { token } => token,
             response => return Err(response_error(&response)),
         };
+        self.grants
+            .lock()
+            .expect("grant book")
+            .hold(&token, &resource, &action);
         Ok(elastos::bus::types::CapabilityGrant {
             id: token,
             resource,
@@ -1369,9 +1412,7 @@ impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<C
         _: String,
     ) -> std::result::Result<v2::elastos::bus::types::Grant, v2::elastos::bus::types::BusError>
     {
-        Err(v2::elastos::bus::types::BusError::Unavailable(
-            "capabilities are not available in this slice".into(),
-        ))
+        refuse_new_capability()
     }
 }
 
@@ -1422,13 +1463,40 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
 impl v2::elastos::bus::ui::Host for ComponentState {}
 impl v2::elastos::bus::ui::HostWithStore<ComponentState> for HasSelf<ComponentState> {
     async fn present(
-        _: &wasmtime::component::Accessor<ComponentState, Self>,
-        _: String,
-        _: Vec<u8>,
+        accessor: &wasmtime::component::Accessor<ComponentState, Self>,
+        media_type: String,
+        document: Vec<u8>,
     ) -> std::result::Result<(), v2::elastos::bus::types::BusError> {
-        Err(v2::elastos::bus::types::BusError::Unavailable(
-            "ui is not available in this slice".into(),
-        ))
+        accessor.with(|mut access| access.get().present_document(&media_type, &document))
+    }
+}
+
+fn refuse_new_capability() -> V2Result<v2::elastos::bus::types::Grant> {
+    #[cfg(test)]
+    CAPABILITY_REFUSALS.fetch_add(1, Ordering::Relaxed);
+    Err(V2BusError::Unavailable(
+        "capabilities are not available in this slice".into(),
+    ))
+}
+
+#[cfg(test)]
+static CAPABILITY_REFUSALS: AtomicU64 = AtomicU64::new(0);
+
+fn present_error(err: super::bus2_ui::PresentError) -> V2BusError {
+    match err {
+        super::bus2_ui::PresentError::Invalid(message) => V2BusError::Invalid(message),
+        super::bus2_ui::PresentError::Denied(message) => V2BusError::Denied(message),
+    }
+}
+
+/// A delivered `grant-revoked` marks that grant. The event source is the
+/// existing events channel. Present does not ask for a new one.
+fn note_delivered_event(
+    book: &Mutex<super::bus2_ui::GrantBook>,
+    event: &v2::elastos::bus::types::Event,
+) {
+    if let v2::elastos::bus::types::Event::GrantRevoked(id) = event {
+        book.lock().expect("grant book").revoke(id);
     }
 }
 
@@ -2096,6 +2164,143 @@ mod tests {
         assert!(lengths
             .iter()
             .all(|length| *length <= crate::providers::bus2_stream::READ_CHUNK as u64));
+    }
+
+    #[test]
+    fn v2_present_stores_the_grant_id_and_a_second_present_replaces_it() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let seen = calls.clone();
+        let mut state = ComponentState::new(
+            Some(Arc::new(move |line, _, _| {
+                seen.fetch_add(1, Ordering::Relaxed);
+                let value: serde_json::Value = serde_json::from_str(line).expect("bridge line");
+                let request = &value["request"];
+                let token = match request["action"].as_str() {
+                    Some("read")
+                        if request["resource"]
+                            .as_str()
+                            .unwrap_or("")
+                            .ends_with("gone.png") =>
+                    {
+                        "g-revoked"
+                    }
+                    Some("read") => "g-read",
+                    _ => "g-write",
+                };
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": { "type": "capability_token", "token": token }
+                })
+                .to_string())
+            })),
+            "capsule-1".into(),
+            None,
+        );
+        let photo = "localhost://Users/self/Pictures/a.png";
+        let ask = |state: &mut ComponentState, resource: &str, action: &str| {
+            elastos::bus::capabilities::Host::request(
+                state,
+                elastos::bus::types::CapabilityRequest {
+                    resource: resource.into(),
+                    actions: vec![action.into()],
+                    reason: "already held".into(),
+                },
+            )
+            .expect("the existing seam returns the grant")
+        };
+        let read = ask(&mut state, photo, "read");
+        let write = ask(&mut state, photo, "write");
+        let revoked = ask(
+            &mut state,
+            "localhost://Users/self/Pictures/gone.png",
+            "read",
+        );
+        assert_eq!(
+            (read.id.as_str(), write.id.as_str(), revoked.id.as_str()),
+            ("g-read", "g-write", "g-revoked")
+        );
+        note_delivered_event(
+            &state.grants,
+            &v2::elastos::bus::types::Event::GrantRevoked(revoked.id.clone()),
+        );
+        let media = crate::providers::bus2_ui::UI_MEDIA_TYPE;
+        let present = |state: &mut ComponentState, document: &str| {
+            state.present_document(media, document.as_bytes())
+        };
+        present(&mut state, r#"{"frame":[{"text":"one"}]}"#).unwrap();
+        let second = format!(
+            r#"{{"frame":[{{"image":{{"grant":"{}"}}}},{{"text":"two"}}]}}"#,
+            read.id
+        );
+        present(&mut state, &second).unwrap();
+        let stored = state
+            .frames
+            .lock()
+            .expect("frames")
+            .get("capsule-1")
+            .unwrap()
+            .clone();
+        assert_eq!(state.frames.lock().expect("frames").len(), 1, "one frame");
+        assert_eq!(
+            stored.nodes,
+            vec![
+                crate::providers::bus2_ui::FrameNode::Image {
+                    grant: read.id.clone(),
+                    resource: photo.into(),
+                },
+                crate::providers::bus2_ui::FrameNode::Text("two".into()),
+            ]
+        );
+        assert_eq!(
+            format!("{:?}", stored.nodes[0]),
+            format!("Image {{ grant: {:?}, resource: {:?} }}", read.id, photo)
+        );
+        let denied = |state: &mut ComponentState, id: &str| {
+            present(
+                state,
+                &format!(r#"{{"frame":[{{"image":{{"grant":"{id}"}}}}]}}"#),
+            )
+            .unwrap_err()
+        };
+        assert!(
+            matches!(denied(&mut state, "g-missing"), V2BusError::Denied(message)
+            if message.contains("is not a grant this guest holds"))
+        );
+        assert!(
+            matches!(denied(&mut state, &revoked.id), V2BusError::Denied(message)
+            if message.contains("was revoked"))
+        );
+        assert!(
+            matches!(denied(&mut state, &write.id), V2BusError::Denied(message)
+            if message.contains("does not allow read"))
+        );
+        let script = present(
+            &mut state,
+            r#"{"frame":[{"text":"x","script":"alert(1)"}]}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(script, V2BusError::Invalid(message) if message.contains("scripts")));
+        assert_eq!(
+            state
+                .frames
+                .lock()
+                .expect("frames")
+                .get("capsule-1")
+                .unwrap(),
+            &stored
+        );
+        state.sealed = true;
+        let sealed = present(&mut state, r#"{"frame":[{"text":"no"}]}"#).unwrap_err();
+        assert!(matches!(sealed, V2BusError::Denied(message) if message == SEALED_BRIDGE));
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            3,
+            "present does not call the bridge"
+        );
+        assert_eq!(CAPABILITY_REFUSALS.load(Ordering::Relaxed), 0);
+        let unavailable = refuse_new_capability().unwrap_err();
+        assert!(matches!(unavailable, V2BusError::Unavailable(message)
+            if message == "capabilities are not available in this slice"));
     }
 
     /// A v2 guest calls `providers.invoke`, reads the stream four bytes at a
