@@ -220,6 +220,16 @@ impl ModelBudget {
         Ok(Hold { tokens })
     }
 
+    #[cfg(test)]
+    pub(crate) fn held_for_test(&self, agent: &AgentKey) -> u64 {
+        self.agents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&agent.0)
+            .map(|account| account.held)
+            .unwrap_or(0)
+    }
+
     /// Test-only: waits for the concurrency row's racers to finish their reads.
     /// Production never calls this; a planted check-then-add does.
     #[cfg(test)]

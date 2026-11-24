@@ -1913,6 +1913,89 @@ async fn unavailable(stream: &mut UnixStream) -> io::Result<()> {
 }
 
 #[cfg(test)]
+fn hosted_text_effect(
+    data_dir: &Path,
+    offer_id: &str,
+    run_id: &str,
+    request_id: &str,
+) -> anyhow::Result<EffectRequest> {
+    let offers = load_model_provider_operator_offers(data_dir)?;
+    let offer = offers
+        .iter()
+        .find(|offer| offer["id"] == offer_id)
+        .ok_or_else(|| anyhow::anyhow!("hosted offer unavailable"))?;
+    let model = offer["adapter"]["model"].as_str().unwrap_or_default();
+    let limit = offer["policy"]["inline_output_bytes_limit"]
+        .as_u64()
+        .unwrap_or(0);
+    let body = serde_json::json!({
+        "model": model,
+        "max_tokens": (limit / 4).max(1),
+        "messages": [{"role": "user", "content": "hi"}],
+    });
+    Ok(EffectRequest {
+        offer_id: offer_id.to_string(),
+        effect: "text".to_string(),
+        run_id: run_id.to_string(),
+        request_id: request_id.to_string(),
+        job_id: None,
+        method: reqwest::Method::POST,
+        body: serde_json::to_vec(&body)?,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn approve_hosted_text_for_test(
+    data_dir: &Path,
+    offer_id: &str,
+    run_id: &str,
+    request_id: &str,
+    owner_proof: &str,
+) -> anyhow::Result<String> {
+    let request = hosted_text_effect(data_dir, offer_id, run_id, request_id)?;
+    let destination = resolve_effect(data_dir, &request)?;
+    let scope = egress_scope(offer_id, "text", "POST", &destination)?;
+    let id = model_provider_egress_decision::request(data_dir, &scope, None)?;
+    model_provider_egress_decision::approve(data_dir, &id, owner_proof)?;
+    create_grant_after_decision(
+        data_dir,
+        offer_id,
+        "text",
+        "POST",
+        &destination,
+        None,
+        Some((run_id, request_id)),
+    )?;
+    Ok(id)
+}
+
+#[cfg(test)]
+pub(crate) fn end_hosted_decision_for_test(
+    data_dir: &Path,
+    id: &str,
+    owner_proof: &str,
+) -> anyhow::Result<()> {
+    model_provider_egress_decision::end_decision(data_dir, id, owner_proof)
+}
+
+#[cfg(test)]
+pub(crate) async fn forward_hosted_text_for_test(
+    data_dir: &Path,
+    offer_id: &str,
+    run_id: &str,
+    request_id: &str,
+) -> anyhow::Result<String> {
+    let request = hosted_text_effect(data_dir, offer_id, run_id, request_id)?;
+    let destination = resolve_effect(data_dir, &request)?;
+    let (mut broker, mut provider) = UnixStream::pair()?;
+    forward(&mut broker, data_dir, &request, &destination, || true).await?;
+    broker.shutdown().await?;
+    let mut response = String::new();
+    provider.read_to_string(&mut response).await?;
+    Ok(response)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;

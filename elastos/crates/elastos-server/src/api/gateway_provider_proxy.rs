@@ -3986,8 +3986,9 @@ pub(super) fn provider_proxy_runtime_metadata_field(request: &serde_json::Value)
 const HOSTED_RUN_ADMIN_ONLY: &str =
     "Hosted AI on this Home is for admins. Local models are still available.";
 
-/// Hosted AI spends this Home's paid connection, so in 0.8.0 only an admin's
-/// run may use a hosted offer. Other offers are not affected.
+/// A hosted offer is open to an admin's own run, and to an admitted agent
+/// whose stored owner is an admin and has approved that offer. The agent's
+/// signed ceiling is reserved before that run is dispatched.
 fn hosted_run_allowed(
     data_dir: &std::path::Path,
     context: &HomeLaunchTokenContext,
@@ -4003,8 +4004,46 @@ fn hosted_run_allowed(
         .is_some_and(|principal| {
             crate::auth::ensure_proof_binding_not_revoked(&principal).is_ok()
                 && principal.principal_id == context.principal_id()
-                && crate::auth::is_admin(&principal)
+                && (crate::auth::is_admin(&principal)
+                    || agent_owner_approved(data_dir, &principal, offer_id))
         })
+}
+
+fn agent_owner_approved(
+    data_dir: &std::path::Path,
+    agent: &crate::auth::PrincipalRecord,
+    offer_id: &str,
+) -> bool {
+    if agent.kind != crate::auth::PrincipalKind::Agent {
+        return false;
+    }
+    let Some(owner_id) = agent.owner.as_deref() else {
+        return false;
+    };
+    if crate::agents::stored_agent(data_dir, owner_id, &agent.principal_id).is_err() {
+        return false;
+    }
+    let Some(owner) = crate::auth::stored_principal_record(data_dir, owner_id)
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        crate::auth::is_admin(&owner)
+            && crate::auth::ensure_proof_binding_not_revoked(&owner).is_ok()
+            && crate::api::model_provider_egress_decision::approved_for_owner(
+                data_dir,
+                offer_id,
+                &owner.proof_binding_id,
+            )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (owner, offer_id);
+        false
+    }
 }
 
 pub(super) fn normalize_model_provider_request(

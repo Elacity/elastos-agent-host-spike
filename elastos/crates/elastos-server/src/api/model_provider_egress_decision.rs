@@ -806,3 +806,17 @@ pub(super) fn offer_state(data_dir: &Path, offer_id: &str) -> anyhow::Result<&'s
     }
     Ok(if pending { "pending" } else { "none" })
 }
+
+/// The offer has an approval that names this owner's proof and has not ended.
+pub(crate) fn approved_for_owner(data_dir: &Path, offer_id: &str, owner_proof: &str) -> bool {
+    let _guard = lock().lock().unwrap_or_else(|error| error.into_inner());
+    let (Ok(now), Ok(file)) = (now_ms(), read(data_dir)) else {
+        return false;
+    };
+    file.decisions.iter().any(|decision| {
+        decision.scope.offer_id == offer_id
+            && decision.status == DecisionStatus::Approved
+            && decision.expires_at_ms > now
+            && decision.owner_proof_binding_id.as_deref() == Some(owner_proof)
+    })
+}

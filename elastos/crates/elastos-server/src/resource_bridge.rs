@@ -9116,6 +9116,524 @@ pub(crate) mod tests {
         assert_eq!(provider.requests.lock().await.len(), 1);
     }
 
+    #[cfg(target_os = "macos")]
+    const HOSTED_OFFER: &str = "model:openrouter";
+    #[cfg(target_os = "macos")]
+    const HOSTED_CAPSULE: &str = "capsule-agent";
+    #[cfg(target_os = "macos")]
+    const HOSTED_INPUT_LIMIT: u64 = 100;
+    #[cfg(target_os = "macos")]
+    const HOSTED_INLINE_LIMIT: u64 = 128;
+
+    #[cfg(target_os = "macos")]
+    fn hosted_offer_tokens() -> u64 {
+        HOSTED_INPUT_LIMIT + 1024 + (HOSTED_INLINE_LIMIT / 4).max(1)
+    }
+
+    #[cfg(target_os = "macos")]
+    struct BrokerModel {
+        data_dir: std::path::PathBuf,
+        creates: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(target_os = "macos")]
+    #[async_trait::async_trait]
+    impl Provider for BrokerModel {
+        async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider("raw model fixture".to_string()))
+        }
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["model"]
+        }
+        fn name(&self) -> &'static str {
+            "broker-model"
+        }
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            if request["op"] == "offers_list" {
+                return Ok(serde_json::json!({
+                    "status": "ok",
+                    "data": {
+                        "offers": [{
+                            "id": HOSTED_OFFER,
+                            "policy": {
+                                "input_bytes_limit": HOSTED_INPUT_LIMIT,
+                                "inline_output_bytes_limit": HOSTED_INLINE_LIMIT,
+                            },
+                        }],
+                        "offer_revisions": {HOSTED_OFFER: "sha256:s8"},
+                    },
+                }));
+            }
+            if request["op"] != "runs_create" {
+                return Ok(serde_json::json!({"status": "error", "code": "unsupported"}));
+            }
+            self.creates
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let binding =
+                serde_json::from_value::<RuntimeCreateBinding>(request["runtime_binding"].clone())
+                    .map_err(|err| ProviderError::Provider(err.to_string()))?;
+            let run_id = elastos_model_contract::model_run_id(&binding);
+            let forwarded = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::api::model_provider_egress::forward_hosted_text_for_test(
+                    &self.data_dir,
+                    &binding.offer_id,
+                    &run_id,
+                    &binding.request_id,
+                ),
+            )
+            .await
+            .map_err(|_| ProviderError::Provider("hosted broker timed out".to_string()))?
+            .map_err(|err| ProviderError::Provider(err.to_string()))?;
+            if !forwarded.starts_with("HTTP/1.1 200") {
+                return Ok(serde_json::json!({
+                    "status": "error",
+                    "code": "broker_refused",
+                    "message": forwarded,
+                }));
+            }
+            Ok(serde_json::json!({"status": "ok", "data": {"run_id": run_id}}))
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    struct HostedHome {
+        ctx: BridgeContext,
+        creates: Arc<std::sync::atomic::AtomicUsize>,
+        hits: Arc<std::sync::atomic::AtomicUsize>,
+        captured: Arc<std::sync::Mutex<String>>,
+        owner_id: String,
+        owner_proof: String,
+        agent_id: String,
+        decision_id: String,
+        account: Arc<ModelBudget>,
+        agent_key: AgentKey,
+        sink: tokio::task::JoinHandle<()>,
+        _temp: tempfile::TempDir,
+    }
+
+    #[cfg(target_os = "macos")]
+    fn enroll_hosted_owner(dir: &std::path::Path) -> (String, String) {
+        let mut identity = elastos_identity::IdentityManager::new(dir.to_path_buf()).unwrap();
+        let secret = crate::auth::random_secret_hex();
+        let owner = crate::auth::OwnerAdmission {
+            origin: "http://localhost:61971",
+            rp_id: "localhost",
+            claimant: &secret,
+            loopback: true,
+        };
+        let (_, options) = crate::auth::begin_owner_enrollment(
+            dir,
+            &mut identity,
+            &owner,
+            "owner",
+            crate::auth::now_ts(),
+        )
+        .unwrap()
+        .unwrap();
+        let attestation = crate::auth::owner_attestation_for_test(
+            &options.unwrap().public_key.challenge,
+            owner.rp_id,
+            owner.origin,
+        );
+        crate::auth::complete_owner_enrollment(
+            dir,
+            &mut identity,
+            &owner,
+            "owner",
+            Some(&attestation),
+            None,
+            crate::auth::now_ts(),
+        )
+        .unwrap()
+        .unwrap();
+        let principal = crate::auth::active_passkey_principals(dir)
+            .unwrap()
+            .into_iter()
+            .find(crate::auth::is_admin)
+            .unwrap();
+        crate::auth::store_test_principal_root_protection_for(
+            dir,
+            &principal.principal_id,
+            &principal.localhost_root,
+        );
+        (principal.principal_id, principal.proof_binding_id)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn hosted_owner_caller<'a>(owner_id: &'a str, proof: &'a str) -> crate::agents::Caller<'a> {
+        crate::agents::Caller {
+            principal_id: owner_id,
+            proof_binding_id: proof,
+            session_id: "s8-session",
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_hosted_fixture(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true).mode(0o600);
+        options.open(path).unwrap().write_all(bytes).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn hosted_run_id(agent_id: &str, request_id: &str) -> String {
+        let input = serde_json::json!({"prompt": "hi"});
+        let binding = RuntimeCreateBinding {
+            schema: RUNTIME_CREATE_BINDING_SCHEMA.to_string(),
+            principal_id: agent_id.to_string(),
+            session_id: HOSTED_CAPSULE.to_string(),
+            capsule_id: HOSTED_CAPSULE.to_string(),
+            grant_id: "capability:preview".to_string(),
+            request_id: request_id.to_string(),
+            offer_id: HOSTED_OFFER.to_string(),
+            operation: "text.generate".to_string(),
+            input_hash: model_input_hash(&input).unwrap(),
+        };
+        elastos_model_contract::model_run_id(&binding)
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn hosted_agent_home(ceiling: u64) -> Option<HostedHome> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if crate::agents::require_build().is_err() {
+            return None;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (owner_id, owner_proof) = enroll_hosted_owner(temp.path());
+        let now = crate::auth::now_ts();
+        let caller = hosted_owner_caller(&owner_id, &owner_proof);
+        crate::agents::set_enabled(temp.path(), &caller, true, now).unwrap();
+        let agent_id = crate::agents::create(
+            temp.path(),
+            &caller,
+            &crate::agents::CreateRequest {
+                display_name: "Hosted".to_string(),
+                agent_host: "a5-launch-probe".to_string(),
+                request_id: "s8-create".to_string(),
+            },
+            |host| {
+                Ok(
+                    crate::agent_admission::VerifiedAgentHost::unchecked_for_test(
+                        host,
+                        "bafkreia5probe",
+                        "bafkreia5bundle",
+                    ),
+                )
+            },
+            now,
+        )
+        .unwrap()
+        .agent_id;
+        crate::agents::set_active(temp.path(), &caller, &agent_id, true, now).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let chat = format!("http://127.0.0.1:{port}/openrouter/api/v1/chat/completions");
+        crate::api::seed_model_provider_operator_offers_for_test(
+            temp.path(),
+            vec![serde_json::json!({
+                "id": HOSTED_OFFER,
+                "title": "Fixture",
+                "operation": "text.generate",
+                "input_modalities": ["text/plain"],
+                "output_modalities": ["text/plain"],
+                "enabled": true,
+                "policy": {
+                    "input_bytes_limit": HOSTED_INPUT_LIMIT,
+                    "inline_output_bytes_limit": HOSTED_INLINE_LIMIT,
+                },
+                "adapter": {
+                    "kind": "open_ai_compatible_text",
+                    "api_url": "https://openrouter.ai/api/v1/chat/completions",
+                    "model": "fixture/model",
+                    "hosted": {
+                        "backend_provider_label": "OpenRouter",
+                        "selection_mode": "pinned",
+                        "privacy_policy_ref": "fixture:privacy:v1",
+                        "terms_ref": "fixture:terms:v1",
+                        "upstream_routing_fallback_assertion": "operator_asserted_disabled"
+                    }
+                }
+            })],
+        )
+        .unwrap();
+        write_hosted_fixture(
+            &temp
+                .path()
+                .join("providers/model-provider/validate-fixtures.json"),
+            serde_json::json!({
+                "openrouter_models_url": format!("http://127.0.0.1:{port}/models"),
+                "venice_rate_limits_url": format!("http://127.0.0.1:{port}/limits"),
+                "venice_models_url": format!("http://127.0.0.1:{port}/venice-models"),
+                "openrouter_chat_url": chat,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        let request_id = "model-v1:1700000000000:s8";
+        let decision_id = crate::api::model_provider_egress::approve_hosted_text_for_test(
+            temp.path(),
+            HOSTED_OFFER,
+            &hosted_run_id(&agent_id, request_id),
+            request_id,
+            &owner_proof,
+        )
+        .unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::new(std::sync::Mutex::new(String::new()));
+        let hits_task = hits.clone();
+        let captured_task = captured.clone();
+        let sink = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 2048];
+                    let Ok(count) = socket.read(&mut chunk).await else {
+                        break;
+                    };
+                    if count == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..count]);
+                    let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&bytes[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if bytes.len() < end + 4 + length {
+                        continue;
+                    }
+                    hits_task.fetch_add(1, Ordering::SeqCst);
+                    *captured_task.lock().unwrap() = String::from_utf8_lossy(&bytes).into_owned();
+                    let body = b"{}";
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(body).await;
+                    break;
+                }
+            }
+        });
+        let creates = Arc::new(AtomicUsize::new(0));
+        let account = Arc::new(ModelBudget::new());
+        let agent_key = AgentKey::for_test(&agent_id);
+        account.open(&agent_key, ceiling).unwrap();
+        let mut ctx = bridge_context();
+        ctx.capsule_id = HOSTED_CAPSULE.to_string();
+        ctx.principal_id = Some(agent_id.clone());
+        ctx.data_dir = Some(temp.path().to_path_buf());
+        ctx.manifest_capabilities = vec!["elastos://model/*".into()];
+        ctx.model_token_ceiling = Some(ceiling);
+        ctx.model_budget = Some(ModelDispatchBudget {
+            agent: agent_key.clone(),
+            account: account.clone(),
+            offers: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+        });
+        let provider = Arc::new(BrokerModel {
+            data_dir: temp.path().to_path_buf(),
+            creates: creates.clone(),
+        });
+        ctx.provider_registry
+            .register_sub_provider("model", provider)
+            .await
+            .unwrap();
+        Some(HostedHome {
+            ctx,
+            creates,
+            hits,
+            captured,
+            owner_id,
+            owner_proof,
+            agent_id,
+            decision_id,
+            account,
+            agent_key,
+            sink,
+            _temp: temp,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn hosted_runs_create(ctx: &BridgeContext, request_id: &str) -> serde_json::Value {
+        model_invoke(
+            ctx,
+            "runs_create",
+            Action::Execute,
+            serde_json::json!({
+                "offer_id": HOSTED_OFFER,
+                "operation": "text.generate",
+                "input": {"prompt": "hi"},
+                "request_id": request_id,
+            }),
+        )
+        .await
+    }
+
+    #[cfg(target_os = "macos")]
+    fn demote_hosted_owner(data_dir: &std::path::Path, owner_id: &str) {
+        let mut state = crate::auth::load_auth_state(data_dir).unwrap();
+        for principal in &mut state.principals {
+            if principal.principal_id == owner_id {
+                principal.role = crate::auth::RuntimePrincipalRole::Guest;
+            }
+        }
+        crate::auth::save_auth_state(data_dir, &state, None).unwrap();
+    }
+
+    /// An admitted agent reaches the loopback broker once, with no credential.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn agent_hosted_run_reaches_the_egress_broker_once() {
+        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
+            return;
+        };
+        let listed = model_invoke(
+            &home.ctx,
+            "offers_list",
+            Action::Read,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(listed["response"]["result"]["status"], "ok", "{listed}");
+        let created = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8").await;
+        assert_eq!(created["response"]["result"]["status"], "ok", "{created}");
+        assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let captured = home.captured.lock().unwrap().to_ascii_lowercase();
+        assert!(
+            !captured.contains("authorization"),
+            "the loopback sink saw a credential: {captured}"
+        );
+        assert_eq!(
+            home.account.held_for_test(&home.agent_key),
+            hosted_offer_tokens()
+        );
+        let caller = hosted_owner_caller(&home.owner_id, &home.owner_proof);
+        crate::agents::set_active(
+            home.ctx.data_dir.as_deref().unwrap(),
+            &caller,
+            &home.agent_id,
+            false,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        let inactive = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8b").await;
+        assert_eq!(
+            inactive["response"]["code"], "hosted_run_admin_only",
+            "{inactive}"
+        );
+        crate::agents::set_active(
+            home.ctx.data_dir.as_deref().unwrap(),
+            &caller,
+            &home.agent_id,
+            true,
+            crate::auth::now_ts(),
+        )
+        .unwrap();
+        crate::api::model_provider_egress::end_hosted_decision_for_test(
+            home.ctx.data_dir.as_deref().unwrap(),
+            &home.decision_id,
+            &home.owner_proof,
+        )
+        .unwrap();
+        let ended = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8c").await;
+        assert_eq!(
+            ended["response"]["code"], "hosted_run_admin_only",
+            "{ended}"
+        );
+        assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            home.account.held_for_test(&home.agent_key),
+            hosted_offer_tokens()
+        );
+        home.sink.abort();
+    }
+
+    /// An agent whose stored owner is not an admin keeps the hosted refusal.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn agent_hosted_run_without_admin_owner_is_refused() {
+        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
+            return;
+        };
+        demote_hosted_owner(home.ctx.data_dir.as_deref().unwrap(), &home.owner_id);
+        let listed = model_invoke(
+            &home.ctx,
+            "offers_list",
+            Action::Read,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(listed["response"]["result"]["status"], "ok", "{listed}");
+        let refused = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8").await;
+        assert_eq!(
+            refused["response"]["code"], "hosted_run_admin_only",
+            "{refused}"
+        );
+        let mut guest = home.ctx.clone();
+        guest.principal_id = Some(home.owner_id.clone());
+        guest.model_token_ceiling = None;
+        guest.model_budget = None;
+        let guest_run = hosted_runs_create(&guest, "model-v1:1700000000000:s8g").await;
+        assert_eq!(
+            guest_run["response"]["code"], "hosted_run_admin_only",
+            "{guest_run}"
+        );
+        let mut unknown = home.ctx.clone();
+        unknown.principal_id = Some("agent:v2:notstored".to_string());
+        let unknown_run = hosted_runs_create(&unknown, "model-v1:1700000000000:s8u").await;
+        assert_eq!(
+            unknown_run["response"]["code"], "principal_context_required",
+            "{unknown_run}"
+        );
+        assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        home.sink.abort();
+    }
+
+    /// A run that does not fit the signed ceiling is refused before dispatch.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn agent_hosted_run_over_its_ceiling_is_refused_before_dispatch() {
+        let Some(home) = hosted_agent_home(hosted_offer_tokens() - 1).await else {
+            return;
+        };
+        let listed = model_invoke(
+            &home.ctx,
+            "offers_list",
+            Action::Read,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(listed["response"]["result"]["status"], "ok", "{listed}");
+        let refused = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8").await;
+        let message = refused["response"]["message"].as_str().unwrap_or("");
+        assert!(message.contains("model_budget_exceeded"), "{refused}");
+        assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(home.account.held_for_test(&home.agent_key), 0);
+        home.sink.abort();
+    }
+
     /// The gateway walker keeps production code written after a `tests`
     /// module, counts an inline call whose first argument starts right after
     /// the paren, and still drops the module body (including a brace inside a
