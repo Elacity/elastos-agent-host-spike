@@ -251,6 +251,43 @@ impl Provider for MockPeerProvider {
     }
 }
 
+#[cfg(unix)]
+struct FixedTicketProvider {
+    requests: Arc<TokioMutex<Vec<serde_json::Value>>>,
+}
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl Provider for FixedTicketProvider {
+    async fn handle(&self, _request: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
+        Err(ProviderError::Provider(
+            "fixed ticket provider only supports raw requests".into(),
+        ))
+    }
+
+    fn schemes(&self) -> Vec<&'static str> {
+        vec!["peer"]
+    }
+
+    fn name(&self) -> &'static str {
+        "fixed-ticket-provider"
+    }
+
+    async fn send_raw(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, ProviderError> {
+        self.requests.lock().await.push(request.clone());
+        Ok(json!({
+            "status": "ok",
+            "data": {
+                "ticket": "private-room-ticket",
+                "node_id": "private-room-node"
+            }
+        }))
+    }
+}
+
 #[tokio::test]
 async fn test_room_service_assets_serve() {
     let dir = tempfile::tempdir().unwrap();
@@ -462,6 +499,120 @@ async fn test_gateway_carrier_bootstrap_publisher_role_uses_gateway_ticket() {
     assert_eq!(payload["node_id"], "gateway-live-node");
     assert_eq!(payload["role"], "publisher");
     assert!(payload.get("did").is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn room_bootstrap_reads_the_private_carrier_ticket() {
+    use crate::api::handlers::provider::{provider_proxy, ProviderProxyState};
+    use elastos_runtime::session::{Session, SessionType};
+
+    let dir = tempfile::tempdir().unwrap();
+    let authority = passkey_authority(dir.path());
+    let registry = Arc::new(ProviderRegistry::new());
+    registry
+        .register_sub_provider("peer", Arc::new(MockPeerProvider))
+        .await
+        .unwrap();
+    let private_ticket = crate::carrier::read_private_carrier_ticket(&registry, true)
+        .await
+        .unwrap();
+    assert_eq!(private_ticket.ticket, "gateway-live-ticket");
+    assert_eq!(private_ticket.node_id, "gateway-live-node");
+
+    let requests = Arc::new(TokioMutex::new(Vec::new()));
+    let managed_registry = Arc::new(ProviderRegistry::new());
+    managed_registry
+        .register_sub_provider(
+            "peer",
+            Arc::new(FixedTicketProvider {
+                requests: requests.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let managed = axum::Router::new()
+        .route(
+            "/api/auth/attach",
+            post(|AxumJson(body): AxumJson<serde_json::Value>| async move {
+                if body.get("secret").and_then(|value| value.as_str()) != Some("room-secret") {
+                    return (StatusCode::FORBIDDEN, "bad attach secret").into_response();
+                }
+                let scope = body
+                    .get("scope")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("client");
+                AxumJson(json!({ "token": format!("{scope}-room") })).into_response()
+            }),
+        )
+        .merge(
+            axum::Router::new()
+                .route("/api/provider/:scheme/:op", post(provider_proxy))
+                .layer(axum::middleware::from_fn(
+                    |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                        let shell = request
+                            .headers()
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            == Some("Bearer shell-room");
+                        let kind = if shell {
+                            SessionType::Shell
+                        } else {
+                            SessionType::Capsule
+                        };
+                        request.extensions_mut().insert(Session::new(kind, None));
+                        next.run(request).await
+                    },
+                ))
+                .with_state(ProviderProxyState {
+                    registry: managed_registry,
+                    capability_manager: None,
+                }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    let managed_server = tokio::spawn(async move { axum::serve(listener, managed).await });
+    std::fs::write(
+        dir.path().join("home-runtime-coords.json"),
+        serde_json::to_vec(&json!({
+            "api_url": api_url,
+            "attach_secret": "room-secret"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = gateway_router(GatewayState {
+        provider_registry: Some(registry),
+        collaboration_chat_product_port: None,
+        collaboration_presence_product_port: None,
+        carrier_endpoint: None,
+        collaboration_discovery_service: None,
+        browser_internet: Default::default(),
+        identity_manager: Arc::new(std::sync::OnceLock::new()),
+        cache_dir: dir.path().to_path_buf(),
+        data_dir: dir.path().to_path_buf(),
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/elastos/carrier-bootstrap.json")
+                .header("x-elastos-home-token", authority.home_token.as_str())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    managed_server.abort();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["ticket"], "private-room-ticket");
+    assert_eq!(payload["node_id"], "private-room-node");
+    let seen = requests.lock().await.clone();
+    assert_eq!(seen, vec![json!({"op": "get_ticket", "exported": true})]);
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -1763,7 +1914,7 @@ async fn test_chat_room_shell_can_approve_browser_access_request() {
             test_browser_request("localhost:61180", "http://localhost:61180")
                 .method("POST")
                 .uri("/api/apps/home/launch")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", granted_home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"chat-room"}"#))
                 .unwrap(),

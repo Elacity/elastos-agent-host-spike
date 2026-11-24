@@ -373,8 +373,22 @@ fn home_app_token(data_dir: &std::path::Path) -> String {
     issue_home_launch_token(data_dir, HOME_CAPSULE_ID).unwrap()
 }
 
+/// Home token whose live grant lets a launch mint a projection for another app.
+fn granted_home_app_token(data_dir: &std::path::Path) -> String {
+    let context = bind_device_session_grant(data_dir, &[HOME_CAPSULE_ID]).unwrap();
+    issue_home_launch_token_with_context(data_dir, HOME_CAPSULE_ID, &context).unwrap()
+}
+
+#[cfg(unix)]
+#[cfg(feature = "prototype-agents")]
 fn system_app_token(data_dir: &std::path::Path) -> String {
-    issue_home_launch_token(data_dir, SYSTEM_CAPSULE_ID).unwrap()
+    passkey_authority_with_name_role_credential(
+        data_dir,
+        Some("unproved-guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+        "gateway-test-system-guest-passkey",
+    )
+    .system_token
 }
 
 fn people_app_token(data_dir: &std::path::Path) -> String {
@@ -733,6 +747,7 @@ struct FakePeerBus {
     fail_message_substrings: Vec<String>,
     drop_remote_message_substrings: Vec<String>,
     local_only_message_substrings: Vec<String>,
+    ticket_by_peer: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -1217,14 +1232,23 @@ async fn fake_runtime_provider(
             }))
             .into_response()
         }
-        ("peer", "get_ticket") => AxumJson(json!({
-            "status": "ok",
-            "data": {
-                "ticket": format!("fake-ticket-{}", state.peer_id),
-                "node_id": state.peer_id,
-            }
-        }))
-        .into_response(),
+        ("peer", "get_ticket") => {
+            let ticket = {
+                let bus = state.bus.lock().await;
+                bus.ticket_by_peer
+                    .get(&state.peer_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("fake-ticket-{}", state.peer_id))
+            };
+            AxumJson(json!({
+                "status": "ok",
+                "data": {
+                    "ticket": ticket,
+                    "node_id": state.peer_id,
+                }
+            }))
+            .into_response()
+        }
         ("peer", "gossip_join") => {
             let topic = body
                 .get("topic")
@@ -1401,12 +1425,12 @@ async fn fake_runtime_provider(
                 .skip(start)
                 .take(limit as usize)
                 .filter(|message| {
+                    let shown = message
+                        .get("sender_id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
                     skip_sender_id.is_empty()
-                        || message
-                            .get("sender_id")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("")
-                            != skip_sender_id
+                        || !crate::carrier::same_home_identity(shown, skip_sender_id)
                 })
                 .collect::<Vec<_>>();
             let next_cursor = start + count;

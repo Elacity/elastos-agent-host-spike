@@ -279,7 +279,6 @@ dependencies = [
  "elastos-guest",
  "elastos-identity",
  "hex",
- "hkdf",
  "rand",
  "serde",
  "serde_json",

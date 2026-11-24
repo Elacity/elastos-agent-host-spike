@@ -2547,9 +2547,6 @@ async fn gather_runtime_status(data_dir: &Path) -> RuntimeStatus {
         status.peer_count = fetch_peer_count(&client, &coords.api_url, &client_token, &peer_cap)
             .await
             .ok();
-        status.ticket = fetch_ticket(&client, &coords.api_url, &client_token, &peer_cap)
-            .await
-            .ok();
     }
 
     status
@@ -2792,29 +2789,6 @@ async fn fetch_peer_count(
     Ok(count)
 }
 
-async fn fetch_ticket(
-    client: &reqwest::Client,
-    api_url: &str,
-    client_token: &str,
-    peer_cap: &str,
-) -> anyhow::Result<String> {
-    let body = provider_call(
-        client,
-        api_url,
-        client_token,
-        peer_cap,
-        "peer",
-        "get_ticket",
-        &serde_json::json!({}),
-    )
-    .await?;
-    body.get("data")
-        .and_then(|d| d.get("ticket"))
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_string())
-        .ok_or_else(|| anyhow::anyhow!("ticket response missing ticket"))
-}
-
 async fn provider_call(
     client: &reqwest::Client,
     api_url: &str,
@@ -2963,7 +2937,7 @@ fn write_home_state_probe(
         match snapshot.runtime.peer_count {
             Some(0) if snapshot.runtime.ticket.is_some() =>
                 "Carrier bootstrap ready; waiting for another Home".to_string(),
-            Some(0) => "starting up".to_string(),
+            Some(0) => "Carrier ready".to_string(),
             Some(1) => "1 Carrier peer reachable".to_string(),
             Some(peers) => format!("{} Carrier peers reachable", peers),
             None => "runtime not connected yet".to_string(),
@@ -3023,9 +2997,6 @@ fn write_home_state_probe(
     writeln!(out, "  Delivery:  {}", delivery)?;
     writeln!(out, "  Roots:     localhost://Users, localhost://UsersAI")?;
     writeln!(out, "  Profile:   elastos identity nickname set")?;
-    if let Some(ticket) = &snapshot.runtime.ticket {
-        writeln!(out, "  Ticket:    {}", ticket)?;
-    }
     writeln!(out)?;
 
     writeln!(out, "Spaces")?;
@@ -3573,6 +3544,46 @@ pub(crate) mod tests {
         assert!(render(Some(2)).contains("  Carrier:   2 reachable\n"));
     }
 
+    /// Printing `Ticket:` again fails this assertion. The snapshot may still
+    /// hold a ticket for the network line; the status text does not show it.
+    #[test]
+    fn home_status_text_omits_the_carrier_ticket() {
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.runtime.peer_count = Some(0);
+        snapshot.runtime.ticket = Some("addr-ticket-should-stay-off-the-page".to_string());
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("Carrier bootstrap ready; waiting for another Home"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("Ticket:"),
+            "status text prints a Carrier ticket:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("addr-ticket-should-stay-off-the-page"),
+            "status text prints the ticket value:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn home_status_shows_carrier_ready_without_a_ticket() {
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.runtime.peer_count = Some(0);
+        snapshot.runtime.ticket = None;
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("  Network:   Carrier ready\n"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Carrier bootstrap ready"), "{rendered}");
+        assert!(!rendered.contains("Ticket:"), "{rendered}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn home_cli_renderer_rejects_nonexecutable_link_and_corrupt_files() {
@@ -3631,7 +3642,7 @@ pub(crate) mod tests {
     /// that temp dir, or `temp.path()` directly. Every caller that derives it
     /// from `default_data_dir()` asserts it is under the temp dir before its
     /// first write, so this writes nothing outside the temp tree.
-    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
+    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) -> String {
         fs::create_dir_all(data_dir).unwrap();
         let now = elastos_server::auth::now_ts();
         let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
@@ -3657,6 +3668,31 @@ pub(crate) mod tests {
         )
         .expect("fixture principal must be stored through the production store");
         assert_eq!(stored.principal_id, principal_id);
+        stored.proof_binding_id
+    }
+
+    fn store_home_cmd_live_grant(
+        data_dir: &Path,
+        principal_id: &str,
+        session_id: &str,
+        grant_id: &str,
+        proof_binding_id: &str,
+    ) {
+        let now = elastos_server::auth::now_ts();
+        elastos_server::auth::store_session_grant(
+            data_dir,
+            elastos_runtime::auth::AuthSessionGrantV1 {
+                schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+                grant_id: grant_id.to_string(),
+                session_id: session_id.to_string(),
+                principal_id: principal_id.to_string(),
+                proof_binding_id: proof_binding_id.to_string(),
+                issued_at: now,
+                expires_at: now + 300,
+                apps: vec!["home".to_string()],
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3671,7 +3707,7 @@ pub(crate) mod tests {
             "fixture data_dir {} escapes the test temp dir",
             data_dir.display()
         );
-        store_home_cmd_test_principal(&data_dir, "principal-a");
+        let proof_binding_id = store_home_cmd_test_principal(&data_dir, "principal-a");
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         let _principal = ScopedEnvVar::set(
@@ -3696,6 +3732,31 @@ pub(crate) mod tests {
         );
 
         assert!(
+            !elastos_server::api::gateway::gateway_owned_home_cli_authority_available(&data_dir)
+        );
+        let missing = gather_home_cli_session_status();
+        assert_eq!(missing.mode, "browser_pty");
+        assert_eq!(
+            missing.passkey_state,
+            "browser Home terminal missing launch authority"
+        );
+        assert_eq!(
+            gateway_home_cli_api_url().as_deref(),
+            Some("http://localhost:61180")
+        );
+
+        store_home_cmd_live_grant(
+            &data_dir,
+            "principal-a",
+            "session-a",
+            "grant-a",
+            &proof_binding_id,
+        );
+        let _proof_live = ScopedEnvVar::set(
+            elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
+            proof_binding_id,
+        );
+        assert!(
             elastos_server::api::gateway::gateway_owned_home_cli_authority_available(&data_dir)
         );
         let status = gather_home_cli_session_status();
@@ -3703,10 +3764,6 @@ pub(crate) mod tests {
         assert_eq!(
             status.passkey_state,
             "launch-token authorized browser Home session"
-        );
-        assert_eq!(
-            gateway_home_cli_api_url().as_deref(),
-            Some("http://localhost:61180")
         );
     }
 
@@ -3877,7 +3934,14 @@ pub(crate) mod tests {
             "fixture data_dir {} escapes the test temp dir",
             data_dir.display()
         );
-        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        let proof_binding_id = store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        store_home_cmd_live_grant(
+            &data_dir,
+            "person:v07-admin",
+            "session-v07-admin",
+            "grant-v07-admin",
+            &proof_binding_id,
+        );
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3888,7 +3952,7 @@ pub(crate) mod tests {
         );
         let _proof = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
-            "",
+            proof_binding_id,
         );
         let _grant = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
@@ -5226,5 +5290,111 @@ pub(crate) mod tests {
         assert!(managed.running);
         assert_eq!(managed.kind.as_deref(), Some("managed-home"));
         server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gather_runtime_status_shows_carrier_ready_without_fetching_a_ticket() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Mutex;
+
+        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let _coords = ScopedEnvVar::set(
+            "ELASTOS_RUNTIME_COORDS_FILE",
+            temp.path().join("missing-runtime-coords.json"),
+        );
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let record = seen.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({"status": "ok", "version": "2.0.1-test"}))
+                }),
+            )
+            .route(
+                "/api/auth/attach",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({"token": "client"}))
+                }),
+            )
+            .route(
+                "/api/capsules",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({"capsules": []})) }),
+            )
+            .route(
+                "/api/capability/request",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({"token": "peer-cap"}))
+                }),
+            )
+            .route(
+                "/api/provider/:scheme/:op",
+                axum::routing::post(
+                    move |axum::extract::Path((_, op)): axum::extract::Path<(String, String)>| {
+                        let record = record.clone();
+                        async move {
+                            record.lock().expect("op list").push(op.clone());
+                            if op == "get_ticket" {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({"status": "error"})),
+                                );
+                            }
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "status": "ok",
+                                    "data": { "peers": [] }
+                                })),
+                            )
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let path = temp.path().join("home-runtime-coords.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "api_url": format!("http://{addr}"),
+                "attach_secret": "secret",
+                "pid": std::process::id(),
+                "runtime_kind": "managed-home",
+                "home_url": "http://127.0.0.1:1/home/"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let status = gather_runtime_status(temp.path()).await;
+        server.abort();
+        assert_eq!(status.peer_count, Some(0), "{status:?}");
+        assert!(status.ticket.is_none(), "{status:?}");
+        let ops = seen.lock().expect("op list");
+        assert!(
+            ops.iter().any(|op| op == "list_peers"),
+            "status did not read peers: {ops:?}"
+        );
+        assert!(
+            !ops.iter().any(|op| op == "get_ticket"),
+            "status fetched a Carrier ticket: {ops:?}"
+        );
+        drop(ops);
+
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.runtime = status;
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("  Network:   Carrier ready\n"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Ticket:"), "{rendered}");
     }
 }

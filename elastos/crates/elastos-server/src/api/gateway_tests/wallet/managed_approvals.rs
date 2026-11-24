@@ -4,7 +4,7 @@ use super::super::*;
 #[tokio::test]
 async fn test_system_can_select_default_wallet_without_exposing_connector_authority() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[SYSTEM_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &context).unwrap();
     let account_id = "wallet:eip155:8453:0xA4C02dB8653DD0cA18A8736D693B0dB85C5b246C";

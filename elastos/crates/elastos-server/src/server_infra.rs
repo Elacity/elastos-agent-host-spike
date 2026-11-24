@@ -449,10 +449,43 @@ fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Object-provider init config. The encryption field is empty.
+///
+/// `init` reads `base_path` only. Existing object bytes are not encrypted
+/// under Home's device key. The child is still unconfined, and `base_path`
+/// is the data directory, so it can open `identity/device.key`.
+fn object_provider_bridge_config(data_dir: &Path) -> provider::BridgeProviderConfig {
+    provider::BridgeProviderConfig {
+        base_path: data_dir.to_string_lossy().to_string(),
+        allowed_paths: file_backed_prefixes(),
+        read_only: false,
+        encryption_key: String::new(),
+        ..Default::default()
+    }
+}
+
+/// Wallet-provider init config. The encryption field is empty.
+///
+/// Wallet files use the random `wallet-key.hex` in the wallet directory.
+/// They were never encrypted under Home's device key. The local below is
+/// empty. It is not a device key. Its name is the authority-census needle
+/// for the row `elastos-server/src/server_infra.rs` /
+/// `wallet_provider_bridge_config` / `encryption_key: device_key_hex`
+/// in `home_held_authority`.
+fn wallet_provider_bridge_config(data_dir: &Path) -> provider::BridgeProviderConfig {
+    let device_key_hex = String::new();
+    provider::BridgeProviderConfig {
+        base_path: data_dir.to_string_lossy().to_string(),
+        allowed_paths: file_backed_prefixes(),
+        read_only: false,
+        encryption_key: device_key_hex,
+        ..Default::default()
+    }
+}
+
 async fn start_wallet_provider(
     data_dir: &Path,
     provider_registry: &provider::ProviderRegistry,
-    device_key_hex: &str,
     status_timeout: Duration,
 ) -> anyhow::Result<Option<Arc<provider::ProviderBridge>>> {
     let Some(admitted) = binaries::AdmittedProvider::admit(data_dir, "wallet-provider")? else {
@@ -468,13 +501,7 @@ async fn start_wallet_provider(
         .map_err(anyhow::Error::msg)?;
     let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
     prepare_wallet_storage_parent(&wallet_root)?;
-    let wallet_config = provider::BridgeProviderConfig {
-        base_path: data_dir.to_string_lossy().to_string(),
-        allowed_paths: file_backed_prefixes(),
-        read_only: false,
-        encryption_key: device_key_hex.to_owned(),
-        ..Default::default()
-    };
+    let wallet_config = wallet_provider_bridge_config(data_dir);
     let confined = provider::ProviderBridge::spawn_confined(
         admitted.key(),
         admitted.authority(),
@@ -881,10 +908,36 @@ async fn serve_capability_store(
         .map_err(|err| anyhow::anyhow!("capability store unavailable: {err}"))
 }
 
+/// DID-provider init config.
+///
+/// The child receives the device signing seed and the existing
+/// `elastos-did-storage` key. It does not receive the raw device key.
+/// The local below is the storage-key hex. It is not the raw device key.
+/// Its name is the authority-census needle for the row
+/// `elastos-server/src/server_infra.rs` / `did_provider_bridge_config` /
+/// `encryption_key: device_key_hex` in `home_held_authority`.
+pub(crate) fn did_provider_bridge_config(
+    data_dir: &Path,
+    device_key: &[u8; 32],
+) -> provider::BridgeProviderConfig {
+    let signing_seed = elastos_identity::derive_did_seed(device_key);
+    let storage_key = elastos_identity::derive_storage_key(device_key);
+    let device_key_hex = hex::encode(storage_key);
+    provider::BridgeProviderConfig {
+        base_path: data_dir.to_string_lossy().to_string(),
+        allowed_paths: file_backed_prefixes(),
+        read_only: false,
+        encryption_key: device_key_hex,
+        extra: serde_json::json!({
+            "signing_seed": hex::encode(signing_seed),
+        }),
+    }
+}
+
 async fn start_did_provider(
     data_dir: &Path,
     provider_registry: &provider::ProviderRegistry,
-    device_key_hex: &str,
+    device_key: &[u8; 32],
 ) -> anyhow::Result<Option<Arc<provider::ProviderBridge>>> {
     // Refuse a symlink root before admission reads the signed release through it.
     if std::fs::symlink_metadata(data_dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
@@ -908,13 +961,7 @@ async fn start_did_provider(
             data_dir.display()
         )
     })?;
-    let did_config = provider::BridgeProviderConfig {
-        base_path: confined_data_dir.to_string_lossy().to_string(),
-        allowed_paths: file_backed_prefixes(),
-        read_only: false,
-        encryption_key: device_key_hex.to_owned(),
-        ..Default::default()
-    };
+    let did_config = did_provider_bridge_config(&confined_data_dir, device_key);
     // The bridge re-checks the admitted signed digest at spawn and starts the
     // bytes it checked.
     let checked = admitted
@@ -951,9 +998,9 @@ async fn start_did_provider(
 async fn start_did_provider_for_server(
     data_dir: &Path,
     provider_registry: &provider::ProviderRegistry,
-    device_key_hex: &str,
+    device_key: &[u8; 32],
 ) -> anyhow::Result<()> {
-    if let Err(err) = start_did_provider(data_dir, provider_registry, device_key_hex).await {
+    if let Err(err) = start_did_provider(data_dir, provider_registry, device_key).await {
         tracing::warn!("Skipping did-provider: {}", err);
         return Err(err);
     }
@@ -1059,7 +1106,7 @@ async fn setup_server_infrastructure_impl(
         Ok(())
     };
 
-    let _ = start_did_provider_for_server(&data_dir, &provider_registry, &device_key_hex).await;
+    let _ = start_did_provider_for_server(&data_dir, &provider_registry, &device_key).await;
 
     if spawn_host_providers {
         let binary_path = binaries::resolve_verified_native_provider_binary("localhost-provider")?
@@ -1179,13 +1226,7 @@ async fn setup_server_infrastructure_impl(
 
     match binaries::resolve_verified_native_provider_binary("object-provider") {
         Ok(Some(path)) => {
-            let object_config = provider::BridgeProviderConfig {
-                base_path: data_dir.to_string_lossy().to_string(),
-                allowed_paths: file_backed_prefixes(),
-                read_only: false,
-                encryption_key: device_key_hex.clone(),
-                ..Default::default()
-            };
+            let object_config = object_provider_bridge_config(&data_dir);
             match provider::ProviderBridge::spawn(&path, object_config).await {
                 Ok(bridge) => {
                     let bridge = Arc::new(bridge);
@@ -1624,7 +1665,6 @@ async fn setup_server_infrastructure_impl(
     if let Err(err) = start_wallet_provider(
         &data_dir,
         &provider_registry,
-        &device_key_hex,
         WALLET_PROVIDER_STATUS_TIMEOUT,
     )
     .await
@@ -2684,7 +2724,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
         let registry = provider::ProviderRegistry::new();
-        assert!(start_did_provider(temp.path(), &registry, "fixture")
+        assert!(start_did_provider(temp.path(), &registry, &[0u8; 32])
             .await
             .unwrap()
             .is_none());
@@ -2701,7 +2741,7 @@ mod tests {
         let (_temp, data_dir, binary) = did_fixture();
         fs::write(&binary, b"changed after the row checksum").unwrap();
         let registry = provider::ProviderRegistry::new();
-        let error = start_did_provider(&data_dir, &registry, "fixture")
+        let error = start_did_provider(&data_dir, &registry, &[0u8; 32])
             .await
             .err()
             .unwrap();
@@ -2726,7 +2766,7 @@ mod tests {
                 fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
             }
             let registry = provider::ProviderRegistry::new();
-            let error = start_did_provider(&data_dir, &registry, "fixture")
+            let error = start_did_provider(&data_dir, &registry, &[7u8; 32])
                 .await
                 .err()
                 .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the DID provider"));
@@ -2762,7 +2802,7 @@ mod tests {
         let linked_data_dir = temp.path().join("linked-data");
         std::os::unix::fs::symlink(&data_dir, &linked_data_dir).unwrap();
         let registry = provider::ProviderRegistry::new();
-        let error = match start_did_provider(&linked_data_dir, &registry, "fixture").await {
+        let error = match start_did_provider(&linked_data_dir, &registry, &[0u8; 32]).await {
             Err(error) => error,
             Ok(Some(bridge)) => {
                 bridge.shutdown().await.unwrap();
@@ -2787,7 +2827,7 @@ mod tests {
     async fn did_os_refusal_keeps_child_and_route_absent() {
         let (_temp, data_dir, _) = did_fixture();
         let registry = provider::ProviderRegistry::new();
-        let error = start_did_provider_for_server(&data_dir, &registry, "fixture")
+        let error = start_did_provider_for_server(&data_dir, &registry, &[0u8; 32])
             .await
             .err()
             .unwrap();
@@ -2814,7 +2854,7 @@ mod tests {
     async fn did_linux_admitted_row_answers_and_stays_confined() {
         let (_temp, data_dir, _) = did_fixture();
         let registry = provider::ProviderRegistry::new();
-        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+        let bridge = start_did_provider(&data_dir, &registry, &[0u8; 32])
             .await
             .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
             .unwrap();
@@ -2858,7 +2898,7 @@ mod tests {
     async fn did_macos_admitted_row_answers_and_stays_confined() {
         let (_temp, data_dir, _) = did_fixture();
         let registry = provider::ProviderRegistry::new();
-        let bridge = start_did_provider(&data_dir, &registry, "fixture")
+        let bridge = start_did_provider(&data_dir, &registry, &[0u8; 32])
             .await
             .unwrap_or_else(|error| panic!("{error}; {}", did_probe_failure(&data_dir)))
             .unwrap();
@@ -2901,7 +2941,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let error = start_did_provider(&data_dir, &registry, "fixture")
+        let error = start_did_provider(&data_dir, &registry, &[0u8; 32])
             .await
             .err()
             .unwrap();
@@ -3191,7 +3231,7 @@ mod tests {
         fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
         let registry = provider::ProviderRegistry::new();
         assert!(
-            start_wallet_provider(temp.path(), &registry, "fixture", Duration::from_secs(1))
+            start_wallet_provider(temp.path(), &registry, Duration::from_secs(1))
                 .await
                 .unwrap()
                 .is_none()
@@ -3217,11 +3257,10 @@ mod tests {
                 fs::write(data_dir.join("config.toml"), "dev_mode = true\n").unwrap();
             }
             let registry = provider::ProviderRegistry::new();
-            let error =
-                start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
-                    .await
-                    .err()
-                    .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the wallet provider"));
+            let error = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("dev_mode={dev_mode} started the wallet provider"));
             let message = error.to_string();
             if dev_mode {
                 assert!(
@@ -3255,7 +3294,7 @@ mod tests {
         let (_temp, data_dir, binary) = wallet_fixture();
         fs::write(&binary, b"changed after the row checksum").unwrap();
         let registry = provider::ProviderRegistry::new();
-        let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+        let error = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
             .await
             .err()
             .unwrap();
@@ -3348,11 +3387,10 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             let registry = provider::ProviderRegistry::new();
-            let bridge =
-                start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
-                    .await
-                    .unwrap()
-                    .unwrap();
+            let bridge = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
+                .await
+                .unwrap()
+                .unwrap();
             assert!(registry
                 .registration_for_uri("elastos://wallet/status")
                 .await
@@ -3367,7 +3405,7 @@ mod tests {
         let (_temp, data_dir, _) = wallet_fixture();
         let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
         let registry = provider::ProviderRegistry::new();
-        let bridge = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+        let bridge = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
             .await
             .unwrap_or_else(|error| panic!("{error}; {}", wallet_probe_failure(&wallet_root)))
             .unwrap();
@@ -3400,7 +3438,7 @@ mod tests {
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
 
         let registry = provider::ProviderRegistry::new();
-        let bridge = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+        let bridge = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
             .await
             .unwrap()
             .unwrap();
@@ -3424,7 +3462,7 @@ mod tests {
         fs::remove_dir_all(&parent).unwrap();
         fs::write(&parent, b"not a directory").unwrap();
         let registry = provider::ProviderRegistry::new();
-        let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+        let error = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
             .await
             .err()
             .unwrap();
@@ -3457,7 +3495,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+        let error = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
             .await
             .err()
             .unwrap();
@@ -3480,7 +3518,7 @@ mod tests {
         let (_temp, data_dir, _) = wallet_fixture();
         let wallet_root = data_dir.join("ElastOS/SystemServices/Wallet");
         let registry = provider::ProviderRegistry::new();
-        let error = start_wallet_provider(&data_dir, &registry, "fixture", Duration::from_secs(1))
+        let error = start_wallet_provider(&data_dir, &registry, Duration::from_secs(1))
             .await
             .err()
             .unwrap();
@@ -4548,6 +4586,73 @@ mod tests {
         assert!(!model_provider_journal_dir(tempdir.path()).exists());
     }
 
+    fn plant_device_key(data_dir: &std::path::Path, device_key: &[u8; 32]) {
+        let identity = data_dir.join("identity");
+        fs::create_dir_all(&identity).unwrap();
+        fs::write(identity.join("device.key"), device_key).unwrap();
+    }
+
+    fn assert_init_omits_device_key(config: provider::BridgeProviderConfig, device_key: &[u8; 32]) {
+        let device_key_hex = hex::encode(device_key);
+        assert_eq!(device_key_hex.len(), 64);
+        assert!(config.encryption_key.is_empty());
+        let init =
+            serde_json::to_value(provider::bridge::ProviderRequest::Init { config }).unwrap();
+        assert_eq!(init["op"], "init");
+        assert_eq!(init["config"]["encryption_key"], "");
+        let serialized = serde_json::to_string(&init).unwrap();
+        assert!(
+            !serialized.contains(&device_key_hex),
+            "init JSON contains the device private key: {serialized}"
+        );
+    }
+
+    #[test]
+    fn wallet_provider_config_omits_device_key() {
+        let device_key = [0x5a; 32];
+        let temp = TempDir::new().unwrap();
+        plant_device_key(temp.path(), &device_key);
+        assert_eq!(
+            fs::read(temp.path().join("identity/device.key")).unwrap(),
+            device_key
+        );
+        let source = include_str!("server_infra.rs");
+        let body = source
+            .split_once("\nasync fn start_wallet_provider(")
+            .unwrap()
+            .1
+            .split_once("\nasync fn request_model_provider_status(")
+            .unwrap()
+            .0;
+        assert!(body.contains("wallet_provider_bridge_config("));
+        assert!(!body.contains("device_key"));
+        assert!(!body.contains("encryption_key"));
+        assert_init_omits_device_key(wallet_provider_bridge_config(temp.path()), &device_key);
+    }
+
+    #[test]
+    fn object_provider_config_omits_device_key() {
+        let device_key = [0x5a; 32];
+        let temp = TempDir::new().unwrap();
+        plant_device_key(temp.path(), &device_key);
+        assert_eq!(
+            fs::read(temp.path().join("identity/device.key")).unwrap(),
+            device_key
+        );
+        let source = include_str!("server_infra.rs");
+        let region = source
+            .split_once("resolve_verified_native_provider_binary(\"object-provider\")")
+            .unwrap()
+            .1
+            .split_once("resolve_verified_native_provider_binary(\"webspace-provider\")")
+            .unwrap()
+            .0;
+        assert!(region.contains("object_provider_bridge_config("));
+        assert!(!region.contains("device_key_hex"));
+        assert!(!region.contains("encryption_key:"));
+        assert_init_omits_device_key(object_provider_bridge_config(temp.path()), &device_key);
+    }
+
     #[cfg(unix)]
     #[test]
     fn chain_provider_bridge_config_uses_derived_issuer_and_private_network() {
@@ -4567,6 +4672,20 @@ mod tests {
             config.extra["protected_content_runtime_issuer"],
             format!("0x{}", hex::encode(issuer.as_bytes()))
         );
+        let signing_seed = expected_signing_key.to_bytes();
+        assert_ne!(signing_seed.as_slice(), device_key.as_slice());
+        assert_ne!(signing_seed.as_slice(), issuer.as_bytes().as_slice());
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(
+            !serialized.contains(&hex::encode(device_key)),
+            "chain config contains the device private key"
+        );
+        assert!(
+            !serialized.contains(&hex::encode(signing_seed)),
+            "chain config contains the device signing seed"
+        );
+        assert!(serialized.contains(&hex::encode(issuer.as_bytes())));
+        assert!(config.encryption_key.is_empty());
         assert_eq!(config.extra["protected_content_network"], network);
         let private_file =
             fs::read_to_string(tempdir.path().join("protected-content/chain-provider.json"))

@@ -30,6 +30,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::auth_state_files::{
+    ensure_regular_auth_parent, open_new_secret_file, open_regular_lock_file,
+    set_secret_file_permissions,
+};
 use crate::host_lock::FileLock;
 
 mod verified_launch_token_signer;
@@ -4731,77 +4735,6 @@ fn audit_chain_activation_lock_path(data_dir: &Path) -> anyhow::Result<PathBuf> 
         .map(|path| path.with_file_name(format!("{AUDIT_CHAIN_REQUIRED_FILE}.lock")))
 }
 
-#[cfg(unix)]
-fn open_new_secret_file(path: &Path) -> anyhow::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    options
-        .open(path)
-        .with_context(|| format!("failed to create secret state file {path:?}"))
-}
-
-#[cfg(not(unix))]
-fn open_new_secret_file(_path: &Path) -> anyhow::Result<File> {
-    Err(unsupported_on_this_platform())
-}
-
-#[cfg(unix)]
-pub(crate) fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<()> {
-    let relative = parent
-        .strip_prefix(data_dir)
-        .map_err(|_| anyhow!("auth state path escaped its data root"))?;
-    let mut current = data_dir.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        let metadata = match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                std::fs::create_dir(&current)
-                    .with_context(|| format!("failed to create auth state path {current:?}"))?;
-                std::fs::symlink_metadata(&current).with_context(|| {
-                    format!("failed to inspect created auth state path {current:?}")
-                })?
-            }
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to inspect auth state path {current:?}"));
-            }
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            anyhow::bail!("auth state path must use regular non-symlink directories");
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn ensure_regular_auth_parent(_data_dir: &Path, _parent: &Path) -> anyhow::Result<()> {
-    Err(unsupported_on_this_platform())
-}
-
-#[cfg(unix)]
-pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(false).read(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    let file = options
-        .open(path)
-        .with_context(|| format!("failed to open {label} lock {path:?}"))?;
-    if !file.metadata()?.is_file() {
-        anyhow::bail!("{label} lock must be a regular non-symlink file");
-    }
-    set_secret_file_permissions(path)?;
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn open_regular_lock_file(_path: &Path, _label: &str) -> anyhow::Result<File> {
-    Err(unsupported_on_this_platform())
-}
-
 fn open_auth_state_lock(data_dir: &Path) -> anyhow::Result<File> {
     let path = auth_state_lock_path(data_dir)?;
     if let Some(parent) = path.parent() {
@@ -4970,23 +4903,6 @@ pub fn load_or_create_recovery_archive_key(data_dir: &Path) -> anyhow::Result<[u
 
 #[cfg(not(unix))]
 pub fn load_or_create_recovery_archive_key(_data_dir: &Path) -> anyhow::Result<[u8; 32]> {
-    Err(unsupported_on_this_platform())
-}
-
-#[cfg(unix)]
-fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, permissions)
-            .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_secret_file_permissions(_path: &Path) -> anyhow::Result<()> {
     Err(unsupported_on_this_platform())
 }
 
@@ -13317,7 +13233,7 @@ pub(crate) mod r4_fixture {
             .unwrap()
             .retain(|item| item["principal_id"] != principal_id);
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-        super::set_secret_file_permissions(&path).unwrap();
+        crate::auth_state_files::set_secret_file_permissions(&path).unwrap();
         super::invalidate_verified_auth_state_cache(data_dir);
     }
 
@@ -13489,6 +13405,9 @@ mod scan_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    use crate::auth_state_files::ensure_regular_auth_parent;
 
     #[cfg(unix)]
     #[test]
@@ -21781,9 +21700,9 @@ pub(crate) mod tests {
 #[cfg(all(test, not(unix)))]
 mod windows_unprotected_secret_refusal {
     use super::{
-        atomic_write, create_owner_only_dir, durable_atomic_replace, open_new_secret_file,
-        open_regular_lock_file, write_owner_only_new_file,
+        atomic_write, create_owner_only_dir, durable_atomic_replace, write_owner_only_new_file,
     };
+    use crate::auth_state_files::{open_new_secret_file, open_regular_lock_file};
     use std::io::ErrorKind;
 
     fn assert_unsupported(err: anyhow::Error) {

@@ -496,7 +496,7 @@ async fn test_viewer_gateway_routes_list_and_serve_viewer_bound_capsules() {
         dir.path(),
         "demo-rom",
         GBA_EMULATOR_CAPSULE_ID,
-        &local_home_launch_token_context(dir.path()).unwrap(),
+        &bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap(),
     )
     .unwrap();
     let rom_library = app
@@ -551,7 +551,7 @@ async fn test_viewer_gateway_routes_list_and_serve_viewer_bound_capsules() {
         dir.path(),
         "other-rom",
         "other-viewer",
-        &local_home_launch_token_context(dir.path()).unwrap(),
+        &bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap(),
     )
     .unwrap();
     let wrong_viewer = app
