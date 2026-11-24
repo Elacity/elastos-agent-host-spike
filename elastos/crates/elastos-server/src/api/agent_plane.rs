@@ -88,7 +88,7 @@ fn clear_registry(data_dir: &Path) {
 }
 
 /// The provider registry this process installed for the agent Runtime.
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) fn installed_provider_registry(
     data_dir: &Path,
 ) -> Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>> {
