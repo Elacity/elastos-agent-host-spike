@@ -22,6 +22,8 @@ mod free_space;
 pub mod host_memory;
 pub mod localhost;
 mod manifest;
+#[cfg(target_os = "macos")]
+pub mod model_engine_receipt;
 #[cfg(unix)]
 pub mod owned_removal;
 mod pinned_manifest;

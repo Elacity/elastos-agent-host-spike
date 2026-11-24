@@ -105,126 +105,25 @@ fn model_journal_for_sandbox(config: &ProviderConfig) -> Result<std::path::PathB
 }
 
 #[cfg(target_os = "macos")]
-fn model_engine_receipt_entries(
-    base: &Path,
-    engine: &Path,
-) -> Result<(std::path::PathBuf, Vec<serde_json::Value>), BridgeError> {
-    use std::io::Read as _;
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
-
-    let prefix = base.join("libexec/llama.cpp");
-    let relative = engine
-        .strip_prefix(&prefix)
-        .map_err(|_| BridgeError::InitFailed("model engine bundle is unavailable".into()))?;
-    let mut parts = relative.components();
-    let (Some(std::path::Component::Normal(version)), Some(std::path::Component::Normal(platform))) =
-        (parts.next(), parts.next())
-    else {
-        return Err(BridgeError::InitFailed(
-            "model engine bundle is unavailable".into(),
-        ));
-    };
-    if !parts.all(|part| matches!(part, std::path::Component::Normal(_))) {
-        return Err(BridgeError::InitFailed(
-            "model engine bundle is unavailable".into(),
-        ));
+fn receipt_error(error: elastos_common::model_engine_receipt::ModelReceiptError) -> BridgeError {
+    use elastos_common::model_engine_receipt::ModelReceiptError;
+    match error {
+        ModelReceiptError::Io(error) => BridgeError::Spawn(error),
+        ModelReceiptError::Rejected(reason) => BridgeError::InitFailed(reason.into()),
     }
-    let bundle = prefix.join(version).join(platform);
-    let receipt = bundle.join(".elastos-engine.json");
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&receipt)
-        .map_err(BridgeError::Spawn)?;
-    let before = file.metadata().map_err(BridgeError::Spawn)?;
-    if !before.is_file()
-        || before.uid() != unsafe { libc::geteuid() }
-        || before.nlink() != 1
-        || before.permissions().mode() & 0o7777 != 0o400
-        || before.len() > 256 * 1024
-    {
-        return Err(BridgeError::InitFailed(
-            "unsafe model engine receipt".into(),
-        ));
-    }
-    let mut bytes = Vec::new();
-    (&mut file)
-        .take(256 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(BridgeError::Spawn)?;
-    let after = file.metadata().map_err(BridgeError::Spawn)?;
-    if bytes.len() > 256 * 1024
-        || before.len() != after.len()
-        || before.mtime() != after.mtime()
-        || before.mtime_nsec() != after.mtime_nsec()
-        || before.ctime() != after.ctime()
-        || before.ctime_nsec() != after.ctime_nsec()
-        || std::fs::symlink_metadata(&receipt)
-            .map_err(BridgeError::Spawn)?
-            .ino()
-            != after.ino()
-    {
-        return Err(BridgeError::InitFailed(
-            "changed model engine receipt".into(),
-        ));
-    }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|_| BridgeError::InitFailed("invalid model engine receipt".into()))?;
-    if value["schema"] != "elastos.local-model-engine/v2" {
-        return Err(BridgeError::InitFailed(
-            "invalid model engine receipt".into(),
-        ));
-    }
-    let entries = value["entries"]
-        .as_array()
-        .filter(|entries| entries.len() <= 1024)
-        .ok_or_else(|| BridgeError::InitFailed("invalid model engine receipt".into()))?;
-    let mut seen = std::collections::BTreeSet::new();
-    for entry in entries {
-        let path = entry["path"]
-            .as_str()
-            .ok_or_else(|| BridgeError::InitFailed("invalid model engine receipt".into()))?;
-        if path.is_empty()
-            || !Path::new(path)
-                .components()
-                .all(|part| matches!(part, std::path::Component::Normal(_)))
-            || !seen.insert(path)
-        {
-            return Err(BridgeError::InitFailed(
-                "invalid model engine receipt".into(),
-            ));
-        }
-    }
-    Ok((bundle, entries.clone()))
 }
 
 #[cfg(target_os = "macos")]
-fn model_engine_receipt_file_matches(
-    path: &Path,
-    entry: &serde_json::Value,
-) -> Result<bool, BridgeError> {
-    use sha2::{Digest as _, Sha256};
-    use std::io::Read as _;
-
-    if entry["type"] != "file"
-        || !std::fs::symlink_metadata(path)
-            .map_err(BridgeError::Spawn)?
-            .is_file()
-    {
-        return Ok(false);
-    }
-    let mut file = std::fs::File::open(path).map_err(BridgeError::Spawn)?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).map_err(BridgeError::Spawn)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    let expected = format!("sha256:{:x}", digest.finalize());
-    Ok(entry["sha256"].as_str() == Some(expected.as_str()))
+fn model_socket_text(path: &Path, reason: &'static str) -> Result<String, BridgeError> {
+    path.to_str()
+        .filter(|text| {
+            text.len() < 104
+                && text.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
+                })
+        })
+        .map(str::to_string)
+        .ok_or_else(|| BridgeError::InitFailed(reason.into()))
 }
 
 #[cfg(target_os = "macos")]
@@ -232,6 +131,9 @@ fn model_file_policy(
     config: &ProviderConfig,
     pinned_engine_bundle: Option<&Path>,
 ) -> Result<(), BridgeError> {
+    use elastos_common::model_engine_receipt::{
+        model_engine_receipt_entries, model_engine_receipt_file_matches,
+    };
     let base = Path::new(&config.base_path);
     for offer in config.extra["offers"]
         .as_array()
@@ -277,7 +179,7 @@ fn model_file_policy(
         let receipt = if dylibs.is_empty() {
             None
         } else {
-            Some(model_engine_receipt_entries(base, engine)?)
+            Some(model_engine_receipt_entries(base, engine).map_err(receipt_error)?)
         };
         for path in dylibs {
             let (bundle, receipt_entries) = receipt.as_ref().unwrap();
@@ -306,7 +208,7 @@ fn model_file_policy(
                 {
                     return Err(BridgeError::InitFailed("changed model engine file".into()));
                 }
-            } else if !model_engine_receipt_file_matches(&path, entry)? {
+            } else if !model_engine_receipt_file_matches(&path, entry).map_err(receipt_error)? {
                 return Err(BridgeError::InitFailed("changed model engine file".into()));
             }
             let canonical = std::fs::canonicalize(&path).map_err(BridgeError::Spawn)?;
@@ -326,7 +228,8 @@ fn model_file_policy(
                     .filter(|entry| entry["path"].as_str() == Some(target))
                     .collect::<Vec<_>>();
                 if matching.len() != 1
-                    || !model_engine_receipt_file_matches(&canonical, matching[0])?
+                    || !model_engine_receipt_file_matches(&canonical, matching[0])
+                        .map_err(receipt_error)?
                 {
                     return Err(BridgeError::InitFailed("changed model engine file".into()));
                 }
@@ -1896,22 +1799,8 @@ impl ProviderBridge {
         for index in 0..MAX_LOCAL_MODEL_SLOTS {
             let broker = ipc_path.join(format!("{index}.sock"));
             let engine_socket = ipc_path.join(format!("{index}.engine.sock"));
-            let broker_text = broker
-                .to_str()
-                .filter(|text| {
-                    text.len() < 104
-                        && text.bytes().all(|byte| {
-                            byte.is_ascii_alphanumeric()
-                                || matches!(byte, b'/' | b'.' | b'_' | b'-')
-                        })
-                })
-                .ok_or_else(|| BridgeError::InitFailed("invalid local socket path".into()))?
-                .to_string();
-            if engine_socket.as_os_str().len() >= 104 {
-                return Err(BridgeError::InitFailed(
-                    "engine socket path too long".into(),
-                ));
-            }
+            let broker_text = model_socket_text(&broker, "invalid local socket path")?;
+            model_socket_text(&engine_socket, "engine socket path too long")?;
             if let Some(id) = local_ids.get(index) {
                 if sockets
                     .insert((*id).to_string(), broker_text.clone())
@@ -1935,16 +1824,7 @@ impl ProviderBridge {
             engine_paths.push(engine_socket);
         }
         let hosted = ipc_path.join("hosted.sock");
-        let hosted_text = hosted
-            .to_str()
-            .filter(|text| {
-                text.len() < 104
-                    && text.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
-                    })
-            })
-            .ok_or_else(|| BridgeError::InitFailed("invalid hosted socket path".into()))?
-            .to_string();
+        let hosted_text = model_socket_text(&hosted, "invalid hosted socket path")?;
         let prepared = binary_path
             .verify_at_spawn()
             .map_err(BridgeError::Refused)?;
