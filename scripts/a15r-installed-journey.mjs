@@ -7,6 +7,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { pathToFileURL } from "node:url";
 
 const out = process.env.A15R_OUT;
 const root = process.env.A15R_ROOT;
@@ -264,6 +265,118 @@ function rootSuffix(root) {
   return String(root || "").replace(/^localhost:\/\//, "");
 }
 
+export const OWNER_DOCUMENT = Buffer.from("a15r owner document\n");
+
+export function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function agentStartRequestSha256(agentId) {
+  return crypto.createHash("sha256").update(canonicalJson({ agent_id: agentId })).digest("hex");
+}
+
+export function gatewayHealthOk(status, body) {
+  return status === 200 && String(body ?? "").trim() === "OK";
+}
+
+export function runtimeHealthOk(status, body) {
+  if (status !== 200 || typeof body !== "string") return false;
+  try {
+    return JSON.parse(body).status === "ok";
+  } catch {
+    return false;
+  }
+}
+
+export function signedAgentStarts(events, agentIds) {
+  const wanted = Array.isArray(agentIds) ? agentIds : [];
+  if (wanted.length === 0 || wanted.some((id) => typeof id !== "string" || id.length === 0)) {
+    return { ok: false, matched: [] };
+  }
+  const matched = new Set();
+  for (const event of events || []) {
+    if (event?.event_type !== "auth.passkey_step_up.completed") continue;
+    if (typeof event.signature !== "string" || event.signature.length === 0) continue;
+    let reason = event.reason;
+    if (typeof reason === "string") {
+      try {
+        reason = JSON.parse(reason);
+      } catch {
+        continue;
+      }
+    }
+    if (!reason || reason.operation !== "agent.start") continue;
+    for (const id of wanted) {
+      if (reason.request_sha256 === agentStartRequestSha256(id)) matched.add(id);
+    }
+  }
+  return { ok: wanted.every((id) => matched.has(id)), matched: [...matched] };
+}
+
+export function journalFileInRoot(files, root) {
+  const suffix = rootSuffix(root);
+  if (!suffix || suffix.includes("..")) return false;
+  return (files || []).some((file) => {
+    const rel = String(file?.path || "").replaceAll("\\", "/").replace(/^\/+/, "");
+    const base = rel.slice(rel.lastIndexOf("/") + 1);
+    return base === "journal" && rel.startsWith(`${suffix}/`);
+  });
+}
+
+export function ownerDocumentUnchanged(before, after) {
+  if (!Buffer.isBuffer(before) || !Buffer.isBuffer(after) || before.length === 0) return false;
+  return before.equals(after);
+}
+
+export function crossReadRefused(attempt) {
+  if (!attempt || attempt.called !== true) return false;
+  if (typeof attempt.session !== "string" || attempt.session.length === 0) return false;
+  if (typeof attempt.root !== "string" || !attempt.root.startsWith("localhost://UsersAI/")) return false;
+  if (typeof attempt.resource !== "string" || !attempt.resource.startsWith(`${attempt.root}/`)) return false;
+  if (typeof attempt.marker !== "string" || attempt.marker.length === 0) return false;
+  if (String(attempt.body ?? "").includes(attempt.marker)) return false;
+  return attempt.status === 403;
+}
+
+export function createdAgentOwnedBy(row, ownerId) {
+  if (!row || typeof row.id !== "string" || !row.id.startsWith("agent:v2:")) return false;
+  if (typeof row.owner !== "string" || row.owner.length === 0) return false;
+  if (typeof ownerId !== "string" || ownerId.length === 0) return false;
+  return row.owner === ownerId && row.owner !== row.id;
+}
+
+export function shellFailStatuses(failed) {
+  const established = ["release_signed", "signing_key_deleted"];
+  const cut = names.indexOf(failed);
+  return names.map((name, index) => {
+    if (name === failed) return "fail";
+    if (cut > 0 && index < cut && established.includes(name)) return "pass";
+    return "not reached";
+  });
+}
+
+function storedOwnerRoot(principalId) {
+  if (!principalId) return "";
+  const file = path.join(data, "ElastOS/System/Auth/auth-state.json");
+  if (!fs.existsSync(file)) return "";
+  const row = (readJson(file).principals || []).find((principal) => principal.principal_id === principalId);
+  const root = String(row?.localhost_root || "");
+  if (!root.startsWith("localhost://Users/") || root.startsWith("localhost://UsersAI/")) return "";
+  return root;
+}
+
+function readFileOrNull(file) {
+  try {
+    return fs.readFileSync(file);
+  } catch {
+    return null;
+  }
+}
+
 function inspectRecords() {
   const dir = path.join(data, "inspect-actions");
   if (!fs.existsSync(dir)) return [];
@@ -322,10 +435,6 @@ function interestingFiles() {
   return found.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-function ownerFiles(files) {
-  return files.filter((file) => file.path.includes("/Users/") && !file.path.includes("UsersAI"));
-}
-
 async function shellToken() {
   const coords = readJson(path.join(data, "home-runtime-coords.json"));
   const response = await fetch(String(coords.api_url).replace(/\/$/, "") + "/api/auth/attach", {
@@ -336,6 +445,36 @@ async function shellToken() {
   const body = await response.json();
   if (!response.ok || !body.token) throw new Error("runtime attach failed");
   return { token: body.token, api: String(coords.api_url).replace(/\/$/, "") };
+}
+
+async function attemptCrossRead() {
+  const marker = `a15r-b-marker-${crypto.randomBytes(8).toString("hex")}`;
+  const root = String(state.rootB || "");
+  const resource = `${root}/Documents/cross-read.txt`;
+  const session = String(state.launchA?.session_id || "");
+  const attempt = { called: false, session, resource, root, status: 0, body: "", marker };
+  if (!root || !session) return attempt;
+  const full = path.join(data, rootSuffix(root), "Documents", "cross-read.txt");
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, marker);
+  try {
+    const attached = await shellToken();
+    const response = await fetch(`${attached.api}/api/provider/localhost/read`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${attached.token}`,
+        "content-type": "application/json",
+        "x-elastos-capsule-id": session,
+      },
+      body: JSON.stringify({ path: resource }),
+    });
+    attempt.called = true;
+    attempt.status = response.status;
+    attempt.body = await response.text();
+  } catch (error) {
+    attempt.body = String(error.message || error);
+  }
+  return attempt;
 }
 
 async function capsules() {
@@ -509,7 +648,17 @@ async function main() {
       bundle_cid: install.bundle_cid,
     });
   } else halt("installed_identity_recorded", "install identity is incomplete");
-  pass("gateway_started", gateway);
+  let gatewayProbe;
+  try {
+    const response = await fetch(`${pageOrigin}/healthz`);
+    gatewayProbe = { status: response.status, body: await response.text() };
+  } catch (error) {
+    halt("gateway_started", String(error.message || error));
+  }
+  if (!gatewayHealthOk(gatewayProbe.status, gatewayProbe.body)) {
+    halt("gateway_started", { status: gatewayProbe.status, body: String(gatewayProbe.body).slice(0, 200) });
+  }
+  pass("gateway_started", { status: gatewayProbe.status });
 
   const playwright = loadPlaywright();
   if (!playwright) {
@@ -539,7 +688,29 @@ async function main() {
     halt("home_runtime_ensured", { status: ensured.status, body: ensured.text.slice(0, 500) });
   }
   pass("home_runtime_ensured", ensured.json.api_url);
-  pass("runtime_started", ensured.json.api_url);
+  let runtimeApi = "";
+  try {
+    const coords = readJson(path.join(data, "home-runtime-coords.json"));
+    runtimeApi = String(coords.api_url || "").replace(/\/$/, "");
+  } catch (error) {
+    halt("runtime_started", String(error.message || error));
+  }
+  if (!runtimeApi) halt("runtime_started", "runtime coords have no api_url");
+  let runtimeProbe;
+  try {
+    const response = await fetch(`${runtimeApi}/api/health`);
+    runtimeProbe = { status: response.status, body: await response.text() };
+  } catch (error) {
+    halt("runtime_started", String(error.message || error));
+  }
+  if (!runtimeHealthOk(runtimeProbe.status, runtimeProbe.body)) {
+    halt("runtime_started", {
+      api: runtimeApi,
+      status: runtimeProbe.status,
+      body: String(runtimeProbe.body).slice(0, 200),
+    });
+  }
+  pass("runtime_started", { api: runtimeApi, status: runtimeProbe.status });
 
   const system = await launchApp(state.homeToken, "system");
   if (!system.token) halt("u3_agents_enabled", clip(system.reply.text));
@@ -591,10 +762,21 @@ async function main() {
     display_name: "Agent A", agent_host: "agent-host", request_id: "a15r-s9b-agent-a",
   });
   state.agentA = createdA.json?.agent_id || "";
-  if (createdA.status !== 200 || !/^agent:v2:[0-9a-f]{32}$/.test(state.agentA) || createdA.json.active !== false) {
-    halt("u3_agent_created", { status: createdA.status, body: createdA.text.slice(0, 400) });
+  const storedA = agentRows().find((row) => row.id === state.agentA);
+  if (
+    createdA.status !== 200
+    || !/^agent:v2:[0-9a-f]{32}$/.test(state.agentA)
+    || createdA.json.active !== false
+    || !createdAgentOwnedBy(storedA, owner.principal_id)
+  ) {
+    halt("u3_agent_created", {
+      status: createdA.status,
+      body: createdA.text.slice(0, 400),
+      stored_owner: storedA?.owner || "",
+      owner: owner.principal_id || "",
+    });
   }
-  pass("u3_agent_created", state.agentA);
+  pass("u3_agent_created", { agent: state.agentA, owner: storedA.owner });
 
   const unknownActivate = await call("POST", "/api/apps/system/agents/activate", state.systemToken, {
     agent_id: unknownId, active: true,
@@ -678,36 +860,45 @@ async function main() {
   if (!distinct) halt("u4_distinct_roots", { a: state.rootA, b: state.rootB });
   pass("u4_distinct_roots", { a: state.rootA, b: state.rootB });
 
+  const crossAttempt = await attemptCrossRead();
+  if (!crossReadRefused(crossAttempt)) {
+    halt("u4_no_cross_read", {
+      called: crossAttempt.called,
+      status: crossAttempt.status,
+      session: crossAttempt.session,
+      resource: crossAttempt.resource,
+      body: String(crossAttempt.body || "").slice(0, 300),
+    });
+  }
+  pass("u4_no_cross_read", {
+    status: crossAttempt.status,
+    session: crossAttempt.session,
+    resource: crossAttempt.resource,
+  });
+
   const inboxLaunch = await launchApp(state.homeToken, "inbox");
   if (!inboxLaunch.token) halt("journal_in_agent_root", inboxLaunch.reply.text.slice(0, 240));
   state.inboxToken = inboxLaunch.token;
   const grantResult = await approveGrants(240000);
   const filesAfterGrants = interestingFiles();
-  const crossed = state.grants.some((grant) => (
-    String(grant.resource).includes(state.rootA) && String(grant.resource).includes(state.rootB)
-  )) || filesAfterGrants.some((file) => (
-    file.path.includes(rootSuffix(state.rootA)) && file.path.includes(rootSuffix(state.rootB))
-  ));
-  const separated = !crossed && state.rootA !== state.rootB && state.grants.some((grant) => (
-    grant.status === 200 && String(grant.resource).includes(rootSuffix(state.rootA))
-  )) && state.grants.some((grant) => (
-    grant.status === 200 && String(grant.resource).includes(rootSuffix(state.rootB))
-  ));
-  if (!separated) {
-    halt("u4_no_cross_read", { grantResult, grants: state.grants, files: filesAfterGrants });
+  const journalFiles = filesAfterGrants.filter((file) => journalFileInRoot([file], state.rootA));
+  if (journalFiles.length === 0) {
+    halt("journal_in_agent_root", { grantResult, files: filesAfterGrants.map((file) => file.path) });
   }
-  pass("u4_no_cross_read", {
-    grants: state.grants.map((grant) => grant.resource),
-    files: filesAfterGrants.map((file) => file.path),
-  });
-  const journalA = filesAfterGrants.some((file) => file.path.includes(rootSuffix(state.rootA)))
-    || state.grants.some((grant) => grant.status === 200 && String(grant.resource).includes(rootSuffix(state.rootA)) && String(grant.resource).includes("agent-host"));
-  if (!journalA) halt("journal_in_agent_root", { grantResult, grants: state.grants, files: filesAfterGrants });
-  pass("journal_in_agent_root", { grantResult, root: state.rootA });
+  pass("journal_in_agent_root", { root: state.rootA, files: journalFiles.map((file) => file.path) });
 
   await stopAgent(state.agentB);
+  const ownerRoot = storedOwnerRoot(owner.principal_id);
+  const ownerDocPath = ownerRoot
+    ? path.join(data, rootSuffix(ownerRoot), "Documents", "owner-note.txt")
+    : "";
+  let ownerDocBefore = null;
+  if (ownerDocPath) {
+    fs.mkdirSync(path.dirname(ownerDocPath), { recursive: true });
+    fs.writeFileSync(ownerDocPath, OWNER_DOCUMENT);
+    ownerDocBefore = fs.readFileSync(ownerDocPath);
+  }
   const before = interestingFiles();
-  const ownerBefore = ownerFiles(before);
   let plan = null;
   const planDeadline = Date.now() + 90000;
   while (Date.now() < planDeadline && !plan) {
@@ -798,11 +989,12 @@ async function main() {
     result: settled?.result,
     resources: recordResources,
     files: written,
-    note: "The installed guest submits localhost://Users/self/Documents/note.txt. An agent root is localhost://UsersAI/<id>. This runner does not rewrite that path.",
   });
-  const ownerAfter = ownerFiles(filesAfter);
-  keep("owner_document_unchanged", JSON.stringify(ownerBefore) === JSON.stringify(ownerAfter), {
-    before: ownerBefore, after: ownerAfter,
+  const ownerDocAfter = ownerDocPath ? readFileOrNull(ownerDocPath) : null;
+  keep("owner_document_unchanged", ownerDocumentUnchanged(ownerDocBefore, ownerDocAfter), {
+    path: ownerDocPath ? path.relative(data, ownerDocPath) : "",
+    before_sha256: ownerDocBefore ? crypto.createHash("sha256").update(ownerDocBefore).digest("hex") : "",
+    after_sha256: ownerDocAfter ? crypto.createHash("sha256").update(ownerDocAfter).digest("hex") : "",
   });
   const receiptOk = Boolean(settled
     && settled.principal_id
@@ -817,9 +1009,9 @@ async function main() {
     status: settled?.status,
     requester_id: settled?.requester_id,
   });
-  const startedAudits = signedCount("agent_plan.dispatch.started");
+  const startedAudits = signedAgentStarts(auditEvents(), [state.agentA, state.agentB]);
   const completedAudits = signedCount("agent_plan.dispatch.completed");
-  keep("signed_start_audit", startedAudits === 1, { count: startedAudits });
+  keep("signed_start_audit", startedAudits.ok, { matched: startedAudits.matched });
   keep("signed_completion_audit", completedAudits === 1, { count: completedAudits });
   const afterCard = planCards(await inbox());
   keep("card_removed", afterCard.length === 0, afterCard.map((card) => card.action_ref?.action_id));
@@ -860,15 +1052,12 @@ async function main() {
 function shellFailReceipt() {
   const failed = process.env.FAILED || "";
   const reason = process.env.REASON || "";
-  const established = ["release_signed", "signing_key_deleted", "gateway_started"];
-  const cut = names.indexOf(failed);
-  const assertions = names.map((name, index) => {
-    if (name === failed) return { name, status: "fail", detail: clip(reason) };
-    if (cut > 0 && index < cut && established.includes(name)) {
-      return { name, status: "pass", detail: "" };
-    }
-    return { name, status: "not reached", detail: "" };
-  });
+  const statuses = shellFailStatuses(failed);
+  const assertions = names.map((name, index) => ({
+    name,
+    status: statuses[index],
+    detail: name === failed ? clip(reason) : "",
+  }));
   const installPath = path.join(out, "install.json");
   const receipt = {
     route: "POST /api/apps/system/agents/launch",
@@ -888,15 +1077,22 @@ function shellFailReceipt() {
   fs.writeFileSync(path.join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
 }
 
-if (process.argv[2] === "--shell-fail") {
-  shellFailReceipt();
-  process.exit(1);
+function invokedDirectly() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return import.meta.url === pathToFileURL(path.resolve(entry)).href;
 }
 
-main().catch((error) => {
-  stopped = clip(error && (error.detail || error.stack || error.message) || error);
-}).finally(async () => {
-  if (browser) await browser.close().catch(() => {});
-  const code = writeReceipt();
-  process.exit(code);
-});
+if (invokedDirectly()) {
+  if (process.argv[2] === "--shell-fail") {
+    shellFailReceipt();
+    process.exit(1);
+  }
+  main().catch((error) => {
+    stopped = clip(error && (error.detail || error.stack || error.message) || error);
+  }).finally(async () => {
+    if (browser) await browser.close().catch(() => {});
+    const code = writeReceipt();
+    process.exit(code);
+  });
+}
