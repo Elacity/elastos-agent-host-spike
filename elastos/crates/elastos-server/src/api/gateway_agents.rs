@@ -241,7 +241,11 @@ async fn start_agent(
     let owner = agents_owner(state, headers)?;
     let request: AgentLaunchRequest = agents_request(body)?;
     let launch = require_home_launch_token_binding(&state.data_dir, headers, &[SYSTEM_CAPSULE_ID])?;
-    // The step-up is spent before the Runtime can refuse a Start that is already stopping.
+    // The stopping mark is in the Runtime. This route spends the step-up, then
+    // the Runtime reads the mark. A read here would be a second call, and a
+    // Stop between that call and the launch would still spend the token on
+    // the refusal. Spending after a launch that has started the guest would
+    // run the guest before the passkey is consumed.
     consume_passkey_step_up_token(
         &state.data_dir,
         request.step_up_token.trim(),

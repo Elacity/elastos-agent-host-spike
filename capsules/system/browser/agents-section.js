@@ -141,8 +141,8 @@ export function bindAgents(doc, request, confirmStepUp) {
     if (!body || !Array.isArray(body.agents)) throw pageRefusal("The Home did not list agents.");
     agents = body.agents;
     gate = "ready";
-    // The list names the agent and whether it is turned on. It does not name a
-    // live session, so a reload cannot keep Stopping.
+    // The list is this Home's agent file. It does not read the Runtime's
+    // stopping mark, so a reload shows the stored on/off state.
     stopping.clear();
   }
 
