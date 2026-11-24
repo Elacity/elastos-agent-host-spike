@@ -1994,7 +1994,6 @@ impl ProviderBridge {
 
     /// macOS model start from the admitted rights. The server keeps the hand-written policy until M3.
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
-    #[rustfmt::skip]
     pub async fn spawn_confined_model_from_rights(
         authority: &ProviderAuthority,
         binary_path: &CheckedExecutable,
@@ -2002,25 +2001,48 @@ impl ProviderBridge {
         engine: &Path,
         model_file: &Path,
         bundle: &Path,
-    ) -> Result<(Confined, BTreeMap<String, String>, Vec<String>, ProviderConfig), BridgeError> {
+    ) -> Result<
+        (
+            Confined,
+            BTreeMap<String, String>,
+            Vec<String>,
+            ProviderConfig,
+        ),
+        BridgeError,
+    > {
         let journal = model_journal_for_sandbox(&config)?;
-        let parent = journal.parent().ok_or_else(|| {
-            BridgeError::InitFailed("model journal parent unavailable".into())
-        })?;
-        let offers = config.extra.get("offers").and_then(|value| value.as_array()).ok_or_else(|| {
-            BridgeError::InitFailed("model offers unavailable".into())
-        })?;
-        let local_ids = offers.iter().filter(|offer| {
-            offer.pointer("/adapter/kind").and_then(|value| value.as_str()) == Some("local_llama_cpp_text")
-        }).map(|offer| {
-            offer.get("id").and_then(|value| value.as_str()).ok_or_else(|| {
-                BridgeError::InitFailed("local offer id unavailable".into())
+        let parent = journal
+            .parent()
+            .ok_or_else(|| BridgeError::InitFailed("model journal parent unavailable".into()))?;
+        let offers = config
+            .extra
+            .get("offers")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?;
+        let local_ids = offers
+            .iter()
+            .filter(|offer| {
+                offer
+                    .pointer("/adapter/kind")
+                    .and_then(|value| value.as_str())
+                    == Some("local_llama_cpp_text")
             })
-        }).collect::<Result<Vec<_>, _>>()?;
+            .map(|offer| {
+                offer
+                    .get("id")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
-            return Err(BridgeError::InitFailed("too many local model offers".into()));
+            return Err(BridgeError::InitFailed(
+                "too many local model offers".into(),
+            ));
         }
-        let ipc_dir = tempfile::Builder::new().prefix("em-").tempdir().map_err(BridgeError::Spawn)?;
+        let ipc_dir = tempfile::Builder::new()
+            .prefix("em-")
+            .tempdir()
+            .map_err(BridgeError::Spawn)?;
         let ipc_path = std::fs::canonicalize(ipc_dir.path()).map_err(BridgeError::Spawn)?;
         let provider_pid = Arc::new(AtomicU32::new(0));
         let provider_birth = Arc::new(AtomicU64::new(0));
@@ -2032,46 +2054,86 @@ impl ProviderBridge {
         for index in 0..MAX_LOCAL_MODEL_SLOTS {
             let broker = ipc_path.join(format!("{index}.sock"));
             let engine_socket = ipc_path.join(format!("{index}.engine.sock"));
-            let broker_text = broker.to_str().filter(|text| {
-                text.len() < 104 && text.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
+            let broker_text = broker
+                .to_str()
+                .filter(|text| {
+                    text.len() < 104
+                        && text.bytes().all(|byte| {
+                            byte.is_ascii_alphanumeric()
+                                || matches!(byte, b'/' | b'.' | b'_' | b'-')
+                        })
                 })
-            }).ok_or_else(|| BridgeError::InitFailed("invalid local socket path".into()))?.to_string();
+                .ok_or_else(|| BridgeError::InitFailed("invalid local socket path".into()))?
+                .to_string();
             if engine_socket.as_os_str().len() >= 104 {
-                return Err(BridgeError::InitFailed("engine socket path too long".into()));
+                return Err(BridgeError::InitFailed(
+                    "engine socket path too long".into(),
+                ));
             }
             if let Some(id) = local_ids.get(index) {
-                if sockets.insert((*id).to_string(), broker_text.clone()).is_some() {
+                if sockets
+                    .insert((*id).to_string(), broker_text.clone())
+                    .is_some()
+                {
                     return Err(BridgeError::InitFailed("duplicate local offer id".into()));
                 }
             } else {
                 vacant.push(broker_text.clone());
             }
-            brokers.0.push(super::local_model_broker::start(
-                &broker_text, engine_socket.clone(), provider_pid.clone(), provider_birth.clone(),
-            ).map_err(BridgeError::Spawn)?);
+            brokers.0.push(
+                super::local_model_broker::start(
+                    &broker_text,
+                    engine_socket.clone(),
+                    provider_pid.clone(),
+                    provider_birth.clone(),
+                )
+                .map_err(BridgeError::Spawn)?,
+            );
             broker_paths.push(broker);
             engine_paths.push(engine_socket);
         }
-        let prepared = binary_path.verify_at_spawn().map_err(BridgeError::Refused)?;
+        let prepared = binary_path
+            .verify_at_spawn()
+            .map_err(BridgeError::Refused)?;
         let launch = super::os_entry::ModelLaunch {
-            engine, model: model_file, bundle, brokers: &broker_paths, engines: &engine_paths,
+            engine,
+            model: model_file,
+            bundle,
+            brokers: &broker_paths,
+            engines: &engine_paths,
         };
         let command = super::os_entry::model_rights_command(
-            authority, prepared.exec_path(), &journal, parent, &launch,
-        ).map_err(BridgeError::Refused)?;
+            authority,
+            prepared.exec_path(),
+            &journal,
+            parent,
+            &launch,
+        )
+        .map_err(BridgeError::Refused)?;
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
         let returned = config.clone();
         let mut bridge = Self::spawn_command(
-            prepared, Command::from(command), config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT,
-            std::process::Stdio::inherit(), false,
-        ).await?;
-        let pid = bridge.child.lock().await.as_ref().and_then(|child| child.id()).ok_or_else(|| {
-            BridgeError::InitFailed("model provider pid unavailable".into())
-        })?;
+            prepared,
+            Command::from(command),
+            config,
+            INIT_TIMEOUT,
+            SHUTDOWN_TIMEOUT,
+            std::process::Stdio::inherit(),
+            false,
+        )
+        .await?;
+        let pid = bridge
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|child| child.id())
+            .ok_or_else(|| BridgeError::InitFailed("model provider pid unavailable".into()))?;
         let Some(birth) = super::local_model_broker::process_birth(pid) else {
             let _ = bridge.shutdown().await;
-            return Err(BridgeError::InitFailed("model provider identity unavailable".into()));
+            return Err(BridgeError::InitFailed(
+                "model provider identity unavailable".into(),
+            ));
         };
         provider_pid.store(pid, Ordering::Release);
         provider_birth.store(birth, Ordering::Release);
@@ -2079,7 +2141,14 @@ impl ProviderBridge {
         *bridge._local_brokers.lock().await = brokers;
         bridge._local_provider_pid = provider_pid;
         bridge._local_provider_birth = provider_birth;
-        Ok((Confined { bridge: Arc::new(bridge) }, sockets, vacant, returned))
+        Ok((
+            Confined {
+                bridge: Arc::new(bridge),
+            },
+            sockets,
+            vacant,
+            returned,
+        ))
     }
 
     /// Start a Linux model provider with private local Unix routes and a
@@ -6361,35 +6430,191 @@ int main(void) {
         assert!(!root.exists(), "a refused model start creates no root");
     }
 
+    /// Reruns the confined real-engine receipt. The child answers Init, then
+    /// executes the engine on the bound socket. Capture stdout for the completion.
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
-    #[test]
-    fn model_rights_start_does_not_keep_the_hand_written_policy() {
-        let source = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/provider/bridge.rs"
-        ))
-        .unwrap();
-        let start = source
-            .find("pub async fn spawn_confined_model_from_rights(")
-            .unwrap();
-        let end = source[start..]
-            .find("pub async fn spawn_confined_model_linux(")
-            .map(|at| at + start)
-            .unwrap();
-        let body = &source[start..end];
-        assert!(body.contains("model_rights_command("));
+    #[tokio::test]
+    #[ignore = "requires ELASTOS_B3_MODEL and ELASTOS_B3_ENGINE; optional ELASTOS_B3_GPU_LAYERS"]
+    async fn confined_model_rights_start_runs_the_real_engine() {
+        let model = std::fs::canonicalize(
+            std::env::var("ELASTOS_B3_MODEL").expect("ELASTOS_B3_MODEL is the weights file"),
+        )
+        .expect("ELASTOS_B3_MODEL canonicalizes");
+        let engine = std::fs::canonicalize(
+            std::env::var("ELASTOS_B3_ENGINE")
+                .expect("ELASTOS_B3_ENGINE is the llama-server binary"),
+        )
+        .expect("ELASTOS_B3_ENGINE canonicalizes");
+        let gpu = std::env::var("ELASTOS_B3_GPU_LAYERS").unwrap_or_else(|_| "0".to_string());
         assert!(
-            !body.contains("model_file_policy"),
-            "the rights start must not keep the hand-written policy"
+            gpu.bytes().all(|byte| byte.is_ascii_digit()) && !gpu.is_empty() && gpu.len() <= 3,
+            "ELASTOS_B3_GPU_LAYERS is a decimal layer count"
         );
-        let entry = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/provider/os_entry.rs"
-        ))
+        assert!(model.is_file(), "the weights path is a file");
+        assert!(engine.is_file(), "the engine path is a file");
+        let bundle = engine
+            .parent()
+            .expect("the engine has a bundle directory")
+            .to_path_buf();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let binary = write_real_engine_probe(&base);
+        let journal = base.join("providers/model-provider/journal");
+        let mut config = ProviderConfig {
+            base_path: base.to_string_lossy().into_owned(),
+            ..ProviderConfig::default()
+        };
+        config.extra = serde_json::json!({
+            "journal_dir": journal,
+            "offers": [{"id": "proof", "adapter": {"kind": "local_llama_cpp_text"}}],
+            "proof_engine": engine,
+            "proof_model": model,
+            "proof_gpu": gpu,
+        });
+        let (confined, sockets, vacant, _) = ProviderBridge::spawn_confined_model_from_rights(
+            &committed_authority("model"),
+            &CheckedExecutable::for_test(&binary),
+            config,
+            &engine,
+            &model,
+            &bundle,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("real engine start: {error}"));
+        let broker = sockets["proof"].clone();
+        assert!(broker.ends_with("/0.sock"), "{broker}");
+        assert_eq!(vacant.len(), 63);
+        let engine_socket =
+            PathBuf::from(&broker[..broker.len() - "/0.sock".len()]).join("0.engine.sock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut health = String::new();
+        while std::time::Instant::now() < deadline {
+            if let Ok(response) = unix_http(
+                &engine_socket,
+                "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            ) {
+                if response.contains("200") {
+                    health = response;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(health.contains("200"), "engine health: {health}");
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "Say hello in one word."}],
+            "max_tokens": 16
+        })
+        .to_string();
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let completion = unix_http(&engine_socket, &request).expect("engine completion");
+        println!("real-engine completion:\n{completion}");
+        assert!(completion.contains("200"), "{completion}");
+        assert!(completion.contains("\"content\""), "{completion}");
+        let _ = confined.bridge().shutdown().await;
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    fn write_real_engine_probe(dir: &Path) -> PathBuf {
+        let source = dir.join("real-engine-probe.c");
+        let binary = dir.join("model-provider");
+        std::fs::write(
+            &source,
+            r#"
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+static int field(const char *line, const char *key, char *out, size_t cap) {
+    char pattern[96];
+    snprintf(pattern, sizeof pattern, "\"%s\":\"", key);
+    const char *at = strstr(line, pattern);
+    size_t i = 0;
+    if (!at) return -1;
+    at += strlen(pattern);
+    while (*at && *at != '"' && i + 1 < cap) out[i++] = *at++;
+    out[i] = 0;
+    return *at == '"' ? 0 : -1;
+}
+int main(void) {
+    char line[65536], engine[4096], model[4096], gpu[8], broker[4096], socket_path[4096];
+    size_t broker_len;
+    if (!fgets(line, sizeof line, stdin)) return 1;
+    fputs("{\"status\":\"ok\"}\n", stdout);
+    fflush(stdout);
+    if (field(line, "proof_engine", engine, sizeof engine)
+        || field(line, "proof_model", model, sizeof model)
+        || field(line, "proof_gpu", gpu, sizeof gpu)
+        || field(line, "proof", broker, sizeof broker)) return 2;
+    broker_len = strlen(broker);
+    if (broker_len < 6 || strcmp(broker + broker_len - 6, "/0.sock") != 0) return 3;
+    snprintf(socket_path, sizeof socket_path, "%.*s/0.engine.sock", (int)(broker_len - 6), broker);
+    dup2(STDERR_FILENO, STDOUT_FILENO);
+    execl(engine, engine, "-m", model, "--host", socket_path, "--ctx-size", "512",
+        "--no-context-shift", "--parallel", "4", "--batch-size", "128", "--ubatch-size", "128",
+        "--cache-ram", "0", "--threads", "2", "--threads-batch", "2", "--gpu-layers", gpu,
+        "--alias", "b3-proof", (char *)0);
+    return 4;
+}
+"#,
+        )
         .unwrap();
-        let profile_at = entry.find("fn admitted_model_profile(").unwrap();
-        let profile = &entry[profile_at..profile_at + 240];
-        assert!(profile.contains("render_macos_profile(RuntimeProviderId::Model, admitted)"));
+        let status = std::process::Command::new("/usr/bin/clang")
+            .args(["-O2", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .expect("clang is available");
+        assert!(
+            status.success(),
+            "clang failed to build the real-engine probe"
+        );
+        binary
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    fn unix_http(socket: &Path, request: &str) -> std::io::Result<String> {
+        use std::io::{Read, Write};
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(60)))?;
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
+        stream.write_all(request.as_bytes())?;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 2048];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(split) = buf.windows(4).position(|mark| mark == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&buf[..split]);
+                        let length = headers.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        });
+                        if length.is_some_and(|length| buf.len() >= split + 4 + length) {
+                            break;
+                        }
+                    }
+                    if buf.len() > 1_000_000 {
+                        break;
+                    }
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    break
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(String::from_utf8_lossy(&buf).into_owned())
     }
 
     #[cfg(target_os = "macos")]
