@@ -922,6 +922,14 @@ async fn a_panicking_host_call_leaves_the_session_and_home_up() {
     }
     let output = reexec("a_panicking_host_call_leaves_the_session_and_home_up");
     let value = child_ran(&output, "host");
+    assert_eq!(
+        value["cause"], "Component run ended without publishing an outcome",
+        "{value}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("planted host panic"),
+        "the planted host panic never reached the child's stderr"
+    );
     assert_eq!(value["session_ended"], true, "{value}");
     assert_eq!(value["next_live"], true, "{value}");
     assert_eq!(value["stop"], "ok", "{value}");
@@ -937,6 +945,15 @@ async fn a_panicking_agent_route_leaves_home_serving() {
     }
     let output = reexec("a_panicking_agent_route_leaves_home_serving");
     let value = child_ran(&output, "route");
+    let panic_status = value["panic_status"].as_u64().expect("no panic status");
+    assert!(
+        panic_status == 0 || panic_status >= 500,
+        "the panic route answered with a success status: {value}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("planted agent route panic"),
+        "the planted route panic never reached the child's stderr"
+    );
     assert_eq!(value["home"], 200, "{value}");
     assert_eq!(value["plane_health"], 200, "{value}");
 }
@@ -949,6 +966,10 @@ async fn a_panicking_agent_runtime_task_is_named_and_home_keeps_serving() {
     }
     let output = reexec("a_panicking_agent_runtime_task_is_named_and_home_keeps_serving");
     let value = child_ran(&output, "task");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("planted agent runtime task panic"),
+        "the planted task panic never reached the child's stderr"
+    );
     assert_eq!(value["home"], 200, "{value}");
     assert_eq!(
         value["fault"],
