@@ -1162,9 +1162,14 @@ async fn a_second_stop_of_the_same_agent_is_not_a_server_error() {
     );
     let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
     assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let refusal: serde_json::Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     assert!(
-        status == StatusCode::CONFLICT && body.contains("no running session"),
-        "a stop after the guest ended was not a clean refusal: {status} {body}"
+        status == StatusCode::CONFLICT
+            && refusal["code"] == "agent_no_session"
+            && refusal["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("no running session")),
+        "a stop after the guest ended was not a coded refusal: {status} {body}"
     );
     assert_eq!(stop_reasons(&world, &session).len(), 1);
 }

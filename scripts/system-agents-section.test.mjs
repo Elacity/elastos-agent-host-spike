@@ -525,7 +525,74 @@ test("a stop that is still stopping stays Stopping and Start is disabled", async
   assert.equal(calls.some((call) => call.path.endsWith("/launch")), false);
 });
 
-test("Stopping clears when Stop says the agent is already stopped", async () => {
+function refusal(code, sentence) {
+  return Promise.reject(new Error(`request failed: 409 ${JSON.stringify({ code, reason: sentence })}`));
+}
+
+test("Stopping clears from the already-stopped refusal code, not its sentence", async () => {
+  let stops = 0;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    stops += 1;
+    if (stops === 1) {
+      return Promise.resolve({
+        agent_id: AGENT_ID,
+        stopped: [],
+        stopping: [{ session_id: "session-1", status: "stopping" }],
+      });
+    }
+    return refusal("agent_already_stopped", "the agent is idle");
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping");
+  assert.equal(ui.button("Start").disabled, true);
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "On");
+  assert.equal(ui.button("Start").disabled, false);
+  assert.equal(ui.status.textContent, "the agent is idle");
+});
+
+test("Stopping clears from the no-session refusal code", async () => {
+  let stops = 0;
+  const ui = mount((path, init = {}) => {
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    stops += 1;
+    if (stops === 1) {
+      return Promise.resolve({
+        agent_id: AGENT_ID,
+        stopped: [],
+        stopping: [{ session_id: "session-1", status: "stopping" }],
+      });
+    }
+    return refusal("agent_no_session", "this agent has no running session");
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping");
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "On");
+  assert.equal(ui.button("Start").disabled, false);
+  assert.equal(ui.status.textContent, "this agent has no running session");
+});
+
+test("Stopping stays when Stop's sentence has no refusal code", async () => {
   let stops = 0;
   const ui = mount((path, init = {}) => {
     if ((init.method || "GET") === "GET") {
@@ -548,42 +615,11 @@ test("Stopping clears when Stop says the agent is already stopped", async () => 
   await flush();
   await flush();
   assert.equal(ui.state(AGENT_ID), "Stopping");
-  assert.equal(ui.button("Start").disabled, true);
-  ui.button("Stop").click();
-  await flush();
-  await flush();
-  assert.equal(ui.state(AGENT_ID), "On");
-  assert.equal(ui.button("Start").disabled, false);
-});
-
-test("Stopping clears when Stop says the agent has no running session", async () => {
-  let stops = 0;
-  const ui = mount((path, init = {}) => {
-    if ((init.method || "GET") === "GET") {
-      return Promise.resolve({
-        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
-      });
-    }
-    stops += 1;
-    if (stops === 1) {
-      return Promise.resolve({
-        agent_id: AGENT_ID,
-        stopped: [],
-        stopping: [{ session_id: "session-1", status: "stopping" }],
-      });
-    }
-    return Promise.reject(new Error("request failed: 409 this agent has no running session"));
-  }, () => Promise.resolve("step-token"));
-  await ui.load();
   ui.button("Stop").click();
   await flush();
   await flush();
   assert.equal(ui.state(AGENT_ID), "Stopping");
-  ui.button("Stop").click();
-  await flush();
-  await flush();
-  assert.equal(ui.state(AGENT_ID), "On");
-  assert.equal(ui.button("Start").disabled, false);
+  assert.equal(ui.button("Start").disabled, true);
 });
 
 test("a reload clears Stopping because the list has no session", async () => {

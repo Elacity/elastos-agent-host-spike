@@ -8,9 +8,25 @@ function text(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function reason(error) {
+function refusal(error) {
   const found = text(error && error.message).match(/^request failed: \d{3}\s+([\s\S]+)$/);
-  return (found && found[1].trim()) || "The Home did not answer.";
+  const body = (found && found[1].trim()) || "";
+  if (body.charAt(0) === "{") {
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed.code === "string") {
+        const sentence = text(parsed.reason);
+        return { code: parsed.code, text: sentence || body };
+      }
+    } catch (ignored) {
+      text(ignored);
+    }
+  }
+  return { code: "", text: body || "The Home did not answer." };
+}
+
+function reason(error) {
+  return refusal(error).text;
 }
 
 // A bad reply is this page's refusal. 422 keeps Retry off. A lost answer has no
@@ -195,8 +211,8 @@ export function bindAgents(doc, request, confirmStepUp) {
       try {
         reply = await request("/api/apps/system/agents/stop", { method: "POST", body: JSON.stringify({ agent_id: id }) });
       } catch (error) {
-        const why = reason(error);
-        if (why === "this agent is already stopped" || why === "this agent has no running session") {
+        const found = refusal(error);
+        if (found.code === "agent_already_stopped" || found.code === "agent_no_session") {
           stopping.delete(id);
         }
         throw error;

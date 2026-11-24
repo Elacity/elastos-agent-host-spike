@@ -764,9 +764,11 @@ pub(super) async fn stop_runtime_agent(
         let text = response.text().await.unwrap_or_default();
         let detail = text.trim();
         if status == StatusCode::NOT_FOUND {
-            return Err(
-                crate::agents::Refused("this agent has no running session".to_string()).into(),
-            );
+            return Err(crate::agents::CodedRefusal {
+                code: "agent_no_session",
+                reason: "this agent has no running session",
+            }
+            .into());
         }
         if status == StatusCode::CONFLICT || status == StatusCode::BAD_REQUEST {
             let reason = if detail.is_empty() {

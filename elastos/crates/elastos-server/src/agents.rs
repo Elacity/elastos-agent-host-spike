@@ -116,6 +116,21 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// A refusal the Home page can match by `code`. The sentence stays in `reason`.
+#[derive(Debug)]
+pub(crate) struct CodedRefusal {
+    pub(crate) code: &'static str,
+    pub(crate) reason: &'static str,
+}
+
+impl std::fmt::Display for CodedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+
+impl std::error::Error for CodedRefusal {}
+
 fn refused<T>(reason: impl Into<String>) -> anyhow::Result<T> {
     Err(anyhow::Error::new(Refused(reason.into())))
 }

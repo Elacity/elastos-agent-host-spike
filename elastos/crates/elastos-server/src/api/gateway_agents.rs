@@ -9,7 +9,13 @@
 //! in a build without agents, and on a Runtime that is not the Home.
 
 use super::*;
-use crate::agents::{Caller, CreateRequest, Refused};
+use crate::agents::{Caller, CodedRefusal, CreateRequest, Refused};
+
+#[derive(Serialize)]
+struct CodedRefusalBody<'a> {
+    code: &'a str,
+    reason: &'a str,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,10 +75,22 @@ fn agents_owner(state: &GatewayState, headers: &HeaderMap) -> anyhow::Result<Age
 fn agents_response<T: Serialize>(result: anyhow::Result<T>) -> Response {
     match result {
         Ok(value) => Json(value).into_response(),
-        Err(error) => match error.downcast_ref::<Refused>() {
-            Some(refused) => (StatusCode::CONFLICT, refused.to_string()).into_response(),
-            None => system_error_response(error),
-        },
+        Err(error) => {
+            if let Some(coded) = error.downcast_ref::<CodedRefusal>() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(CodedRefusalBody {
+                        code: coded.code,
+                        reason: coded.reason,
+                    }),
+                )
+                    .into_response();
+            }
+            match error.downcast_ref::<Refused>() {
+                Some(refused) => (StatusCode::CONFLICT, refused.to_string()).into_response(),
+                None => system_error_response(error),
+            }
+        }
     }
 }
 
@@ -326,12 +344,19 @@ async fn stop_agent(
     owner_may_stop(state, headers, Some(&request.agent_id))?;
     let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
     if outcome.stopped.is_empty() && outcome.stopping.is_empty() {
-        let message = match outcome.already.as_deref() {
-            Some("stopping") => "this agent is already stopping",
-            Some("stopped") => "this agent is already stopped",
-            _ => "this agent has no running session",
-        };
-        return Err(Refused(message.to_string()).into());
+        return Err(match outcome.already.as_deref() {
+            Some("stopping") => Refused("this agent is already stopping".to_string()).into(),
+            Some("stopped") => CodedRefusal {
+                code: "agent_already_stopped",
+                reason: "this agent is already stopped",
+            }
+            .into(),
+            _ => CodedRefusal {
+                code: "agent_no_session",
+                reason: "this agent has no running session",
+            }
+            .into(),
+        });
     }
     let session = |session: super::gateway_home_runtime::StoppedRuntimeAgent| AgentStoppedSession {
         session_id: session.session_id,
