@@ -1816,8 +1816,9 @@ impl ProviderBridge {
 
     /// `chain-provider/` must be a real directory before the path allow-list
     /// renders. Create it when Home has not yet. A symlink is refused.
+    /// A directory that already existed keeps its mode. The create path is
+    /// the one that can lose a race.
     fn ensure_chain_provider_root(data_dir: &Path) -> Result<(), BridgeError> {
-        use std::os::unix::fs::DirBuilderExt;
         let root = data_dir.join("chain-provider");
         match std::fs::symlink_metadata(&root) {
             Ok(metadata) if metadata.file_type().is_symlink() => Err(BridgeError::Refused(
@@ -1827,13 +1828,28 @@ impl ProviderBridge {
                 "provider start is refused: chain-provider is not a directory. Replace it with a directory you own, then start Home again.".into(),
             )),
             Ok(_) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                // Mode at create. `create_dir` follows the umask, so 0755 would
-                // sit on the directory until a later chmod.
-                let mut builder = std::fs::DirBuilder::new();
-                builder.mode(0o700);
-                builder.create(&root).map_err(BridgeError::Io)?;
-                Ok(())
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::create_chain_provider_root(&root),
+            Err(err) => Err(BridgeError::Io(err)),
+        }
+    }
+
+    /// Create `chain-provider` at mode 0700. `AlreadyExists` means another
+    /// start created it after this one saw `NotFound`. That path is accepted
+    /// only when it is a real directory, owned by this user, with mode 0700.
+    #[rustfmt::skip]
+    fn create_chain_provider_root(root: &Path) -> Result<(), BridgeError> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(root) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let metadata = std::fs::symlink_metadata(root).map_err(BridgeError::Io)?;
+                if !metadata.file_type().is_symlink() && metadata.is_dir() && metadata.uid() == unsafe { libc::geteuid() } && metadata.mode() & 0o777 == 0o700 {
+                    Ok(())
+                } else {
+                    Err(BridgeError::Refused("provider start is refused: chain-provider appeared during start and is not a directory this user owns with mode 0700".into()))
+                }
             }
             Err(err) => Err(BridgeError::Io(err)),
         }
@@ -6367,5 +6383,44 @@ int main(void) {
         let meta = fs::symlink_metadata(temp.path().join("chain-provider")).unwrap();
         assert!(meta.is_dir());
         assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    }
+
+    /// `AlreadyExists` is the race where two starts both saw a missing root.
+    /// A foreign owner cannot be planted here without extra privileges.
+    #[cfg(unix)]
+    #[test]
+    fn a_raced_chain_root_is_accepted_only_when_it_is_ours() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("chain-provider");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        ProviderBridge::create_chain_provider_root(&root).unwrap();
+
+        fs::remove_dir(&root).unwrap();
+        fs::write(&root, b"not-a-directory").unwrap();
+        let text = ProviderBridge::create_chain_provider_root(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("chain-provider"), "{text}");
+        assert!(text.contains("directory"), "{text}");
+
+        fs::remove_file(&root).unwrap();
+        std::os::unix::fs::symlink("elsewhere", &root).unwrap();
+        let text = ProviderBridge::create_chain_provider_root(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("chain-provider"), "{text}");
+        assert!(text.contains("0700"), "{text}");
+
+        fs::remove_file(&root).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let text = ProviderBridge::create_chain_provider_root(&root)
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("0700"), "{text}");
+        ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
+        let mode = fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "an existing directory keeps its mode");
     }
 }
