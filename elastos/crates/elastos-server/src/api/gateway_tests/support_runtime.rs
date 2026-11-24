@@ -379,7 +379,8 @@ fn granted_home_app_token(data_dir: &std::path::Path) -> String {
     issue_home_launch_token_with_context(data_dir, HOME_CAPSULE_ID, &context).unwrap()
 }
 
-#[allow(dead_code)] // used when prototype-agents is off
+#[cfg(unix)]
+#[cfg(feature = "prototype-agents")]
 fn system_app_token(data_dir: &std::path::Path) -> String {
     passkey_authority_with_name_role_credential(
         data_dir,
@@ -746,6 +747,7 @@ struct FakePeerBus {
     fail_message_substrings: Vec<String>,
     drop_remote_message_substrings: Vec<String>,
     local_only_message_substrings: Vec<String>,
+    ticket_by_peer: HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -1230,14 +1232,23 @@ async fn fake_runtime_provider(
             }))
             .into_response()
         }
-        ("peer", "get_ticket") => AxumJson(json!({
-            "status": "ok",
-            "data": {
-                "ticket": format!("fake-ticket-{}", state.peer_id),
-                "node_id": state.peer_id,
-            }
-        }))
-        .into_response(),
+        ("peer", "get_ticket") => {
+            let ticket = {
+                let bus = state.bus.lock().await;
+                bus.ticket_by_peer
+                    .get(&state.peer_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("fake-ticket-{}", state.peer_id))
+            };
+            AxumJson(json!({
+                "status": "ok",
+                "data": {
+                    "ticket": ticket,
+                    "node_id": state.peer_id,
+                }
+            }))
+            .into_response()
+        }
         ("peer", "gossip_join") => {
             let topic = body
                 .get("topic")

@@ -168,18 +168,26 @@ The default policy must block LAN/private IP ranges unless a user or operator
 explicitly grants them.
 
 Remote Carrier exits are configured as `remote_carrier_exits` on the internal
-`exit-provider`. A remote exit must name the remote Runtime DID/service,
-private `connect_ticket`, stable operator `grant_id`, allowlisted principals,
+`exit-provider`. A remote exit must name the remote Runtime peer DID,
+stable operator `grant_id`, allowlisted principals,
 allowlisted public hosts/schemes/ports, a global active-stream quota, and
-optionally a per-principal active-stream quota plus `expires_at` grant lifetime. Expired
-grants remain visible as expired provider status for diagnostics, but cannot be
+optionally a per-principal active-stream quota plus `expires_at` grant lifetime.
+`connect_ticket` is not part of that authority. A grant installed by Services
+names the peer DID and carries no ticket. The Runtime dials that DID and
+accepts the connection only when the peer presents the same key. A legacy
+config may still include a `connect_ticket`. When it does, the ticket is a
+routing hint: it must be a non-empty token with no padding, and every endpoint
+in it must be that same peer. An empty or padded ticket is rejected.
+Expired grants remain visible as expired provider status for diagnostics, but cannot be
 discovered, quoted, or opened. `discover_remote_carrier_exits` returns a typed,
 principal-scoped `elastos.exit.remote-carrier.discovery/v1` list of
 permitted Carrier stream exits with the grant id, policy/accounting, and without
 leaking the allowed-principal list. `quote` and `open_stream` return typed
 `elastos.exit.remote-carrier.quote/v1` /
 `elastos.exit.remote-carrier-session/v1` receipts with
-`byte_transport=carrier_stream` and the grant id; they do not expose Unix
+`byte_transport=carrier_stream` and the grant id. The session receipt's Carrier
+descriptor names the peer DID. It includes `connect_ticket` only when the
+installed config still has one. Receipts do not expose Unix
 sockets, host paths, TCP sockets, private route tickets, or direct network
 authority to the Browser capsule.
 

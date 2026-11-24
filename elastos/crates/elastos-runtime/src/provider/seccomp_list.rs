@@ -268,9 +268,17 @@ mod tests {
         }
         assert!(!local_x86.contains(&"sendmmsg") && !object_x86.contains(&"sendmmsg"));
         assert!(local_x86.contains(&"rmdir"));
+        assert!(local_x86.contains(&"readlink"), "x86_64 realpath uses syscall readlink");
+        assert!(local_x86.contains(&"readlinkat"));
+        assert!(!local_x86.contains(&"chmod"));
+        assert!(!local_x86.contains(&"fchmodat"));
         assert!(!local_x86.contains(&"flock"));
         assert!(!local_x86.contains(&"socket"));
         assert!(!local_x86.contains(&"connect"));
+        assert!(!chain_x86.contains(&"readlink"), "chain does not canonicalize");
+        assert!(!chain_arm.contains(&"readlink"), "chain does not canonicalize");
+        assert!(object_x86.contains(&"readlink"), "x86_64 realpath uses syscall readlink");
+        assert!(object_x86.contains(&"readlinkat"));
         assert!(object_x86.contains(&"flock"));
         assert!(object_x86.contains(&"fchmod"), "mode uses fchmod on the held descriptor");
         assert!(!object_x86.contains(&"chmod"), "path chmod is not mediated by Landlock");
@@ -282,7 +290,13 @@ mod tests {
         let local_arm = linux_seccomp_list(RuntimeProviderId::Localhost, &local, AuditArch::Aarch64);
         let object_arm = linux_seccomp_list(RuntimeProviderId::Object, &object, AuditArch::Aarch64);
         assert!(!local_arm.contains(&"rmdir"));
+        assert!(!local_arm.contains(&"readlink"), "aarch64 realpath uses readlinkat");
+        assert!(local_arm.contains(&"readlinkat"));
+        assert!(!local_arm.contains(&"chmod"));
+        assert!(!local_arm.contains(&"fchmodat"));
         assert!(local_arm.contains(&"unlinkat"));
+        assert!(!object_arm.contains(&"readlink"), "aarch64 realpath uses readlinkat");
+        assert!(object_arm.contains(&"readlinkat"));
         assert!(object_arm.contains(&"flock"));
         assert!(object_arm.contains(&"fchmod"), "mode uses fchmod on the held descriptor");
         assert!(!object_arm.contains(&"fchmodat"), "path chmod is not mediated by Landlock");

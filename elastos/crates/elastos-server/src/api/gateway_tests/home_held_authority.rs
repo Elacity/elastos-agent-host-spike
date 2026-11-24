@@ -86,18 +86,13 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
     ),
     (
         "elastos-server/src/server_infra.rs",
-        "start_did_provider",
-        "encryption_key: device_key_hex",
+        "register_chain_provider_plane",
+        "load_or_create_device_key",
     ),
     (
         "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
-        "register_chain_provider_plane",
-        "load_or_create_device_key",
     ),
 ];
 
@@ -1389,7 +1384,7 @@ fn rows() -> Vec<HeldRow> {
             "open",
             "device private key",
             "chain provider",
-            "Linux proof pending the CTO's run. A counted run builds chain-provider with --locked --offline into target/provider-fence-tests and panics if that build fails or the Landlock ABI is refused.",
+            "Linux proof pending the CTO's run. A counted run uses the chain binary just prepare-providers built into target/provider-fence-tests and panics if that binary is missing or the Landlock ABI is refused.",
         ),
     ),
     row(
@@ -1420,10 +1415,10 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/server_infra.rs",
-        "start_did_provider",
+        "did_provider_bridge_config",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "DID provider", "Home hands the device private key to the DID provider"),
+        mark("narrowed", "device private key", "DID provider", "DID provider receives the existing device signing seed and the existing `elastos-did-storage` key. It does not receive the raw device key. It can still sign chat as the device."),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -2110,7 +2105,7 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
                 "{}",
                 row.reason
             );
-            assert!(row.reason.contains("panics if that build fails"));
+            assert!(row.reason.contains("panics if that binary is missing"));
         }
         if (row.function, row.mechanism)
             == (

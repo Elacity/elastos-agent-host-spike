@@ -641,6 +641,7 @@ async fn net_exit_test_state(cache_dir: &std::path::Path) -> GatewayState {
 
 async fn browser_engine_test_state(cache_dir: &std::path::Path) -> GatewayState {
     let state = net_exit_test_state(cache_dir).await;
+    crate::setup::install_signed_browser_vm_image_fixture(cache_dir);
     let registry = state.provider_registry.as_ref().unwrap().clone();
     registry
         .register_sub_provider("browser-engine", Arc::new(MockBrowserEngineProvider))
@@ -650,7 +651,7 @@ async fn browser_engine_test_state(cache_dir: &std::path::Path) -> GatewayState 
 }
 
 async fn browser_engine_attached_test_state(cache_dir: &std::path::Path) -> GatewayState {
-    browser_engine_attached_test_state_with_relay(cache_dir, None).await
+    browser_engine_attached_test_state_with_relay(cache_dir, None, true).await
 }
 
 /// Test-only recorder for Browser provider calls.
@@ -720,6 +721,7 @@ async fn browser_engine_reconciliation_test_state(
     BrowserReconciliationCallRecorder,
 ) {
     seed_test_browser_capsules(cache_dir);
+    crate::setup::install_signed_browser_vm_image_fixture(cache_dir);
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register_sub_provider("net", Arc::new(MockNetProvider))
@@ -793,6 +795,7 @@ async fn browser_engine_retrying_close_test_state(
         None
     };
     seed_test_browser_capsules(cache_dir);
+    crate::setup::install_signed_browser_vm_image_fixture(cache_dir);
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register_sub_provider("net", Arc::new(MockNetProvider))
@@ -850,6 +853,7 @@ async fn browser_engine_retrying_close_test_state(
 
 async fn browser_engine_policy_blocked_test_state(cache_dir: &std::path::Path) -> GatewayState {
     seed_test_browser_capsules(cache_dir);
+    crate::setup::install_signed_browser_vm_image_fixture(cache_dir);
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register_sub_provider("net", Arc::new(MockNetProvider))
@@ -900,6 +904,7 @@ async fn browser_engine_remote_carrier_exit_test_state_with_close_failures(
     close_failures: usize,
 ) -> GatewayState {
     seed_test_browser_capsules(cache_dir);
+    crate::setup::install_signed_browser_vm_image_fixture(cache_dir);
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register_sub_provider("net", Arc::new(MockNetProvider))
@@ -957,6 +962,7 @@ async fn rejecting_browser_engine_remote_carrier_exit_test_state_with_close_fail
     close_failures: usize,
 ) -> GatewayState {
     seed_test_browser_capsules(cache_dir);
+    crate::setup::install_signed_browser_vm_image_fixture(cache_dir);
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register_sub_provider("net", Arc::new(MockNetProvider))
@@ -1033,8 +1039,12 @@ async fn malformed_browser_summary_test_state(cache_dir: &std::path::Path) -> Ga
 async fn browser_engine_attached_test_state_with_relay(
     cache_dir: &std::path::Path,
     relay_ipc_path: Option<String>,
+    install_image: bool,
 ) -> GatewayState {
     seed_test_browser_capsules(cache_dir);
+    if install_image {
+        crate::setup::install_signed_browser_vm_image_fixture(cache_dir);
+    }
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register_sub_provider("net", Arc::new(MockNetProvider))

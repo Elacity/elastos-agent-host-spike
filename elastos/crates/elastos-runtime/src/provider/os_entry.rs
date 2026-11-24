@@ -1310,9 +1310,9 @@ mod tests {
 
     /// The real `chain-provider` binary, started by `start_path_allow`.
     ///
-    /// A counted run builds that binary with `--locked --offline` into
-    /// `target/provider-fence-tests` and runs it. A failed build, or a Linux
-    /// kernel that refuses Landlock ABI 5, panics.
+    /// A counted run uses the chain binary `just prepare-providers` built into
+    /// `target/provider-fence-tests`. A missing binary, or a Linux kernel that
+    /// refuses Landlock ABI 5, panics.
     /// Linux-only companions, not this test: `a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer`
     /// and `a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key`.
     #[cfg(all(
@@ -1606,27 +1606,11 @@ mod tests {
         let repo =
             std::fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
                 .expect("repo root");
-        let target_dir = repo.join("target/provider-fence-tests");
-        let binary = target_dir.join("debug/chain-provider");
-        let manifest = repo.join("capsules/chain-provider/Cargo.toml");
-        let output = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--locked", "--offline", "--manifest-path"])
-            .arg(&manifest)
-            .args(["--bin", "chain-provider", "--target-dir"])
-            .arg(&target_dir)
-            .current_dir(&repo)
-            .env("CARGO_TARGET_DIR", &target_dir)
-            .env("CARGO_BUILD_BUILD_DIR", target_dir.join("build"))
-            .env("CARGO_PROFILE_DEV_DEBUG", "line-tables-only")
-            .env("CARGO_TERM_COLOR", "never")
-            .output()
-            .unwrap_or_else(|err| panic!("cargo build chain-provider did not start: {err}"));
-        if !output.status.success() || !binary.is_file() {
+        let binary = repo.join("target/provider-fence-tests/debug/chain-provider");
+        if !binary.is_file() {
             panic!(
-                "cargo build --locked --offline --bin chain-provider failed ({}); binary {}\n{}",
-                output.status,
-                binary.display(),
-                String::from_utf8_lossy(&output.stderr)
+                "chain-provider is not at {}. Run `just prepare-providers` before these tests. That command builds the helper binaries; the tests do not download crates.",
+                binary.display()
             );
         }
         binary
