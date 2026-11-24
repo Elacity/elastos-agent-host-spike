@@ -123,18 +123,28 @@ fn rows() -> Vec<Row> {
             "P2-8",
             1,
         ),
+        // C2 round 2 (6448d2257) moved Command::new(launcher) out of
+        // macos_command into macos_sandbox_command. Both the single-root
+        // start and the path-allow start call that function. It clears the
+        // environment and runs /usr/bin/sandbox-exec. It does not check the
+        // executable bytes; the caller admits the binary first.
         row(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_command",
+            "macos_sandbox_command",
             "command",
             "native provider",
             "none",
             "P2-8",
             1,
         ),
+        // C2 round 2 (6448d2257) moved .spawn() out of macos_start into
+        // macos_launch. macos_start still checks the storage directory and
+        // builds the Seatbelt command. macos_launch sets the child's
+        // descriptors and spawns that command. The spawn does not check the
+        // executable bytes.
         row(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_start",
+            "macos_launch",
             "spawn()",
             "native provider",
             "checked storage+Seatbelt profile",
@@ -662,6 +672,19 @@ fn rows() -> Vec<Row> {
             "checksum",
             "P2-8",
             12,
+        ),
+        // Unix calls spawn_path_allow. Windows calls ProviderBridge::spawn.
+        // The scanner labels both ProviderBridge::spawn, because
+        // spawn_path_allow starts with that prefix. The start census already
+        // counts these two arms.
+        row(
+            "elastos-server/src/server_infra.rs",
+            "spawn_allow_listed_provider",
+            "ProviderBridge::spawn",
+            "native provider",
+            "admitted rights+checked directory+bound executable",
+            "P2-8",
+            2,
         ),
         row(
             "elastos-server/src/server_infra.rs",

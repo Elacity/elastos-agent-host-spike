@@ -10,12 +10,14 @@
 pub mod store;
 pub mod webauthn;
 
+#[cfg(unix)]
+pub use store::install_object_helper_runtime_did;
 pub use store::{
     decode_did_key, derive_did, device_key_path, encode_did_key, encode_signing_key_did,
     load_existing_did, load_nickname, load_nickname_with_device_key, load_or_create_device_key,
-    load_or_create_did, object_helper_runtime_did_path, save_nickname,
-    save_nickname_with_device_key, validate_canonical_ed25519_verifying_key_bytes,
-    validate_nickname, IdentityData, IdentityStore, StoredCredential,
+    load_or_create_did, save_nickname, save_nickname_with_device_key,
+    validate_canonical_ed25519_verifying_key_bytes, validate_nickname, IdentityData, IdentityStore,
+    StoredCredential,
 };
 pub use webauthn::{
     AuthenticationOutcome, AuthenticationResponse, AuthenticatorAssertionResponse,

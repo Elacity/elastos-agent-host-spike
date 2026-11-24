@@ -94,6 +94,11 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
     ),
+    (
+        "elastos-server/src/server_infra.rs",
+        "register_chain_provider_plane",
+        "load_or_create_device_key",
+    ),
 ];
 
 /// Localhost stays open until slice L. Home still passes the raw device key.
@@ -1381,10 +1386,10 @@ fn rows() -> Vec<HeldRow> {
         "load_or_create_device_key",
         1,
         mark(
-            "narrowed",
+            "open",
             "device private key",
             "chain provider",
-            "Home derives the runtime issuer from the device key. The confined chain process is not given that key and cannot open identity/device.key.",
+            "Linux proof pending the CTO's run. The real-binary test prints \"chain-provider binary is absent from the test build\" or the Landlock ABI refusal when it cannot run.",
         ),
     ),
     row(
@@ -2040,7 +2045,7 @@ fn open_rows_are_an_explicit_list() {
 }
 
 /// Localhost, object, and chain start through the path allow-list. The chain
-/// process cannot open `identity/device.key`.
+/// census row stays open until the Linux seccomp and Landlock proof.
 #[test]
 fn localhost_object_and_chain_start_on_the_path_allow_list() {
     let raw = sources()
@@ -2099,8 +2104,15 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
         if (row.function, row.mechanism)
             == ("register_chain_provider_plane", "load_or_create_device_key")
         {
-            assert_eq!(row.status, "narrowed");
-            assert!(row.reason.contains("cannot open identity/device.key"));
+            assert_eq!(row.status, "open");
+            assert!(
+                row.reason.starts_with("Linux proof pending the CTO's run"),
+                "{}",
+                row.reason
+            );
+            assert!(row
+                .reason
+                .contains("chain-provider binary is absent from the test build"));
         }
         if (row.function, row.mechanism)
             == (

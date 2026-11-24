@@ -94,14 +94,17 @@ impl RuntimeProviderId {
     }
 
     /// Calls measured for this helper and absent from its file rows.
-    /// `unlinkat` and `fchmod` stay on the storage row. Chain's names are its
-    /// own row: reqwest 0.12.28, tokio 1.52.1, mio 1.2.0. `fcntl`, `clone`,
+    /// `unlinkat` and `fchmod` stay on the storage row. `chmod` and
+    /// `fchmodat` are not granted: Landlock does not mediate them, so a path
+    /// chmod would reach any same-user file. Mode is `fchmod` on the held
+    /// descriptor, or the mode passed at create. Chain's names are its own
+    /// row: reqwest 0.12.28, tokio 1.52.1, mio 1.2.0. `fcntl`, `clone`,
     /// `socket`, `setsockopt`, and `getsockopt` are argument-checked, so they
     /// stay off this list.
     pub(super) fn measured_syscalls(self) -> &'static str {
         match self {
             Self::Localhost => "rmdir",
-            Self::Object => "chmod fchmodat flock rename renameat rmdir",
+            Self::Object => "flock rename renameat rmdir",
             Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit rseq rt_sigprocmask rename renameat",
             Self::Did | Self::Wallet | Self::Model => "",
         }

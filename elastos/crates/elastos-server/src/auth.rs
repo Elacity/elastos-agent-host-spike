@@ -4975,13 +4975,15 @@ pub fn load_or_create_recovery_archive_key(_data_dir: &Path) -> anyhow::Result<[
 
 #[cfg(unix)]
 fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, permissions)
-            .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
-    }
+    use std::os::unix::fs::PermissionsExt;
+    // `fchmod` on the opened descriptor. A path chmod is not mediated by Landlock.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
     Ok(())
 }
 
@@ -12813,7 +12815,14 @@ pub(crate) fn create_owner_only_dir_all(data_dir: &Path, path: &Path) -> anyhow:
             && metadata.uid() == unsafe { libc::geteuid() }
             && metadata.permissions().mode() & 0o077 != 0
         {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            // `fchmod` on the directory descriptor. A path chmod is not mediated by Landlock.
+            let directory = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(path)
+                .with_context(|| format!("failed to restrict {path:?} to owner-only"))?;
+            directory
+                .set_permissions(std::fs::Permissions::from_mode(0o700))
                 .with_context(|| format!("failed to restrict {path:?} to owner-only"))?;
         }
     }

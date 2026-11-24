@@ -111,12 +111,13 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(prepared.exec_path())"].concat(),
             os_path: "",
         },
-        // The macOS confined start checks the storage root's identity and
-        // wraps the provider in a Seatbelt profile. Neither checks the
-        // executable's bytes; the caller's admission does that.
+        // C2 round 2 (6448d2257) moved Command::new(launcher) into
+        // macos_sandbox_command. That function clears the environment and
+        // runs /usr/bin/sandbox-exec. It does not check the executable bytes.
+        // The caller admits the binary first. macos_command only forwards.
         TrustColumn {
             file: "elastos-runtime/src/provider/os_entry.rs",
-            function: "macos_command",
+            function: "macos_sandbox_command",
             call: "command",
             class: "n/a",
             trust_root: "none",
@@ -124,9 +125,12 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["Command::new", "(launcher)"].concat(),
             os_path: "",
         },
+        // C2 round 2 (6448d2257) moved .spawn() into macos_launch.
+        // macos_start checks the storage directory and builds the command.
+        // This function spawns it and does not check the executable bytes.
         TrustColumn {
             file: "elastos-runtime/src/provider/os_entry.rs",
-            function: "macos_start",
+            function: "macos_launch",
             call: "spawn()",
             class: "n/a",
             trust_root: "none",
@@ -684,6 +688,19 @@ fn columns() -> Vec<TrustColumn> {
             trust_root: "none",
             verified_when: "never",
             evidence: ["ProviderBr", "idge::spawn; verified via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            os_path: "",
+        },
+        // Unix is spawn_path_allow. Windows is ProviderBridge::spawn.
+        // Both sit in spawn_allow_listed_provider. The scanner's label is
+        // ProviderBridge::spawn for the shared prefix.
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "spawn_allow_listed_provider",
+            call: "ProviderBridge::spawn",
+            class: "n/a",
+            trust_root: "none",
+            verified_when: "never",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1511,7 +1528,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&binary_path, config)"].concat(),
+            [
+                "spawn_allow_listed_provider(",
+                "\"localhost-provider\", &binary_path, &data_dir, config)",
+            ]
+            .concat(),
             1,
         ),
         (
@@ -1535,7 +1556,11 @@ fn trust_columns_cover_each_loader_and_bind_to_source() {
         (
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
-            ["ProviderBridge::", "spawn(&path, object_config)"].concat(),
+            [
+                "spawn_allow_listed_provider(",
+                "\"object-provider\", &path, &data_dir, object_config)",
+            ]
+            .concat(),
             1,
         ),
         (

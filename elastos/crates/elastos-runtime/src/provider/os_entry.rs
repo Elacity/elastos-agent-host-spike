@@ -1223,7 +1223,7 @@ mod tests {
             let foreign_lit = format!("{:?}", foreign.display().to_string());
             let result_lit = format!("{:?}", result.display().to_string());
             let mut probe = String::from(
-                "fn main() {\n    let mut report = String::new();\n    let checks: &[(&str, &str)] = &[\n        (\"device\", ",
+                "use std::os::unix::fs::PermissionsExt;\nfn main() {\n    let mut report = String::new();\n    let checks: &[(&str, &str)] = &[\n        (\"device\", ",
             );
             probe.push_str(&device_lit);
             probe.push_str("),\n        (\"own\", ");
@@ -1231,7 +1231,7 @@ mod tests {
             probe.push_str("),\n        (\"foreign\", ");
             probe.push_str(&foreign_lit);
             probe.push_str(
-                "),\n    ];\n    for (name, path) in checks {\n        let code = match std::fs::File::open(path) {\n            Ok(_) => \"open\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        let stat = match std::fs::symlink_metadata(path) {\n            Ok(_) => \"stat\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        report.push_str(name);\n        report.push('=');\n        report.push_str(&code);\n        report.push('\\n');\n        report.push_str(name);\n        report.push_str(\"_stat=\");\n        report.push_str(&stat);\n        report.push('\\n');\n    }\n    if std::fs::write(",
+                "),\n    ];\n    for (name, path) in checks {\n        let code = match std::fs::File::open(path) {\n            Ok(_) => \"open\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        let stat = match std::fs::symlink_metadata(path) {\n            Ok(_) => \"stat\".to_string(),\n            Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n        };\n        report.push_str(name);\n        report.push('=');\n        report.push_str(&code);\n        report.push('\\n');\n        report.push_str(name);\n        report.push_str(\"_stat=\");\n        report.push_str(&stat);\n        report.push('\\n');\n        if *name == \"device\" {\n            let chmod = match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {\n                Ok(_) => \"chmod\".to_string(),\n                Err(err) => err.raw_os_error().unwrap_or(-1).to_string(),\n            };\n            report.push_str(\"device_chmod=\");\n            report.push_str(&chmod);\n            report.push('\\n');\n        }\n    }\n    if std::fs::write(",
             );
             probe.push_str(&result_lit);
             probe.push_str(", report).is_err() {\n        std::process::exit(91);\n    }\n}\n");
@@ -1286,6 +1286,16 @@ mod tests {
                 "stat",
                 "{key} Landlock does not gate inode metadata; stat of identity/device.key stays allowed: {report}"
             );
+            // chmod/fchmodat are not in the object filter. Seccomp returns
+            // EACCES (13). Landlock would not have stopped a granted chmod.
+            #[cfg(target_os = "linux")]
+            if key == "object-provider" {
+                assert_eq!(
+                    line("device_chmod"),
+                    "13",
+                    "{key} chmod of identity/device.key was not refused: {report}"
+                );
+            }
             assert_eq!(
                 line("own"),
                 "open",
@@ -1300,8 +1310,9 @@ mod tests {
 
     /// The real `chain-provider` binary, started by `start_path_allow`.
     ///
-    /// Run on Linux with `--ignored` and `ELASTOS_CHAIN_PROVIDER_BIN` set.
-    /// The kernel Landlock ABI must be at least 5. The same test runs on macOS.
+    /// Runs when that binary is already in this test build. Linux also needs
+    /// Landlock ABI 5 or newer. When the binary is absent, or the kernel
+    /// refuses that ABI, the test prints the named reason and returns.
     /// Linux-only companions, not this test: `a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer`
     /// and `a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key`.
     #[cfg(all(
@@ -1314,17 +1325,22 @@ mod tests {
             )
         )
     ))]
-    #[ignore = "needs ELASTOS_CHAIN_PROVIDER_BIN; Linux also needs Landlock ABI >= 5"]
     #[test]
     fn chain_provider_binary_answers_inside_its_fence() {
         use sha2::{Digest, Sha256};
         use std::io::{Read, Write};
 
-        let bin = PathBuf::from(
-            std::env::var("ELASTOS_CHAIN_PROVIDER_BIN").unwrap_or_else(|_| {
-                panic!("ELASTOS_CHAIN_PROVIDER_BIN is required to run this ignored test")
-            }),
-        );
+        #[cfg(target_os = "linux")]
+        if let Err(reason) = super::super::landlock_plan::kernel_abi() {
+            eprintln!("chain-provider real-binary proof did not run: {reason}");
+            return;
+        }
+        let Some(bin) = chain_provider_binary() else {
+            eprintln!(
+                "chain-provider real-binary proof did not run: chain-provider binary is absent from the test build"
+            );
+            return;
+        };
         assert!(bin.is_file(), "chain binary {}", bin.display());
         let binary_bytes = std::fs::read(&bin).unwrap();
         eprintln!("chain binary sha256 {:x}", Sha256::digest(&binary_bytes));
@@ -1580,6 +1596,22 @@ mod tests {
             "clean chain helper {}",
             wait_text(status)
         );
+    }
+
+    fn chain_provider_binary() -> Option<PathBuf> {
+        let mut candidates = Vec::new();
+        if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
+            candidates.push(PathBuf::from(dir).join("debug").join("chain-provider"));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(debug_dir) = exe.parent().and_then(|path| path.parent()) {
+                candidates.push(debug_dir.join("chain-provider"));
+            }
+        }
+        candidates.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/debug/chain-provider"),
+        );
+        candidates.into_iter().find(|path| path.is_file())
     }
 
     fn probe_stdio() -> (ChildStdio, i32, i32) {

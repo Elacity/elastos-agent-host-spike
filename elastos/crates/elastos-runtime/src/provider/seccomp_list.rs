@@ -272,8 +272,9 @@ mod tests {
         assert!(!local_x86.contains(&"socket"));
         assert!(!local_x86.contains(&"connect"));
         assert!(object_x86.contains(&"flock"));
-        assert!(object_x86.contains(&"chmod"));
-        assert!(object_x86.contains(&"fchmodat"));
+        assert!(object_x86.contains(&"fchmod"), "mode uses fchmod on the held descriptor");
+        assert!(!object_x86.contains(&"chmod"), "path chmod is not mediated by Landlock");
+        assert!(!object_x86.contains(&"fchmodat"), "path chmod is not mediated by Landlock");
         assert!(object_x86.contains(&"rename"));
         assert!(object_x86.contains(&"rmdir"));
         assert!(!object_x86.contains(&"socket"));
@@ -283,7 +284,8 @@ mod tests {
         assert!(!local_arm.contains(&"rmdir"));
         assert!(local_arm.contains(&"unlinkat"));
         assert!(object_arm.contains(&"flock"));
-        assert!(object_arm.contains(&"fchmodat"));
+        assert!(object_arm.contains(&"fchmod"), "mode uses fchmod on the held descriptor");
+        assert!(!object_arm.contains(&"fchmodat"), "path chmod is not mediated by Landlock");
         assert!(object_arm.contains(&"renameat"));
         assert!(!object_arm.contains(&"chmod"));
         assert!(!object_arm.contains(&"rename"));

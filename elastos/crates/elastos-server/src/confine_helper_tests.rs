@@ -7,10 +7,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// Localhost and object do their file job and cannot open or stat the device key.
+/// Localhost and object do their file job and cannot open the device key.
 ///
-/// Object init itself opens and lstats `identity/device.key`. A successful init
-/// means both calls were refused. The parent then checks the key bytes are unchanged.
+/// macOS also refuses lstat. Linux Landlock does not mediate stat, so the
+/// localhost stat of `identity/device.key` is `ok` and must not carry the key
+/// bytes. The read stays an error. Removing the fence makes that read succeed.
+/// Object init decides by open on Linux and by open plus lstat on macOS. A
+/// successful init means that check passed. The parent then checks the key
+/// bytes are unchanged.
 #[cfg(any(
     target_os = "macos",
     all(
@@ -137,14 +141,26 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     assert_eq!(removed["status"], "ok", "{removed}");
     assert!(!data.join("AppCapsules/folder").exists());
     for op in ["stat", "read"] {
-        let denied = exchange(
+        let answer = exchange(
             &bridge,
             serde_json::json!({"op": op, "path": "identity/device.key"}),
         )
         .await;
-        assert_eq!(denied["status"], "error", "{op}: {denied}");
-        let text = denied.to_string();
-        assert!(!text.contains("localhost-device-key-secret!!"), "{text}");
+        let text = answer.to_string();
+        assert!(
+            !text.contains("localhost-device-key-secret!!"),
+            "{op}: {text}"
+        );
+        if op == "read" || !cfg!(target_os = "linux") {
+            assert_eq!(answer["status"], "error", "{op}: {answer}");
+        } else {
+            // Landlock does not mediate stat. The read above is the fence:
+            // if the fence is removed, open succeeds and this test fails.
+            assert_eq!(
+                answer["status"], "ok",
+                "Linux stat of identity/device.key is not mediated by Landlock: {answer}"
+            );
+        }
     }
     assert_eq!(std::fs::read(&key_path).unwrap(), secret);
     bridge.shutdown().await.unwrap();
@@ -153,11 +169,11 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     let principal = "person:local:ada";
     let record = crate::auth::store_test_human_principal(&object_data, principal);
     let (_, did) = elastos_identity::load_or_create_did(&object_data).unwrap();
-    let did_path = elastos_identity::object_helper_runtime_did_path(&object_data);
-    if let Some(parent) = did_path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(&did_path, did.as_bytes()).unwrap();
+    let runtime_did_file = object_data.join("ElastOS/System/Auth/runtime-did");
+    assert!(
+        !runtime_did_file.exists(),
+        "the object helper has no runtime-did file"
+    );
     let object_key = object_data.join("identity").join("device.key");
     let object_secret = std::fs::read(&object_key).unwrap();
     let object_secret_hex = hex::encode(&object_secret);
@@ -169,6 +185,7 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
         &object_data,
         elastos_runtime::provider::BridgeProviderConfig {
             base_path: object_data.display().to_string(),
+            extra: serde_json::json!({ "runtime_did": did }),
             ..Default::default()
         },
     )
@@ -231,5 +248,9 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
         assert!(!text.contains(&object_secret_hex), "{text}");
     }
     assert_eq!(std::fs::read(&object_key).unwrap(), object_secret);
+    assert!(
+        !runtime_did_file.exists(),
+        "the confined helper must not create a runtime-did file"
+    );
     object_bridge.shutdown().await.unwrap();
 }
