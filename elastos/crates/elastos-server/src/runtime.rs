@@ -2951,88 +2951,6 @@ impl Runtime {
         }
     }
 
-    /// Gives `planted_id` the model account and manifest ceiling `live_id`
-    /// already holds. This does not Start the planted session and does not
-    /// admit a live run.
-    #[cfg(test)]
-    pub(crate) fn share_agent_model_account_for_test(&self, live_id: &str, planted_id: &str) {
-        let held = self
-            .bridge_model_token_ceilings
-            .read()
-            .unwrap_or_else(|err| err.into_inner())
-            .get(live_id)
-            .cloned()
-            .expect("the live run holds this agent's model account");
-        self.bridge_model_token_ceilings
-            .write()
-            .unwrap_or_else(|err| err.into_inner())
-            .insert(planted_id.to_string(), held);
-        let bounds = self
-            .bridge_manifest_capabilities
-            .read()
-            .ok()
-            .and_then(|guard| guard.get(live_id).cloned())
-            .unwrap_or_default();
-        if let Ok(mut guard) = self.bridge_manifest_capabilities.write() {
-            guard.insert(planted_id.to_string(), bounds);
-        }
-    }
-
-    /// The account [`Self::model_dispatch_budget`] would hand this capsule.
-    #[cfg(test)]
-    pub(crate) fn model_dispatch_for_test(
-        &self,
-        capsule_id: &str,
-    ) -> (
-        Option<u64>,
-        Option<crate::resource_bridge::ModelDispatchBudget>,
-    ) {
-        Self::model_dispatch_budget(
-            capsule_id,
-            &self.bridge_model_token_ceilings,
-            &self.model_budget,
-            &self.model_offer_bounds,
-        )
-    }
-
-    /// The bridge context the hostcall builds for `capsule_id`, including the
-    /// model account from [`Self::model_dispatch_budget`].
-    #[cfg(test)]
-    pub(crate) async fn bridge_context_for_test(
-        &self,
-        capsule_id: &str,
-        principal_id: Option<String>,
-    ) -> crate::resource_bridge::BridgeContext {
-        let registry = self
-            .provider_registry
-            .read()
-            .await
-            .clone()
-            .expect("the runtime has a provider registry");
-        let authority = self
-            .instance_authority
-            .read()
-            .unwrap_or_else(|err| err.into_inner())
-            .clone()
-            .expect("the runtime has its capability plane");
-        let tables = self.bridge_tables_for_test(capsule_id);
-        let (model_token_ceiling, model_budget) = self.model_dispatch_for_test(capsule_id);
-        crate::resource_bridge::BridgeContext {
-            provider_registry: registry,
-            capability_manager: authority.capability_manager,
-            pending_store: authority.pending_store,
-            capsule_id: capsule_id.to_string(),
-            session_id: capsule_id.to_string(),
-            principal_id,
-            manifest_capabilities: tables.manifest_capabilities,
-            data_dir: Some(authority.data_dir),
-            launch: tables.launch,
-            model_token_ceiling,
-            model_budget,
-            stop: tables.stop,
-        }
-    }
-
     /// The end of every start, and the one place in this file that fills a
     /// capsule's ceiling: from the one bounds function, for a start from a
     /// folder and for a start by CID alike. While the activation runs, that
@@ -3612,6 +3530,87 @@ pub(crate) mod tests {
         Component, ComponentImportSection, ComponentTypeRef as EncodedComponentTypeRef,
         ComponentTypeSection, InstanceType,
     };
+
+    impl Runtime {
+        /// Gives `planted_id` the model account and manifest ceiling `live_id`
+        /// already holds. This does not Start the planted session and does not
+        /// admit a live run.
+        pub(crate) fn share_agent_model_account_for_test(&self, live_id: &str, planted_id: &str) {
+            let held = self
+                .bridge_model_token_ceilings
+                .read()
+                .unwrap_or_else(|err| err.into_inner())
+                .get(live_id)
+                .cloned()
+                .expect("the live run holds this agent's model account");
+            self.bridge_model_token_ceilings
+                .write()
+                .unwrap_or_else(|err| err.into_inner())
+                .insert(planted_id.to_string(), held);
+            let bounds = self
+                .bridge_manifest_capabilities
+                .read()
+                .ok()
+                .and_then(|guard| guard.get(live_id).cloned())
+                .unwrap_or_default();
+            if let Ok(mut guard) = self.bridge_manifest_capabilities.write() {
+                guard.insert(planted_id.to_string(), bounds);
+            }
+        }
+
+        /// The account [`Self::model_dispatch_budget`] would hand this capsule.
+        pub(crate) fn model_dispatch_for_test(
+            &self,
+            capsule_id: &str,
+        ) -> (
+            Option<u64>,
+            Option<crate::resource_bridge::ModelDispatchBudget>,
+        ) {
+            Self::model_dispatch_budget(
+                capsule_id,
+                &self.bridge_model_token_ceilings,
+                &self.model_budget,
+                &self.model_offer_bounds,
+            )
+        }
+
+        /// The bridge context the hostcall builds for `capsule_id`, including the
+        /// model account from [`Self::model_dispatch_budget`].
+        pub(crate) async fn bridge_context_for_test(
+            &self,
+            capsule_id: &str,
+            principal_id: Option<String>,
+        ) -> crate::resource_bridge::BridgeContext {
+            let registry = self
+                .provider_registry
+                .read()
+                .await
+                .clone()
+                .expect("the runtime has a provider registry");
+            let authority = self
+                .instance_authority
+                .read()
+                .unwrap_or_else(|err| err.into_inner())
+                .clone()
+                .expect("the runtime has its capability plane");
+            let tables = self.bridge_tables_for_test(capsule_id);
+            let (model_token_ceiling, model_budget) = self.model_dispatch_for_test(capsule_id);
+            crate::resource_bridge::BridgeContext {
+                provider_registry: registry,
+                capability_manager: authority.capability_manager,
+                pending_store: authority.pending_store,
+                capsule_id: capsule_id.to_string(),
+                session_id: capsule_id.to_string(),
+                principal_id,
+                manifest_capabilities: tables.manifest_capabilities,
+                data_dir: Some(authority.data_dir),
+                launch: tables.launch,
+                model_token_ceiling,
+                model_budget,
+                stop: tables.stop,
+            }
+        }
+    }
 
     pub(crate) struct NoopComputeProvider;
 
