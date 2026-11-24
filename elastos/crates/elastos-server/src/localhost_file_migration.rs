@@ -47,9 +47,12 @@ const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
 const LOCALHOST_ENCRYPTED_ROOTS: &[&str] = &["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"];
 
 #[cfg(all(unix, test))]
+type MigrationReplaceHook = Box<dyn Fn(&Path)>;
+
+#[cfg(all(unix, test))]
 thread_local! {
     static WRITE_BUDGET: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
-    static BEFORE_REPLACE: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> =
+    static BEFORE_REPLACE: std::cell::RefCell<Option<MigrationReplaceHook>> =
         std::cell::RefCell::new(None);
 }
 
@@ -62,7 +65,7 @@ pub(crate) fn set_localhost_migration_write_budget(budget: Option<u32>) {
 /// Runs once for each file, after the bytes are read and before they are
 /// replaced. The test uses this to change the file mid-walk.
 #[cfg(all(unix, test))]
-pub(crate) fn set_localhost_migration_before_replace(hook: Option<Box<dyn Fn(&Path)>>) {
+pub(crate) fn set_localhost_migration_before_replace(hook: Option<MigrationReplaceHook>) {
     BEFORE_REPLACE.with(|slot| *slot.borrow_mut() = hook);
 }
 
