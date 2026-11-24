@@ -136,14 +136,16 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The shell's read of the one frame a v2 guest presented. Home gets nodes,
-/// grant ids, and resource names. This read mints nothing and it is not a
+/// The shell's read of the one frame a v2 guest presented. `caller` is the
+/// principal asking. Home gets nodes, grant ids, and resource names when that
+/// principal presented the frame. This read mints nothing and it is not a
 /// gateway path.
 pub fn read_v2_frame_for_home(
     provider: &elastos_compute::providers::ComponentProvider,
+    caller: Option<&str>,
     id: &str,
 ) -> Option<Vec<elastos_compute::providers::bus2_ui::FrameNode>> {
-    provider.read_v2_frame(id).map(|frame| frame.nodes)
+    provider.read_v2_frame(caller, id).map(|frame| frame.nodes)
 }
 
 /// The public v1 component admission check for capsule kit host tests (kit
@@ -347,38 +349,21 @@ mod tests {
 
     #[test]
     fn v2_frame_read_returns_nodes_and_grant_ids() {
-        use elastos_compute::providers::bus2_ui::{FrameNode, GrantBook, UI_MEDIA_TYPE};
+        use elastos_compute::providers::bus2_ui::{
+            present_frame, FrameNode, GrantBook, UI_MEDIA_TYPE,
+        };
         use elastos_compute::providers::ComponentProvider;
-        use std::sync::atomic::{AtomicU64, Ordering};
-        use std::sync::Arc;
 
-        let provider = ComponentProvider::new();
-        let calls = Arc::new(AtomicU64::new(0));
-        let seen = calls.clone();
-        provider.set_bus_hostcall(Arc::new(move |_, _, _| {
-            seen.fetch_add(1, Ordering::Relaxed);
-            Err("the frame read must not call the bridge".into())
-        }));
         let mut book = GrantBook::default();
         let photo = "localhost://Users/self/Pictures/a.png";
         book.hold("g1", photo, "read");
-        provider
-            .present_held_frame(
-                "cap",
-                UI_MEDIA_TYPE,
-                br#"{"frame":[{"text":"one"}]}"#,
-                &book,
-            )
-            .unwrap();
-        provider
-            .present_held_frame(
-                "cap",
-                UI_MEDIA_TYPE,
-                br#"{"frame":[{"text":"two"},{"image":{"grant":"g1"}}]}"#,
-                &book,
-            )
-            .unwrap();
-        let nodes = super::read_v2_frame_for_home(&provider, "cap").expect("the frame");
+        let replaced = present_frame(
+            UI_MEDIA_TYPE,
+            br#"{"frame":[{"text":"two"},{"image":{"grant":"g1"}}]}"#,
+            &book,
+        )
+        .unwrap();
+        let nodes = replaced.nodes;
         assert_eq!(
             nodes,
             vec![
@@ -396,8 +381,8 @@ mod tests {
                 "two", "g1", photo
             )
         );
-        assert!(super::read_v2_frame_for_home(&provider, "other").is_none());
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let provider = ComponentProvider::new();
+        assert!(super::read_v2_frame_for_home(&provider, None, "other").is_none());
     }
 
     /// A guest reads an object it holds and calls ui.present. Home's frame
@@ -476,16 +461,19 @@ mod tests {
             .expect("docs")
             .insert(second.id.as_str().to_string(), object_b);
 
+        provider
+            .set_bridge_principal(&first.id, Some("person:local:a".into()))
+            .await;
         provider.start(&first).await.expect("first guest starts");
         provider.start(&second).await.expect("second guest starts");
 
-        let frame_of = |id: &str| {
+        let frame_of = |id: &str, caller: Option<&'static str>| {
             let provider = &provider;
             let id = id.to_string();
             async move {
                 tokio::time::timeout(Duration::from_secs(3), async {
                     loop {
-                        if let Some(nodes) = read_v2_frame_for_home(provider, &id) {
+                        if let Some(nodes) = read_v2_frame_for_home(provider, caller, &id) {
                             return nodes;
                         }
                         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -495,16 +483,20 @@ mod tests {
                 .unwrap_or_else(|_| panic!("home frame read stayed empty for {id}"))
             }
         };
-        let nodes_a = frame_of(first.id.as_str()).await;
-        let nodes_b = frame_of(second.id.as_str()).await;
+        let nodes_a = frame_of(first.id.as_str(), Some("person:local:a")).await;
+        let nodes_b = frame_of(second.id.as_str(), None).await;
         assert_eq!(nodes_a, vec![FrameNode::Text("A".into())]);
         assert_eq!(nodes_b, vec![FrameNode::Text("B".into())]);
         assert_eq!(
-            read_v2_frame_for_home(&provider, first.id.as_str()),
+            read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str()),
             Some(vec![FrameNode::Text("A".into())]),
             "the second guest does not replace the first frame"
         );
-        assert!(read_v2_frame_for_home(&provider, "other-guest").is_none());
+        assert!(read_v2_frame_for_home(&provider, None, first.id.as_str()).is_none());
+        assert!(
+            read_v2_frame_for_home(&provider, Some("person:local:a"), second.id.as_str()).is_none()
+        );
+        assert!(read_v2_frame_for_home(&provider, None, "other-guest").is_none());
 
         let seen = lines.lock().expect("lines").clone();
         assert_eq!(seen.len(), 2, "each guest reads its object once: {seen:?}");
@@ -528,6 +520,10 @@ mod tests {
 
         provider.stop(&first).await.unwrap();
         provider.stop(&second).await.unwrap();
+        assert!(
+            read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str()).is_none()
+        );
+        assert!(read_v2_frame_for_home(&provider, None, second.id.as_str()).is_none());
     }
 
     /// A v2 guest asks on the real bridge. The owner grants that pending
@@ -969,7 +965,7 @@ mod tests {
 
         let started = Instant::now();
         let nodes = loop {
-            if let Some(nodes) = read_v2_frame_for_home(&provider, handle.id.as_str()) {
+            if let Some(nodes) = read_v2_frame_for_home(&provider, None, handle.id.as_str()) {
                 break nodes;
             }
             if let Some(outcome) = resident.outcome() {

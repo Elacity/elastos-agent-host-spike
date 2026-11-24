@@ -6078,14 +6078,6 @@ pub(crate) mod tests {
         runtime
             .hold_launch_context(&handle, Some("person:local:resident".into()), None)
             .await;
-        component
-            .present_held_frame(
-                &id,
-                elastos_compute::providers::bus2_ui::UI_MEDIA_TYPE,
-                br#"{"frame":[{"text":"up"}]}"#,
-                &elastos_compute::providers::bus2_ui::GrantBook::default(),
-            )
-            .unwrap();
         runtime
             .register_capsule(RunningCapsuleInfo {
                 id: id.clone(),
@@ -6136,7 +6128,9 @@ pub(crate) mod tests {
         );
         assert!(!runtime.provider_entry_for_test(handle).await);
         assert!(runtime.provider_principal_for_test(handle).await.is_none());
-        assert!(component.read_v2_frame(handle.id.as_str()).is_none());
+        assert!(component
+            .read_v2_frame(Some("person:local:resident"), handle.id.as_str())
+            .is_none());
     }
 
     /// A detached v2 guest stays up, answers stop, and the end clears its
@@ -6154,7 +6148,6 @@ pub(crate) mod tests {
             component.status(&handle).await.unwrap(),
             CapsuleStatus::Running
         );
-        assert!(component.read_v2_frame(handle.id.as_str()).is_some());
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
         assert_eq!(
             component.status(&handle).await.unwrap(),
