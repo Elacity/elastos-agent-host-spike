@@ -611,7 +611,6 @@ mod tests {
             &[],
             None,
             None,
-            None,
         ) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
             Ok(pid) => {
