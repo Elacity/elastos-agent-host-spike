@@ -23,8 +23,6 @@ pub(in crate::api::gateway) async fn resolve_browser_engine_adapter(
     let platform = crate::setup::detect_platform();
     let adapter_id = resolve_browser_engine_adapter_with_preparation(
         registry,
-        data_dir,
-        &platform,
         principal_id,
         requested_adapter,
         display_mode,
@@ -49,11 +47,8 @@ pub(in crate::api::gateway) async fn resolve_browser_engine_adapter(
     Ok((adapter_id, seed))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn resolve_browser_engine_adapter_with_preparation<F, Fut>(
     registry: &ProviderRegistry,
-    _data_dir: &FsPath,
-    _platform: &str,
     principal_id: &str,
     requested_adapter: Option<&str>,
     display_mode: BrowserDisplayMode,
@@ -710,15 +705,12 @@ mod tests {
             "native_browser",
             "diagnostic_playwright",
         ] {
-            let dir = tempfile::tempdir().unwrap();
             let mut adapter = image_adapter("candidate", "configured_provider", true);
             adapter["engine"] = json!(engine);
             let (registry, calls) =
                 image_registry("capsule-provider", vec![adapter], Duration::ZERO).await;
             let result = resolve_browser_engine_adapter_with_preparation(
                 &registry,
-                dir.path(),
-                "darwin-arm64",
                 "person:test",
                 Some("candidate"),
                 BrowserDisplayMode::WebrtcRemoteDisplay,
@@ -971,90 +963,82 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn image_acquisition_finishes_before_local_readiness_budget_starts() {
-        for platform in ["darwin-arm64", "linux-arm64"] {
-            let dir = tempfile::tempdir().unwrap();
-            write_image_config(dir.path());
-            let (registry, calls) = image_registry(
-                "capsule-provider",
-                vec![image_adapter("local", "local_microvm", true)],
-                std::time::Duration::from_secs(11),
-            )
-            .await;
-            let started = tokio::time::Instant::now();
-            let resolved = resolve_browser_engine_adapter_with_preparation(
-                &registry,
-                dir.path(),
-                platform,
-                "person:test",
-                None,
-                BrowserDisplayMode::WebrtcRemoteDisplay,
-                BrowserGuaranteeLevel::MechanismMicrovm,
-                || async {
-                    calls.lock().unwrap().push("prepare".into());
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    calls.lock().unwrap().push("verified".into());
-                    Ok(())
-                },
-            )
-            .await
-            .unwrap();
-            assert_eq!(resolved, "local");
-            assert!(started.elapsed() >= std::time::Duration::from_secs(41));
-            assert_eq!(
-                *calls.lock().unwrap(),
-                ["status", "prepare", "verified", "readiness"]
-            );
-        }
+        let dir = tempfile::tempdir().unwrap();
+        write_image_config(dir.path());
+        let (registry, calls) = image_registry(
+            "capsule-provider",
+            vec![image_adapter("local", "local_microvm", true)],
+            std::time::Duration::from_secs(11),
+        )
+        .await;
+        let started = tokio::time::Instant::now();
+        let resolved = resolve_browser_engine_adapter_with_preparation(
+            &registry,
+            "person:test",
+            None,
+            BrowserDisplayMode::WebrtcRemoteDisplay,
+            BrowserGuaranteeLevel::MechanismMicrovm,
+            || async {
+                calls.lock().unwrap().push("prepare".into());
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                calls.lock().unwrap().push("verified".into());
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolved, "local");
+        assert!(started.elapsed() >= std::time::Duration::from_secs(41));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["status", "prepare", "verified", "readiness"]
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn open_during_startup_verification_waits_outside_readiness_budget() {
-        for platform in ["darwin-arm64", "linux-arm64"] {
-            let dir = tempfile::tempdir().unwrap();
-            write_image_config(dir.path());
-            let (registry, calls) = image_registry(
-                "capsule-provider",
-                vec![image_adapter("local", "local_microvm", true)],
-                std::time::Duration::from_secs(11),
-            )
-            .await;
-            let (finished, verification) = tokio::sync::watch::channel(false);
-            let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let background_count = count.clone();
-            let worker = tokio::spawn(async move {
-                background_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                tokio::time::sleep(std::time::Duration::from_secs(90)).await;
-                finished.send(true).unwrap();
-            });
-            tokio::task::yield_now().await;
-            assert!(!*verification.borrow(), "open starts during verification");
-            let started = tokio::time::Instant::now();
-            let resolved = resolve_browser_engine_adapter_with_preparation(
-                &registry,
-                dir.path(),
-                platform,
-                "person:test",
-                None,
-                BrowserDisplayMode::WebrtcRemoteDisplay,
-                BrowserGuaranteeLevel::MechanismMicrovm,
-                || {
-                    let mut verification = verification.clone();
-                    async move {
-                        while !*verification.borrow_and_update() {
-                            verification.changed().await?;
-                        }
-                        Ok(())
+        let dir = tempfile::tempdir().unwrap();
+        write_image_config(dir.path());
+        let (registry, calls) = image_registry(
+            "capsule-provider",
+            vec![image_adapter("local", "local_microvm", true)],
+            std::time::Duration::from_secs(11),
+        )
+        .await;
+        let (finished, verification) = tokio::sync::watch::channel(false);
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let background_count = count.clone();
+        let worker = tokio::spawn(async move {
+            background_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+            finished.send(true).unwrap();
+        });
+        tokio::task::yield_now().await;
+        assert!(!*verification.borrow(), "open starts during verification");
+        let started = tokio::time::Instant::now();
+        let resolved = resolve_browser_engine_adapter_with_preparation(
+            &registry,
+            "person:test",
+            None,
+            BrowserDisplayMode::WebrtcRemoteDisplay,
+            BrowserGuaranteeLevel::MechanismMicrovm,
+            || {
+                let mut verification = verification.clone();
+                async move {
+                    while !*verification.borrow_and_update() {
+                        verification.changed().await?;
                     }
-                },
-            )
-            .await
-            .unwrap();
-            worker.await.unwrap();
-            assert_eq!(resolved, "local");
-            assert!(started.elapsed() >= std::time::Duration::from_secs(101));
-            assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
-            assert_eq!(*calls.lock().unwrap(), ["status", "readiness"]);
-        }
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+        worker.await.unwrap();
+        assert_eq!(resolved, "local");
+        assert!(started.elapsed() >= std::time::Duration::from_secs(101));
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(*calls.lock().unwrap(), ["status", "readiness"]);
     }
 
     #[tokio::test]
@@ -1084,8 +1068,6 @@ mod tests {
             let (registry, calls) = image_registry(name, adapters, std::time::Duration::ZERO).await;
             let resolved = resolve_browser_engine_adapter_with_preparation(
                 &registry,
-                dir.path(),
-                "darwin-arm64",
                 "person:test",
                 requested,
                 BrowserDisplayMode::WebrtcRemoteDisplay,
@@ -1112,8 +1094,6 @@ mod tests {
             .await;
             let error = resolve_browser_engine_adapter_with_preparation(
                 &registry,
-                dir.path(),
-                "linux-arm64",
                 "person:test",
                 Some("local"),
                 BrowserDisplayMode::WebrtcRemoteDisplay,
@@ -1136,7 +1116,6 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_local_image_reports_artifact_invalid_before_probe() {
-        let dir = tempfile::tempdir().unwrap();
         let (registry, calls) = image_registry(
             "capsule-provider",
             vec![image_adapter("local", "local_microvm", true)],
@@ -1145,8 +1124,6 @@ mod tests {
         .await;
         let error = resolve_browser_engine_adapter_with_preparation(
             &registry,
-            dir.path(),
-            "linux-arm64",
             "person:test",
             Some("local"),
             BrowserDisplayMode::WebrtcRemoteDisplay,
@@ -1198,8 +1175,6 @@ mod tests {
             .await;
             let result = resolve_browser_engine_adapter_with_preparation(
                 &registry,
-                dir.path(),
-                "linux-arm64",
                 "person:test",
                 requested,
                 BrowserDisplayMode::WebrtcRemoteDisplay,
@@ -1217,7 +1192,6 @@ mod tests {
 
     #[tokio::test]
     async fn remote_default_waits_for_explicit_owner_selection() {
-        let dir = tempfile::tempdir().unwrap();
         let (registry, calls) = image_registry(
             "capsule-provider",
             vec![image_adapter("remote", "remote_operator_vm", true)],
@@ -1226,8 +1200,6 @@ mod tests {
         .await;
         let result = resolve_browser_engine_adapter_with_preparation(
             &registry,
-            dir.path(),
-            "darwin-arm64",
             "person:test",
             None,
             BrowserDisplayMode::WebrtcRemoteDisplay,
