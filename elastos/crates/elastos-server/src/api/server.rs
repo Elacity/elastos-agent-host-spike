@@ -245,6 +245,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         capability_manager: capability_manager.clone(),
         capability_store,
         policy_evaluator,
+        v2_guests: runtime.component_guests(),
     };
     let capsule_audit_log = audit_log
         .clone()

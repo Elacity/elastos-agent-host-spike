@@ -867,12 +867,13 @@ mod tests {
         }
 
         let audit = Arc::new(AuditLog::new());
+        let store = Arc::new(CapabilityStore::new());
         let manager = Arc::new(CapabilityManager::new(
-            Arc::new(CapabilityStore::new()),
+            store.clone(),
             audit.clone(),
             Arc::new(MetricsManager::new()),
         ));
-        let pending = Arc::new(PendingRequestStore::new(audit));
+        let pending = Arc::new(PendingRequestStore::new(audit.clone()));
         let registry = Arc::new(ProviderRegistry::new());
         let calls = Arc::new(Mutex::new(0u32));
         registry
@@ -883,7 +884,7 @@ mod tests {
             .await;
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
         let host = tokio::runtime::Handle::current();
-        let provider = ComponentProvider::new();
+        let provider = Arc::new(ComponentProvider::new());
         {
             let registry = registry.clone();
             let manager = manager.clone();
@@ -965,7 +966,8 @@ mod tests {
 
         let started = Instant::now();
         let nodes = loop {
-            if let Some(nodes) = read_v2_frame_for_home(&provider, None, handle.id.as_str()) {
+            if let Some(nodes) = read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str())
+            {
                 break nodes;
             }
             if let Some(outcome) = resident.outcome() {
@@ -998,10 +1000,42 @@ mod tests {
             "the read used the granted token"
         );
 
-        provider
-            .deliver_grant_revoked(&handle.id, &encoded)
+        use tower::ServiceExt;
+        let session_registry = Arc::new(elastos_runtime::session::SessionRegistry::new(audit));
+        let shell = session_registry
+            .create_session(elastos_runtime::session::SessionType::Shell, None)
+            .await;
+        let state = crate::api::handlers::CapabilityState {
+            pending_store: pending.clone(),
+            capability_manager: manager.clone(),
+            capability_store: store,
+            policy_evaluator: Arc::new(elastos_runtime::capability::PolicyEvaluator::new(
+                Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
+                Arc::new(AuditLog::new()),
+            )),
+            v2_guests: Some(provider.clone()),
+        };
+        let app = crate::api::server::shell_capability_routes(
+            crate::api::middleware::ApiState { session_registry },
+            state,
+        );
+        let revoked = app
+            .oneshot(
+                axum::http::Request::delete(format!("/api/capability/{}", request.id.as_str()))
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {}", shell.token),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
             .await
-            .expect("grant-revoked is delivered");
+            .expect("the revoke route answers");
+        assert_eq!(revoked.status(), axum::http::StatusCode::OK);
+        assert!(
+            read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str()).is_none(),
+            "the route drops the frame that names the grant"
+        );
         let outcome = tokio::time::timeout(Duration::from_secs(8), resident.ended())
             .await
             .expect("guest timed out");

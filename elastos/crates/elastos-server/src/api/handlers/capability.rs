@@ -30,6 +30,25 @@ pub struct CapabilityState {
     /// The same store `capability_manager` holds: revocations, use counts, epoch.
     pub capability_store: Arc<CapabilityStore>,
     pub policy_evaluator: Arc<PolicyEvaluator>,
+    /// The runtime's v2 guests. The owner's revoke tells the one that holds the grant.
+    pub v2_guests: Option<Arc<elastos_compute::providers::ComponentProvider>>,
+}
+
+/// Tells the running v2 guest `session_id` that `token` is revoked.
+/// The guest holds the token's base64 text. A runtime with no guests does nothing.
+pub(crate) async fn tell_v2_grant_revoked(
+    guests: Option<&elastos_compute::providers::ComponentProvider>,
+    session_id: &str,
+    token: &elastos_runtime::capability::CapabilityToken,
+) {
+    let Some(guests) = guests else {
+        return;
+    };
+    let Ok(encoded) = token.to_base64() else {
+        return;
+    };
+    let id = elastos_common::CapsuleId::new(session_id);
+    let _ = guests.deliver_grant_revoked(&id, &encoded).await;
 }
 
 // === Request Capability ===
@@ -736,6 +755,12 @@ pub async fn revoke_capability(
                 .pending_store
                 .revoke_request_by(&request_id, "Revoked by user", Settler::Shell)
                 .await;
+            tell_v2_grant_revoked(
+                state.v2_guests.as_deref(),
+                request.session_id.as_str(),
+                token,
+            )
+            .await;
 
             Ok(Json(RevokeCapabilityOutput {
                 success: true,
@@ -780,10 +805,22 @@ pub async fn revoke_all_capabilities(
     Extension(_session): Extension<Session>, // Shell check done by middleware
     Json(input): Json<RevokeAllInput>,
 ) -> Json<RevokeAllOutput> {
+    let held = state.pending_store.list_requests().await;
     let new_epoch = state.capability_manager.revoke_all(&input.reason);
 
     // Mark all granted requests as revoked
     state.pending_store.revoke_all_granted().await;
+    for request in &held {
+        let RequestStatus::Granted { token, .. } = &request.status else {
+            continue;
+        };
+        tell_v2_grant_revoked(
+            state.v2_guests.as_deref(),
+            request.session_id.as_str(),
+            token,
+        )
+        .await;
+    }
 
     Json(RevokeAllOutput {
         success: true,
@@ -1076,6 +1113,7 @@ mod tests {
                 Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
                 audit_log,
             )),
+            v2_guests: None,
         }
     }
 
@@ -1678,6 +1716,7 @@ mod tests {
                 Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
                 audit_log,
             )),
+            v2_guests: None,
         };
         (state, key)
     }

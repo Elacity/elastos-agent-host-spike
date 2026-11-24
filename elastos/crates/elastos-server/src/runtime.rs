@@ -535,12 +535,13 @@ impl ActivationContextHeld {
                 let _ = self.component.stop(&self.handle).await;
                 let settled = match &self.authority {
                     Some(authority) => {
-                        crate::api::handlers::settle::settle_and_revoke(
+                        crate::api::handlers::settle::settle_and_revoke_guests(
                             &authority.pending_store,
                             &authority.capability_manager,
                             &authority.data_dir,
                             &self.id.0,
                             cause,
+                            Some(self.component.as_ref()),
                         )
                         .await
                     }
@@ -825,6 +826,11 @@ pub(crate) struct BridgeTables {
 }
 
 impl Runtime {
+    /// The v2 guests this runtime hosts. The owner's revoke routes tell them.
+    pub(crate) fn component_guests(&self) -> Option<Arc<ComponentProvider>> {
+        self.component_provider.clone()
+    }
+
     /// Create a new runtime with a single compute provider (backward compatible)
     pub fn new(storage: Arc<dyn StorageProvider>, compute: Arc<dyn ComputeProvider>) -> Self {
         Self {

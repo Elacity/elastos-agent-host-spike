@@ -290,7 +290,9 @@ impl ComponentProvider {
 
     /// Delivers `grant-revoked` on the guest's event stream. The next present
     /// of that grant is denied. This uses the stream the guest is already reading.
+    /// A host frame whose image names the grant is dropped here, before the guest reads.
     pub async fn deliver_grant_revoked(&self, id: &CapsuleId, grant: &str) -> Result<()> {
+        drop_frame_naming(&self.frames, &id.0, grant);
         let sender = self
             .instances
             .read()
@@ -1666,10 +1668,15 @@ fn note_delivered_event(
         return;
     };
     book.lock().expect("grant book").revoke(id);
+    drop_frame_naming(frames, capsule_id, id);
+}
+
+/// Drops the host frame for `capsule_id` when an image node names `grant`.
+fn drop_frame_naming(frames: &Mutex<HashMap<String, StoredFrame>>, capsule_id: &str, grant: &str) {
     let mut frames = frames.lock().expect("frames");
     let names = frames.get(capsule_id).is_some_and(|stored| {
         stored.frame.nodes.iter().any(|node| match node {
-            crate::providers::bus2_ui::FrameNode::Image { grant, .. } => grant == id,
+            crate::providers::bus2_ui::FrameNode::Image { grant: named, .. } => named == grant,
             crate::providers::bus2_ui::FrameNode::Text(_) => false,
         })
     });

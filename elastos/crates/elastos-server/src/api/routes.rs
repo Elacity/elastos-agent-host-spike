@@ -1785,6 +1785,7 @@ pub(crate) mod tests {
                     Box::new(ShellPassthroughVerifier),
                     self.audit_log.clone(),
                 )),
+                v2_guests: None,
             }
         }
 
