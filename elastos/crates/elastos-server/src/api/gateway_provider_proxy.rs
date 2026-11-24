@@ -1824,6 +1824,19 @@ pub(super) async fn gateway_provider_proxy(
                     )
                         .into_response();
                 }
+                Err(super::gateway_model_remote::RemoteRouteError::Transport(message))
+                    if message == crate::carrier::SERVICE_PROVIDER_UNREACHABLE =>
+                {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "status": "error",
+                            "code": crate::carrier::SERVICE_PROVIDER_UNREACHABLE,
+                            "message": crate::carrier::SERVICE_PROVIDER_UNREACHABLE,
+                        })),
+                    )
+                        .into_response();
+                }
                 Err(super::gateway_model_remote::RemoteRouteError::Transport(message)) => {
                     return (
                         StatusCode::SERVICE_UNAVAILABLE,

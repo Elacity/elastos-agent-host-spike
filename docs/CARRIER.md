@@ -236,10 +236,16 @@ Configured stream backends can return two private Unix-socket descriptors:
 the socket between them.
 Remote Carrier exits are the cross-runtime form of the same internal Exit
 handoff. They are configured on `exit-provider` as `remote_carrier_exits` with a
-remote Runtime DID/service, private `connect_ticket`, stable operator
+remote Runtime peer DID, stable operator
 `grant_id`, allowlisted principals, allowlisted public hosts/schemes/ports, an
 optional `expires_at` Unix timestamp, a global active-stream quota, and an
-optional per-principal active-stream quota.
+optional per-principal active-stream quota. `connect_ticket` is not required.
+A Services-installed grant names the peer DID and carries no ticket. The
+Runtime dials that DID and accepts the connection only when the peer presents
+the same key. A legacy config may still include a `connect_ticket`. When it
+does, the ticket is a routing hint: it must be a non-empty token with no
+padding, and every endpoint in it must be that same peer. An empty or padded
+ticket is rejected.
 Expired grants remain diagnosable as `state=expired` in provider status, but
 are excluded from discovery and rejected by `quote` / `open_stream`. The returned
 `elastos.exit.remote-carrier.discovery/v1` response is principal-scoped and lists
@@ -248,9 +254,12 @@ but no allowed-principal list, host socket, relay socket, or direct TCP
 authority. `quote` is also a preview surface and does not expose private route
 metadata. The `elastos.exit.remote-carrier-session/v1` receipt carries
 `byte_transport=carrier_stream`, the grant id, and a Carrier peer/service
-descriptor with the private `connect_ticket` consumed by the Runtime-owned
-Carrier stream bridge. Browser capsules and Browser summary responses never
-receive the ticket, a host socket, a relay socket, or direct TCP authority.
+descriptor that names the peer DID. The descriptor includes `connect_ticket`
+only when the installed config still has one. The Runtime-owned Carrier stream
+bridge dials the peer DID. A legacy ticket, when present, is tried first and
+only an endpoint with that peer's key is dialed. Browser capsules and Browser
+summary responses never receive the ticket, a host socket, a relay socket, or
+direct TCP authority.
 The local Browser engine still receives only a Runtime-owned Unix stream socket.
 Runtime opens the remote byte path with the Carrier `browser_exit_stream`
 operation, and the remote runtime must delegate to its own `exit-provider`
@@ -356,11 +365,13 @@ the remote seed option for principals covered by the grant. This selectable
 product mode is not the strict remote-only acceptance lane; use the default
 remote-only mode when collecting proof that no local fallback exists.
 
-The readiness report must pass before acceptance evidence is meaningful. It
-fails if the Browser source still has a local Exit backend fallback, if the
+The readiness report must pass before acceptance evidence is meaningful. The
+product contract above accepts a ticketless grant. The readiness script is an
+acceptance gate and still fails a source grant that has no `connect_ticket`.
+It also fails if the Browser source still has a local Exit backend fallback, if the
 selected `remote_carrier_exits` grant is missing, expired, not permitted for the
-reviewed principal or target, lacks a private route ticket, or points at the
-wrong exit DID. It also fails if the remote exit runtime lacks a target-matching
+reviewed principal or target, or points at the wrong exit DID. A ticket that is
+present must decode and match the peer. It also fails if the remote exit runtime lacks a target-matching
 `stream_relay` backend with private `adapter_ipc` and `relay_ipc` descriptors.
 The report hash-binds the source and exit config files with `config_sha256`,
 records only whether private route material exists, and never prints the
