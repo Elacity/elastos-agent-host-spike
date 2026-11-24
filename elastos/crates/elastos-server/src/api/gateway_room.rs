@@ -641,36 +641,17 @@ async fn gateway_provider_carrier_bootstrap(
         )
             .into_response());
     };
-    let body = match registry
-        .send_raw(
-            "peer",
-            &serde_json::json!({ "op": "get_ticket", "exported": true }),
-        )
-        .await
-    {
-        Ok(body) => body,
-        Err(err) => {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("Collaboration bootstrap unavailable: {err}"),
-            )
-                .into_response())
-        }
-    };
-    if body.get("status").and_then(|status| status.as_str()) == Some("error") {
-        let message = body
-            .get("message")
-            .and_then(|message| message.as_str())
-            .unwrap_or("Collaboration bootstrap unavailable");
-        return Err((StatusCode::SERVICE_UNAVAILABLE, message.to_string()).into_response());
-    }
-    carrier_bootstrap_from_body(&body).ok_or_else(|| {
-        (
+    match crate::carrier::read_private_carrier_ticket(&registry, true).await {
+        Ok(ticket) => Ok(CarrierBootstrapTicket {
+            ticket: ticket.ticket,
+            node_id: ticket.node_id,
+        }),
+        Err(err) => Err((
             StatusCode::SERVICE_UNAVAILABLE,
-            "Collaboration bootstrap unavailable: ticket missing",
+            format!("Collaboration bootstrap unavailable: {err}"),
         )
-            .into_response()
-    })
+            .into_response()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -732,19 +713,11 @@ async fn managed_runtime_carrier_bootstrap_from_coords(
             .timeout(Duration::from_secs(3))
             .build()
             .ok()?;
-        let client_token = attach_client_token_blocking(&client, &coords)?;
-        let peer_cap = request_attached_capability_blocking(
+        let shell_token = attach_runtime_token_blocking(&client, &coords, "shell")?;
+        let body = private_carrier_request_blocking(
             &client,
             &coords.api_url,
-            &client_token,
-            "elastos://peer/*",
-            "message",
-        )?;
-        let body = peer_provider_request_blocking(
-            &client,
-            &coords.api_url,
-            &client_token,
-            &peer_cap,
+            &shell_token,
             "get_ticket",
             serde_json::json!({ "exported": true }),
         )
@@ -1396,15 +1369,16 @@ pub(super) fn ensure_local_room_owner_or_actor(
     Ok(did)
 }
 
-fn attach_client_token_blocking(
+fn attach_runtime_token_blocking(
     client: &reqwest::blocking::Client,
     coords: &GatewayRuntimeCoords,
+    scope: &str,
 ) -> Option<String> {
     let body: serde_json::Value = client
         .post(format!("{}/api/auth/attach", coords.api_url))
         .json(&serde_json::json!({
             "secret": coords.attach_secret,
-            "scope": "client",
+            "scope": scope,
         }))
         .send()
         .ok()?
@@ -1415,64 +1389,21 @@ fn attach_client_token_blocking(
         .map(|resp| resp.token)
 }
 
-fn request_attached_capability_blocking(
+fn private_carrier_request_blocking(
     client: &reqwest::blocking::Client,
     api: &str,
-    client_token: &str,
-    resource: &str,
-    action: &str,
-) -> Option<String> {
-    let body: serde_json::Value = client
-        .post(format!("{}/api/capability/request", api))
-        .header("Authorization", format!("Bearer {}", client_token))
-        .json(&serde_json::json!({
-            "resource": resource,
-            "action": action,
-        }))
-        .send()
-        .ok()?
-        .json()
-        .ok()?;
-
-    if let Some(token) = body.get("token").and_then(|t| t.as_str()) {
-        return Some(token.to_string());
-    }
-
-    let request_id = body.get("request_id").and_then(|r| r.as_str())?;
-    for _ in 0..30 {
-        std::thread::sleep(Duration::from_millis(100));
-        let status: serde_json::Value = client
-            .get(format!("{}/api/capability/request/{}", api, request_id))
-            .header("Authorization", format!("Bearer {}", client_token))
-            .send()
-            .ok()?
-            .json()
-            .ok()?;
-        if let Some(token) = status.get("token").and_then(|t| t.as_str()) {
-            return Some(token.to_string());
-        }
-        match status.get("status").and_then(|s| s.as_str()) {
-            Some("denied") | Some("expired") => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
-fn peer_provider_request_blocking(
-    client: &reqwest::blocking::Client,
-    api: &str,
-    client_token: &str,
-    peer_cap: &str,
+    shell_token: &str,
     op: &str,
     body: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     let response = client
         .post(format!("{api}/api/provider/peer/{op}"))
-        .header(AUTHORIZATION, format!("Bearer {client_token}"))
-        .header("X-Capability-Token", peer_cap)
+        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
         .json(&body)
         .send()?;
+    if !response.status().is_success() {
+        anyhow::bail!("private Carrier request was refused");
+    }
     let body: serde_json::Value = response.json()?;
     if body.get("status").and_then(|status| status.as_str()) == Some("error") {
         anyhow::bail!(

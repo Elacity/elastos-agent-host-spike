@@ -1197,6 +1197,8 @@ jobs:
       - name: configure Rust compile cache
         if: env.CI_USE_CACHE == 'true'
         uses: ./.github/actions/rust-compile-cache
+        with:
+          sccache-cache-size: 4G
       - name: verify compiler cache reuse and invalidation
         if: env.RUSTC_WRAPPER == 'sccache'
         run: python3 scripts/ci-rust-cache-smoke.py --output-json "$RUNNER_TEMP/source-home-cache-probe.json"
@@ -1204,11 +1206,15 @@ jobs:
         if: env.CI_USE_CACHE == 'true'
         with:
           workspaces: elastos
-          prefix-key: ${{ matrix.os }}-${{ runner.arch }}-source-home-registry-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          # The shared key replaces the action's automatic job-id key, so both
+          # x64 journeys resolve one cache entry; the action still appends the
+          # runner OS and CPU architecture, so the ARM entry stays separate.
+          prefix-key: source-home-registry
+          shared-key: journey
           # Cache Cargo inputs; journey artifacts start fresh.
           cache-targets: false
           cache-directories: ${{ env.SCCACHE_DIR }}
-          save-if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host') }}
+          save-if: ${{ (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host') && github.job == 'source-home-linux' }}
       - name: free runner disk
         if: runner.os == 'Linux'
         run: |
@@ -1252,15 +1258,6 @@ jobs:
         id: apt-prerequisites
         timeout-minutes: 13
         run: bash scripts/ci-apt-prerequisites.sh
-      - name: check native musl release crates
-        timeout-minutes: 30
-        run: |
-          case "${{ runner.arch }}" in
-            X64) target=x86_64-unknown-linux-musl ;;
-            ARM64) target=aarch64-unknown-linux-musl ;;
-            *) exit 1 ;;
-          esac
-          bash scripts/check-release-musl.sh "$target"
       - name: save Ubuntu prerequisite archives
         if: ((github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host')) && steps.apt-prerequisites.outputs.changed == 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -1850,8 +1847,8 @@ jobs:
     steps:
       - name: set job build directories
         run: |
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/update-hop-linux-target" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/update-hop-linux-build" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/source-home-linux-target" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_BUILD_DIR=$RUNNER_TEMP/source-home-linux-build" >> "$GITHUB_ENV"
       # Published tarballs keep the shipped Cargo release profile. The nightly
       # builds the PR profile, so the caches it saves match PR runs.
       - name: use CI journey release profile
@@ -1871,15 +1868,21 @@ jobs:
       - name: configure Rust compile cache
         if: env.CI_USE_CACHE == 'true'
         uses: ./.github/actions/rust-compile-cache
+        with:
+          sccache-cache-size: 4G
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         if: env.CI_USE_CACHE == 'true'
         with:
           workspaces: elastos
-          prefix-key: ubuntu-24.04-${{ runner.arch }}-update-hop-source-home-registry-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          # The shared key replaces the action's automatic job-id key, so both
+          # x64 journeys resolve one cache entry; the action still appends the
+          # runner OS and CPU architecture, so the ARM entry stays separate.
+          prefix-key: source-home-registry
+          shared-key: journey
           # Cache Cargo inputs; journey artifacts start fresh.
           cache-targets: false
           cache-directories: ${{ env.SCCACHE_DIR }}
-          save-if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host') }}
+          save-if: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host' }}
       # Two Runtime builds, both releases' support and eight installed Homes need
       # more than the runner image leaves free; these preinstalled SDKs are unused.
       - name: free hosted runner disk
@@ -2072,6 +2075,70 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # The musl release check moved out of the source-home journeys: it compiles the
+  # same release targets per architecture while the journeys rebuild their Homes.
+  musl-check-linux:
+    name: musl-check-linux
+    runs-on: ubuntu-24.04
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
+    timeout-minutes: 45
+    needs: [installed-app-paths, fork-gate]
+    env:
+      # musl-tools is the only host package the musl release check needs.
+      CI_APT_PACKAGES: musl-tools
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      # Published tarballs keep the shipped Cargo release profile. The nightly
+      # builds the PR profile, so the musl check compiles what PR runs compile.
+      - name: use CI journey release profile
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/develop')
+        run: |
+          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
+      - name: install the musl toolchain
+        # The journey host-prerequisites path retries and switches Ubuntu
+        # mirrors; a bare apt-get here fails the merge queue on one mirror error.
+        timeout-minutes: 10
+        run: bash scripts/ci-apt-prerequisites.sh
+      - name: check native musl release crates
+        timeout-minutes: 30
+        run: bash scripts/check-release-musl.sh x86_64-unknown-linux-musl
+
+  musl-check-linux-arm64:
+    name: musl-check-linux-arm64
+    runs-on: ubuntu-22.04-arm
+    # Lane PRs (spark/*) run only the quick checks; the full CI runs on the twice-daily batch PR (batch/*).
+    if: (needs.installed-app-paths.outputs.run != 'false') && !(github.event_name == 'pull_request' && startsWith(github.head_ref, 'spark/'))
+    timeout-minutes: 45
+    needs: [installed-app-paths, fork-gate]
+    env:
+      # musl-tools is the only host package the musl release check needs.
+      CI_APT_PACKAGES: musl-tools
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.sha }}
+      - uses: dtolnay/rust-toolchain@035fceb3c12fb0c6a9461b52775e16473133e591 # 1.95.0
+      # Published tarballs keep the shipped Cargo release profile. The nightly
+      # builds the PR profile, so the musl check compiles what PR runs compile.
+      - name: use CI journey release profile
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/develop')
+        run: |
+          echo "CARGO_PROFILE_RELEASE_LTO=false" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
+      - name: install the musl toolchain
+        # The journey host-prerequisites path retries and switches Ubuntu
+        # mirrors; a bare apt-get here fails the merge queue on one mirror error.
+        timeout-minutes: 10
+        run: bash scripts/ci-apt-prerequisites.sh
+      - name: check native musl release crates
+        timeout-minutes: 30
+        run: bash scripts/check-release-musl.sh aarch64-unknown-linux-musl
+
   # The one check that sums up the run, for branch protection to require: it fails
   # unless every job succeeded or was skipped by its own guard for a reason pinned
   # here. A required job that is skipped otherwise, such as test-behaviour after a
@@ -2082,7 +2149,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: always()
-    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux]
+    needs: [source-gate, fork-gate, pr-substance, test-behaviour, cargo-audit, core-size, engine-llama-amd64, engine-llama-arm64, lint, lab-gates, lab-standin, lab-operator-effects-macos, lab-wasm-capsule, test-elastos, test-capsules, custody-harness-smoke, release-upstream-paths, release-upstream-assets, installed-app-paths, source-home-linux, source-home-linux-arm64, source-home-macos, update-hop-linux, musl-check-linux, musl-check-linux-arm64]
     steps:
       - name: every job passed or was skipped by its own guard
         env:
@@ -2098,7 +2165,8 @@ jobs:
           # Lane pull requests (spark/*) run only the quick checks.
           full_proof = {"engine-llama-amd64", "engine-llama-arm64", "test-elastos", "test-capsules",
                         "custody-harness-smoke", "release-upstream-paths", "release-upstream-assets",
-                        "installed-app-paths", "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux"}
+                        "installed-app-paths", "source-home-linux", "source-home-linux-arm64", "source-home-macos", "update-hop-linux",
+                        "musl-check-linux", "musl-check-linux-arm64"}
           may_skip = set(full_proof) if os.environ["SPARK_PULL_REQUEST"] == "true" else set()
           if os.environ["PULL_REQUEST"] != "true":
               may_skip.add("pr-substance")
@@ -2110,7 +2178,7 @@ jobs:
               may_skip.add("release-upstream-assets")
           # A pull request that changes only notes and lab files skips the installed-app jobs.
           if os.environ["PULL_REQUEST"] == "true" and needs.get("installed-app-paths", {}).get("outputs", {}).get("run") == "false":
-              may_skip.update(("source-home-linux", "source-home-linux-arm64", "update-hop-linux"))
+              may_skip.update(("source-home-linux", "source-home-linux-arm64", "update-hop-linux", "musl-check-linux", "musl-check-linux-arm64"))
           failed = [f"{job}: {need['result']}" for job, need in sorted(needs.items())
                     if need["result"] != "success" and not (need["result"] == "skipped" and job in may_skip)]
           for line in failed:
