@@ -493,8 +493,15 @@ pub async fn stop_agent_session(
         )
             .into_response();
     }
-    // The guard clears the stopping mark on every exit, including cancellation.
+    // This Stop's guard clears only its own token, including cancellation and panic.
     let _stop = runtime.begin_agent_stop(&agent_id).await;
+    #[cfg(test)]
+    {
+        runtime.pause_before_stop_rows(&agent_id).await;
+        if runtime.take_stop_panic_after_mark(&agent_id) {
+            panic!("stop panicked after its mark");
+        }
+    }
     stop_collected_agent_rows(&runtime, &agent_id).await
 }
 
@@ -8726,6 +8733,139 @@ pub(crate) mod tests {
         assert_ne!(stored, revision);
         let (status, _) = stop_route(&home, &second.id, Some("user")).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    /// Stop has set its mark and has not read the registry. There is no live
+    /// row. Start in that window is refused. After this Stop exits, Start is
+    /// allowed again.
+    #[tokio::test]
+    async fn start_is_refused_while_stop_is_marked_before_rows() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let pause = runtime.arm_stop_before_rows(agent);
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            let agent = agent.to_string();
+            async move {
+                stop_agent_session(
+                    Extension(runtime),
+                    Extension(Arc::new(AuditLog::new())),
+                    axum::body::Bytes::from(format!(r#"{{"agent_id":"{agent}"}}"#)),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), pause.entered.notified())
+            .await
+            .expect("Stop did not pause after its mark");
+        assert!(
+            runtime.list_capsules().await.is_empty(),
+            "a live row was present before Stop read the registry"
+        );
+        assert!(
+            start_refused_because_stopping(&runtime, agent).await,
+            "Start was allowed after the mark and before the rows were read"
+        );
+        pause.release.notify_one();
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("Stop did not finish")
+            .expect("Stop panicked");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !runtime.agent_stop_flag_is_set(agent).await,
+            "the mark stayed after Stop returned"
+        );
+        assert!(
+            !start_refused_because_stopping(&runtime, agent).await,
+            "a finished Stop left Start refused"
+        );
+    }
+
+    /// Two Stops at once. The first to exit clears only its own token. The
+    /// mark stays until the second exits.
+    #[tokio::test]
+    async fn two_stops_keep_the_mark_until_both_exit() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let pause = runtime.arm_stop_before_rows(agent);
+        let first = tokio::spawn({
+            let runtime = runtime.clone();
+            let agent = agent.to_string();
+            async move {
+                stop_agent_session(
+                    Extension(runtime),
+                    Extension(Arc::new(AuditLog::new())),
+                    axum::body::Bytes::from(format!(r#"{{"agent_id":"{agent}"}}"#)),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), pause.entered.notified())
+            .await
+            .expect("the first Stop did not pause after its mark");
+        let second = stop_agent_session(
+            Extension(runtime.clone()),
+            Extension(Arc::new(AuditLog::new())),
+            axum::body::Bytes::from(format!(r#"{{"agent_id":"{agent}"}}"#)),
+        )
+        .await;
+        assert_eq!(second.status(), StatusCode::NOT_FOUND);
+        assert!(
+            runtime.agent_stop_flag_is_set(agent).await,
+            "the second Stop cleared the first Stop's mark"
+        );
+        assert!(
+            start_refused_because_stopping(&runtime, agent).await,
+            "Start was allowed while the first Stop still holds its mark"
+        );
+        pause.release.notify_one();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), first)
+            .await
+            .expect("the first Stop did not finish")
+            .expect("the first Stop panicked");
+        assert_eq!(first.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !runtime.agent_stop_flag_is_set(agent).await,
+            "the mark stayed after both Stops exited"
+        );
+        assert!(
+            !start_refused_because_stopping(&runtime, agent).await,
+            "Start stayed refused after both Stops exited"
+        );
+    }
+
+    /// A panic after the mark drops this Stop's token. Start is allowed again.
+    #[tokio::test]
+    async fn a_panic_in_stop_clears_its_mark() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        runtime.arm_stop_panic_after_mark(agent);
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            let agent = agent.to_string();
+            async move {
+                stop_agent_session(
+                    Extension(runtime),
+                    Extension(Arc::new(AuditLog::new())),
+                    axum::body::Bytes::from(format!(r#"{{"agent_id":"{agent}"}}"#)),
+                )
+                .await
+            }
+        });
+        let joined = task.await;
+        assert!(joined.is_err(), "Stop did not panic");
+        assert!(
+            !runtime.agent_stop_flag_is_set(agent).await,
+            "a panic in Stop left the stopping mark set"
+        );
+        assert!(
+            !start_refused_because_stopping(&runtime, agent).await,
+            "a panic in Stop left Start refused"
+        );
     }
 }
 

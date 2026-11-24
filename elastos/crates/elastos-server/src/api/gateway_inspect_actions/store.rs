@@ -374,7 +374,10 @@ fn write_inspect_action_at_path(
 }
 
 /// The store lock is per process, so an update successor can mark a plan
-/// unknown after the draining process completed it.
+/// unknown after the draining process completed it. Between this read and
+/// this write, another process can change the same file, and this write
+/// then replaces that change. A write that fails is skipped, and that
+/// record stays `dispatching`.
 pub(super) fn settle_agent_plans_lost_before_start(
     data_dir: &Path,
     updated_at: u64,

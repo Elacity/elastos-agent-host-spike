@@ -812,7 +812,7 @@ fn write_private_runtime_coords_atomically(
 }
 
 #[cfg(unix)]
-fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
+fn read_private_runtime_coord_bytes(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read as _;
 
     let metadata = std::fs::symlink_metadata(path).ok()?;
@@ -840,7 +840,7 @@ fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
         if data.len() > 64 * 1024 {
             return None;
         }
-        serde_json::from_slice(&data).ok()
+        Some(data)
     }
     #[cfg(not(unix))]
     {
@@ -853,14 +853,19 @@ fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
         if data.len() > 64 * 1024 {
             return None;
         }
-        serde_json::from_slice(&data).ok()
+        Some(data)
     }
 }
 
 #[cfg(windows)]
-fn read_private_runtime_coords(_path: &Path) -> Option<RuntimeCoords> {
+fn read_private_runtime_coord_bytes(_path: &Path) -> Option<Vec<u8>> {
     // Unknown file custody cannot establish a Runtime attach authority.
     None
+}
+
+fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
+    let data = read_private_runtime_coord_bytes(path)?;
+    serde_json::from_slice(&data).ok()
 }
 
 impl Drop for GatewayRuntimeCoordsGuard {
@@ -871,15 +876,66 @@ impl Drop for GatewayRuntimeCoordsGuard {
     }
 }
 
+#[cfg(test)]
+struct CoordsRemovePause {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static COORDS_BEFORE_REMOVE: std::sync::Mutex<Vec<(std::path::PathBuf, CoordsRemovePause)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+async fn pause_before_coords_remove(path: &Path) {
+    let gate = {
+        let mut gates = COORDS_BEFORE_REMOVE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let pos = gates.iter().position(|(stored, _)| stored == path);
+        pos.map(|pos| gates.swap_remove(pos).1)
+    };
+    if let Some(gate) = gate {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+fn arm_coords_before_remove(path: &Path) -> CoordsRemovePause {
+    let pause = CoordsRemovePause {
+        entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    };
+    let handed = CoordsRemovePause {
+        entered: std::sync::Arc::clone(&pause.entered),
+        release: std::sync::Arc::clone(&pause.release),
+    };
+    COORDS_BEFORE_REMOVE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((path.to_path_buf(), pause));
+    handed
+}
+
 pub async fn read_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
     let data = std::fs::read(path).ok()?;
     let coords: RuntimeCoords = serde_json::from_slice(&data).ok()?;
-    validate_runtime_coords(path, coords).await
+    validate_runtime_coords(path, &data, coords).await
 }
 
-async fn validate_runtime_coords(path: &Path, coords: RuntimeCoords) -> Option<RuntimeCoords> {
+/// Removes the file only when it still holds the bytes this call judged.
+async fn validate_runtime_coords(
+    path: &Path,
+    judged: &[u8],
+    coords: RuntimeCoords,
+) -> Option<RuntimeCoords> {
     if !pid_is_alive(coords.pid) {
-        let _ = std::fs::remove_file(path);
+        #[cfg(test)]
+        pause_before_coords_remove(path).await;
+        if std::fs::read(path).ok().as_deref() == Some(judged) {
+            let _ = std::fs::remove_file(path);
+        }
         return None;
     }
     let api_base = LoopbackHttpBaseUrl::parse(&coords.api_url).ok()?;
@@ -993,7 +1049,9 @@ pub async fn read_attachable_runtime_coords(
     let coords = match runtime_kind {
         AttachableRuntimeKind::Operator => read_runtime_coords(&path).await?,
         AttachableRuntimeKind::Gateway => {
-            validate_runtime_coords(&path, read_private_runtime_coords(&path)?).await?
+            let data = read_private_runtime_coord_bytes(&path)?;
+            let coords = serde_json::from_slice(&data).ok()?;
+            validate_runtime_coords(&path, &data, coords).await?
         }
     };
     runtime_kind.matches(&coords).then_some(coords)
@@ -1849,6 +1907,35 @@ mod tests {
         assert!(
             !good.try_exists().unwrap(),
             "pid 0 with a loopback URL was left in place"
+        );
+    }
+
+    /// The dead owner's bytes were judged, then the file was replaced. The
+    /// replacement is kept.
+    #[tokio::test]
+    async fn a_coords_file_replaced_after_the_read_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coords.json");
+        let judged = br#"{"api_url":"http://127.0.0.1:9","attach_secret":"judged","pid":0}"#;
+        let replacement =
+            br#"{"api_url":"http://127.0.0.1:9","attach_secret":"live-owner","pid":1}"#;
+        std::fs::write(&path, judged).unwrap();
+        let pause = super::arm_coords_before_remove(&path);
+        let path_for_read = path.clone();
+        let task = tokio::spawn(async move { read_runtime_coords(&path_for_read).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), pause.entered.notified())
+            .await
+            .expect("coords validation did not pause before remove");
+        std::fs::write(&path, replacement).unwrap();
+        pause.release.notify_one();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("coords read did not finish")
+            .expect("coords read task panicked");
+        assert!(read.is_none());
+        assert!(
+            std::fs::read(&path).ok().as_deref() == Some(replacement.as_slice()),
+            "a coordinates file replaced after the read was removed"
         );
     }
 
