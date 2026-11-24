@@ -338,6 +338,40 @@ system beside Runtime.
 - A public profile projection exposes only fields the principal explicitly
   publishes; a route or visible page does not grant access to private state.
 
+### Agent storage protection
+
+The wrap key seals an agent's data key. Runtime derives that wrap key from
+the owner's data key. The derivation inputs are the owner, the agent id, and
+the agent's root. The same derivation binds the agent's data key id, so a
+key derived for another id, another root, or another data key id does not
+open the wrap. A rename keeps the agent id, the root, and the wrap, and
+changes the display name. Opening the same Home again reads that same
+record, and the stored note opens under the same wrap. Owner recovery on
+the same Home, with the same owner key, reopens every agent of that owner.
+Another person's agents stay closed to the recovered owner, and those agents
+still open for their own owner.
+
+These limits are part of the property:
+
+- A new Home has no agents.
+- A replaced owner data key does not re-wrap agent data yet. The stored
+  wraps stay as they were, and they do not open under the replacement key.
+- A process of the same operating-system user, outside the agent's sandbox,
+  can read the sealed file. The plaintext stays inside the wrap.
+
+`the_wrap_key_binds_each_input`, `the_wrap_key_binds_the_owner_id`, and
+`the_wrap_key_is_the_owners_alone` show the wrap key's inputs.
+`rename_changes_display_name_only` shows a rename leaves the wrap in place.
+`stable_id_after_rename_and_reopen` shows the id, the root, and the note
+after a rename and a reopen. `owner_recovery_reopens_agent_data` shows one
+agent's note after recovery on this Home with the same owner key.
+`owner_recovery_reopens_every_agents_data_and_no_other_persons` shows every
+agent of that owner, and the other person's agent. `a_missing_file_means_no_agents`
+shows a new Home has no agents.
+`a_replaced_owner_data_key_does_not_rewrap_agent_data` shows the replaced-key
+limit. `a_same_user_process_reads_the_sealed_agent_file` shows the same-user
+limit. The doc comment on `the_wrap_key_binds_each_input` names the same tests.
+
 This document does not freeze the exact path layout below `Users/...` or
 `UsersAI/...`. Those paths require their own versioned object contract before
 applications may depend on them.

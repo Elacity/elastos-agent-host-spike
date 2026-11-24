@@ -821,6 +821,33 @@ fn unwrap_data_key(
     )
 }
 
+/// Agent storage protection is the wrap key on the agent's data key.
+///
+/// The wrap key's inputs are the owner, the agent id, and the agent's root.
+/// The derivation also binds the agent's data key id. A rename or a reopen
+/// keeps that wrap, and the stored note still opens. Owner recovery on the
+/// same Home with the same owner key reopens every agent of that owner and
+/// leaves every other person's agent closed to the recovered owner. A new
+/// Home has no agents. A replaced owner data key does not re-wrap agent data
+/// yet. A same-user process outside the agent's sandbox can read the sealed
+/// file; the plaintext stays inside the wrap.
+///
+/// Claims and the tests that show them:
+/// - owner, agent id, root, and data key id: `the_wrap_key_binds_each_input`
+/// - the owner id, even when the data key is shared: `the_wrap_key_binds_the_owner_id`
+/// - another person derives another key: `the_wrap_key_is_the_owners_alone`
+/// - a rename leaves the wrap in place: `rename_changes_display_name_only`
+/// - a rename and a reopen keep the id, the root, and the note:
+///   `stable_id_after_rename_and_reopen`
+/// - recovery on this Home with the same owner key reopens an agent's note:
+///   `owner_recovery_reopens_agent_data`
+/// - that recovery reopens every agent of the owner and no other person's:
+///   `owner_recovery_reopens_every_agents_data_and_no_other_persons`
+/// - a new Home has no agents: `a_missing_file_means_no_agents`
+/// - a replaced owner data key does not re-wrap agent data yet:
+///   `a_replaced_owner_data_key_does_not_rewrap_agent_data`
+/// - a same-user process outside the sandbox reads the sealed file:
+///   `a_same_user_process_reads_the_sealed_agent_file`
 #[test]
 fn the_wrap_key_binds_each_input() {
     let home = Home::new();
@@ -1115,21 +1142,26 @@ fn create_real(home: &Home, request_id: &str) -> AgentView {
     create(home.path(), &home.caller(), &request(request_id), admit, 9).unwrap()
 }
 
-#[cfg(feature = "prototype-agents")]
-fn write_agent_note(home: &Home, agent_id: &str) -> (String, String, PathBuf) {
+fn write_note(home: &Home, agent_id: &str, bytes: &[u8]) -> (String, String, PathBuf) {
+    // The sign-in load includes agent principals when the feature is on, and
+    // in a build without it only for a dispatch fixture. The note is still
+    // written by the real root writer.
+    DISPATCH_FIXTURES
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(home.path().to_path_buf());
     let root = crate::auth::principal_stored_localhost_root(Some(home.path()), agent_id).unwrap();
     let uri = format!("{root}/journal/stable-id.txt");
     let path = elastos_common::localhost::rooted_localhost_fs_path(home.path(), &uri).unwrap();
-    crate::auth::write_principal_root_object(
-        home.path(),
-        agent_id,
-        &root,
-        &uri,
-        &path,
-        b"agent-owned data",
-    )
-    .unwrap();
+    crate::auth::write_principal_root_object(home.path(), agent_id, &root, &uri, &path, bytes)
+        .unwrap();
     (root, uri, path)
+}
+
+#[cfg(feature = "prototype-agents")]
+fn write_agent_note(home: &Home, agent_id: &str) -> (String, String, PathBuf) {
+    write_note(home, agent_id, b"agent-owned data")
 }
 
 #[cfg(feature = "prototype-agents")]
@@ -1775,6 +1807,211 @@ fn owner_recovery_reopens_agent_data() {
         "recovered root"
     );
     assert_agent_note(&reopened, &original_id, &original_root, &uri, &path);
+}
+
+/// Owner recovery on this Home, with the same owner key, reopens every agent
+/// of that owner. Another person's agent still opens for that person, and the
+/// recovered owner cannot read it.
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn owner_recovery_reopens_every_agents_data_and_no_other_persons() {
+    const ORIGIN: &str = "http://localhost:61180";
+    let dir = tempfile::tempdir().unwrap();
+    let mut identity = elastos_identity::IdentityManager::new(dir.path().into()).unwrap();
+    let secret = crate::auth::random_secret_hex();
+    let admission = crate::auth::OwnerAdmission {
+        origin: ORIGIN,
+        rp_id: "localhost",
+        claimant: &secret,
+        loopback: true,
+    };
+    let (_, options) = crate::auth::begin_owner_enrollment(
+        dir.path(),
+        &mut identity,
+        &admission,
+        "owner",
+        crate::auth::now_ts(),
+    )
+    .unwrap()
+    .unwrap();
+    let response = crate::auth::owner_attestation_for_test(
+        &options.unwrap().public_key.challenge,
+        "localhost",
+        ORIGIN,
+    );
+    let grant = crate::auth::complete_owner_enrollment(
+        dir.path(),
+        &mut identity,
+        &admission,
+        "owner",
+        Some(&response),
+        None,
+        crate::auth::now_ts(),
+    )
+    .unwrap()
+    .unwrap();
+    let owner =
+        crate::auth::load_principal_for_proof_binding(dir.path(), &grant.proof_binding_id).unwrap();
+    let protection =
+        crate::auth::store_test_principal_root_protection(dir.path(), &owner.principal_id);
+    let kit = crate::auth::recovery_kit_from_archive(
+        dir.path(),
+        protection.protectors[0].archive.as_ref().unwrap(),
+    )
+    .unwrap();
+    let home = Home { dir, owner };
+    turn_on(&home);
+    let first = create_real(&home, "recovery-a").agent_id;
+    let second = create_real(&home, "recovery-b").agent_id;
+    let (first_root, first_uri, first_path) = write_agent_note(&home, &first);
+    let (second_root, second_uri, second_path) = write_agent_note(&home, &second);
+    let other = second_person(&home, "person:local:other-owner");
+    let other_id = other.principal_id.clone();
+    let foreign = create_as(&home, &caller_of(&other), "recovery-other")
+        .unwrap()
+        .agent_id;
+    let (foreign_root, foreign_uri, foreign_path) = write_agent_note(&home, &foreign);
+
+    let code = crate::auth::arm_owner_recovery(home.path(), ORIGIN, "localhost", 300).unwrap();
+    let client = crate::auth::OwnerRecoveryClient {
+        origin: ORIGIN,
+        rp_id: "localhost",
+        code: &code,
+    };
+    let options =
+        crate::auth::begin_owner_recovery(home.path(), &mut identity, &client, "recovery").unwrap();
+    let response = crate::auth::passkey_attestation_with_id_for_test(
+        &options.public_key.challenge,
+        "localhost",
+        ORIGIN,
+        b"replacement-passkey-every-agent",
+    );
+    crate::auth::complete_owner_recovery(
+        home.path(),
+        &mut identity,
+        &client,
+        "recovery",
+        &response,
+        &kit,
+    )
+    .expect("same-Home owner recovery succeeds");
+
+    let owner_id = home.owner.principal_id.clone();
+    let Home { dir, owner: _ } = home;
+    drop(identity);
+    crate::auth::invalidate_verified_auth_state_cache_for_test(dir.path());
+    let owner = crate::auth::stored_principal_record(dir.path(), &owner_id)
+        .unwrap()
+        .unwrap();
+    let reopened = Home { dir, owner };
+    let mut ids: Vec<String> = loaded(&reopened)
+        .agents
+        .iter()
+        .map(|agent| agent.record.principal_id.clone())
+        .collect();
+    ids.sort();
+    let mut wanted = vec![first.clone(), second.clone(), foreign.clone()];
+    wanted.sort();
+    assert_eq!(ids, wanted, "recovery keeps every stored agent");
+    assert_agent_note(&reopened, &first, &first_root, &first_uri, &first_path);
+    assert_agent_note(&reopened, &second, &second_root, &second_uri, &second_path);
+    assert_agent_note(
+        &reopened,
+        &foreign,
+        &foreign_root,
+        &foreign_uri,
+        &foreign_path,
+    );
+    assert!(
+        crate::auth::read_principal_root_object(
+            reopened.path(),
+            &owner_id,
+            &foreign_root,
+            &foreign_uri,
+            &foreign_path,
+        )
+        .is_err(),
+        "the recovered owner does not open the other person's agent"
+    );
+    assert!(
+        crate::auth::read_principal_root_object(
+            reopened.path(),
+            &other_id,
+            &first_root,
+            &first_uri,
+            &first_path,
+        )
+        .is_err(),
+        "the other person does not open the recovered owner's agent"
+    );
+}
+
+/// Replacing the owner's data key leaves the agent wrap as it was. The new
+/// key does not open it. Nothing in this Home re-wraps the agent data.
+#[test]
+fn a_replaced_owner_data_key_does_not_rewrap_agent_data() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-replaced-key");
+    let plain = b"sealed-under-the-original-owner-key";
+    let (root, uri, path) = write_note(&home, &agent.agent_id, plain);
+    assert_eq!(
+        crate::auth::read_principal_root_object(home.path(), &agent.agent_id, &root, &uri, &path)
+            .unwrap(),
+        plain
+    );
+    let stored = loaded(&home).agents[0].protection.clone();
+    let envelope = stored.protectors[0].envelope.clone().unwrap();
+    let old_wrap = wrap_key(&home, &home.owner, &stored);
+    assert!(unwrap_data_key(&old_wrap, &envelope).is_ok());
+    let file = home.agent_bytes();
+
+    crate::auth::store_test_principal_root_protection(home.path(), &home.owner.principal_id);
+
+    assert_eq!(
+        home.agent_bytes(),
+        file,
+        "a replaced owner data key does not re-wrap the agent"
+    );
+    assert_eq!(loaded(&home).agents[0].protection, stored);
+    let new_wrap = wrap_key(&home, &home.owner, &stored);
+    assert_ne!(
+        new_wrap, old_wrap,
+        "the replacement key derives a different wrap"
+    );
+    assert!(
+        unwrap_data_key(&new_wrap, &envelope).is_err(),
+        "the replacement key does not open the stored wrap"
+    );
+    assert!(unwrap_data_key(&old_wrap, &envelope).is_ok());
+    assert!(
+        crate::auth::read_principal_root_object(home.path(), &agent.agent_id, &root, &uri, &path)
+            .is_err(),
+        "the agent data does not open under the replacement key"
+    );
+}
+
+/// The seal is a normal file. This test process is the same operating-system
+/// user and is outside the agent's sandbox, and it can read the sealed bytes.
+/// The plaintext stays inside the wrap, and the agent's own read still opens it.
+#[test]
+fn a_same_user_process_reads_the_sealed_agent_file() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-same-user");
+    let plain = b"plain-agent-note";
+    let (root, uri, path) = write_note(&home, &agent.agent_id, plain);
+    let sealed = std::fs::read(&path).expect("the same user reads the sealed file");
+    assert!(path.is_file(), "the seal is a regular file");
+    assert!(
+        !sealed.windows(plain.len()).any(|window| window == plain),
+        "the plaintext stays inside the wrap"
+    );
+    assert_eq!(
+        crate::auth::read_principal_root_object(home.path(), &agent.agent_id, &root, &uri, &path)
+            .unwrap(),
+        plain
+    );
 }
 
 #[test]
