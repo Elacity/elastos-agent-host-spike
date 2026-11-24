@@ -190,10 +190,16 @@ export function bindAgents(doc, request, confirmStepUp) {
         throw pageRefusal("Open System from Home to verify your passkey.");
       }
       const stepUpToken = await confirmStepUp(agent);
-      const reply = await request("/api/apps/system/agents/launch", {
-        method: "POST",
-        body: JSON.stringify({ agent_id: id, step_up_token: stepUpToken }),
-      });
+      let reply;
+      try {
+        reply = await request("/api/apps/system/agents/launch", {
+          method: "POST",
+          body: JSON.stringify({ agent_id: id, step_up_token: stepUpToken }),
+        });
+      } catch (error) {
+        if (refusal(error).code === "agent_stopping") stopping.add(id);
+        throw error;
+      }
       if (!reply || reply.agent_id !== id || typeof reply.session_id !== "string") {
         throw pageRefusal("The Home did not confirm that change.");
       }

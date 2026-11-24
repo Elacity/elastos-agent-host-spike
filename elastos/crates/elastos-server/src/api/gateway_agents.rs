@@ -241,6 +241,7 @@ async fn start_agent(
     let owner = agents_owner(state, headers)?;
     let request: AgentLaunchRequest = agents_request(body)?;
     let launch = require_home_launch_token_binding(&state.data_dir, headers, &[SYSTEM_CAPSULE_ID])?;
+    // The step-up is spent before the Runtime can refuse a Start that is already stopping.
     consume_passkey_step_up_token(
         &state.data_dir,
         request.step_up_token.trim(),
@@ -345,7 +346,6 @@ async fn stop_agent(
     let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
     if outcome.stopped.is_empty() && outcome.stopping.is_empty() {
         return Err(match outcome.already.as_deref() {
-            Some("stopping") => Refused("this agent is already stopping".to_string()).into(),
             Some("stopped") => CodedRefusal {
                 code: "agent_already_stopped",
                 reason: "this agent is already stopped",

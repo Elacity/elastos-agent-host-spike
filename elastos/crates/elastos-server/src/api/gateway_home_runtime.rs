@@ -686,7 +686,15 @@ pub(super) async fn launch_runtime_agent(
     let status = response.status();
     if status == StatusCode::CONFLICT {
         let text = response.text().await.unwrap_or_default();
-        return Err(crate::agents::Refused(text.trim().to_string()).into());
+        let trimmed = text.trim();
+        if trimmed == crate::runtime::Runtime::AGENT_STOPPING {
+            return Err(crate::agents::CodedRefusal {
+                code: "agent_stopping",
+                reason: "this agent is stopping",
+            }
+            .into());
+        }
+        return Err(crate::agents::Refused(trimmed.to_string()).into());
     }
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
