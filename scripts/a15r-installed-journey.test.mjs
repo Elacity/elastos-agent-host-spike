@@ -225,6 +225,7 @@ test("user-area route row requires both reads refused", () => {
   const marker = "secret-marker";
   const refused = (root, file) => ({
     called: true,
+    runtime: LIVE_SESSION_COORDS,
     session: "session-a",
     root,
     resource: `${root}/Documents/${file}`,
@@ -242,6 +243,14 @@ test("user-area route row requires both reads refused", () => {
   assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, session: "session-b" } }), false);
   assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, root: rootA, resource: `${rootA}/Documents/other.txt` } }), false);
   assert.equal(userAreaRouteRefused({ grants: [`${rootA}/journal`, `${rootB}/journal`] }), false);
+  assert.equal(userAreaRouteRefused({
+    own: { ...pair.own, status: 404, body: "" },
+    other: { ...pair.other, status: 404, body: "" },
+  }), true);
+  assert.equal(userAreaRouteRefused({
+    own: { ...pair.own, runtime: "home-runtime-coords.json" },
+    other: pair.other,
+  }), false);
   const routes = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/routes.rs", import.meta.url), "utf8");
   for (const line of U4_ISOLATION_NOT_COVERED) {
     assert.equal(line.includes("routes.rs:"), false);
