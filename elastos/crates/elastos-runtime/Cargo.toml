@@ -48,11 +48,6 @@ tar = "0.4"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-[features]
-# Tests in another crate name this process as the confined model provider.
-# A release build leaves the feature off, so `from_io` stays anonymous.
-in-process-model-for-test = []
-
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tempfile = "3.10"

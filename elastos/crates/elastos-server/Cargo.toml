@@ -121,7 +121,6 @@ data-encoding = "2.6"
 custody-provider = { path = "../../../capsules/custody-provider" }
 
 [dev-dependencies]
-elastos-runtime = { path = "../elastos-runtime", features = ["in-process-model-for-test"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 tokio = { version = "1.0", features = ["full", "test-util"] }
 tempfile = "3.10"
@@ -147,4 +146,4 @@ default = []
 prototype-agents = []
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(elastos_unsupported_os_check)", "cfg(elastos_prototype_agents)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(elastos_unsupported_os_check)"] }

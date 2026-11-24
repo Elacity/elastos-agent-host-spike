@@ -127,6 +127,9 @@ mod gateway_transaction_effects;
 mod gateway_wallet;
 #[path = "gateway_wallet_adapter.rs"]
 mod gateway_wallet_adapter;
+#[cfg(test)]
+#[path = "gateway_provider_proxy_tests/http_hosted.rs"]
+pub(crate) mod http_hosted_agent;
 use gateway_agents::*;
 #[cfg(unix)]
 #[cfg(test)]
@@ -233,9 +236,6 @@ pub(super) use gateway_passkey_step_up::{
     consume_or_recover_passkey_step_up_effect, consume_passkey_step_up_token,
     require_hosted_step_up_launch,
 };
-#[cfg(all(test, target_os = "macos"))]
-#[cfg(elastos_prototype_agents)]
-pub(crate) use gateway_provider_proxy::http_hosted_run_with_principal_for_test;
 #[cfg(unix)]
 #[cfg(test)]
 pub(crate) use gateway_provider_proxy::runtime_custody_publish_creator_tail_for_test;

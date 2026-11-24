@@ -1912,134 +1912,14 @@ async fn unavailable(stream: &mut UnixStream) -> io::Result<()> {
         .await
 }
 
-#[cfg(all(test, target_os = "macos"))]
-#[cfg(elastos_prototype_agents)]
-fn hosted_text_effect(
-    data_dir: &Path,
-    offer_id: &str,
-    run_id: &str,
-    request_id: &str,
-) -> anyhow::Result<EffectRequest> {
-    let offers = load_model_provider_operator_offers(data_dir)?;
-    let offer = offers
-        .iter()
-        .find(|offer| offer["id"] == offer_id)
-        .ok_or_else(|| anyhow::anyhow!("hosted offer unavailable"))?;
-    let model = offer["adapter"]["model"].as_str().unwrap_or_default();
-    let limit = offer["policy"]["inline_output_bytes_limit"]
-        .as_u64()
-        .unwrap_or(0);
-    let body = serde_json::json!({
-        "model": model,
-        "max_tokens": (limit / 4).max(1),
-        "messages": [{"role": "user", "content": "hi"}],
-    });
-    Ok(EffectRequest {
-        offer_id: offer_id.to_string(),
-        effect: "text".to_string(),
-        run_id: run_id.to_string(),
-        request_id: request_id.to_string(),
-        job_id: None,
-        method: reqwest::Method::POST,
-        body: serde_json::to_vec(&body)?,
-    })
-}
-
-#[cfg(all(test, target_os = "macos"))]
-#[cfg(elastos_prototype_agents)]
-pub(crate) fn approve_hosted_text_for_test(
-    data_dir: &Path,
-    offer_id: &str,
-    run_id: &str,
-    request_id: &str,
-    owner_proof: &str,
-) -> anyhow::Result<String> {
-    let request = hosted_text_effect(data_dir, offer_id, run_id, request_id)?;
-    let destination = resolve_effect(data_dir, &request)?;
-    let scope = egress_scope(offer_id, "text", "POST", &destination)?;
-    let id = model_provider_egress_decision::request(data_dir, &scope, None)?;
-    model_provider_egress_decision::approve(data_dir, &id, owner_proof)?;
-    create_grant_after_decision(
-        data_dir,
-        offer_id,
-        "text",
-        "POST",
-        &destination,
-        None,
-        Some((run_id, request_id)),
-    )?;
-    Ok(id)
-}
-
-#[cfg(all(test, target_os = "macos"))]
-#[cfg(elastos_prototype_agents)]
-pub(crate) fn end_hosted_decision_for_test(
-    data_dir: &Path,
-    id: &str,
-    owner_proof: &str,
-) -> anyhow::Result<()> {
-    model_provider_egress_decision::end_decision(data_dir, id, owner_proof)
-}
-
-#[cfg(all(test, target_os = "macos"))]
-#[cfg(elastos_prototype_agents)]
-pub(crate) use tests::forward_hosted_text_for_test;
+#[cfg(test)]
+#[path = "model_provider_egress_tests/hosted_forward.rs"]
+pub(crate) mod hosted_forward;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    /// Drives production `send_raw` and then production `handle`. The effect
-    /// is forwarded only when `confined_model_run_matches` is true.
-    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
-    pub(crate) async fn forward_hosted_text_for_test(
-        data_dir: &Path,
-        runs_create: &serde_json::Value,
-        run_id: &str,
-        request_id: &str,
-    ) -> anyhow::Result<String> {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-        let (provider_read, bridge_write) = tokio::io::duplex(4096);
-        let (bridge_read, mut provider_write) = tokio::io::duplex(4096);
-        let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(bridge_read), bridge_write);
-        bridge.name_this_process_for_test();
-        let answered = tokio::spawn(async move {
-            let mut reader = tokio::io::BufReader::new(provider_read);
-            let mut line = String::new();
-            reader.read_line(&mut line).await?;
-            provider_write.write_all(b"{\"status\":\"ok\"}\n").await?;
-            provider_write.flush().await?;
-            Ok::<(), std::io::Error>(())
-        });
-        bridge
-            .send_raw(runs_create)
-            .await
-            .map_err(|err| anyhow::anyhow!("{err}"))?;
-        answered
-            .await
-            .map_err(|err| anyhow::anyhow!("{err}"))?
-            .map_err(|err| anyhow::anyhow!("{err}"))?;
-        let offer_id = runs_create["offer_id"].as_str().unwrap_or("");
-        let mut effect = hosted_text_effect(data_dir, offer_id, run_id, request_id)?;
-        let mut body: serde_json::Value = serde_json::from_slice(&effect.body)?;
-        body["stream"] = json!(true);
-        effect.body = serde_json::to_vec(&body)?;
-        let (broker, mut provider) = UnixStream::pair()?;
-        let head = format!(
-            "POST /v1/hosted-effect HTTP/1.1\r\nHost: runtime.invalid\r\nContent-Length: {}\r\nX-Elastos-Offer-Id: {}\r\nX-Elastos-Effect: text\r\nX-Elastos-Run-Id: {run_id}\r\nX-Elastos-Request-Id: {request_id}\r\n\r\n",
-            effect.body.len(),
-            effect.offer_id,
-        );
-        provider.write_all(head.as_bytes()).await?;
-        provider.write_all(&effect.body).await?;
-        handle(broker, &bridge, std::process::id(), data_dir)
-            .await
-            .map_err(|err| anyhow::anyhow!("{err}"))?;
-        let mut response = String::new();
-        provider.read_to_string(&mut response).await?;
-        Ok(response)
-    }
 
     use std::fs::{self, OpenOptions};
     use std::io::Write as _;

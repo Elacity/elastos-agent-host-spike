@@ -2662,18 +2662,6 @@ impl ProviderBridge {
         }
     }
 
-    /// Names this process and stores its birth. A release build leaves this out,
-    /// so `from_io` cannot admit a hosted run.
-    #[cfg(all(target_os = "macos", feature = "in-process-model-for-test"))]
-    pub fn name_this_process_for_test(&self) {
-        let pid = std::process::id();
-        let Some(birth) = super::local_model_broker::process_birth(pid) else {
-            return;
-        };
-        self._local_provider_pid.store(pid, Ordering::Release);
-        self._local_provider_birth.store(birth, Ordering::Release);
-    }
-
     /// Send a request and receive a response (with timeout).
     pub async fn request(&self, req: ProviderRequest) -> Result<ProviderResponse, BridgeError> {
         tokio::time::timeout(REQUEST_TIMEOUT, self.request_raw(req))
@@ -3293,23 +3281,6 @@ mod tests {
         assert!(
             bridge.confined_model_identity().is_none(),
             "from_io named this process"
-        );
-    }
-
-    #[cfg(all(target_os = "macos", feature = "in-process-model-for-test"))]
-    #[test]
-    fn naming_this_process_admits_a_confined_model() {
-        let (reader, _) = tokio::io::duplex(64);
-        let (writer, _) = tokio::io::duplex(64);
-        let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(reader), writer);
-        bridge.name_this_process_for_test();
-        let (pid, birth) = bridge
-            .confined_model_identity()
-            .expect("the test name did not admit this process");
-        assert_eq!(pid, std::process::id());
-        assert_eq!(
-            Some(birth),
-            super::super::local_model_broker::process_birth(pid)
         );
     }
 
