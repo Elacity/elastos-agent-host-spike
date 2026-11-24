@@ -1536,7 +1536,6 @@ async fn ensure_browser_vm_image_in_context_for_platform(
             Err(error) => return Err(BrowserVmImageInvalid::new(error).into()),
         }
         let dest = data_dir.join(browser_vm_image::INSTALL_PATH);
-        let existing_image = dest.is_dir();
         if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
             return Ok(());
         }
@@ -1547,15 +1546,7 @@ async fn ensure_browser_vm_image_in_context_for_platform(
             browser_vm_image::NAME,
             info,
         )?;
-        return download_component(data_dir, &row, &dest, context)
-            .await
-            .map_err(|error| {
-                if existing_image {
-                    BrowserVmImageInvalid::new(error).into()
-                } else {
-                    error
-                }
-            });
+        return download_component(data_dir, &row, &dest, context).await;
     }
     let check_dir = data_dir.to_path_buf();
     let check_platform = platform.clone();
@@ -4953,6 +4944,12 @@ async fn download_component(
     install_first_party_component_via_carrier(data_dir, row, dest, carrier_context)
         .await
         .map_err(|err| {
+            // An invalid-image refusal keeps its typed error so the gateway's
+            // Engine gate reports ArtifactInvalid; only a fetch-phase failure
+            // is reported as a Carrier fetch failure.
+            if err.downcast_ref::<BrowserVmImageInvalid>().is_some() {
+                return err;
+            }
             anyhow::anyhow!(
                 "Trusted source Carrier fetch failed for {} ({}): {}",
                 name,
