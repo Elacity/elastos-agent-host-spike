@@ -17,6 +17,7 @@ const PR_GET_SECCOMP: i64 = 21;
 const AF_INET: i64 = 2;
 const SOCK_STREAM: i64 = 1;
 const EPERM: i64 = 1;
+const EACCES: i64 = 13;
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn syscall(number: i64, a: i64, b: i64, c: i64, d: i64) -> i64 {
@@ -55,7 +56,8 @@ unsafe fn syscall(number: i64, a: i64, b: i64, c: i64, d: i64) -> i64 {
 }
 
 /// The three kernel observations, each as `<name>=<value>`. A refused AF_INET
-/// socket reports `EPERM`; any other errno or an open socket reports its number.
+/// socket reports `EPERM` or `EACCES`; any other errno or an open socket
+/// reports its number.
 fn observations() -> String {
     let no_new_privs = unsafe { syscall(SYS_PRCTL, PR_GET_NO_NEW_PRIVS, 0, 0, 0) };
     let seccomp = unsafe { syscall(SYS_PRCTL, PR_GET_SECCOMP, 0, 0, 0) };
@@ -65,22 +67,38 @@ fn observations() -> String {
     }
     let inet = if fd == -EPERM {
         "EPERM".to_string()
+    } else if fd == -EACCES {
+        "EACCES".to_string()
     } else {
         fd.to_string()
     };
     format!("no_new_privs={no_new_privs}\nseccomp={seccomp}\ninet_socket={inet}\n")
 }
 
+fn journal_observation(line: &str) -> Option<std::path::PathBuf> {
+    let key = "\"base_path\":\"";
+    let start = line.find(key)? + key.len();
+    let end = line[start..].find('"')?;
+    Some(
+        std::path::PathBuf::from(&line[start..start + end])
+            .join("providers/model-provider/journal/model-provider.observed"),
+    )
+}
+
 fn main() {
-    // The route expects NO_NEW_PRIVS=1, seccomp mode 2, AF_INET EPERM.
+    // The route expects NO_NEW_PRIVS=1, seccomp mode 2, and a refused AF_INET socket.
+    let text = observations();
     if let Ok(exe) = std::env::current_exe() {
         let report = exe.with_extension("observed");
-        std::fs::write(report, observations()).unwrap();
+        let _ = std::fs::write(report, &text);
     }
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
+        if let Some(path) = journal_observation(&line) {
+            let _ = std::fs::write(path, &text);
+        }
         // The startup route checks the model-provider status contract; every
         // other line gets the plain ok reply.
         let reply = if line.contains("\"status\"") {

@@ -533,17 +533,104 @@ async fn request_model_provider_status(
     .map_err(|err| anyhow::anyhow!("model-provider status request failed: {err}"))
 }
 
-async fn start_model_provider(
+fn local_model_paths(
+    config: &provider::BridgeProviderConfig,
+) -> Result<Vec<(PathBuf, PathBuf)>, String> {
+    let offers = config
+        .extra
+        .get("offers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or("model offers unavailable")?;
+    let mut local = Vec::new();
+    for offer in offers {
+        if offer
+            .pointer("/adapter/kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("local_llama_cpp_text")
+        {
+            continue;
+        }
+        let engine = offer
+            .pointer("/adapter/engine/path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("model engine path unavailable")?;
+        let model = offer
+            .pointer("/adapter/model/path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("model weights path unavailable")?;
+        local.push((PathBuf::from(engine), PathBuf::from(model)));
+    }
+    Ok(local)
+}
+
+/// Linux has no admitted path for a local weights file or its engine.
+#[cfg(any(
+    test,
+    all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn linux_local_model_refusal(local_models: usize) -> Option<&'static str> {
+    (local_models > 0)
+        .then_some("provider start is refused: Linux admits no path for a local model")
+}
+
+#[cfg(target_os = "macos")]
+fn hosted_model_binding(base: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = base.join("providers/model-provider/hosted-binding");
+    let bundle = root.join("bundle");
+    std::fs::create_dir_all(&bundle).map_err(|error| error.to_string())?;
+    let engine = bundle.join("engine");
+    let model = root.join("model");
+    std::fs::write(&engine, b"").map_err(|error| error.to_string())?;
+    std::fs::write(&model, b"").map_err(|error| error.to_string())?;
+    for directory in [&root, &bundle] {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+    }
+    for file in [&engine, &model] {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o400))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok((
+        std::fs::canonicalize(&engine).map_err(|error| error.to_string())?,
+        std::fs::canonicalize(&model).map_err(|error| error.to_string())?,
+        std::fs::canonicalize(&bundle).map_err(|error| error.to_string())?,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_model_launch_paths(
+    config: &provider::BridgeProviderConfig,
+) -> Result<(PathBuf, PathBuf, PathBuf), provider::bridge::BridgeError> {
+    let refused = |reason: &str| provider::bridge::BridgeError::InitFailed(reason.to_owned());
+    let local = local_model_paths(config).map_err(|reason| refused(&reason))?;
+    if local.len() > 1 {
+        return Err(refused("too many local model offers"));
+    }
+    let Some((engine, model)) = local.into_iter().next() else {
+        return hosted_model_binding(Path::new(&config.base_path))
+            .map_err(|reason| refused(&reason));
+    };
+    let bundle = api::model_provider_engine_bundle(Path::new(&config.base_path))
+        .map_err(|_| refused("model engine confinement unavailable"))?
+        .ok_or_else(|| refused("model engine confinement unavailable"))?;
+    Ok((engine, model, bundle))
+}
+
+async fn finish_model_provider_start(
     registry: &provider::ProviderRegistry,
     bridge: Arc<provider::ProviderBridge>,
+    model_provider: Arc<dyn provider::Provider>,
     status_timeout: Duration,
 ) -> anyhow::Result<()> {
     let startup = async {
         let status = request_model_provider_status(&bridge, status_timeout).await?;
         require_model_provider_status(&status)?;
-        let model_provider: Arc<dyn provider::Provider> = Arc::new(
-            provider::CapsuleProvider::with_scheme(bridge.clone(), "model"),
-        );
         register_model_provider(registry, model_provider).await
     }
     .await;
@@ -556,6 +643,201 @@ async fn start_model_provider(
         return Err(startup_error);
     }
     Ok(())
+}
+
+async fn start_model_provider(
+    registry: &provider::ProviderRegistry,
+    confined: provider::Confined,
+    status_timeout: Duration,
+) -> anyhow::Result<()> {
+    let bridge = Arc::clone(confined.bridge());
+    let model_provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::from_confined(confined, "model"));
+    finish_model_provider_start(registry, bridge, model_provider, status_timeout).await
+}
+
+#[cfg(test)]
+async fn start_model_provider_for_test(
+    registry: &provider::ProviderRegistry,
+    bridge: Arc<provider::ProviderBridge>,
+    status_timeout: Duration,
+) -> anyhow::Result<()> {
+    let model_provider: Arc<dyn provider::Provider> = Arc::new(
+        provider::CapsuleProvider::with_scheme(bridge.clone(), "model"),
+    );
+    finish_model_provider_start(registry, bridge, model_provider, status_timeout).await
+}
+
+async fn register_started_model(
+    data_dir: &Path,
+    provider_registry: &provider::ProviderRegistry,
+    admitted: &binaries::AdmittedProvider,
+    confined: provider::Confined,
+    model_config: &provider::BridgeProviderConfig,
+    sockets: Option<(std::collections::BTreeMap<String, String>, Vec<String>)>,
+    worker: Option<&elastos_server::host_lock::FileLock>,
+) -> anyhow::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some((assigned, vacant)) = sockets {
+        provider_registry
+            .set_local_model_sockets(assigned, vacant)
+            .await;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = sockets;
+    let bridge = Arc::clone(confined.bridge());
+    #[cfg(target_os = "macos")]
+    {
+        let socket = model_config
+            .extra
+            .get("runtime_hosted_socket")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("model hosted socket unavailable"))?;
+        provider_registry
+            .set_hosted_model_socket(socket.to_owned())
+            .await;
+        match tokio::net::UnixListener::bind(socket) {
+            Ok(listener) => {
+                if let Err(error) = api::model_provider_egress::start(
+                    listener,
+                    Arc::clone(&bridge),
+                    data_dir.to_path_buf(),
+                ) {
+                    tracing::warn!(%error, "model hosted egress broker unavailable");
+                }
+            }
+            Err(error) => {
+                let _ = bridge.shutdown().await;
+                anyhow::bail!("model hosted socket: {error}");
+            }
+        }
+    }
+    #[cfg(unix)]
+    if let Err(error) =
+        api::settle_pending_model_startup(data_dir, &bridge, model_config, worker).await
+    {
+        let _ = bridge.shutdown().await;
+        return Err(error);
+    }
+    #[cfg(not(unix))]
+    let _ = worker;
+    start_model_provider(provider_registry, confined, MODEL_PROVIDER_STATUS_TIMEOUT).await?;
+    #[cfg(unix)]
+    if let Err(error) =
+        api::complete_admitted_model_startup(data_dir, provider_registry, worker).await
+    {
+        tracing::warn!(%error, "model startup activation receipt pending");
+    }
+    tracing::info!("model-provider capsule from {}", admitted.path().display());
+    Ok(())
+}
+
+async fn launch_admitted_model(
+    data_dir: &Path,
+    provider_registry: &provider::ProviderRegistry,
+    admitted: &binaries::AdmittedProvider,
+    model_config: provider::BridgeProviderConfig,
+    worker: Option<&elastos_server::host_lock::FileLock>,
+) -> anyhow::Result<()> {
+    if let Err(error) = model_provider_confinement(std::env::consts::OS) {
+        anyhow::bail!("{error}");
+    }
+    let local = local_model_paths(&model_config).map_err(anyhow::Error::msg)?;
+    if local.len() > 1 {
+        anyhow::bail!("too many local model offers");
+    }
+    #[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+    {
+        let checked = admitted
+            .checked_executable(data_dir)
+            .map_err(anyhow::Error::msg)?;
+        let (engine, model, bundle) =
+            macos_model_launch_paths(&model_config).map_err(|error| anyhow::anyhow!("{error}"))?;
+        let (confined, sockets, vacant, confined_config) =
+            provider::ProviderBridge::spawn_confined_model_from_rights(
+                admitted.authority(),
+                &checked,
+                model_config,
+                &engine,
+                &model,
+                &bundle,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        register_started_model(
+            data_dir,
+            provider_registry,
+            admitted,
+            confined,
+            &confined_config,
+            Some((sockets, vacant)),
+            worker,
+        )
+        .await
+    }
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    {
+        if let Some(reason) = linux_local_model_refusal(local.len()) {
+            anyhow::bail!(reason);
+        }
+        let checked = admitted
+            .checked_executable(data_dir)
+            .map_err(anyhow::Error::msg)?;
+        let storage = Path::new(&model_config.base_path).join("providers/model-provider/journal");
+        let parent = storage
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("model journal parent unavailable"))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| anyhow::anyhow!("model journal: {error}"))?;
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| anyhow::anyhow!("model journal: {error}"))?;
+        }
+        let confined = provider::ProviderBridge::spawn_confined_model_from_rights(
+            admitted.authority(),
+            &checked,
+            &storage,
+            model_config.clone(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+        register_started_model(
+            data_dir,
+            provider_registry,
+            admitted,
+            confined,
+            &model_config,
+            None,
+            worker,
+        )
+        .await
+    }
+    #[cfg(any(
+        elastos_unsupported_os_check,
+        not(any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        ))
+    ))]
+    {
+        let _ = (
+            data_dir,
+            provider_registry,
+            admitted,
+            model_config,
+            worker,
+            local,
+        );
+        anyhow::bail!(MODEL_PROVIDER_CONFINEMENT_UNAVAILABLE);
+    }
 }
 
 async fn request_media_provider_status(
@@ -1345,133 +1627,20 @@ async fn setup_server_infrastructure_impl(
     }
 
     // Admitted model startup reuses the registered native IPFS verifier.
-    match binaries::resolve_verified_native_provider_binary("model-provider") {
-        Ok(Some(path)) => {
+    match binaries::AdmittedProvider::admit(&data_dir, "model-provider") {
+        Ok(Some(admitted)) => {
             match model_provider_startup_config(&data_dir, &provider_registry).await {
-                Ok((mut model_config, worker)) => {
-                    // Refuse before any spawn when this OS has no confinement backend.
-                    let confinement = model_provider_confinement(std::env::consts::OS);
-                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                    let bridge_result: Result<
-                        (provider::ProviderBridge, Option<()>, _, Option<()>),
-                        provider::bridge::BridgeError,
-                    > = match confinement {
-                        Ok(()) => unreachable!(
-                            "model_provider_confinement refuses every OS without a confinement backend"
-                        ),
-                        Err(refusal) => Err(refusal),
-                    };
-                    #[cfg(target_os = "macos")]
-                    let bridge_result = match confinement {
-                        Ok(()) => {
-                            let root = Path::new(&model_config.base_path);
-                            let bundle = api::model_provider_engine_bundle(root).map_err(|_| {
-                                provider::bridge::BridgeError::InitFailed(
-                                    "model engine confinement unavailable".into(),
-                                )
-                            });
-                            match bundle {
-                                Ok(bundle) => provider::ProviderBridge::spawn_confined_model_with_engine_bundle(
-                                    &path,
-                                    model_config.clone(),
-                                    bundle.as_deref(),
-                                )
-                                .await
-                                .map(|(bridge, sockets, vacant, config, listener)| {
-                                    (bridge, Some((sockets, vacant)), config, Some(listener))
-                                }),
-                                Err(refusal) => Err(refusal),
-                            }
-                        }
-                        Err(refusal) => Err(refusal),
-                    };
-                    #[cfg(target_os = "linux")]
-                    let bridge_result = match confinement {
-                        Ok(()) => provider::ProviderBridge::spawn_confined_model_linux(
-                            &path,
-                            model_config.clone(),
-                        )
-                        .await
-                        .map(|(bridge, sockets, vacant, config)| {
-                            (bridge, Some((sockets, vacant)), config, None::<()>)
-                        }),
-                        Err(refusal) => Err(refusal),
-                    };
-                    match bridge_result {
-                        Ok((bridge, local_sockets, confined_config, hosted_listener)) => {
-                            model_config = confined_config;
-                            #[cfg(any(target_os = "macos", target_os = "linux"))]
-                            if let Some((sockets, vacant)) = local_sockets {
-                                provider_registry
-                                    .set_local_model_sockets(sockets, vacant)
-                                    .await;
-                                #[cfg(target_os = "macos")]
-                                if let Some(socket) =
-                                    model_config.extra["runtime_hosted_socket"].as_str()
-                                {
-                                    provider_registry
-                                        .set_hosted_model_socket(socket.to_owned())
-                                        .await;
-                                }
-                            }
-                            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                            let _ = local_sockets;
-                            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                            let _ = model_config;
-                            #[cfg(not(target_os = "macos"))]
-                            let _ = hosted_listener;
-                            let bridge = Arc::new(bridge);
-                            #[cfg(target_os = "macos")]
-                            if let Some(listener) = hosted_listener {
-                                if let Err(error) = api::model_provider_egress::start(
-                                    listener,
-                                    bridge.clone(),
-                                    data_dir.clone(),
-                                ) {
-                                    tracing::warn!(%error, "model hosted egress broker unavailable");
-                                }
-                            }
-                            let startup = async {
-                                #[cfg(unix)]
-                                api::settle_pending_model_startup(
-                                    &data_dir,
-                                    &bridge,
-                                    &model_config,
-                                    worker.as_ref(),
-                                )
-                                .await?;
-                                start_model_provider(
-                                    &provider_registry,
-                                    bridge.clone(),
-                                    MODEL_PROVIDER_STATUS_TIMEOUT,
-                                )
-                                .await
-                            }
-                            .await;
-                            match startup {
-                                Ok(()) => {
-                                    #[cfg(unix)]
-                                    if let Err(error) = api::complete_admitted_model_startup(
-                                        &data_dir,
-                                        &provider_registry,
-                                        worker.as_ref(),
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(%error, "model startup activation receipt pending");
-                                    }
-                                    tracing::info!("model-provider capsule from {}", path.display())
-                                }
-                                Err(_) => {
-                                    let _ = bridge.shutdown().await;
-                                    tracing::warn!("Skipping model-provider because startup failed")
-                                }
-                            }
-                        }
-                        Err(provider::bridge::BridgeError::InitFailed(reason)) => {
-                            tracing::warn!("Skipping model-provider: {}", reason)
-                        }
-                        Err(_) => tracing::warn!("Skipping model-provider because startup failed"),
+                Ok((model_config, worker)) => {
+                    if let Err(error) = launch_admitted_model(
+                        &data_dir,
+                        &provider_registry,
+                        &admitted,
+                        model_config,
+                        worker.as_ref(),
+                    )
+                    .await
+                    {
+                        tracing::warn!("Skipping model-provider: {error}");
                     }
                     drop(worker);
                 }
@@ -4029,7 +4198,7 @@ mod tests {
             provider_status(MODEL_PROVIDER_ID, MODEL_PROVIDER_PROTOCOL_VERSION),
             Duration::ZERO,
         );
-        start_model_provider(&registry, bridge, Duration::from_secs(1))
+        start_model_provider_for_test(&registry, bridge, Duration::from_secs(1))
             .await
             .unwrap();
 
@@ -4051,7 +4220,7 @@ mod tests {
         ] {
             let registry = provider::ProviderRegistry::new();
             let (bridge, provider) = test_provider_bridge(status, Duration::ZERO);
-            let error = start_model_provider(&registry, bridge, Duration::from_secs(1))
+            let error = start_model_provider_for_test(&registry, bridge, Duration::from_secs(1))
                 .await
                 .unwrap_err();
 
@@ -4080,7 +4249,7 @@ mod tests {
         ] {
             let registry = provider::ProviderRegistry::new();
             let (bridge, provider) = test_provider_bridge(status, Duration::ZERO);
-            start_model_provider(&registry, bridge, Duration::from_secs(1))
+            start_model_provider_for_test(&registry, bridge, Duration::from_secs(1))
                 .await
                 .unwrap_err();
 
@@ -4117,7 +4286,7 @@ mod tests {
             provider_status(MODEL_PROVIDER_ID, MODEL_PROVIDER_PROTOCOL_VERSION),
             Duration::from_millis(20),
         );
-        let error = start_model_provider(&registry, bridge, Duration::from_millis(5))
+        let error = start_model_provider_for_test(&registry, bridge, Duration::from_millis(5))
             .await
             .unwrap_err();
 
@@ -4138,7 +4307,7 @@ mod tests {
             provider_status(MODEL_PROVIDER_ID, MODEL_PROVIDER_PROTOCOL_VERSION),
             Duration::ZERO,
         );
-        start_model_provider(&registry, first_bridge, Duration::from_secs(1))
+        start_model_provider_for_test(&registry, first_bridge, Duration::from_secs(1))
             .await
             .unwrap();
 
@@ -4146,7 +4315,7 @@ mod tests {
             provider_status(MODEL_PROVIDER_ID, MODEL_PROVIDER_PROTOCOL_VERSION),
             Duration::ZERO,
         );
-        let error = start_model_provider(&registry, second_bridge, Duration::from_secs(1))
+        let error = start_model_provider_for_test(&registry, second_bridge, Duration::from_secs(1))
             .await
             .unwrap_err();
         assert!(error.to_string().contains("failed to register"));
@@ -5873,6 +6042,53 @@ mod tests {
     }
 
     #[test]
+    fn linux_refuses_a_local_model_by_name() {
+        assert_eq!(super::linux_local_model_refusal(0), None);
+        let reason = "provider start is refused: Linux admits no path for a local model";
+        assert_eq!(super::linux_local_model_refusal(1), Some(reason));
+        assert_eq!(super::linux_local_model_refusal(2), Some(reason));
+    }
+
+    #[test]
+    fn model_caller_starts_only_through_admitted_rights() {
+        let source = include_str!("server_infra.rs");
+        let launch_at = source.find("async fn launch_admitted_model(").unwrap();
+        let launch_end = source[launch_at..]
+            .find("\nasync fn request_media_provider_status(")
+            .unwrap()
+            + launch_at;
+        let launch = &source[launch_at..launch_end];
+        assert!(launch.contains("spawn_confined_model_from_rights"));
+        assert!(launch.contains("linux_local_model_refusal"));
+        assert!(!launch.contains("spawn_confined_model_with_engine_bundle"));
+        assert!(!launch.contains("spawn_confined_model_linux"));
+        assert!(!launch.contains("ProviderBridge::spawn("));
+        let caller_at = source.find("// Admitted model startup").unwrap();
+        let caller_end = source[caller_at..]
+            .find("match binaries::resolve_verified_native_provider_binary(\"chain-provider\")")
+            .unwrap()
+            + caller_at;
+        let caller = &source[caller_at..caller_end];
+        assert_eq!(
+            caller
+                .matches("AdmittedProvider::admit(&data_dir, \"model-provider\")")
+                .count(),
+            1
+        );
+        assert!(caller.contains("launch_admitted_model("));
+        assert!(!caller.contains("resolve_verified_native_provider_binary(\"model-provider\")"));
+        assert!(!caller.contains("spawn_confined_model"));
+        let start_at = source.find("async fn start_model_provider(").unwrap();
+        let start_end = source[start_at..]
+            .find("\n#[cfg(test)]\nasync fn start_model_provider_for_test(")
+            .unwrap()
+            + start_at;
+        let start = &source[start_at..start_end];
+        assert!(start.contains("CapsuleProvider::from_confined(confined, \"model\")"));
+        assert!(!start.contains("with_scheme"));
+    }
+
+    #[test]
     fn model_provider_confinement_refuses_unsupported_os() {
         for os in ["macos", "linux"] {
             assert!(
@@ -5943,7 +6159,7 @@ mod tests {
                 "substrate": "native",
                 "runtime_abi": "elastos.provider-stdio/v1",
                 "execution": "native-provider",
-                "provides": "elastos://model",
+                "provides": "elastos://model/*",
             },
             "platforms": {&elastos_server::setup::detect_platform(): {
                 "checksum": checksum,
@@ -5956,9 +6172,17 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
+        let manifest_dir = root.join("capsules/model-provider");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../capsules/model-provider/capsule.json"),
+            manifest_dir.join("capsule.json"),
+        )
+        .unwrap();
         // Startup admits model-provider against this Home's signed release
-        // (binaries::resolve_verified_native_provider_binary), as on an
-        // installed Home; without one, admission refuses before spawn.
+        // and the capsule manifest, as on an installed Home. Without either,
+        // admission refuses before spawn.
         sign_test_home(&root);
         // One hosted offer answers status without a local model slot.
         let config_root = root.join("providers/model-provider");
@@ -5982,10 +6206,10 @@ mod tests {
     }
 
     /// Prove the real Linux startup path starts the model provider through the
-    /// egress-filtered spawn: the child it starts reports NO_NEW_PRIVS=1, SECCOMP
-    /// mode 2, and an AF_INET socket refused with EPERM. Falsifier B swaps the
-    /// call at server_infra.rs:1082 for the plain `spawn`, which installs no
-    /// filter, and this test then fails at its `no_new_privs` assertion.
+    /// admitted rights: the child it starts reports NO_NEW_PRIVS=1, SECCOMP
+    /// mode 2, and an AF_INET socket refused with EACCES. Swapping the rights
+    /// start for a plain spawn installs no filter, and this test then fails
+    /// at its `no_new_privs` assertion.
     ///
     /// The child half is the `linux_model_startup_probe` test below: this test
     /// starts one real startup composition in a child process against the
@@ -6042,9 +6266,14 @@ mod tests {
             serde_json::json!("model"),
             "startup did not register the model target\n{stderr}"
         );
-        // The child writes one `name=value` line per kernel observation.
-        let report = fs::read_to_string(root.join("bin/model-provider.observed"))
-            .expect("model provider wrote no observations from the startup route");
+        // The child writes one `name=value` line per kernel observation into
+        // the admitted journal, and the probe test copies that text here.
+        // The journal is removed when the child stops.
+        let report = facts["observed"].as_str().unwrap_or("");
+        assert!(
+            !report.is_empty(),
+            "model provider wrote no observations from the startup route\n{stderr}"
+        );
         let inherited = report
             .lines()
             .filter_map(|line| line.split_once('='))
@@ -6061,7 +6290,7 @@ mod tests {
         );
         assert_eq!(
             inherited.get("inet_socket"),
-            Some(&"EPERM"),
+            Some(&"EACCES"),
             "startup child could open an Internet socket: {report}"
         );
     }
@@ -6098,6 +6327,10 @@ mod tests {
             .registration_for_uri("elastos://model/offers")
             .await
             .map(|registration| registration.route);
+        let observed = fs::read_to_string(
+            data_dir.join("providers/model-provider/journal/model-provider.observed"),
+        )
+        .unwrap_or_default();
         // Stopping the model target shuts the recorded child down.
         infrastructure
             .provider_registry
@@ -6110,7 +6343,7 @@ mod tests {
         drop(infrastructure);
         println!(
             "{}",
-            serde_json::json!({"data_root": data_dir, "registered_route": registration})
+            serde_json::json!({"data_root": data_dir, "registered_route": registration, "observed": observed})
         );
     }
 }

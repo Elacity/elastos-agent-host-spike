@@ -9,10 +9,10 @@
 ;;   STORAGE_ROOT         - the model journal root: Init.base_path/providers/model-provider,
 ;;                          or the configured absolute journal_dir
 ;;   STORAGE_PARENT       - the existing parent of STORAGE_ROOT
-;; Every operation no rule grants is refused, including every network operation.
+;; Every operation no rule grants is refused. The hosted socket below is the one outbound path.
 (version 1)
 (deny default)
-;; The provider speaks stdin/stdout only; no socket or listener is granted.
+;; The provider speaks stdin/stdout. Network is denied, then one outbound socket is granted below.
 (deny network*)
 
 ;; Startup: execute only the bound provider binary.
@@ -40,6 +40,8 @@
 (allow file-read* (subpath (param "ENGINE_BUNDLE")))
 ;; macOS probe X4: /usr/lib is a launch input. It is not GPU access.
 (allow file-read* (subpath "/usr/lib"))
+;; The server binds this one socket and accepts the provider's hosted effects.
+(allow network-outbound (literal (param "HOSTED_SOCKET")))
 ;; macOS probe X1: exact metadata ancestors from the measured lab layout.
 (allow file-read-metadata (literal (param "MODEL_ANCESTOR_0")))
 (allow file-read-metadata (literal (param "MODEL_ANCESTOR_1")))

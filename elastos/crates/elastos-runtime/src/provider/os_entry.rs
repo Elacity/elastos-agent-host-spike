@@ -422,6 +422,7 @@ pub(super) struct ModelLaunch<'a> {
     pub engine: &'a Path,
     pub model: &'a Path,
     pub bundle: &'a Path,
+    pub hosted: &'a Path,
     pub brokers: &'a [std::path::PathBuf],
     pub engines: &'a [std::path::PathBuf],
 }
@@ -457,10 +458,15 @@ fn model_bindings(launch: &ModelLaunch<'_>) -> Result<Vec<(String, std::path::Pa
         return Err("model ancestors".into());
     }
     ancestors.resize(19, root);
+    let hosted_parent = launch.hosted.parent().ok_or("model socket")?;
+    if std::fs::canonicalize(hosted_parent).ok().as_deref() != Some(hosted_parent) {
+        return Err("model socket".into());
+    }
     let mut bindings = vec![
         ("MODEL".into(), model),
         ("ENGINE".into(), engine),
         ("ENGINE_BUNDLE".into(), bundle),
+        ("HOSTED_SOCKET".into(), launch.hosted.to_path_buf()),
     ];
     for (index, ancestor) in ancestors.into_iter().enumerate() {
         bindings.push((format!("MODEL_ANCESTOR_{index}"), ancestor));
@@ -1180,10 +1186,12 @@ mod tests {
         let engines: Vec<_> = (0..64)
             .map(|index| ipc.join(format!("{index}.engine.sock")))
             .collect();
+        let hosted = ipc.join("hosted.sock");
         let launch = ModelLaunch {
             engine: &engine,
             model: &model,
             bundle: &bundle,
+            hosted: &hosted,
             brokers: &brokers,
             engines: &engines,
         };

@@ -20,6 +20,7 @@ fn model_inputs() -> Vec<String> {
         r#"(allow process-exec (literal (param "ENGINE")))"#,
         r#"(allow file-read* (subpath (param "ENGINE_BUNDLE")))"#,
         r#"(allow file-read* (subpath "/usr/lib"))"#,
+        r#"(allow network-outbound (literal (param "HOSTED_SOCKET")))"#,
     ];
     let mut forms: Vec<String> = fixed.into_iter().map(str::to_string).collect();
     // macOS probe X1: 19 measured canonical ancestors, each a bound literal.
@@ -162,7 +163,9 @@ mod tests {
             let shared = BTreeSet::from(["PROVIDER_EXECUTABLE", "STORAGE_PARENT", "STORAGE_ROOT"]);
             if name == "model-provider" {
                 let mut expected = shared.iter().copied().map(str::to_string).collect::<BTreeSet<_>>();
-                expected.extend(["MODEL", "ENGINE", "ENGINE_BUNDLE"].map(str::to_string));
+                expected.extend(
+                    ["MODEL", "ENGINE", "ENGINE_BUNDLE", "HOSTED_SOCKET"].map(str::to_string),
+                );
                 for index in 0..19 {
                     expected.insert(format!("MODEL_ANCESTOR_{index}"));
                 }

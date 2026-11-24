@@ -419,6 +419,101 @@ fn model_file_policy(
     Ok(policy)
 }
 
+/// One local offer may name one weights file under `model-preparation/admitted-`
+/// and 64 hex digits. A second file in that directory, a second local offer,
+/// or an engine the receipt does not list is refused before a child exists.
+#[cfg(target_os = "macos")]
+fn admit_model_rights_inputs(
+    binary: &Path,
+    config: &ProviderConfig,
+    journal: &Path,
+    engine: &Path,
+    model: &Path,
+    bundle: &Path,
+) -> Result<(), BridgeError> {
+    let offers = config
+        .extra
+        .get("offers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?;
+    let local: Vec<_> = offers
+        .iter()
+        .filter(|offer| {
+            offer
+                .pointer("/adapter/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("local_llama_cpp_text")
+        })
+        .collect();
+    if local.len() > 1 {
+        return Err(BridgeError::InitFailed(
+            "too many local model offers".into(),
+        ));
+    }
+    let base = Path::new(&config.base_path);
+    let inside = |path: &Path, file: bool| {
+        path.starts_with(base)
+            && std::fs::canonicalize(path).ok().as_deref() == Some(path)
+            && std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() == file)
+    };
+    if !inside(engine, true) || !inside(bundle, false) || !engine.starts_with(bundle) {
+        return Err(BridgeError::InitFailed("unsafe model artifact path".into()));
+    }
+    if local.is_empty() {
+        return inside(model, true)
+            .then_some(())
+            .ok_or_else(|| BridgeError::InitFailed("unsafe model artifact path".into()));
+    }
+    let offer_path = |pointer: &str| {
+        local[0]
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(Path::new)
+            .ok_or_else(|| BridgeError::InitFailed("model engine path unavailable".into()))
+    };
+    if offer_path("/adapter/engine/path")? != engine || offer_path("/adapter/model/path")? != model
+    {
+        return Err(BridgeError::InitFailed(
+            "model offer paths differ from the admitted start".into(),
+        ));
+    }
+    let relative = model
+        .strip_prefix(base.join("model-preparation"))
+        .map_err(|_| BridgeError::InitFailed("model preparation path is not admitted".into()))?;
+    let mut parts = relative.components();
+    let admission = parts.next().and_then(|part| match part {
+        std::path::Component::Normal(name) => name.to_str()?.strip_prefix("admitted-"),
+        _ => None,
+    });
+    let file = matches!(parts.next(), Some(std::path::Component::Normal(_)));
+    if parts.next().is_some()
+        || !file
+        || !admission.is_some_and(|id| {
+            id.len() == 64
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(BridgeError::InitFailed(
+            "model preparation path is not admitted".into(),
+        ));
+    }
+    let name = model
+        .file_name()
+        .ok_or_else(|| BridgeError::InitFailed("model preparation path is not admitted".into()))?;
+    let parent = model
+        .parent()
+        .ok_or_else(|| BridgeError::InitFailed("model preparation path is not admitted".into()))?;
+    for entry in std::fs::read_dir(parent).map_err(BridgeError::Spawn)? {
+        if entry.map_err(BridgeError::Spawn)?.file_name() != name {
+            return Err(BridgeError::InitFailed("unlisted model sidecar".into()));
+        }
+    }
+    model_file_policy(binary, config, journal, Some(bundle))?;
+    Ok(())
+}
+
 pub use super::bridge_protocol::{BridgeError, ProviderConfig, ProviderRequest, ProviderResponse};
 
 // === ProviderBridge ===
@@ -1886,7 +1981,7 @@ impl ProviderBridge {
                     .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
+        if local_ids.len() > 1 {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
             ));
@@ -1992,7 +2087,7 @@ impl ProviderBridge {
         Ok((bridge, sockets, vacant_sockets, config, hosted_listener))
     }
 
-    /// macOS model start from the admitted rights. The server keeps the hand-written policy until M3.
+    /// macOS model start from the admitted rights. The server binds the hosted socket.
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
     pub async fn spawn_confined_model_from_rights(
         authority: &ProviderAuthority,
@@ -2034,11 +2129,19 @@ impl ProviderBridge {
                     .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
+        if local_ids.len() > 1 {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
             ));
         }
+        admit_model_rights_inputs(
+            binary_path.path(),
+            &config,
+            &journal,
+            engine,
+            model_file,
+            bundle,
+        )?;
         let ipc_dir = tempfile::Builder::new()
             .prefix("em-")
             .tempdir()
@@ -2092,6 +2195,17 @@ impl ProviderBridge {
             broker_paths.push(broker);
             engine_paths.push(engine_socket);
         }
+        let hosted = ipc_path.join("hosted.sock");
+        let hosted_text = hosted
+            .to_str()
+            .filter(|text| {
+                text.len() < 104
+                    && text.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
+                    })
+            })
+            .ok_or_else(|| BridgeError::InitFailed("invalid hosted socket path".into()))?
+            .to_string();
         let prepared = binary_path
             .verify_at_spawn()
             .map_err(BridgeError::Refused)?;
@@ -2099,6 +2213,7 @@ impl ProviderBridge {
             engine,
             model: model_file,
             bundle,
+            hosted: &hosted,
             brokers: &broker_paths,
             engines: &engine_paths,
         };
@@ -2111,6 +2226,7 @@ impl ProviderBridge {
         )
         .map_err(BridgeError::Refused)?;
         config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
+        config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_text);
         let returned = config.clone();
         let mut bridge = Self::spawn_command(
             prepared,
@@ -2261,7 +2377,7 @@ impl ProviderBridge {
                     .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if local_ids.len() > MAX_LOCAL_MODEL_SLOTS {
+        if local_ids.len() > 1 {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
             ));
@@ -6832,7 +6948,110 @@ __attribute__((used)) void run(void) {
         assert!(sockets.is_empty());
         assert_eq!(vacant.len(), 64);
         assert!(returned.extra["runtime_local_sockets"].is_object());
+        assert!(returned.extra["runtime_hosted_socket"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("/hosted.sock")));
         confined.bridge().shutdown().await.unwrap();
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    fn rights_input_base() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let bundle = base.join("bundle");
+        std::fs::create_dir(&bundle).unwrap();
+        let engine = bundle.join("llama-server");
+        let model = base.join("model.gguf");
+        std::fs::write(&engine, b"engine").unwrap();
+        std::fs::write(&model, b"gguf").unwrap();
+        (temp, base, engine, model, bundle)
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn a_second_local_offer_is_refused_before_start() {
+        let (_temp, base, engine, model, bundle) = rights_input_base();
+        let config = ProviderConfig {
+            base_path: base.to_string_lossy().into_owned(),
+            extra: serde_json::json!({
+                "offers": [
+                    {"id":"one","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}},
+                    {"id":"two","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}}
+                ]
+            }),
+            ..ProviderConfig::default()
+        };
+        let error = admit_model_rights_inputs(
+            Path::new("/bin/true"),
+            &config,
+            &base.join("journal"),
+            &engine,
+            &model,
+            &bundle,
+        )
+        .expect_err("two local offers");
+        assert!(
+            matches!(error, BridgeError::InitFailed(ref reason) if reason == "too many local model offers"),
+            "{error:?}"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn a_model_outside_the_preparation_directory_is_refused() {
+        let (_temp, base, engine, model, bundle) = rights_input_base();
+        let config = ProviderConfig {
+            base_path: base.to_string_lossy().into_owned(),
+            extra: serde_json::json!({
+                "offers": [{"id":"one","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}}]
+            }),
+            ..ProviderConfig::default()
+        };
+        let error = admit_model_rights_inputs(
+            Path::new("/bin/true"),
+            &config,
+            &base.join("journal"),
+            &engine,
+            &model,
+            &bundle,
+        )
+        .expect_err("weights outside model-preparation");
+        assert!(
+            matches!(error, BridgeError::InitFailed(ref reason) if reason == "model preparation path is not admitted"),
+            "{error:?}"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+    #[test]
+    fn a_sidecar_beside_the_admitted_weights_is_refused() {
+        let (_temp, base, engine, _, bundle) = rights_input_base();
+        let admitted = base.join(format!("model-preparation/admitted-{}", "ab".repeat(32)));
+        std::fs::create_dir_all(&admitted).unwrap();
+        let model = admitted.join("weights.gguf");
+        std::fs::write(&model, b"gguf").unwrap();
+        std::fs::write(admitted.join("tokenizer.json"), b"{}").unwrap();
+        let config = ProviderConfig {
+            base_path: base.to_string_lossy().into_owned(),
+            extra: serde_json::json!({
+                "offers": [{"id":"one","adapter":{"kind":"local_llama_cpp_text","engine":{"path":engine},"model":{"path":model}}}]
+            }),
+            ..ProviderConfig::default()
+        };
+        let error = admit_model_rights_inputs(
+            Path::new("/bin/true"),
+            &config,
+            &base.join("journal"),
+            &engine,
+            &model,
+            &bundle,
+        )
+        .expect_err("sidecar");
+        assert!(
+            matches!(error, BridgeError::InitFailed(ref reason) if reason == "unlisted model sidecar"),
+            "{error:?}"
+        );
     }
 
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
@@ -6882,10 +7101,19 @@ __attribute__((used)) void run(void) {
             .parent()
             .expect("the engine has a bundle directory")
             .to_path_buf();
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let base = temp.path().canonicalize().unwrap();
-        let binary = write_real_engine_probe(&base);
+        let model_text = model.to_str().expect("the weights path is unicode");
+        let marker = "/model-preparation/admitted-";
+        let base = PathBuf::from(
+            &model_text[..model_text
+                .find(marker)
+                .expect("the weights file is an admitted preparation path")],
+        );
+        assert!(
+            engine.starts_with(&base),
+            "the engine is inside the Home that holds the weights"
+        );
+        let probe_dir = tempfile::tempdir().unwrap();
+        let binary = write_real_engine_probe(probe_dir.path());
         let journal = base.join("providers/model-provider/journal");
         let mut config = ProviderConfig {
             base_path: base.to_string_lossy().into_owned(),
@@ -6893,7 +7121,11 @@ __attribute__((used)) void run(void) {
         };
         config.extra = serde_json::json!({
             "journal_dir": journal,
-            "offers": [{"id": "proof", "adapter": {"kind": "local_llama_cpp_text"}}],
+            "offers": [{"id": "proof", "adapter": {
+                "kind": "local_llama_cpp_text",
+                "engine": {"path": engine},
+                "model": {"path": model}
+            }}],
             "proof_engine": engine,
             "proof_model": model,
             "proof_gpu": gpu,
