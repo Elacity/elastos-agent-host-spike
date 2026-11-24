@@ -530,6 +530,283 @@ mod tests {
         provider.stop(&second).await.unwrap();
     }
 
+    /// A v2 guest asks on the real bridge. The owner grants that pending
+    /// request. The guest's read carries the token from that grant. A token
+    /// the bridge did not sign is refused, and a denial keeps the owner's text.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn v2_guest_obtains_a_grant_and_reads_with_that_token() {
+        use crate::resource_bridge::{handle_component_resource_request, BridgeContext};
+        use elastos_common::AuthorityBound;
+        use elastos_compute::providers::{ActivationOutcome, ComponentProvider};
+        use elastos_compute::ComputeProvider;
+        use elastos_runtime::capability::pending::PendingRequestStore;
+        use elastos_runtime::capability::{
+            Action, CapabilityManager, CapabilityStore, GrantDuration, RequestStatus, Settler,
+            TokenConstraints,
+        };
+        use elastos_runtime::primitives::audit::AuditLog;
+        use elastos_runtime::primitives::metrics::MetricsManager;
+        use elastos_runtime::provider::{
+            Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
+        };
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        const RESOURCE: &str = "localhost://Local/SharedByLocalUsersAndBots/Home/note.txt";
+
+        struct NoteProvider {
+            calls: Arc<Mutex<Vec<serde_json::Value>>>,
+            note: Vec<u8>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for NoteProvider {
+            async fn handle(
+                &self,
+                _: ResourceRequest,
+            ) -> std::result::Result<ResourceResponse, ProviderError> {
+                Err(ProviderError::Provider("raw only".into()))
+            }
+
+            fn schemes(&self) -> Vec<&'static str> {
+                vec!["localhost"]
+            }
+
+            fn name(&self) -> &'static str {
+                "note"
+            }
+
+            async fn send_raw(
+                &self,
+                request: &serde_json::Value,
+            ) -> std::result::Result<serde_json::Value, ProviderError> {
+                self.calls.lock().expect("calls").push(request.clone());
+                let offset = request["offset"].as_u64().unwrap_or(0) as usize;
+                let length = request["length"].as_u64().unwrap_or(0) as usize;
+                let start = offset.min(self.note.len());
+                let end = start.saturating_add(length).min(self.note.len());
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "data": { "content": self.note[start..end] }
+                }))
+            }
+        }
+
+        let audit = Arc::new(AuditLog::new());
+        let manager = Arc::new(CapabilityManager::new(
+            Arc::new(CapabilityStore::new()),
+            audit.clone(),
+            Arc::new(MetricsManager::new()),
+        ));
+        let pending = Arc::new(PendingRequestStore::new(audit));
+        let registry = Arc::new(ProviderRegistry::new());
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        registry
+            .register(Arc::new(NoteProvider {
+                calls: calls.clone(),
+                note: b"note".to_vec(),
+            }))
+            .await;
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+        let host = tokio::runtime::Handle::current();
+        let provider = ComponentProvider::new();
+        {
+            let registry = registry.clone();
+            let manager = manager.clone();
+            let pending = pending.clone();
+            let lines = lines.clone();
+            provider.set_bus_hostcall(Arc::new(move |line, capsule, principal| {
+                lines.lock().expect("lines").push(line.to_string());
+                let ctx = BridgeContext {
+                    provider_registry: registry.clone(),
+                    capability_manager: manager.clone(),
+                    pending_store: pending.clone(),
+                    capsule_id: capsule.to_string(),
+                    session_id: capsule.to_string(),
+                    principal_id: principal.map(str::to_string),
+                    manifest_capabilities: vec![AuthorityBound::from(
+                        "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+                    )],
+                    data_dir: None,
+                    launch: None,
+                    model_token_ceiling: None,
+                    model_budget: None,
+                    stop: None,
+                };
+                let response = crate::runtime::Runtime::block_on_component_bridge(
+                    &host,
+                    handle_component_resource_request(line, ctx),
+                )
+                .map_err(|err| err.to_string())?;
+                serde_json::to_string(&response).map_err(|err| err.to_string())
+            }));
+        }
+
+        let bytes = wat::parse_str(include_str!(
+            "../../../tests/fixtures/components/v2-grant.wat"
+        ))
+        .expect("v2-grant.wat parses");
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1/capsule.json");
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let handle = provider
+            .load_admitted(bytes, manifest)
+            .await
+            .expect("grant guest loads");
+        let mut resident = provider
+            .start_resident(&handle)
+            .await
+            .expect("grant guest starts");
+
+        let started = Instant::now();
+        let request = loop {
+            if let Some(request) = pending.list_pending().await.into_iter().next() {
+                break request;
+            }
+            if let Some(outcome) = resident.outcome() {
+                panic!("guest ended before a pending request: {outcome:?}");
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!(
+                    "no pending request; lines: {:?}",
+                    lines.lock().expect("lines")
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_eq!(request.resource.as_str(), RESOURCE);
+        assert_eq!(request.reason, "to read");
+        assert_eq!(request.action, Action::Read);
+        assert!(matches!(request.status, RequestStatus::Pending));
+        let token = manager.grant(
+            request.session_id.as_str(),
+            request.resource.clone(),
+            request.action,
+            TokenConstraints::default(),
+            None,
+        );
+        let encoded = token.to_base64().expect("token encodes");
+        pending
+            .grant_request(request.id.as_str(), token, GrantDuration::Session)
+            .await
+            .expect("owner grants");
+
+        let outcome = tokio::time::timeout(Duration::from_secs(10), resident.ended())
+            .await
+            .expect("guest timed out");
+        assert_eq!(outcome, ActivationOutcome::Returned, "guest ending");
+        let seen = lines.lock().expect("lines").clone();
+        let reads: Vec<serde_json::Value> = seen
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|value| value["request"]["type"] == "resource_invoke")
+            .collect();
+        assert_eq!(reads.len(), 1, "one read: {seen:?}");
+        assert_eq!(reads[0]["request"]["token"], encoded);
+        assert_eq!(reads[0]["request"]["uri"], RESOURCE);
+        let dispatched = calls.lock().expect("calls").clone();
+        assert_eq!(
+            dispatched.len(),
+            1,
+            "the bridge dispatched the granted read"
+        );
+        assert_eq!(dispatched[0]["op"], "read");
+        assert_eq!(dispatched[0]["path"], RESOURCE);
+
+        let bad = handle_component_resource_request(
+            &serde_json::json!({
+                "id": 2,
+                "request": {
+                    "type": "resource_invoke",
+                    "uri": RESOURCE,
+                    "operation": "read",
+                    "body": { "path": RESOURCE, "offset": 0, "length": 8 },
+                    "token": "grant-token"
+                }
+            })
+            .to_string(),
+            BridgeContext {
+                provider_registry: registry.clone(),
+                capability_manager: manager.clone(),
+                pending_store: pending.clone(),
+                capsule_id: handle.id.0.clone(),
+                session_id: handle.id.0.clone(),
+                principal_id: None,
+                manifest_capabilities: vec![AuthorityBound::from(
+                    "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+                )],
+                data_dir: None,
+                launch: None,
+                model_token_ceiling: None,
+                model_budget: None,
+                stop: None,
+            },
+        )
+        .await
+        .expect("bad token call");
+        assert_eq!(bad["response"]["code"], "invalid_token");
+        assert_eq!(
+            calls.lock().expect("calls").len(),
+            1,
+            "an ungranted token never reaches the provider"
+        );
+
+        let deny_line = serde_json::json!({
+            "id": 3,
+            "request": {
+                "type": "request_capability",
+                "resource": RESOURCE,
+                "action": "read",
+                "reason": "because"
+            }
+        })
+        .to_string();
+        let deny_ctx = BridgeContext {
+            provider_registry: registry,
+            capability_manager: manager,
+            pending_store: pending.clone(),
+            capsule_id: handle.id.0.clone(),
+            session_id: handle.id.0.clone(),
+            principal_id: None,
+            manifest_capabilities: vec![AuthorityBound::from(
+                "localhost://Local/SharedByLocalUsersAndBots/Home/*".to_string(),
+            )],
+            data_dir: None,
+            launch: None,
+            model_token_ceiling: None,
+            model_budget: None,
+            stop: None,
+        };
+        let deny_pending = pending.clone();
+        let waiting = tokio::spawn(async move {
+            handle_component_resource_request(&deny_line, deny_ctx)
+                .await
+                .expect("denial call")
+        });
+        let started = Instant::now();
+        let denied = loop {
+            if let Some(request) = deny_pending.list_pending().await.into_iter().next() {
+                break request;
+            }
+            if started.elapsed() > Duration::from_secs(5) {
+                panic!("denial left no pending request");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        deny_pending
+            .deny_request_by(denied.id.as_str(), "not now", Settler::Shell)
+            .await
+            .expect("owner denies");
+        let denied = waiting.await.expect("denial task");
+        assert_eq!(denied["response"]["code"], "denied");
+        assert_eq!(denied["response"]["message"], "not now");
+
+        provider.stop(&handle).await.unwrap();
+    }
+
     fn wat_imports(names: &[&str]) -> Vec<u8> {
         let imports = names
             .iter()

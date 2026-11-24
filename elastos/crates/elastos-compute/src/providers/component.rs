@@ -1514,14 +1514,35 @@ impl v2::elastos::bus::credentials::Host for ComponentState {
 
 impl v2::elastos::bus::capabilities::Host for ComponentState {}
 impl v2::elastos::bus::capabilities::HostWithStore<ComponentState> for HasSelf<ComponentState> {
+    /// The same call the v1 request makes: one action, the same bridge line,
+    /// the same pending store, and the owner's decision. This function grants
+    /// nothing by itself.
     async fn request(
-        _: &wasmtime::component::Accessor<ComponentState, Self>,
-        _: String,
-        _: Vec<String>,
-        _: String,
+        accessor: &wasmtime::component::Accessor<ComponentState, Self>,
+        resource: String,
+        actions: Vec<String>,
+        reason: String,
     ) -> std::result::Result<v2::elastos::bus::types::Grant, v2::elastos::bus::types::BusError>
     {
-        refuse_new_capability()
+        let decided = accessor.with(|mut access| {
+            elastos::bus::capabilities::Host::request(
+                access.get(),
+                elastos::bus::types::CapabilityRequest {
+                    resource,
+                    actions,
+                    reason,
+                },
+            )
+        });
+        match decided {
+            Ok(grant) => Ok(v2::elastos::bus::types::Grant {
+                id: grant.id,
+                resource: grant.resource,
+                actions: grant.actions,
+                expires_at_ms: grant.expires_at_ms,
+            }),
+            Err(err) => Err(v2_error(err)),
+        }
     }
 }
 
@@ -1579,17 +1600,6 @@ impl v2::elastos::bus::ui::HostWithStore<ComponentState> for HasSelf<ComponentSt
         accessor.with(|mut access| access.get().present_document(&media_type, &document))
     }
 }
-
-fn refuse_new_capability() -> V2Result<v2::elastos::bus::types::Grant> {
-    #[cfg(test)]
-    CAPABILITY_REFUSALS.fetch_add(1, Ordering::Relaxed);
-    Err(V2BusError::Unavailable(
-        "capabilities are not available in this slice".into(),
-    ))
-}
-
-#[cfg(test)]
-static CAPABILITY_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 fn present_error(err: super::bus2_ui::PresentError) -> V2BusError {
     match err {
@@ -2434,10 +2444,6 @@ mod tests {
             3,
             "present does not call the bridge"
         );
-        assert_eq!(CAPABILITY_REFUSALS.load(Ordering::Relaxed), 0);
-        let unavailable = refuse_new_capability().unwrap_err();
-        assert!(matches!(unavailable, V2BusError::Unavailable(message)
-            if message == "capabilities are not available in this slice"));
     }
 
     /// A v2 guest calls `providers.invoke`, reads the stream four bytes at a

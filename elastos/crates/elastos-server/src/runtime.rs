@@ -872,6 +872,27 @@ impl Runtime {
         }
     }
 
+    /// Runs one bridge future on `handle`. A v2 guest is already inside its own
+    /// runtime, so that wait runs on a side thread. A v1 guest calls from
+    /// `spawn_blocking`, which has no runtime, and waits on this thread.
+    pub(crate) fn block_on_component_bridge<T>(
+        handle: &tokio::runtime::Handle,
+        fut: impl std::future::Future<Output = T> + Send,
+    ) -> T
+    where
+        T: Send,
+    {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return handle.block_on(fut);
+        }
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| handle.block_on(fut))
+                .join()
+                .unwrap_or_else(|err| std::panic::resume_unwind(err))
+        })
+    }
+
     /// Set the provider registry and capability manager for provider dispatch
     /// and real token minting.
     ///
@@ -961,11 +982,11 @@ impl Runtime {
                     model_budget,
                     stop,
                 };
-                let response = host_handle
-                    .block_on(crate::resource_bridge::handle_component_resource_request(
-                        line, ctx,
-                    ))
-                    .map_err(|err| err.to_string())?;
+                let response = Self::block_on_component_bridge(
+                    &host_handle,
+                    crate::resource_bridge::handle_component_resource_request(line, ctx),
+                )
+                .map_err(|err| err.to_string())?;
                 serde_json::to_string(&response).map_err(|err| err.to_string())
             }));
             tracing::info!("Component resource bridge configured");
