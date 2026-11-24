@@ -84,6 +84,8 @@ pub(crate) async fn start_gateway_local_control_with_home_url(
         policy_sha256: String::new(),
         dependency_sha256: String::new(),
         generation: std::env::var("ELASTOS_UPDATE_GENERATION").unwrap_or_default(),
+        process_start: crate::update_controller::child::process_start(std::process::id())
+            .unwrap_or_default(),
         home_url,
     };
     let coords_guard =

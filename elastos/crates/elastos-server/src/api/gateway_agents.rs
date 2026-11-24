@@ -9,7 +9,13 @@
 //! in a build without agents, and on a Runtime that is not the Home.
 
 use super::*;
-use crate::agents::{Caller, CreateRequest, Refused};
+use crate::agents::{Caller, CodedRefusal, CreateRequest, Refused};
+
+#[derive(Serialize)]
+struct CodedRefusalBody<'a> {
+    code: &'a str,
+    reason: &'a str,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,10 +75,22 @@ fn agents_owner(state: &GatewayState, headers: &HeaderMap) -> anyhow::Result<Age
 fn agents_response<T: Serialize>(result: anyhow::Result<T>) -> Response {
     match result {
         Ok(value) => Json(value).into_response(),
-        Err(error) => match error.downcast_ref::<Refused>() {
-            Some(refused) => (StatusCode::CONFLICT, refused.to_string()).into_response(),
-            None => system_error_response(error),
-        },
+        Err(error) => {
+            if let Some(coded) = error.downcast_ref::<CodedRefusal>() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(CodedRefusalBody {
+                        code: coded.code,
+                        reason: coded.reason,
+                    }),
+                )
+                    .into_response();
+            }
+            match error.downcast_ref::<Refused>() {
+                Some(refused) => (StatusCode::CONFLICT, refused.to_string()).into_response(),
+                None => system_error_response(error),
+            }
+        }
     }
 }
 
@@ -223,6 +241,11 @@ async fn start_agent(
     let owner = agents_owner(state, headers)?;
     let request: AgentLaunchRequest = agents_request(body)?;
     let launch = require_home_launch_token_binding(&state.data_dir, headers, &[SYSTEM_CAPSULE_ID])?;
+    // The stopping mark is in the Runtime. This route spends the step-up, then
+    // the Runtime reads the mark. A read here would be a second call, and a
+    // Stop between that call and the launch would still spend the token on
+    // the refusal. Spending after a launch that has started the guest would
+    // run the guest before the passkey is consumed.
     consume_passkey_step_up_token(
         &state.data_dir,
         request.step_up_token.trim(),
@@ -275,6 +298,8 @@ struct AgentStoppedSession {
 struct AgentStopResponse {
     agent_id: String,
     stopped: Vec<AgentStoppedSession>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stopping: Vec<AgentStoppedSession>,
 }
 
 pub(super) async fn agents_stop(
@@ -282,7 +307,12 @@ pub(super) async fn agents_stop(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    agents_response(stop_agent(&state, &headers, &body).await)
+    match stop_agent(&state, &headers, &body).await {
+        Ok(value) if !value.stopping.is_empty() => {
+            (StatusCode::ACCEPTED, Json(value)).into_response()
+        }
+        other => agents_response(other),
+    }
 }
 
 /// The owner gate. With no agent id this is the admin check, and it runs
@@ -318,23 +348,27 @@ async fn stop_agent(
     let request: AgentStopRequest = agents_request(body)?;
     owner_may_stop(state, headers, Some(&request.agent_id))?;
     let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
-    if outcome.stopped.is_empty() {
-        let message = match outcome.already.as_deref() {
-            Some("stopping") => "this agent is already stopping",
-            Some("stopped") => "this agent is already stopped",
-            _ => "this agent has no running session",
-        };
-        return Err(Refused(message.to_string()).into());
+    if outcome.stopped.is_empty() && outcome.stopping.is_empty() {
+        return Err(match outcome.already.as_deref() {
+            Some("stopped") => CodedRefusal {
+                code: "agent_already_stopped",
+                reason: "this agent is already stopped",
+            }
+            .into(),
+            _ => CodedRefusal {
+                code: "agent_no_session",
+                reason: "this agent has no running session",
+            }
+            .into(),
+        });
     }
+    let session = |session: super::gateway_home_runtime::StoppedRuntimeAgent| AgentStoppedSession {
+        session_id: session.session_id,
+        status: session.status,
+    };
     Ok(AgentStopResponse {
         agent_id: request.agent_id,
-        stopped: outcome
-            .stopped
-            .into_iter()
-            .map(|session| AgentStoppedSession {
-                session_id: session.session_id,
-                status: session.status,
-            })
-            .collect(),
+        stopped: outcome.stopped.into_iter().map(&session).collect(),
+        stopping: outcome.stopping.into_iter().map(&session).collect(),
     })
 }
