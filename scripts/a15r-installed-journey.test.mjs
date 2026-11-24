@@ -9,6 +9,7 @@ import {
   agentStartStepUps,
   carriedAgentId,
   createdAgentOwnedBy,
+  LIVE_SESSION_COORDS,
   gatewayHealthOk,
   journalFileInRoot,
   ownerDocumentUnchanged,
@@ -36,6 +37,11 @@ function startEvent(agentId, signature = "signed") {
     }),
   };
 }
+
+test("the live session list reads the agent runtime", () => {
+  assert.equal(LIVE_SESSION_COORDS, "agent-runtime-coords.json");
+  assert.notEqual(LIVE_SESSION_COORDS, "home-runtime-coords.json");
+});
 
 test("gateway health is the gateway body", () => {
   assert.equal(gatewayHealthOk(200, "OK"), true);
