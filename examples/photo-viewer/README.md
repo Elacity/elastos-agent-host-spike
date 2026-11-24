@@ -7,8 +7,9 @@ imports only the `elastos:bus@v1` interfaces it uses (`types`, `runtime`,
 `capabilities`, `providers`). It gets no WASI, files, sockets, clock or
 environment.
 
-This directory stays outside the ElastOS Cargo workspace and all CI, setup,
-release and deployment lists, like `examples/hello`.
+This directory stays outside the ElastOS Cargo workspace and the setup,
+release and deployment lists, like `examples/hello`. The nightly
+`examples-nightly` workflow runs this folder's gate (`bash verify.sh`).
 
 ## What one run does
 
