@@ -1171,6 +1171,34 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
 }
 
 #[tokio::test]
+async fn another_owner_cannot_retire_a_live_guest() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    let (status, body) = call(
+        &world.app,
+        "/api/apps/system/agents/retire",
+        &world.other.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "another owner's retire: {body}"
+    );
+    assert!(
+        body.contains("the caller owns no agent with that id"),
+        "{status} {body}"
+    );
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        1,
+        "another owner's retire ended the guest: {status} {body}"
+    );
+}
+
+#[tokio::test]
 async fn a_second_stop_of_the_same_agent_is_not_a_server_error() {
     let world = world().await;
     let started = started(&world, &world.agent_a).await;

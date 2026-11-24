@@ -137,6 +137,11 @@ pub(super) async fn agents_retire(
     let result = async {
         let owner = agents_owner(&state, &headers)?;
         let request: RetireRequest = agents_request(&body)?;
+        crate::agents::stored_agent_for_stop(
+            &state.data_dir,
+            &owner.principal.principal_id,
+            &request.agent_id,
+        )?;
         end_live_agent(&state.data_dir, &request.agent_id).await?;
         crate::agents::retire(
             &state.data_dir,
@@ -149,7 +154,8 @@ pub(super) async fn agents_retire(
     agents_response(result)
 }
 
-/// Stop one live agent before its record is retired. A Home with no agent
+/// Stop one live agent before its record is retired. The retire route checks
+/// that the caller owns the agent before this stop. A Home with no agent
 /// Runtime retires the record as before. A stop the Runtime refuses because
 /// the agent is already stopped still retires the record.
 pub(super) async fn end_live_agent(
