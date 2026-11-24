@@ -239,8 +239,9 @@ impl LocalProvider {
             PathBuf::from(&config.base_path)
         };
 
-        // Ensure base path exists and canonicalize for symlink-safe comparisons
-        if !base_path.exists() {
+        // lstat, so a symlink to the data directory is still a path. `exists`
+        // follows the link and a seatbelt can hide that follow.
+        if std::fs::symlink_metadata(&base_path).is_err() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("Base path does not exist: {:?}", base_path),

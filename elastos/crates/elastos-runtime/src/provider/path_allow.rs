@@ -98,21 +98,17 @@ fn current_user() -> u32 {
 /// `path` is one allow-list root. It must be a real directory this user owns,
 /// and its resolved path must stay a child of `data_dir` that does not reach
 /// `identity/` or `identity/device.key`.
-fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u64), String> {
+#[rustfmt::skip] fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u64), String> {
     let metadata = std::fs::symlink_metadata(path)
-        .map_err(|_| format!("provider start is refused: {name} is not an existing directory"))?;
+        .map_err(|_| format!("provider start is refused: {name} is missing. Create a directory named {name} that you own in the data directory, then start Home again."))?;
     if metadata.file_type().is_symlink() {
         return Err(format!("provider start is refused: {name} is a symlink"));
     }
     if !metadata.is_dir() {
-        return Err(format!(
-            "provider start is refused: {name} is not a directory"
-        ));
+        return Err(format!("provider start is refused: {name} is not a directory. Replace it with a directory you own, then start Home again."));
     }
     if metadata.uid() != current_user() {
-        return Err(format!(
-            "provider start is refused: {name} is not owned by the current user"
-        ));
+        return Err(format!("provider start is refused: {name} is not owned by the current user. Give {name} to this user, or replace it with a directory this user owns, then start Home again."));
     }
     let resolved = std::fs::canonicalize(path)
         .map_err(|_| format!("provider start is refused: {name} could not be resolved"))?;
@@ -571,5 +567,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn old_home(parent: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let data = parent.join("data");
+        std::fs::create_dir_all(data.join("ElastOS")).unwrap();
+        for relative in ["ElastOS/kept.txt", "chain-provider/kept.txt"] {
+            let path = data.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"kept-from-the-old-home").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        assert!(!data.join("UsersAI").exists(), "an old home has no UsersAI yet");
+        assert!(!data.join("capsules/localhost-provider/capsule.json").exists());
+        elastos_common::localhost::ensure_file_backed_roots(&data).unwrap();
+        assert!(data.join("UsersAI").is_dir(), "Home creates the missing root");
+        data
+    }
+
+    fn assert_old_home_fenced(data: &std::path::Path) {
+        use std::os::unix::fs::MetadataExt;
+        for key in ["localhost-provider", "object-provider", "chain-provider"] {
+            let rendered = render(key, data, Path::new(EXE), 5)
+                .unwrap_or_else(|err| panic!("{key} at {}: {err}", data.display()));
+            let file = if key == "chain-provider" {
+                data.join("chain-provider/kept.txt")
+            } else {
+                data.join("ElastOS/kept.txt")
+            };
+            assert!(
+                rendered
+                    .landlock
+                    .iter()
+                    .any(|rule| file.starts_with(&rule.1) && rule.1 != data),
+                "{key} plan does not cover {} in {:?}",
+                file.display(),
+                rendered.landlock
+            );
+        }
+        for relative in ["ElastOS/kept.txt", "chain-provider/kept.txt"] {
+            let path = data.join(relative);
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            assert_eq!(meta.mode() & 0o777, 0o640, "{relative}");
+            assert_eq!(meta.uid(), super::current_user(), "{relative}");
+            assert_eq!(std::fs::read(&path).unwrap(), b"kept-from-the-old-home");
+        }
+    }
+
+    #[test]
+    fn an_updated_home_fences_helpers_and_keeps_existing_files() {
+        use std::os::unix::fs::MetadataExt;
+        let held = tempfile::tempdir().unwrap();
+        let data = old_home(held.path());
+        assert_old_home_fenced(&data);
+
+        let link_hold = tempfile::tempdir().unwrap();
+        let link = link_hold.path().join("home");
+        std::os::unix::fs::symlink(&data, &link).unwrap();
+        assert_old_home_fenced(&link);
+
+        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let tmp_data = old_home(tmp.path());
+        let canonical = std::fs::canonicalize(&tmp_data).unwrap();
+        assert!(
+            canonical.starts_with("/tmp") || canonical.starts_with("/private/tmp"),
+            "{}",
+            canonical.display()
+        );
+        assert_old_home_fenced(&tmp_data);
+
+        let root_dev = std::fs::metadata("/").unwrap().dev();
+        let mut other = None;
+        for mount in ["/Volumes", "/mnt", "/media"] {
+            let Ok(entries) = std::fs::read_dir(mount) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                if !meta.is_dir() || meta.dev() == root_dev {
+                    continue;
+                }
+                if let Ok(dir) = tempfile::tempdir_in(&path) {
+                    other = Some(dir);
+                    break;
+                }
+            }
+            if other.is_some() {
+                break;
+            }
+        }
+        if let Some(dir) = other {
+            let data = old_home(dir.path());
+            let dev = std::fs::metadata(&data).unwrap().dev();
+            assert_ne!(dev, root_dev, "the other volume is the boot volume");
+            assert_old_home_fenced(&data);
+            eprintln!("other-volume {}", data.display());
+        } else {
+            eprintln!("other-volume none");
+        }
+    }
+
+    #[test]
+    fn a_missing_root_names_itself_and_what_to_do() {
+        let held = real_data_dir();
+        std::fs::remove_dir(held.path().join("UsersAI")).unwrap();
+        let error = render("localhost-provider", held.path(), Path::new(EXE), 5)
+            .expect_err("a missing root is refused");
+        assert!(error.contains("UsersAI"), "{error}");
+        assert!(error.contains("Create a directory named UsersAI"), "{error}");
+        assert!(error.contains("that you own"), "{error}");
+        assert!(error.contains("start Home again"), "{error}");
+    }
+
+    #[test]
+    fn a_root_that_is_not_a_directory_names_itself_and_what_to_do() {
+        let held = real_data_dir();
+        let root = held.path().join("Users");
+        std::fs::remove_dir(&root).unwrap();
+        std::fs::write(&root, b"not-a-directory").unwrap();
+        let error = render("object-provider", held.path(), Path::new(EXE), 5)
+            .expect_err("a file in place of a root is refused");
+        assert!(error.contains("Users"), "{error}");
+        assert!(
+            error.contains("Replace it with a directory you own"),
+            "{error}"
+        );
+        assert!(error.contains("start Home again"), "{error}");
+    }
+
+    #[test]
+    fn a_root_owned_by_someone_else_names_itself_and_what_to_do() {
+        use std::os::unix::fs::MetadataExt;
+        let uid = super::current_user();
+        let mut found = None;
+        for (parent, name) in [("/usr", "bin"), ("/usr", "lib"), ("/private", "etc"), ("/", "usr")]
+        {
+            let path = std::path::Path::new(parent).join(name);
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() == uid {
+                continue;
+            }
+            found = Some((parent, name, path));
+            break;
+        }
+        let (parent, name, path) =
+            found.expect("this machine has no directory owned by another user");
+        let error = super::require_real_root(std::path::Path::new(parent), name, &path)
+            .expect_err("a root owned by someone else is refused");
+        assert!(error.contains(name), "{error}");
+        assert!(error.contains("not owned by the current user"), "{error}");
+        assert!(error.contains(&format!("Give {name} to this user")), "{error}");
+        assert!(error.contains("start Home again"), "{error}");
     }
 }

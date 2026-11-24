@@ -1824,7 +1824,7 @@ impl ProviderBridge {
                 "provider start is refused: chain-provider is a symlink".into(),
             )),
             Ok(metadata) if !metadata.is_dir() => Err(BridgeError::Refused(
-                "provider start is refused: chain-provider is not a directory".into(),
+                "provider start is refused: chain-provider is not a directory. Replace it with a directory you own, then start Home again.".into(),
             )),
             Ok(_) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1847,11 +1847,15 @@ impl ProviderBridge {
         authority: &ProviderAuthority,
         binary_path: &CheckedExecutable,
         data_dir: &Path,
-        config: ProviderConfig,
+        mut config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
         // Admission is the first refusal, before a chain directory is created.
         super::os_entry::admit_path_allow(component_key, authority)
             .map_err(BridgeError::Refused)?;
+        // A symlinked data directory is the real directory it names. The fence
+        // and the helper both use that directory, so a read matches the grant.
+        let data_dir = &std::fs::canonicalize(data_dir).map_err(BridgeError::Io)?;
+        config.base_path = data_dir.to_string_lossy().into_owned();
         if component_key == "chain-provider" {
             Self::ensure_chain_provider_root(data_dir)?;
         }
@@ -6338,5 +6342,30 @@ int main(void) {
         );
         assert!(!marker.exists(), "the provider binary never runs");
         assert!(!root.exists(), "a refused start leaves no root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_chain_root_that_is_not_a_directory_names_what_to_do() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("chain-provider"), b"not-a-directory").unwrap();
+        let error = ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("chain-provider"), "{text}");
+        assert!(
+            text.contains("Replace it with a directory you own"),
+            "{text}"
+        );
+        assert!(text.contains("start Home again"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_chain_root_is_created_for_an_old_home() {
+        let temp = TempDir::new().unwrap();
+        ProviderBridge::ensure_chain_provider_root(temp.path()).unwrap();
+        let meta = fs::symlink_metadata(temp.path().join("chain-provider")).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
     }
 }

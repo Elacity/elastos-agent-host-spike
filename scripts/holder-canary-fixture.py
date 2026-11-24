@@ -297,48 +297,6 @@ def canonical_publisher_did(value):
     return isinstance(value, str) and re.fullmatch(r"did:key:z6Mk[1-9A-HJ-NP-Za-km-z]{44}", value) is not None
 
 
-# admit() reads capsules/<name>/capsule.json for these three. A signed binary
-# row without that file makes `elastos serve` exit before the helper is fenced.
-ADMITTED_NATIVE_PROVIDERS = ("localhost-provider", "object-provider", "chain-provider")
-
-
-def install_source_capsule_manifests(data, source_root):
-    """Copy each admitted provider's source capsule.json into this Home.
-
-    The holder fixture installs the native binary and a signed components row.
-    Admission still requires the manifest beside that row. A missing file is
-    `cannot admit '<name>'`, and serve exits with that name. This copies the
-    source manifest the product tree already ships.
-    """
-    catalogue = json.loads((data / "components.json").read_bytes())
-    external = catalogue.get("external", {})
-    for name in ADMITTED_NATIVE_PROVIDERS:
-        if name not in external:
-            continue
-        source = None
-        for relative in (
-            Path("elastos/capsules") / name / "capsule.json",
-            Path("capsules") / name / "capsule.json",
-        ):
-            candidate = source_root / relative
-            if candidate.is_symlink():
-                raise AssertionError(f"{name} source capsule.json is a symlink")
-            if candidate.is_file():
-                source = candidate
-                break
-        if source is None:
-            raise AssertionError(f"{name} is installed but {source_root} has no capsule.json for it")
-        dest_dir = data / "capsules" / name
-        if dest_dir.is_symlink():
-            raise AssertionError(f"{name} capsule directory is a symlink")
-        dest_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        dest = dest_dir / "capsule.json"
-        if dest.is_symlink() or (dest.exists() and not dest.is_file()):
-            raise AssertionError(f"{name} capsule.json is not a regular file")
-        dest.write_bytes(source.read_bytes())
-        dest.chmod(0o600)
-
-
 def sign_install(home, data, runtime, environment, preserve_source=False):
     """Install a release trusted only by this fixture Home; discard its signing key."""
     sources = json.loads((data / "sources.json").read_text()) if preserve_source else None

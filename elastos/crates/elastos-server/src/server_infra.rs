@@ -2679,6 +2679,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_uninstalled_object_or_chain_helper_does_not_stop_home() {
+        let source = include_str!("server_infra.rs");
+        let production = source.split("mod tests").next().unwrap();
+        for key in ["object-provider", "chain-provider"] {
+            let marker = format!("resolve_verified_native_provider_binary(\"{key}\")");
+            let at = production
+                .find(&marker)
+                .unwrap_or_else(|| panic!("{marker}"));
+            let window = &production[at..];
+            let none_at = window
+                .find("Ok(None) =>")
+                .unwrap_or_else(|| panic!("{key} Ok(None)"));
+            let arm = &window[none_at..];
+            let end = arm
+                .find("\n        Err(")
+                .unwrap_or_else(|| panic!("{key} Err arm"));
+            let arm = &arm[..end];
+            assert!(
+                !arm.contains('?'),
+                "{key} absence is a start refusal:\n{arm}"
+            );
+        }
+    }
+
     fn did_fixture() -> (TempDir, PathBuf, PathBuf) {
         let temp = TempDir::new().unwrap();
         let data_dir = temp.path().join("data");

@@ -340,9 +340,47 @@ pub struct AdmittedProvider {
     authority: ProviderAuthority,
 }
 
+/// Manifest bytes compiled into this Runtime. These three helpers have no
+/// separate signed manifest: the binary is the authority. Every other
+/// provider still reads `capsules/<key>/capsule.json` from the data directory.
+fn embedded_helper_manifest(key: &str) -> Option<&'static str> {
+    match key {
+        "localhost-provider" => Some(include_str!(
+            "../../../capsules/localhost-provider/capsule.json"
+        )),
+        "object-provider" => Some(include_str!(
+            "../../../../capsules/object-provider/capsule.json"
+        )),
+        "chain-provider" => Some(include_str!(
+            "../../../../capsules/chain-provider/capsule.json"
+        )),
+        _ => None,
+    }
+}
+
+/// A file beside an embedded helper is not authority. The data directory is
+/// not signed, so a different file cannot stop Home and cannot change rights.
+/// A missing file is normal. Anything else is logged and ignored.
+fn note_on_disk_helper_manifest(key: &str, path: &Path, embedded: &str) {
+    match elastos_common::capsule_manifest_file::read(path) {
+        Ok(on_disk) if on_disk == embedded.as_bytes() => {}
+        Ok(_) => tracing::warn!(
+            "{key} on-disk capsule.json differs from the signed binary; ignoring {}",
+            path.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => tracing::warn!(
+            "{key} on-disk capsule.json at {} is ignored ({err}); the signed binary is the authority",
+            path.display()
+        ),
+    }
+}
+
 impl AdmittedProvider {
     /// `Ok(None)` when no row resolves for `key` here; `Err` when a resolved
-    /// row or the manifest beside it does not verify.
+    /// row or its manifest does not verify. Localhost, object, and chain read
+    /// the manifest compiled into this binary. Every other provider still
+    /// reads `capsules/<key>/capsule.json`.
     pub fn admit(data_dir: &Path, key: &str) -> anyhow::Result<Option<Self>> {
         let bin_dir = std::env::var_os("ELASTOS_CAPSULE_BIN_DIR").map(PathBuf::from);
         let signers = setup::installed_release_signers(data_dir)?;
@@ -360,8 +398,13 @@ impl AdmittedProvider {
         };
         let manifest_path = data_dir.join("capsules").join(key).join("capsule.json");
         let invalid = |err: String| anyhow::anyhow!("cannot admit '{}': {}", key, err);
-        let bytes = elastos_common::capsule_manifest_file::read(&manifest_path)
-            .map_err(|err| invalid(format!("read {}: {err}", manifest_path.display())))?;
+        let bytes = if let Some(embedded) = embedded_helper_manifest(key) {
+            note_on_disk_helper_manifest(key, &manifest_path, embedded);
+            embedded.as_bytes().to_vec()
+        } else {
+            elastos_common::capsule_manifest_file::read(&manifest_path)
+                .map_err(|err| invalid(format!("read {}: {err}", manifest_path.display())))?
+        };
         let manifest: CapsuleManifest = serde_json::from_slice(&bytes)
             .map_err(|err| invalid(format!("{}: {err}", manifest_path.display())))?;
         manifest.validate().map_err(invalid)?;
@@ -939,6 +982,193 @@ mod tests {
         let error = admit(&data_dir, &BTreeMap::new()).err().expect("refused");
         assert!(error.to_string().contains("capsule.json"), "{error}");
     }
+
+    #[cfg(unix)]
+    fn helper_home(key: &str, provides: &str) -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let bin_dir = data_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bytes = format!("{key}-binary").into_bytes();
+        let path = bin_dir.join(key);
+        std::fs::write(&path, &bytes).unwrap();
+        let checksum = format!("sha256:{}", hex::encode(sha2::Sha256::digest(&bytes)));
+        write_components_manifest(&data_dir, key, &checksum, Some(native_runtime(provides)));
+        (temp, data_dir)
+    }
+
+    #[cfg(unix)]
+    fn capture_warn<T>(body: impl FnOnce() -> T) -> (T, String) {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct WarningWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for WarningWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let writer = WarningWriter(log.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let value = body();
+        let text = String::from_utf8(log.lock().unwrap().clone()).unwrap();
+        (value, text)
+    }
+
+    #[cfg(unix)]
+    /// The three first-party helpers admit from the manifest in the binary.
+    #[test]
+    fn embedded_helpers_admit_when_no_capsule_file_exists() {
+        for (key, raw) in [
+            (
+                "localhost-provider",
+                include_str!("../../../capsules/localhost-provider/capsule.json"),
+            ),
+            (
+                "object-provider",
+                include_str!("../../../../capsules/object-provider/capsule.json"),
+            ),
+            (
+                "chain-provider",
+                include_str!("../../../../capsules/chain-provider/capsule.json"),
+            ),
+        ] {
+            let manifest: CapsuleManifest = serde_json::from_str(raw).unwrap();
+            let provides = manifest.provides.clone().unwrap();
+            let (_temp, data_dir) = helper_home(key, &provides);
+            let manifest_path = data_dir.join("capsules").join(key).join("capsule.json");
+            assert!(!manifest_path.exists(), "{key}");
+            let (admitted, log) = capture_warn(|| {
+                AdmittedProvider::admit_with_bin_dir(&data_dir, key, None, &BTreeMap::new())
+                    .unwrap()
+            });
+            assert_eq!(
+                admitted.unwrap().authority(),
+                manifest.authority.as_ref().unwrap(),
+                "{key}"
+            );
+            assert!(log.is_empty(), "{key} logged about a missing file: {log}");
+        }
+    }
+
+    #[cfg(unix)]
+    /// A different file in the data directory is not authority and does not stop admission.
+    #[test]
+    fn a_tampered_helper_manifest_on_disk_changes_nothing() {
+        let raw = include_str!("../../../capsules/localhost-provider/capsule.json");
+        let manifest: CapsuleManifest = serde_json::from_str(raw).unwrap();
+        let (_temp, data_dir) =
+            helper_home("localhost-provider", manifest.provides.as_deref().unwrap());
+        let path = data_dir.join("capsules/localhost-provider/capsule.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{\"name\":\"wider-than-the-binary\"}\n").unwrap();
+        let (admitted, log) = capture_warn(|| {
+            AdmittedProvider::admit_with_bin_dir(
+                &data_dir,
+                "localhost-provider",
+                None,
+                &BTreeMap::new(),
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            admitted.unwrap().authority(),
+            manifest.authority.as_ref().unwrap()
+        );
+        assert!(
+            log.contains("differs from the signed binary") && log.contains("ignoring"),
+            "{log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_helper_manifest_on_disk_is_ignored() {
+        let raw = include_str!("../../../../capsules/object-provider/capsule.json");
+        let manifest: CapsuleManifest = serde_json::from_str(raw).unwrap();
+        let (_temp, data_dir) =
+            helper_home("object-provider", manifest.provides.as_deref().unwrap());
+        let dir = data_dir.join("capsules/object-provider");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("capsule.json")).unwrap();
+        let (admitted, log) = capture_warn(|| {
+            AdmittedProvider::admit_with_bin_dir(
+                &data_dir,
+                "object-provider",
+                None,
+                &BTreeMap::new(),
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            admitted.unwrap().authority(),
+            manifest.authority.as_ref().unwrap()
+        );
+        assert!(
+            log.contains("is ignored") && log.contains("signed binary is the authority"),
+            "{log}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_equal_helper_manifest_on_disk_is_silent() {
+        let raw = include_str!("../../../../capsules/chain-provider/capsule.json");
+        let manifest: CapsuleManifest = serde_json::from_str(raw).unwrap();
+        let (_temp, data_dir) =
+            helper_home("chain-provider", manifest.provides.as_deref().unwrap());
+        let path = data_dir.join("capsules/chain-provider/capsule.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, raw.as_bytes()).unwrap();
+        let (admitted, log) = capture_warn(|| {
+            AdmittedProvider::admit_with_bin_dir(
+                &data_dir,
+                "chain-provider",
+                None,
+                &BTreeMap::new(),
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            admitted.unwrap().authority(),
+            manifest.authority.as_ref().unwrap()
+        );
+        assert!(log.is_empty(), "{log}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_uninstalled_chain_or_object_helper_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("components.json"),
+            br#"{"external":{},"capsules":{},"profiles":{}}"#,
+        )
+        .unwrap();
+        for key in ["chain-provider", "object-provider"] {
+            let admitted =
+                AdmittedProvider::admit_with_bin_dir(&data_dir, key, None, &BTreeMap::new())
+                    .unwrap();
+            assert!(admitted.is_none(), "{key}");
+        }
+    }
+
     #[cfg(unix)]
     /// R4 ADMIT-BAD-CHECKSUM stays the resolver's row.
     #[test]

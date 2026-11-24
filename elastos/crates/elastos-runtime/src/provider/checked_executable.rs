@@ -51,6 +51,10 @@ fn private_copy_root(data_dir: &Path, create: bool) -> Result<Option<PathBuf>, S
         std::fs::create_dir_all(data_dir)
             .map_err(|e| format!("provider copy Home cannot be created: {e}"))?;
     }
+    // A symlinked data directory is the real directory it names. The owner
+    // and mode checks apply to that directory, not to the symlink inode.
+    let data_dir = &std::fs::canonicalize(data_dir)
+        .map_err(|e| format!("provider copy Home cannot be inspected: {e}"))?;
     let home = std::fs::symlink_metadata(data_dir)
         .map_err(|e| format!("provider copy Home cannot be inspected: {e}"))?;
     if !home.is_dir()
@@ -653,5 +657,34 @@ mod tests {
             "a #! script needs /proc/self/fd/N after exec"
         );
         assert!(!native.script, "an ELF provider keeps FD_CLOEXEC");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod symlink_home_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_symlinked_data_directory_uses_the_real_directory() {
+        let held = tempfile::tempdir().unwrap();
+        let real = held.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = held.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let root = private_copy_root(&link, true).unwrap().unwrap();
+        assert_eq!(
+            root,
+            std::fs::canonicalize(&real)
+                .unwrap()
+                .join("provider-copies")
+        );
+        let meta = std::fs::symlink_metadata(&root).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let error = private_copy_root(&link, false).unwrap_err();
+        assert!(error.contains("unsafe ownership or permissions"), "{error}");
     }
 }

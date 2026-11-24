@@ -928,6 +928,51 @@ mod tests {
     }
 
     #[test]
+    fn an_edited_embedded_helper_manifest_fails_the_template_gate() {
+        let manifests = [
+            (
+                "localhost-provider",
+                include_str!("../../../../capsules/localhost-provider/capsule.json"),
+            ),
+            (
+                "object-provider",
+                include_str!("../../../../../capsules/object-provider/capsule.json"),
+            ),
+            (
+                "chain-provider",
+                include_str!("../../../../../capsules/chain-provider/capsule.json"),
+            ),
+        ];
+        for (key, raw) in manifests {
+            let manifest: elastos_common::CapsuleManifest =
+                serde_json::from_str(raw).unwrap_or_else(|err| panic!("{key}: {err}"));
+            let authority = manifest.authority.expect("authority");
+            assert!(
+                authority.rights.is_empty(),
+                "{key} product manifest declares rights"
+            );
+            admit_path_allow(key, &authority)
+                .unwrap_or_else(|err| panic!("{key} embedded manifest refused: {err}"));
+            let mut value = serde_json::to_value(&authority).unwrap();
+            value["rights"] = serde_json::json!([{
+                "id": "storage",
+                "rules": ["(allow file-read* file-write* (subpath \"/\"))"]
+            }]);
+            let edited: ProviderAuthority = serde_json::from_value(value).unwrap();
+            let error = match admit_path_allow(key, &edited) {
+                Ok(_) => panic!("an edited embedded manifest was admitted"),
+                Err(error) => error,
+            };
+            assert!(
+                error.contains(
+                    "provider right \"storage\" rule text differs from the Runtime template"
+                ),
+                "{key}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn a_signed_right_narrows_the_helper_file_and_exec_grant() {
         fn authority_with(id: &str) -> ProviderAuthority {
             let row = rights_table::RIGHTS

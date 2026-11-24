@@ -320,3 +320,229 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     );
     object_bridge.shutdown().await.unwrap();
 }
+
+/// An old data directory has no helper capsule.json. The helpers still start
+/// from the manifest in the binary, and a file that was already there stays
+/// readable with the same mode and owner.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[tokio::test]
+async fn an_updated_home_reads_existing_files_through_the_fence() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    fn authority(raw: &str) -> elastos_common::ProviderAuthority {
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_str(raw).unwrap();
+        manifest.authority.unwrap()
+    }
+
+    fn pinned(path: &Path, data_dir: &Path) -> elastos_runtime::provider::CheckedExecutable {
+        let digest = hex::encode(Sha256::digest(std::fs::read(path).unwrap()));
+        elastos_runtime::provider::CheckedExecutable::pinned(path, &format!("sha256:{digest}"))
+            .unwrap()
+            .with_home_data_dir(data_dir)
+    }
+
+    fn old_home(parent: &Path) -> PathBuf {
+        let data = parent.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::create_dir_all(data.join("ElastOS")).unwrap();
+        let file = data.join("ElastOS/kept.txt");
+        std::fs::write(&file, b"kept-from-the-old-home").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        assert!(!data.join("UsersAI").exists());
+        assert!(!data
+            .join("capsules/localhost-provider/capsule.json")
+            .exists());
+        elastos_common::localhost::ensure_file_backed_roots(&data).unwrap();
+        let chain = data.join("chain-provider");
+        std::fs::create_dir_all(&chain).unwrap();
+        std::fs::set_permissions(&chain, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let chain_file = chain.join("kept.txt");
+        std::fs::write(&chain_file, b"kept-from-the-old-home").unwrap();
+        std::fs::set_permissions(&chain_file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::canonicalize(&data).unwrap_or(data)
+    }
+
+    async fn exchange(
+        bridge: &elastos_runtime::provider::ProviderBridge,
+        request: serde_json::Value,
+    ) -> serde_json::Value {
+        bridge
+            .send_raw(&request)
+            .await
+            .unwrap_or_else(|err| panic!("{request}: {err}"))
+    }
+
+    async fn read_localhost(data: &Path) {
+        let file = data.join("ElastOS/kept.txt");
+        let before = std::fs::symlink_metadata(&file).unwrap();
+        let binary = provider_binary("localhost-provider");
+        let confined = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+            "localhost-provider",
+            &authority(include_str!(
+                "../../../capsules/localhost-provider/capsule.json"
+            )),
+            &pinned(&binary, data),
+            data,
+            elastos_runtime::provider::BridgeProviderConfig {
+                base_path: data.display().to_string(),
+                allowed_paths: vec!["*".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|err| panic!("localhost at {}: {err}", data.display()));
+        let bridge = confined.bridge().clone();
+        let read = exchange(
+            &bridge,
+            serde_json::json!({
+                "op": "read",
+                "path": "ElastOS/kept.txt",
+                "encoding": "utf8"
+            }),
+        )
+        .await;
+        assert_eq!(read["status"], "ok", "{read}");
+        assert_eq!(read["data"]["content"], "kept-from-the-old-home");
+        let after = std::fs::symlink_metadata(&file).unwrap();
+        assert_eq!(after.mode() & 0o777, 0o640);
+        assert_eq!(after.uid(), before.uid());
+        assert_eq!(std::fs::read(&file).unwrap(), b"kept-from-the-old-home");
+        bridge.shutdown().await.unwrap();
+    }
+
+    let held = tempfile::tempdir().unwrap();
+    let data = old_home(held.path());
+    read_localhost(&data).await;
+
+    let principal = "person:local:ada";
+    let record = crate::auth::store_test_human_principal(&data, principal);
+    let relative = record.localhost_root.trim_start_matches("localhost://");
+    let object_file = data.join(relative).join("kept.txt");
+    std::fs::create_dir_all(object_file.parent().unwrap()).unwrap();
+    std::fs::write(&object_file, b"kept-from-the-old-home").unwrap();
+    std::fs::set_permissions(&object_file, std::fs::Permissions::from_mode(0o640)).unwrap();
+    let object_before = std::fs::symlink_metadata(&object_file).unwrap();
+    let (_, did) = elastos_identity::load_or_create_did(&data).unwrap();
+    let object_bin = provider_binary("object-provider");
+    let object = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "object-provider",
+        &authority(include_str!(
+            "../../../../capsules/object-provider/capsule.json"
+        )),
+        &pinned(&object_bin, &data),
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig {
+            base_path: data.display().to_string(),
+            extra: serde_json::json!({ "runtime_did": did }),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("object init failed: {err}"));
+    let object_bridge = object.bridge().clone();
+    let object_read = exchange(
+        &object_bridge,
+        serde_json::json!({
+            "op": "read",
+            "principal_id": principal,
+            "uri": format!("{}/kept.txt", record.localhost_root)
+        }),
+    )
+    .await;
+    assert_eq!(object_read["status"], "ok", "{object_read}");
+    let object_after = std::fs::symlink_metadata(&object_file).unwrap();
+    assert_eq!(object_after.mode() & 0o777, 0o640);
+    assert_eq!(object_after.uid(), object_before.uid());
+    object_bridge.shutdown().await.unwrap();
+
+    let chain_file = data.join("chain-provider/kept.txt");
+    let chain_before = std::fs::symlink_metadata(&chain_file).unwrap();
+    let chain_bin = provider_binary("chain-provider");
+    let chain = elastos_runtime::provider::ProviderBridge::spawn_path_allow(
+        "chain-provider",
+        &authority(include_str!(
+            "../../../../capsules/chain-provider/capsule.json"
+        )),
+        &pinned(&chain_bin, &data),
+        &data,
+        elastos_runtime::provider::BridgeProviderConfig {
+            base_path: data.display().to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("chain init failed: {err}"));
+    let chain_bridge = chain.bridge().clone();
+    let networks = exchange(&chain_bridge, serde_json::json!({"op": "networks"})).await;
+    let networks_text = networks.to_string();
+    assert!(
+        networks_text.contains("ok")
+            || networks.get("status").and_then(|v| v.as_str()) == Some("ok"),
+        "{networks}"
+    );
+    let chain_after = std::fs::symlink_metadata(&chain_file).unwrap();
+    assert_eq!(chain_after.mode() & 0o777, 0o640);
+    assert_eq!(chain_after.uid(), chain_before.uid());
+    assert_eq!(
+        std::fs::read(&chain_file).unwrap(),
+        b"kept-from-the-old-home"
+    );
+    chain_bridge.shutdown().await.unwrap();
+
+    let link_hold = tempfile::tempdir().unwrap();
+    let link = std::fs::canonicalize(link_hold.path())
+        .unwrap()
+        .join("home");
+    std::os::unix::fs::symlink(&data, &link).unwrap();
+    read_localhost(&link).await;
+
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    let tmp_data = old_home(tmp.path());
+    let canonical = std::fs::canonicalize(&tmp_data).unwrap();
+    assert!(
+        canonical.starts_with("/tmp") || canonical.starts_with("/private/tmp"),
+        "{}",
+        canonical.display()
+    );
+    read_localhost(&tmp_data).await;
+
+    let root_dev = std::fs::metadata("/").unwrap().dev();
+    let mut other = None;
+    for mount in ["/Volumes", "/mnt", "/media"] {
+        let Ok(entries) = std::fs::read_dir(mount) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if !meta.is_dir() || meta.dev() == root_dev {
+                continue;
+            }
+            if let Ok(dir) = tempfile::tempdir_in(&path) {
+                other = Some(dir);
+                break;
+            }
+        }
+        if other.is_some() {
+            break;
+        }
+    }
+    if let Some(dir) = other {
+        let data = old_home(dir.path());
+        assert_ne!(std::fs::metadata(&data).unwrap().dev(), root_dev);
+        read_localhost(&data).await;
+        eprintln!("other-volume-read {}", data.display());
+    } else {
+        eprintln!("other-volume-read none");
+    }
+}
