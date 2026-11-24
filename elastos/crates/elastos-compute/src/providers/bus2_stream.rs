@@ -6,8 +6,10 @@
 //! cap never opens a chunk.
 
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use wasmtime::component::{Destination, StreamProducer, StreamResult, VecBuffer};
 use wasmtime::StoreContextMut;
@@ -17,58 +19,121 @@ pub(crate) const READ_CHUNK: usize = 64 * 1024;
 /// The host cap on one read, and on every read in this process together.
 pub(crate) const HOST_MAX_READ_BYTES: usize = 16 * 1024 * 1024;
 
-static HOST_READ_HELD: AtomicUsize = AtomicUsize::new(0);
+/// How long one open read may keep its reservation. A guest that never pulls
+/// still loses it, so the next guest can read. Dropping the stream releases
+/// sooner. Tests use a short bound; a running Home uses 30s.
+#[cfg(test)]
+pub(crate) const READ_HOLD_LIMIT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const READ_HOLD_LIMIT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct Slot {
+    bytes: AtomicUsize,
+    /// When the guest received the bytes. The fetch itself does not spend this.
+    started: Mutex<Instant>,
+    released: AtomicBool,
+}
+
+struct Ledger {
+    held: usize,
+    open: Vec<Weak<Slot>>,
+}
+
+static LEDGER: Mutex<Ledger> = Mutex::new(Ledger {
+    held: 0,
+    open: Vec::new(),
+});
+
+fn release(ledger: &mut Ledger, slot: &Slot) {
+    if slot.released.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let bytes = slot.bytes.swap(0, Ordering::Relaxed);
+    ledger.held = ledger.held.saturating_sub(bytes);
+}
+
+fn reap(ledger: &mut Ledger) {
+    let mut expired = Vec::new();
+    ledger.open.retain(|weak| {
+        let Some(slot) = weak.upgrade() else {
+            return false;
+        };
+        let age = slot.started.lock().expect("hold start").elapsed();
+        if slot.released.load(Ordering::Relaxed) || age >= READ_HOLD_LIMIT {
+            expired.push(slot);
+            return false;
+        }
+        true
+    });
+    for slot in expired {
+        release(ledger, &slot);
+    }
+}
 
 /// Bytes this process is keeping for reads that are still open.
 #[derive(Debug)]
 pub(crate) struct ReadHold {
-    bytes: usize,
+    slot: Arc<Slot>,
 }
 
 impl ReadHold {
     #[cfg(test)]
     pub(crate) fn empty() -> Self {
-        Self { bytes: 0 }
+        Self {
+            slot: Arc::new(Slot {
+                bytes: AtomicUsize::new(0),
+                started: Mutex::new(Instant::now()),
+                released: AtomicBool::new(false),
+            }),
+        }
     }
 
     /// Reserves `bytes` against the host cap. `None` means the cap is already
-    /// in use, so the caller makes no bridge call.
+    /// in use, so the caller makes no bridge call. A reservation older than
+    /// [`READ_HOLD_LIMIT`] is released here first.
     pub(crate) fn try_reserve(bytes: usize) -> Option<Self> {
-        let mut held = HOST_READ_HELD.load(Ordering::Acquire);
-        loop {
-            let next = held.checked_add(bytes)?;
-            if next > HOST_MAX_READ_BYTES {
-                return None;
-            }
-            match HOST_READ_HELD.compare_exchange_weak(
-                held,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(Self { bytes }),
-                Err(current) => held = current,
-            }
+        let mut ledger = LEDGER.lock().expect("read ledger");
+        reap(&mut ledger);
+        let next = ledger.held.checked_add(bytes)?;
+        if next > HOST_MAX_READ_BYTES {
+            return None;
         }
+        ledger.held = next;
+        let slot = Arc::new(Slot {
+            bytes: AtomicUsize::new(bytes),
+            started: Mutex::new(Instant::now()),
+            released: AtomicBool::new(false),
+        });
+        ledger.open.push(Arc::downgrade(&slot));
+        Some(Self { slot })
     }
 
     /// Keeps `bytes` and releases the rest, so a short object leaves room.
     pub(crate) fn shrink(&mut self, bytes: usize) {
-        if bytes >= self.bytes {
+        let mut ledger = LEDGER.lock().expect("read ledger");
+        if self.slot.released.load(Ordering::Relaxed) {
             return;
         }
-        let release = self.bytes - bytes;
-        HOST_READ_HELD.fetch_sub(release, Ordering::AcqRel);
-        self.bytes = bytes;
+        let current = self.slot.bytes.load(Ordering::Relaxed);
+        if bytes >= current {
+            return;
+        }
+        self.slot.bytes.store(bytes, Ordering::Relaxed);
+        ledger.held = ledger.held.saturating_sub(current - bytes);
+    }
+
+    /// The guest has the bytes. The hold bound runs from here, not from the fetch.
+    pub(crate) fn arm(&mut self) {
+        let _ledger = LEDGER.lock().expect("read ledger");
+        *self.slot.started.lock().expect("hold start") = Instant::now();
     }
 }
 
 impl Drop for ReadHold {
     fn drop(&mut self) {
-        if self.bytes > 0 {
-            HOST_READ_HELD.fetch_sub(self.bytes, Ordering::AcqRel);
-            self.bytes = 0;
-        }
+        let mut ledger = LEDGER.lock().expect("read ledger");
+        release(&mut ledger, &self.slot);
     }
 }
 

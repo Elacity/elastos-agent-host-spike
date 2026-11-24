@@ -1343,6 +1343,7 @@ impl ComponentState {
             )));
         }
         hold.shrink(bytes.len());
+        hold.arm();
         self.grants
             .lock()
             .expect("grant book")
@@ -2602,6 +2603,41 @@ mod tests {
             .windowed_read(&read_request(8), false)
             .expect("the cap is free once the first read ends");
         assert_eq!(again.bytes, vec![4, 4, 4, 4]);
+    }
+
+    /// A guest that keeps the capped read and never pulls a chunk must not
+    /// hold the cap past the host's bound. The next guest then reads.
+    #[test]
+    fn v2_a_guest_that_never_drains_frees_the_read_cap() {
+        let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut first = state_for(vec![3u8; host], calls.clone());
+        let prepared = first
+            .windowed_read(&read_request(host as u64), false)
+            .expect("the first guest takes the cap");
+        std::thread::sleep(
+            crate::providers::bus2_stream::READ_HOLD_LIMIT + std::time::Duration::from_millis(50),
+        );
+        let mut second = state_for(vec![5u8; host], calls.clone());
+        let again = second
+            .windowed_read(&read_request(host as u64), false)
+            .expect("a guest that never drains loses the cap");
+        assert_eq!(again.bytes, vec![5u8; host]);
+        drop(prepared);
+        let mut third = state_for(vec![9u8; host], calls.clone());
+        let err = third
+            .windowed_read(&read_request(host as u64), false)
+            .expect_err("the second guest still holds the cap");
+        assert!(
+            matches!(err, V2BusError::Unavailable(_)),
+            "dropping the reaped hold must leave the live read, got {err:?}"
+        );
+        drop(again);
+        let mut fourth = state_for(vec![6u8; 4], calls);
+        let after = fourth
+            .windowed_read(&read_request(4), false)
+            .expect("dropping the live read frees the cap");
+        assert_eq!(after.bytes, vec![6, 6, 6, 6]);
     }
 
     /// The bridge reports that the object changed. The read must end as an
