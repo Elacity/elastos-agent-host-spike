@@ -74,7 +74,7 @@ fn checked_local_root(root: &std::path::Path) -> Result<&str, ProviderError> {
         if components.len() > 64 {
             return Err(private_ipfs_unavailable());
         }
-        return Ok(root);
+        Ok(root)
     }
     #[cfg(not(windows))]
     {
