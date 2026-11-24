@@ -17,6 +17,28 @@ struct TrustColumn {
     os_path: &'static str,
 }
 
+fn own_command_verified_when() -> &'static str {
+    #[cfg(windows)]
+    {
+        "Verified executable start is unsupported on Windows"
+    }
+    #[cfg(not(windows))]
+    {
+        "at-every-start"
+    }
+}
+
+fn managed_runtime_verified_when() -> &'static str {
+    #[cfg(windows)]
+    {
+        "managed Runtime process ownership is unsupported on Windows"
+    }
+    #[cfg(not(windows))]
+    {
+        "at-every-start"
+    }
+}
+
 fn columns() -> Vec<TrustColumn> {
     vec![
         TrustColumn {
@@ -230,7 +252,7 @@ fn columns() -> Vec<TrustColumn> {
             call: "command",
             class: "own-binary",
             trust_root: "release-signature",
-            verified_when: "at-every-start",
+            verified_when: own_command_verified_when(),
             evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
@@ -250,7 +272,7 @@ fn columns() -> Vec<TrustColumn> {
             call: "command",
             class: "own-binary",
             trust_root: "release-signature",
-            verified_when: "at-every-start",
+            verified_when: own_command_verified_when(),
             evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
@@ -260,7 +282,7 @@ fn columns() -> Vec<TrustColumn> {
             call: "command",
             class: "own-binary",
             trust_root: "release-signature",
-            verified_when: "at-every-start",
+            verified_when: own_command_verified_when(),
             evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
@@ -612,7 +634,7 @@ fn columns() -> Vec<TrustColumn> {
             call: "command",
             class: "own-binary",
             trust_root: "release-signature",
-            verified_when: "at-every-start",
+            verified_when: managed_runtime_verified_when(),
             evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
@@ -622,7 +644,7 @@ fn columns() -> Vec<TrustColumn> {
             call: "spawn()",
             class: "own-binary",
             trust_root: "release-signature",
-            verified_when: "at-every-start",
+            verified_when: managed_runtime_verified_when(),
             evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
@@ -1653,7 +1675,14 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&30));
     assert_eq!(roots.get("staged-cid"), Some(&8));
+    #[cfg(not(windows))]
     assert_eq!(times.get("at-every-start"), Some(&37));
+    #[cfg(windows)]
+    {
+        assert_eq!(times.get("at-every-start"), Some(&32));
+        assert_eq!(times.get(own_command_verified_when()), Some(&3));
+        assert_eq!(times.get(managed_runtime_verified_when()), Some(&2));
+    }
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
     assert_eq!(times.get("never"), Some(&51));

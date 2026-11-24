@@ -5,9 +5,7 @@ use sha2::Digest;
 #[cfg(target_os = "macos")]
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::Read;
-#[cfg(target_os = "macos")]
-use std::io::{Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +16,7 @@ pub struct VerifiedExecutable {
     #[cfg(target_os = "macos")]
     _private_dir: tempfile::TempDir,
     exec_path: PathBuf,
+    content_sha256: String,
     /// The signed release digest these held bytes matched (none for a source
     /// Home's `dev_mode = true` start). A native provider start pins its
     /// spawn-time check to this same digest.
@@ -44,6 +43,8 @@ impl VerifiedExecutable {
             file.metadata()?.is_file(),
             "installed executable is not a regular file"
         );
+        let content_sha256 = sha256_hex(&mut file)?;
+        file.seek(SeekFrom::Start(0))?;
         anyhow::ensure!(
             checksum.map_or(Ok(true), |checksum| matches_checksum(&mut file, checksum))?,
             "installed executable differs from signed release digest"
@@ -61,6 +62,7 @@ impl VerifiedExecutable {
             Ok(Self {
                 file: unsafe { File::from_raw_fd(fd) },
                 exec_path: format!("/proc/self/fd/{fd}").into(),
+                content_sha256,
                 checksum: checksum.map(str::to_owned),
             })
         }
@@ -92,6 +94,7 @@ impl VerifiedExecutable {
                 // Future macOS helpers must not resolve resources from current_exe().
                 _private_dir: private_dir,
                 exec_path,
+                content_sha256,
                 checksum: checksum.map(str::to_owned),
             })
         }
@@ -101,6 +104,11 @@ impl VerifiedExecutable {
 
     pub fn exec_path(&self) -> &Path {
         &self.exec_path
+    }
+
+    /// Digest of the bytes read into this hold, not a later read of the caller path.
+    pub(crate) fn held_content_sha256(&self) -> &str {
+        &self.content_sha256
     }
 
     /// Native providers require a signed digest even in a source Home's
@@ -187,24 +195,28 @@ impl VerifiedExecutable {
     }
 }
 
+fn sha256_hex(file: &mut File) -> Result<String> {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&buffer[..n]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
 fn matches_checksum(file: &mut File, checksum: &str) -> Result<bool> {
     let (algorithm, expected) = checksum
         .split_once(':')
         .context("signed executable digest is malformed")?;
-    let mut buffer = [0u8; 8192];
     match algorithm {
-        "sha256" if expected.len() == 64 => {
-            let mut digest = sha2::Sha256::new();
-            loop {
-                let n = file.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                digest.update(&buffer[..n]);
-            }
-            Ok(hex::encode(digest.finalize()) == expected.to_ascii_lowercase())
-        }
+        "sha256" if expected.len() == 64 => Ok(sha256_hex(file)? == expected.to_ascii_lowercase()),
         "sha512" if expected.len() == 128 => {
+            let mut buffer = [0u8; 8192];
             let mut digest = sha2::Sha512::new();
             loop {
                 let n = file.read(&mut buffer)?;

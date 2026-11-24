@@ -1819,7 +1819,8 @@ fn return_to_home_if_requested(data_dir: &Path, home_requested: bool) -> anyhow:
         return Ok(());
     }
     let exe = std::env::current_exe()?;
-    let prepared = elastos_server::binaries::checked_running_runtime(data_dir, &exe)?;
+    let admitted = elastos_server::binaries::checked_running_runtime(data_dir, &exe)?;
+    let prepared = admitted.prepare()?;
     let mut command = std::process::Command::new(prepared.exec_path());
     command.arg("home");
     prepared.attach_std(&mut command, false)?;

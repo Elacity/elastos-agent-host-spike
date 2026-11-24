@@ -2091,10 +2091,11 @@ async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Resu
         }
         ActionLaunch::External(args) => {
             let exe = std::env::current_exe().context("current exe unavailable")?;
-            let prepared = elastos_server::binaries::checked_running_runtime(
+            let admitted = elastos_server::binaries::checked_running_runtime(
                 Path::new(&snapshot.data_dir),
                 &exe,
             )?;
+            let prepared = admitted.prepare()?;
             let mut command = Command::new(prepared.exec_path());
             command.args(args).env("ELASTOS_PARENT_SURFACE", "home");
             prepared.attach_std(&mut command, false)?;
@@ -2118,7 +2119,8 @@ async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Resu
 /// Launch a dynamically discovered capsule by name.
 async fn run_capsule_action(data_dir: &Path, capsule_name: &str) -> anyhow::Result<String> {
     let exe = std::env::current_exe().context("current exe unavailable")?;
-    let prepared = elastos_server::binaries::checked_running_runtime(data_dir, &exe)?;
+    let admitted = elastos_server::binaries::checked_running_runtime(data_dir, &exe)?;
+    let prepared = admitted.prepare()?;
     let mut command = Command::new(prepared.exec_path());
     command
         .args([

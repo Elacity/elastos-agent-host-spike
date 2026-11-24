@@ -680,7 +680,7 @@ fn read_regular(path: &Path, limit: u64, private: bool) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn file_digest(path: &Path) -> Result<(String, u64)> {
+pub(crate) fn file_digest(path: &Path) -> Result<(String, u64)> {
     let mut file = open_regular(path, false)?;
     let before = file.metadata()?;
     let mut digest = Sha256::new();

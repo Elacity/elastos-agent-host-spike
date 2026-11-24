@@ -576,6 +576,25 @@ fn descriptor(bytes: &[u8]) -> Value {
     json!({"cid": raw_cid(bytes), "sha256": hex::encode(Sha256::digest(bytes)), "size": bytes.len()})
 }
 
+fn file_descriptor(path: &std::path::Path) -> Value {
+    let mut file = fs::File::open(path).unwrap();
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    json!({
+        "cid": cid::Cid::new_v1(0x55, cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice()).unwrap()).to_string(),
+        "sha256": hex::encode(digest),
+        "size": fs::metadata(path).unwrap().len(),
+    })
+}
+
 impl Fixture {
     pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -583,12 +602,30 @@ impl Fixture {
         let binary = data.join("runtime");
         fs::write(&binary, b"installed signed runtime").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        Self::release(root, data, binary, descriptor(b"installed signed runtime"))
+    }
+
+    /// Sign an existing file as this Home's runtime. The file is not copied or deleted.
+    pub(crate) fn bound_to(binary: &std::path::Path) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let data = fs::canonicalize(root.path()).unwrap();
+        let binary = fs::canonicalize(binary).unwrap();
+        let described = file_descriptor(&binary);
+        Self::release(root, data, binary, described)
+    }
+
+    fn release(
+        root: tempfile::TempDir,
+        data: std::path::PathBuf,
+        binary: std::path::PathBuf,
+        binary_descriptor: Value,
+    ) -> Self {
         let components =
             br#"{"schema":"elastos.components/v1","external":{},"capsules":{},"profiles":{}}"#;
         fs::write(data.join("components.json"), components).unwrap();
         let release = signed(
             json!({"schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
-            "platforms": {(crate::update::detect_release_platform()): {"binary":descriptor(b"installed signed runtime"), "components":descriptor(components)}}}),
+            "platforms": {(crate::update::detect_release_platform()): {"binary": binary_descriptor, "components": descriptor(components)}}}),
             "elastos.release.v1",
             71,
         );
@@ -610,6 +647,15 @@ impl Fixture {
         };
         fixture.publish();
         fixture
+    }
+
+    pub(crate) fn binary_sha256(&self) -> String {
+        let release: Value = serde_json::from_slice(&self.release).unwrap();
+        release["payload"]["platforms"][crate::update::detect_release_platform()]["binary"]
+            ["sha256"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     fn publish(&self) {
