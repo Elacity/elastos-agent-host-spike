@@ -594,7 +594,18 @@ async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
         .await;
     home.runtime
         .copy_manifest_ceiling_for_test(&used.session, second_id);
-    assert_ne!(second_id, used.session);
+    assert_eq!(
+        used.token.capsule(),
+        used.session,
+        "the first grant names the live session"
+    );
+    let sessions = home.runtime.live_sessions_for_agent(&agent).await;
+    assert_eq!(
+        sessions.len(),
+        2,
+        "the planted row is a second live session of this agent"
+    );
+    assert_ne!(sessions[0], sessions[1], "the two live sessions are one id");
     let manifest = ceiling(&home, second_id);
     // `wrong_capsule` is checked before revocation, so the refusal below does
     // not show that this token is still live. This read does not count a use.

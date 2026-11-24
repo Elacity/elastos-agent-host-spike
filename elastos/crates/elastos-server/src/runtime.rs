@@ -463,6 +463,27 @@ struct LiveRunGate {
 static LIVE_RUN_GATES: StdMutex<Vec<(usize, &'static str, LiveRunGate)>> =
     StdMutex::new(Vec::new());
 
+/// Waits when a test armed `point` for this live-run map. An unarmed point
+/// returns at once. The end uses the same gate as a Start.
+#[cfg(test)]
+async fn await_live_run_gate(key: usize, point: &'static str) {
+    let gate = {
+        let mut gates = LIVE_RUN_GATES.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(pos) = gates
+            .iter()
+            .rposition(|(stored, name, _)| *stored == key && *name == point)
+        else {
+            return;
+        };
+        gates.swap_remove(pos).2
+    };
+    if gate.panic {
+        panic!("live run panic at {point}");
+    }
+    gate.entered.notify_one();
+    gate.release.notified().await;
+}
+
 #[cfg(test)]
 static REFUSE_AFTER_ADMIT: StdMutex<Vec<usize>> = StdMutex::new(Vec::new());
 
@@ -844,6 +865,10 @@ impl ActivationContextHeld {
         // `release`, before this write, would admit a second run while this
         // row is still live. A start that never records a row, such as a
         // launch cancelled before registration, still drops the token here.
+        #[cfg(test)]
+        if let Some(run) = &self.live_run {
+            await_live_run_gate(std::sync::Arc::as_ptr(&run.runs) as usize, "ended").await;
+        }
         drop(self.live_run.take());
 
         // The start record goes after `ended_at` is visible. A reader that
@@ -1591,9 +1616,14 @@ impl Runtime {
     }
 
     fn launch_turn(&self, agent_id: &str) -> LaunchTurn {
-        self.launch_turns
+        let mut turns = self
+            .launch_turns
             .lock()
-            .unwrap_or_else(|err| err.into_inner())
+            .unwrap_or_else(|err| err.into_inner());
+        let runs = self.live_runs.lock().unwrap_or_else(|err| err.into_inner());
+        turns.retain(|id, turn| id == agent_id || Arc::strong_count(turn) > 1 || runs.holds(id));
+        drop(runs);
+        turns
             .entry(agent_id.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
@@ -1927,22 +1957,7 @@ impl Runtime {
     /// Waits when a test armed this point. An unarmed point returns at once.
     #[cfg(test)]
     async fn live_run_await(&self, point: &'static str) {
-        let gate = {
-            let key = self.live_run_key();
-            let mut gates = LIVE_RUN_GATES.lock().unwrap_or_else(|err| err.into_inner());
-            let Some(pos) = gates
-                .iter()
-                .rposition(|(stored, name, _)| *stored == key && *name == point)
-            else {
-                return;
-            };
-            gates.swap_remove(pos).2
-        };
-        if gate.panic {
-            panic!("live run panic at {point}");
-        }
-        gate.entered.notify_one();
-        gate.release.notified().await;
+        await_live_run_gate(self.live_run_key(), point).await;
     }
 
     #[cfg(test)]
@@ -3016,6 +3031,11 @@ impl Runtime {
             Some((ceiling, live_run)) => (Some(ceiling), live_run),
             None => (None, None),
         };
+        if live_run.is_some() && !handle.manifest.is_component_capsule() {
+            return Err(ElastosError::InvalidManifest(
+                crate::agent_admission::NOT_A_COMPONENT.to_string(),
+            ));
+        }
         let detached_component =
             if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
                 Some(self.component_provider.clone().ok_or_else(|| {
@@ -3578,6 +3598,14 @@ pub(crate) mod tests {
     };
 
     impl Runtime {
+        /// How many per-agent turns this runtime still holds.
+        pub(crate) fn launch_turn_count_for_test(&self) -> usize {
+            self.launch_turns
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .len()
+        }
+
         /// Gives `planted_id` the model account and manifest ceiling `live_id`
         /// already holds. This does not Start the planted session and does not
         /// admit a live run.
@@ -4433,6 +4461,76 @@ pub(crate) mod tests {
         );
         let compute = Arc::new(NoopComputeProvider);
         (Runtime::new(storage, compute), temp_dir)
+    }
+
+    #[tokio::test]
+    async fn an_unused_turn_is_removed_and_a_live_agents_turn_stays() {
+        let (runtime, _dir) = test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let live = "agent:v2:0123456789abcdef0123456789abcdef";
+        let idle = "not-an-agent";
+        let other = "also-not";
+        runtime
+            .plant_open_agent_stop_for_test(live, "session-held")
+            .await;
+        drop(runtime.begin_agent_stop(live).await);
+        drop(runtime.begin_agent_stop(idle).await);
+        assert_eq!(runtime.launch_turn_count_for_test(), 2);
+        drop(runtime.begin_agent_stop(other).await);
+        assert_eq!(
+            runtime.launch_turn_count_for_test(),
+            2,
+            "the live turn was dropped or the idle turn stayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_loaded_refuses_a_non_component_on_the_token_path() {
+        let (runtime, _dir) = test_runtime().await;
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let token = runtime
+            .admit_live_run(agent)
+            .expect("the token path has a token");
+        let mut manifest: CapsuleManifest =
+            serde_json::from_str(&component_manifest_json("plain-wasm")).unwrap();
+        manifest.runtime_abi = None;
+        manifest.bus_contract = None;
+        manifest.execution = None;
+        assert!(
+            !manifest.is_component_capsule(),
+            "the fixture is still a component"
+        );
+        let mut handle = CapsuleHandle {
+            id: CapsuleId::new("plain-wasm"),
+            manifest,
+            args: Vec::new(),
+        };
+        let err = runtime
+            .start_loaded(
+                Arc::new(NoopComputeProvider),
+                &mut handle,
+                Vec::new(),
+                Some(agent.to_string()),
+                Some((
+                    AgentModelCeiling {
+                        ceiling: 0,
+                        key: AgentKey::for_test(agent),
+                    },
+                    Some(token),
+                )),
+                LaunchMode::Detached,
+            )
+            .await
+            .expect_err("a non-component on the token path was started");
+        assert!(
+            err.to_string()
+                .contains(crate::agent_admission::NOT_A_COMPONENT),
+            "{err}"
+        );
+        assert!(
+            !runtime.agent_live_run_held(agent),
+            "the refused start left the token held"
+        );
     }
 
     #[tokio::test]

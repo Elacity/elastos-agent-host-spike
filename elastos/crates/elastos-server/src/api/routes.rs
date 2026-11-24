@@ -8781,6 +8781,17 @@ pub(crate) mod tests {
         assert_eq!(live_of(&home, &other).await, 0);
     }
 
+    /// Notifies one waiter when dropped, so a pause is released on every path.
+    #[cfg(unix)]
+    struct ReleasePause(Arc<tokio::sync::Notify>);
+
+    #[cfg(unix)]
+    impl Drop for ReleasePause {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
     /// The ending drops the token after the row records its end. A later Start
     /// waits until that drop is visible.
     #[cfg(unix)]
@@ -8899,17 +8910,27 @@ pub(crate) mod tests {
             home.runtime.agent_live_run_held(&agent_a),
             "the first start admitted its token"
         );
-        let b = home
-            .launch_from(&dir_b, &agent_b)
-            .await
-            .expect("the other agent starts while the first is still loading")
-            .0;
+        // The pause is released when this value drops, including a timeout.
+        let release_pause = ReleasePause(Arc::clone(&pause.release));
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            home.launch_from(&dir_b, &agent_b),
+        )
+        .await;
+        let b = match second {
+            Ok(started) => {
+                started
+                    .expect("the other agent starts while the first is still loading")
+                    .0
+            }
+            Err(_elapsed) => panic!("the other agent did not start within 60s"),
+        };
         assert!(
             home.runtime.agent_live_run_held(&agent_a),
             "the first token stays with its own launch"
         );
         assert!(home.runtime.agent_live_run_held(&agent_b));
-        pause.release.notify_one();
+        drop(release_pause);
         let a = tokio::time::timeout(std::time::Duration::from_secs(60), started)
             .await
             .expect("the paused launch finishes")
@@ -9193,6 +9214,172 @@ pub(crate) mod tests {
         assert_eq!(object_bytes(&home, &agent, suffix), b"journal v2");
         assert_ne!(stored, revision);
         let (status, _) = stop_route(&home, &second.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// The token is still held when the row records `ended_at`, and it is
+    /// gone once that end has returned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_token_stays_until_the_row_records_its_end() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = Arc::new(ProbeLaunch::new(&[]).await);
+        let (dir, cid) = home.spin_host();
+        let agent = home.create_agent_for_host("spinning", &cid);
+        let run = home
+            .launch_from(&dir, &agent)
+            .await
+            .expect("the spinning guest starts")
+            .0;
+        home.wait_running(&run.id).await;
+        let pause = home.runtime.arm_live_run_await("ended");
+        let entered = pause.entered.notified();
+        let home_stop = Arc::clone(&home);
+        let session = run.id.clone();
+        let stopping =
+            tokio::spawn(async move { stop_route(&home_stop, &session, Some("user")).await });
+        let release_pause = ReleasePause(Arc::clone(&pause.release));
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered)
+            .await
+            .expect("the end reaches the recorded row");
+        let info = home
+            .runtime
+            .get_capsule(&run.id)
+            .await
+            .expect("the row is still listed");
+        assert!(info.ended_at.is_some(), "the row has not recorded its end");
+        assert!(
+            home.runtime.agent_live_run_held(&agent),
+            "the token was released before the row recorded its end"
+        );
+        drop(release_pause);
+        let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(30), stopping)
+            .await
+            .expect("the stop finishes")
+            .expect("the stop task joins");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !home.runtime.agent_live_run_held(&agent),
+            "the token stayed after the end"
+        );
+    }
+
+    /// One live session and one planted session of the same agent, each with
+    /// its own grant, write one journal at the same revision. One write is
+    /// `ok`. The other is `revision_conflict`. The file is the winner's bytes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_sessions_writing_one_journal_at_one_revision_have_one_winner() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = Arc::new(ProbeLaunch::new(&[]).await);
+        let (dir, cid) = home.spin_host();
+        let agent = home.create_agent_for_host("spinning", &cid);
+        let journal = "localhost://UsersAI/self/.AppData/Agents/agent-host/tasks/t1/journal";
+        let suffix = "/.AppData/Agents/agent-host/tasks/t1/journal";
+        let run = home
+            .launch_from(&dir, &agent)
+            .await
+            .expect("the live session starts")
+            .0;
+        home.wait_running(&run.id).await;
+        let revision = write_ok_revision(
+            &write_in_session(
+                &home,
+                &run.id,
+                &agent,
+                journal,
+                b"journal v1",
+                serde_json::json!({ "create_only": true }),
+            )
+            .await,
+        );
+        let planted = format!("{}-planted", run.id);
+        home.runtime
+            .register_capsule(crate::runtime::RunningCapsuleInfo {
+                id: planted.clone(),
+                name: "planted".to_string(),
+                status: "running".to_string(),
+                capsule_type: elastos_common::CapsuleType::Wasm,
+                handle: None,
+                session_id: planted.clone(),
+                principal: Some(agent.clone()),
+                cause: None,
+                ended_at: None,
+            })
+            .await;
+        home.runtime
+            .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+                agent_id: agent.clone(),
+                owner: "planted-owner".into(),
+                host_cid: "planted".into(),
+                launch_id: format!("launch:{planted}"),
+                session_id: planted.clone(),
+            })
+            .await;
+        home.runtime
+            .share_agent_model_account_for_test(&run.id, &planted);
+        let live_bytes = b"from the live session";
+        let planted_bytes = b"from the planted session";
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let live_home = Arc::clone(&home);
+        let live_session = run.id.clone();
+        let live_agent = agent.clone();
+        let live_journal = journal.to_string();
+        let live_revision = revision.clone();
+        let live_barrier = Arc::clone(&barrier);
+        let planted_home = Arc::clone(&home);
+        let planted_session = planted.clone();
+        let planted_agent = agent.clone();
+        let planted_journal = journal.to_string();
+        let planted_revision = revision.clone();
+        let planted_barrier = barrier;
+        let live_write = tokio::spawn(async move {
+            live_barrier.wait().await;
+            write_in_session(
+                &live_home,
+                &live_session,
+                &live_agent,
+                &live_journal,
+                live_bytes,
+                serde_json::json!({ "if_revision": live_revision }),
+            )
+            .await
+        });
+        let planted_write = tokio::spawn(async move {
+            planted_barrier.wait().await;
+            write_in_session(
+                &planted_home,
+                &planted_session,
+                &planted_agent,
+                &planted_journal,
+                planted_bytes,
+                serde_json::json!({ "if_revision": planted_revision }),
+            )
+            .await
+        });
+        let (live_answer, planted_answer) = tokio::join!(live_write, planted_write);
+        let live_answer = live_answer.expect("the live write task joins");
+        let planted_answer = planted_answer.expect("the planted write task joins");
+        let outcome = |answer: &serde_json::Value| {
+            let result = &answer["response"]["result"];
+            (
+                result["status"] == "ok",
+                result["code"] == "revision_conflict",
+            )
+        };
+        let (live_ok, live_conflict) = outcome(&live_answer);
+        let (planted_ok, planted_conflict) = outcome(&planted_answer);
+        assert!(
+            (live_ok && planted_conflict) || (planted_ok && live_conflict),
+            "one ok and one revision_conflict: live={live_answer} planted={planted_answer}"
+        );
+        let winner: &[u8] = if live_ok { live_bytes } else { planted_bytes };
+        assert_eq!(object_bytes(&home, &agent, suffix), winner);
+        let (status, _) = stop_route(&home, &run.id, Some("user")).await;
         assert_eq!(status, StatusCode::OK);
     }
 
