@@ -1726,3 +1726,128 @@ async fn a15r_real_restart_zero() {
     assert_eq!(case.audit("agent_plan.dispatch.started"), 1);
     assert!(case.calls.lock().await.is_empty() && after_calls.lock().await.is_empty());
 }
+
+fn planted_plan(now: u64) -> (tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let agent_id = crate::agents::tests::plant_for_dispatch(
+        dir.path(),
+        &owner.principal_id,
+        &owner.principal_id,
+    );
+    let created = submit(dir.path(), &owner.principal_id, &agent_id, read_plan(), now);
+    let request_id = created["request_id"].as_str().unwrap().to_string();
+    (dir, owner.principal_id, request_id)
+}
+
+fn plan_status(dir: &Path, request_id: &str) -> String {
+    read_record(dir, request_id)["status"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn chain_has(dir: &Path, event_type: &str, result: &str) -> bool {
+    crate::auth::load_auth_state(dir)
+        .unwrap()
+        .audit
+        .iter()
+        .any(|event| event.event_type == event_type && event.result == result)
+}
+
+#[tokio::test]
+async fn a_denied_plan_is_closed_and_cannot_be_approved() {
+    let (dir, owner, request_id) = planted_plan(10);
+    super::super::gateway_inspect_actions::deny_agent_plan_request(dir.path(), &owner, &request_id)
+        .unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "denied");
+    let block = crate::api::gateway::agent_plan_approval_block(dir.path(), &request_id).unwrap();
+    assert!(block.contains("denied"), "{block}");
+    assert!(block.contains("cannot be approved"), "{block}");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "denied"));
+}
+
+#[tokio::test]
+async fn stop_closes_the_pending_plan_as_instance_ended() {
+    let (dir, _owner, request_id) = planted_plan(11);
+    crate::api::gateway::close_instance_plans(dir.path(), "capsule:agent-host", "instance ended")
+        .unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "instance ended");
+    let block = crate::api::gateway::agent_plan_approval_block(dir.path(), &request_id).unwrap();
+    assert!(block.contains("instance ended"), "{block}");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "instance ended"));
+}
+
+#[tokio::test]
+async fn retire_closes_the_pending_plan_as_instance_ended() {
+    let (dir, _owner, request_id) = planted_plan(12);
+    let agent_id = read_record(dir.path(), &request_id)["requester_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    crate::api::gateway::close_agent_plans(dir.path(), &agent_id, "instance ended").unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "instance ended");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "instance ended"));
+}
+
+#[tokio::test]
+async fn agents_off_closes_a_pending_plan() {
+    let (dir, _owner, request_id) = planted_plan(14);
+    crate::api::gateway::close_home_plans(dir.path(), "agents off").unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "agents off");
+    let block = crate::api::gateway::agent_plan_approval_block(dir.path(), &request_id).unwrap();
+    assert!(block.contains("agents off"), "{block}");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "agents off"));
+}
+
+#[tokio::test]
+async fn agent_off_closes_that_agents_pending_plan() {
+    let (dir, _owner, request_id) = planted_plan(15);
+    let agent_id = read_record(dir.path(), &request_id)["requester_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    crate::api::gateway::close_agent_plans(dir.path(), &agent_id, "agent off").unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "agent off");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "agent off"));
+}
+
+#[tokio::test]
+async fn a_plan_expires_from_its_created_time() {
+    let (dir, _owner, request_id) = planted_plan(1);
+    crate::api::gateway::expire_pending_agent_plans(dir.path()).unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "expired");
+    let block = crate::api::gateway::agent_plan_approval_block(dir.path(), &request_id).unwrap();
+    assert!(block.contains("expired"), "{block}");
+    assert!(chain_has(dir.path(), "agent.plan.closed", "expired"));
+}
+
+#[tokio::test]
+async fn a_lost_receipt_is_unresolved_and_a_named_step_is_reconciled() {
+    let (dir, _owner, request_id) = planted_plan(16);
+    let mut record = read_record(dir.path(), &request_id);
+    record["status"] = json!("started");
+    write_record(dir.path(), &request_id, &record);
+    crate::api::gateway::reconcile_lost_plan_receipts(dir.path()).unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "unresolved");
+    assert!(chain_has(
+        dir.path(),
+        "agent_plan.dispatch.unresolved",
+        "unresolved"
+    ));
+    let again = crate::api::gateway::reconcile_lost_plan_receipts(dir.path()).unwrap();
+    assert_eq!(again, 0, "an unresolved step is not dispatched again");
+
+    let (dir, _owner, request_id) = planted_plan(17);
+    let mut record = read_record(dir.path(), &request_id);
+    record["status"] = json!("started");
+    write_record(dir.path(), &request_id, &record);
+    super::super::gateway_inspect_actions::note_test_provider_step(&request_id, "completed");
+    crate::api::gateway::reconcile_lost_plan_receipts(dir.path()).unwrap();
+    assert_eq!(plan_status(dir.path(), &request_id), "completed");
+    assert!(chain_has(
+        dir.path(),
+        "agent_plan.dispatch.completed",
+        "completed"
+    ));
+}

@@ -336,6 +336,58 @@ fn load_inspect_action_records_skipping_unreadable(
     Ok(records)
 }
 
+pub(super) fn load_agent_plan_records(
+    data_dir: &Path,
+) -> anyhow::Result<Vec<InspectActionRequestRecord>> {
+    let _guard = inspect_action_store_lock()?;
+    let records = load_inspect_action_records(data_dir)?;
+    Ok(records
+        .into_iter()
+        .filter(|record| record.kind == AGENT_PLAN_KIND)
+        .collect())
+}
+
+/// Close pending agent plans the predicate names. The status becomes `outcome`.
+pub(super) fn close_pending_agent_plans(
+    data_dir: &Path,
+    outcome: &str,
+    now: u64,
+    keep: impl Fn(&InspectActionRequestRecord) -> bool,
+) -> anyhow::Result<Vec<InspectActionRequestRecord>> {
+    let _guard = inspect_action_store_lock()?;
+    let records = load_inspect_action_records(data_dir)?;
+    let mut closed = Vec::new();
+    for mut record in records {
+        if record.kind != AGENT_PLAN_KIND || record.status != "pending" || !keep(&record) {
+            continue;
+        }
+        record.status = outcome.to_string();
+        record.error = Some(outcome.to_string());
+        record.updated_at = now;
+        write_inspect_action_record_unlocked(data_dir, &record)?;
+        closed.push(record);
+    }
+    Ok(closed)
+}
+
+pub(super) fn set_agent_plan_status(
+    data_dir: &Path,
+    request_id: &str,
+    status: &str,
+    now: u64,
+) -> anyhow::Result<InspectActionRequestRecord> {
+    let _guard = inspect_action_store_lock()?;
+    let mut record = read_inspect_action_record_unlocked(data_dir, request_id)?;
+    if record.kind != AGENT_PLAN_KIND {
+        anyhow::bail!("agent plan has a different kind");
+    }
+    record.status = status.to_string();
+    record.error = Some(status.to_string());
+    record.updated_at = now;
+    write_inspect_action_record_unlocked(data_dir, &record)?;
+    Ok(record)
+}
+
 fn load_inspect_action_records(data_dir: &Path) -> anyhow::Result<Vec<InspectActionRequestRecord>> {
     let root = inspect_actions_root(data_dir);
     let Ok(entries) = std::fs::read_dir(root) else {

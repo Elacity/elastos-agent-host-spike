@@ -18,7 +18,7 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::{from_fn, from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Extension, Json, Router};
+use axum::{extract::State, Extension, Json, Router};
 use elastos_runtime::session::Session;
 
 use crate::api::middleware::{auth_middleware, shell_only_middleware, ApiState};
@@ -56,14 +56,14 @@ fn clear_fault(data_dir: &Path) {
     }
 }
 
-#[cfg(all(test, feature = "prototype-agents"))]
-pub(crate) fn plant_task_panic() {
-    PLANT_TASK_PANIC.store(true, Ordering::Release);
-}
+crate::agents::cfg_prototype_agents! {
+    pub(crate) fn plant_task_panic() {
+        PLANT_TASK_PANIC.store(true, Ordering::Release);
+    }
 
-#[cfg(all(test, feature = "prototype-agents"))]
-pub(crate) fn dirs_lock_works() -> bool {
-    dirs().lock().is_ok()
+    pub(crate) fn dirs_lock_works() -> bool {
+        dirs().lock().is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -94,12 +94,13 @@ fn clear_registry(data_dir: &Path) {
     }
 }
 
-/// The provider registry this process installed for the agent Runtime.
-#[cfg(all(test, feature = "prototype-agents"))]
-pub(crate) fn installed_provider_registry(
-    data_dir: &Path,
-) -> Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>> {
-    registries().lock().ok()?.get(data_dir).cloned()
+crate::agents::cfg_prototype_agents! {
+    /// The provider registry this process installed for the agent Runtime.
+    pub(crate) fn installed_provider_registry(
+        data_dir: &Path,
+    ) -> Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>> {
+        registries().lock().ok()?.get(data_dir).cloned()
+    }
 }
 #[cfg(unix)]
 const KIND: &str = "agent";
@@ -125,16 +126,32 @@ pub(crate) fn coords_path(data_dir: &Path) -> PathBuf {
     data_dir.join(COORDS_FILE)
 }
 
-#[derive(Debug)]
 pub(crate) struct AgentPlane {
     server: tokio::task::AbortHandle,
     watcher: tokio::task::JoinHandle<()>,
     coords_path: PathBuf,
     data_dir: PathBuf,
+    pub(crate) runtime: Arc<crate::runtime::Runtime>,
 }
 
 impl AgentPlane {
+    /// Stop every live guest first, so each end revokes that guest's grants
+    /// and closes its pending plans, then stop the listener.
     pub(crate) async fn shutdown(mut self) {
+        let live: Vec<String> = self
+            .runtime
+            .list_capsules()
+            .await
+            .into_iter()
+            .filter(|info| info.ended_at.is_none())
+            .map(|info| info.id)
+            .collect();
+        for id in live {
+            let _ = self
+                .runtime
+                .stop_capsule_with_reason(&id, "agents off")
+                .await;
+        }
         self.server.abort();
         let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.watcher).await;
     }
@@ -185,6 +202,88 @@ pub(crate) async fn start(
     }
 }
 
+static PLANES: OnceLock<Mutex<HashMap<PathBuf, AgentPlane>>> = OnceLock::new();
+
+fn planes() -> &'static Mutex<HashMap<PathBuf, AgentPlane>> {
+    PLANES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Start the agent Runtime when the build and the owner both allow it, without
+/// a second Home start. A process that does not own the data folder leaves the
+/// record as it is: the owning Home is the one that binds the listener.
+pub(crate) async fn ensure_running(
+    data_dir: &Path,
+    providers: Option<Arc<elastos_runtime::provider::ProviderRegistry>>,
+) -> anyhow::Result<()> {
+    if !crate::agents::build_allows()
+        || !crate::agents::home_enabled(data_dir)
+        || serves(Some(data_dir))
+    {
+        return Ok(());
+    }
+    let owner = crate::host_lock::active_host_process(data_dir)?;
+    if owner.as_ref().map(|info| info.pid) != Some(std::process::id()) {
+        return Ok(());
+    }
+    let plane = start(data_dir, providers).await?;
+    if let Ok(mut held) = planes().lock() {
+        held.insert(data_dir.to_path_buf(), plane);
+    }
+    Ok(())
+}
+
+/// End one agent's grants on this Home's agent Runtime and leave the guest
+/// running. A Home whose plane is not in this process has nothing to revoke.
+pub(crate) async fn revoke_agent_grants(data_dir: &Path, agent_id: &str) {
+    let runtime = planes().lock().ok().and_then(|held| {
+        held.get(data_dir)
+            .map(|plane| std::sync::Arc::clone(&plane.runtime))
+    });
+    if let Some(runtime) = runtime {
+        runtime
+            .revoke_live_agent_grants(agent_id, "agent off")
+            .await;
+    }
+}
+
+/// Stop the agent Runtime for this Home. Live guests end first, inside
+/// [`AgentPlane::shutdown`], so their grants and pending plans end with them.
+pub(crate) async fn stop_running(data_dir: &Path) {
+    let plane = planes()
+        .lock()
+        .ok()
+        .and_then(|mut held| held.remove(data_dir));
+    if let Some(plane) = plane {
+        let dir = plane.data_dir.clone();
+        plane.shutdown().await;
+        let _ = crate::api::gateway::close_home_plans(&dir, "agents off");
+        crate::resource_bridge::notify_plan_waiters();
+    }
+}
+
+/// A grant whose asker has no live capsule is refused. The shell session is
+/// not the asker; the pending request names the guest.
+async fn grant_if_asker_is_live(
+    State(state): State<crate::api::handlers::CapabilityState>,
+    Extension(session): Extension<Session>,
+    Extension(runtime): Extension<Arc<crate::runtime::Runtime>>,
+    Json(input): Json<crate::api::handlers::GrantRequestInput>,
+) -> Response {
+    if let Some(request) = state.pending_store.get_request(&input.request_id).await {
+        let live = runtime
+            .get_capsule(request.session_id.as_str())
+            .await
+            .is_some_and(|info| info.ended_at.is_none());
+        if !live {
+            return (StatusCode::CONFLICT, "the asking session has ended").into_response();
+        }
+    }
+    match crate::api::handlers::grant_request(State(state), Extension(session), Json(input)).await {
+        Ok(body) => body.into_response(),
+        Err((status, text)) => (status, text).into_response(),
+    }
+}
+
 /// The routes a stored agent uses. A guest, app, or native start is not mounted.
 pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
     let runtime = config.runtime.clone();
@@ -223,10 +322,7 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
         .layer(Extension(runtime.clone()));
     let asks = Router::new()
         .route("/api/capability/pending", get(list_owner_pending))
-        .route(
-            "/api/capability/grant",
-            post(crate::api::handlers::grant_request),
-        )
+        .route("/api/capability/grant", post(grant_if_asker_is_live))
         .route(
             "/api/capability/deny",
             post(crate::api::handlers::deny_request),
@@ -374,6 +470,9 @@ async fn start_owned(
     if RESERVED.contains(&COORDS_FILE) {
         anyhow::bail!("agent coordinates use their own file");
     }
+    if !crate::agents::home_enabled(&data_dir) {
+        anyhow::bail!(crate::agents::NOT_ENABLED);
+    }
     dirs()
         .lock()
         .expect("agent plane set")
@@ -479,11 +578,13 @@ async fn listen(
             clear_fault(&data_dir);
             #[cfg(test)]
             note_registry(&data_dir, installed.clone());
+            let _ = crate::api::gateway::reconcile_lost_plan_receipts(&data_dir);
             return Ok(AgentPlane {
                 server: running.server,
                 watcher: running.watcher,
                 coords_path: coords_path(&data_dir),
                 data_dir,
+                runtime,
             });
         }
         running.stop().await;

@@ -370,9 +370,14 @@ fn ask_sentence(agent: &OwnedAgent, ask: &RuntimeCapabilityPendingRequest) -> Op
     } else {
         ask.resource.clone()
     };
+    let who = if ask.resource.starts_with("elastos://") {
+        format!("{} ({})", agent.name, agent.id)
+    } else {
+        agent.name.clone()
+    };
     Some(format!(
-        "{} asks to {word} {place}. It requests {} access to {}.",
-        agent.name, ask.action, ask.resource
+        "{who} asks to {word} {place}. It requests {} access to {}.",
+        ask.action, ask.resource
     ))
 }
 
@@ -760,6 +765,13 @@ async fn dispatch_inbox_action(
         )
         .await;
     }
+    if let Some(request_id) = action_id.strip_prefix("agent-plan-deny-request:") {
+        return super::gateway_inspect_actions::deny_agent_plan_request(
+            data_dir,
+            context.principal_id(),
+            request_id,
+        );
+    }
     if let Some(request_id) = action_id.strip_prefix("agent-plan-approve-request:") {
         if state.provider_registry.is_none() {
             anyhow::bail!("agent plan provider registry unavailable");
@@ -1012,6 +1024,9 @@ async fn answer_agent_ask(
         .iter()
         .find(|row| row.request_id == request_id)
         .ok_or_else(|| anyhow::anyhow!("that request is no longer pending"))?;
+    if ask.agent_id.is_empty() {
+        anyhow::bail!("the asking session has ended");
+    }
     let agents = owned_agents(data_dir);
     let Some(agent) = agents.iter().find(|agent| agent.id == ask.agent_id) else {
         anyhow::bail!("{}", not_owner(caller, "this agent"));
@@ -1023,7 +1038,32 @@ async fn answer_agent_ask(
         decide_capability(&coords, request_id, false).await?;
         anyhow::bail!("a path outside the agent's own folder is not pending");
     }
-    decide_capability(&coords, request_id, approve).await
+    let answered = decide_capability(&coords, request_id, approve).await?;
+    let event_type = if approve {
+        "agent.grant.approved"
+    } else {
+        "agent.grant.denied"
+    };
+    let result = if approve { "approved" } else { "denied" };
+    crate::auth::append_audit_event(
+        data_dir,
+        elastos_runtime::auth::RuntimeAuditEventV1 {
+            schema: elastos_runtime::auth::RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!("audit:{}", super::gateway_home_token::uuid_like_token()),
+            event_type: event_type.to_string(),
+            principal_id: Some(caller.to_string()),
+            proof_binding_id: None,
+            session_id: Some(ask.agent_id.clone()),
+            challenge_id: Some(request_id.to_string()),
+            capsule_id: Some(ask.agent_id.clone()),
+            result: result.to_string(),
+            reason: format!("{result} {}", ask.resource),
+            occurred_at: now_ts(),
+            signer_did: None,
+            signature: None,
+        },
+    )?;
+    Ok(answered)
 }
 
 #[cfg(test)]
@@ -1119,7 +1159,7 @@ mod tests {
             &ask("elastos://inspect/submit_agent_plan", "write"),
         )
         .unwrap();
-        assert!(body.contains("Notes asks to write "), "{body}");
+        assert!(body.contains("Notes (agent-1) asks to write "), "{body}");
         assert!(
             body.contains("access to elastos://inspect/submit_agent_plan."),
             "{body}"

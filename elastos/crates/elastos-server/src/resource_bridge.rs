@@ -8,9 +8,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::RwLock as StdRwLock;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::local_http::LoopbackHttpBaseUrl;
 use crate::model_budget::{AgentKey, ModelBudget, Refusal as BudgetRefusal, RunKey};
@@ -400,9 +401,268 @@ pub(crate) fn retain_agent_plan_dispatch_authority(
     Ok(())
 }
 
-pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
+pub(crate) fn forget_agent_plan_dispatch_authority(data_dir: Option<&Path>, capsule_id: &str) {
     if let Ok(mut authorities) = plan_authorities().lock() {
-        authorities.retain(|_, held| held.context.capsule_id != capsule_id);
+        authorities.retain(|_, held| {
+            if held.context.capsule_id != capsule_id {
+                return true;
+            }
+            match (data_dir, held.context.data_dir.as_deref()) {
+                (Some(dir), Some(held_dir)) => held_dir != dir,
+                _ => true,
+            }
+        });
+    }
+}
+
+pub(crate) fn forget_one_agent_plan_authority(request_id: &str) {
+    if let Ok(mut authorities) = plan_authorities().lock() {
+        authorities.remove(request_id);
+    }
+}
+
+/// How many guests on one Home may sit in the host waiting for a plan
+/// decision at once. A third Start on that Home is refused while two waits
+/// are held. Another Home counts its own waits.
+pub(crate) const MAX_CONCURRENT_PLAN_WAITS: usize = 2;
+/// One park of the status read. The guest repeats it until the plan's own
+/// 300s life, measured from `created_at`, runs out.
+pub(crate) const PLAN_PARK_SECS: u64 = 30;
+pub(crate) const PLAN_WAIT_FULL: &str = "too many agents are waiting for a plan decision";
+
+struct PlanWaitState {
+    held: HashMap<PathBuf, usize>,
+    generation: HashMap<PathBuf, u64>,
+}
+
+static PLAN_WAITS: OnceLock<Mutex<PlanWaitState>> = OnceLock::new();
+static PLAN_WAIT_CV: Condvar = Condvar::new();
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct PlanUseKey {
+    data_dir: PathBuf,
+    capsule_id: String,
+}
+
+static PLAN_ONE_USE: OnceLock<
+    Mutex<HashMap<PlanUseKey, Vec<elastos_runtime::capability::token::TokenId>>>,
+> = OnceLock::new();
+
+fn plan_one_use(
+) -> &'static Mutex<HashMap<PlanUseKey, Vec<elastos_runtime::capability::token::TokenId>>> {
+    PLAN_ONE_USE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn plan_waits() -> std::sync::MutexGuard<'static, PlanWaitState> {
+    PLAN_WAITS
+        .get_or_init(|| {
+            Mutex::new(PlanWaitState {
+                held: HashMap::new(),
+                generation: HashMap::new(),
+            })
+        })
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
+
+pub(crate) fn plan_waits_block_another_start(home: &Path) -> bool {
+    plan_waits().held.get(home).copied().unwrap_or(0) >= MAX_CONCURRENT_PLAN_WAITS
+}
+
+pub(crate) fn notify_plan_waiters() {
+    {
+        let mut waits = plan_waits();
+        for generation in waits.generation.values_mut() {
+            *generation = generation.wrapping_add(1);
+        }
+    }
+    PLAN_WAIT_CV.notify_all();
+}
+
+struct PlanWaitPermit {
+    home: PathBuf,
+}
+
+impl Drop for PlanWaitPermit {
+    fn drop(&mut self) {
+        let mut waits = plan_waits();
+        if let Some(held) = waits.held.get_mut(&self.home) {
+            *held = held.saturating_sub(1);
+        }
+    }
+}
+
+fn try_acquire_plan_wait(home: &Path) -> Option<PlanWaitPermit> {
+    let mut waits = plan_waits();
+    let held = waits.held.entry(home.to_path_buf()).or_insert(0);
+    if *held >= MAX_CONCURRENT_PLAN_WAITS {
+        return None;
+    }
+    *held += 1;
+    waits.generation.entry(home.to_path_buf()).or_insert(0);
+    Some(PlanWaitPermit {
+        home: home.to_path_buf(),
+    })
+}
+
+#[cfg(test)]
+pub(crate) struct PlanWaitHold {
+    _permit: PlanWaitPermit,
+}
+
+#[cfg(test)]
+pub(crate) fn hold_plan_wait_for_test(home: &Path) -> Option<PlanWaitHold> {
+    try_acquire_plan_wait(home).map(|permit| PlanWaitHold { _permit: permit })
+}
+
+fn plan_park_limit() -> Duration {
+    Duration::from_secs(PLAN_PARK_SECS)
+}
+
+#[cfg(test)]
+pub(crate) fn plan_one_use_count(data_dir: &Path, capsule_id: &str) -> usize {
+    let key = PlanUseKey {
+        data_dir: data_dir.to_path_buf(),
+        capsule_id: capsule_id.to_string(),
+    };
+    plan_one_use()
+        .lock()
+        .ok()
+        .and_then(|tokens| tokens.get(&key).map(|ids| ids.len()))
+        .unwrap_or(0)
+}
+
+fn note_plan_one_use(data_dir: &Path, capsule_id: &str, token: &CapabilityToken) {
+    let key = PlanUseKey {
+        data_dir: data_dir.to_path_buf(),
+        capsule_id: capsule_id.to_string(),
+    };
+    if let Ok(mut tokens) = plan_one_use().lock() {
+        tokens.entry(key).or_default().push(*token.id());
+    }
+}
+
+/// The instance end revokes the one-use token minted for a plan step on this
+/// Home. A token whose effect has already run stays recorded; this only
+/// stops a later use. Another Home's token for the same capsule id stays.
+pub(crate) async fn revoke_plan_one_use_tokens(
+    manager: &CapabilityManager,
+    data_dir: &Path,
+    capsule_id: &str,
+) {
+    let key = PlanUseKey {
+        data_dir: data_dir.to_path_buf(),
+        capsule_id: capsule_id.to_string(),
+    };
+    let ids = plan_one_use()
+        .lock()
+        .ok()
+        .and_then(|mut tokens| tokens.remove(&key))
+        .unwrap_or_default();
+    for id in ids {
+        let _ = manager.revoke(id, "instance ended").await;
+    }
+}
+
+fn plan_result_value(
+    data_dir: &Path,
+    request_id: &str,
+    owner_id: &str,
+    requester_id: &str,
+    capsule_id: &str,
+    session_id: &str,
+) -> serde_json::Value {
+    match crate::api::gateway::agent_plan_result_for_requester(
+        data_dir,
+        request_id,
+        owner_id,
+        requester_id,
+        capsule_id,
+        session_id,
+    ) {
+        Ok(receipt) => serde_json::json!({
+            "type": "resource_result",
+            "result": {"status": "ok", "data": receipt},
+        }),
+        Err(err) => resource_error_response("agent_plan_result_refused", &err.to_string()),
+    }
+}
+
+fn plan_result_is_unsettled(value: &serde_json::Value) -> bool {
+    value["message"].as_str() == Some("agent plan has no settled result")
+}
+
+/// Park the status read until the row changes, the guest is stopped, or the
+/// park bound passes. The wait is a condition variable on this host thread.
+/// It is not a loop that polls, and it spends no guest fuel: it runs inside
+/// the Bus call, whose time the compute deadline does not count.
+fn park_for_agent_plan_result(
+    bridge_ctx: &BridgeContext,
+    data_dir: &Path,
+    request_id: &str,
+    owner_id: &str,
+    requester_id: &str,
+) -> serde_json::Value {
+    let _ = crate::api::gateway::expire_pending_agent_plans(data_dir);
+    let read = || {
+        plan_result_value(
+            data_dir,
+            request_id,
+            owner_id,
+            requester_id,
+            &bridge_ctx.capsule_id,
+            &bridge_ctx.session_id,
+        )
+    };
+    let first = read();
+    if !plan_result_is_unsettled(&first) {
+        return first;
+    }
+    if bridge_ctx
+        .stop
+        .as_ref()
+        .is_some_and(|flag| flag.requested.load(Ordering::Acquire))
+    {
+        return resource_error_response("stopped", "the agent was stopped");
+    }
+    let Some(_permit) = try_acquire_plan_wait(data_dir) else {
+        return resource_error_response("plan_wait_full", PLAN_WAIT_FULL);
+    };
+    let deadline = Instant::now() + plan_park_limit();
+    loop {
+        let generation = plan_waits().generation.get(data_dir).copied().unwrap_or(0);
+        let current = read();
+        if !plan_result_is_unsettled(&current) {
+            return current;
+        }
+        if bridge_ctx
+            .stop
+            .as_ref()
+            .is_some_and(|flag| flag.requested.load(Ordering::Acquire))
+        {
+            return resource_error_response("stopped", "the agent was stopped");
+        }
+        let _ = crate::api::gateway::expire_pending_agent_plans(data_dir);
+        let after_expiry = read();
+        if !plan_result_is_unsettled(&after_expiry) {
+            return after_expiry;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return current;
+        }
+        let waits = plan_waits();
+        if waits.generation.get(data_dir).copied().unwrap_or(0) != generation {
+            continue;
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let (guard, wait) = PLAN_WAIT_CV
+            .wait_timeout(waits, remaining)
+            .unwrap_or_else(|err| err.into_inner());
+        drop(guard);
+        if wait.timed_out() {
+            return read();
+        }
     }
 }
 
@@ -491,6 +751,19 @@ pub(crate) async fn dispatch_agent_plan_step(
         return resource_error_response("admission_missing", "agent plan admission is unavailable");
     };
     let ctx = held.context;
+    // Stop is read before any later check can mint. The admission was already
+    // taken, so this refusal is not a second dispatch. An effect that has
+    // already entered the provider is still tracked to its outcome.
+    if ctx
+        .stop
+        .as_ref()
+        .is_some_and(|flag| flag.requested.load(Ordering::Acquire))
+    {
+        return resource_error_response(
+            "stopped",
+            "the agent was stopped before this step was sent",
+        );
+    }
     if held.owner_id != owner_id
         || ctx.principal_id.as_deref() != Some(requester_id)
         || ctx.capsule_id != capsule_id
@@ -556,6 +829,9 @@ pub(crate) async fn dispatch_agent_plan_step(
                 request_id.to_string(),
                 (ctx.capability_manager.clone(), token.clone()),
             );
+        if let Some(dir) = ctx.data_dir.as_deref() {
+            note_plan_one_use(dir, &ctx.capsule_id, &token);
+        }
         token
     } else {
         let mut granted = None;
@@ -1277,19 +1553,13 @@ fn submit_agent_plan_response(
         Err(err) => return resource_error_response("submit_agent_plan_refused", &err.to_string()),
     };
     if let Some(request_id) = plan.get("request_id").and_then(serde_json::Value::as_str) {
-        return match crate::api::gateway::agent_plan_result_for_requester(
+        return park_for_agent_plan_result(
+            bridge_ctx,
             data_dir,
             request_id,
             &owner_id,
             requester_id,
-            &bridge_ctx.capsule_id,
-            &bridge_ctx.session_id,
-        ) {
-            Ok(receipt) => serde_json::json!({
-                "type": "resource_result", "result": {"status": "ok", "data": receipt},
-            }),
-            Err(err) => resource_error_response("agent_plan_result_refused", &err.to_string()),
-        };
+        );
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

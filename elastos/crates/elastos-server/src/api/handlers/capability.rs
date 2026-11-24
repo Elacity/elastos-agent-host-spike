@@ -517,6 +517,16 @@ pub async fn create_request_retiring(
     reason: String,
 ) -> PendingCapabilityRequest {
     retire_dead_grants(store, manager).await;
+    // One step keeps one live card. A repeated ask returns the earlier pending
+    // row. A denied or expired row is not pending, so the next ask is new.
+    if let Some(existing) = store.list_requests().await.into_iter().find(|request| {
+        request.is_pending()
+            && request.session_id.as_str() == session_id.as_str()
+            && request.resource.as_str() == resource.as_str()
+            && request.action == action
+    }) {
+        return existing;
+    }
     let request = store.create_request_with_reason(session_id, resource, action, reason);
     request.await
 }
@@ -981,6 +991,33 @@ mod tests {
                 assert!(result.token.is_none());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_repeated_ask_reuses_the_earlier_card() {
+        let state = test_state();
+        let session = elastos_runtime::session::SessionId::from_string("session:one-step");
+        let resource = ResourceId::new("elastos://inspect/submit_agent_plan");
+        let first = create_request_retiring(
+            &state.pending_store,
+            &state.capability_manager,
+            session.clone(),
+            resource.clone(),
+            Action::Write,
+            "first".to_string(),
+        )
+        .await;
+        let second = create_request_retiring(
+            &state.pending_store,
+            &state.capability_manager,
+            session,
+            resource,
+            Action::Write,
+            "again".to_string(),
+        )
+        .await;
+        assert_eq!(first.id.as_str(), second.id.as_str());
+        assert_eq!(state.pending_store.list_pending().await.len(), 1);
     }
 
     #[test]

@@ -97,7 +97,13 @@ mod gateway_inbox;
 pub(crate) use gateway_inbox::inbox_request_entries_for_test;
 #[path = "gateway_inspect_actions.rs"]
 mod gateway_inspect_actions;
+pub(crate) use gateway_inspect_actions::agent_plan_approval_block;
 pub(crate) use gateway_inspect_actions::agent_plan_result_for_requester;
+pub(crate) use gateway_inspect_actions::close_agent_plans;
+pub(crate) use gateway_inspect_actions::close_home_plans;
+pub(crate) use gateway_inspect_actions::close_instance_plans;
+pub(crate) use gateway_inspect_actions::expire_pending_agent_plans;
+pub(crate) use gateway_inspect_actions::reconcile_lost_plan_receipts;
 pub(crate) use gateway_inspect_actions::submit_pending_agent_plan;
 #[path = "gateway_model_remote.rs"]
 mod gateway_model_remote;
@@ -1595,6 +1601,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         StatusCode::FORBIDDEN
     } else if profile_required.is_some()
         || text == crate::collaboration_release_network::COMMUNITY_LEFT_DETAIL
+        || text.contains("the asking session has ended")
     {
         StatusCode::CONFLICT
     } else if text.contains("service access request delivery failed") {
@@ -1603,6 +1610,7 @@ fn inbox_error_response(err: anyhow::Error) -> Response {
         || text.contains("Open Wallet")
         || text.contains("is not pending")
         || text.contains("is no longer pending")
+        || text.contains("cannot be approved")
         || text.contains("changed before Inbox approval")
         || text.contains("card binding")
         || text.contains("service access request")

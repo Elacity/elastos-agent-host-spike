@@ -225,14 +225,31 @@ pub(super) async fn agents_enable(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
-    agents_response(agents_set_enabled(&state, &headers, true))
+    let enabled = agents_set_enabled(&state, &headers, true);
+    if enabled.is_ok() {
+        if let Err(error) = crate::api::agent_plane::ensure_running(
+            &state.data_dir,
+            state.provider_registry.clone(),
+        )
+        .await
+        {
+            return agents_response(Err(error) as anyhow::Result<serde_json::Value>);
+        }
+    }
+    agents_response(enabled)
 }
 
 pub(super) async fn agents_disable(
     State(state): State<GatewayState>,
     headers: HeaderMap,
 ) -> Response {
-    agents_response(agents_set_enabled(&state, &headers, false))
+    let disabled = agents_set_enabled(&state, &headers, false);
+    if disabled.is_ok() {
+        crate::api::agent_plane::stop_running(&state.data_dir).await;
+        let _ = crate::api::gateway::close_home_plans(&state.data_dir, "agents off");
+        crate::resource_bridge::notify_plan_waiters();
+    }
+    agents_response(disabled)
 }
 
 pub(super) async fn agents_create(
@@ -295,6 +312,12 @@ pub(super) async fn agents_retire(
             &request.agent_id,
         )?;
         end_live_agent(&state.data_dir, &request.agent_id).await?;
+        let _ = crate::api::gateway::close_agent_plans(
+            &state.data_dir,
+            &request.agent_id,
+            "instance ended",
+        );
+        crate::resource_bridge::notify_plan_waiters();
         crate::agents::retire(
             &state.data_dir,
             &owner.caller(),
@@ -326,9 +349,21 @@ pub(super) async fn end_live_agent(
     }
     match super::gateway_home_runtime::stop_runtime_agent(data_dir, agent_id).await {
         Ok(_) => Ok(()),
-        Err(error) if error.downcast_ref::<Refused>().is_some() => Ok(()),
+        // A runtime that has no row, or that already refused the stop, still
+        // leaves the record write to retire. A stop that failed for another
+        // reason does not.
+        Err(error) if stop_found_no_live_guest(&error) => Ok(()),
         Err(error) => Err(error),
     }
+}
+
+fn stop_found_no_live_guest(error: &anyhow::Error) -> bool {
+    if error.downcast_ref::<Refused>().is_some() {
+        return true;
+    }
+    error.downcast_ref::<CodedRefusal>().is_some_and(|coded| {
+        coded.code == "agent_no_session" || coded.code == "agent_already_stopped"
+    })
 }
 
 pub(super) async fn agents_rename(
@@ -353,16 +388,31 @@ pub(super) async fn agents_activate(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    agents_response(agents_owner(&state, &headers).and_then(|owner| {
+    let result = async {
+        let owner = agents_owner(&state, &headers)?;
         let request: ActiveRequest = agents_request(&body)?;
-        crate::agents::set_active(
+        let active = crate::agents::set_active(
             &state.data_dir,
             &owner.caller(),
             &request.agent_id,
             request.active,
             now_ts(),
-        )
-    }))
+        )?;
+        if !request.active {
+            // The guest stays up so the owner's Stop can still reach it.
+            // Grants on the agent Runtime end now; plans close as `agent off`.
+            crate::api::agent_plane::revoke_agent_grants(&state.data_dir, &request.agent_id).await;
+            let _ = crate::api::gateway::close_agent_plans(
+                &state.data_dir,
+                &request.agent_id,
+                "agent off",
+            );
+            crate::resource_bridge::notify_plan_waiters();
+        }
+        Ok(active)
+    }
+    .await;
+    agents_response(result)
 }
 
 /// The passkey step-up operation for one Start. The ceremony and the route

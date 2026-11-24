@@ -185,6 +185,9 @@ pub async fn launch_capsule(
                         host_cid,
                         launch_id,
                         expires_at: *expires_at,
+                        data_dir: data_dir
+                            .as_deref()
+                            .expect("an admitted agent launch has this Home's data directory"),
                     },
                 )
                 .await
@@ -8051,6 +8054,7 @@ pub(crate) mod tests {
                     host_cid: "cid",
                     launch_id: &launch_id,
                     expires_at: verified_exp,
+                    data_dir: &home.data_dir,
                 },
             )
             .await
@@ -9160,6 +9164,9 @@ pub(crate) mod tests {
             "a panic in Stop left Start refused"
         );
     }
+
+    mod instance_storage_rows;
+    mod instance_storage_rows_feature_off;
 }
 
 /// `POST /api/launch/open` (shell only), `{cid}`: start the content at `cid`

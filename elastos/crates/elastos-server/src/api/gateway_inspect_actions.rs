@@ -410,7 +410,10 @@ pub(super) fn approve_agent_plan_request(
     card_binding: &serde_json::Value,
     step_up_token: Option<&str>,
 ) -> anyhow::Result<String> {
-    store::claim_pending_agent_plan_for_owner(
+    if let Some(block) = agent_plan_approval_block(&state.data_dir, request_id) {
+        anyhow::bail!(block);
+    }
+    let claimed = store::claim_pending_agent_plan_for_owner(
         &state.data_dir,
         request_id,
         context.principal_id(),
@@ -431,11 +434,185 @@ pub(super) fn approve_agent_plan_request(
             )
         },
     )?;
+    append_agent_plan_decision_audit(&state.data_dir, &claimed, "agent.plan.approved", "approved")?;
+    crate::resource_bridge::notify_plan_waiters();
     Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
 
 pub(super) fn settle_agent_plans_lost_before_start(data_dir: &FsPath) -> anyhow::Result<()> {
     store::settle_agent_plans_lost_before_start(data_dir, now_ts())
+}
+
+/// A pending plan lives this long from `created_at`, the same bound as a
+/// pending ask. The guest repeats the 30s host park until this life ends.
+pub(crate) const PLAN_DECISION_SECS: u64 = 300;
+
+/// Why this plan cannot be approved, or nothing when it is still pending.
+pub(crate) fn agent_plan_approval_block(data_dir: &FsPath, request_id: &str) -> Option<String> {
+    let current = read_inspect_action_record(data_dir, request_id).ok()?;
+    const CLOSED: &[&str] = &[
+        "instance ended",
+        "denied",
+        "expired",
+        "agents off",
+        "agent off",
+        "stopped",
+        "unresolved",
+    ];
+    if current.kind == AGENT_PLAN_KIND && CLOSED.contains(&current.status.as_str()) {
+        Some(format!(
+            "agent plan is {} and cannot be approved",
+            current.status
+        ))
+    } else {
+        None
+    }
+}
+
+fn append_agent_plan_decision_audit(
+    data_dir: &FsPath,
+    record: &InspectActionRequestRecord,
+    event_type: &str,
+    result: &str,
+) -> anyhow::Result<()> {
+    append_provider_effect_audit(
+        data_dir,
+        ProviderEffectAuditInput {
+            capsule_id: &record.id,
+            event_type,
+            principal_id: &record.principal_id,
+            session_id: &record.session_id,
+            request_id: &record.request_id,
+            result,
+            reason: result,
+        },
+    )
+}
+
+fn finish_closed_plans(records: Vec<InspectActionRequestRecord>, data_dir: &FsPath) {
+    for record in &records {
+        crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
+        let _ =
+            append_agent_plan_decision_audit(data_dir, record, "agent.plan.closed", &record.status);
+    }
+    if !records.is_empty() {
+        crate::resource_bridge::notify_plan_waiters();
+    }
+}
+
+/// Close this instance's pending plans as `outcome` in the same step that
+/// settles its asks. An `instance ended` plan cannot be approved.
+pub(crate) fn close_instance_plans(
+    data_dir: &FsPath,
+    capsule_id: &str,
+    outcome: &str,
+) -> anyhow::Result<usize> {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), |record| {
+        record.id == capsule_id
+    })?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir);
+    Ok(count)
+}
+
+pub(crate) fn close_agent_plans(
+    data_dir: &FsPath,
+    agent_id: &str,
+    outcome: &str,
+) -> anyhow::Result<usize> {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), |record| {
+        record.requester_id.as_deref() == Some(agent_id)
+    })?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir);
+    Ok(count)
+}
+
+pub(crate) fn close_home_plans(data_dir: &FsPath, outcome: &str) -> anyhow::Result<usize> {
+    let closed = store::close_pending_agent_plans(data_dir, outcome, now_ts(), |_| true)?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir);
+    Ok(count)
+}
+
+pub(crate) fn deny_agent_plan_request(
+    data_dir: &FsPath,
+    owner_id: &str,
+    request_id: &str,
+) -> anyhow::Result<String> {
+    let closed = store::close_pending_agent_plans(data_dir, "denied", now_ts(), |record| {
+        record.request_id == request_id && record.principal_id == owner_id
+    })?;
+    if closed.is_empty() {
+        anyhow::bail!("agent plan is not pending");
+    }
+    finish_closed_plans(closed, data_dir);
+    Ok("Denied agent plan.".to_string())
+}
+
+/// Pending plans older than [`PLAN_DECISION_SECS`] close as `expired`.
+pub(crate) fn expire_pending_agent_plans(data_dir: &FsPath) -> anyhow::Result<usize> {
+    let now = now_ts();
+    let closed = store::close_pending_agent_plans(data_dir, "expired", now, |record| {
+        now.saturating_sub(record.created_at) >= PLAN_DECISION_SECS
+    })?;
+    let count = closed.len();
+    finish_closed_plans(closed, data_dir);
+    Ok(count)
+}
+
+/// A dispatch that started, and whose confirmation never arrived, is settled
+/// from the test provider when that provider can name the step. No product
+/// provider can answer "did this step happen" today, so a step the test
+/// provider does not name is `unresolved` and is not dispatched again.
+pub(crate) fn reconcile_lost_plan_receipts(data_dir: &FsPath) -> anyhow::Result<usize> {
+    let _ = expire_pending_agent_plans(data_dir);
+    let records = store::load_agent_plan_records(data_dir)?;
+    let mut settled = 0;
+    for record in records {
+        if record.status != "started" {
+            continue;
+        }
+        let outcome = test_provider_step_outcome(&record.request_id)
+            .unwrap_or_else(|| "unresolved".to_string());
+        let updated =
+            store::set_agent_plan_status(data_dir, &record.request_id, &outcome, now_ts())?;
+        crate::resource_bridge::forget_one_agent_plan_authority(&record.request_id);
+        append_agent_plan_dispatch_audit(data_dir, &updated, &outcome)?;
+        crate::resource_bridge::notify_plan_waiters();
+        settled += 1;
+    }
+    Ok(settled)
+}
+
+#[cfg(test)]
+static TEST_PROVIDER_STEPS: std::sync::Mutex<Option<std::collections::HashMap<String, String>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn note_test_provider_step(step_id: &str, outcome: &str) {
+    let mut steps = TEST_PROVIDER_STEPS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    steps
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(step_id.to_string(), outcome.to_string());
+}
+
+fn test_provider_step_outcome(step_id: &str) -> Option<String> {
+    #[cfg(test)]
+    {
+        TEST_PROVIDER_STEPS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .as_ref()
+            .and_then(|steps| steps.get(step_id).cloned())
+    }
+    #[cfg(not(test))]
+    {
+        let _ = step_id;
+        None
+    }
 }
 
 /// Claim the stored step, audit the claim, then let its settlement outlive the
@@ -526,6 +703,7 @@ fn settle_agent_plan_dispatch(
     record.result = Some(result);
     record.updated_at = now_ts();
     write_inspect_action_record(data_dir, &record)?;
+    crate::resource_bridge::notify_plan_waiters();
     append_agent_plan_dispatch_audit(data_dir, &record, status)?;
     Ok(format!("Agent plan dispatch {status}."))
 }
@@ -542,6 +720,7 @@ fn append_agent_plan_dispatch_audit(
         "refused" => "agent_plan.dispatch.refused",
         "not_sent" => "agent_plan.dispatch.not_sent",
         "stale" => "agent_plan.dispatch.stale",
+        "unresolved" => "agent_plan.dispatch.unresolved",
         _ => "agent_plan.dispatch.unknown",
     };
     append_provider_effect_audit(
@@ -592,7 +771,17 @@ pub(crate) fn agent_plan_result_for_requester(
     }
     if !matches!(
         record.status.as_str(),
-        "completed" | "failed" | "refused" | "unknown"
+        "completed"
+            | "failed"
+            | "refused"
+            | "unknown"
+            | "unresolved"
+            | "instance ended"
+            | "denied"
+            | "expired"
+            | "agents off"
+            | "stopped"
+            | "agent off"
     ) {
         anyhow::bail!("agent plan has no settled result");
     }

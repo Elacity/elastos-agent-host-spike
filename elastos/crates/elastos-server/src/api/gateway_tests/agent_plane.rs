@@ -235,13 +235,23 @@ impl Gateway {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(up, "did not answer {health_url}");
-        let coords = wait_coords(data).await;
-        Self {
-            addr,
-            agent_url: coords.api_url,
-            secret: coords.attach_secret,
-            task,
-            stop: Some(stop_tx),
+        if crate::agents::home_enabled(data) {
+            let coords = wait_coords(data).await;
+            Self {
+                addr,
+                agent_url: coords.api_url,
+                secret: coords.attach_secret,
+                task,
+                stop: Some(stop_tx),
+            }
+        } else {
+            Self {
+                addr,
+                agent_url: String::new(),
+                secret: String::new(),
+                task,
+                stop: Some(stop_tx),
+            }
         }
     }
 
@@ -609,8 +619,42 @@ async fn agent_runtime_is_loopback_owner_only_and_stops_with_the_gateway() {
     std::fs::write(&home_coords, b"home-sentinel").unwrap();
     let _lock =
         crate::host_lock::acquire_host_process_lock(&data, "gateway", "127.0.0.1:0").unwrap();
-    let gateway = Gateway::start(&data).await;
-    let coords = crate::api::agent_plane::live_coords(&data).await.unwrap();
+    let key = elastos_runtime::signature::SigningKey::from_bytes(&[0x44; 32]);
+    let trusted = hex::encode(key.verifying_key().to_bytes());
+    std::fs::write(
+        data.join("config.toml"),
+        format!("dev_mode = false\ntrusted_keys = [\"{trusted}\"]\n"),
+    )
+    .unwrap();
+    let context = super::super::gateway_home_token::bind_device_session_grant(
+        &data,
+        &[HOME_CAPSULE_ID, HOST],
+    )
+    .unwrap();
+    let owner = context.principal_id().to_string();
+    crate::auth::store_test_principal_root_protection(&data, &owner);
+    crate::api::routes::tests::make_admin(&data, &owner);
+    let record = crate::auth::stored_principal_record(&data, &owner)
+        .unwrap()
+        .unwrap();
+    let session = context.session_id().to_string();
+    let caller = crate::agents::Caller {
+        principal_id: &owner,
+        proof_binding_id: &record.proof_binding_id,
+        session_id: &session,
+    };
+    let mut gateway = Gateway::start(&data).await;
+    assert!(
+        crate::api::agent_plane::live_coords(&data).await.is_none(),
+        "the agent runtime started before Allow"
+    );
+    crate::agents::set_enabled(&data, &caller, true, 1).unwrap();
+    crate::api::agent_plane::ensure_running(&data, None)
+        .await
+        .unwrap();
+    let coords = wait_coords(&data).await;
+    gateway.agent_url = coords.api_url.clone();
+    gateway.secret = coords.attach_secret.clone();
     assert!(
         coords.api_url.starts_with("http://127.0.0.1:"),
         "{}",
@@ -626,6 +670,12 @@ async fn agent_runtime_is_loopback_owner_only_and_stops_with_the_gateway() {
     assert_ne!(gateway_bytes, std::fs::read(&agent_path).unwrap());
     assert!(!gateway_bytes.is_empty());
     gateway.health().await;
+    crate::agents::set_enabled(&data, &caller, false, 2).unwrap();
+    crate::api::agent_plane::stop_running(&data).await;
+    assert!(
+        crate::api::agent_plane::live_coords(&data).await.is_none(),
+        "the agent runtime stayed up after Off"
+    );
     gateway.shutdown().await;
     assert!(!agent_path.exists());
     assert_eq!(std::fs::read(&runtime_coords).unwrap(), b"runtime-sentinel");
@@ -1024,6 +1074,8 @@ async fn a_panicking_host_call_leaves_the_session_and_home_up() {
     assert_eq!(value["stop"], "ok", "{value}");
     assert_eq!(value["home"], 200, "{value}");
     assert_eq!(value["dirs_lock"], true, "{value}");
+    assert_eq!(value["plan_status"], "instance ended", "{value}");
+    assert_ne!(value["plan_status"], "completed", "{value}");
 }
 
 #[tokio::test]
@@ -1079,9 +1131,36 @@ async fn host_panic_child() {
     let first = home.create_agent("Panic", &cid);
     let second = home.create_agent("Next", &cid);
     let gateway = Gateway::start(&home.data).await;
+    crate::runtime::hold_planted_host_panic();
     crate::runtime::plant_host_panic();
     let session = home.launch(&first, &dir).await;
+    let submitted = crate::api::gateway::submit_pending_agent_plan(
+        &home.data,
+        &home.owner,
+        &first,
+        &session,
+        &session,
+        &json!({
+            "steps": [{
+                "scheme": "availability",
+                "operation": "status",
+                "request": {}
+            }]
+        }),
+        crate::auth::now_ts(),
+    );
+    crate::runtime::release_planted_host_panic();
+    let submitted =
+        submitted.expect("the pending step is stored before the host panic ends the session");
+    let request_id = submitted["request_id"].as_str().unwrap().to_string();
     let cause = poll_cause(&gateway, &session).await;
+    let plan_path = home
+        .data
+        .join("inspect-actions")
+        .join(format!("{request_id}.json"));
+    let plan: Value =
+        serde_json::from_slice(&std::fs::read(&plan_path).expect("the pending step file")).unwrap();
+    let plan_status = plan["status"].as_str().unwrap_or("").to_string();
     let next = home.launch(&second, &dir).await;
     let next_live = capsule_live(&gateway.agent_url, &gateway.secret, &next).await;
     let stop = super::super::gateway_home_runtime::stop_runtime_agent(&home.data, &second).await;
@@ -1097,6 +1176,7 @@ async fn host_panic_child() {
             "stop_error": stop.as_ref().err().map(|error| error.to_string()),
             "home": home_status,
             "dirs_lock": crate::api::agent_plane::dirs_lock_works(),
+            "plan_status": plan_status,
         })
     );
     gateway.shutdown().await;
@@ -1173,4 +1253,288 @@ async fn http_status(url: &str) -> u16 {
         Ok(response) => response.status().as_u16(),
         Err(_) => 0,
     }
+}
+
+#[test]
+fn two_plan_waits_refuse_a_third_start() {
+    let home = std::path::Path::new("/two-plan-waits");
+    let other = std::path::Path::new("/another-home");
+    let first = crate::resource_bridge::hold_plan_wait_for_test(home).expect("first wait");
+    let second = crate::resource_bridge::hold_plan_wait_for_test(home).expect("second wait");
+    assert!(crate::resource_bridge::plan_waits_block_another_start(home));
+    assert!(crate::resource_bridge::hold_plan_wait_for_test(home).is_none());
+    assert!(
+        crate::resource_bridge::hold_plan_wait_for_test(other).is_some(),
+        "another Home's Start is not this Home's wait"
+    );
+    drop(first);
+    drop(second);
+    assert!(!crate::resource_bridge::plan_waits_block_another_start(
+        home
+    ));
+}
+
+#[tokio::test]
+async fn a_stopped_plan_is_not_minted() {
+    let home = Home::open();
+    let flag = std::sync::Arc::new(crate::resource_bridge::ActivationStopFlag {
+        requested: std::sync::atomic::AtomicBool::new(true),
+        cancelled: std::sync::atomic::AtomicBool::new(false),
+    });
+    let step = json!({"scheme": "localhost", "operation": "read", "request": {"path": "note"}});
+    let ctx = crate::resource_bridge::BridgeContext {
+        provider_registry: Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+        capability_manager: Arc::new(elastos_runtime::capability::CapabilityManager::new(
+            Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+            Arc::new(elastos_runtime::primitives::audit::AuditLog::new()),
+            Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+        )),
+        pending_store: Arc::new(elastos_runtime::capability::PendingRequestStore::new(
+            Arc::new(elastos_runtime::primitives::audit::AuditLog::new()),
+        )),
+        capsule_id: "capsule:stopped".to_string(),
+        session_id: "session:stopped".to_string(),
+        principal_id: Some("agent:stopped".to_string()),
+        manifest_capabilities: Vec::new(),
+        data_dir: Some(home.data.clone()),
+        launch: None,
+        model_token_ceiling: None,
+        model_budget: None,
+        stop: Some(flag),
+    };
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        "plan-stopped",
+        "person:stopped",
+        &ctx,
+        &step,
+    )
+    .unwrap();
+    let response = crate::resource_bridge::dispatch_agent_plan_step(
+        "plan-stopped",
+        "person:stopped",
+        "agent:stopped",
+        "capsule:stopped",
+        "session:stopped",
+        &home.data,
+        &step,
+    )
+    .await;
+    assert_eq!(response["code"], "stopped", "{response}");
+    assert_eq!(
+        crate::resource_bridge::plan_one_use_count(&home.data, "capsule:stopped"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_grant_with_no_live_session_is_refused_on_the_plane() {
+    let home = Home::open();
+    let plane = home.plane().await;
+    assert!(plane.plane.runtime.instance_authority_is_set());
+    let (store, _manager, _dir) = plane
+        .plane
+        .runtime
+        .instance_authority_plane()
+        .expect("the plane set its instance authority");
+    let request = store
+        .create_request_with_reason(
+            elastos_runtime::session::SessionId::from_string("capsule:not-live"),
+            elastos_runtime::capability::ResourceId::new("localhost://UsersAI/notes/journal"),
+            elastos_runtime::capability::Action::Write,
+            "store a note".to_string(),
+        )
+        .await;
+    let token = plane.token().await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/capability/grant", plane.url))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"request_id": request.id.as_str(), "duration": "session"}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let text = response.text().await.unwrap();
+    assert_eq!(status.as_u16(), 409, "{text}");
+    assert!(text.contains("the asking session has ended"), "{text}");
+    plane.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_used_storage_grant_is_refused_after_stop_on_the_plane() {
+    let home = Home::open();
+    let plane = home.plane().await;
+    let (store, manager, dir) = plane
+        .plane
+        .runtime
+        .instance_authority_plane()
+        .expect("the plane set its instance authority");
+    let session = "capsule:stored";
+    let resource =
+        elastos_runtime::capability::ResourceId::new("localhost://UsersAI/notes/.AppData/journal");
+    let request = store
+        .create_request_with_reason(
+            elastos_runtime::session::SessionId::from_string(session),
+            resource.clone(),
+            elastos_runtime::capability::Action::Write,
+            "write the journal".to_string(),
+        )
+        .await;
+    let token = manager.grant(
+        session,
+        resource,
+        elastos_runtime::capability::Action::Write,
+        elastos_runtime::capability::TokenConstraints::default(),
+        None,
+    );
+    store
+        .grant_request(
+            request.id.as_str(),
+            token.clone(),
+            elastos_runtime::capability::pending::GrantDuration::Session,
+        )
+        .await
+        .unwrap();
+    assert!(manager.can_still_validate(&token).await);
+    crate::api::handlers::settle::settle_and_revoke(&store, &manager, &dir, session, "stopped")
+        .await
+        .unwrap();
+    assert!(
+        !manager.can_still_validate(&token).await,
+        "a used storage grant still validated after stop on the plane"
+    );
+    plane.shutdown().await;
+}
+
+fn inbox_token(data: &Path, principal: &str, proof: &str) -> String {
+    let now = crate::auth::now_ts();
+    let grant = elastos_runtime::auth::AuthSessionGrantV1 {
+        schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: format!("grant:{}", super::uuid_like_token()),
+        session_id: format!("auth:{}", super::uuid_like_token()),
+        principal_id: principal.to_string(),
+        proof_binding_id: proof.to_string(),
+        issued_at: now,
+        expires_at: now + 12 * 60 * 60,
+        apps: vec!["inbox".to_string()],
+    };
+    crate::auth::store_session_grant(data, grant.clone()).unwrap();
+    super::super::gateway_home_token::issue_home_launch_token_for_auth_grant(data, "inbox", &grant)
+        .unwrap()
+}
+
+async fn post_inbox(state: &super::GatewayState, token: &str, action_id: &str) -> (u16, String) {
+    let request = super::test_browser_request("localhost:61180", "null")
+        .method("POST")
+        .uri("/api/apps/inbox/actions")
+        .header("x-elastos-home-token", token)
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(
+            json!({ "action_id": action_id }).to_string(),
+        ))
+        .unwrap();
+    let (parts, body) = request.into_parts();
+    let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    let response =
+        super::inbox_action(axum::extract::State(state.clone()), parts.headers, body).await;
+    let status = response.status().as_u16();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+#[tokio::test]
+async fn the_owner_answer_is_refused_at_the_inbox_route() {
+    let home = Home::open();
+    let agent_id = home.create_agent("Notes", "bafkreia5notesl1");
+    let root = crate::auth::stored_principal_record(&home.data, &agent_id)
+        .unwrap()
+        .unwrap()
+        .localhost_root;
+    let plane = home.plane().await;
+    let session = "capsule:l1-live";
+    plane
+        .plane
+        .runtime
+        .insert_agent_session_for_test(crate::runtime::AgentSessionRecord {
+            agent_id: agent_id.clone(),
+            owner: home.owner.clone(),
+            host_cid: REGISTRY_CID.to_string(),
+            launch_id: "launch-l1".to_string(),
+            session_id: session.to_string(),
+        })
+        .await;
+    let (store, _, _) = plane
+        .plane
+        .runtime
+        .instance_authority_plane()
+        .expect("the plane set its instance authority");
+    let resource = elastos_runtime::capability::ResourceId::new(format!("{root}/.AppData/journal"));
+    let live = store
+        .create_request_with_reason(
+            elastos_runtime::session::SessionId::from_string(session),
+            resource.clone(),
+            elastos_runtime::capability::Action::Write,
+            "write the journal".to_string(),
+        )
+        .await;
+    let ended = store
+        .create_request_with_reason(
+            elastos_runtime::session::SessionId::from_string("capsule:l1-ended"),
+            resource,
+            elastos_runtime::capability::Action::Write,
+            "the session has ended".to_string(),
+        )
+        .await;
+    let owner_token = inbox_token(&home.data, &home.owner, &home.proof);
+    let other = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Other"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "l1-other-owner",
+    );
+    let admin = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Admin"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "l1-other-admin",
+    );
+    let guest = super::passkey_authority_with_name_role_credential(
+        &home.data,
+        Some("Guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+        "l1-guest",
+    );
+    let other_token = super::app_token_for_authority(&home.data, "inbox", &other);
+    let admin_token = super::app_token_for_authority(&home.data, "inbox", &admin);
+    let guest_token = super::app_token_for_authority(&home.data, "inbox", &guest);
+    let state = super::test_state(&home.data);
+    let action = format!("capability-deny-request:agent:{}", live.id.as_str());
+    for (who, token, principal) in [
+        ("other owner", &other_token, &other.principal_id),
+        ("admin", &admin_token, &admin.principal_id),
+        ("guest", &guest_token, &guest.principal_id),
+    ] {
+        let (status, body) = post_inbox(&state, token, &action).await;
+        assert_eq!(status, 403, "{who}: {body}");
+        assert!(
+            body.contains("belongs to a different principal"),
+            "{who}: {body}"
+        );
+        assert!(body.contains(principal), "{who}: {body}");
+        assert!(body.contains("Notes"), "{who}: {body}");
+        assert!(
+            !body.contains("the asking session has ended"),
+            "{who}: {body}"
+        );
+    }
+    let ended_action = format!("capability-deny-request:agent:{}", ended.id.as_str());
+    let (status, body) = post_inbox(&state, &owner_token, &ended_action).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body.contains("the asking session has ended"), "{body}");
+    assert!(!body.contains("belongs to a different principal"), "{body}");
+    let (status, body) = post_inbox(&state, &owner_token, &action).await;
+    assert_eq!(status, 200, "{body}");
+    plane.shutdown().await;
 }

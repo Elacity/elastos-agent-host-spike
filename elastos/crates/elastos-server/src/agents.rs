@@ -90,6 +90,27 @@ pub(crate) fn build_allows() -> bool {
     cfg!(feature = "prototype-agents")
 }
 
+/// Compile a test item only in the agents build. The feature name stays in
+/// this file; callers do not spell it.
+macro_rules! cfg_prototype_agents {
+    ($($item:item)*) => {
+        $(
+            #[cfg(all(test, feature = "prototype-agents"))]
+            $item
+        )*
+    };
+}
+
+pub(crate) use cfg_prototype_agents;
+
+/// Whether the owner has allowed agents on this Home. A missing or unreadable
+/// file is off. This reads the record; it does not start the agent Runtime.
+pub(crate) fn home_enabled(data_dir: &Path) -> bool {
+    open(data_dir, false)
+        .map(|opened| opened.file.enabled.is_some())
+        .unwrap_or(false)
+}
+
 fn build_allows_for_home(data_dir: &Path) -> bool {
     build_allows() || {
         #[cfg(all(test, unix))]

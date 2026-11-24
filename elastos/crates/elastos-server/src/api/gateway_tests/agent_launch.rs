@@ -1899,11 +1899,18 @@ async fn stub_runtime_stop(
 #[tokio::test]
 async fn agents_audit_settle_stop_ends_only_the_session_this_start_made() {
     let world = world().await;
-    let first = started(&world, &world.agent_a).await;
-    let first_session = first["session_id"].as_str().unwrap().to_string();
-    // The second start's completion row is the fourth signed agent append
-    // of this Home, so the plant fails only that row.
-    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 4);
+    let first_session = "session-earlier";
+    // One live run refuses a second Start while the first guest holds the
+    // token. This earlier row is resident and holds no token, so this Start
+    // is admitted. Its completion row fails, and the settle stop names only
+    // the session this Start made.
+    world
+        .runtime
+        .runtime
+        .plant_open_agent_row_for_test(&world.agent_a, first_session)
+        .await;
+    // This Start's completion row is the second signed agent append.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 2);
     let token = step_up(&world.app, &world.admin, &world.agent_a).await;
     let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
@@ -1917,7 +1924,7 @@ async fn agents_audit_settle_stop_ends_only_the_session_this_start_made() {
     assert_eq!(stopped.len(), 1, "{stopped:?}");
     assert_ne!(
         stopped[0].session_id.as_deref(),
-        Some(first_session.as_str()),
+        Some(first_session),
         "the settle stop labelled the earlier session unrecorded_start"
     );
     let reason: Value = serde_json::from_str(&stopped[0].reason).unwrap();
@@ -1978,24 +1985,30 @@ async fn agents_audit_settle_stop_failure_still_refuses_by_name_and_records_it()
 async fn agents_audit_owner_stop_reports_which_rows_are_missing() {
     let world = world().await;
     let first = started(&world, &world.agent_a).await;
-    let second = started(&world, &world.agent_a).await;
-    let a = first["session_id"].as_str().unwrap();
-    let b = second["session_id"].as_str().unwrap();
-    let (earlier, later) = if a < b { (a, b) } else { (b, a) };
-    // Two starts spent four signed appends; the owner's stop writes the
-    // requested row fifth and the first signed stop row sixth, so the plant
-    // fails only that row.
-    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 6);
+    let earlier = first["session_id"].as_str().unwrap().to_string();
+    // One live run refuses a second Start. The second row is planted beside
+    // the session this Start made, so Stop still has two rows to sign.
+    let later = format!("{earlier}-later");
+    world
+        .runtime
+        .runtime
+        .plant_open_agent_stop_for_test(&world.agent_a, &later)
+        .await;
+    // The start wrote requested and completed. Stop writes the requested row
+    // third and the first signed stop row fourth, so the plant fails only
+    // that row. The rows are signed in session-id order, so the later id is
+    // the one that is recorded.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 4);
     let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert!(
-        body.contains(earlier) && body.contains(later),
+        body.contains(&earlier) && body.contains(&later),
         "the error does not name the stopped and unrecorded sessions: {body}"
     );
     // The row after the failed one was still attempted.
     let stopped = signed_audit_rows(&world, "agent.stopped");
     assert_eq!(stopped.len(), 1, "{stopped:?}");
-    assert_eq!(stopped[0].session_id.as_deref(), Some(later));
+    assert_eq!(stopped[0].session_id.as_deref(), Some(later.as_str()));
     assert_eq!(signed_audit_rows(&world, "agent.stop.requested").len(), 1);
 }
 
@@ -2109,7 +2122,9 @@ async fn agents_audit_launch_conflict_keeps_the_named_sentence() {
     let token = step_up(&world.app, &world.admin, &world.agent_a).await;
     let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(body, sentence);
+    let coded: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(coded["code"], "agent_already_running");
+    assert_eq!(coded["reason"], sentence);
     let completed = signed_audit_rows(&world, "agent.start.completed");
     assert_eq!(completed.len(), 1, "{completed:?}");
     assert_eq!(completed[0].result, "failed");

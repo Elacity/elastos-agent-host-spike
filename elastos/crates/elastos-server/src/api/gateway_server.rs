@@ -175,13 +175,16 @@ pub(super) async fn start_gateway_server_with_shutdown(
         }
         None => None,
     };
-    let agent_plane = match crate::api::agent_plane::start(&data_dir, agent_providers).await {
-        Ok(plane) => Some(plane),
-        Err(error) => {
+    // The agent Runtime starts only when this build has agents and the owner
+    // has already allowed them. Allow brings it up later, without a second
+    // Home start. Off takes it down.
+    if crate::agents::build_allows() && crate::agents::home_enabled(&data_dir) {
+        if let Err(error) =
+            crate::api::agent_plane::ensure_running(&data_dir, agent_providers).await
+        {
             tracing::info!(%error, "agent runtime stayed down");
-            None
         }
-    };
+    }
     // Every Home start, local or public and whoever launched it, publishes its
     // coordinates here. Cleanup then proves this Home ready before removing files.
     let backup_cleanup = gateway_local_control.as_ref().map(|_| {
@@ -226,9 +229,7 @@ pub(super) async fn start_gateway_server_with_shutdown(
             (&mut server).await
         }
     };
-    if let Some(plane) = agent_plane {
-        plane.shutdown().await;
-    }
+    crate::api::agent_plane::stop_running(&data_dir).await;
     if let Some(task) = backup_cleanup {
         task.abort();
     }
