@@ -400,6 +400,136 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
+    /// A guest reads an object it holds and calls ui.present. Home's frame
+    /// read returns that frame. A second guest's frame stays its own.
+    #[tokio::test]
+    async fn v2_guest_present_reaches_the_home_frame_read() {
+        use elastos_compute::providers::bus2_ui::FrameNode;
+        use elastos_compute::providers::ComponentProvider;
+        use elastos_compute::ComputeProvider;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let object_a = br#"{"frame":[{"text":"A"}]}"#.to_vec();
+        let object_b = br#"{"frame":[{"text":"B"}]}"#.to_vec();
+        let docs = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+        let lines = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let provider = ComponentProvider::new();
+        let docs_for_call = docs.clone();
+        let lines_for_call = lines.clone();
+        provider.set_bus_hostcall(Arc::new(move |line, capsule, _principal| {
+            lines_for_call
+                .lock()
+                .expect("lines")
+                .push((capsule.to_string(), line.to_string()));
+            let value: serde_json::Value =
+                serde_json::from_str(line).map_err(|err| err.to_string())?;
+            let body = &value["request"]["body"];
+            let offset = body["offset"].as_u64().ok_or("offset")? as usize;
+            let length = body["length"].as_u64().ok_or("length")? as usize;
+            let doc = docs_for_call
+                .lock()
+                .expect("docs")
+                .get(capsule)
+                .cloned()
+                .ok_or_else(|| format!("no object for {capsule}"))?;
+            let start = offset.min(doc.len());
+            let end = start.saturating_add(length).min(doc.len());
+            let window = doc[start..end].to_vec();
+            Ok(serde_json::json!({
+                "id": 1,
+                "response": {
+                    "type": "resource_result",
+                    "result": {
+                        "status": "ok",
+                        "data": { "content": window, "size": window.len() }
+                    },
+                    "audit": "read-1"
+                }
+            })
+            .to_string())
+        }));
+
+        let bytes = wat::parse_str(include_str!(
+            "../../../tests/fixtures/components/v2-present.wat"
+        ))
+        .expect("v2-present.wat parses");
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/components/bus-v1/capsule.json");
+        let mut manifest: CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let first = provider
+            .load_admitted(bytes.clone(), manifest.clone())
+            .await
+            .expect("first guest loads");
+        let second = provider
+            .load_admitted(bytes, manifest)
+            .await
+            .expect("second guest loads");
+        docs.lock()
+            .expect("docs")
+            .insert(first.id.as_str().to_string(), object_a);
+        docs.lock()
+            .expect("docs")
+            .insert(second.id.as_str().to_string(), object_b);
+
+        provider.start(&first).await.expect("first guest starts");
+        provider.start(&second).await.expect("second guest starts");
+
+        let frame_of = |id: &str| {
+            let provider = &provider;
+            let id = id.to_string();
+            async move {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        if let Some(nodes) = read_v2_frame_for_home(provider, &id) {
+                            return nodes;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("home frame read stayed empty for {id}"))
+            }
+        };
+        let nodes_a = frame_of(first.id.as_str()).await;
+        let nodes_b = frame_of(second.id.as_str()).await;
+        assert_eq!(nodes_a, vec![FrameNode::Text("A".into())]);
+        assert_eq!(nodes_b, vec![FrameNode::Text("B".into())]);
+        assert_eq!(
+            read_v2_frame_for_home(&provider, first.id.as_str()),
+            Some(vec![FrameNode::Text("A".into())]),
+            "the second guest does not replace the first frame"
+        );
+        assert!(read_v2_frame_for_home(&provider, "other-guest").is_none());
+
+        let seen = lines.lock().expect("lines").clone();
+        assert_eq!(seen.len(), 2, "each guest reads its object once: {seen:?}");
+        for (capsule, line) in &seen {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            let request = &value["request"];
+            assert_eq!(request["type"], "resource_invoke");
+            assert_eq!(request["operation"], "read");
+            assert_eq!(request["token"], "grant-token");
+            assert_eq!(request["uri"], "localhost://Users/self/Documents/note.bin");
+            assert!(
+                capsule == first.id.as_str() || capsule == second.id.as_str(),
+                "{capsule}"
+            );
+        }
+        let mut callers: Vec<&str> = seen.iter().map(|(capsule, _)| capsule.as_str()).collect();
+        callers.sort();
+        let mut ids = vec![first.id.as_str(), second.id.as_str()];
+        ids.sort();
+        assert_eq!(callers, ids);
+
+        provider.stop(&first).await.unwrap();
+        provider.stop(&second).await.unwrap();
+    }
+
     fn wat_imports(names: &[&str]) -> Vec<u8> {
         let imports = names
             .iter()
