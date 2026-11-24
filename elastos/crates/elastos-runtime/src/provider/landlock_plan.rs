@@ -1,5 +1,5 @@
-//! Landlock file decisions for one provider launch; attachment comes later.
-#![allow(dead_code)] // The spawn caller is added in a later slice.
+//! Landlock file decisions for one provider launch. The Linux spawn path installs them.
+#![allow(dead_code)] // Linux spawn is the caller. A macOS library build does not compile that path.
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;

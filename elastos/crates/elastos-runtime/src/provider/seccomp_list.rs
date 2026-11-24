@@ -4,7 +4,7 @@ use super::rights_table::RuntimeProviderId;
 use super::seccomp_program::number;
 
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)] // The installer is a later B3 slice.
+#[allow(dead_code)] // Linux spawn is the caller. A macOS library build does not compile that path.
 pub(super) enum AuditArch {
     X86_64,
     Aarch64,

@@ -1,5 +1,5 @@
 //! Linux provider attachment. Prepare owned buffers before fork; install in the child.
-#![allow(dead_code)] // The spawn caller arrives in a later B3 slice.
+#![allow(dead_code)] // Linux spawn is the caller. A macOS library build does not compile this module.
 
 use super::super::{
     landlock_plan, rights::AdmittedRights, rights_table::RuntimeProviderId,

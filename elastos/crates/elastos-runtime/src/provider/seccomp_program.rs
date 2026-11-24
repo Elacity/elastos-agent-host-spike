@@ -62,7 +62,7 @@ const MODEL_RULES: &str = concat!(
     "0015000400000000 0020000000000010 0015000100000001 000600007fff0000 000600000005000d 000600000005000d",
 );
 
-#[allow(dead_code)] // The installer is a later B3 slice.
+#[allow(dead_code)] // Linux spawn is the caller. A macOS library build does not compile that path.
 #[rustfmt::skip]
 pub(super) fn program(
     provider: RuntimeProviderId,
