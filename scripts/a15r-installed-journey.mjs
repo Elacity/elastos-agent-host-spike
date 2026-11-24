@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-// Owner journey against the installed Home started by a15r-installed-journey.sh.
-// Route: POST /api/apps/system/agents/launch after enable, create, activate,
+// POST /api/apps/system/agents/launch after enable, create, activate,
 // and passkey step-up operation agent.start.
 
 import { spawn } from "node:child_process";
@@ -39,7 +38,6 @@ const names = [
 const marks = new Map();
 const started = Date.now();
 const timings = {};
-const notes = [];
 const screenshots = [];
 let browser;
 let adminPage;
@@ -87,8 +85,6 @@ function sleep(ms) {
 }
 
 async function call(method, urlPath, token, body) {
-  // Home launch and step-up are the Home document. A System or Inbox token
-  // is a capsule grant and is admitted only from the opaque origin.
   const capsule = urlPath.startsWith("/api/apps/system/") || urlPath.startsWith("/api/apps/inbox/");
   const headers = capsule
     ? { origin: "null" }
@@ -491,7 +487,6 @@ function writeReceipt() {
     grants: state.grants,
     launches: { a: state.launchA, b: state.launchB },
     screenshots,
-    notes,
     stopped,
   };
   fs.writeFileSync(path.join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
@@ -705,14 +700,12 @@ async function main() {
     grants: state.grants.map((grant) => grant.resource),
     files: filesAfterGrants.map((file) => file.path),
   });
-  notes.push("The real agent-host does not attempt a cross-read. Isolation is the approved resource of each agent and the file path under that agent's root.");
   const journalA = filesAfterGrants.some((file) => file.path.includes(rootSuffix(state.rootA)))
     || state.grants.some((grant) => grant.status === 200 && String(grant.resource).includes(rootSuffix(state.rootA)) && String(grant.resource).includes("agent-host"));
   if (!journalA) halt("journal_in_agent_root", { grantResult, grants: state.grants, files: filesAfterGrants });
   pass("journal_in_agent_root", { grantResult, root: state.rootA });
 
-  const stoppedB = await stopAgent(state.agentB);
-  if (stoppedB.status !== 200) notes.push("stop of the second agent returned " + stoppedB.status + " " + stoppedB.text.slice(0, 160));
+  await stopAgent(state.agentB);
   const before = interestingFiles();
   const ownerBefore = ownerFiles(before);
   let plan = null;
@@ -862,13 +855,43 @@ async function main() {
   } catch (error) {
     mark("restart_zero", "fail", String(error.message || error));
   }
-  timings.done_ms = Date.now() - started;
 }
 
-notes.push("The host is elastos gateway. The owner calls POST /api/apps/home/runtime/ensure, which starts the managed Home runtime. Launch then uses POST /api/apps/system/agents/launch.");
-notes.push("The disposable key signs the capsule and the release envelope, then the runner deletes it. holder-canary-fixture.py is unchanged.");
-notes.push("A non-admin is a second passkey guest. An unknown id is agent:v2: followed by 32 f digits, refused by activate and by launch.");
-notes.push("U4 launches the real agent-host twice. No probe guest is added.");
+function shellFailReceipt() {
+  const failed = process.env.FAILED || "";
+  const reason = process.env.REASON || "";
+  const established = ["release_signed", "signing_key_deleted", "gateway_started"];
+  const cut = names.indexOf(failed);
+  const assertions = names.map((name, index) => {
+    if (name === failed) return { name, status: "fail", detail: clip(reason) };
+    if (cut > 0 && index < cut && established.includes(name)) {
+      return { name, status: "pass", detail: "" };
+    }
+    return { name, status: "not reached", detail: "" };
+  });
+  const installPath = path.join(out, "install.json");
+  const receipt = {
+    route: "POST /api/apps/system/agents/launch",
+    step_up_operation: "agent.start",
+    plan_step_up_operation: "agent_plan.approve",
+    source_commit: process.env.A15R_SOURCE_COMMIT || "",
+    source_tree: process.env.A15R_SOURCE_TREE || "",
+    install: fs.existsSync(installPath) ? readJson(installPath) : {},
+    timings_ms: {},
+    assertions,
+    card: null,
+    grants: [],
+    launches: { a: null, b: null },
+    screenshots: [],
+    stopped: clip(reason),
+  };
+  fs.writeFileSync(path.join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
+}
+
+if (process.argv[2] === "--shell-fail") {
+  shellFailReceipt();
+  process.exit(1);
+}
 
 main().catch((error) => {
   stopped = clip(error && (error.detail || error.stack || error.message) || error);
