@@ -7,12 +7,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use axum::middleware::{from_fn, from_fn_with_state};
+use elastos_runtime::capability::{PendingRequestStore, Settler};
+use elastos_runtime::primitives::audit::AuditLog;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use axum::middleware::{from_fn, from_fn_with_state, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Extension, Router};
+use axum::{Extension, Json, Router};
+use elastos_runtime::session::Session;
 
 use crate::api::middleware::{auth_middleware, shell_only_middleware, ApiState};
 use crate::api::server::ServerConfig;
@@ -185,30 +192,53 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
     let data_dir = config.data_dir.clone();
     let attach_secret = config.attach_secret.clone();
     let audit_log = config.audit_log.clone();
+    let pending = config.pending_store.clone();
     let api_state = ApiState {
         session_registry: session_registry.clone(),
     };
     let audit = audit_log.unwrap_or_else(|| {
         std::sync::Arc::new(elastos_runtime::primitives::audit::AuditLog::new())
     });
+    let capability_state = crate::api::handlers::CapabilityState {
+        pending_store: pending.clone(),
+        capability_manager: config.capability_manager.clone(),
+        capability_store: config.capability_store.clone(),
+        policy_evaluator: std::sync::Arc::new(elastos_runtime::capability::PolicyEvaluator::new(
+            Box::new(elastos_runtime::capability::evaluator::ShellPassthroughVerifier),
+            config.capability_manager.audit_log().clone(),
+        )),
+    };
     let mut capsules = Router::new()
         .route("/api/capsules", get(crate::api::routes::list_capsules))
         .route("/api/capsules", post(crate::api::routes::launch_capsule));
     if crate::agents::build_allows() {
-        capsules = capsules.route(
-            "/api/capsules/stop-agent",
-            post(crate::api::routes::stop_agent_session),
-        );
+        capsules = capsules.route("/api/capsules/stop-agent", post(stop_and_settle));
     }
     let capsules = capsules
         .layer(from_fn(shell_only_middleware))
-        .layer(from_fn_with_state(api_state, auth_middleware))
+        .layer(from_fn_with_state(api_state.clone(), auth_middleware))
         .layer(Extension(data_dir))
         .layer(Extension(audit))
-        .layer(Extension(runtime));
+        .layer(Extension(pending))
+        .layer(Extension(runtime.clone()));
+    let asks = Router::new()
+        .route("/api/capability/pending", get(list_owner_pending))
+        .route(
+            "/api/capability/grant",
+            post(crate::api::handlers::grant_request),
+        )
+        .route(
+            "/api/capability/deny",
+            post(crate::api::handlers::deny_request),
+        )
+        .layer(Extension(runtime))
+        .layer(from_fn(attach_shell_only))
+        .layer(from_fn_with_state(api_state, auth_middleware))
+        .with_state(capability_state);
     let mut app = Router::new()
         .route("/api/health", get(crate::api::routes::health))
-        .merge(capsules);
+        .merge(capsules)
+        .merge(asks);
     if let Some(secret) = attach_secret {
         app = app.merge(
             Router::new()
@@ -232,6 +262,94 @@ pub(crate) fn router(config: ServerConfig) -> anyhow::Result<Router> {
 #[cfg(test)]
 async fn planted_route_panic() -> &'static str {
     panic!("planted agent route panic")
+}
+
+/// The attach-secret shell, with no VM. A guest and a Home app session are named and refused.
+pub(crate) fn shell_refusal(session: &Session) -> Option<&'static str> {
+    if session.is_shell() && session.vm_id.is_none() {
+        return None;
+    }
+    if !session.is_shell() && session.vm_id.is_some() {
+        return Some("a guest session is refused");
+    }
+    Some("a Home app session is refused")
+}
+
+async fn attach_shell_only(req: Request<Body>, next: Next) -> Response {
+    match req.extensions().get::<Session>().map(shell_refusal) {
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Session not found in request extensions",
+        )
+            .into_response(),
+        Some(Some(reason)) => (StatusCode::FORBIDDEN, reason).into_response(),
+        Some(None) => next.run(req).await,
+    }
+}
+
+async fn list_owner_pending(
+    axum::extract::State(state): axum::extract::State<crate::api::handlers::CapabilityState>,
+    Extension(runtime): Extension<Arc<crate::runtime::Runtime>>,
+    Extension(_session): Extension<Session>,
+) -> Json<serde_json::Value> {
+    let mut requests = Vec::new();
+    for ask in state.pending_store.list_pending().await {
+        let session_id = ask.session_id.to_string();
+        let agent_id = runtime
+            .agent_session(&session_id)
+            .await
+            .map(|row| row.agent_id)
+            .unwrap_or_default();
+        requests.push(serde_json::json!({
+            "request_id": ask.id.to_string(), "session_id": session_id, "agent_id": agent_id,
+            "resource": ask.resource.to_string(), "action": ask.action.to_string(),
+            "reason": ask.reason, "requested_at": ask.requested_at.unix_secs,
+            "expires_at": ask.expires_at.unix_secs,
+        }));
+    }
+    Json(serde_json::json!({ "requests": requests }))
+}
+
+async fn stop_and_settle(
+    Extension(runtime): Extension<Arc<crate::runtime::Runtime>>,
+    Extension(audit): Extension<Arc<AuditLog>>,
+    Extension(pending): Extension<Arc<PendingRequestStore>>,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(agent_id) = serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("agent_id")?
+                .as_str()
+                .map(str::trim)
+                .map(str::to_string)
+        })
+        .filter(|id| !id.is_empty())
+    {
+        let ids = runtime.live_sessions_for_agent(&agent_id).await;
+        deny_waiting_asks(&pending, &ids, &agent_id).await;
+    }
+    crate::api::routes::stop_agent_session(Extension(runtime), Extension(audit), body).await
+}
+
+/// Deny every still-waiting ask of these sessions. The reason names the agent.
+pub(crate) async fn deny_waiting_asks(
+    store: &PendingRequestStore,
+    session_ids: &[String],
+    agent_id: &str,
+) {
+    let reason = format!("denied: {agent_id} stopped");
+    for ask in store.list_pending().await {
+        if session_ids
+            .iter()
+            .any(|id| id == &ask.session_id.to_string())
+        {
+            let _ = store
+                .deny_request_by(ask.id.as_str(), &reason, Settler::Runtime)
+                .await;
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -552,4 +670,77 @@ async fn health(url: &str) -> bool {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use elastos_runtime::capability::{
+        Action, PendingRequestStore, RequestStatus, ResourceId, Settler,
+    };
+    use elastos_runtime::primitives::audit::AuditLog;
+    use elastos_runtime::session::{Session, SessionId, SessionType};
+    use std::sync::Arc;
+
+    #[test]
+    fn only_the_unbound_attach_shell_may_answer() {
+        assert!(super::shell_refusal(&Session::new(SessionType::Shell, None)).is_none());
+        assert_eq!(
+            super::shell_refusal(&Session::new(SessionType::Shell, Some("vm".into()))),
+            Some("a Home app session is refused")
+        );
+        assert_eq!(
+            super::shell_refusal(&Session::new(SessionType::Capsule, Some("guest-vm".into()))),
+            Some("a guest session is refused")
+        );
+        assert_eq!(
+            super::shell_refusal(&Session::new(SessionType::Capsule, None)),
+            Some("a Home app session is refused")
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_denies_that_agents_ask_and_leaves_the_other() {
+        let store = PendingRequestStore::new(Arc::new(AuditLog::new()));
+        let kept = store
+            .create_request(
+                SessionId::from_string("session-b"),
+                ResourceId::new("localhost://UsersAI/b/journal"),
+                Action::Write,
+            )
+            .await;
+        let denied = store
+            .create_request(
+                SessionId::from_string("session-a"),
+                ResourceId::new("localhost://UsersAI/a/journal"),
+                Action::Read,
+            )
+            .await;
+        super::deny_waiting_asks(&store, &["session-a".to_string()], "agent-a").await;
+        match store.get_request(denied.id.as_str()).await.unwrap().status {
+            RequestStatus::Denied { reason, settled_by } => {
+                assert!(reason.contains("agent-a"), "{reason}");
+                assert_eq!(settled_by, Settler::Runtime);
+            }
+            other => panic!("ask stayed {other:?}"),
+        }
+        assert!(store
+            .get_request(kept.id.as_str())
+            .await
+            .unwrap()
+            .is_pending());
+    }
+
+    #[tokio::test]
+    async fn a_second_ask_is_accepted_while_the_first_is_pending() {
+        let store = PendingRequestStore::new(Arc::new(AuditLog::new()));
+        let session = SessionId::from_string("session-a");
+        let resource = ResourceId::new("localhost://UsersAI/a/journal");
+        let first = store
+            .create_request(session.clone(), resource.clone(), Action::Write)
+            .await;
+        let second = store.create_request(session, resource, Action::Write).await;
+        assert!(first.is_pending() && second.is_pending());
+        assert_ne!(first.id.as_str(), second.id.as_str());
+        assert_eq!(store.list_pending().await.len(), 2);
+    }
 }
