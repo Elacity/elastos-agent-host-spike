@@ -1475,16 +1475,26 @@ function guestProcesses() {
     fs.existsSync(path.join(data, name))
   ));
   let others = 0;
+  const stray = [];
+  const gatewayPid = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, "utf8").trim() : "";
   try {
-    const listed = spawnSync("ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8" });
-    const gatewayPid = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, "utf8").trim() : "";
+    // Wide output keeps one process on one line. Only a process whose own
+    // argv starts with this Home's elastos binary counts; a command that
+    // merely mentions the path does not.
+    const listed = spawnSync("ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8" });
+    const prefix = String(serveBin);
     for (const line of String(listed.stdout || "").split("\n")) {
-      if (!line.includes(String(serveBin))) continue;
-      const pid = line.trim().split(/\s+/)[0];
-      if (pid && pid !== gatewayPid) others += 1;
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const pid = trimmed.split(/\s+/)[0];
+      const command = trimmed.slice(pid.length).trim();
+      if (!(command === prefix || command.startsWith(prefix + " "))) continue;
+      if (!pid || pid === gatewayPid) continue;
+      others += 1;
+      stray.push(command.slice(prefix.length).trim().split(/\s+/)[0] || "elastos");
     }
   } catch { /* coords are the product's record of a running runtime */ }
-  return { coords, other_gateway_processes: others };
+  return { coords, other_gateway_processes: others, stray, gateway_pid: gatewayPid };
 }
 
 async function startGatewayOnly() {
@@ -1743,20 +1753,49 @@ async function runU3Create() {
     fs.readFileSync(path.join(root, "elastos/crates/elastos-server/src/agents.rs"), "utf8"),
     fs.readFileSync(path.join(root, "elastos/crates/elastos-server/src/api/gateway.rs"), "utf8"),
   );
+  // Home's own page asks the gateway to start the managed Home runtime
+  // (`elastos serve`). That process is not an agent guest. An agent guest
+  // would be another elastos argv, an agent-runtime coord file, a session
+  // id, or a running capsule for this agent.
+  const managedOnly = processes.stray.every((arg) => arg === "serve");
+  const agentCoords = processes.coords.includes("agent-runtime-coords.json");
+  let runningAgentCapsules = 0;
+  let capsuleNote = "home runtime coords absent";
+  if (processes.coords.includes("home-runtime-coords.json")) {
+    try {
+      const attached = await runtimeToken("home-runtime-coords.json");
+      const response = await fetch(attached.api + "/api/capsules", {
+        headers: { authorization: "Bearer " + attached.token },
+      });
+      const text = await response.text();
+      const listed = JSON.parse(text);
+      const rows = listed.capsules || [];
+      runningAgentCapsules = rows.filter((row) => {
+        const blob = JSON.stringify(row);
+        const live = row.status === "starting" || row.status === "running";
+        return live && (blob.includes(createdId) || blob.includes("agent-host"));
+      }).length;
+      capsuleNote = "listed";
+    } catch (error) {
+      halt("u3_no_guest_no_mint", { capsules: String(error.message || error).slice(0, 180) });
+    }
+  }
   const noMint = refusalIncludes(minted.status, minted.text, 409, "agent request is invalid")
     && JSON.stringify(storedAgentRecords()) === beforeMint
     && !storedAgentRecords().some((row) => row.id === chosenId)
     && created.json?.session_id === undefined
     && activated.json?.session_id === undefined
-    && processes.coords.length === 0
-    && processes.other_gateway_processes === 0
+    && managedOnly
+    && !agentCoords
+    && runningAgentCapsules === 0
     && replacement.ok;
   if (!noMint) {
     halt("u3_no_guest_no_mint", {
       status: minted.status,
       body: minted.text.slice(0, 180),
       coords: processes.coords,
-      other_gateway_processes: processes.other_gateway_processes,
+      stray: processes.stray,
+      running_agent_capsules: runningAgentCapsules,
       route: replacement.route,
       fields: replacement.fields,
       id_source: replacement.id_source,
@@ -1766,8 +1805,10 @@ async function runU3Create() {
     route: replacement.route,
     fields: replacement.fields,
     id_source: replacement.id_source,
-    coords: [],
     sessions: 0,
+    agent_runtime_coords: false,
+    managed_runtime: processes.stray,
+    capsules: capsuleNote,
   });
 
   const beforeBytes = fs.readFileSync(agentRecordsPath());
