@@ -1310,10 +1310,11 @@ impl Runtime {
             .await
     }
 
-    /// Consume the short grant once. Distinct grants may start independent
-    /// sessions for the same Agent; the gate covers provider start and registry insertion.
-    /// The session record is written before this returns, under the same lock
-    /// as the one-use mark, so a Stop that sees the row can take the tuple.
+    /// Consume the short grant once. One live row for this agent refuses
+    /// another start. The check and the registry insert share this lock, so
+    /// two starts at the same moment produce one session. The session record
+    /// is written before this returns, under the same lock as the one-use
+    /// mark, so a Stop that sees the row can take the tuple.
     pub(crate) async fn start_agent_once(
         &self,
         path: &Path,
@@ -1338,6 +1339,13 @@ impl Runtime {
         if state.used.contains_key(facts.launch_id) {
             return Err(ElastosError::InvalidManifest(
                 "agent launch grant was already used".into(),
+            ));
+        }
+        // A refused second grant is not marked used. The row is visible to the
+        // next waiter before this lock is released.
+        if Self::agent_has_live_row(capsules, facts.agent_id).await {
+            return Err(ElastosError::InvalidManifest(
+                Self::AGENT_ALREADY_RUNNING.into(),
             ));
         }
         state
@@ -1375,6 +1383,8 @@ impl Runtime {
     }
 
     pub(crate) const AGENT_STOPPING: &'static str = "this agent is stopping";
+
+    pub(crate) const AGENT_ALREADY_RUNNING: &'static str = "this agent is already running";
 
     pub(crate) async fn mark_agent_stopping(&self, agent_id: &str) {
         self.agent_launches
@@ -1420,6 +1430,18 @@ impl Runtime {
                 .values()
                 .any(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id)),
         )
+    }
+
+    /// `true` when a row for this agent has not ended. Waits for the registry.
+    async fn agent_has_live_row(
+        capsules: &RwLock<HashMap<String, RunningCapsuleInfo>>,
+        agent_id: &str,
+    ) -> bool {
+        capsules
+            .read()
+            .await
+            .values()
+            .any(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id))
     }
 
     /// A stop signal refuses Start while a live row remains or the registry

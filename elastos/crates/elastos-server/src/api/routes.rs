@@ -231,7 +231,8 @@ pub async fn launch_capsule(
             }))
         }
         Err(elastos_common::ElastosError::InvalidManifest(message))
-            if message == crate::runtime::Runtime::AGENT_STOPPING =>
+            if message == crate::runtime::Runtime::AGENT_STOPPING
+                || message == crate::runtime::Runtime::AGENT_ALREADY_RUNNING =>
         {
             Err((StatusCode::CONFLICT, message))
         }
@@ -8383,6 +8384,348 @@ pub(crate) mod tests {
             !runtime.agent_stop_flag_is_set(agent).await,
             "a dropped Stop left the stopping mark set"
         );
+    }
+
+    /// A write from a live agent session, through the bridge that session holds.
+    /// `uri` may name `UsersAI/self`; the grant is the concrete root that alias
+    /// becomes. A precondition is merged into the body, so `append` replaces
+    /// the default.
+    #[cfg(unix)]
+    async fn write_in_session(
+        home: &ProbeLaunch,
+        session: &str,
+        principal: &str,
+        uri: &str,
+        content: &[u8],
+        precondition: serde_json::Value,
+    ) -> serde_json::Value {
+        use elastos_runtime::capability::{Action, ResourceId, TokenConstraints};
+        let root = home.root(principal);
+        let concrete = uri.replacen("localhost://UsersAI/self", &root, 1);
+        let tables = home.runtime.bridge_tables_for_test(session);
+        let token = home.capability_manager.grant(
+            session,
+            ResourceId::new(&concrete),
+            Action::Write,
+            TokenConstraints::default(),
+            None,
+        );
+        let mut body = serde_json::json!({ "content": content.to_vec(), "append": false });
+        if let Some(extra) = precondition.as_object() {
+            for (key, value) in extra {
+                body[key] = value.clone();
+            }
+        }
+        let line = serde_json::json!({
+            "id": 70,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "write",
+                "token": token.to_base64().expect("a minted token is base64"),
+                "body": body,
+            }
+        })
+        .to_string();
+        let ctx = crate::resource_bridge::BridgeContext {
+            provider_registry: home.registry.clone(),
+            capability_manager: home.capability_manager.clone(),
+            pending_store: home.pending_store.clone(),
+            capsule_id: session.to_string(),
+            session_id: session.to_string(),
+            principal_id: Some(principal.to_string()),
+            manifest_capabilities: tables.manifest_capabilities,
+            data_dir: Some(home.data_dir.clone()),
+            launch: tables.launch,
+            model_token_ceiling: tables.model_token_ceiling,
+            model_budget: None,
+            stop: tables.stop,
+        };
+        let answer = crate::resource_bridge::handle_component_resource_request(&line, ctx)
+            .await
+            .expect("the bridge answers a session write");
+        home.capability_manager
+            .revoke(*token.id(), "the session write")
+            .await
+            .expect("the session write grant is revoked");
+        answer
+    }
+
+    #[cfg(unix)]
+    fn write_ok_revision(answer: &serde_json::Value) -> String {
+        assert_eq!(
+            answer["response"]["result"]["status"], "ok",
+            "the session write was refused: {answer}"
+        );
+        answer["response"]["result"]["data"]["revision"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the write named no revision: {answer}"))
+            .to_string()
+    }
+
+    #[cfg(unix)]
+    fn object_bytes(home: &ProbeLaunch, principal: &str, suffix: &str) -> Vec<u8> {
+        let root = home.root(principal);
+        let uri = format!("{root}{suffix}");
+        let path = elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &uri)
+            .unwrap_or_else(|| panic!("{uri} is not a rooted path"));
+        crate::auth::read_principal_root_object(&home.data_dir, principal, &root, &uri, &path)
+            .unwrap_or_else(|err| panic!("{uri} is not readable: {err}"))
+    }
+
+    #[cfg(unix)]
+    async fn live_of(home: &ProbeLaunch, agent: &str) -> usize {
+        home.runtime
+            .list_capsules()
+            .await
+            .into_iter()
+            .filter(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent))
+            .count()
+    }
+
+    #[cfg(unix)]
+    fn assert_already_running(result: Result<Json<LaunchResponse>, (StatusCode, String)>) {
+        match result {
+            Err((status, body)) => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(body, crate::runtime::Runtime::AGENT_ALREADY_RUNNING);
+            }
+            Ok(answer) => panic!("a second start was accepted: {}", answer.0.id),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn launch_grant(
+        home: &ProbeLaunch,
+        dir: &std::path::Path,
+        agent: &str,
+        grant: &str,
+    ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
+        launch_capsule(
+            Extension(home.runtime.clone()),
+            Extension(home.audit_log.clone()),
+            Extension(Some(home.data_dir.clone())),
+            Json(LaunchRequest {
+                path: dir.to_string_lossy().into_owned(),
+                principal_id: None,
+                launch_grant: Some(grant.to_string()),
+                agent_id: Some(agent.to_string()),
+            }),
+        )
+        .await
+    }
+
+    /// One agent, one live run. A second grant is refused with the stable
+    /// sentence, and that grant is not consumed. The live run can still write.
+    /// A different agent runs beside it. Stop frees the agent, and the refused
+    /// grant can then start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_second_start_is_refused_while_the_first_run_can_write() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["other"]).await;
+        let other = home.agents[0].clone();
+        let (spin_dir, spin_cid) = home.spin_host();
+        let agent = home.create_agent_for_host("spinning", &spin_cid);
+        let journal = "localhost://UsersAI/self/.AppData/Agents/agent-host/tasks/t1/journal";
+        let notes = "localhost://UsersAI/self/memory/notes.md";
+        let journal_suffix = "/.AppData/Agents/agent-host/tasks/t1/journal";
+        let notes_suffix = "/memory/notes.md";
+
+        let beside = home.launch(&other).await.unwrap().0;
+        home.wait_pending(&beside.id).await;
+        let first = home.launch_from(&spin_dir, &agent).await.unwrap().0;
+        home.wait_running(&first.id).await;
+        assert_eq!(live_of(&home, &agent).await, 1);
+        assert_eq!(live_of(&home, &other).await, 1);
+        let revision = write_ok_revision(
+            &write_in_session(
+                &home,
+                &first.id,
+                &agent,
+                journal,
+                b"journal v1",
+                serde_json::json!({ "create_only": true }),
+            )
+            .await,
+        );
+        assert_eq!(object_bytes(&home, &agent, journal_suffix), b"journal v1");
+
+        let grant = gateway::issue_home_agent_launch_token_with_context(
+            &home.data_dir,
+            &agent,
+            PROBE_HOST,
+            &home.context,
+        )
+        .unwrap();
+        assert_already_running(launch_grant(&home, &spin_dir, &agent, &grant).await);
+        assert_eq!(live_of(&home, &agent).await, 1);
+        let next = write_ok_revision(
+            &write_in_session(
+                &home,
+                &first.id,
+                &agent,
+                journal,
+                b"journal v2",
+                serde_json::json!({ "if_revision": &revision }),
+            )
+            .await,
+        );
+        assert_ne!(next, revision);
+        assert_eq!(object_bytes(&home, &agent, journal_suffix), b"journal v2");
+        write_ok_revision(
+            &write_in_session(
+                &home,
+                &first.id,
+                &agent,
+                notes,
+                b"one",
+                serde_json::json!({}),
+            )
+            .await,
+        );
+        write_ok_revision(
+            &write_in_session(
+                &home,
+                &first.id,
+                &agent,
+                notes,
+                b"two",
+                serde_json::json!({ "append": true }),
+            )
+            .await,
+        );
+        assert_eq!(object_bytes(&home, &agent, notes_suffix), b"onetwo");
+        assert_eq!(live_of(&home, &other).await, 1);
+        assert_eq!(object_bytes(&home, &agent, journal_suffix), b"journal v2");
+
+        let (status, _) = stop_route(&home, &first.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(live_of(&home, &agent).await, 0);
+        let again = launch_grant(&home, &spin_dir, &agent, &grant)
+            .await
+            .expect("stop frees the agent, and the refused grant was not used");
+        home.wait_running(&again.0.id).await;
+        assert_eq!(live_of(&home, &agent).await, 1);
+        assert_ne!(again.0.id, first.id);
+        let (status, _) = stop_route(&home, &again.0.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let beside_end = home.wait_ended(&beside.id).await;
+        grants.abort();
+        assert_eq!(beside_end.cause.as_deref(), Some("completed"));
+        assert_eq!(live_of(&home, &other).await, 0);
+    }
+
+    /// Two starts of one agent at the same moment: the launch lock admits one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_starts_at_once_produce_one_run() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (spin_dir, spin_cid) = home.spin_host();
+        let agent = home.create_agent_for_host("spinning", &spin_cid);
+        let (first, second) = tokio::join!(
+            home.launch_from(&spin_dir, &agent),
+            home.launch_from(&spin_dir, &agent),
+        );
+        let winner = match (first, second) {
+            (Ok(answer), Err((status, body))) | (Err((status, body)), Ok(answer)) => {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(body, crate::runtime::Runtime::AGENT_ALREADY_RUNNING);
+                assert!(!body.contains("already used"));
+                answer.0.id
+            }
+            (Ok(a), Ok(b)) => panic!("both starts were accepted: {} and {}", a.0.id, b.0.id),
+            (Err(a), Err(b)) => panic!("both starts were refused: {a:?} {b:?}"),
+        };
+        home.wait_running(&winner).await;
+        assert_eq!(live_of(&home, &agent).await, 1);
+        let (status, _) = stop_route(&home, &winner, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// The first run has ended. A second run has started. The ended run cannot
+    /// write, and a stale revision of the live run is a conflict.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ended_run_cannot_write_after_the_next_run_starts() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (spin_dir, spin_cid) = home.spin_host();
+        let agent = home.create_agent_for_host("spinning", &spin_cid);
+        let journal = "localhost://UsersAI/self/.AppData/Agents/agent-host/tasks/t1/journal";
+        let suffix = "/.AppData/Agents/agent-host/tasks/t1/journal";
+
+        let first = home.launch_from(&spin_dir, &agent).await.unwrap().0;
+        home.wait_running(&first.id).await;
+        let revision = write_ok_revision(
+            &write_in_session(
+                &home,
+                &first.id,
+                &agent,
+                journal,
+                b"journal v1",
+                serde_json::json!({ "create_only": true }),
+            )
+            .await,
+        );
+        let (status, _) = stop_route(&home, &first.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let second = home.launch_from(&spin_dir, &agent).await.unwrap().0;
+        home.wait_running(&second.id).await;
+        let stale = write_in_session(
+            &home,
+            &first.id,
+            &agent,
+            journal,
+            b"from the ended run",
+            serde_json::json!({ "if_revision": &revision }),
+        )
+        .await;
+        assert_eq!(
+            stale["response"]["code"], "manifest_capability_denied",
+            "the ended run wrote after the next run started: {stale}"
+        );
+        assert_eq!(object_bytes(&home, &agent, suffix), b"journal v1");
+
+        let stored = write_ok_revision(
+            &write_in_session(
+                &home,
+                &second.id,
+                &agent,
+                journal,
+                b"journal v2",
+                serde_json::json!({ "if_revision": &revision }),
+            )
+            .await,
+        );
+        assert_eq!(object_bytes(&home, &agent, suffix), b"journal v2");
+        let conflict = write_in_session(
+            &home,
+            &second.id,
+            &agent,
+            journal,
+            b"stale",
+            serde_json::json!({ "if_revision": &revision }),
+        )
+        .await;
+        assert_eq!(
+            conflict["response"]["result"]["code"], "revision_conflict",
+            "a stale revision replaced the journal: {conflict}"
+        );
+        assert_eq!(object_bytes(&home, &agent, suffix), b"journal v2");
+        assert_ne!(stored, revision);
+        let (status, _) = stop_route(&home, &second.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
     }
 }
 

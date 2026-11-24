@@ -177,6 +177,12 @@ instance must be bound independently to its agent principal, session, state,
 capabilities, resources, and lifecycle. Updating the harness must not rewrite
 the agent's public identity, private persona, or memory.
 
+## One live run
+
+One agent has one live run. A second Start while that run is live is refused, and the refusal says "this agent is already running". The run ends when the owner stops it, when the guest fails or crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. Retire refuses a later Start because the agent is retired. Two different agents may run at the same time, and two Starts of one agent at the same moment produce one run.
+
+A journal under `.AppData/Agents` is written as a whole object. The write carries `create_only` when the object is new, or `if_revision` with the revision last read, and append is refused. A write whose revision is not the stored revision is a conflict, so a run that has ended cannot replace the journal after a later run has stored a new revision. Outside `.AppData/Agents`, a plain write replaces the object and an append extends a file that is already there. One live run does not change those writes.
+
 ## Runtime and provider architecture
 
 The minimal agent path on ElastOS is:
