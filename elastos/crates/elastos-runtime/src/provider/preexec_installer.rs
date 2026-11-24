@@ -642,6 +642,15 @@ mod tests {
         );
     }
 
+    /// `libc::sock_filter` has no `PartialEq` in libc 0.2.189, so the Linux
+    /// target compares the four instruction fields.
+    fn sock_words(filters: &[libc::sock_filter]) -> Vec<(u16, u8, u8, u32)> {
+        filters
+            .iter()
+            .map(|insn| (insn.code, insn.jt, insn.jf, insn.k))
+            .collect()
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key() {
@@ -674,11 +683,13 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            prepared.filters, chain_filter,
+            sock_words(&prepared.filters),
+            sock_words(&chain_filter),
             "the chain allow-list filter is chain's own grant"
         );
         assert_ne!(
-            prepared.filters, did_filter,
+            sock_words(&prepared.filters),
+            sock_words(&did_filter),
             "the chain allow-list filter is chain's own grant"
         );
         let sendmmsg =
@@ -703,12 +714,13 @@ mod tests {
             super::host_audit_arch(),
         ))
         .unwrap();
-        assert_eq!(local.filters, local_filter);
+        assert_eq!(sock_words(&local.filters), sock_words(&local_filter));
         let (_object, object_plan) =
             path_allow::render_with_plan("object-provider", data, executable, 5).unwrap();
         let object = prepare_path_allow(RuntimeProviderId::Object, object_plan).unwrap();
         assert_ne!(
-            object.filters, local.filters,
+            sock_words(&object.filters),
+            sock_words(&local.filters),
             "object and localhost keep separate syscall lists"
         );
         assert!(prepared

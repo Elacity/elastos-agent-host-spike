@@ -93,9 +93,39 @@ pub(super) fn program(
     } else if matches!(provider, RuntimeProviderId::Chain) {
         code.extend(chain_argument_rules(arch));
     } else {
+        // Object only. Localhost deletes an empty directory with rmdir, which
+        // does not call fcntl. Chain keeps its own fcntl commands.
+        if matches!(provider, RuntimeProviderId::Object) {
+            code.extend(object_directory_fcntl(arch));
+        }
         code.push(stmt(6, DENY));
     }
     code
+}
+
+/// `fcntl` commands glibc `fdopendir` uses for Rust `remove_dir_all`.
+///
+/// On x86_64 and aarch64, glibc 2.35 and 2.39 `fdopendir` calls `F_GETFL`,
+/// then `__alloc_dir` with `close_fd = false` calls `F_SETFD` of `FD_CLOEXEC`.
+/// Rust 1.95 `remove_dir_all` opens with `openat(O_DIRECTORY|O_NOFOLLOW)` and
+/// passes that descriptor to `fdopendir`. `opendir` (list, and `rmdir` of an
+/// empty directory) sets `close_fd` and does not call `fcntl`, which is why
+/// trash of a directory already succeeds. The filter's deny is `EACCES` and
+/// does not name the call. Landlock `REMOVE_DIR` is already on the storage
+/// mask; this is not a path rule.
+fn object_directory_fcntl(arch: AuditArch) -> Vec<Instruction> {
+    let nr = number("fcntl", arch).expect("object fcntl rule needs a number");
+    // F_GETFL = 3, F_SETFD = 2, FD_CLOEXEC = 1. Same numbers on both arches.
+    vec![
+        jump(0x15, nr, 0, 7),
+        stmt(0x20, 24),
+        jump(0x15, 3, 3, 0),
+        jump(0x15, 2, 0, 3),
+        stmt(0x20, 32),
+        jump(0x15, 1, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]
 }
 
 /// Chain argument tail. Allow-list entries win on the first match, so these
@@ -458,6 +488,71 @@ mod tests {
                 }
             }
             assert_eq!(found, vec![(*version).to_string()], "{name} left the pinned chain stack");
+        }
+    }
+
+    /// Names the fcntl commands `remove_dir_all` needs. Seccomp's deny is
+    /// EACCES and the kernel does not put the syscall number in that errno,
+    /// so this interpreter is the name. `--nocapture` prints each decision.
+    #[test]
+    fn object_directory_delete_names_the_fdopendir_fcntl_commands() {
+        let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Object);
+        let local = super::super::rights::admit_runtime_grant(RuntimeProviderId::Localhost);
+        let cases: &[(&str, [u64; 6], bool)] = &[
+            ("fcntl F_GETFL", [7, 3, 0, 0, 0, 0], true),
+            ("fcntl F_SETFD FD_CLOEXEC", [7, 2, 1, 0, 0, 0], true),
+            ("fcntl F_SETFD other", [7, 2, 0, 0, 0, 0], false),
+            ("fcntl F_GETFD", [7, 1, 0, 0, 0, 0], false),
+            ("fcntl F_SETFL", [7, 4, 0, 0, 0, 0], false),
+            ("fcntl F_DUPFD_CLOEXEC", [7, 0x406, 0, 0, 0, 0], false),
+        ];
+        for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+            let audit = match arch {
+                AuditArch::X86_64 => 0xc000_003e,
+                AuditArch::Aarch64 => 0xc000_00b7,
+            };
+            let object = program(RuntimeProviderId::Object, &admitted, arch);
+            let localhost = program(RuntimeProviderId::Localhost, &local, arch);
+            assert!(
+                object.len() <= 256,
+                "{arch:?} object filter is {} instructions",
+                object.len()
+            );
+            for (label, args, allow) in cases {
+                let nr = number("fcntl", arch).expect("fcntl");
+                let got = interpret(&object, nr, *args, audit);
+                let want = if *allow { super::ALLOW } else { super::DENY };
+                let decision = if got == super::ALLOW { "allow" } else { "deny" };
+                eprintln!("{arch:?} object {label}: {decision}");
+                assert_eq!(got, want, "{arch:?} object {label} returned {got:#x}");
+                assert_eq!(
+                    interpret(&localhost, nr, *args, audit),
+                    super::DENY,
+                    "{arch:?} localhost {label} must stay denied"
+                );
+            }
+            let unlinkat = number("unlinkat", arch).expect("unlinkat");
+            assert_eq!(
+                interpret(&object, unlinkat, [0; 6], audit),
+                super::ALLOW,
+                "{arch:?} unlinkat AT_REMOVEDIR stays allowed"
+            );
+            if let Some(rmdir) = number("rmdir", arch) {
+                assert_eq!(
+                    interpret(&object, rmdir, [0; 6], audit),
+                    super::ALLOW,
+                    "{arch:?} rmdir stays allowed"
+                );
+            }
+            for name in ["chmod", "fchmodat"] {
+                if let Some(nr) = number(name, arch) {
+                    assert_eq!(
+                        interpret(&object, nr, [0; 6], audit),
+                        super::DENY,
+                        "{arch:?} {name} stays denied"
+                    );
+                }
+            }
         }
     }
 }
