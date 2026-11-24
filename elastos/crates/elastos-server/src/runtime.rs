@@ -1,6 +1,6 @@
 //! Core runtime implementation
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -284,6 +284,9 @@ struct AgentLaunchState {
     /// session's one end removes it, whether the owner stopped the guest or
     /// the guest ended on its own.
     sessions: HashMap<String, AgentSessionRecord>,
+    /// Agents whose Stop has begun and has not returned. Start refuses one
+    /// of these before it adds a session the Stop has not collected.
+    stopping: HashSet<String>,
 }
 
 /// The facts a Start keeps so the owner's Stop can write the same tuple.
@@ -397,6 +400,12 @@ impl ActivationStop {
 
 #[cfg(test)]
 static TEST_STOP_WAITS: StdMutex<Vec<(usize, std::time::Duration)>> = StdMutex::new(Vec::new());
+
+/// First observation of whether Stop had marked this agent before its rows
+/// were read. Keyed by the launch gate so parallel tests stay apart.
+#[cfg(test)]
+static STOP_MARK_BEFORE_ROWS: StdMutex<Vec<(usize, String, Option<bool>)>> =
+    StdMutex::new(Vec::new());
 
 #[cfg(test)]
 pub(crate) struct StopWaitLimit {
@@ -1262,6 +1271,9 @@ impl Runtime {
         facts: AgentStartFacts<'_>,
     ) -> Result<(CapsuleHandle, Signer)> {
         let mut state = self.agent_launches.lock().await;
+        if state.stopping.contains(facts.agent_id) {
+            return Err(ElastosError::InvalidManifest(Self::AGENT_STOPPING.into()));
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1299,6 +1311,8 @@ impl Runtime {
     /// not read: two rows that share a host name stay distinct, and a row
     /// with no principal is not this agent.
     pub(crate) async fn live_sessions_for_agent(&self, agent_id: &str) -> Vec<String> {
+        #[cfg(test)]
+        self.note_stop_mark_before_rows(agent_id);
         let capsules = self.running_capsules.read().await;
         let mut ids: Vec<String> = capsules
             .values()
@@ -1309,7 +1323,24 @@ impl Runtime {
         ids
     }
 
+    pub(crate) const AGENT_STOPPING: &'static str = "this agent is stopping";
+
+    pub(crate) async fn mark_agent_stopping(&self, agent_id: &str) {
+        self.agent_launches
+            .lock()
+            .await
+            .stopping
+            .insert(agent_id.to_string());
+    }
+
+    pub(crate) async fn clear_agent_stopping(&self, agent_id: &str) {
+        self.agent_launches.lock().await.stopping.remove(agent_id);
+    }
+
     pub(crate) async fn agent_is_stopping(&self, agent_id: &str) -> bool {
+        if self.agent_launches.lock().await.stopping.contains(agent_id) {
+            return true;
+        }
         let ids = self.live_sessions_for_agent(agent_id).await;
         let stops = self
             .activation_stops
@@ -1347,6 +1378,54 @@ impl Runtime {
             .await
             .sessions
             .insert(session_id, record);
+    }
+
+    #[cfg(test)]
+    fn note_stop_mark_before_rows(&self, agent_id: &str) {
+        let key = Arc::as_ptr(&self.agent_launches) as usize;
+        let marked = self
+            .agent_launches
+            .try_lock()
+            .is_ok_and(|state| state.stopping.contains(agent_id));
+        let mut probes = STOP_MARK_BEFORE_ROWS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(slot) = probes
+            .iter_mut()
+            .rev()
+            .find(|(stored, id, seen)| *stored == key && id == agent_id && seen.is_none())
+        {
+            slot.2 = Some(marked);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn agent_stop_flag_is_set(&self, agent_id: &str) -> bool {
+        self.agent_launches.lock().await.stopping.contains(agent_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_stop_mark_probe(&self, agent_id: &str) {
+        STOP_MARK_BEFORE_ROWS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((
+                Arc::as_ptr(&self.agent_launches) as usize,
+                agent_id.to_string(),
+                None,
+            ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_mark_seen_before_rows(&self, agent_id: &str) -> Option<bool> {
+        let key = Arc::as_ptr(&self.agent_launches) as usize;
+        STOP_MARK_BEFORE_ROWS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .rev()
+            .find(|(stored, id, _)| *stored == key && id == agent_id)
+            .and_then(|(_, _, seen)| *seen)
     }
 
     #[cfg(test)]

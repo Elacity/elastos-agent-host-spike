@@ -106,7 +106,10 @@ pub async fn launch_capsule(
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
     if let Some(agent_id) = req.agent_id.as_deref() {
         if runtime.agent_is_stopping(agent_id).await {
-            return Err((StatusCode::CONFLICT, "this agent is stopping".to_string()));
+            return Err((
+                StatusCode::CONFLICT,
+                crate::runtime::Runtime::AGENT_STOPPING.to_string(),
+            ));
         }
     }
     let path = std::path::Path::new(&req.path);
@@ -226,6 +229,11 @@ pub async fn launch_capsule(
                 status: status.into(),
                 session_id: handle.id.0,
             }))
+        }
+        Err(elastos_common::ElastosError::InvalidManifest(message))
+            if message == crate::runtime::Runtime::AGENT_STOPPING =>
+        {
+            Err((StatusCode::CONFLICT, message))
         }
         Err(e) => Err((StatusCode::BAD_REQUEST, e.to_string())),
     }
@@ -484,7 +492,15 @@ pub async fn stop_agent_session(
         )
             .into_response();
     }
-    let ids = runtime.live_sessions_for_agent(&agent_id).await;
+    runtime.mark_agent_stopping(&agent_id).await;
+    let response = stop_collected_agent_rows(&runtime, &agent_id).await;
+    runtime.clear_agent_stopping(&agent_id).await;
+    response
+}
+
+/// Reads and stops rows after the per-agent stopping flag is set.
+async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::response::Response {
+    let ids = runtime.live_sessions_for_agent(agent_id).await;
     if ids.is_empty() {
         return (
             StatusCode::NOT_FOUND,
@@ -8113,6 +8129,36 @@ pub(crate) mod tests {
                 && body["stopping"][0]["session_id"] == "session-held"
                 && ended.is_none(),
             "a session that is still running was answered as stopped: {status} {body} ended={ended:?}"
+        );
+    }
+
+    /// Stop marks the agent before it reads the rows, so a Start in that
+    /// window is refused instead of adding a session the Stop never sees.
+    #[tokio::test]
+    async fn stop_marks_the_agent_before_it_reads_rows() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        runtime
+            .plant_open_agent_stop_for_test(agent, "session-held")
+            .await;
+        runtime.arm_stop_mark_probe(agent);
+        let _limit = runtime.limit_stop_wait_for_test(std::time::Duration::from_millis(20));
+        let response = stop_agent_session(
+            Extension(runtime.clone()),
+            Extension(Arc::new(AuditLog::new())),
+            axum::body::Bytes::from(format!(r#"{{"agent_id":"{agent}"}}"#)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            runtime.stop_mark_seen_before_rows(agent),
+            Some(true),
+            "Stop read its rows before the agent was marked stopping"
+        );
+        assert!(
+            !runtime.agent_stop_flag_is_set(agent).await,
+            "the stopping flag stayed set after Stop returned"
         );
     }
 }
