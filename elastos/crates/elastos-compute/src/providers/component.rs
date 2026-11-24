@@ -2063,6 +2063,61 @@ mod tests {
         assert!(rx.await.expect("trailer").is_ok());
     }
 
+    /// A v2 guest calls `providers.invoke`, reads the stream four bytes at a
+    /// time, and records those bytes only after the trailer is ok. The same
+    /// run then asks over the cap and sees an error with no chunk, and drops
+    /// a one-chunk read whose trailer is an error and whose bytes are not
+    /// recorded.
+    #[tokio::test]
+    async fn v2_guest_reads_the_stream_and_records_the_trailer() {
+        let object = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = calls.clone();
+        let provider = ComponentProvider::new();
+        provider.set_bus_hostcall(Arc::new(move |line, _capsule, _principal| {
+            let value: serde_json::Value =
+                serde_json::from_str(line).map_err(|err| err.to_string())?;
+            let body = &value["request"]["body"];
+            let offset = body["offset"].as_u64().ok_or("offset")? as usize;
+            let length = body["length"].as_u64().ok_or("length")?;
+            seen.lock().unwrap().push(length);
+            let start = offset.min(object.len());
+            let end = start.saturating_add(length as usize).min(object.len());
+            let window = object[start..end].to_vec();
+            Ok(serde_json::json!({
+                "id": 1,
+                "response": {
+                    "type": "resource_result",
+                    "result": {
+                        "status": "ok",
+                        "data": { "content": window, "size": window.len() }
+                    },
+                    "audit": "read-1"
+                }
+            })
+            .to_string())
+        }));
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-read-stream.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        tokio::time::timeout(Duration::from_secs(2), provider.start(&handle))
+            .await
+            .expect("guest start completes")
+            .unwrap();
+        let ending = v2_ending(&provider, &handle).await;
+        assert_eq!(
+            ending, "returned",
+            "the guest records two chunks, an ok trailer, an over-cap error with no chunk, and a short trailer that keeps no byte"
+        );
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![9, 5, 9],
+            "full read, over-cap read, short read, each one window"
+        );
+    }
+
     /// A file of `len` zero bytes named as the fixture manifest's entrypoint.
     fn capsule_dir_with_entrypoint_of(len: u64) -> (tempfile::TempDir, CapsuleManifest) {
         let (_, manifest) = component_fixture();
