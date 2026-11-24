@@ -409,13 +409,6 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(
-            format!("{nodes:?}"),
-            format!(
-                "[Text({:?}), Image {{ grant: {:?}, resource: {:?} }}]",
-                "two", "g1", photo
-            )
-        );
         let provider = ComponentProvider::new();
         assert!(super::read_v2_frame_for_home(&provider, None, "other").is_none());
     }

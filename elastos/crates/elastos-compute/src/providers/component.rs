@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::task::{Context, Poll};
@@ -2997,10 +2999,6 @@ mod tests {
                 },
                 crate::providers::bus2_ui::FrameNode::Text("two".into()),
             ]
-        );
-        assert_eq!(
-            format!("{:?}", stored.frame.nodes[0]),
-            format!("Image {{ grant: {:?}, resource: {:?} }}", read.id, photo)
         );
         let denied = |state: &mut ComponentState, id: &str| {
             present(

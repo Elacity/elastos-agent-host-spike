@@ -411,6 +411,13 @@ pub fn present_frame(
                     return Err(PresentError::Denied(format!("{grant} was revoked")));
                 }
                 let Some(held) = book.grants.iter().find(|item| item.id == grant) else {
+                    if book.revoked.len() == MAX_REVOKED_GRANTS
+                        && !book.revoked.iter().any(|id| id == &grant)
+                    {
+                        return Err(PresentError::Denied(format!(
+                            "{grant} is not among the {MAX_REVOKED_GRANTS} revokes still recorded"
+                        )));
+                    }
                     return Err(PresentError::Denied(format!(
                         "{grant} is not a grant this guest holds"
                     )));
@@ -541,7 +548,7 @@ mod tests {
         let oldest =
             present_frame(media, br#"{"frame":[{"image":{"grant":"g0"}}]}"#, &book).unwrap_err();
         assert!(
-            matches!(oldest, PresentError::Denied(ref message) if message.contains("is not a grant")),
+            matches!(oldest, PresentError::Denied(ref message) if message.contains("not among the 32")),
             "{oldest:?}"
         );
     }
