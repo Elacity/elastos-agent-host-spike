@@ -340,9 +340,11 @@ pub struct AdmittedProvider {
     authority: ProviderAuthority,
 }
 
-/// Manifest bytes compiled into this Runtime. These three helpers have no
-/// separate signed manifest: the binary is the authority. Every other
-/// provider still reads `capsules/<key>/capsule.json` from the data directory.
+/// Manifest bytes compiled into this Runtime. The fence binding is the
+/// template match in `rights`, not a second signature on these bytes. These
+/// three helpers have no separate signed manifest: the binary is the
+/// authority. Every other provider still reads `capsules/<key>/capsule.json`
+/// from the data directory.
 fn embedded_helper_manifest(key: &str) -> Option<&'static str> {
     match key {
         "localhost-provider" => Some(include_str!(

@@ -20,6 +20,10 @@
 //! manifests. Comparison normalises whitespace only; rule order and rule count
 //! stay meaningful, and template text carries no `;` comments, so a declared
 //! rule with a comment is refused.
+//!
+//! The template match is the binding. The helper manifest is compiled into the
+//! signed Runtime binary. This gate does not check a second signature on those
+//! bytes. A declared rule that is not the template is refused.
 
 use super::rights_table::{self, RuntimeProviderId};
 use elastos_common::ProviderAuthority;

@@ -101,10 +101,14 @@ impl RuntimeProviderId {
     /// `fchmodat` are not granted: Landlock does not mediate them, so a path
     /// chmod would reach any same-user file. Mode is `fchmod` on the held
     /// descriptor, or the mode passed at create. Chain's names are its own
-    /// row: reqwest 0.12.28, tokio 1.52.1, mio 1.2.0. `fcntl`, `clone`,
-    /// `socket`, `setsockopt`, and `getsockopt` are argument-checked, so they
-    /// stay off this list. Object's check allows only `F_GETFL` and `F_SETFD`
-    /// of `FD_CLOEXEC`: glibc `fdopendir` needs those for `remove_dir_all`.
+    /// row: reqwest 0.12.28, tokio 1.52.1, mio 1.2.0. Chain's row names
+    /// `connect`, `recvfrom`, and `sendmmsg`. Those stay on the list. They are
+    /// inert unless `socket` is allowed: `seccomp_program::chain_argument_rules`
+    /// allows `socket` for `AF_INET` and `AF_INET6` only, and denies `AF_UNIX`
+    /// and `AF_NETLINK`. `fcntl`, `clone`, `socket`, `setsockopt`, and
+    /// `getsockopt` are argument-checked, so they stay off this list. Object's
+    /// check allows only `F_GETFL` and `F_SETFD` of `FD_CLOEXEC`: glibc
+    /// `fdopendir` needs those for `remove_dir_all`.
     ///
     /// `readlink` is x86_64 glibc `realpath`: `__readlink` is syscall
     /// `readlink` (89). Landlock does not mediate it. This filter's deny is
@@ -138,7 +142,8 @@ pub(super) fn resolve(provider: RuntimeProviderId, dictionary: &[RightRow]) -> V
 }
 
 /// A v2 package without `rights` uses its Runtime-owned provider grant.
-#[allow(dead_code)] // The spawn caller is added in a later slice.
+/// Tests are the only caller. Production admission reads `RIGHTS` directly.
+#[cfg(test)]
 pub(super) fn for_provider(provider: RuntimeProviderId) -> Vec<&'static RightRow> {
     resolve(provider, RIGHTS)
 }
