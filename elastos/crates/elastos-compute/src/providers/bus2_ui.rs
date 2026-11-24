@@ -323,6 +323,8 @@ const MAX_REVOKED_GRANTS: usize = 32;
 pub struct GrantBook {
     grants: Vec<HeldGrant>,
     revoked: Vec<String>,
+    /// Ids pushed out of `revoked`. An id that was never revoked is not here.
+    dropped: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,6 +337,7 @@ struct HeldGrant {
 impl GrantBook {
     pub fn hold(&mut self, id: &str, resource: &str, action: &str) {
         self.revoked.retain(|kept| kept != id);
+        self.dropped.retain(|kept| kept != id);
         if self.grants.iter().any(|grant| grant.id == id) {
             return;
         }
@@ -354,7 +357,11 @@ impl GrantBook {
             return;
         }
         if self.revoked.len() == MAX_REVOKED_GRANTS {
-            self.revoked.remove(0);
+            let old = self.revoked.remove(0);
+            if self.dropped.len() == MAX_REVOKED_GRANTS {
+                self.dropped.remove(0);
+            }
+            self.dropped.push(old);
         }
         self.revoked.push(id.to_string());
     }
@@ -364,6 +371,7 @@ impl GrantBook {
     pub fn clear(&mut self) {
         self.grants.clear();
         self.revoked.clear();
+        self.dropped.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -411,11 +419,9 @@ pub fn present_frame(
                     return Err(PresentError::Denied(format!("{grant} was revoked")));
                 }
                 let Some(held) = book.grants.iter().find(|item| item.id == grant) else {
-                    if book.revoked.len() == MAX_REVOKED_GRANTS
-                        && !book.revoked.iter().any(|id| id == &grant)
-                    {
+                    if book.dropped.iter().any(|id| id == &grant) {
                         return Err(PresentError::Denied(format!(
-                            "{grant} is not among the {MAX_REVOKED_GRANTS} revokes still recorded"
+                            "{grant} is not among the {MAX_REVOKED_GRANTS}"
                         )));
                     }
                     return Err(PresentError::Denied(format!(
@@ -550,6 +556,12 @@ mod tests {
         assert!(
             matches!(oldest, PresentError::Denied(ref message) if message.contains("not among the 32")),
             "{oldest:?}"
+        );
+        let never =
+            present_frame(media, br#"{"frame":[{"image":{"grant":"never"}}]}"#, &book).unwrap_err();
+        assert!(
+            matches!(never, PresentError::Denied(ref message) if message.contains("not a grant") && !message.contains("not among the 32")),
+            "an id that was never revoked must not claim the revoke list, got {never:?}"
         );
     }
 
