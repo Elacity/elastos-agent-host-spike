@@ -2917,18 +2917,19 @@ mod tests {
             }))),
             "invalid_config"
         );
-        assert_eq!(
-            error_code(provider.init(json!({
-                "remote_carrier_exits": [{
-                    "id": "server-exit",
-                    "grant_id": "operator-grant:server-exit:alice",
-                    "peer_did": "did:elastos:server",
-                    "allowed_principals": ["person:local:alice"],
-                    "allowed_hosts": ["example.com"]
-                }]
-            }))),
-            "invalid_config"
-        );
+        // P2-9 step 4: with the grant, the peer DID and the allowed principals
+        // present, a missing ticket is a peer-DID grant, not a missing permission.
+        let accepted = serde_json::to_value(provider.init(json!({
+            "remote_carrier_exits": [{
+                "id": "server-exit",
+                "grant_id": "operator-grant:server-exit:alice",
+                "peer_did": "did:elastos:server",
+                "allowed_principals": ["person:local:alice"],
+                "allowed_hosts": ["example.com"]
+            }]
+        })))
+        .unwrap();
+        assert_eq!(accepted["status"], "ok", "{accepted}");
         assert_eq!(
             error_code(provider.init(json!({
                 "remote_carrier_exits": [{
