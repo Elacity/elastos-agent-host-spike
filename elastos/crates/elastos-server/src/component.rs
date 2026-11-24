@@ -136,6 +136,16 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// The shell's read of the one frame a v2 guest presented. Home gets nodes,
+/// grant ids, and resource names. This read mints nothing and it is not a
+/// gateway path.
+pub fn read_v2_frame_for_home(
+    provider: &elastos_compute::providers::ComponentProvider,
+    id: &str,
+) -> Option<Vec<elastos_compute::providers::bus2_ui::FrameNode>> {
+    provider.read_v2_frame(id).map(|frame| frame.nodes)
+}
+
 /// The public v1 component admission check for capsule kit host tests (kit
 /// item A2). Capsule and bundle starts use the manifest-aware check below.
 pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {
@@ -334,6 +344,61 @@ mod tests {
         Component, ComponentImportSection, ComponentTypeRef as EncodedComponentTypeRef,
         ComponentTypeSection, InstanceType, PrimitiveValType,
     };
+
+    #[test]
+    fn v2_frame_read_returns_nodes_and_grant_ids() {
+        use elastos_compute::providers::bus2_ui::{FrameNode, GrantBook, UI_MEDIA_TYPE};
+        use elastos_compute::providers::ComponentProvider;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let provider = ComponentProvider::new();
+        let calls = Arc::new(AtomicU64::new(0));
+        let seen = calls.clone();
+        provider.set_bus_hostcall(Arc::new(move |_, _, _| {
+            seen.fetch_add(1, Ordering::Relaxed);
+            Err("the frame read must not call the bridge".into())
+        }));
+        let mut book = GrantBook::default();
+        let photo = "localhost://Users/self/Pictures/a.png";
+        book.hold("g1", photo, "read");
+        provider
+            .present_held_frame(
+                "cap",
+                UI_MEDIA_TYPE,
+                br#"{"frame":[{"text":"one"}]}"#,
+                &book,
+            )
+            .unwrap();
+        provider
+            .present_held_frame(
+                "cap",
+                UI_MEDIA_TYPE,
+                br#"{"frame":[{"text":"two"},{"image":{"grant":"g1"}}]}"#,
+                &book,
+            )
+            .unwrap();
+        let nodes = super::read_v2_frame_for_home(&provider, "cap").expect("the frame");
+        assert_eq!(
+            nodes,
+            vec![
+                FrameNode::Text("two".into()),
+                FrameNode::Image {
+                    grant: "g1".into(),
+                    resource: photo.into(),
+                },
+            ]
+        );
+        assert_eq!(
+            format!("{nodes:?}"),
+            format!(
+                "[Text({:?}), Image {{ grant: {:?}, resource: {:?} }}]",
+                "two", "g1", photo
+            )
+        );
+        assert!(super::read_v2_frame_for_home(&provider, "other").is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
 
     fn wat_imports(names: &[&str]) -> Vec<u8> {
         let imports = names

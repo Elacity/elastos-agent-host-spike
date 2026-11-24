@@ -258,6 +258,28 @@ impl ComponentProvider {
         *self.bus_hostcall.write().unwrap() = Some(hostcall);
     }
 
+    /// Stores one frame after the document checker and the held-grant check.
+    /// A second call for the same id replaces the frame. This does not mint a grant.
+    pub fn present_held_frame(
+        &self,
+        id: &str,
+        media: &str,
+        document: &[u8],
+        book: &super::bus2_ui::GrantBook,
+    ) -> std::result::Result<(), super::bus2_ui::PresentError> {
+        let frame = super::bus2_ui::present_frame(media, document, book)?;
+        self.frames
+            .lock()
+            .expect("frames")
+            .insert(id.to_string(), frame);
+        Ok(())
+    }
+
+    /// The one frame stored for `id`: nodes, grant ids, and resource names.
+    pub fn read_v2_frame(&self, id: &str) -> Option<super::bus2_ui::Frame> {
+        self.frames.lock().expect("frames").get(id).cloned()
+    }
+
     pub async fn set_bridge_principal(&self, capsule_id: &CapsuleId, principal_id: Option<String>) {
         self.bridge_principals
             .write()
