@@ -95,6 +95,18 @@ def chmod(path, mode):
     path.chmod(mode)
 
 
+def home_env(home):
+    # The Home process gets this allowlist. Inherited ELASTOS_* is not copied.
+    env = {}
+    for key in ("PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME"):
+        value = os.environ.get(key)
+        if value:
+            env[key] = value
+    env["HOME"] = str(home)
+    env["ELASTOS_QUIET_RUNTIME_NOTICES"] = "1"
+    return env
+
+
 def write_bytes(path, payload, mode):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(payload)
@@ -140,11 +152,7 @@ def stage(args):
 
     key = data / ".a15r-publisher.key"
     key.unlink(missing_ok=True)
-    env = os.environ.copy()
-    env["HOME"] = str(home)
-    env.pop("XDG_DATA_HOME", None)
-    env.pop("XDG_CONFIG_HOME", None)
-    env.pop("XDG_STATE_HOME", None)
+    env = home_env(home)
     try:
         fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as output:
