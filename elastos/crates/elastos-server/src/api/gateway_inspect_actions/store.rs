@@ -288,6 +288,54 @@ fn inspect_action_path(data_dir: &Path, request_id: &str) -> anyhow::Result<Path
     Ok(inspect_actions_root(data_dir).join(format!("{request_id}.json")))
 }
 
+/// Reads every record, skipping one unreadable file with a log line that
+/// names the file and not its bytes. The strict loader is unchanged.
+fn load_inspect_action_records_skipping_unreadable(
+    data_dir: &Path,
+) -> anyhow::Result<Vec<InspectActionRequestRecord>> {
+    let root = inspect_actions_root(data_dir);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Ok(Vec::new());
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            eprintln!("[gateway] skipped unreadable inspect action record");
+            continue;
+        };
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            eprintln!(
+                "[gateway] skipped unreadable inspect action record {}",
+                path.display()
+            );
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(data) = std::fs::read_to_string(&path) else {
+            eprintln!(
+                "[gateway] skipped unreadable inspect action record {}",
+                path.display()
+            );
+            continue;
+        };
+        let Ok(record) = serde_json::from_str::<InspectActionRequestRecord>(&data) else {
+            eprintln!(
+                "[gateway] skipped unreadable inspect action record {}",
+                path.display()
+            );
+            continue;
+        };
+        records.push(record);
+    }
+    Ok(records)
+}
+
 fn load_inspect_action_records(data_dir: &Path) -> anyhow::Result<Vec<InspectActionRequestRecord>> {
     let root = inspect_actions_root(data_dir);
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -316,7 +364,7 @@ pub(super) fn settle_agent_plans_lost_before_start(
 ) -> anyhow::Result<()> {
     let _guard = inspect_action_store_lock()?;
     let reason = "a dispatch cannot survive a restart";
-    for mut record in load_inspect_action_records(data_dir)? {
+    for mut record in load_inspect_action_records_skipping_unreadable(data_dir)? {
         if record.kind != AGENT_PLAN_KIND
             || !matches!(record.status.as_str(), "approved" | "dispatching")
         {
@@ -437,5 +485,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(claimed.status, "denied");
+    }
+
+    /// A leftover file the loader cannot read must not stop settling, and the
+    /// inbox list still fails on that same file.
+    #[test]
+    fn an_unreadable_record_does_not_stop_settling_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = pending_record("agent-plan-good");
+        plan.kind = AGENT_PLAN_KIND.to_string();
+        plan.status = "dispatching".to_string();
+        write_inspect_action_record(dir.path(), &plan).unwrap();
+        let bad = dir.path().join("inspect-actions").join("bad.json");
+        std::fs::write(&bad, b"not json").unwrap();
+
+        let listed = pending_inspect_action_requests(dir.path(), "person:test");
+        assert!(
+            listed.is_err(),
+            "the inbox list still fails on a bad file: {listed:?}"
+        );
+        settle_agent_plans_lost_before_start(dir.path(), 9).unwrap();
+        let stored = read_inspect_action_record(dir.path(), "agent-plan-good").unwrap();
+        assert_eq!(stored.status, "unknown");
+        assert_eq!(
+            stored.error.as_deref(),
+            Some("a dispatch cannot survive a restart")
+        );
+        assert_eq!(std::fs::read(&bad).unwrap(), b"not json");
     }
 }
