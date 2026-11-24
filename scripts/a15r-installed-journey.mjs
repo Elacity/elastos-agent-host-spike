@@ -29,7 +29,7 @@ const names = [
   "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
   "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
   "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-  "u4_distinct_roots", "u4_no_cross_read", "journal_in_agent_root",
+  "u4_distinct_roots", "u4_route_refuses_user_area", "journal_in_agent_root",
   "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
   "step_up_approve", "one_authorised_write", "owner_document_unchanged",
   "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
@@ -267,6 +267,17 @@ function rootSuffix(root) {
 
 export const OWNER_DOCUMENT = Buffer.from("a15r owner document\n");
 
+// The document the guest used to submit. For this owner, Users/self is that
+// person's stored Users root, so the file is Documents/note.txt there.
+export const OWNER_NOTE = "Documents/note.txt";
+
+// The installed guest has no request channel, and this route is not the Bus
+// read. These in-Runtime rows are the isolation words this journey does not cover.
+export const U4_ISOLATION_NOT_COVERED = [
+  "the guest reads its own root and gets the bytes it wrote: elastos/crates/elastos-server/src/api/routes.rs:4825 an_agents_guest_serves_its_own_root_on_the_component_bridge",
+  "another agent's root is refused and that agent's bytes stay out of the answer: elastos/crates/elastos-server/src/api/routes.rs:4884 an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+];
+
 export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
   if (value && typeof value === "object") {
@@ -292,29 +303,82 @@ export function runtimeHealthOk(status, body) {
   }
 }
 
-export function signedAgentStarts(events, agentIds) {
+function wantedAgentIds(agentIds) {
   const wanted = Array.isArray(agentIds) ? agentIds : [];
   if (wanted.length === 0 || wanted.some((id) => typeof id !== "string" || id.length === 0)) {
-    return { ok: false, matched: [] };
+    return [];
   }
+  return wanted;
+}
+
+function signedEvent(event) {
+  return typeof event?.signature === "string" && event.signature.length > 0;
+}
+
+function reasonObject(event) {
+  const reason = event?.reason;
+  if (reason && typeof reason === "object") return reason;
+  if (typeof reason !== "string") return null;
+  try {
+    const parsed = JSON.parse(reason);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// The start row carries agent_id on the event or in its reason. A principal
+// id is not that field, and a step-up hash is not that field.
+export function carriedAgentId(event) {
+  if (typeof event?.agent_id === "string" && event.agent_id.length > 0) return event.agent_id;
+  const reason = reasonObject(event);
+  if (typeof reason?.agent_id === "string" && reason.agent_id.length > 0) return reason.agent_id;
+  return "";
+}
+
+export function agentStartStepUps(events, agentIds) {
+  const wanted = wantedAgentIds(agentIds);
+  if (wanted.length === 0) return { ok: false, matched: [] };
   const matched = new Set();
   for (const event of events || []) {
     if (event?.event_type !== "auth.passkey_step_up.completed") continue;
-    if (typeof event.signature !== "string" || event.signature.length === 0) continue;
-    let reason = event.reason;
-    if (typeof reason === "string") {
-      try {
-        reason = JSON.parse(reason);
-      } catch {
-        continue;
-      }
-    }
+    if (!signedEvent(event)) continue;
+    const reason = reasonObject(event);
     if (!reason || reason.operation !== "agent.start") continue;
     for (const id of wanted) {
       if (reason.request_sha256 === agentStartRequestSha256(id)) matched.add(id);
     }
   }
   return { ok: wanted.every((id) => matched.has(id)), matched: [...matched] };
+}
+
+export function signedAgentStarts(events, agentIds) {
+  const wanted = wantedAgentIds(agentIds);
+  if (wanted.length === 0) return { ok: false, matched: [] };
+  const list = events || [];
+  const matched = [];
+  for (const id of wanted) {
+    const requestedAt = list.findIndex((event) => (
+      signedEvent(event)
+      && event.event_type === "agent.start.requested"
+      && carriedAgentId(event) === id
+    ));
+    if (requestedAt < 0) continue;
+    const completed = list.slice(requestedAt + 1).some((event) => (
+      signedEvent(event)
+      && event.event_type === "agent.start.completed"
+      && event.result === "ok"
+      && carriedAgentId(event) === id
+    ));
+    if (completed) matched.push(id);
+  }
+  return { ok: wanted.every((id) => matched.includes(id)), matched };
+}
+
+export function signedStartAudit(events, agentIds) {
+  const stepUp = agentStartStepUps(events, agentIds);
+  const started = signedAgentStarts(events, agentIds);
+  return { ok: stepUp.ok && started.ok, step_up: stepUp, started };
 }
 
 export function journalFileInRoot(files, root) {
@@ -327,12 +391,21 @@ export function journalFileInRoot(files, root) {
   });
 }
 
+export function ownerNoteRelative(ownerRoot) {
+  if (typeof ownerRoot !== "string" || !ownerRoot.startsWith("localhost://Users/")) return "";
+  if (ownerRoot.startsWith("localhost://UsersAI/")) return "";
+  const suffix = rootSuffix(ownerRoot);
+  if (!suffix || suffix === "Users" || suffix.includes("..")) return "";
+  if (suffix.split("/").includes("UsersAI")) return "";
+  return `${suffix}/${OWNER_NOTE}`;
+}
+
 export function ownerDocumentUnchanged(before, after) {
   if (!Buffer.isBuffer(before) || !Buffer.isBuffer(after) || before.length === 0) return false;
   return before.equals(after);
 }
 
-export function crossReadRefused(attempt) {
+function routeReadRefused(attempt) {
   if (!attempt || attempt.called !== true) return false;
   if (typeof attempt.session !== "string" || attempt.session.length === 0) return false;
   if (typeof attempt.root !== "string" || !attempt.root.startsWith("localhost://UsersAI/")) return false;
@@ -340,6 +413,18 @@ export function crossReadRefused(attempt) {
   if (typeof attempt.marker !== "string" || attempt.marker.length === 0) return false;
   if (String(attempt.body ?? "").includes(attempt.marker)) return false;
   return attempt.status === 403;
+}
+
+// Both calls use the capsule provider route. A refusal here is the route
+// closing every user-area path. It passes only when the own read is refused
+// too, so a lone cross-read refusal cannot stand for isolation.
+export function userAreaRouteRefused(pair) {
+  const own = pair?.own;
+  const other = pair?.other;
+  if (!routeReadRefused(own) || !routeReadRefused(other)) return false;
+  if (own.session !== other.session) return false;
+  if (own.root === other.root || own.resource === other.resource) return false;
+  return true;
 }
 
 export function createdAgentOwnedBy(row, ownerId) {
@@ -447,14 +532,12 @@ async function shellToken() {
   return { token: body.token, api: String(coords.api_url).replace(/\/$/, "") };
 }
 
-async function attemptCrossRead() {
-  const marker = `a15r-b-marker-${crypto.randomBytes(8).toString("hex")}`;
-  const root = String(state.rootB || "");
-  const resource = `${root}/Documents/cross-read.txt`;
-  const session = String(state.launchA?.session_id || "");
+async function readThroughCapsuleRoute(session, root, fileName) {
+  const marker = `a15r-marker-${crypto.randomBytes(8).toString("hex")}`;
+  const resource = `${root}/Documents/${fileName}`;
   const attempt = { called: false, session, resource, root, status: 0, body: "", marker };
   if (!root || !session) return attempt;
-  const full = path.join(data, rootSuffix(root), "Documents", "cross-read.txt");
+  const full = path.join(data, rootSuffix(root), "Documents", fileName);
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, marker);
   try {
@@ -475,6 +558,24 @@ async function attemptCrossRead() {
     attempt.body = String(error.message || error);
   }
   return attempt;
+}
+
+async function attemptUserAreaRoute() {
+  const session = String(state.launchA?.session_id || "");
+  const own = await readThroughCapsuleRoute(session, String(state.rootA || ""), "own-marker.txt");
+  const other = await readThroughCapsuleRoute(session, String(state.rootB || ""), "cross-read.txt");
+  return { own, other };
+}
+
+function routeAttemptDetail(attempt) {
+  const marker = typeof attempt?.marker === "string" ? attempt.marker : "";
+  return {
+    called: attempt?.called === true,
+    status: attempt?.status || 0,
+    session: attempt?.session || "",
+    resource: attempt?.resource || "",
+    marker_returned: marker.length > 0 && String(attempt?.body || "").includes(marker),
+  };
 }
 
 async function capsules() {
@@ -860,20 +961,18 @@ async function main() {
   if (!distinct) halt("u4_distinct_roots", { a: state.rootA, b: state.rootB });
   pass("u4_distinct_roots", { a: state.rootA, b: state.rootB });
 
-  const crossAttempt = await attemptCrossRead();
-  if (!crossReadRefused(crossAttempt)) {
-    halt("u4_no_cross_read", {
-      called: crossAttempt.called,
-      status: crossAttempt.status,
-      session: crossAttempt.session,
-      resource: crossAttempt.resource,
-      body: String(crossAttempt.body || "").slice(0, 300),
+  const routeReads = await attemptUserAreaRoute();
+  if (!userAreaRouteRefused(routeReads)) {
+    halt("u4_route_refuses_user_area", {
+      own: routeAttemptDetail(routeReads.own),
+      other: routeAttemptDetail(routeReads.other),
+      isolation_not_covered: U4_ISOLATION_NOT_COVERED,
     });
   }
-  pass("u4_no_cross_read", {
-    status: crossAttempt.status,
-    session: crossAttempt.session,
-    resource: crossAttempt.resource,
+  pass("u4_route_refuses_user_area", {
+    own: routeAttemptDetail(routeReads.own),
+    other: routeAttemptDetail(routeReads.other),
+    isolation_not_covered: U4_ISOLATION_NOT_COVERED,
   });
 
   const inboxLaunch = await launchApp(state.homeToken, "inbox");
@@ -889,9 +988,8 @@ async function main() {
 
   await stopAgent(state.agentB);
   const ownerRoot = storedOwnerRoot(owner.principal_id);
-  const ownerDocPath = ownerRoot
-    ? path.join(data, rootSuffix(ownerRoot), "Documents", "owner-note.txt")
-    : "";
+  const ownerNoteRel = ownerNoteRelative(ownerRoot);
+  const ownerDocPath = ownerNoteRel ? path.join(data, ownerNoteRel) : "";
   let ownerDocBefore = null;
   if (ownerDocPath) {
     fs.mkdirSync(path.dirname(ownerDocPath), { recursive: true });
@@ -992,7 +1090,8 @@ async function main() {
   });
   const ownerDocAfter = ownerDocPath ? readFileOrNull(ownerDocPath) : null;
   keep("owner_document_unchanged", ownerDocumentUnchanged(ownerDocBefore, ownerDocAfter), {
-    path: ownerDocPath ? path.relative(data, ownerDocPath) : "",
+    alias: "localhost://Users/self/Documents/note.txt",
+    path: ownerNoteRel,
     before_sha256: ownerDocBefore ? crypto.createHash("sha256").update(ownerDocBefore).digest("hex") : "",
     after_sha256: ownerDocAfter ? crypto.createHash("sha256").update(ownerDocAfter).digest("hex") : "",
   });
@@ -1009,9 +1108,12 @@ async function main() {
     status: settled?.status,
     requester_id: settled?.requester_id,
   });
-  const startedAudits = signedAgentStarts(auditEvents(), [state.agentA, state.agentB]);
+  const startedAudits = signedStartAudit(auditEvents(), [state.agentA, state.agentB]);
   const completedAudits = signedCount("agent_plan.dispatch.completed");
-  keep("signed_start_audit", startedAudits.ok, { matched: startedAudits.matched });
+  keep("signed_start_audit", startedAudits.ok, {
+    step_up: startedAudits.step_up,
+    started: startedAudits.started,
+  });
   keep("signed_completion_audit", completedAudits === 1, { count: completedAudits });
   const afterCard = planCards(await inbox());
   keep("card_removed", afterCard.length === 0, afterCard.map((card) => card.action_ref?.action_id));

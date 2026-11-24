@@ -3,15 +3,21 @@ import crypto from "node:crypto";
 import test from "node:test";
 import {
   OWNER_DOCUMENT,
+  OWNER_NOTE,
+  U4_ISOLATION_NOT_COVERED,
   agentStartRequestSha256,
+  agentStartStepUps,
+  carriedAgentId,
   createdAgentOwnedBy,
-  crossReadRefused,
   gatewayHealthOk,
   journalFileInRoot,
   ownerDocumentUnchanged,
+  ownerNoteRelative,
   runtimeHealthOk,
   shellFailStatuses,
   signedAgentStarts,
+  signedStartAudit,
+  userAreaRouteRefused,
 } from "./a15r-installed-journey.mjs";
 
 const agentA = "agent:v2:" + "a".repeat(32);
@@ -46,7 +52,24 @@ test("runtime health is the runtime status", () => {
   assert.equal(runtimeHealthOk(503, "{\"status\":\"ok\"}"), false);
 });
 
-test("signed start names both agent starts", () => {
+function lifecycleEvent(type, agentId, options = {}) {
+  const signature = options.signature === undefined ? "signed" : options.signature;
+  const result = options.result === undefined ? "ok" : options.result;
+  const event = { event_type: type, signature, result, reason: "seq=1" };
+  if (options.carry === "reason") event.reason = JSON.stringify({ agent_id: agentId });
+  else if (options.carry === "principal") event.principal_id = agentId;
+  else event.agent_id = agentId;
+  return event;
+}
+
+function startedPair(agentId, carry = "field") {
+  return [
+    lifecycleEvent("agent.start.requested", agentId, { carry }),
+    lifecycleEvent("agent.start.completed", agentId, { carry }),
+  ];
+}
+
+test("step-up binding stays its own check", () => {
   const digest = agentStartRequestSha256(agentA);
   assert.equal(digest, crypto.createHash("sha256").update(`{"agent_id":"${agentA}"}`).digest("hex"));
   const dispatchOnly = [{
@@ -54,16 +77,57 @@ test("signed start names both agent starts", () => {
     signature: "signed",
     reason: "claimed by Runtime",
   }];
-  assert.equal(signedAgentStarts(dispatchOnly, [agentA, agentB]).ok, false);
-  assert.equal(signedAgentStarts([startEvent(agentA, "")], [agentA]).ok, false);
-  assert.equal(signedAgentStarts([startEvent(agentA)], [agentA, agentB]).ok, false);
-  const both = signedAgentStarts([
+  assert.equal(agentStartStepUps(dispatchOnly, [agentA, agentB]).ok, false);
+  assert.equal(agentStartStepUps([startEvent(agentA, "")], [agentA]).ok, false);
+  assert.equal(agentStartStepUps([startEvent(agentA)], [agentA, agentB]).ok, false);
+  const both = agentStartStepUps([
     startEvent("agent:v2:" + "f".repeat(32)),
     startEvent(agentA),
     startEvent(agentB),
   ], [agentA, agentB]);
   assert.equal(both.ok, true);
   assert.deepEqual(both.matched.sort(), [agentA, agentB].sort());
+});
+
+test("signed start requires requested then completed ok by agent_id", () => {
+  const stepUps = [startEvent(agentA), startEvent(agentB)];
+  assert.equal(signedAgentStarts(stepUps, [agentA, agentB]).ok, false);
+  assert.equal(carriedAgentId({ principal_id: agentA }), "");
+  assert.equal(signedAgentStarts([
+    lifecycleEvent("agent.start.completed", agentA),
+    lifecycleEvent("agent.start.requested", agentA),
+  ], [agentA]).ok, false);
+  assert.equal(signedAgentStarts([
+    lifecycleEvent("agent.start.requested", agentA),
+    lifecycleEvent("agent.start.completed", agentA, { result: "success" }),
+  ], [agentA]).ok, false);
+  assert.equal(signedAgentStarts([
+    lifecycleEvent("agent.start.requested", agentA, { signature: "" }),
+    lifecycleEvent("agent.start.completed", agentA),
+  ], [agentA]).ok, false);
+  assert.equal(signedAgentStarts(startedPair(agentA), [agentA, agentB]).ok, false);
+  assert.equal(signedAgentStarts([
+    lifecycleEvent("agent.start.requested", agentA, { carry: "principal" }),
+    lifecycleEvent("agent.start.completed", agentA, { carry: "principal" }),
+  ], [agentA]).ok, false);
+  const both = signedAgentStarts([
+    ...startedPair(agentA),
+    ...startedPair(agentB, "reason"),
+  ], [agentA, agentB]);
+  assert.equal(both.ok, true);
+  assert.deepEqual(both.matched, [agentA, agentB]);
+  const audit = signedStartAudit([...stepUps, ...startedPair(agentA), ...startedPair(agentB)], [agentA, agentB]);
+  assert.equal(audit.step_up.ok, true);
+  assert.equal(audit.started.ok, true);
+  assert.equal(audit.ok, true);
+  const consentOnly = signedStartAudit(stepUps, [agentA, agentB]);
+  assert.equal(consentOnly.step_up.ok, true);
+  assert.equal(consentOnly.started.ok, false);
+  assert.equal(consentOnly.ok, false);
+  const startedOnly = signedStartAudit([...startedPair(agentA), ...startedPair(agentB)], [agentA, agentB]);
+  assert.equal(startedOnly.step_up.ok, false);
+  assert.equal(startedOnly.started.ok, true);
+  assert.equal(startedOnly.ok, false);
 });
 
 test("journal row requires the file under the agent root", () => {
@@ -79,7 +143,13 @@ test("journal row requires the file under the agent root", () => {
   }], rootA), false);
 });
 
-test("owner document compares the seeded bytes", () => {
+test("owner document is the old note path and compares its bytes", () => {
+  assert.equal(OWNER_NOTE, "Documents/note.txt");
+  assert.equal(ownerNoteRelative("localhost://Users/self"), "Users/self/Documents/note.txt");
+  assert.equal(ownerNoteRelative("localhost://Users/abc123"), "Users/abc123/Documents/note.txt");
+  assert.equal(ownerNoteRelative("localhost://UsersAI/abc123"), "");
+  assert.equal(ownerNoteRelative("localhost://Users/self/../secret"), "");
+  assert.equal(ownerNoteRelative(""), "");
   assert.equal(ownerDocumentUnchanged(OWNER_DOCUMENT, Buffer.from(OWNER_DOCUMENT)), true);
   assert.equal(ownerDocumentUnchanged(OWNER_DOCUMENT, Buffer.from("three lines")), false);
   assert.equal(ownerDocumentUnchanged(null, null), false);
@@ -87,26 +157,29 @@ test("owner document compares the seeded bytes", () => {
   assert.equal(ownerDocumentUnchanged(OWNER_DOCUMENT, null), false);
 });
 
-test("cross read passes only after a refused attempt", () => {
+test("user-area route row requires both reads refused", () => {
   const marker = "secret-marker";
-  const refused = {
+  const refused = (root, file) => ({
     called: true,
     session: "session-a",
-    root: rootB,
-    resource: `${rootB}/Documents/cross-read.txt`,
+    root,
+    resource: `${root}/Documents/${file}`,
     status: 403,
     body: "Capsules cannot access a localhost user area root",
     marker,
-  };
-  assert.equal(crossReadRefused(refused), true);
-  assert.equal(crossReadRefused({ ...refused, called: false }), false);
-  assert.equal(crossReadRefused({ ...refused, session: "" }), false);
-  assert.equal(crossReadRefused({ ...refused, status: 200, body: marker }), false);
-  assert.equal(crossReadRefused({ ...refused, body: `refused ${marker}` }), false);
-  assert.equal(crossReadRefused({ ...refused, status: 404 }), false);
-  assert.equal(crossReadRefused({
-    grants: [`${rootA}/journal`, `${rootB}/journal`],
-  }), false);
+  });
+  const pair = { own: refused(rootA, "own-marker.txt"), other: refused(rootB, "cross-read.txt") };
+  assert.equal(userAreaRouteRefused(pair), true);
+  assert.equal(userAreaRouteRefused({ other: pair.other }), false);
+  assert.equal(userAreaRouteRefused({ own: { ...pair.own, status: 200, body: marker }, other: pair.other }), false);
+  assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, status: 200, body: marker } }), false);
+  assert.equal(userAreaRouteRefused({ own: { ...pair.own, called: false }, other: pair.other }), false);
+  assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, body: `refused ${marker}` } }), false);
+  assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, session: "session-b" } }), false);
+  assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, root: rootA, resource: `${rootA}/Documents/other.txt` } }), false);
+  assert.equal(userAreaRouteRefused({ grants: [`${rootA}/journal`, `${rootB}/journal`] }), false);
+  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("elastos/crates/elastos-server/src/api/routes.rs:4825")));
+  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("elastos/crates/elastos-server/src/api/routes.rs:4884")));
 });
 
 test("created agent stores the creating owner", () => {
@@ -126,7 +199,7 @@ test("a shell failure does not pass a row the node did not check", () => {
     "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
     "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
     "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-    "u4_distinct_roots", "u4_no_cross_read", "journal_in_agent_root",
+    "u4_distinct_roots", "u4_route_refuses_user_area", "journal_in_agent_root",
     "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
     "step_up_approve", "one_authorised_write", "owner_document_unchanged",
     "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
