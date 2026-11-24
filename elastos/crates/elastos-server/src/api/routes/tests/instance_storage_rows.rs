@@ -1,12 +1,16 @@
 //! Each running instance gets fresh, limited access to its agent's storage,
-//! which ends when the instance stops.
+//! which ends when the instance stops. A plan step whose dispatch had already
+//! begun when the end was recorded may finish after it. A plan step still
+//! pending at the end is refused.
 //!
 //! The rows below use the route-level probe (`ProbeLaunch`, the launch route,
 //! and the bridge). A journal write that succeeded is the storage grant. The
 //! replay keeps the manifest ceiling the instance had while it ran, so the
 //! answer is the grant check. A cleared ceiling would refuse the call earlier,
 //! which the existing late-call rows already show. The stop flag is left unset
-//! on the replay for the same reason: the row is the grant.
+//! on the replay for the same reason: the row is the grant. Those replays call
+//! `handle_component_resource_request`, the bridge handler, not the host-call
+//! wrapper.
 //!
 //! The refusal is a new `capability_validation_failed` warning for this caller
 //! and this token. After the instance has ended, that warning ends in
@@ -14,7 +18,8 @@
 //! the session check. A retained plan step is outside the pending store. The
 //! instance end drops that admission while the plan is still pending. The
 //! owner's later approval is then refused `admission_missing`, and the step's
-//! file is unchanged.
+//! file is unchanged. That row calls `dispatch_agent_plan_step`. It does not
+//! call the approve route or the dispatch route.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -612,8 +617,9 @@ fn plan_record_path(dir: &std::path::Path, request_id: &str) -> std::path::PathB
 }
 
 /// The owner's approval is the stored move from `pending` to `approved`.
-/// The approve route writes that status. The dispatch below is what runs
-/// after it.
+/// The approve route writes that status. This row then calls
+/// `dispatch_agent_plan_step`, not the approve route and not the dispatch
+/// route.
 fn owner_approves_pending_plan(dir: &std::path::Path, request_id: &str) {
     let path = plan_record_path(dir, request_id);
     let mut record: serde_json::Value =
@@ -627,11 +633,13 @@ fn owner_approves_pending_plan(dir: &std::path::Path, request_id: &str) {
     std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
 }
 
-/// Today's rule. A plan step is retained for the live instance. The instance
-/// then ends, by the stop route or by the guest completing, while that plan
-/// is still pending. Ending the instance drops the retained admission. The
-/// owner then approves. The dispatch is refused `admission_missing`, and the
-/// step's file is unchanged.
+/// Today's rule for a plan step still pending at the end. A plan step is
+/// retained for the live instance. The instance then ends, by the stop route
+/// or by the guest completing, while that plan is still pending. Ending the
+/// instance drops the retained admission. The owner then approves. This row
+/// calls `dispatch_agent_plan_step`, which is refused `admission_missing`, and
+/// the step's file is unchanged. A plan step whose dispatch had already begun
+/// when the end was recorded may finish after it.
 ///
 /// The admission is dropped for a pending plan as well as any other. A change
 /// that keeps a pending plan's admission after the guest ends would let this

@@ -834,9 +834,9 @@ fn unwrap_data_key(
 /// replaced protection does not re-wrap. A replaced owner data key makes
 /// existing agent data unopenable on this Home, for an active agent and a
 /// retired agent. A replaced, rolled-back or deleted agent file is not
-/// detected on load yet. The sealed file holds no plaintext. This protection
-/// makes no claim against a process of the same operating-system user outside
-/// the agent's sandbox.
+/// detected on load yet. The sealed file holds none of the object's content
+/// in plaintext. This protection makes no claim against a process of the same
+/// operating-system user outside the agent's sandbox.
 ///
 /// Claims and the tests that show them:
 /// - owner, agent id, root, and data key id: `the_wrap_key_binds_each_input`
@@ -856,7 +856,8 @@ fn unwrap_data_key(
 ///   data key makes an active agent's data and a retired agent's data
 ///   unopenable on this Home:
 ///   `a_replaced_owner_data_key_does_not_rewrap_agent_data`
-/// - the sealed file holds no plaintext: `the_sealed_file_holds_no_plaintext`
+/// - the sealed file holds none of the object's content in plaintext:
+///   `the_sealed_file_holds_none_of_the_objects_content_in_plaintext`
 #[test]
 fn the_wrap_key_binds_each_input() {
     let home = Home::new();
@@ -2118,11 +2119,11 @@ fn a_replaced_owner_data_key_does_not_rewrap_agent_data() {
     );
 }
 
-/// The sealed file holds no plaintext. This protection makes no claim against
-/// a process of the same operating-system user outside the agent's sandbox.
-/// The agent's own read still opens the note.
+/// The sealed file holds none of the object's content in plaintext. This
+/// protection makes no claim against a process of the same operating-system
+/// user outside the agent's sandbox. The agent's own read still opens the note.
 #[test]
-fn the_sealed_file_holds_no_plaintext() {
+fn the_sealed_file_holds_none_of_the_objects_content_in_plaintext() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-same-user");
@@ -2132,7 +2133,7 @@ fn the_sealed_file_holds_no_plaintext() {
     assert!(path.is_file(), "the seal is a regular file");
     assert!(
         !sealed.windows(plain.len()).any(|window| window == plain),
-        "the sealed file holds no plaintext"
+        "the sealed file holds none of the object's content in plaintext"
     );
     assert_eq!(
         crate::auth::read_principal_root_object(home.path(), &agent.agent_id, &root, &uri, &path)
