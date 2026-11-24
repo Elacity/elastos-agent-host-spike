@@ -183,18 +183,14 @@ fn everyone_ace_fails_verify_owner_only() {
 #[test]
 fn rename_to_a_one_unit_name_succeeds() {
     let scratch = Scratch::new("rename-one");
-    let source_path = scratch.0.join("source.tmp");
+    // The rename accepts only an owner-only directory here.
+    let dir = scratch.0.join("owner");
+    drop(create_owner_dir(&dir).unwrap());
+    let source_path = dir.join("source.tmp");
     let file = open_owner_file(&source_path, READ_WRITE, Disp::CreateNew).unwrap();
-    rename_owner_file(
-        &scratch.0,
-        &file,
-        &source_path,
-        std::ffi::OsStr::new("k"),
-        false,
-    )
-    .unwrap();
+    rename_owner_file(&dir, &file, &source_path, std::ffi::OsStr::new("k"), false).unwrap();
     drop(file);
-    assert!(scratch.0.join("k").is_file());
+    assert!(dir.join("k").is_file());
     assert!(!source_path.exists());
 }
 
