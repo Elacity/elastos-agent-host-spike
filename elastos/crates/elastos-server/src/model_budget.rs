@@ -11,8 +11,8 @@
 //! **Hold-only.** A reservation is charged once and never returns: no refund and
 //! no settle (design §5 "No refund"), so an agent that keeps running drains its
 //! ceiling and a cancel or unknown outcome keeps its hold. A bound Home stores
-//! that total on the agent record: open reads it, and charge writes it under
-//! the agent lock before reserve. `held` can lag other Runtimes; the store refuses.
+//! that total on the agent record in blocks: open reads it, and charge writes
+//! one block under the agent lock. `held` can lag other Runtimes; the store refuses.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -103,8 +103,10 @@ impl HoldFingerprint {
 #[derive(Debug, Default)]
 struct Account {
     ceiling: u64,
-    /// Tokens held by reservations, refunded by nothing.
+    /// Tokens drawn by reservations in this process, refunded by nothing.
     held: u64,
+    /// Stored block this process last observed.
+    charged: u64,
     owner: Option<String>,
     /// Held tokens and request fingerprints by `model_run_id()`; only an
     /// identical retry reuses a hold without a second charge.
@@ -152,6 +154,29 @@ pub(crate) struct ModelBudget {
     after_read: Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
 }
 
+type Block = Result<(u64, u64, Option<u64>), (u64, u64)>;
+
+/// One run against the charged block. The record rises by `max(run, ceil(ceiling / 64))`,
+/// never above the ceiling. When the stored total is ahead of this process, that
+/// block counts as spent, unused part included. A restart does the same.
+pub(crate) fn block_charge(memory: (u64, u64), stored: u64, run: u64, ceiling: u64) -> Block {
+    let ahead = stored > memory.1;
+    let (drawn, charged) = if ahead { (stored, stored) } else { memory };
+    let next = drawn.checked_add(run).filter(|n| *n <= ceiling);
+    let Some(next) = next else {
+        return Err((drawn, charged));
+    };
+    if next <= charged {
+        return Ok((next, charged, None));
+    }
+    let unit = ceiling.div_ceil(64);
+    let raise = run.max(unit).min(ceiling.saturating_sub(charged));
+    let sum = charged.checked_add(raise);
+    let total = sum.filter(|n| *n > stored && *n >= next);
+    let raised = total.map(|n| (next, n, Some(n)));
+    raised.ok_or((drawn, charged))
+}
+
 impl ModelBudget {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -178,7 +203,9 @@ impl ModelBudget {
         let account = agents.entry(agent.0.clone()).or_default();
         if let Some((owner, spent)) = loaded {
             account.owner = Some(owner);
+            // A restart counts the unused part of a charged block as spent (conservative).
             account.held = spent;
+            account.charged = spent;
         }
         account.ceiling = ceiling;
         Ok(())
@@ -218,14 +245,22 @@ impl ModelBudget {
         }
         let total = if let Some(dir) = home {
             let owner = account.owner.clone().ok_or(Refusal::Record(NO_OWNER))?;
-            match charge_model_spend(&dir, &owner, agent.principal(), tokens, account.ceiling) {
-                Ok(total) => total,
-                Err(SpendRefusal::Over {
-                    asked,
-                    held,
-                    ceiling,
-                }) => {
+            let memory = (account.held, account.charged);
+            match charge_model_spend(
+                &dir,
+                &owner,
+                agent.principal(),
+                memory,
+                tokens,
+                account.ceiling,
+            ) {
+                Ok((drawn, charged)) => {
+                    account.charged = charged;
+                    drawn
+                }
+                Err(SpendRefusal::Over(asked, held, charged, ceiling)) => {
                     account.held = held;
+                    account.charged = charged;
                     return Err(Refusal::OverCap {
                         asked,
                         held,
@@ -612,5 +647,194 @@ mod tests {
         );
         assert_eq!(second.held_for_test(&key_b), 60);
         assert_eq!(first.held_for_test(&key), 60);
+    }
+
+    #[cfg(unix)]
+    fn audit_of(dir: &std::path::Path) -> Vec<elastos_runtime::auth::RuntimeAuditEventV1> {
+        crate::auth::load_auth_state(dir).unwrap().audit
+    }
+
+    #[cfg(unix)]
+    fn stored_spent(dir: &std::path::Path, agent: &str) -> u64 {
+        model_spend(dir, agent).unwrap().1
+    }
+
+    #[cfg(unix)]
+    fn spend_rows(dir: &std::path::Path, agent: &str) -> usize {
+        audit_of(dir)
+            .iter()
+            .filter(|event| {
+                event.event_type == "agent.record.spend"
+                    && event.principal_id.as_deref() == Some(agent)
+            })
+            .count()
+    }
+
+    /// The spend row is the Runtime's record: the agent is the subject, the
+    /// owner's proof is absent, and the owner appears only as owner.
+    #[cfg(unix)]
+    #[test]
+    fn spend_row_records_the_agents_spend_not_the_owners_act() {
+        let (dir, owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        budget.reserve(&key, &run_key(&agent, "row"), 40).unwrap();
+        let events = audit_of(dir.path());
+        let create = events
+            .iter()
+            .find(|event| event.event_type == "agent.record.create")
+            .unwrap();
+        let row = events
+            .iter()
+            .find(|event| event.event_type == "agent.record.spend")
+            .unwrap();
+        assert_eq!(row.principal_id.as_deref(), Some(agent.as_str()));
+        assert_eq!(row.proof_binding_id, None);
+        assert_eq!(row.session_id, None);
+        assert!(row.signature.is_some() && row.signer_did.is_some());
+        assert!(create.proof_binding_id.is_some());
+        assert_ne!(row.proof_binding_id, create.proof_binding_id);
+        assert!(create.session_id.is_some());
+        assert!(row.reason.starts_with(&format!("owner={owner} ")));
+        let proof = create.proof_binding_id.as_deref().unwrap();
+        assert!(!row.reason.contains(proof));
+        assert_eq!(stored_spent(dir.path(), &agent), 40);
+    }
+
+    /// 1,000 one-token runs stay inside one block per 1/64 of the ceiling, so
+    /// the owner's earlier rows are still inside the 512-row chain.
+    #[cfg(unix)]
+    #[test]
+    fn a_thousand_small_runs_leave_the_owner_row_in_the_chain() {
+        let (dir, _owner, agent) = planted_agent();
+        let owner_ids: Vec<_> = audit_of(dir.path())
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect();
+        assert!(!owner_ids.is_empty());
+        let (budget, key) = opened_on(dir.path(), &agent, 1_000);
+        budget.reserve(&key, &run_key(&agent, "n0"), 1).unwrap();
+        assert_eq!(budget.held_for_test(&key), 1);
+        assert_eq!(stored_spent(dir.path(), &agent), 16);
+        assert_eq!(spend_rows(dir.path(), &agent), 1);
+        for i in 1..16 {
+            budget
+                .reserve(&key, &run_key(&agent, &format!("n{i}")), 1)
+                .unwrap();
+        }
+        assert_eq!(budget.held_for_test(&key), 16);
+        assert_eq!(stored_spent(dir.path(), &agent), 16);
+        assert_eq!(spend_rows(dir.path(), &agent), 1);
+        for i in 16..1_000 {
+            budget
+                .reserve(&key, &run_key(&agent, &format!("n{i}")), 1)
+                .unwrap();
+        }
+        assert_eq!(budget.held_for_test(&key), 1_000);
+        assert_eq!(stored_spent(dir.path(), &agent), 1_000);
+        let spends = spend_rows(dir.path(), &agent);
+        assert!(spends <= 65, "{spends} spend rows");
+        assert_eq!(spends, 63);
+        let after = audit_of(dir.path());
+        for id in owner_ids {
+            assert!(
+                after.iter().any(|event| event.event_id == id),
+                "owner row left the chain: {id}"
+            );
+        }
+    }
+
+    /// Same process: a run that fits the ceiling draws the unused block and is
+    /// not refused. After a restart that unused part counts as spent.
+    #[cfg(unix)]
+    #[test]
+    fn restart_mid_block_counts_the_unused_part_as_spent() {
+        let (dir, owner, agent) = planted_agent();
+        let other = crate::agents::tests::plant_another_dispatch(dir.path(), &owner, "request-b");
+        let (budget, key) = opened_on(dir.path(), &agent, 640);
+        budget.reserve(&key, &run_key(&agent, "a1"), 1).unwrap();
+        budget.reserve(&key, &run_key(&agent, "a2"), 4).unwrap();
+        assert_eq!(budget.held_for_test(&key), 5);
+        assert_eq!(stored_spent(dir.path(), &agent), 10);
+        assert_eq!(spend_rows(dir.path(), &agent), 1);
+        budget.reserve(&key, &run_key(&agent, "a3"), 635).unwrap();
+        assert_eq!(budget.held_for_test(&key), 640);
+        assert_eq!(stored_spent(dir.path(), &agent), 640);
+        assert_eq!(
+            budget.reserve(&key, &run_key(&agent, "a4"), 1),
+            Err(over_cap(1, 640, 640))
+        );
+        let (fresh, other_key) = opened_on(dir.path(), &other, 640);
+        fresh
+            .reserve(&other_key, &run_key(&other, "b1"), 1)
+            .unwrap();
+        assert_eq!(fresh.held_for_test(&other_key), 1);
+        assert_eq!(stored_spent(dir.path(), &other), 10);
+        drop(fresh);
+        let (restarted, other_key) = opened_on(dir.path(), &other, 640);
+        assert_eq!(restarted.held_for_test(&other_key), 10);
+        assert_eq!(
+            restarted.reserve(&other_key, &run_key(&other, "b2"), 631),
+            Err(over_cap(631, 10, 640))
+        );
+        restarted
+            .reserve(&other_key, &run_key(&other, "b3"), 630)
+            .unwrap();
+        assert_eq!(stored_spent(dir.path(), &other), 640);
+    }
+
+    /// The last raise is only what remains under the ceiling.
+    #[cfg(unix)]
+    #[test]
+    fn the_last_partial_block_stops_at_the_ceiling() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 65);
+        for i in 0..64 {
+            budget
+                .reserve(&key, &run_key(&agent, &format!("p{i}")), 1)
+                .unwrap();
+        }
+        assert_eq!(stored_spent(dir.path(), &agent), 64);
+        assert_eq!(budget.held_for_test(&key), 64);
+        assert_eq!(spend_rows(dir.path(), &agent), 32);
+        budget.reserve(&key, &run_key(&agent, "last"), 1).unwrap();
+        assert_eq!(stored_spent(dir.path(), &agent), 65);
+        assert_eq!(budget.held_for_test(&key), 65);
+        assert_eq!(spend_rows(dir.path(), &agent), 33);
+        assert_eq!(
+            budget.reserve(&key, &run_key(&agent, "over"), 1),
+            Err(over_cap(1, 65, 65))
+        );
+        assert_eq!(stored_spent(dir.path(), &agent), 65);
+    }
+
+    /// Below 64 the block unit is one token, so a one-token run writes a row
+    /// and still cannot pass the ceiling.
+    #[cfg(unix)]
+    #[test]
+    fn a_ceiling_under_64_charges_one_token_blocks() {
+        let (dir, owner, agent) = planted_agent();
+        let other = crate::agents::tests::plant_another_dispatch(dir.path(), &owner, "request-c");
+        let (budget, key) = opened_on(dir.path(), &agent, 7);
+        for i in 0..7 {
+            budget
+                .reserve(&key, &run_key(&agent, &format!("c{i}")), 1)
+                .unwrap();
+        }
+        assert_eq!(stored_spent(dir.path(), &agent), 7);
+        assert_eq!(spend_rows(dir.path(), &agent), 7);
+        assert_eq!(
+            budget.reserve(&key, &run_key(&agent, "c7"), 1),
+            Err(over_cap(1, 7, 7))
+        );
+        let (whole, other_key) = opened_on(dir.path(), &other, 7);
+        whole
+            .reserve(&other_key, &run_key(&other, "all"), 7)
+            .unwrap();
+        assert_eq!(stored_spent(dir.path(), &other), 7);
+        assert_eq!(spend_rows(dir.path(), &other), 1);
+        assert_eq!(
+            whole.reserve(&other_key, &run_key(&other, "more"), 1),
+            Err(over_cap(1, 7, 7))
+        );
     }
 }

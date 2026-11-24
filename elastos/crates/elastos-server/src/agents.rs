@@ -445,7 +445,7 @@ impl Operation {
 /// - rename: one agent's `display_name`, and its `updated_at`;
 /// - retire: one agent's `retired_at`, set once, and its `updated_at`;
 /// - set active: one agent's `active`, and its `updated_at`;
-/// - charge: one active agent's `model_tokens_spent`, raised.
+/// - charge: one active agent's `model_tokens_spent`, raised by one block.
 fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecordsFile) -> bool {
     if after.schema != before.schema || before.sequence.checked_add(1) != Some(after.sequence) {
         return false;
@@ -569,7 +569,8 @@ fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
 
 #[derive(Debug)]
 pub(crate) enum SpendRefusal {
-    Over { asked: u64, held: u64, ceiling: u64 },
+    /// `asked`, the drawn total excluding it, the charged block, the ceiling.
+    Over(u64, u64, u64, u64),
     Name(&'static str),
 }
 
@@ -579,49 +580,77 @@ fn reason_of(err: &anyhow::Error) -> &'static str {
         .unwrap_or(CANNOT_READ)
 }
 
-#[rustfmt::skip]
-fn agent_of<'a>(file: &'a AgentRecordsFile, id: &str, owner: Option<&str>) -> Result<&'a StoredAgent, &'static str> {
-    if file.enabled.is_none() { return Err(NOT_ENABLED); }
-    let agent = file.agents.iter().find(|a| a.record.principal_id == id).ok_or(NO_SUCH_AGENT)?;
-    if owner.is_some_and(|o| agent.record.owner.as_deref() != Some(o)) { return Err(NO_SUCH_AGENT); }
-    if agent.record.retired_at.is_some() { return Err(ALREADY_RETIRED); }
-    if !agent.active { return Err(NOT_ACTIVE); }
-    if agent.record.owner.as_deref().unwrap_or("").is_empty() { return Err(NO_OWNER); }
+fn agent_of<'a>(
+    file: &'a AgentRecordsFile,
+    id: &str,
+    owner: Option<&str>,
+) -> Result<&'a StoredAgent, &'static str> {
+    file.enabled.as_ref().ok_or(NOT_ENABLED)?;
+    let same_id = |agent: &&StoredAgent| agent.record.principal_id == id;
+    let agent = file.agents.iter().find(same_id).ok_or(NO_SUCH_AGENT)?;
+    let same_owner = |o: &str| agent.record.owner.as_deref() == Some(o);
+    let owned = owner.is_none_or(same_owner);
+    owned.then_some(()).ok_or(NO_SUCH_AGENT)?;
+    let live = agent.record.retired_at.is_none();
+    live.then_some(()).ok_or(ALREADY_RETIRED)?;
+    agent.active.then_some(()).ok_or(NOT_ACTIVE)?;
+    let named = agent.record.owner.as_deref().filter(|id| !id.is_empty());
+    named.ok_or(NO_OWNER)?;
     Ok(agent)
 }
 
-#[rustfmt::skip]
 pub(crate) fn model_spend(data_dir: &Path, agent_id: &str) -> Result<(String, u64), &'static str> {
     let opened = open(data_dir, true).map_err(|err| reason_of(&err))?;
     let agent = agent_of(&opened.file, agent_id, None)?;
-    Ok((agent.record.owner.clone().ok_or(NO_OWNER)?, agent.model_tokens_spent))
+    let owner = agent.record.owner.clone().ok_or(NO_OWNER)?;
+    Ok((owner, agent.model_tokens_spent))
 }
 
-#[rustfmt::skip]
 pub(crate) fn charge_model_spend(
-    data_dir: &Path, owner: &str, agent_id: &str, add: u64, ceiling: u64,
-) -> Result<u64, SpendRefusal> {
+    data_dir: &Path,
+    owner: &str,
+    agent_id: &str,
+    memory: (u64, u64),
+    add: u64,
+    ceiling: u64,
+) -> Result<(u64, u64), SpendRefusal> {
     let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
     let agent = agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
-    let held = agent.model_tokens_spent;
-    let Some(total) = held.checked_add(add).filter(|n| *n <= ceiling) else {
-        return Err(SpendRefusal::Over { asked: add, held, ceiling });
+    let stored = agent.model_tokens_spent;
+    let is_owner = |record: &&PrincipalRecord| record.principal_id == owner;
+    let person = opened.owner_file.iter().find(is_owner);
+    let person = person.ok_or(SpendRefusal::Name(NOT_A_PERSON))?;
+    let decided = crate::model_budget::block_charge(memory, stored, add, ceiling);
+    let err = |held, charged| SpendRefusal::Over(add, held, charged, ceiling);
+    let (next, charged, raised) = decided.map_err(|(held, charged)| err(held, charged))?;
+    let Some(total) = raised else {
+        return Ok((next, charged));
     };
-    if total == held { return Ok(held); }
     let mut after = opened.file.clone();
-    after.sequence = after.sequence.checked_add(1).ok_or(SpendRefusal::Name(BAD_SEQUENCE))?;
-    after.agents.iter_mut().find(|a| a.record.principal_id == agent_id)
-        .ok_or(SpendRefusal::Name(NO_SUCH_AGENT))?.model_tokens_spent = total;
-    let person = opened.owner_file.iter().find(|r| r.principal_id == owner)
-        .ok_or(SpendRefusal::Name(NOT_A_PERSON))?;
+    let seq = after.sequence.checked_add(1);
+    after.sequence = seq.ok_or(SpendRefusal::Name(BAD_SEQUENCE))?;
+    let same = |agent: &&mut StoredAgent| agent.record.principal_id == agent_id;
+    let slot = after.agents.iter_mut().find(same);
+    let slot = slot.ok_or(SpendRefusal::Name(NO_SUCH_AGENT))?;
+    slot.model_tokens_spent = total;
+    let proof = &person.proof_binding_id;
     let caller = Caller {
         principal_id: owner,
-        proof_binding_id: &person.proof_binding_id,
-        session_id: "model-budget",
+        proof_binding_id: proof,
+        session_id: "",
     };
-    write(data_dir, &opened, Operation::Charge, &after, &caller, agent_id, crate::auth::now_ts())
-        .map_err(|_| SpendRefusal::Name(CANNOT_WRITE))?;
-    Ok(total)
+    let now = crate::auth::now_ts();
+    let saved = write(
+        data_dir,
+        &opened,
+        Operation::Charge,
+        &after,
+        &caller,
+        agent_id,
+        now,
+    );
+    saved.map_err(|_| SpendRefusal::Name(CANNOT_WRITE))?;
+    Ok((next, charged))
 }
 
 /// Writes `after` over the opened file. `subject` is the agent the event is
@@ -647,6 +676,14 @@ fn write(
     let bytes = serde_json::to_vec_pretty(after)?;
     crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
     let digest = hex::encode(Sha256::digest(&bytes));
+    // Spend names the agent. append_audit_event needs no proof binding.
+    // The owner is only `owner=` in the reason.
+    let spend = operation == Operation::Charge;
+    let who = if spend {
+        format!("owner={} ", caller.principal_id)
+    } else {
+        String::new()
+    };
     crate::auth::append_audit_event(
         data_dir,
         RuntimeAuditEventV1 {
@@ -654,12 +691,12 @@ fn write(
             event_id: format!("audit:agent-records:{}:{}", after.sequence, &digest[..16]),
             event_type: operation.event_type().to_string(),
             principal_id: Some(subject.to_string()),
-            proof_binding_id: Some(caller.proof_binding_id.to_string()),
-            session_id: Some(caller.session_id.to_string()),
+            proof_binding_id: (!spend).then(|| caller.proof_binding_id.to_string()),
+            session_id: (!spend).then(|| caller.session_id.to_string()),
             challenge_id: None,
             capsule_id: None,
             result: "ok".to_string(),
-            reason: format!("seq={} sha256={digest}", after.sequence),
+            reason: format!("{who}seq={} sha256={digest}", after.sequence),
             occurred_at: now,
             signer_did: None,
             signature: None,
