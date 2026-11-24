@@ -104,6 +104,45 @@ fn require_grant(admitted: &AdmittedRights) -> Result<(), String> {
     Ok(())
 }
 
+/// Admit the model grant and build its Linux plan.
+///
+/// The Landlock report is the caller's. ABI 5 or newer returns the plan the
+/// preexec installer attaches. A missing, older, or failed report refuses
+/// before a provider is registered.
+#[cfg(any(
+    test,
+    all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+pub(super) fn model_linux_attachment(
+    authority: &ProviderAuthority,
+    bindings: &super::landlock_plan::Bindings,
+    reported: std::io::Result<u32>,
+    arch: super::landlock_plan::ModelArch,
+) -> Result<super::landlock_plan::LinuxModelPlan, String> {
+    let admitted = super::rights::check_rights_against_runtime_templates(
+        RuntimeProviderId::Model,
+        authority,
+        rights_table::RIGHTS,
+    )?;
+    require_grant(&admitted)?;
+    let abi = super::landlock_plan::require_abi(reported)?;
+    let plan = super::landlock_plan::linux_model_plan(&admitted, bindings, arch, abi)?;
+    let attached = plan.rules.iter().any(|rule| rule.0 == "STORAGE_ROOT")
+        && plan
+            .rules
+            .iter()
+            .any(|rule| rule.0 == "PROVIDER_EXECUTABLE")
+        && !plan.program.is_empty();
+    if !attached {
+        return Err("provider start is refused: the Landlock plan is not attached".to_string());
+    }
+    Ok(plan)
+}
+
 #[cfg(all(
     not(elastos_unsupported_os_check),
     target_os = "linux",
@@ -1232,5 +1271,83 @@ mod tests {
         assert!(args
             .iter()
             .any(|arg| arg == "ENGINE=/private/fixture/engine"));
+    }
+
+    fn linux_model_bindings() -> super::super::landlock_plan::Bindings {
+        super::super::landlock_plan::Bindings {
+            storage_root: PathBuf::from("/provider/model"),
+            provider_executable: PathBuf::from("/bin/model"),
+            storage_dev: 7,
+            storage_ino: 9,
+        }
+    }
+
+    #[test]
+    fn model_linux_landlock_check_refuses_before_registration() {
+        let authority = committed_authority("model");
+        let bindings = linux_model_bindings();
+        let no_landlock = super::super::landlock_plan::require_abi(Err(std::io::Error::from(
+            std::io::ErrorKind::Unsupported,
+        )))
+        .unwrap_err();
+        for reported in [
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            Err(std::io::Error::other("landlock query failed")),
+        ] {
+            assert_eq!(
+                model_linux_attachment(
+                    &authority,
+                    &bindings,
+                    reported,
+                    super::super::landlock_plan::ModelArch::X86_64,
+                )
+                .unwrap_err(),
+                no_landlock,
+                "a missing or failed Landlock check refuses before a provider is registered"
+            );
+        }
+        for abi in [0u32, 2, 4] {
+            assert_eq!(
+                model_linux_attachment(
+                    &authority,
+                    &bindings,
+                    Ok(abi),
+                    super::super::landlock_plan::ModelArch::Aarch64,
+                )
+                .unwrap_err(),
+                super::super::landlock_plan::require_abi(Ok(abi)).unwrap_err(),
+                "ABI {abi} refuses before a provider is registered"
+            );
+        }
+    }
+
+    #[test]
+    fn model_linux_start_attaches_the_admitted_plan() {
+        let authority = committed_authority("model");
+        let admitted = super::super::rights::admit_committed(RuntimeProviderId::Model);
+        let bindings = linux_model_bindings();
+        for arch in [
+            super::super::landlock_plan::ModelArch::X86_64,
+            super::super::landlock_plan::ModelArch::Aarch64,
+        ] {
+            for abi in [5u32, 6] {
+                let plan = model_linux_attachment(&authority, &bindings, Ok(abi), arch)
+                    .unwrap_or_else(|error| panic!("{arch:?} ABI {abi}: {error}"));
+                let reference =
+                    super::super::landlock_plan::linux_model_plan(&admitted, &bindings, arch, abi)
+                        .unwrap();
+                assert_eq!(plan.rules, reference.rules, "{arch:?} ABI {abi} landlock");
+                assert_eq!(
+                    plan.program, reference.program,
+                    "{arch:?} ABI {abi} seccomp"
+                );
+                assert!(plan.rules.iter().any(|rule| rule.0 == "STORAGE_ROOT"));
+                assert!(plan
+                    .rules
+                    .iter()
+                    .any(|rule| rule.0 == "PROVIDER_EXECUTABLE"));
+                assert!(!plan.program.is_empty());
+            }
+        }
     }
 }

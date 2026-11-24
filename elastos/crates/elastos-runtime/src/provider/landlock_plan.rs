@@ -94,7 +94,7 @@ pub(super) fn require_abi(reported: io::Result<u32>) -> Result<u32, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn query_abi() -> io::Result<u32> {
+pub(super) fn query_abi() -> io::Result<u32> {
     // landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION).
     let abi = unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, 0usize, 0usize, 1u32) };
     if abi < 0 {
@@ -104,7 +104,7 @@ fn query_abi() -> io::Result<u32> {
     }
 }
 #[cfg(not(target_os = "linux"))]
-fn query_abi() -> io::Result<u32> {
+pub(super) fn query_abi() -> io::Result<u32> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 pub(super) fn kernel_abi() -> Result<u32, String> {
@@ -197,6 +197,7 @@ impl ModelArch {
 }
 
 /// Landlock rules and the seccomp program for the admitted model grant.
+#[derive(Debug)]
 pub(super) struct LinuxModelPlan {
     pub abi: u32,
     pub handled: u64,

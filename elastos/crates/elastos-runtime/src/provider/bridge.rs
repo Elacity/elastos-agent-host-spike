@@ -2151,6 +2151,79 @@ impl ProviderBridge {
         ))
     }
 
+    /// Linux model start from the admitted rights. The server keeps the hand-written policy until M3.
+    ///
+    /// ABI 5 or newer continues into the preexec installer, which attaches the
+    /// admitted Landlock plan and seccomp program. A missing, older, or failed
+    /// Landlock check returns before the storage root exists and before a
+    /// provider is registered.
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub async fn spawn_confined_model_from_rights(
+        authority: &ProviderAuthority,
+        binary_path: &CheckedExecutable,
+        storage_root: &Path,
+        config: ProviderConfig,
+    ) -> Result<Confined, BridgeError> {
+        Self::start_linux_model_from_rights(
+            authority,
+            binary_path,
+            storage_root,
+            config,
+            super::landlock_plan::query_abi(),
+        )
+        .await
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    async fn start_linux_model_from_rights(
+        authority: &ProviderAuthority,
+        binary_path: &CheckedExecutable,
+        storage_root: &Path,
+        config: ProviderConfig,
+        reported: std::io::Result<u32>,
+    ) -> Result<Confined, BridgeError> {
+        let bindings = super::landlock_plan::Bindings {
+            storage_root: storage_root.to_path_buf(),
+            provider_executable: binary_path.path().to_path_buf(),
+            storage_dev: 0,
+            storage_ino: 0,
+        };
+        let plan = super::os_entry::model_linux_attachment(
+            authority,
+            &bindings,
+            reported,
+            super::landlock_plan::ModelArch::host(),
+        )
+        .map_err(BridgeError::Refused)?;
+        if plan.program.is_empty()
+            || !plan.rules.iter().any(|rule| rule.0 == "STORAGE_ROOT")
+            || !plan
+                .rules
+                .iter()
+                .any(|rule| rule.0 == "PROVIDER_EXECUTABLE")
+        {
+            return Err(refused(
+                "provider start is refused: the Landlock plan is not attached",
+            ));
+        }
+        Self::spawn_confined(
+            "model-provider",
+            authority,
+            binary_path,
+            storage_root,
+            config,
+        )
+        .await
+    }
+
     /// Start a Linux model provider with private local Unix routes and a
     /// kernel socket filter inherited by its guard and llama.cpp descendants.
     #[cfg(target_os = "linux")]
@@ -5537,6 +5610,359 @@ int main(void) {
         let metadata = std::fs::metadata(&root).unwrap();
         assert_eq!(metadata.mode() & 0o777, 0o700);
         assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        confined.bridge().shutdown().await.unwrap();
+    }
+
+    /// A freestanding provider. Its only syscalls are on the admitted model
+    /// list, so the seccomp program can let it answer Init.
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn build_linux_model_probe(dir: &Path, outside: &Path) -> PathBuf {
+        let source = dir.join("linux-model-probe.c");
+        let binary = dir.join("linux-model-probe");
+        let outside = outside.to_str().expect("the outside path is UTF-8");
+        assert!(
+            !outside.contains(['\\', '"', '\n']),
+            "the outside path is a C string"
+        );
+        let text = r#"
+#if defined(__x86_64__)
+#define SYS_read 0
+#define SYS_write 1
+#define SYS_close 3
+#define SYS_getpid 39
+#define SYS_exit_group 231
+#define SYS_openat 257
+static long call0(long n) {
+    long r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n) : "rcx", "r11", "memory");
+    return r;
+}
+static long call1(long n, long a) {
+    long r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a) : "rcx", "r11", "memory");
+    return r;
+}
+static long call3(long n, long a, long b, long c) {
+    long r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
+    return r;
+}
+static long call4(long n, long a, long b, long c, long d) {
+    long r;
+    register long r10 __asm__("r10") = d;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10) : "rcx", "r11", "memory");
+    return r;
+}
+__asm__(
+    ".global _start\n"
+    "_start:\n"
+    "  and $-16, %rsp\n"
+    "  call run\n"
+    "  mov $231, %rax\n"
+    "  xor %rdi, %rdi\n"
+    "  syscall\n"
+);
+#elif defined(__aarch64__)
+#define SYS_read 63
+#define SYS_write 64
+#define SYS_close 57
+#define SYS_getpid 172
+#define SYS_exit_group 94
+#define SYS_openat 56
+static long call0(long n) {
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = 0;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8) : "memory");
+    return x0;
+}
+static long call1(long n, long a) {
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = a;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8) : "memory");
+    return x0;
+}
+static long call3(long n, long a, long b, long c) {
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = a;
+    register long x1 __asm__("x1") = b;
+    register long x2 __asm__("x2") = c;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
+}
+static long call4(long n, long a, long b, long c, long d) {
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = a;
+    register long x1 __asm__("x1") = b;
+    register long x2 __asm__("x2") = c;
+    register long x3 __asm__("x3") = d;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return x0;
+}
+__asm__(
+    ".global _start\n"
+    "_start:\n"
+    "  mov x29, xzr\n"
+    "  mov x30, xzr\n"
+    "  mov x16, sp\n"
+    "  and x16, x16, #~15\n"
+    "  mov sp, x16\n"
+    "  bl run\n"
+    "  mov x8, #94\n"
+    "  mov x0, xzr\n"
+    "  svc #0\n"
+);
+#else
+#error this probe runs on x86_64 or aarch64
+#endif
+#define AT_FDCWD (-100)
+static const char OUTSIDE[] = "@@OUTSIDE@@";
+static int contains(const char *line, const char *needle) {
+    for (const char *p = line; *p; p++) {
+        const char *a = p;
+        const char *b = needle;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+static char *copy_text(char *p, const char *s) {
+    while (*s) *p++ = *s++;
+    return p;
+}
+static unsigned divu10(unsigned n) {
+    unsigned q = (n >> 1) + (n >> 2);
+    q = q + (q >> 4);
+    q = q + (q >> 8);
+    q = q + (q >> 16);
+    q = q >> 3;
+    unsigned r = n - ((q << 3) + (q << 1));
+    return r > 9 ? q + 1 : q;
+}
+static char *put_u(char *p, unsigned v) {
+    char tmp[16];
+    int n = 0;
+    do {
+        unsigned q = divu10(v);
+        tmp[n++] = (char)('0' + (v - ((q << 3) + (q << 1))));
+        v = q;
+    } while (v);
+    while (n > 0) *p++ = tmp[--n];
+    return p;
+}
+static void emit(const char *s, long n) {
+    long off = 0;
+    while (off < n) {
+        long wrote = call3(SYS_write, 1, (long)(s + off), n - off);
+        if (wrote <= 0) call1(SYS_exit_group, 1);
+        off += wrote;
+    }
+}
+static int outside_errno(void) {
+    long fd = call4(SYS_openat, (long)AT_FDCWD, (long)OUTSIDE, 0, 0);
+    if (fd >= 0) {
+        call1(SYS_close, fd);
+        return 0;
+    }
+    return (int)(-fd);
+}
+static void reply_ok(void) { emit("{\"status\":\"ok\"}\n", 16); }
+static void reply_outside(void) {
+    char buf[160];
+    char *p = buf;
+    p = copy_text(p, "{\"status\":\"ok\",\"data\":{\"outside_errno\":");
+    p = put_u(p, (unsigned)outside_errno());
+    p = copy_text(p, ",\"pid\":");
+    p = put_u(p, (unsigned)call0(SYS_getpid));
+    p = copy_text(p, "}}\n");
+    emit(buf, (long)(p - buf));
+}
+__attribute__((used)) void run(void) {
+    char line[8192];
+    for (;;) {
+        int n = 0;
+        for (;;) {
+            char byte;
+            long got = call3(SYS_read, 0, (long)&byte, 1);
+            if (got <= 0) call1(SYS_exit_group, 0);
+            if (byte == '\n' || n + 1 == (int)sizeof line) break;
+            line[n++] = byte;
+        }
+        line[n] = 0;
+        if (contains(line, "\"op\":\"shutdown\"")) {
+            reply_ok();
+            call1(SYS_exit_group, 0);
+        } else if (contains(line, "\"path\":\"outside\"")) {
+            reply_outside();
+        } else {
+            reply_ok();
+        }
+    }
+}
+"#
+        .replace("@@OUTSIDE@@", outside);
+        std::fs::write(&source, text).unwrap();
+        let mut compile = None;
+        for compiler in ["cc", "gcc"] {
+            let output = std::process::Command::new(compiler)
+                .args([
+                    "-std=c11",
+                    "-static",
+                    "-fno-pie",
+                    "-no-pie",
+                    "-nostdlib",
+                    "-ffreestanding",
+                    "-fno-stack-protector",
+                    "-fno-asynchronous-unwind-tables",
+                    "-fno-ident",
+                    "-O2",
+                    "-Wl,-e,_start",
+                    "-Wl,--build-id=none",
+                    "-o",
+                ])
+                .arg(&binary)
+                .arg(&source)
+                .output();
+            match output {
+                Ok(output) if output.status.success() => {
+                    compile = Some(Ok(()));
+                    break;
+                }
+                Ok(output) => {
+                    compile = Some(Err(format!(
+                        "{compiler} failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => compile = Some(Err(format!("{compiler}: {error}"))),
+            }
+        }
+        compile
+            .unwrap_or_else(|| Err("cc and gcc are absent".into()))
+            .unwrap_or_else(|error| panic!("{error}"));
+        binary
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[tokio::test]
+    async fn linux_model_abi_refusal_creates_no_root_and_no_child() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = temp.path().join("model-root");
+        let binary = temp.path().join("unused-model");
+        std::fs::write(&binary, b"not-run").unwrap();
+        let reports = [
+            Ok(4u32),
+            Ok(2),
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported)),
+            Err(std::io::Error::other("landlock query failed")),
+        ];
+        for reported in reports {
+            let expect = super::super::landlock_plan::require_abi(match &reported {
+                Ok(abi) => Ok(*abi),
+                Err(error) => Err(std::io::Error::new(error.kind(), "same refusal")),
+            })
+            .unwrap_err();
+            let error = ProviderBridge::start_linux_model_from_rights(
+                &committed_authority("model"),
+                &CheckedExecutable::for_test(&binary),
+                &root,
+                ProviderConfig::default(),
+                reported,
+            )
+            .await
+            .expect_err("an older, missing, or failed Landlock check refuses");
+            assert_eq!(error.to_string(), expect);
+            assert!(
+                !root.exists(),
+                "the refusal returns before a storage root or a child exists"
+            );
+        }
+    }
+
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[tokio::test]
+    async fn linux_model_start_attaches_the_admitted_plan() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = temp.path().join("model-root");
+        let reported = super::super::landlock_plan::query_abi();
+        if let Err(error) = super::super::landlock_plan::require_abi(reported) {
+            let binary = temp.path().join("unused-model");
+            std::fs::write(&binary, b"not-run").unwrap();
+            let refused = ProviderBridge::spawn_confined_model_from_rights(
+                &committed_authority("model"),
+                &CheckedExecutable::for_test(&binary),
+                &root,
+                ProviderConfig::default(),
+            )
+            .await
+            .expect_err("this kernel's Landlock check refuses the model start");
+            assert_eq!(refused.to_string(), error);
+            assert!(!root.exists(), "a refused kernel check creates no root");
+            return;
+        }
+        let outside = temp.path().join("outside-proof");
+        std::fs::write(&outside, b"outside").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let binary = build_linux_model_probe(temp.path(), &outside);
+        let confined = ProviderBridge::spawn_confined_model_from_rights(
+            &committed_authority("model"),
+            &CheckedExecutable::for_test(&binary),
+            &root,
+            ProviderConfig::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("ABI 5 model start: {error}"));
+        let metadata = std::fs::metadata(&root).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        let pid = fork_pid(confined.bridge());
+        let response = confined
+            .bridge()
+            .request(ProviderRequest::Exists {
+                path: "outside".into(),
+                token: String::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("outside open report: {error}"));
+        let ProviderResponse::Ok { data } = response else {
+            panic!("the probe reports the outside open: {response:?}");
+        };
+        let data = data.expect("the probe returns the outside errno");
+        let errno = data["outside_errno"].as_i64().expect("outside errno");
+        let reported_pid = data["pid"].as_i64().expect("probe pid");
+        assert_eq!(
+            reported_pid, pid as i64,
+            "the confined child reports its pid"
+        );
+        assert_eq!(
+            errno,
+            libc::EACCES as i64,
+            "a path outside storage, the executable, and the loaders is refused"
+        );
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        let field = |name: &str| {
+            status.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name).then(|| value.trim().to_string())
+            })
+        };
+        assert_eq!(field("Seccomp").as_deref(), Some("2"), "{status}");
+        assert_eq!(field("NoNewPrivs").as_deref(), Some("1"), "{status}");
         confined.bridge().shutdown().await.unwrap();
     }
 
