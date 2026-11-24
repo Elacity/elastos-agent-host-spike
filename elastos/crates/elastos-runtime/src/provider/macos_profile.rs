@@ -93,40 +93,42 @@ pub(super) fn render_path_allow_profile(
     roots: &[&str],
     metadata_slots: usize,
     chain: bool,
+    storage: bool,
+    executable: bool,
 ) -> Result<String, String> {
-    if roots.is_empty() {
+    if storage && roots.is_empty() {
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
-    }
-    if chain && metadata_slots != 0 {
-        return Err(
-            "provider start is refused: the chain profile has no metadata grants".to_string(),
-        );
     }
     let mut lines = Vec::with_capacity(HEAD.len() + 3 + roots.len() + metadata_slots);
     for line in HEAD {
         lines.push((*line).to_string());
     }
-    lines.push(r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#.to_string());
+    if executable {
+        lines.push(r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#.to_string());
+    }
     lines.push(r#"(allow file-read* (literal "/"))"#.to_string());
     lines.push("(allow sysctl-read)".to_string());
-    for name in roots {
-        let plain = name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            && !name.is_empty();
-        if !plain || *name == "STORAGE_ROOT" || *name == "STORAGE_PARENT" || *name == "identity" {
-            return Err(format!(
-                "provider start is refused: {name} cannot be a Seatbelt allow-list parameter"
+    if storage {
+        for name in roots {
+            let plain = name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && !name.is_empty();
+            if !plain || *name == "STORAGE_ROOT" || *name == "STORAGE_PARENT" || *name == "identity"
+            {
+                return Err(format!(
+                    "provider start is refused: {name} cannot be a Seatbelt allow-list parameter"
+                ));
+            }
+            lines.push(format!(
+                "(allow file-read* file-write* (subpath (param \"{name}\")))"
             ));
         }
-        lines.push(format!(
-            "(allow file-read* file-write* (subpath (param \"{name}\")))"
-        ));
-    }
-    for index in 0..metadata_slots {
-        lines.push(format!(
-            "(allow file-read-metadata (literal (param \"META_{index}\")))"
-        ));
+        for index in 0..metadata_slots {
+            lines.push(format!(
+                "(allow file-read-metadata (literal (param \"META_{index}\")))"
+            ));
+        }
     }
     if chain {
         // Measured on this Mac against the real chain-provider binary.
@@ -380,7 +382,7 @@ mod tests {
 
     #[test]
     fn chain_seatbelt_is_the_measured_outbound_set() {
-        let chain = render_path_allow_profile(&["chain-provider"], 0, true).unwrap();
+        let chain = render_path_allow_profile(&["chain-provider"], 0, true, true, true).unwrap();
         assert_eq!(
             chain,
             "\
@@ -397,7 +399,7 @@ mod tests {
         );
         assert!(!chain.contains("mach-lookup"));
         assert!(!chain.contains("/etc"));
-        let other = render_path_allow_profile(&["ElastOS"], 1, false).unwrap();
+        let other = render_path_allow_profile(&["ElastOS"], 1, false, true, true).unwrap();
         assert!(!other.contains("network-outbound"));
         assert!(!other.contains("/var"));
         assert!(other.contains("META_0"));

@@ -1771,14 +1771,7 @@ impl ProviderBridge {
             &created_root.directory,
             &created_root.name,
         );
-        let (stdin_read, to_child) = pipe_pair()?;
-        let (from_child, stdout_write) = pipe_pair()?;
-        let stdio = super::os_entry::ChildStdio {
-            stdin: stdin_read.as_raw_fd(),
-            stdout: stdout_write.as_raw_fd(),
-            to_child,
-            from_child,
-        };
+        let (stdin_read, stdout_write, stdio) = Self::protocol_pipes()?;
         let launched =
             super::os_entry::start_provider(provider, authority, binary_path, checked, stdio)
                 .map_err(BridgeError::Refused)?;
@@ -1807,6 +1800,18 @@ impl ProviderBridge {
         Ok(Confined {
             bridge: Arc::new(bridge),
         })
+    }
+
+    fn protocol_pipes() -> Result<(OwnedFd, OwnedFd, super::os_entry::ChildStdio), BridgeError> {
+        let (stdin_read, to_child) = pipe_pair()?;
+        let (from_child, stdout_write) = pipe_pair()?;
+        let stdio = super::os_entry::ChildStdio {
+            stdin: stdin_read.as_raw_fd(),
+            stdout: stdout_write.as_raw_fd(),
+            to_child,
+            from_child,
+        };
+        Ok((stdin_read, stdout_write, stdio))
     }
 
     /// `chain-provider/` must be a real directory before the path allow-list
@@ -1839,29 +1844,26 @@ impl ProviderBridge {
     /// There is no single storage root. A refusal starts nothing.
     pub async fn spawn_path_allow(
         component_key: &str,
+        authority: &ProviderAuthority,
         binary_path: &CheckedExecutable,
         data_dir: &Path,
         config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
+        // Admission is the first refusal, before a chain directory is created.
+        super::os_entry::admit_path_allow(component_key, authority)
+            .map_err(BridgeError::Refused)?;
         if component_key == "chain-provider" {
             Self::ensure_chain_provider_root(data_dir)?;
         }
-        if super::rights_table::RuntimeProviderId::path_allow(component_key).is_none() {
-            return Err(BridgeError::Refused(format!(
-                "provider start is refused: component key \"{component_key}\" has no path allow-list"
-            )));
-        }
-        let (stdin_read, to_child) = pipe_pair()?;
-        let (from_child, stdout_write) = pipe_pair()?;
-        let stdio = super::os_entry::ChildStdio {
-            stdin: stdin_read.as_raw_fd(),
-            stdout: stdout_write.as_raw_fd(),
-            to_child,
-            from_child,
-        };
-        let launched =
-            super::os_entry::start_path_allow(component_key, binary_path, data_dir, stdio)
-                .map_err(BridgeError::Refused)?;
+        let (stdin_read, stdout_write, stdio) = Self::protocol_pipes()?;
+        let launched = super::os_entry::start_path_allow(
+            component_key,
+            authority,
+            binary_path,
+            data_dir,
+            stdio,
+        )
+        .map_err(BridgeError::Refused)?;
         drop(stdin_read);
         drop(stdout_write);
         let bridge = Self::bridge_from_launch(launched)?;

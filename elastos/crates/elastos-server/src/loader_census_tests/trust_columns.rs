@@ -714,14 +714,15 @@ fn columns() -> Vec<TrustColumn> {
             evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
+        // spawn_path_allow calls verify_at_spawn before the chain process starts.
         TrustColumn {
             file: "elastos-server/src/server_infra.rs",
             function: "register_chain_provider_plane",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["ProviderBr", "idge::spawn; separate verified spawn via setup_server_infrastructure_impl; not verified via ProviderPlane::register"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -792,7 +793,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "ensure_browser_vm_image_in_context_for_platform",
             call: "component install",
             class: "n/a",
-            trust_root: "release-signature",
+            trust_root: "release-signature or source Home dev-pinned image",
             verified_when: "at-every-start",
             evidence: "admit_installed_components(data_dir, context)?".into(),
             os_path: "",
@@ -1678,7 +1679,8 @@ fn trust_column_counts_and_chokepoint_queue() {
     // release-signature 25, at-every-start 33, at-install-only 7, staged-cid 8.
     // The row adds one to length, n/a, release-signature, and at-every-start.
     // to_gate counts release-component and other, so this n/a row leaves it
-    // at 31.
+    // at 31. register_chain_provider_plane's direct spawn is the same check,
+    // so none and never each drop by one and the two verified counts rise.
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
     assert_eq!(columns.len(), 106);
     assert_eq!(classes.get("n/a"), Some(&57));
@@ -1688,14 +1690,18 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&56));
+    assert_eq!(roots.get("none"), Some(&55));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&26));
+    assert_eq!(
+        roots.get("release-signature or source Home dev-pinned image"),
+        Some(&1)
+    );
     assert_eq!(roots.get("staged-cid"), Some(&8));
-    assert_eq!(times.get("at-every-start"), Some(&34));
+    assert_eq!(times.get("at-every-start"), Some(&35));
     assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
-    assert_eq!(times.get("never"), Some(&56));
+    assert_eq!(times.get("never"), Some(&55));
     assert_eq!(to_gate, 31);
 }
 

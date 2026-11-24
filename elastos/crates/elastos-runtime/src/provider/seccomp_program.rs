@@ -9,7 +9,7 @@ const ALLOW: u32 = 0x7fff_0000;
 const NUMBERS: &str = concat!(
     "arch_prctl:158:- close:3:57 epoll_create1:291:20 epoll_ctl:233:21 epoll_pwait:281:22 epoll_wait:232:- ",
     "eventfd2:290:19 execve:59:221 execveat:322:281 exit:60:93 exit_group:231:94 faccessat:269:48 ",
-    "chmod:90:- fchmod:91:52 fchmodat:268:53 fcntl:72:25 fdatasync:75:83 flock:73:32 fstat:5:80 fsync:74:82 ",
+    "fchmod:91:52 fcntl:72:25 fdatasync:75:83 flock:73:32 fstat:5:80 fsync:74:82 ",
     "ftruncate:77:46 futex:202:98 getdents64:217:61 geteuid:107:175 getrandom:318:278 linkat:265:37 ",
     "lseek:8:62 mkdir:83:- mkdirat:258:34 mmap:9:222 mprotect:10:226 munmap:11:215 ",
     "newfstatat:262:79 openat:257:56 openat2:437:437 poll:7:- ppoll:271:73 pread64:17:67 ",
@@ -79,17 +79,7 @@ pub(super) fn program(
         code.extend([jump(0x15, nr, 0, 1), stmt(6, ALLOW)]);
     }
     if matches!(provider, RuntimeProviderId::Model) {
-        let mut rules: Vec<Instruction> = MODEL_RULES.split_whitespace().map(|packed| {
-            let bits = u64::from_str_radix(packed, 16).expect("model rule encoding");
-            [(bits >> 48) as u32, ((bits >> 40) & 255) as u32,
-             ((bits >> 32) & 255) as u32, bits as u32]
-        }).collect();
-        for (at, name) in [(0, "clone3"), (2, "clone"), (9, "socketpair"),
-                           (14, "fcntl"), (22, "prlimit64"), (33, "futex"),
-                           (42, "socket")] {
-            rules[at][3] = number(name, arch).expect("model rule needs an architecture number");
-        }
-        code.extend(rules);
+        code.extend(measured_argument_rules(arch));
     } else if matches!(provider, RuntimeProviderId::Chain) {
         code.extend(chain_argument_rules(arch));
     } else {
@@ -128,62 +118,38 @@ fn object_directory_fcntl(arch: AuditArch) -> Vec<Instruction> {
     ]
 }
 
+/// The model's measured argument rules, with syscall numbers filled in.
+/// Chain uses the clone3, clone, fcntl, futex, and prlimit64 blocks. Those
+/// blocks jump only inside themselves, so chain can place them in its order.
+#[rustfmt::skip]
+fn measured_argument_rules(arch: AuditArch) -> Vec<Instruction> {
+    let mut rules: Vec<Instruction> = MODEL_RULES.split_whitespace().map(|packed| {
+        let bits = u64::from_str_radix(packed, 16).expect("model rule encoding");
+        [(bits >> 48) as u32, ((bits >> 40) & 255) as u32,
+         ((bits >> 32) & 255) as u32, bits as u32]
+    }).collect();
+    for (at, name) in [(0, "clone3"), (2, "clone"), (9, "socketpair"),
+                       (14, "fcntl"), (22, "prlimit64"), (33, "futex"),
+                       (42, "socket")] {
+        rules[at][3] = number(name, arch).expect("measured rule needs an architecture number");
+    }
+    rules
+}
+
 /// Chain argument tail. Allow-list entries win on the first match, so these
 /// names stay out of `measured_syscalls`. Pinned to reqwest 0.12.28, tokio
 /// 1.52.1, mio 1.2.0, hyper-util 0.1.20, and socket2 0.6.3
 /// (`chain_filter_names_the_pinned_network_stack`).
 fn chain_argument_rules(arch: AuditArch) -> Vec<Instruction> {
+    let measured = measured_argument_rules(arch);
     let nr = |name: &str| number(name, arch).expect("chain rule needs an architecture number");
     let mut code = Vec::new();
-    // clone3: glibc falls back to clone when this returns ENOSYS.
-    code.extend([jump(0x15, nr("clone3"), 0, 1), stmt(6, 0x0005_0026)]);
-    // clone: a thread (CLONE_THREAD) or the measured vfork flags. A fork is denied.
-    code.extend([
-        jump(0x15, nr("clone"), 0, 6),
-        stmt(0x20, 16),
-        jump(0x45, 0x10000, 0, 1),
-        stmt(6, ALLOW),
-        jump(0x15, 0x4111, 0, 1),
-        stmt(6, ALLOW),
-        stmt(6, DENY),
-    ]);
-    // fcntl: F_GETFD, F_DUPFD_CLOEXEC, F_GETFL, F_SETFL. set_nonblocking needs the last two.
-    code.extend([
-        jump(0x15, nr("fcntl"), 0, 7),
-        stmt(0x20, 24),
-        jump(0x15, 1, 3, 0),
-        jump(0x15, 0x406, 2, 0),
-        jump(0x15, 3, 1, 0),
-        jump(0x15, 4, 0, 1),
-        stmt(6, ALLOW),
-        stmt(6, DENY),
-    ]);
-    // futex: wait, wake, and the two lock ops, with the private and clock bits cleared.
-    code.extend([
-        jump(0x15, nr("futex"), 0, 8),
-        stmt(0x20, 24),
-        stmt(0x54, 0xffff_fe7f),
-        jump(0x15, 0, 3, 0),
-        jump(0x15, 1, 2, 0),
-        jump(0x15, 9, 1, 0),
-        jump(0x15, 10, 0, 1),
-        stmt(6, ALLOW),
-        stmt(6, DENY),
-    ]);
-    // prlimit64: a thread-stack query (pid 0, new limit 0). Both halves of each argument.
-    code.extend([
-        jump(0x15, nr("prlimit64"), 0, 10),
-        stmt(0x20, 16),
-        jump(0x15, 0, 0, 7),
-        stmt(0x20, 20),
-        jump(0x15, 0, 0, 5),
-        stmt(0x20, 32),
-        jump(0x15, 0, 0, 3),
-        stmt(0x20, 36),
-        jump(0x15, 0, 0, 1),
-        stmt(6, ALLOW),
-        stmt(6, DENY),
-    ]);
+    // clone3 and clone, then fcntl, futex, and prlimit64. Same instructions as
+    // the model blocks. Chain's order is fcntl, futex, prlimit64.
+    code.extend_from_slice(&measured[0..9]);
+    code.extend_from_slice(&measured[14..22]);
+    code.extend_from_slice(&measured[33..42]);
+    code.extend_from_slice(&measured[22..33]);
     // socket: AF_INET and AF_INET6. AF_UNIX and AF_NETLINK stay denied.
     code.extend([
         jump(0x15, nr("socket"), 0, 5),
@@ -544,15 +510,14 @@ mod tests {
                     "{arch:?} rmdir stays allowed"
                 );
             }
-            for name in ["chmod", "fchmodat"] {
-                if let Some(nr) = number(name, arch) {
-                    assert_eq!(
-                        interpret(&object, nr, [0; 6], audit),
-                        super::DENY,
-                        "{arch:?} {name} stays denied"
-                    );
-                }
-            }
+        }
+        for name in ["chmod", "fchmodat"] {
+            assert!(
+                !super::NUMBERS
+                    .split_whitespace()
+                    .any(|row| row.split(':').next() == Some(name)),
+                "{name} is not a helper syscall number"
+            );
         }
     }
 }

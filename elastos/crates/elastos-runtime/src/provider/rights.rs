@@ -80,17 +80,10 @@ impl AdmittedRights {
     pub(super) fn rows(&self) -> &[&'static rights_table::RightRow] {
         &self.rows
     }
-}
 
-/// The full Runtime grant for `provider`: every row that provider's filter
-/// installs when the manifest does not narrow the list.
-#[cfg(all(
-    not(elastos_unsupported_os_check),
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub(super) fn runtime_grant(provider: RuntimeProviderId) -> AdmittedRights {
-    AdmittedRights::from_table(rights_table::resolve(provider, rights_table::RIGHTS))
+    pub(super) fn admits(&self, id: &str) -> bool {
+        self.rows.iter().any(|row| row.id == id)
+    }
 }
 
 /// The provider's Runtime grant. Tests that build a plan use this path.

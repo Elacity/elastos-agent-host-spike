@@ -131,12 +131,12 @@ fn to_sock_filters(instructions: Vec<[u32; 4]>) -> Result<Vec<libc::sock_filter>
         .collect())
 }
 
-pub(super) fn prepare(
+fn assemble(
     provider: RuntimeProviderId,
     admitted: &AdmittedRights,
-    bindings: &landlock_plan::Bindings,
+    plan: landlock_plan::Plan,
+    root_pins: Vec<RootPin>,
 ) -> Result<Prepared, String> {
-    let plan = landlock_plan::build(provider, admitted, bindings, landlock_plan::kernel_abi()?)?;
     let paths = plan
         .rules
         .iter()
@@ -150,6 +150,20 @@ pub(super) fn prepare(
         admitted,
         host_audit_arch(),
     ))?;
+    Ok(Prepared {
+        plan,
+        paths,
+        filters,
+        root_pins,
+    })
+}
+
+pub(super) fn prepare(
+    provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
+    bindings: &landlock_plan::Bindings,
+) -> Result<Prepared, String> {
+    let plan = landlock_plan::build(provider, admitted, bindings, landlock_plan::kernel_abi()?)?;
     // The single-root plan has one directory root, named STORAGE_ROOT.
     // Allow-list plans pin every root in `prepare_path_allow`.
     let root_pins = plan
@@ -163,12 +177,7 @@ pub(super) fn prepare(
             ino: plan.storage_ino,
         })
         .collect();
-    Ok(Prepared {
-        plan,
-        paths,
-        filters,
-        root_pins,
-    })
+    assemble(provider, admitted, plan, root_pins)
 }
 
 /// # Safety
@@ -325,42 +334,13 @@ pub(super) unsafe fn install(
 
 pub(super) fn prepare_path_allow(
     provider: RuntimeProviderId,
-    plan: landlock_plan::PathAllowPlan,
+    admitted: &AdmittedRights,
+    plan: landlock_plan::Plan,
 ) -> Result<Prepared, String> {
-    if plan.root_dev.len() != plan.root_ino.len() || plan.root_dev.is_empty() {
+    if plan.root_dev.len() != plan.root_ino.len() {
         return Err("provider start is refused: a path root has no identity".into());
     }
-    let mut root_pins = Vec::with_capacity(plan.root_dev.len());
-    for (index, (dev, ino)) in plan
-        .root_dev
-        .iter()
-        .copied()
-        .zip(plan.root_ino.iter().copied())
-        .enumerate()
-    {
-        let Some(rule) = plan.rules.get(index) else {
-            return Err("provider start is refused: a path root has no Landlock rule".into());
-        };
-        if matches!(
-            rule.0,
-            "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS" | "STORAGE_ROOT" | "STORAGE_PARENT"
-        ) {
-            return Err(format!(
-                "provider start is refused: {} is not a path allow-list root",
-                rule.0
-            ));
-        }
-        root_pins.push(RootPin { index, dev, ino });
-    }
-    let paths = plan
-        .rules
-        .iter()
-        .map(|rule| {
-            CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rule.1.as_os_str()))
-                .map_err(|_| format!("Landlock path contains NUL: {}", rule.0))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    // Each helper's filter comes from its own grant. Did's list is not reused.
+    // Each helper's filter comes from the admitted grant. Did's list is not reused.
     if !matches!(
         provider,
         RuntimeProviderId::Localhost | RuntimeProviderId::Object | RuntimeProviderId::Chain
@@ -370,25 +350,15 @@ pub(super) fn prepare_path_allow(
                 .into(),
         );
     }
-    let admitted = super::super::rights::runtime_grant(provider);
-    let filters = to_sock_filters(seccomp_program::program(
-        provider,
-        &admitted,
-        host_audit_arch(),
-    ))?;
-    let first = root_pins[0];
-    Ok(Prepared {
-        plan: landlock_plan::Plan {
-            abi: plan.abi,
-            handled: plan.handled,
-            rules: plan.rules,
-            storage_dev: first.dev,
-            storage_ino: first.ino,
-        },
-        paths,
-        filters,
-        root_pins,
-    })
+    let root_pins = plan
+        .root_dev
+        .iter()
+        .copied()
+        .zip(plan.root_ino.iter().copied())
+        .enumerate()
+        .map(|(index, (dev, ino))| RootPin { index, dev, ino })
+        .collect();
+    assemble(provider, admitted, plan, root_pins)
 }
 
 #[cfg(test)]
@@ -399,6 +369,10 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
+
+    fn helper_grant(provider: RuntimeProviderId) -> super::super::super::rights::AdmittedRights {
+        super::super::super::rights::admit_runtime_grant(provider)
+    }
 
     fn bindings_for(root: &Path, executable: &Path) -> landlock_plan::Bindings {
         let meta = std::fs::symlink_metadata(root).unwrap();
@@ -604,15 +578,16 @@ mod tests {
         std::fs::create_dir(data.join("identity")).unwrap();
         std::fs::create_dir(data.join("chain-provider")).unwrap();
         let executable = Path::new("/opt/elastos/helper-provider");
+        let admitted = helper_grant(RuntimeProviderId::Chain);
         let (_confinement, plan) =
-            path_allow::render_with_plan("chain-provider", data, executable, 5)
+            path_allow::render_with_plan(RuntimeProviderId::Chain, &admitted, data, executable, 5)
                 .unwrap_or_else(|err| panic!("render before the swap: {err}"));
         let root_index = plan
             .rules
             .iter()
             .position(|rule| rule.0 == "chain-provider")
             .expect("chain root");
-        let prepared = prepare_path_allow(RuntimeProviderId::Chain, plan).unwrap();
+        let prepared = prepare_path_allow(RuntimeProviderId::Chain, &admitted, plan).unwrap();
         let root = data.join("chain-provider");
         std::fs::remove_dir(&root).unwrap();
         std::os::unix::fs::symlink(data.join("identity"), &root).unwrap();
@@ -666,19 +641,20 @@ mod tests {
         let allowed_path = root.join("note");
         std::fs::write(&allowed_path, b"ok").unwrap();
         let executable = Path::new("/bin/true");
+        let admitted = helper_grant(RuntimeProviderId::Chain);
         let (_confinement, plan) =
-            path_allow::render_with_plan("chain-provider", data, executable, 5)
+            path_allow::render_with_plan(RuntimeProviderId::Chain, &admitted, data, executable, 5)
                 .unwrap_or_else(|err| panic!("clean render: {err}"));
-        let prepared = prepare_path_allow(RuntimeProviderId::Chain, plan).unwrap();
+        let prepared = prepare_path_allow(RuntimeProviderId::Chain, &admitted, plan).unwrap();
         let chain_filter = super::to_sock_filters(super::super::super::seccomp_program::program(
             RuntimeProviderId::Chain,
-            &super::super::super::rights::runtime_grant(RuntimeProviderId::Chain),
+            &admitted,
             super::host_audit_arch(),
         ))
         .unwrap();
         let did_filter = super::to_sock_filters(super::super::super::seccomp_program::program(
             RuntimeProviderId::Did,
-            &super::super::super::rights::runtime_grant(RuntimeProviderId::Did),
+            &helper_grant(RuntimeProviderId::Did),
             super::host_audit_arch(),
         ))
         .unwrap();
@@ -705,19 +681,35 @@ mod tests {
                 std::fs::create_dir(&path).unwrap();
             }
         }
-        let (_local, local_plan) =
-            path_allow::render_with_plan("localhost-provider", data, executable, 5).unwrap();
-        let local = prepare_path_allow(RuntimeProviderId::Localhost, local_plan).unwrap();
+        let local_grant = helper_grant(RuntimeProviderId::Localhost);
+        let (_local, local_plan) = path_allow::render_with_plan(
+            RuntimeProviderId::Localhost,
+            &local_grant,
+            data,
+            executable,
+            5,
+        )
+        .unwrap();
+        let local =
+            prepare_path_allow(RuntimeProviderId::Localhost, &local_grant, local_plan).unwrap();
         let local_filter = super::to_sock_filters(super::super::super::seccomp_program::program(
             RuntimeProviderId::Localhost,
-            &super::super::super::rights::runtime_grant(RuntimeProviderId::Localhost),
+            &local_grant,
             super::host_audit_arch(),
         ))
         .unwrap();
         assert_eq!(sock_words(&local.filters), sock_words(&local_filter));
-        let (_object, object_plan) =
-            path_allow::render_with_plan("object-provider", data, executable, 5).unwrap();
-        let object = prepare_path_allow(RuntimeProviderId::Object, object_plan).unwrap();
+        let object_grant = helper_grant(RuntimeProviderId::Object);
+        let (_object, object_plan) = path_allow::render_with_plan(
+            RuntimeProviderId::Object,
+            &object_grant,
+            data,
+            executable,
+            5,
+        )
+        .unwrap();
+        let object =
+            prepare_path_allow(RuntimeProviderId::Object, &object_grant, object_plan).unwrap();
         assert_ne!(
             sock_words(&object.filters),
             sock_words(&local.filters),

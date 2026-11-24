@@ -7,6 +7,8 @@
 //! and chain. Chain's resolver files are read-only and are not a storage
 //! root. The single-root `spawn_confined` does not start these helpers.
 
+use super::rights::AdmittedRights;
+use super::rights_table::RuntimeProviderId;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -18,61 +20,40 @@ pub(crate) struct HelperConfinement {
     pub seatbelt: String,
     pub landlock_abi: u32,
     pub landlock_handled: u64,
-    pub landlock: Vec<HelperLandlockRule>,
+    pub landlock: Vec<super::landlock_plan::PathRule>,
     /// Data directory and its ancestors. Seatbelt `file-read-metadata` literals
     /// only. They are not Landlock rules: a path-beneath rule here would include
     /// `identity/device.key`.
     pub metadata: Vec<PathBuf>,
 }
 
-/// One Landlock path rule. `mask` is the ABI-5 access bits.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct HelperLandlockRule {
-    pub name: &'static str,
-    pub path: PathBuf,
-    pub mask: u64,
-}
-
-#[derive(Clone, Copy)]
-enum HelperId {
-    Localhost,
-    Object,
-    Chain,
-}
-
-/// Object path builders name these file-backed roots:
-/// `AUTH_STATE_ROOT` (`ElastOS/System/Auth`), principal roots
-/// `localhost://Users/` and `localhost://UsersAI/`, and the published index
-/// under `ElastOS`.
+/// Object file roots. `Users` and `UsersAI` hold caller-chosen object names,
+/// so each is one directory. `ElastOS` stays one directory too. The helper's
+/// auth operations create `audit-chain-required.json.lock` and a randomly
+/// named `.{file}.{pid}.{nanos}.tmp` beside the target, both in
+/// `ElastOS/System/Auth`. `recovery-archive.key` is in that same directory.
+/// Landlock cannot exclude one child of a directory rule, and `auth.rs` is
+/// not moved. A literal file grant cannot name the temp.
 const OBJECT_ROOTS: &[&str] = &["ElastOS", "Users", "UsersAI"];
 
 /// `node_lifecycle_state_path` joins this directory under the data directory.
 const CHAIN_ROOTS: &[&str] = &["chain-provider"];
 
-fn file_roots(provider: HelperId) -> &'static [&'static str] {
+/// Localhost serves a caller-chosen path under any file-backed root, so it
+/// needs all seven: AppCapsules, ElastOS, Local, MyWebSite, Public, Users,
+/// and UsersAI.
+fn file_roots(provider: RuntimeProviderId) -> &'static [&'static str] {
     match provider {
-        HelperId::Localhost => elastos_common::localhost::FILE_BACKED_ROOTS,
-        HelperId::Object => OBJECT_ROOTS,
-        HelperId::Chain => CHAIN_ROOTS,
-    }
-}
-
-fn runtime_provider(provider: HelperId) -> super::rights_table::RuntimeProviderId {
-    match provider {
-        HelperId::Localhost => super::rights_table::RuntimeProviderId::Localhost,
-        HelperId::Object => super::rights_table::RuntimeProviderId::Object,
-        HelperId::Chain => super::rights_table::RuntimeProviderId::Chain,
+        RuntimeProviderId::Localhost => elastos_common::localhost::FILE_BACKED_ROOTS,
+        RuntimeProviderId::Object => OBJECT_ROOTS,
+        RuntimeProviderId::Chain => CHAIN_ROOTS,
+        RuntimeProviderId::Did | RuntimeProviderId::Wallet | RuntimeProviderId::Model => &[],
     }
 }
 
 /// The data directory and every ancestor except `/`, for both the path the
 /// caller passed and its canonical path. `/` already has `file-read*`.
 fn metadata_literals(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    if !data_dir.is_absolute() {
-        return Err(
-            "provider start is refused: the data directory path is not absolute".to_string(),
-        );
-    }
     let canonical = std::fs::canonicalize(data_dir).map_err(|_| {
         "provider start is refused: the data directory could not be resolved".to_string()
     })?;
@@ -95,33 +76,6 @@ fn metadata_literals(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
         );
     }
     Ok(paths)
-}
-
-fn helper_id(component_key: &str) -> Result<HelperId, String> {
-    match component_key {
-        "localhost-provider" => Ok(HelperId::Localhost),
-        "object-provider" => Ok(HelperId::Object),
-        "chain-provider" => Ok(HelperId::Chain),
-        _ => Err(format!(
-            "provider start is refused: component key \"{component_key}\" has no path allow-list"
-        )),
-    }
-}
-
-fn valid_root_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        && !matches!(
-            name,
-            "STORAGE_ROOT"
-                | "STORAGE_PARENT"
-                | "PROVIDER_EXECUTABLE"
-                | "LANDLOCK_LOADER_PATHS"
-                | "identity"
-                | "device.key"
-        )
 }
 
 /// `granted` is a path-beneath rule. `/` and any ancestor of `identity/` or
@@ -195,7 +149,7 @@ fn require_real_root(data_dir: &Path, name: &str, path: &Path) -> Result<(u64, u
 }
 
 fn resolve_roots(
-    provider: HelperId,
+    provider: RuntimeProviderId,
     data_dir: &Path,
 ) -> Result<Vec<super::landlock_plan::AllowRoot>, String> {
     if !data_dir.is_absolute() {
@@ -209,27 +163,7 @@ fn resolve_roots(
     }
     let mut resolved: Vec<super::landlock_plan::AllowRoot> = Vec::with_capacity(names.len());
     for name in names {
-        if !valid_root_name(name) {
-            return Err(format!(
-                "provider start is refused: {name} cannot be a path allow-list root"
-            ));
-        }
-        if matches!(provider, HelperId::Localhost | HelperId::Object)
-            && !elastos_common::localhost::FILE_BACKED_ROOTS.contains(name)
-        {
-            return Err(format!(
-                "provider start is refused: {name} is outside the file-backed roots"
-            ));
-        }
         let path = data_dir.join(name);
-        if path.parent() != Some(data_dir) || reaches_device_key(data_dir, &path) {
-            return Err(format!(
-                "provider start is refused: {name} reaches identity/device.key"
-            ));
-        }
-        if resolved.iter().any(|seen| seen.name == *name) {
-            return Err(format!("provider start is refused: {name} is listed twice"));
-        }
         let (dev, ino) = require_real_root(data_dir, name, &path)?;
         resolved.push(super::landlock_plan::AllowRoot {
             name,
@@ -241,53 +175,20 @@ fn resolve_roots(
     Ok(resolved)
 }
 
-fn read_only_files_are_the_resolver_list(
-    provider: HelperId,
-    data_dir: &Path,
-    rules: &[HelperLandlockRule],
-) -> Result<(), String> {
-    const FILES: &[&str] = &["/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"];
-    let files: Vec<_> = rules
-        .iter()
-        .filter(|rule| rule.name == "READ_ONLY_FILE")
-        .collect();
-    if !matches!(provider, HelperId::Chain) {
-        if files.is_empty() {
-            return Ok(());
-        }
-        return Err(
-            "provider start is refused: a read-only resolver file is not a chain grant".into(),
-        );
-    }
-    for rule in files {
-        let text = rule.path.to_str().unwrap_or("");
-        if !FILES.contains(&text) || rule.mask != 4 || rule.path.starts_with(data_dir) {
-            return Err(format!(
-                "provider start is refused: {} is not a chain resolver file",
-                rule.path.display()
-            ));
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn render(
-    component_key: &str,
-    data_dir: &Path,
-    executable: &Path,
-    landlock_abi: u32,
-) -> Result<HelperConfinement, String> {
-    Ok(render_with_plan(component_key, data_dir, executable, landlock_abi)?.0)
-}
-
 pub(super) fn render_with_plan(
-    component_key: &str,
+    provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
     data_dir: &Path,
     executable: &Path,
     landlock_abi: u32,
-) -> Result<(HelperConfinement, super::landlock_plan::PathAllowPlan), String> {
-    let provider = helper_id(component_key)?;
-    let roots = resolve_roots(provider, data_dir)?;
+) -> Result<(HelperConfinement, super::landlock_plan::Plan), String> {
+    let storage = admitted.admits("storage");
+    let executable_right = admitted.admits("bound-executable");
+    let roots = if storage {
+        resolve_roots(provider, data_dir)?
+    } else {
+        Vec::new()
+    };
     if reaches_device_key(data_dir, executable) {
         return Err(
             "provider start is refused: the executable path reaches identity/device.key"
@@ -295,65 +196,44 @@ pub(super) fn render_with_plan(
         );
     }
     let names: Vec<&str> = roots.iter().map(|root| root.name).collect();
-    let chain = matches!(provider, HelperId::Chain);
+    let chain = matches!(provider, RuntimeProviderId::Chain);
     // Chain's measured profile has no ancestor metadata. The data directory
     // stays out of the Seatbelt text, so identity/device.key stays unreadable.
-    let metadata = if chain {
+    // A grant without storage has no file roots and no metadata literals.
+    let metadata = if chain || !storage {
         Vec::new()
     } else {
         metadata_literals(data_dir)?
     };
-    let seatbelt = super::macos_profile::render_path_allow_profile(&names, metadata.len(), chain)?;
-    if seatbelt.contains("STORAGE_ROOT")
-        || seatbelt.contains("STORAGE_PARENT")
-        || seatbelt.contains("identity")
-    {
-        return Err(
-            "provider start is refused: the Seatbelt profile names a forbidden path".to_string(),
-        );
-    }
+    let seatbelt = super::macos_profile::render_path_allow_profile(
+        &names,
+        metadata.len(),
+        chain,
+        storage,
+        executable_right,
+    )?;
     let plan = super::landlock_plan::build_path_allow_plan(
-        runtime_provider(provider),
+        provider,
+        admitted,
         &roots,
         executable,
         landlock_abi,
     )?;
-    if plan.root_dev.len() != roots.len() || plan.root_ino.len() != roots.len() {
-        return Err(
-            "provider start is refused: the Landlock plan has no identity for a root".to_string(),
-        );
-    }
-    for (index, root) in roots.iter().enumerate() {
-        if plan.root_dev[index] != root.dev || plan.root_ino[index] != root.ino {
-            return Err(
-                "provider start is refused: the Landlock plan lost a root identity".to_string(),
-            );
-        }
-    }
-    let landlock = plan
+    if plan
         .rules
         .iter()
-        .map(|rule| HelperLandlockRule {
-            name: rule.0,
-            path: rule.1.clone(),
-            mask: rule.2,
-        })
-        .collect::<Vec<_>>();
-    if landlock
-        .iter()
-        .any(|rule| reaches_device_key(data_dir, &rule.path))
+        .any(|rule| reaches_device_key(data_dir, &rule.1))
     {
         return Err(
             "provider start is refused: the Landlock plan reaches identity/device.key".to_string(),
         );
     }
-    read_only_files_are_the_resolver_list(provider, data_dir, &landlock)?;
     Ok((
         HelperConfinement {
             seatbelt,
             landlock_abi: plan.abi,
             landlock_handled: plan.handled,
-            landlock,
+            landlock: plan.rules.clone(),
             metadata,
         },
         plan,
@@ -366,6 +246,22 @@ mod tests {
     use std::path::Path;
 
     const EXE: &str = "/opt/elastos/helper-provider";
+
+    fn render(
+        component_key: &str,
+        data_dir: &Path,
+        executable: &Path,
+        abi: u32,
+    ) -> Result<super::HelperConfinement, String> {
+        let provider = super::super::rights_table::RuntimeProviderId::path_allow(component_key)
+            .ok_or_else(|| {
+                format!(
+                    "provider start is refused: component key \"{component_key}\" has no path allow-list"
+                )
+            })?;
+        let admitted = super::super::rights::admit_runtime_grant(provider);
+        Ok(super::render_with_plan(provider, &admitted, data_dir, executable, abi)?.0)
+    }
 
     fn real_data_dir() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("data directory");
@@ -468,13 +364,8 @@ mod tests {
                     .is_none(),
                 "{component_key} stays outside single-root spawn_confined"
             );
-            let rendered = super::super::os_entry::render_helper_confinement(
-                component_key,
-                data_dir,
-                executable,
-                5,
-            )
-            .unwrap_or_else(|err| panic!("{component_key}: {err}"));
+            let rendered = render(component_key, data_dir, executable, 5)
+                .unwrap_or_else(|err| panic!("{component_key}: {err}"));
             let chain = *component_key == "chain-provider";
             assert!(rendered
                 .seatbelt
@@ -507,7 +398,7 @@ mod tests {
             assert!(!rendered
                 .landlock
                 .iter()
-                .any(|rule| rendered.metadata.iter().any(|path| path == &rule.path)));
+                .any(|rule| rendered.metadata.iter().any(|path| path == &rule.1)));
             assert!(!rendered
                 .seatbelt
                 .contains(data_dir.to_str().expect("data directory path")));
@@ -561,22 +452,22 @@ mod tests {
             }
 
             let (roots, rest): (Vec<_>, Vec<_>) = rendered.landlock.iter().partition(|rule| {
-                rule.name != "PROVIDER_EXECUTABLE"
-                    && rule.name != "LANDLOCK_LOADER_PATHS"
-                    && rule.name != "READ_ONLY_FILE"
+                rule.0 != "PROVIDER_EXECUTABLE"
+                    && rule.0 != "LANDLOCK_LOADER_PATHS"
+                    && rule.0 != "READ_ONLY_FILE"
             });
             let resolver: Vec<_> = rendered
                 .landlock
                 .iter()
-                .filter(|rule| rule.name == "READ_ONLY_FILE")
+                .filter(|rule| rule.0 == "READ_ONLY_FILE")
                 .collect();
             if chain {
                 const ALLOWED: &[&str] = &["/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"];
                 for rule in &resolver {
-                    let path = rule.path.to_str().unwrap();
+                    let path = rule.1.to_str().unwrap();
                     assert!(ALLOWED.contains(&path), "{path}");
-                    assert_eq!(rule.mask, 4, "{path}");
-                    assert!(!rule.path.starts_with(data_dir));
+                    assert_eq!(rule.2, 4, "{path}");
+                    assert!(!rule.1.starts_with(data_dir));
                 }
             } else {
                 assert!(resolver.is_empty(), "{component_key} gained resolver files");
@@ -584,42 +475,42 @@ mod tests {
             assert_eq!(roots.len(), expected.len(), "{component_key} root count");
             for (rule, name) in roots.iter().zip(expected.iter()) {
                 let path = data_dir.join(name);
-                assert_eq!(rule.name, *name, "{component_key}");
-                assert_eq!(rule.path, path, "{component_key}");
+                assert_eq!(rule.0, *name, "{component_key}");
+                assert_eq!(rule.1, path, "{component_key}");
                 assert_eq!(
-                    rule.path.parent(),
+                    rule.1.parent(),
                     Some(data_dir),
                     "allow list grew to the whole data directory: {:?}",
-                    rule.path
+                    rule.1
                 );
                 assert!(
-                    !reaches(&rule.path, &key) && !reaches(&rule.path, &identity),
+                    !reaches(&rule.1, &key) && !reaches(&rule.1, &identity),
                     "{component_key} reaches the device key through {}",
-                    rule.path.display()
+                    rule.1.display()
                 );
-                assert_eq!(rule.mask, storage_mask, "{component_key} mask");
+                assert_eq!(rule.2, storage_mask, "{component_key} mask");
             }
             let executable_rules: Vec<_> = rest
                 .iter()
-                .filter(|rule| rule.name == "PROVIDER_EXECUTABLE")
+                .filter(|rule| rule.0 == "PROVIDER_EXECUTABLE")
                 .collect();
             assert_eq!(executable_rules.len(), 1, "{component_key} executable");
-            assert_eq!(executable_rules[0].path, executable);
-            assert_eq!(executable_rules[0].mask, binary_mask);
+            assert_eq!(executable_rules[0].1, executable);
+            assert_eq!(executable_rules[0].2, binary_mask);
             let loaders: Vec<_> = rest
                 .iter()
-                .filter(|rule| rule.name == "LANDLOCK_LOADER_PATHS")
-                .map(|rule| rule.path.clone())
+                .filter(|rule| rule.0 == "LANDLOCK_LOADER_PATHS")
+                .map(|rule| rule.1.clone())
                 .collect();
             assert_eq!(loaders, did_loaders, "{component_key} loaders");
             for rule in &rendered.landlock {
                 assert!(
-                    !reaches(&rule.path, &key) && !reaches(&rule.path, &identity),
+                    !reaches(&rule.1, &key) && !reaches(&rule.1, &identity),
                     "{component_key} Landlock rule {} reaches the device key",
-                    rule.path.display()
+                    rule.1.display()
                 );
                 assert_ne!(
-                    rule.path, data_dir,
+                    rule.1, data_dir,
                     "allow list grew to the whole data directory"
                 );
             }
@@ -648,12 +539,7 @@ mod tests {
             .collect();
         assert_eq!(wallet_rules, oracle_rules, "wallet profile left its oracle");
 
-        let refused = super::super::os_entry::render_helper_confinement(
-            "wallet-provider",
-            data_dir,
-            executable,
-            5,
-        );
+        let refused = render("wallet-provider", data_dir, executable, 5);
         assert!(refused.is_err(), "wallet stays on its single-root profile");
     }
 
@@ -677,13 +563,8 @@ mod tests {
                     data.to_path_buf()
                 };
                 std::os::unix::fs::symlink(&target, &root).expect("symlink");
-                let error = super::super::os_entry::render_helper_confinement(
-                    component,
-                    data,
-                    Path::new(EXE),
-                    5,
-                )
-                .expect_err("a symlinked root must be refused at render");
+                let error = render(component, data, Path::new(EXE), 5)
+                    .expect_err("a symlinked root must be refused at render");
                 assert!(
                     error.contains(root_name) && error.contains("is a symlink"),
                     "{component} to_identity={to_identity}: {error}"
