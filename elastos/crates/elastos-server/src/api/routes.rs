@@ -8198,7 +8198,19 @@ pub(crate) mod tests {
         assert!(runtime.list_capsules().await.is_empty());
     }
 
-    #[cfg(unix)]
+    /// The storage-grant rows compile only with `prototype-agents`. Cargo
+    /// lists this ignored row, and the reason, in a build without that feature.
+    #[cfg(all(unix, not(feature = "prototype-agents")))]
+    #[test]
+    #[ignore = "prototype-agents is off, so instance_storage_rows is not compiled"]
+    fn instance_storage_rows_are_not_compiled() {
+        let reason = crate::agents::require_build()
+            .expect_err("prototype-agents is off, so instance_storage_rows is not compiled");
+        eprintln!("instance_storage_rows is not compiled: {reason}");
+    }
+
+    /// Storage-grant rows. This module compiles only with `prototype-agents`.
+    #[cfg(all(unix, feature = "prototype-agents"))]
     mod instance_storage_rows;
 }
 

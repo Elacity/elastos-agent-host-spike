@@ -20,6 +20,9 @@
 //! owner's later approval is then refused `admission_missing`, and the step's
 //! file is unchanged. That row calls `dispatch_agent_plan_step`. It does not
 //! call the approve route or the dispatch route.
+//!
+//! This module compiles only with `prototype-agents`. A build without that
+//! feature does not contain these rows.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -319,8 +322,10 @@ async fn assert_replay_refused(
     );
 }
 
-fn require_agents() -> bool {
-    crate::agents::require_build().is_ok()
+fn require_agents() {
+    if let Err(reason) = crate::agents::require_build() {
+        panic!("instance_storage_rows compiles only with the prototype-agents feature: {reason}");
+    }
 }
 
 async fn own_grant_finishes(
@@ -358,9 +363,7 @@ async fn own_grant_finishes(
 #[cfg(unix)]
 #[tokio::test]
 async fn a_used_storage_grant_is_refused_after_stop() {
-    if !require_agents() {
-        return;
-    }
+    require_agents();
     let home = ProbeLaunch::new(&["a"]).await;
     let agent = home.agents[0].clone();
     let control = GrantControl::new(true);
@@ -391,9 +394,7 @@ async fn a_used_storage_grant_is_refused_after_stop() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_used_storage_grant_is_refused_after_cancel() {
-    if !require_agents() {
-        return;
-    }
+    require_agents();
     let home = ProbeLaunch::new(&["a"]).await;
     let agent = home.agents[0].clone();
     let control = GrantControl::new(true);
@@ -430,9 +431,7 @@ async fn a_used_storage_grant_is_refused_after_cancel() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_used_storage_grant_is_refused_after_failure() {
-    if !require_agents() {
-        return;
-    }
+    require_agents();
     let home = ProbeLaunch::new(&["a", "b"]).await;
     let agent = home.agents[0].clone();
     let other = home.agents[1].clone();
@@ -480,9 +479,7 @@ async fn a_used_storage_grant_is_refused_after_failure() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_used_storage_grant_is_refused_after_the_guest_completes() {
-    if !require_agents() {
-        return;
-    }
+    require_agents();
     let home = ProbeLaunch::new(&["a"]).await;
     let agent = home.agents[0].clone();
     let control = GrantControl::new(true);
@@ -513,9 +510,7 @@ async fn a_used_storage_grant_is_refused_after_the_guest_completes() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_later_run_cannot_use_the_earlier_runs_storage_grant() {
-    if !require_agents() {
-        return;
-    }
+    require_agents();
     let home = ProbeLaunch::new(&["a"]).await;
     let agent = home.agents[0].clone();
     let control = GrantControl::new(true);
@@ -558,7 +553,8 @@ async fn a_later_run_cannot_use_the_earlier_runs_storage_grant() {
 }
 
 /// Where two runs of one agent are admitted together, the second cannot use
-/// the first's live storage grant. The refusal is the session check
+/// the first's live storage grant. Before that refusal, the first grant still
+/// validates for the first run. The refusal is the session check
 /// (`wrong_capsule`). The file is unchanged. The second run gets its own
 /// grant.
 ///
@@ -569,9 +565,7 @@ async fn a_later_run_cannot_use_the_earlier_runs_storage_grant() {
 #[cfg(unix)]
 #[tokio::test]
 async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
-    if !require_agents() {
-        return;
-    }
+    require_agents();
     let home = ProbeLaunch::new(&["a"]).await;
     let agent = home.agents[0].clone();
     let control = GrantControl::new(true);
@@ -588,6 +582,14 @@ async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
     assert_ne!(second.id, used.session);
     home.wait_pending(&second.id).await;
     let manifest = ceiling(&home, &second.id);
+    // `wrong_capsule` is checked before revocation, so the refusal below does
+    // not show that this token is still live. This read does not count a use.
+    assert!(
+        home.capability_manager
+            .can_still_validate_for_caller(&used.token, &used.session)
+            .await,
+        "the first run's storage grant is still live"
+    );
     assert_replay_refused(
         &home,
         &agent,
@@ -764,9 +766,7 @@ async fn retained_plan_dispatch_after(end: InstanceEnd) {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_retained_plan_step_is_refused_after_the_instance_ends() {
-    if !require_agents() {
-        return;
-    }
+    require_agents();
     retained_plan_dispatch_after(InstanceEnd::Stop).await;
     retained_plan_dispatch_after(InstanceEnd::Completed).await;
 }
