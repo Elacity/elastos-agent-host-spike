@@ -454,6 +454,21 @@ fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
 /// `init` reads `base_path` only. Existing object bytes are not encrypted
 /// under Home's device key. The child is confined to its file roots, so it
 /// cannot open `identity/device.key`.
+/// The object helper verifies the audit chain with this public DID. The file
+/// is not `identity/device.key`, and the helper receives no signing key.
+#[cfg(unix)]
+fn write_object_helper_runtime_did(data_dir: &Path, device_key: &[u8; 32]) -> anyhow::Result<()> {
+    let (_, did) = elastos_identity::derive_did(device_key);
+    let path = elastos_identity::object_helper_runtime_did_path(data_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, did.as_bytes())?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 fn object_provider_bridge_config(data_dir: &Path) -> provider::BridgeProviderConfig {
     provider::BridgeProviderConfig {
         base_path: data_dir.to_string_lossy().to_string(),
@@ -533,10 +548,8 @@ async fn request_model_provider_status(
     .map_err(|err| anyhow::anyhow!("model-provider status request failed: {err}"))
 }
 
-/// Start localhost, object, or chain on that provider's path allow-list.
-///
-/// Chain keeps its state under `data_dir/chain-provider`. That directory is
-/// created here when it is absent. A symlink is left for the launcher to refuse.
+/// Start localhost or object on that provider's path allow-list.
+/// Chain stays on the plain spawn until slice C3.
 #[cfg(unix)]
 async fn spawn_allow_listed_provider(
     component_key: &str,
@@ -544,16 +557,6 @@ async fn spawn_allow_listed_provider(
     data_dir: &Path,
     config: provider::BridgeProviderConfig,
 ) -> Result<Arc<provider::ProviderBridge>, provider::bridge::BridgeError> {
-    if component_key == "chain-provider" {
-        let root = data_dir.join("chain-provider");
-        if std::fs::symlink_metadata(&root).is_err() {
-            std::fs::create_dir(&root).map_err(|err| {
-                provider::bridge::BridgeError::Refused(format!(
-                    "provider start is refused: chain-provider cannot be created: {err}"
-                ))
-            })?;
-        }
-    }
     let confined =
         provider::ProviderBridge::spawn_path_allow(component_key, binary, data_dir, config).await?;
     Ok(Arc::clone(confined.bridge()))
@@ -875,10 +878,9 @@ pub(crate) async fn register_chain_provider_plane(
     }
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
     // Admit against the signed release of the Home this chain plane serves.
-    let bridge = spawn_allow_listed_provider(
-        "chain-provider",
+    // Chain stays on this plain spawn until slice C3.
+    let bridge = provider::ProviderBridge::spawn(
         &checked_native_provider_with_data_dir(data_dir, binary_path),
-        data_dir,
         generic_config,
     )
     .await
@@ -899,8 +901,9 @@ pub(crate) async fn register_chain_provider_plane(
             anyhow::bail!("chain-provider transport failed while applying configuration: {err}");
         }
     }
-    let chain_provider: Arc<dyn provider::Provider> =
-        Arc::new(provider::CapsuleProvider::with_scheme(bridge, "chain"));
+    let chain_provider: Arc<dyn provider::Provider> = Arc::new(
+        provider::CapsuleProvider::with_scheme(Arc::new(bridge), "chain"),
+    );
     provider_registry
         .register_sub_provider("chain", chain_provider)
         .await
@@ -1246,6 +1249,10 @@ async fn setup_server_infrastructure_impl(
 
     match binaries::resolve_verified_native_provider_binary("object-provider") {
         Ok(Some(path)) => {
+            #[cfg(unix)]
+            if let Err(err) = write_object_helper_runtime_did(&data_dir, &device_key) {
+                tracing::warn!("object helper runtime DID was not written: {err}");
+            }
             let object_config = object_provider_bridge_config(&data_dir);
             match spawn_allow_listed_provider("object-provider", &path, &data_dir, object_config)
                 .await
@@ -1516,15 +1523,9 @@ async fn setup_server_infrastructure_impl(
             let generic_chain_config = chain_provider_bridge_config_without_protected_network(
                 &protected_content_runtime_issuer,
             );
-            match spawn_allow_listed_provider(
-                "chain-provider",
-                &path,
-                &data_dir,
-                generic_chain_config,
-            )
-            .await
-            {
+            match provider::ProviderBridge::spawn(&path, generic_chain_config).await {
                 Ok(bridge) => {
+                    let bridge = Arc::new(bridge);
                     let mut transport_ready = true;
                     if let Some(config) = protected_chain_config {
                         match bridge

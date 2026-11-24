@@ -48,6 +48,8 @@ pub mod collaboration_startup;
 pub(crate) mod collaboration_transport;
 pub(crate) mod component;
 #[cfg(test)]
+mod confine_helper_tests;
+#[cfg(test)]
 mod loader_census_tests;
 #[cfg(test)]
 mod start_census_tests;

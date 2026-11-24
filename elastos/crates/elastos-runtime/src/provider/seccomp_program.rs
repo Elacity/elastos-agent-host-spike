@@ -9,12 +9,12 @@ const ALLOW: u32 = 0x7fff_0000;
 const NUMBERS: &str = concat!(
     "arch_prctl:158:- close:3:57 epoll_create1:291:20 epoll_ctl:233:21 epoll_pwait:281:22 epoll_wait:232:- ",
     "eventfd2:290:19 execve:59:221 execveat:322:281 exit:60:93 exit_group:231:94 faccessat:269:48 ",
-    "fchmod:91:52 fcntl:72:25 fdatasync:75:83 flock:73:32 fstat:5:80 fsync:74:82 ",
+    "chmod:90:- fchmod:91:52 fchmodat:268:53 fcntl:72:25 fdatasync:75:83 flock:73:32 fstat:5:80 fsync:74:82 ",
     "ftruncate:77:46 futex:202:98 getdents64:217:61 geteuid:107:175 getrandom:318:278 linkat:265:37 ",
     "lseek:8:62 mkdir:83:- mkdirat:258:34 mmap:9:222 mprotect:10:226 munmap:11:215 ",
     "newfstatat:262:79 openat:257:56 openat2:437:437 poll:7:- ppoll:271:73 pread64:17:67 ",
     "prlimit64:302:261 pwrite64:18:68 read:0:63 readlinkat:267:78 readv:19:65 rename:82:- ",
-    "renameat:-:38 renameat2:316:276 rseq:334:293 rt_sigaction:13:134 socketpair:53:199 statx:332:291 ",
+    "renameat:-:38 renameat2:316:276 rmdir:84:- rseq:334:293 rt_sigaction:13:134 socketpair:53:199 statx:332:291 ",
     "sysinfo:99:179 uname:63:160 unlink:87:- unlinkat:263:35 write:1:64 writev:20:66 ",
     "clone:56:220 clone3:435:435 ",
     // Linux probe rows. The measured x86-only dup2, getpgrp, and readlink

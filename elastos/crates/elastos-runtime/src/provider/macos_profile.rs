@@ -84,14 +84,19 @@ pub(super) fn render_macos_profile(
     rendered
 }
 
-/// Seatbelt text for a helper allow-list. Parameters are the file-root names.
-/// There is no `STORAGE_ROOT` and no `STORAGE_PARENT`: those parents would be
-/// the data directory, which contains `identity/device.key`.
-pub(super) fn render_path_allow_profile(roots: &[&str], outbound: bool) -> Result<String, String> {
+/// Seatbelt text for a helper allow-list. Parameters are the file-root names
+/// and `META_n` metadata literals. There is no `STORAGE_ROOT` and no
+/// `STORAGE_PARENT`: those parents would be the data directory, which contains
+/// `identity/device.key`. Metadata literals are the data directory and its
+/// ancestors only. They are not a read of that directory's children.
+pub(super) fn render_path_allow_profile(
+    roots: &[&str],
+    metadata_slots: usize,
+) -> Result<String, String> {
     if roots.is_empty() {
         return Err("provider start is refused: the path allow-list has no file roots".to_string());
     }
-    let mut lines = Vec::with_capacity(HEAD.len() + 3 + roots.len());
+    let mut lines = Vec::with_capacity(HEAD.len() + 3 + roots.len() + metadata_slots);
     for line in HEAD {
         lines.push((*line).to_string());
     }
@@ -112,12 +117,10 @@ pub(super) fn render_path_allow_profile(roots: &[&str], outbound: bool) -> Resul
             "(allow file-read* file-write* (subpath (param \"{name}\")))"
         ));
     }
-    // Chain places outbound HTTPS. `(deny network*)` stays, so inbound and
-    // bind remain refused. mDNSResponder is the macOS name lookup for that
-    // outbound call. The file roots are unchanged.
-    if outbound {
-        lines.push("(allow network-outbound)".to_string());
-        lines.push("(allow mach-lookup (global-name \"com.apple.mDNSResponder\"))".to_string());
+    for index in 0..metadata_slots {
+        lines.push(format!(
+            "(allow file-read-metadata (literal (param \"META_{index}\")))"
+        ));
     }
     let mut rendered = lines.join("\n");
     rendered.push('\n');

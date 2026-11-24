@@ -1681,6 +1681,59 @@ impl ProviderBridge {
         Self::spawn_with_timeouts(binary_path, config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT).await
     }
 
+    fn bridge_from_launch(launched: super::os_entry::Launched) -> Result<Self, BridgeError> {
+        #[cfg(target_os = "macos")]
+        let executable_copy = {
+            #[cfg(not(elastos_unsupported_os_check))]
+            {
+                Some(launched.prepared)
+            }
+            #[cfg(elastos_unsupported_os_check)]
+            {
+                None
+            }
+        };
+        let fork = ForkChild::start(launched.pid)?;
+        let mut to_child = std::fs::File::from(launched.to_child);
+        if let Some(line) = launched_pid_line(launched.pid) {
+            use std::io::Write as _;
+            if let Err(error) = to_child.write_all(line.as_bytes()) {
+                drop(fork);
+                return Err(BridgeError::Io(error));
+            }
+        }
+        let from_child = std::fs::File::from(launched.from_child);
+        let bridge = Self {
+            io: Arc::new(Mutex::new(ProviderIo {
+                writer: Box::new(tokio::fs::File::from_std(to_child)),
+                reader: Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
+                    from_child,
+                ))),
+            })),
+            child: Arc::new(Mutex::new(None)),
+            fork: Mutex::new(Some(fork)),
+            #[cfg(target_os = "macos")]
+            executable_copy: Arc::new(Mutex::new(executable_copy)),
+            #[cfg(unix)]
+            helper_owner: Mutex::new(None),
+            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
+            shutdown_timeout: SHUTDOWN_TIMEOUT,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_ipc_dir: Mutex::new(None),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_brokers: Mutex::new(BrokerTasks::default()),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_provider_pid: Arc::new(AtomicU32::new(0)),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            _local_provider_birth: Arc::new(AtomicU64::new(0)),
+            #[cfg(target_os = "macos")]
+            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
+        };
+        #[cfg(target_os = "macos")]
+        bridge.watch_confined_executable_copy();
+        Ok(bridge)
+    }
+
     /// Start a rights-declaring provider through the OS entry and return
     /// `Confined` only after `Init` succeeded.
     ///
@@ -1734,55 +1787,7 @@ impl ProviderBridge {
         drop(stdin_read);
         drop(stdout_write);
 
-        #[cfg(target_os = "macos")]
-        let executable_copy = {
-            #[cfg(not(elastos_unsupported_os_check))]
-            {
-                Some(launched.prepared)
-            }
-            #[cfg(elastos_unsupported_os_check)]
-            {
-                None
-            }
-        };
-        let fork = ForkChild::start(launched.pid)?;
-        let mut to_child = std::fs::File::from(launched.to_child);
-        if let Some(line) = launched_pid_line(launched.pid) {
-            use std::io::Write as _;
-            if let Err(error) = to_child.write_all(line.as_bytes()) {
-                drop(fork);
-                return Err(BridgeError::Io(error));
-            }
-        }
-        let from_child = std::fs::File::from(launched.from_child);
-        let bridge = Self {
-            io: Arc::new(Mutex::new(ProviderIo {
-                writer: Box::new(tokio::fs::File::from_std(to_child)),
-                reader: Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
-                    from_child,
-                ))),
-            })),
-            child: Arc::new(Mutex::new(None)),
-            fork: Mutex::new(Some(fork)),
-            #[cfg(target_os = "macos")]
-            executable_copy: Arc::new(Mutex::new(executable_copy)),
-            #[cfg(unix)]
-            helper_owner: Mutex::new(None),
-            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
-            shutdown_timeout: SHUTDOWN_TIMEOUT,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_ipc_dir: Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_brokers: Mutex::new(BrokerTasks::default()),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_birth: Arc::new(AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
-        };
-        #[cfg(target_os = "macos")]
-        bridge.watch_confined_executable_copy();
+        let bridge = Self::bridge_from_launch(launched)?;
         let mut start = ConfinedStart {
             bridge: Some(bridge),
             root: created_root,
@@ -1804,16 +1809,21 @@ impl ProviderBridge {
         })
     }
 
-    /// Start localhost, object, or chain on that provider's path allow-list.
+    /// Start localhost or object on that provider's path allow-list.
     ///
-    /// There is no single storage root. A refusal starts nothing, and there is
-    /// no fallback to plain `spawn`.
+    /// Chain stays on the plain spawn until slice C3. There is no single
+    /// storage root. A refusal starts nothing.
     pub async fn spawn_path_allow(
         component_key: &str,
         binary_path: &CheckedExecutable,
         data_dir: &Path,
         config: ProviderConfig,
     ) -> Result<Confined, BridgeError> {
+        if component_key == "chain-provider" {
+            return Err(BridgeError::Refused(
+                "provider start is refused: chain-provider stays unconfined until slice C3".into(),
+            ));
+        }
         if super::rights_table::RuntimeProviderId::path_allow(component_key).is_none() {
             return Err(BridgeError::Refused(format!(
                 "provider start is refused: component key \"{component_key}\" has no path allow-list"
@@ -1832,55 +1842,7 @@ impl ProviderBridge {
                 .map_err(BridgeError::Refused)?;
         drop(stdin_read);
         drop(stdout_write);
-        #[cfg(target_os = "macos")]
-        let executable_copy = {
-            #[cfg(not(elastos_unsupported_os_check))]
-            {
-                Some(launched.prepared)
-            }
-            #[cfg(elastos_unsupported_os_check)]
-            {
-                None
-            }
-        };
-        let fork = ForkChild::start(launched.pid)?;
-        let mut to_child = std::fs::File::from(launched.to_child);
-        if let Some(line) = launched_pid_line(launched.pid) {
-            use std::io::Write as _;
-            if let Err(error) = to_child.write_all(line.as_bytes()) {
-                drop(fork);
-                return Err(BridgeError::Io(error));
-            }
-        }
-        let from_child = std::fs::File::from(launched.from_child);
-        let bridge = Self {
-            io: Arc::new(Mutex::new(ProviderIo {
-                writer: Box::new(tokio::fs::File::from_std(to_child)),
-                reader: Box::new(tokio::io::BufReader::new(tokio::fs::File::from_std(
-                    from_child,
-                ))),
-            })),
-            child: Arc::new(Mutex::new(None)),
-            fork: Mutex::new(Some(fork)),
-            #[cfg(target_os = "macos")]
-            executable_copy: Arc::new(Mutex::new(executable_copy)),
-            #[cfg(unix)]
-            helper_owner: Mutex::new(None),
-            shutdown_completed: std::sync::atomic::AtomicBool::new(false),
-            shutdown_timeout: SHUTDOWN_TIMEOUT,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_ipc_dir: Mutex::new(None),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_brokers: Mutex::new(BrokerTasks::default()),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_birth: Arc::new(AtomicU64::new(0)),
-            #[cfg(target_os = "macos")]
-            hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
-        };
-        #[cfg(target_os = "macos")]
-        bridge.watch_confined_executable_copy();
+        let bridge = Self::bridge_from_launch(launched)?;
         bridge.init_provider(config, INIT_TIMEOUT).await?;
         Ok(Confined {
             bridge: Arc::new(bridge),

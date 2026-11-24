@@ -53,6 +53,13 @@ impl ObjectProviderProcess {
         if !data_dir.is_absolute() {
             return response_error("invalid_config", "config.base_path must be absolute");
         }
+        #[cfg(unix)]
+        if !device_key_is_closed(&data_dir) {
+            return response_error(
+                "refused",
+                "object helper can open or stat identity/device.key",
+            );
+        }
         self.data_dir = Some(data_dir.clone());
         response_ok(json!({
             "provider": PROVIDER_ID,
@@ -60,6 +67,23 @@ impl ObjectProviderProcess {
             "version": PROVIDER_VERSION,
             "base_path": data_dir,
         }))
+    }
+}
+
+/// Open and lstat of the real key must both fail. A missing key is closed.
+/// A successful open or lstat refuses init. This is not a grant.
+#[cfg(unix)]
+fn device_key_is_closed(data_dir: &std::path::Path) -> bool {
+    let path = data_dir.join("identity").join("device.key");
+    let closed = |err: &std::io::Error| {
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+        )
+    };
+    match (std::fs::File::open(&path), std::fs::symlink_metadata(&path)) {
+        (Err(open_err), Err(stat_err)) => closed(&open_err) && closed(&stat_err),
+        _ => false,
     }
 }
 
@@ -79,6 +103,8 @@ fn response_error(code: &str, message: &str) -> Value {
 }
 
 fn main() {
+    #[cfg(unix)]
+    std::env::set_var("ELASTOS_OBJECT_HELPER", "1");
     eprintln!("object-provider: starting v{PROVIDER_VERSION}");
     let stdin = io::stdin();
     let mut stdout = io::stdout();

@@ -677,9 +677,9 @@ mod tests {
             prepared.filters, chain_filter,
             "the chain allow-list filter is chain's own grant"
         );
-        assert_ne!(
+        assert_eq!(
             prepared.filters, did_filter,
-            "the chain allow-list filter must not be the Did list"
+            "chain has no extra calls until slice C3"
         );
         for name in elastos_common::localhost::FILE_BACKED_ROOTS {
             let path = data.join(name);
@@ -697,7 +697,13 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(local.filters, local_filter);
-        assert_ne!(local.filters, prepared.filters);
+        let (_object, object_plan) =
+            path_allow::render_with_plan("object-provider", data, executable, 5).unwrap();
+        let object = prepare_path_allow(RuntimeProviderId::Object, object_plan).unwrap();
+        assert_ne!(
+            object.filters, local.filters,
+            "object and localhost keep separate syscall lists"
+        );
         assert!(prepared
             .plan
             .rules

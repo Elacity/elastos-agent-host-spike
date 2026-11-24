@@ -1,10 +1,11 @@
-//! File allow-list for localhost, object, and chain.
+//! File allow-list for localhost and object.
 //!
 //! A single `STORAGE_ROOT` of the data directory would include
 //! `identity/device.key`. Each helper gets its own child directories instead.
 //! Each of those directories must already exist, be owned by the current user,
-//! and must not be a symlink. `spawn_path_allow` starts them. The single-root
-//! `spawn_confined` does not.
+//! and must not be a symlink. `spawn_path_allow` starts localhost and object.
+//! Chain stays on the plain spawn until slice C3. The single-root
+//! `spawn_confined` does not start these helpers.
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -18,6 +19,10 @@ pub(crate) struct HelperConfinement {
     pub landlock_abi: u32,
     pub landlock_handled: u64,
     pub landlock: Vec<HelperLandlockRule>,
+    /// Data directory and its ancestors. Seatbelt `file-read-metadata` literals
+    /// only. They are not Landlock rules: a path-beneath rule here would include
+    /// `identity/device.key`.
+    pub metadata: Vec<PathBuf>,
 }
 
 /// One Landlock path rule. `mask` is the ABI-5 access bits.
@@ -50,6 +55,46 @@ fn file_roots(provider: HelperId) -> &'static [&'static str] {
         HelperId::Object => OBJECT_ROOTS,
         HelperId::Chain => CHAIN_ROOTS,
     }
+}
+
+fn runtime_provider(provider: HelperId) -> super::rights_table::RuntimeProviderId {
+    match provider {
+        HelperId::Localhost => super::rights_table::RuntimeProviderId::Localhost,
+        HelperId::Object => super::rights_table::RuntimeProviderId::Object,
+        HelperId::Chain => super::rights_table::RuntimeProviderId::Chain,
+    }
+}
+
+/// The data directory and every ancestor except `/`, for both the path the
+/// caller passed and its canonical path. `/` already has `file-read*`.
+fn metadata_literals(data_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    if !data_dir.is_absolute() {
+        return Err(
+            "provider start is refused: the data directory path is not absolute".to_string(),
+        );
+    }
+    let canonical = std::fs::canonicalize(data_dir).map_err(|_| {
+        "provider start is refused: the data directory could not be resolved".to_string()
+    })?;
+    let mut paths = Vec::new();
+    for start in [data_dir, canonical.as_path()] {
+        let mut current = Some(start);
+        while let Some(path) = current {
+            if path == Path::new("/") {
+                break;
+            }
+            if !paths.iter().any(|seen| seen == path) {
+                paths.push(path.to_path_buf());
+            }
+            current = path.parent();
+        }
+    }
+    if paths.is_empty() {
+        return Err(
+            "provider start is refused: the data directory has no metadata path".to_string(),
+        );
+    }
+    Ok(paths)
 }
 
 fn helper_id(component_key: &str) -> Result<HelperId, String> {
@@ -220,10 +265,8 @@ pub(super) fn render_with_plan(
         );
     }
     let names: Vec<&str> = roots.iter().map(|root| root.name).collect();
-    let seatbelt = super::macos_profile::render_path_allow_profile(
-        &names,
-        matches!(provider, HelperId::Chain),
-    )?;
+    let metadata = metadata_literals(data_dir)?;
+    let seatbelt = super::macos_profile::render_path_allow_profile(&names, metadata.len())?;
     if seatbelt.contains("STORAGE_ROOT")
         || seatbelt.contains("STORAGE_PARENT")
         || seatbelt.contains("identity")
@@ -232,7 +275,12 @@ pub(super) fn render_with_plan(
             "provider start is refused: the Seatbelt profile names a forbidden path".to_string(),
         );
     }
-    let plan = super::landlock_plan::build_path_allow_plan(&roots, executable, landlock_abi)?;
+    let plan = super::landlock_plan::build_path_allow_plan(
+        runtime_provider(provider),
+        &roots,
+        executable,
+        landlock_abi,
+    )?;
     if plan.root_dev.len() != roots.len() || plan.root_ino.len() != roots.len() {
         return Err(
             "provider start is refused: the Landlock plan has no identity for a root".to_string(),
@@ -268,6 +316,7 @@ pub(super) fn render_with_plan(
             landlock_abi: plan.abi,
             landlock_handled: plan.handled,
             landlock,
+            metadata,
         },
         plan,
     ))
@@ -391,17 +440,20 @@ mod tests {
             assert!(rendered
                 .seatbelt
                 .starts_with("(version 1)\n(deny default)\n(deny network*)\n"));
-            if *component_key == "chain-provider" {
-                assert!(rendered.seatbelt.contains("(allow network-outbound)\n"));
-                assert!(rendered
-                    .seatbelt
-                    .contains("(allow mach-lookup (global-name \"com.apple.mDNSResponder\"))"));
-                assert!(!rendered.seatbelt.contains("(allow network*)"));
-                assert!(!rendered.seatbelt.contains("(allow network-inbound"));
-                assert!(!rendered.seatbelt.contains("(allow network-bind"));
-            } else {
-                assert!(!rendered.seatbelt.contains("(allow network"));
-            }
+            assert!(!rendered.seatbelt.contains("(allow network"));
+            assert!(
+                !rendered.metadata.is_empty(),
+                "{component_key} metadata literals"
+            );
+            assert!(rendered.metadata.iter().any(|path| path == data_dir));
+            assert!(rendered
+                .metadata
+                .iter()
+                .all(|path| { path != Path::new("/") && path != &key && path != &identity }));
+            assert!(!rendered
+                .landlock
+                .iter()
+                .any(|rule| rendered.metadata.iter().any(|path| path == &rule.path)));
             assert!(!rendered
                 .seatbelt
                 .contains(data_dir.to_str().expect("data directory path")));
@@ -425,11 +477,22 @@ mod tests {
                 }
             }
             assert_eq!(subpaths, *expected, "{component_key} seatbelt roots");
-            assert_eq!(
-                literals,
-                ["PROVIDER_EXECUTABLE"],
-                "{component_key} literals"
+            assert_eq!(literals.first().copied(), Some("PROVIDER_EXECUTABLE"));
+            assert!(
+                literals.len() > 1
+                    && literals
+                        .iter()
+                        .skip(1)
+                        .all(|name| name.starts_with("META_")),
+                "{component_key} literals {literals:?}"
             );
+            for line in rendered.seatbelt.lines() {
+                if line.contains("META_") {
+                    assert!(line.contains("file-read-metadata"), "{line}");
+                    assert!(!line.contains("file-read-data"), "{line}");
+                    assert!(!line.contains("subpath"), "{line}");
+                }
+            }
 
             let (roots, rest): (Vec<_>, Vec<_>) = rendered.landlock.iter().partition(|rule| {
                 rule.name != "PROVIDER_EXECUTABLE" && rule.name != "LANDLOCK_LOADER_PATHS"

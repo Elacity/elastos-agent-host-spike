@@ -43,8 +43,9 @@ pub(super) static RIGHTS: &[RightRow] = &[
 const DID_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const WALLET_RIGHT_IDS: &[&str] = &["storage", "bound-executable"];
 const MODEL_RIGHT_IDS: &[&str] = &["storage", "bound-executable", "model-gpu"];
-/// Localhost, object, and chain use the same file and exec rows. Chain's
-/// outbound calls are added in `linux_seccomp_list`, not as a second storage root.
+/// Localhost, object, and chain use the same file and exec rows. A helper's
+/// extra calls live in `measured_syscalls`, not in a second storage root.
+/// Chain adds none until slice C3.
 const HELPER_RIGHT_IDS: &[&str] = DID_RIGHT_IDS;
 
 /// The caller derives this id from the Runtime's `components.json` key,
@@ -90,6 +91,16 @@ impl RuntimeProviderId {
             Self::Wallet => WALLET_RIGHT_IDS,
             Self::Model => MODEL_RIGHT_IDS,
             Self::Localhost | Self::Object | Self::Chain => HELPER_RIGHT_IDS,
+        }
+    }
+
+    /// Calls measured for this helper and absent from its file rows.
+    /// `unlinkat` and `fchmod` stay on the storage row. Chain adds none until C3.
+    pub(super) fn measured_syscalls(self) -> &'static str {
+        match self {
+            Self::Localhost => "rmdir",
+            Self::Object => "chmod fchmodat flock rename renameat rmdir",
+            Self::Did | Self::Wallet | Self::Model | Self::Chain => "",
         }
     }
 }

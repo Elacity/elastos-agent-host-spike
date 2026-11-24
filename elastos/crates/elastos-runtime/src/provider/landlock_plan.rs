@@ -187,6 +187,7 @@ pub(super) struct PathAllowPlan {
 }
 
 pub(super) fn build_path_allow_plan(
+    provider: RuntimeProviderId,
     roots: &[AllowRoot],
     executable: &Path,
     abi: u32,
@@ -220,7 +221,7 @@ pub(super) fn build_path_allow_plan(
         executable.to_path_buf(),
         BINARY,
     ));
-    for path in loader_paths(RuntimeProviderId::Did, LoaderArch::host()) {
+    for path in loader_paths(provider, LoaderArch::host()) {
         rules.push(PathRule("LANDLOCK_LOADER_PATHS", path.into(), BINARY));
     }
     Ok(PathAllowPlan {

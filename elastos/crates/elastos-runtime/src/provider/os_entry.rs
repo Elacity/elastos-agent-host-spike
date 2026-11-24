@@ -222,100 +222,38 @@ fn start_path_allow_os(
     data_dir: &Path,
     stdio: ChildStdio,
 ) -> Result<Launched, String> {
-    use std::os::fd::FromRawFd;
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
-
     let confinement = super::path_allow::render(component_key, data_dir, executable.path(), 5)?;
     let prepared = executable.verify_at_spawn()?;
     let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
         format!("provider start is refused: cannot resolve provider executable: {error}")
     })?;
-    let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
-    command.env_clear();
-    command.env("ELASTOS_DATA_DIR", data_dir);
-    command.arg("-p").arg(&confinement.seatbelt);
+    let mut defines = Vec::new();
     for rule in &confinement.landlock {
         if matches!(rule.name, "PROVIDER_EXECUTABLE" | "LANDLOCK_LOADER_PATHS") {
             continue;
         }
-        command
-            .arg("-D")
-            .arg(format!("{}={}", rule.name, rule.path.display()));
+        defines.push((rule.name.to_string(), rule.path.clone()));
     }
-    command
-        .arg("-D")
-        .arg(format!("PROVIDER_EXECUTABLE={}", binary.display()));
-    command.arg(&binary);
-    let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) };
-    if arg_max <= 0 {
-        return Err("provider start is refused: cannot inspect argument limit".into());
+    for (index, path) in confinement.metadata.iter().enumerate() {
+        defines.push((format!("META_{index}"), path.clone()));
     }
-    use std::os::unix::ffi::OsStrExt as _;
-    let args: Vec<_> = command.get_args().collect();
-    let argv_bytes = "/usr/bin/sandbox-exec".len()
-        + 1
-        + args
-            .iter()
-            .map(|arg| arg.as_bytes().len() + 1)
-            .sum::<usize>()
-        + (args.len() + 2) * std::mem::size_of::<*const libc::c_char>();
-    if argv_bytes > (arg_max as usize) / 2 {
-        return Err(
-            "provider start is refused: sandbox-exec arguments exceed argument limit".into(),
-        );
-    }
-    let duplicate = |fd| {
-        let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-        if copy < 0 {
-            Err(format!(
-                "provider start is refused: cannot duplicate child pipe: {}",
-                std::io::Error::last_os_error()
-            ))
-        } else {
-            Ok(unsafe { OwnedFd::from_raw_fd(copy) })
-        }
-    };
-    let input = duplicate(stdio.stdin)?;
-    let output = duplicate(stdio.stdout)?;
-    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
-        return Err(format!(
-            "provider start is refused: cannot inspect descriptor limit: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let max_fd = macos_fd_sweep_limit(
-        unsafe { limit.assume_init() }.rlim_cur,
-        macos_maxfilesperproc(),
+    defines.push(("PROVIDER_EXECUTABLE".to_string(), binary.clone()));
+    let bound: Vec<(&str, &Path)> = defines
+        .iter()
+        .map(|(name, path)| (name.as_str(), path.as_path()))
+        .collect();
+    let mut command = macos_sandbox_command(
+        Path::new("/usr/bin/sandbox-exec"),
+        &confinement.seatbelt,
+        &binary,
+        &bound,
+        Some(data_dir),
     )?;
-    unsafe {
-        command.pre_exec(move || {
-            for fd in 3..max_fd {
-                let flags = libc::fcntl(fd, libc::F_GETFD);
-                if flags >= 0 && libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            Ok(())
-        });
-    }
-    let child = command
-        .stdin(Stdio::from(input))
-        .stdout(Stdio::from(output))
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| {
-            format!("provider start is refused: cannot start sandbox-exec: {error}")
-        })?;
-    let pid = child.id() as libc::pid_t;
-    drop(child);
-    Ok(Launched {
-        pid,
-        to_child: stdio.to_child,
-        from_child: stdio.from_child,
-        prepared,
-    })
+    // localhost stats the working directory before it reads init. That directory
+    // is the data directory, which has a metadata grant. The parent's directory
+    // does not.
+    command.current_dir(data_dir);
+    macos_launch(command, stdio, prepared)
 }
 
 #[cfg(any(
@@ -411,12 +349,10 @@ fn macos_start(
     stdio: ChildStdio,
     profile: String,
 ) -> Result<Launched, String> {
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::OpenOptionsExt;
-    use std::os::unix::process::CommandExt;
-    use std::process::Stdio;
 
     let directory = std::fs::OpenOptions::new()
         .read(true)
@@ -458,6 +394,26 @@ fn macos_start(
     let binary = std::fs::canonicalize(prepared.exec_path()).map_err(|error| {
         format!("provider start is refused: cannot resolve provider executable: {error}")
     })?;
+    let command = macos_command(
+        Path::new("/usr/bin/sandbox-exec"),
+        &profile,
+        &binary,
+        parent,
+        &storage,
+    )?;
+    macos_launch(command, stdio, prepared)
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+fn macos_launch(
+    mut command: std::process::Command,
+    stdio: ChildStdio,
+    prepared: super::checked_executable::PreparedExecutable,
+) -> Result<Launched, String> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
     let duplicate = |fd| {
         // Command maps this copy to fd 0 or 1. Keep the original copy closed
         // across exec so the provider receives only the protocol descriptors.
@@ -473,13 +429,6 @@ fn macos_start(
     };
     let input = duplicate(stdio.stdin)?;
     let output = duplicate(stdio.stdout)?;
-    let mut command = macos_command(
-        Path::new("/usr/bin/sandbox-exec"),
-        &profile,
-        &binary,
-        parent,
-        &storage,
-    )?;
     let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
         return Err(format!(
@@ -487,8 +436,10 @@ fn macos_start(
             std::io::Error::last_os_error()
         ));
     }
-    let maxfilesperproc = macos_maxfilesperproc();
-    let max_fd = macos_fd_sweep_limit(unsafe { limit.assume_init() }.rlim_cur, maxfilesperproc)?;
+    let max_fd = macos_fd_sweep_limit(
+        unsafe { limit.assume_init() }.rlim_cur,
+        macos_maxfilesperproc(),
+    )?;
     // The child's stdio is already mapped when pre_exec runs. Mark every
     // other open descriptor close-on-exec before sandbox-exec starts.
     unsafe {
@@ -566,16 +517,36 @@ fn macos_command(
     parent: &Path,
     storage: &Path,
 ) -> Result<std::process::Command, String> {
+    macos_sandbox_command(
+        launcher,
+        profile,
+        binary,
+        &[
+            ("STORAGE_ROOT", storage),
+            ("STORAGE_PARENT", parent),
+            ("PROVIDER_EXECUTABLE", binary),
+        ],
+        None,
+    )
+}
+
+#[cfg(all(not(elastos_unsupported_os_check), target_os = "macos"))]
+fn macos_sandbox_command(
+    launcher: &Path,
+    profile: &str,
+    binary: &Path,
+    defines: &[(&str, &Path)],
+    data_dir: Option<&Path>,
+) -> Result<std::process::Command, String> {
     use std::os::unix::ffi::OsStrExt;
 
     let mut command = std::process::Command::new(launcher);
     command.env_clear();
+    if let Some(data_dir) = data_dir {
+        command.env("ELASTOS_DATA_DIR", data_dir);
+    }
     command.arg("-p").arg(profile);
-    for (name, path) in [
-        ("STORAGE_ROOT", storage),
-        ("STORAGE_PARENT", parent),
-        ("PROVIDER_EXECUTABLE", binary),
-    ] {
+    for (name, path) in defines {
         command.arg("-D").arg(format!("{name}={}", path.display()));
     }
     command.arg(binary);

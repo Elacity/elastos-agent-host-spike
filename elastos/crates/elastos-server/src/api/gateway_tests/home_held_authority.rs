@@ -89,11 +89,23 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "start_did_provider",
         "encryption_key: device_key_hex",
     ),
+    (
+        "elastos-server/src/server_infra.rs",
+        "register_chain_provider_plane",
+        "load_or_create_device_key",
+    ),
+    (
+        "elastos-server/src/server_infra.rs",
+        "setup_server_infrastructure_impl",
+        "encryption_key: device_key_hex",
+    ),
 ];
 
-/// Localhost, object, and chain. The same sentence is the census reason for
-/// both narrowed rows. Object has no row of its own.
-const HELPER_FENCE_REASON: &str = "localhost holds the file HKDF key only; object holds no device key; chain holds only the public verifying key; none of the three processes can open identity/device.key";
+/// Chain stays open until slice C3. The sentence is the census reason.
+const CHAIN_C3_REASON: &str = "confined in slice C3 (needs threads, DNS files and network)";
+
+/// Localhost stays open until slice L. Home still passes the raw device key.
+const LOCALHOST_OPEN_REASON: &str = "Home still passes the raw device key to the localhost provider. The row stays open until slice L.";
 
 fn rows() -> Vec<HeldRow> {
     vec![
@@ -1376,7 +1388,7 @@ fn rows() -> Vec<HeldRow> {
         "register_chain_provider_plane",
         "load_or_create_device_key",
         1,
-        mark("narrowed", "device private key", "chain provider", HELPER_FENCE_REASON),
+        mark("open", "device private key", "chain provider", CHAIN_C3_REASON),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1390,7 +1402,12 @@ fn rows() -> Vec<HeldRow> {
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
         1,
-        mark("narrowed", "device private key", "localhost provider", HELPER_FENCE_REASON),
+        mark(
+            "open",
+            "device private key",
+            "localhost provider",
+            LOCALHOST_OPEN_REASON,
+        ),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -2025,10 +2042,10 @@ fn open_rows_are_an_explicit_list() {
     assert_eq!(from_rows, listed, "open rows drifted from OPEN_ROWS");
 }
 
-/// Localhost, object, and chain start through the path allow-list. A plain
-/// `ProviderBridge::spawn` of any of the three fails this test.
+/// Localhost and object start through the path allow-list. Chain stays on the
+/// plain spawn until slice C3. Both key rows stay open.
 #[test]
-fn localhost_object_and_chain_are_not_spawned_unconfined() {
+fn localhost_and_object_are_confined_and_chain_stays_plain() {
     let raw = sources()
         .get("elastos-server/src/server_infra.rs")
         .expect("server_infra")
@@ -2058,21 +2075,16 @@ fn localhost_object_and_chain_are_not_spawned_unconfined() {
     let mut keys = helper_component_keys(setup[0]);
     keys.extend(helper_component_keys(plane[0]));
     keys.sort();
-    assert_eq!(
-        keys,
-        vec![
-            "chain-provider",
-            "chain-provider",
-            "localhost-provider",
-            "object-provider",
-        ]
-    );
+    assert_eq!(keys, vec!["localhost-provider", "object-provider"]);
+    assert!(plane[0].contains("ProviderBridge::spawn("));
+    assert!(!plane[0].contains("spawn_path_allow"));
+    assert!(setup[0].contains("ProviderBridge::spawn("));
     let spawn = "ProviderBridge::spawn(";
     let mut from = 0;
     while let Some(at) = raw[from..].find(spawn) {
         let pos = from + at;
         let window = &raw[pos..raw.len().min(pos + 180)];
-        for key in ["localhost-provider", "object-provider", "chain-provider"] {
+        for key in ["localhost-provider", "object-provider"] {
             assert!(
                 !window.contains(key),
                 "{key} is spawned unconfined: {window}"
@@ -2081,16 +2093,20 @@ fn localhost_object_and_chain_are_not_spawned_unconfined() {
         from = pos + spawn.len();
     }
     for row in rows() {
-        if matches!(
-            (row.function, row.mechanism),
-            ("register_chain_provider_plane", "load_or_create_device_key")
-                | (
-                    "setup_server_infrastructure_impl",
-                    "encryption_key: device_key_hex"
-                )
-        ) {
-            assert_eq!(row.status, "narrowed");
-            assert_eq!(row.reason, HELPER_FENCE_REASON);
+        if (row.function, row.mechanism)
+            == ("register_chain_provider_plane", "load_or_create_device_key")
+        {
+            assert_eq!(row.status, "open");
+            assert_eq!(row.reason, CHAIN_C3_REASON);
+        }
+        if (row.function, row.mechanism)
+            == (
+                "setup_server_infrastructure_impl",
+                "encryption_key: device_key_hex",
+            )
+        {
+            assert_eq!(row.status, "open");
+            assert_eq!(row.reason, LOCALHOST_OPEN_REASON);
         }
     }
 }

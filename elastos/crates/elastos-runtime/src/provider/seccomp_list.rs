@@ -23,9 +23,10 @@ const BASELINE: &str = concat!(
     "arch_prctl close exit_group getrandom mmap mprotect ppoll poll rt_sigaction",
 );
 
-// Linux probe rows follow the original model names. `socket` is absent here:
-// the program admits it only for AF_UNIX. `connect`, `sendto` and `bind` stay,
-// because the probe measured them and they do not carry an address family.
+// Linux probe rows follow the original model names. `socket` is absent from
+// this model list: the model program admits it only for AF_UNIX, in the
+// argument rules. `connect`, `sendto` and `bind` stay, because the probe
+// measured them and they do not carry an address family.
 const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
 /// The lab sorts names after it joins declared rights and the baseline.
@@ -39,15 +40,13 @@ pub(super) fn linux_seccomp_list(
         .iter()
         .flat_map(|row| row.linux_syscalls.split_whitespace())
         .chain(BASELINE.split_whitespace())
+        .chain(provider.measured_syscalls().split_whitespace())
         .collect();
     match provider {
-        RuntimeProviderId::Did | RuntimeProviderId::Localhost | RuntimeProviderId::Object => {}
-        // Chain's reqwest client places outbound TCP. `read` and `write` are
-        // already in the baseline. Inbound calls stay out. The file grant is
-        // still only the chain-provider directory.
-        RuntimeProviderId::Chain => {
-            names.extend(["connect", "getsockopt", "recvfrom", "sendto", "socket"])
-        }
+        RuntimeProviderId::Did
+        | RuntimeProviderId::Localhost
+        | RuntimeProviderId::Object
+        | RuntimeProviderId::Chain => {}
         RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
         RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
     }
@@ -243,5 +242,40 @@ mod tests {
                 assert!(lab.contains(call), "pin d0dd5693 does not derive baseline {call} for the {name} {arch:?} grant");
             }
         });
+    }
+
+    #[test]
+    fn each_helper_keeps_its_own_measured_calls() {
+        let local = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Localhost);
+        let object = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Object);
+        let chain = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Chain);
+        let did = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Did);
+        let local_x86 = linux_seccomp_list(RuntimeProviderId::Localhost, &local, AuditArch::X86_64);
+        let object_x86 = linux_seccomp_list(RuntimeProviderId::Object, &object, AuditArch::X86_64);
+        let chain_x86 = linux_seccomp_list(RuntimeProviderId::Chain, &chain, AuditArch::X86_64);
+        let did_x86 = linux_seccomp_list(RuntimeProviderId::Did, &did, AuditArch::X86_64);
+        assert_eq!(chain_x86, did_x86, "chain adds no calls until slice C3");
+        assert!(local_x86.contains(&"rmdir"));
+        assert!(!local_x86.contains(&"flock"));
+        assert!(!local_x86.contains(&"socket"));
+        assert!(!local_x86.contains(&"connect"));
+        assert!(object_x86.contains(&"flock"));
+        assert!(object_x86.contains(&"chmod"));
+        assert!(object_x86.contains(&"fchmodat"));
+        assert!(object_x86.contains(&"rename"));
+        assert!(object_x86.contains(&"rmdir"));
+        assert!(!object_x86.contains(&"socket"));
+        assert!(!object_x86.contains(&"clone"));
+        let local_arm = linux_seccomp_list(RuntimeProviderId::Localhost, &local, AuditArch::Aarch64);
+        let object_arm = linux_seccomp_list(RuntimeProviderId::Object, &object, AuditArch::Aarch64);
+        assert!(!local_arm.contains(&"rmdir"));
+        assert!(local_arm.contains(&"unlinkat"));
+        assert!(object_arm.contains(&"flock"));
+        assert!(object_arm.contains(&"fchmodat"));
+        assert!(object_arm.contains(&"renameat"));
+        assert!(!object_arm.contains(&"chmod"));
+        assert!(!object_arm.contains(&"rename"));
+        assert_ne!(object_x86, local_x86);
+        assert_ne!(object_arm, local_arm);
     }
 }

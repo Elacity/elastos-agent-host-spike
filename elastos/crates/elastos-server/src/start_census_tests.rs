@@ -167,7 +167,7 @@ fn places() -> Vec<Place> {
         ),
         place(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_start",
+            "macos_launch",
             "spawn()".to_string(),
             1,
             "admitted grant, checked storage, Seatbelt profile",
@@ -345,8 +345,15 @@ fn places() -> Vec<Place> {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             spawn.clone(),
-            15,
+            13,
             P2_2,
+        ),
+        place(
+            "elastos-server/src/server_infra.rs",
+            "spawn_allow_listed_provider",
+            spawn.clone(),
+            2,
+            "localhost and object path allow-list; windows stays plain",
         ),
         place(
             "elastos-server/src/server_infra.rs",
