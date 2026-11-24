@@ -344,6 +344,27 @@ applications may depend on them.
 
 ## Current implementation status
 
+### Prototype inside Home
+
+For this prototype, an agent runs inside Home's main program. The guest runs in
+the Wasm sandbox the Runtime already uses for a component capsule. A default
+build leaves this off: Home does not open the agent listener, does not create
+an attach secret, and does not write the agent coordinates file. A build with
+the prototype feature starts that listener on loopback, on the Home data
+folder, and only for a stored agent.
+
+The named next step is a confined worker that runs the agent without Home's
+keys.
+
+Two standing conditions are named here so later work can close them:
+
+- Condition 4 is a later slice. Start and Stop join the signed audit chain and
+  fail closed, and the runner's start-audit row stops counting
+  `agent_plan.dispatch.started` (`gateway_inspect_actions.rs`,
+  `append_agent_plan_dispatch_audit`).
+- Condition 7 is this section: the interim above, and the confined worker as
+  the named next step. A later slice does not owe this statement again.
+
 The repository already establishes several parts of this model:
 
 - `Users` and `UsersAI` are canonical local roots.
