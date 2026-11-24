@@ -11738,6 +11738,10 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     use elastos_runtime::provider::{
         ProviderCarrierRoute, ProviderInvocation, ProviderInvocationTransport, ProviderTransfer,
     };
+    consumer_registry
+        .remember_carrier_peer_ticket(&bob_did, &ticket)
+        .await
+        .unwrap();
     let invocation = ProviderInvocation {
         source: "browser".into(),
         target: "browser-engine".into(),
@@ -11746,10 +11750,10 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
         transfer: ProviderTransfer::Json,
         range: None,
         progress: None,
-        transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::ConnectTicket {
-            connect_ticket: ticket,
-            peer_did: Some(bob_did),
+        transport: ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+            peer_did: bob_did.clone(),
             timeout_ms: Some(2000),
+            reply_wait_ms: None,
         }),
     };
     assert!(consumer_registry.invoke_provider(invocation).await.is_err());
