@@ -461,6 +461,7 @@ fn write_coords(path: &Path, api_url: &str, attach_secret: &str) -> anyhow::Resu
         policy_sha256: String::new(),
         dependency_sha256: String::new(),
         generation: String::new(),
+        process_start: String::new(),
         home_url: String::new(),
     })?;
     let write_result = (|| -> anyhow::Result<()> {

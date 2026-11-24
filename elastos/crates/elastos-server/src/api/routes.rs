@@ -446,19 +446,26 @@ pub async fn stop_capsule(
     }
 }
 
-/// Body of `POST /api/capsules/stop-agent`. The only selector is the agent
-/// id, which is the principal on the Runtime row. A capsule name is not a
-/// field: an unknown field is refused and nothing is stopped.
+/// Body of `POST /api/capsules/stop-agent`. The agent id is the principal
+/// on the Runtime rows. A settle path that must end only the session its
+/// own Start made also names that `session_id`; without it every live row
+/// of the agent is stopped. A capsule name is not a field: an unknown field
+/// is refused and nothing is stopped.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StopAgentRequest {
     agent_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Serialize)]
 struct StoppedAgentBody {
     session_id: String,
     status: String,
+    /// Whether this stop left `ended_at` set. The gateway's signed row says
+    /// `ok` only when this is true and `status` is an ended status.
+    ended: bool,
 }
 
 #[derive(Serialize)]
@@ -500,6 +507,10 @@ pub async fn stop_agent_session(
             .into_response();
     }
     // This Stop's guard clears only its own token, including cancellation and panic.
+    // Lock order, shared with retire and one live run: `begin_agent_stop`
+    // takes `agent_launches`, then `stop_marks`. The live-run mutex is not
+    // taken here. A Start admits `live_runs` only while it already holds
+    // `agent_launches`.
     let _stop = runtime.begin_agent_stop(&agent_id).await;
     #[cfg(test)]
     {
@@ -508,12 +519,22 @@ pub async fn stop_agent_session(
             panic!("stop panicked after its mark");
         }
     }
-    stop_collected_agent_rows(&runtime, &agent_id).await
+    stop_collected_agent_rows(&runtime, &agent_id, request.session_id.as_deref()).await
 }
 
 /// Reads and stops rows after the per-agent stopping flag is set.
-async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::response::Response {
-    let ids = runtime.live_sessions_for_agent(agent_id).await;
+/// `only_session` is the settle path of a Start: keep only that row, so an
+/// earlier session of the same agent, which already has its own completion
+/// row, stays up. `None` stops every live row of the agent.
+async fn stop_collected_agent_rows(
+    runtime: &Runtime,
+    agent_id: &str,
+    only_session: Option<&str>,
+) -> axum::response::Response {
+    let mut ids = runtime.live_sessions_for_agent(agent_id).await;
+    if let Some(session_id) = only_session {
+        ids.retain(|id| id == session_id);
+    }
     if ids.is_empty() {
         return (
             StatusCode::NOT_FOUND,
@@ -567,6 +588,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
                 stopped.push(StoppedAgentBody {
                     session_id: info.session_id,
                     status: info.status,
+                    ended: info.ended_at.is_some(),
                 });
             }
             continue;
@@ -586,11 +608,13 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
             stopping.push(StoppedAgentBody {
                 session_id: info.session_id,
                 status: "stopping".to_string(),
+                ended: false,
             });
         } else {
             stopped.push(StoppedAgentBody {
                 session_id: info.session_id,
                 status: info.status,
+                ended: true,
             });
         }
     }

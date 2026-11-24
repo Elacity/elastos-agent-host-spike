@@ -655,16 +655,35 @@ struct RuntimeAgentLaunchResponse {
     status: String,
 }
 
-/// The agent Runtime's coordinates, or the name of a plane task that has ended.
+/// The runtime that runs the agent. The agent plane's coordinates win when
+/// they are live: that is the runtime the plane started. When they are not,
+/// the Home runtime's coordinates are the hop the signed lifecycle used, so
+/// a Home that has not started the plane, and a test stub of that hop, still
+/// start and stop the guest. A plane task that has ended is named and is not
+/// hidden by the Home file.
 async fn live_agent_coords(
     data_dir: &FsPath,
 ) -> anyhow::Result<crate::runtime_control::RuntimeCoords> {
     if let Some(name) = crate::api::agent_plane::task_fault(data_dir) {
         anyhow::bail!(name);
     }
-    crate::api::agent_plane::live_coords(data_dir)
+    if let Some(coords) = crate::api::agent_plane::live_coords(data_dir).await {
+        return Ok(coords);
+    }
+    load_live_runtime_coords(data_dir)
         .await
         .ok_or_else(|| anyhow::anyhow!("agent runtime is not running"))
+}
+
+/// The short cause a failed launch carries in the signed row and the
+/// answer. The runtime's own detail can name host paths, so it stays in
+/// the log and never travels into the signed chain or the response.
+const RUNTIME_LAUNCH_FAILURE_CAUSE: &str = "the runtime did not start the agent host";
+
+/// A launch body that names a filesystem path. A 409 sentence such as
+/// "this agent is already running" has neither separator.
+fn text_has_host_path(text: &str) -> bool {
+    text.contains('/') || text.contains('\\')
 }
 
 /// Ask the live Home Runtime to start one agent. `capsule_dir` is the
@@ -714,8 +733,18 @@ pub(super) async fn launch_runtime_agent(
         return Err(crate::agents::Refused(trimmed.to_string()).into());
     }
     if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        anyhow::bail!("runtime launch failed ({}): {}", status, text.trim());
+        let detail = response.text().await.unwrap_or_default();
+        // The body can name a bundle root. It stays in this log.
+        tracing::warn!("runtime launch failed ({status}): {detail}");
+        let trimmed = detail.trim();
+        // A 409 with no host path is a named refusal ("this agent is
+        // stopping", "this agent is already running"). The sentence stays
+        // so that answer can keep its code. Any other body is stored and
+        // returned as the short cause below.
+        if status == StatusCode::CONFLICT && !trimmed.is_empty() && !text_has_host_path(trimmed) {
+            return Err(crate::agents::Refused(trimmed.to_string()).into());
+        }
+        anyhow::bail!("runtime launch failed ({status}): {RUNTIME_LAUNCH_FAILURE_CAUSE}");
     }
     let payload = response.json::<RuntimeAgentLaunchResponse>().await?;
     Ok(StartedRuntimeAgent {
@@ -726,10 +755,12 @@ pub(super) async fn launch_runtime_agent(
 }
 
 /// One session the Runtime stopped. The hop sends the agent id and nothing
-/// else: the Runtime chooses the row by that principal.
+/// else: the Runtime chooses the row by that principal. `ended` is that
+/// row's `ended_at`: the signed stop says `ok` only when this is set.
 pub(super) struct StoppedRuntimeAgent {
     pub(super) session_id: String,
     pub(super) status: String,
+    pub(super) ended: bool,
 }
 
 /// What the Runtime's stop route answered. `already` is set when the route
@@ -754,12 +785,26 @@ struct RuntimeAgentStopResponse {
 struct RuntimeStoppedSession {
     session_id: String,
     status: String,
+    /// `ended_at` was set. Absent means this answer did not say.
+    #[serde(default)]
+    ended: bool,
+}
+
+/// The body the gateway sends the Runtime's stop route. The owner's Stop
+/// names the agent only; the settle path of a Start also names the one
+/// session its own Start made.
+#[derive(Serialize)]
+struct RuntimeAgentStopRequest<'a> {
+    agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
 }
 
 fn stopped_agent(session: RuntimeStoppedSession) -> StoppedRuntimeAgent {
     StoppedRuntimeAgent {
         session_id: session.session_id,
         status: session.status,
+        ended: session.ended,
     }
 }
 
@@ -768,6 +813,27 @@ fn stopped_agent(session: RuntimeStoppedSession) -> StoppedRuntimeAgent {
 pub(super) async fn stop_runtime_agent(
     data_dir: &FsPath,
     agent_id: &str,
+) -> anyhow::Result<RuntimeAgentStop> {
+    stop_runtime_agent_rows(data_dir, agent_id, None).await
+}
+
+/// Ask the agent Runtime to stop one session of this agent, named by
+/// session id: the Runtime stops only the row whose session this is, so an
+/// earlier session of the same agent, which already has its own completion
+/// row, stays up. The settle path of a Start ends only the guest its own
+/// Start made. The coordinates are the agent plane's, the same hop Stop uses.
+pub(super) async fn stop_runtime_agent_session(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: &str,
+) -> anyhow::Result<RuntimeAgentStop> {
+    stop_runtime_agent_rows(data_dir, agent_id, Some(session_id)).await
+}
+
+async fn stop_runtime_agent_rows(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: Option<&str>,
 ) -> anyhow::Result<RuntimeAgentStop> {
     let coords = live_agent_coords(data_dir).await?;
     let client = reqwest::Client::builder()
@@ -779,7 +845,10 @@ pub(super) async fn stop_runtime_agent(
     let response = client
         .post(format!("{}/api/capsules/stop-agent", coords.api_url))
         .header(AUTHORIZATION, format!("Bearer {shell}"))
-        .json(&serde_json::json!({ "agent_id": agent_id }))
+        .json(&RuntimeAgentStopRequest {
+            agent_id,
+            session_id,
+        })
         .send()
         .await?;
     let status = response.status();
