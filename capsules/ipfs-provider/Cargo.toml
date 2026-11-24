@@ -14,6 +14,9 @@ base64 = "0.22"
 tempfile = "3"
 url = "2"
 
+[target.'cfg(windows)'.dependencies]
+elastos-win-custody = { path = "../../elastos/crates/elastos-win-custody" }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

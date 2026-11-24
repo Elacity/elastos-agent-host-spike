@@ -62,15 +62,30 @@ struct LocalStagedDirectory<'a> {
 
 fn checked_local_root(root: &std::path::Path) -> Result<&str, ProviderError> {
     let root = root.to_str().ok_or_else(private_ipfs_unavailable)?;
-    if !root.starts_with('/')
-        || root.len() > 4096
-        || root.contains('\0')
-        || root[1..].split('/').count() > 64
-        || root[1..].split('/').any(|p| matches!(p, "" | "." | ".."))
-    {
+    if root.len() > 4096 || root.contains('\0') {
         return Err(private_ipfs_unavailable());
     }
-    Ok(root)
+    #[cfg(windows)]
+    {
+        // Windows absolute local-disk path (`C:\…`), same component-count and
+        // component-name bounds, validated with the custody helper's name rules.
+        let (_, components) = elastos_win_custody::absolute_local_disk(std::ffi::OsStr::new(root))
+            .map_err(|_| private_ipfs_unavailable())?;
+        if components.len() > 64 {
+            return Err(private_ipfs_unavailable());
+        }
+        return Ok(root);
+    }
+    #[cfg(not(windows))]
+    {
+        if !root.starts_with('/')
+            || root[1..].split('/').count() > 64
+            || root[1..].split('/').any(|p| matches!(p, "" | "." | ".."))
+        {
+            return Err(private_ipfs_unavailable());
+        }
+        Ok(root)
+    }
 }
 
 impl<'a> LocalStagedDirectory<'a> {
@@ -1615,7 +1630,7 @@ impl ProviderRegistry {
         &self,
         request: &serde_json::Value,
     ) -> Result<LocalIpfsResult<T>, ProviderError> {
-        if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
             return Err(private_ipfs_unavailable());
         }
         // Exact local sub-provider only: no URI resolution, main-provider alias or Carrier fallback.

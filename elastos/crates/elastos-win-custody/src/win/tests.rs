@@ -5,7 +5,8 @@ use std::process::Command;
 use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 
 use super::open::{
-    clear_created_verify_failure, create_owner_dir, fail_next_created_verify, open_owner_file, Disp,
+    clear_created_verify_failure, create_owner_dir, fail_next_created_verify, open_accepted_file,
+    open_owner_file, Disp,
 };
 use super::sd::{verify_owner_only, OWNER_USE};
 use crate::CustodyError;
@@ -177,6 +178,26 @@ fn everyone_ace_fails_verify_owner_only() {
     let opened = std::fs::File::open(&path).unwrap();
     let error = verify_owner_only(&opened, &path).expect_err("everyone");
     assert!(matches!(error, CustodyError::ForeignDacl { .. }), "{error}");
+}
+
+#[test]
+fn accepted_file_open_takes_the_accepted_root_rule() {
+    let scratch = Scratch::new("accepted-file");
+    let path = write_marker(&scratch.0);
+
+    // A profile file carries inherited SYSTEM and Administrators ACEs, so it
+    // opens under the accepted-root rule but fails the stricter owner-only one.
+    drop(open_accepted_file(&path, FILE_GENERIC_READ, false).unwrap());
+    let strict = std::fs::File::open(&path).unwrap();
+    assert!(verify_owner_only(&strict, &path).is_err());
+    drop(strict);
+    drop(open_accepted_file(&scratch.0, FILE_GENERIC_READ, true).unwrap());
+
+    // A Users-write ACE is refused and the bytes stay.
+    icacls(&[&path.display().to_string(), "/grant", "*S-1-5-32-545:F"]);
+    let error = open_accepted_file(&path, FILE_GENERIC_READ, false).expect_err("users write");
+    assert!(matches!(error, CustodyError::ForeignDacl { .. }), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), MARKER);
 }
 
 #[test]

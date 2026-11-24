@@ -162,12 +162,63 @@ fn open_local_object_file(root: &fs::File, path: &str, size: u64) -> io::Result<
     Ok(file)
 }
 
+/// Windows twin of the Unix root open: the custody helper walks the path
+/// handle-relative from the volume root and refuses a reparse point on every
+/// component, so a junction cannot lead the import outside the data root. The
+/// root itself must pass the accepted-root rule.
+#[cfg(windows)]
+fn open_local_object_root(data_root: &Path, root: &Path) -> io::Result<fs::File> {
+    use elastos_win_custody::open_accepted_file;
+    // Same value as the crate's FILE_GENERIC_READ owner-file access.
+    use elastos_win_custody::READ_EXISTING as ROOT_READ;
+
+    let outside = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Local object is outside the data root",
+        )
+    };
+    let relative = root.strip_prefix(data_root).map_err(|_| outside())?;
+    for part in relative.components() {
+        let std::path::Component::Normal(_) = part else {
+            return Err(outside());
+        };
+    }
+    open_accepted_file(root, ROOT_READ, true)
+        .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error.to_string()))
+}
+
+/// Windows twin of the Unix leaf open: the custody helper re-walks from the
+/// volume root refusing every reparse point, and the leaf must be a regular
+/// file under the accepted-root rule with exactly the recorded size.
+#[cfg(windows)]
+fn open_local_object_file(root_path: &Path, path: &str, size: u64) -> io::Result<fs::File> {
+    let mut full = root_path.to_path_buf();
+    for part in path.split('/') {
+        full.push(part);
+    }
+    let file =
+        elastos_win_custody::open_accepted_file(&full, elastos_win_custody::READ_EXISTING, false)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() != size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Local object file is not the recorded regular file",
+        ));
+    }
+    Ok(file)
+}
+
 /// Multipart body of one local object directory for Kubo `add`. Files open one
 /// at a time when their part starts and stream through `AddPathReader`, so the
 /// provider holds one bounded chunk whatever the object's size.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 struct LocalObjectBody<'a> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     root: fs::File,
+    #[cfg(windows)]
+    root_path: PathBuf,
     files: std::slice::Iter<'a, StagedFile>,
     boundary: String,
     pending: io::Cursor<Vec<u8>>,
@@ -175,7 +226,7 @@ struct LocalObjectBody<'a> {
     finished: bool,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 impl Read for LocalObjectBody<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
@@ -196,7 +247,7 @@ impl Read for LocalObjectBody<'_> {
                 continue;
             }
             if let Some(file) = self.files.next() {
-                let source = open_local_object_file(&self.root, &file.path, file.size)?;
+                let source = self.open_object_file(&file.path, file.size)?;
                 self.current = Some(AddPathReader::new(source)?);
                 self.pending = io::Cursor::new(directory_part_header(&self.boundary, &file.path));
             } else if !self.finished {
@@ -206,6 +257,18 @@ impl Read for LocalObjectBody<'_> {
                 return Ok(0);
             }
         }
+    }
+}
+
+impl LocalObjectBody<'_> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn open_object_file(&self, path: &str, size: u64) -> io::Result<fs::File> {
+        open_local_object_file(&self.root, path, size)
+    }
+
+    #[cfg(windows)]
+    fn open_object_file(&self, path: &str, size: u64) -> io::Result<fs::File> {
+        open_local_object_file(&self.root_path, path, size)
     }
 }
 
@@ -338,6 +401,7 @@ struct StagedDirectory {
     total_bytes: u64,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn valid_root(root: &Path) -> bool {
     root.to_str().is_some_and(|root| {
         root.starts_with('/')
@@ -345,6 +409,18 @@ fn valid_root(root: &Path) -> bool {
             && !root.contains('\0')
             && root[1..].split('/').count() <= 64
             && !root[1..].split('/').any(|p| matches!(p, "" | "." | ".."))
+    })
+}
+
+#[cfg(windows)]
+fn valid_root(root: &Path) -> bool {
+    // Same Windows shape `checked_local_root` accepts in the Runtime: a
+    // drive-absolute local-disk path with the same bounds.
+    root.to_str().is_some_and(|root| {
+        root.len() <= 4096
+            && !root.contains('\0')
+            && elastos_win_custody::absolute_local_disk(std::ffi::OsStr::new(root))
+                .is_ok_and(|(_, components)| components.len() <= 64)
     })
 }
 
@@ -787,7 +863,7 @@ impl IpfsProvider {
                 if !object.valid_shape() {
                     return private_preparation_error();
                 }
-                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                #[cfg(any(target_os = "linux", target_os = "macos", windows))]
                 {
                     if let Err(error) = self.ensure_kubo() {
                         eprintln!("ipfs-provider: local object backend unavailable: {error}");
@@ -801,7 +877,7 @@ impl IpfsProvider {
                         }
                     }
                 }
-                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
                 {
                     private_preparation_error()
                 }
@@ -1820,6 +1896,43 @@ impl IpfsProvider {
         }
         let body = LocalObjectBody {
             root,
+            files: object.files.iter(),
+            boundary: boundary.clone(),
+            pending: io::Cursor::new(Vec::new()),
+            current: None,
+            finished: false,
+        };
+        let resp = ureq::post(&self.add_directory_url(false))
+            .set(
+                "Content-Type",
+                &format!("multipart/form-data; boundary={}", boundary),
+            )
+            .set("Content-Length", &length.to_string())
+            .timeout(LARGE_HTTP_TIMEOUT)
+            .send(body)
+            .map_err(|e| format!("IPFS add local object failed: {}", e))?;
+        directory_root(resp)
+    }
+
+    /// Windows twin: files stream from disk through accepted-root opens below
+    /// the data root without following reparse points. The root stays open for
+    /// the whole send, so the object directory cannot be renamed mid-stream.
+    #[cfg(windows)]
+    fn kubo_add_local_object(&self, object: &LocalObject) -> Result<String, String> {
+        let _root = open_local_object_root(&self.data_dir, &object.root)
+            .map_err(|e| format!("Local object root refused: {}", e))?;
+        let boundary = format!("----elastos{}", now_unix_secs());
+        let mut length = format!("--{boundary}--\r\n").len() as u64;
+        for file in &object.files {
+            open_local_object_file(&object.root, &file.path, file.size)
+                .map_err(|e| format!("Local object file refused: {}", e))?;
+            length = length
+                .checked_add(directory_part_header(&boundary, &file.path).len() as u64 + 2)
+                .and_then(|n| n.checked_add(file.size))
+                .ok_or("Local object length exceeds its bound")?;
+        }
+        let body = LocalObjectBody {
+            root_path: object.root.clone(),
             files: object.files.iter(),
             boundary: boundary.clone(),
             pending: io::Cursor::new(Vec::new()),
@@ -5711,6 +5824,124 @@ mod tests {
             failures.len(),
             paths.len() * 2,
             failures.join("\n")
+        );
+    }
+}
+
+#[cfg(windows)]
+mod windows_object_open_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn icacls(args: &[&str]) {
+        let output = Command::new("icacls").args(args).output().expect("icacls");
+        assert!(
+            output.status.success(),
+            "icacls {args:?}\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn grant_users_write(file: &Path) {
+        icacls(&[&file.display().to_string(), "/grant", "*S-1-5-32-545:F"]);
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        let status = Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.display().to_string(),
+                &target.display().to_string(),
+            ])
+            .status()
+            .expect("mklink");
+        assert!(status.success(), "mklink /J");
+    }
+
+    const MARKER: &[u8] = b"junction-target-bytes";
+
+    fn write_object_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let file = dir.join(name);
+        fs::write(&file, bytes).unwrap();
+        file
+    }
+
+    #[test]
+    fn windows_local_object_junction_component_is_refused_and_bytes_stay() {
+        let data_root = tempfile::tempdir().unwrap();
+        let object_dir = data_root.path().join("held-object");
+        fs::create_dir(&object_dir).unwrap();
+        let side_dir = data_root.path().join("side");
+        fs::create_dir(&side_dir).unwrap();
+        let target = write_object_file(&side_dir, "file.md", MARKER);
+        junction(&object_dir.join("link"), &side_dir);
+
+        let error = open_local_object_file(&object_dir, "link/file.md", MARKER.len() as u64)
+            .expect_err("junction component");
+        assert!(error.to_string().contains("reparse point"), "{error}");
+        assert_eq!(fs::read(&target).unwrap(), MARKER);
+    }
+
+    #[test]
+    fn windows_local_object_root_outside_data_root_is_refused() {
+        let data_root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = outside.path().join("held-object");
+        fs::create_dir(&root).unwrap();
+
+        let error = open_local_object_root(data_root.path(), &root).expect_err("outside root");
+        assert!(
+            error.to_string().contains("outside the data root"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn windows_local_object_file_writable_by_users_is_refused() {
+        let data_root = tempfile::tempdir().unwrap();
+        let object_dir = data_root.path().join("held-object");
+        fs::create_dir(&object_dir).unwrap();
+
+        // The accepted-root rule opens a plain profile file...
+        let plain = write_object_file(&object_dir, "plain.md", MARKER);
+        drop(
+            open_local_object_file(
+                data_root.path(),
+                "held-object/plain.md",
+                MARKER.len() as u64,
+            )
+            .unwrap(),
+        );
+        // ...while a Users-write ACE on the declared file is refused.
+        grant_users_write(&plain);
+        let error = open_local_object_file(
+            data_root.path(),
+            "held-object/plain.md",
+            MARKER.len() as u64,
+        )
+        .expect_err("users write");
+        assert!(
+            error.to_string().contains("DACL is not owner-only"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&plain).unwrap(), MARKER);
+    }
+
+    #[test]
+    fn windows_local_object_file_size_mismatch_is_refused() {
+        let data_root = tempfile::tempdir().unwrap();
+        let object_dir = data_root.path().join("held-object");
+        fs::create_dir(&object_dir).unwrap();
+        write_object_file(&object_dir, "file.md", MARKER);
+
+        let error = open_local_object_file(data_root.path(), "held-object/file.md", 0)
+            .expect_err("size mismatch");
+        assert!(
+            error.to_string().contains("not the recorded regular file"),
+            "{error}"
         );
     }
 }

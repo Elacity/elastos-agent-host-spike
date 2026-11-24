@@ -108,6 +108,20 @@ pub fn refuse_other_writers(path: &Path) -> Result<(), CustodyError> {
     verify_not_writable_by_others(&file, path)
 }
 
+/// Open an existing file or directory under the accepted data root rule.
+///
+/// The walk is handle-relative from the volume root and a reparse point on any
+/// component is refused. The leaf must exist as the requested kind and must not
+/// be writable by anyone except its owner, SYSTEM, and Administrators — the W2
+/// accepted-root rule — so files that carry inherited SYSTEM or Administrators
+/// ACEs open, while a Users-writable file is refused. Unlike
+/// [`open_owner_file`] it does not require the owner-only DACL.
+pub fn open_accepted_file(path: &Path, access: u32, directory: bool) -> Result<File, CustodyError> {
+    let file = open_at(path, access, Disp::OpenExisting, directory, false, false)?;
+    verify_not_writable_by_others(&file, path)?;
+    Ok(file)
+}
+
 /// Rename the open file `source` to `dest_name` inside `directory`.
 ///
 /// The directory open is handle-relative. A reparse point on the directory,

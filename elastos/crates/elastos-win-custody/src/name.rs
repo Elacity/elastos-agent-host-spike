@@ -27,7 +27,7 @@ const NO_NAME: &str = "path has no file or directory name";
 /// A relative path is refused. This does not read the current directory and
 /// does not collapse `.` or `..`.
 #[cfg(any(windows, test))]
-pub(crate) fn absolute_local_disk(path: &OsStr) -> Result<(u8, Vec<OsString>), &'static str> {
+pub fn absolute_local_disk(path: &OsStr) -> Result<(u8, Vec<OsString>), &'static str> {
     let bytes = path.as_encoded_bytes();
     let (drive, rest, verbatim) = disk_prefix(bytes)?;
     let mut names = Vec::new();
