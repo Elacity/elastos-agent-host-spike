@@ -1034,6 +1034,39 @@ async fn run() -> Result<(), String> {
             locks.push(post_effect_try!(lock.file.try_clone()));
         }
         post_effect_try!(provider.retain_writer_locks(&handle, locks));
+        // Bind the crosvm boot to the supervisor's held checked boot
+        // descriptors before start, so the guest boots the checked bytes.
+        let launch = owner.launch_rootfs.as_ref().expect("Browser VZ boot files owner");
+        let boot = &launch.boot;
+        let kernel_fd = boot
+            .kernel_file
+            .as_ref()
+            .expect("Browser VZ kernel descriptor owner")
+            .as_raw_fd();
+        let initrd_fd = boot
+            .initrd_file
+            .as_ref()
+            .expect("Browser VZ initrd descriptor owner")
+            .as_raw_fd();
+        let seed_fd = boot
+            .rootfs_copy_file
+            .as_ref()
+            .expect("Browser VZ seed descriptor owner")
+            .as_raw_fd();
+        let overlay_fd = launch
+            .overlay_file
+            .as_ref()
+            .expect("Browser VZ overlay descriptor owner")
+            .as_raw_fd();
+        post_effect_try!(provider.retain_launch_boot_descriptors(
+            &handle,
+            linux::LaunchBootDescriptors {
+                kernel_fd,
+                initrd_fd,
+                seed_fd,
+                overlay_fd,
+            },
+        ));
     }
     trace_stage("load_vm_done", "");
     trace_stage("start_vm_start", "");
@@ -3395,6 +3428,10 @@ struct PreparedLaunchRootfs {
     /// A Linux launch overlay: removed when the launch ends, before its lease
     /// is released, so a free lease beside an overlay marks a crashed launch.
     overlay: bool,
+    /// The Linux overlay held open after its qcow2 header was verified; the
+    /// crosvm child reopens it through `/proc/self/fd`.
+    #[cfg(target_os = "linux")]
+    overlay_file: Option<File>,
 }
 
 #[derive(Debug)]
@@ -3403,6 +3440,12 @@ struct PreparedBootFiles {
     kernel_path: PathBuf,
     initrd_path: PathBuf,
     owned: [bool; 3],
+
+    /// The held checked copies: the boot reopens these descriptors, not the
+    /// session paths, so a same-UID swap after the check cannot boot.
+    rootfs_copy_file: Option<File>,
+    kernel_file: Option<File>,
+    initrd_file: Option<File>,
 }
 
 impl Drop for PreparedBootFiles {
@@ -3520,6 +3563,7 @@ fn copy_verified_boot_file(
         expected_len,
         check,
     )
+    .map(|_held: File| ())
 }
 
 fn copy_verified_boot_file_in(
@@ -3530,7 +3574,7 @@ fn copy_verified_boot_file_in(
     expected: &str,
     expected_len: u64,
     check: impl Fn(&Path) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<File, String> {
     if expected.len() != 64
         || !expected
             .bytes()
@@ -3571,7 +3615,22 @@ fn copy_verified_boot_file_in(
     }
     confirm_copied_name(destination_dir, &name, &output, destination_path)?;
     created.armed = false;
-    Ok(())
+    // The launch keeps this checked description open past the crosvm spawn
+    // and re-dups it above the child's fixed 3..6 lock handoff range, so the
+    // child's lock dup2 cannot clobber the boot input.
+    durable_launch_descriptor(&output)
+}
+
+/// Re-dups a held launch descriptor above the fixed 3..6 handoff range the
+/// crosvm child uses for its writer locks, so the child's lock dup2 can never
+/// clobber a boot input.
+fn durable_launch_descriptor(file: &File) -> Result<File, String> {
+    let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // SAFETY: `fd` is a new descriptor from F_DUPFD_CLOEXEC, or we returned.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 /// Removes a boot file this copy created when the copy does not succeed.
@@ -3758,8 +3817,11 @@ fn prepare_launch_rootfs(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, St
         kernel_path: paths.session_dir.join("verified-vmlinux"),
         initrd_path: paths.session_dir.join("verified-initrd"),
         owned: [false; 3],
+        rootfs_copy_file: None,
+        kernel_file: None,
+        initrd_file: None,
     };
-    copy_verified_boot_file_in(
+    boot.rootfs_copy_file = Some(copy_verified_boot_file_in(
         &paths.rootfs_path,
         &session,
         OsStr::new("verified-rootfs.ext4"),
@@ -3767,9 +3829,9 @@ fn prepare_launch_rootfs(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, St
         rootfs_hash,
         verified.admitted_len(),
         |path| verified.check(path),
-    )?;
+    )?);
     boot.owned[0] = true;
-    copy_verified_boot_file_in(
+    boot.kernel_file = Some(copy_verified_boot_file_in(
         &paths.kernel_path,
         &session,
         OsStr::new("verified-vmlinux"),
@@ -3777,9 +3839,9 @@ fn prepare_launch_rootfs(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, St
         &kernel.sha256,
         kernel.admitted_len(),
         |path| kernel.check(path),
-    )?;
+    )?);
     boot.owned[1] = true;
-    copy_verified_boot_file_in(
+    boot.initrd_file = Some(copy_verified_boot_file_in(
         initrd_source,
         &session,
         OsStr::new("verified-initrd"),
@@ -3787,7 +3849,7 @@ fn prepare_launch_rootfs(paths: &LaunchPaths) -> Result<PreparedLaunchRootfs, St
         &initrd.sha256,
         initrd.admitted_len(),
         |path| initrd.check(path),
-    )?;
+    )?);
     boot.owned[2] = true;
     for path in [&boot.kernel_path, &boot.initrd_path] {
         fs::set_permissions(path, fs::Permissions::from_mode(0o400))
@@ -3869,18 +3931,34 @@ fn prepare_launch_rootfs_overlay(
     }
     let overlay = paths.session_dir.join(ROOTFS_OVERLAY_NAME);
     let lock = LifetimeFileLock::acquire_disk_sidecar(&overlay, "Browser VM rootfs overlay")?;
-    let prepared = PreparedLaunchRootfs {
+    let seed_fd = boot
+        .rootfs_copy_file
+        .as_ref()
+        .ok_or("Browser VM rootfs seed descriptor is absent")?
+        .as_raw_fd();
+    let mut prepared = PreparedLaunchRootfs {
         path: overlay,
         _lock: Some(lock),
         boot,
         overlay: true,
+        overlay_file: None,
     };
     linux::create_rootfs_overlay(
         &linux::crosvm_binary(),
         &prepared.boot.rootfs_copy_path,
+        seed_fd,
         &prepared.path,
     )
     .map_err(|error| format!("failed to prepare the Browser VM rootfs overlay: {error}"))?;
+    // Hold the verified overlay open above the child lock handoff range; the
+    // crosvm child reopens it read-write through /proc/self/fd at boot.
+    let held_overlay = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&prepared.path)
+        .map_err(|error| format!("Browser VM rootfs overlay open: {error}"))?;
+    prepared.overlay_file = Some(durable_launch_descriptor(&held_overlay)?);
     Ok(prepared)
 }
 
@@ -3957,6 +4035,13 @@ fn find_debugfs_bin() -> Result<PathBuf, String> {
 #[cfg(any(target_os = "macos", test))]
 fn host_selkies_control_service_path() -> Result<PathBuf, String> {
     if let Ok(explicit) = std::env::var("ELASTOS_BROWSER_SELKIES_CONTROL_SERVICE") {
+        // Only the installed release's signed script reaches a production
+        // launch; the override is a source-home dev escape hatch.
+        if !source_home_dev_mode(&browser_data_dir()) {
+            return Err(
+                "ELASTOS_BROWSER_SELKIES_CONTROL_SERVICE requires the source-home dev opt-in; production launches use the installed release script".to_string(),
+            );
+        }
         let path = PathBuf::from(explicit);
         if path.is_file() {
             return Ok(path);
@@ -6817,8 +6902,13 @@ mod tests {
                 kernel_path: root.path().join("kernel"),
                 initrd_path: root.path().join("initrd"),
                 owned: [false; 3],
+                rootfs_copy_file: None,
+                kernel_file: None,
+                initrd_file: None,
             },
             overlay: false,
+            #[cfg(target_os = "linux")]
+            overlay_file: None,
         });
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -8556,7 +8646,14 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _debugfs = EnvVarRestore::capture("ELASTOS_DEBUGFS_BIN");
         let _source = EnvVarRestore::capture("ELASTOS_BROWSER_SELKIES_CONTROL_SERVICE");
+        let _data_dir = EnvVarRestore::capture("ELASTOS_BROWSER_VM_DATA_DIR");
         let tmp = tempfile::tempdir().unwrap();
+        // The dev gate must pass before the debugfs check runs: opt the
+        // pinned data dir into source-home dev mode.
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        fs::write(data_dir.join("config.toml"), b"dev_mode = true\n").unwrap();
+        std::env::set_var("ELASTOS_BROWSER_VM_DATA_DIR", &data_dir);
         let source = tmp.path().join("browser-selkies-control-service.mjs");
         fs::write(
             &source,
@@ -8574,6 +8671,42 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn selkies_control_service_override_requires_source_home_dev_mode() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _source = EnvVarRestore::capture("ELASTOS_BROWSER_SELKIES_CONTROL_SERVICE");
+        let _data_dir = EnvVarRestore::capture("ELASTOS_BROWSER_VM_DATA_DIR");
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("browser-selkies-control-service.mjs");
+        fs::write(
+            &source,
+            b"export function flushAndUnmountBrowserProfileDisk() {}\n",
+        )
+        .unwrap();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        std::env::set_var("ELASTOS_BROWSER_VM_DATA_DIR", &data_dir);
+        // Without the dev opt-in the override is refused before any path
+        // check, so an injected guest script cannot ride a production launch.
+        std::env::set_var("ELASTOS_BROWSER_SELKIES_CONTROL_SERVICE", &source);
+        let error = host_selkies_control_service_path().unwrap_err();
+        assert!(
+            error.contains("requires the source-home dev opt-in"),
+            "{error}"
+        );
+        // With the dev opt-in the override names the launched script.
+        fs::write(data_dir.join("config.toml"), b"dev_mode = true\n").unwrap();
+        assert_eq!(host_selkies_control_service_path().unwrap(), source);
+        // Production keeps the installed release's script path: without the
+        // override the runtime binary's release scripts dir is consulted.
+        std::env::remove_var("ELASTOS_BROWSER_SELKIES_CONTROL_SERVICE");
+        let error = host_selkies_control_service_path().unwrap_err();
+        assert!(
+            error.contains("Browser selkies control service source is missing"),
+            "{error}"
+        );
+    }
     #[test]
     fn overlay_webrtc_send_is_noop_without_opt_in() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
@@ -9026,13 +9159,15 @@ mod tests {
         let _per_launch = EnvVarRestore::capture("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
         let _crosvm = EnvVarRestore::capture("ELASTOS_BROWSER_VM_CROSVM_BIN");
         std::env::remove_var("ELASTOS_BROWSER_VM_ROOTFS_PER_LAUNCH");
-        // crosvm's create_qcow2, faked: records its call, writes a v3 header.
+        // crosvm's create_qcow2, faked: records its call and writes a v3
+        // header whose backing path is the child's argument $3, the way
+        // create_qcow2 bakes the backing path into the header.
         let calls = tmp.path().join("crosvm-calls");
         let crosvm = tmp.path().join("crosvm");
         fs::write(
             &crosvm,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf 'QFI\\373\\000\\000\\000\\003' > \"$4\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nbacking=\"$3\"\nsize=${{#backing}}\nprintf 'QFI\\373' > \"$4\"\nprintf '\\000\\000\\000\\003' >> \"$4\"\nprintf '\\000\\000\\000\\000\\000\\000\\000\\024' >> \"$4\"\nprintf '\\000\\000\\000' >> \"$4\"\nprintf \"\\\\$(printf '%03o' \"$size\")\" >> \"$4\"\nprintf '%s' \"$backing\" >> \"$4\"\n",
                 calls.display()
             ),
         )
@@ -9080,7 +9215,14 @@ mod tests {
         assert_eq!(prepared.path, overlay);
         let metadata = fs::metadata(&overlay).unwrap();
         assert_eq!(metadata.mode() & 0o777, 0o600);
-        assert_eq!(metadata.len(), 8);
+        let seed_fd = prepared
+            .boot
+            .rootfs_copy_file
+            .as_ref()
+            .unwrap()
+            .as_raw_fd();
+        let backing = format!("/proc/self/fd/{seed_fd}");
+        assert_eq!(metadata.len() as usize, 20 + backing.len());
         assert_eq!(
             fs::read(&prepared.boot.rootfs_copy_path).unwrap(),
             seed_bytes
@@ -9088,15 +9230,19 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&calls).unwrap(),
             format!(
-                "create_qcow2 --backing-file {} {}\n",
-                prepared
-                    .boot
-                    .rootfs_copy_path
-                    .canonicalize()
-                    .unwrap()
-                    .display(),
+                "create_qcow2 --backing-file /proc/self/fd/{seed_fd} {}\n",
                 overlay.display()
             )
+        );
+        // The create call named the held seed descriptor, and a same-UID
+        // swap of the checked copy's path cannot reach it: the descriptor
+        // still holds the checked bytes.
+        let swapped = tmp.path().join("swapped-seed.ext4");
+        fs::rename(&prepared.boot.rootfs_copy_path, &swapped).unwrap();
+        fs::write(&prepared.boot.rootfs_copy_path, b"forged-after-check").unwrap();
+        assert_eq!(
+            fs::read(format!("/proc/self/fd/{seed_fd}")).unwrap(),
+            seed_bytes
         );
         assert_eq!(fs::read_dir(&paths.session_dir).unwrap().count(), 5);
         // The launch holds the overlay's lease (crosvm's disk workers get it too).
@@ -9342,3 +9488,4 @@ mod tests {
         LifetimeFileLock::acquire_lock_file(&lock_path, "test Browser VM resource").unwrap();
     }
 }
+// probe

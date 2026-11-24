@@ -4,10 +4,10 @@
 use super::{LockFile, SpawnGated};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -103,17 +103,19 @@ pub(super) fn crosvm_binary() -> PathBuf {
 }
 
 /// Creates a launch's qcow2 overlay of `seed` with crosvm's own writer
-/// (version 3, 16-bit refcounts, the absolute seed path as backing file and
-/// `raw` as its format), the form crosvm boots. The overlay starts private
-/// and empty; crosvm opens the seed read-only, now and when it boots.
+/// (version 3, 16-bit refcounts, the `/proc/self/fd` form of the held seed as
+/// backing file and `raw` as its format), the form crosvm boots. The overlay
+/// starts private and empty; crosvm opens the seed read-only, now and when it
+/// boots, so a seed path swapped after the check cannot boot.
 pub(super) fn create_rootfs_overlay(
     crosvm: &Path,
     seed: &Path,
+    seed_fd: RawFd,
     overlay: &Path,
 ) -> Result<(), String> {
-    // crosvm resolves a relative backing path against its working directory.
-    let seed = fs::canonicalize(seed).map_err(|e| format!("rootfs seed: {e}"))?;
-    if !fs::metadata(&seed).map_err(|e| e.to_string())?.is_file() {
+    // The held descriptor is the boot input; the seed path only proves the
+    // seed still resolves to a regular file at prepare time.
+    if !fs::metadata(seed).map_err(|e| e.to_string())?.is_file() {
         return Err("rootfs seed is not a regular file".into());
     }
     // create_qcow2 truncates the file it is given and keeps its mode.
@@ -128,13 +130,13 @@ pub(super) fn create_rootfs_overlay(
     command
         .arg("create_qcow2")
         .arg("--backing-file")
-        .arg(&seed)
+        .arg(format!("/proc/self/fd/{seed_fd}"))
         .arg(overlay)
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    own_process_group(&mut command, Vec::new());
+    own_process_group(&mut command, Vec::new(), &[seed_fd]);
     let mut child = command.spawn_gated().map_err(|e| e.to_string())?;
     let deadline = Instant::now() + ROOTFS_OVERLAY_CREATE_BUDGET;
     let status = loop {
@@ -172,6 +174,30 @@ pub(super) fn create_rootfs_overlay(
         || header[4..] != 3_u32.to_be_bytes()
     {
         return Err("crosvm create_qcow2 left no private qcow2 v3 overlay".into());
+    }
+    // The overlay must name the held seed descriptor, not a session path a
+    // same-UID swap could retarget: read back the backing path the header
+    // baked and require the exact descriptor form before the launch goes on.
+    let mut fields = [0_u8; 12];
+    file.read_exact(&mut fields)
+        .map_err(|e| format!("read overlay backing fields: {e}"))?;
+    let backing_offset = u64::from_be_bytes(fields[..8].try_into().unwrap());
+    let backing_size = u32::from_be_bytes(fields[8..].try_into().unwrap()) as usize;
+    let expected_backing = format!("/proc/self/fd/{seed_fd}");
+    if backing_offset == 0 || backing_size != expected_backing.len() {
+        return Err(
+            "crosvm create_qcow2 did not bind the overlay to the held seed descriptor".into(),
+        );
+    }
+    file.seek(SeekFrom::Start(backing_offset))
+        .map_err(|e| format!("seek overlay backing path: {e}"))?;
+    let mut backing = vec![0_u8; backing_size];
+    file.read_exact(&mut backing)
+        .map_err(|e| format!("read overlay backing path: {e}"))?;
+    if backing != expected_backing.as_bytes() {
+        return Err(
+            "crosvm create_qcow2 did not bind the overlay to the held seed descriptor".into(),
+        );
     }
     Ok(())
 }
@@ -274,7 +300,7 @@ fn setup_check() -> Result<(), String> {
 }
 
 fn run_setup_check(mut command: Command, budget: Duration) -> Result<(), String> {
-    own_process_group(&mut command, Vec::new());
+    own_process_group(&mut command, Vec::new(), &[]);
     let mut child = command.spawn_gated().map_err(|e| e.to_string())?;
     let pgid = child.id() as i32;
     let deadline = Instant::now() + budget;
@@ -457,9 +483,22 @@ struct Vm {
     state: AtomicU8,
     stop: AtomicBool,
     writer_locks: Mutex<Vec<LockFile>>,
+    boot: Mutex<Option<LaunchBootDescriptors>>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     /// Set before STOPPED when crosvm or its backend exited unrequested.
     exit: Mutex<Option<String>>,
+}
+
+/// The launch's held checked boot descriptors, by the supervisor fd numbers
+/// the crosvm child reopens through `/proc/self/fd`. The supervisor keeps
+/// every descriptor open until the VM is released, so the numbers stay valid
+/// and a session path swapped after the check never enters the boot.
+#[derive(Clone, Copy)]
+pub(super) struct LaunchBootDescriptors {
+    pub(super) kernel_fd: RawFd,
+    pub(super) initrd_fd: RawFd,
+    pub(super) seed_fd: RawFd,
+    pub(super) overlay_fd: RawFd,
 }
 
 pub(super) struct CrosvmBrowserProvider {
@@ -542,6 +581,7 @@ impl CrosvmBrowserProvider {
             state: AtomicU8::new(LOADED),
             stop: AtomicBool::new(false),
             writer_locks: Mutex::new(vec![lease]),
+            boot: Mutex::new(None),
             worker: Mutex::new(None),
             exit: Mutex::new(None),
         });
@@ -589,6 +629,24 @@ impl CrosvmBrowserProvider {
             .lock()
             .map_err(|e| e.to_string())?
             .extend(retained);
+        Ok(())
+    }
+
+    /// Binds the launch to the supervisor's held checked boot descriptors
+    /// before crosvm starts, so the boot reopens those bytes instead of
+    /// rereading session paths a same-UID process could have swapped. The
+    /// supervisor keeps each descriptor open until the VM is released.
+    pub(super) fn retain_launch_boot_descriptors(
+        &self,
+        handle: &CapsuleHandle,
+        boot: LaunchBootDescriptors,
+    ) -> Result<(), String> {
+        let vm = self.vm(handle)?;
+        let _worker = vm.worker.lock().map_err(|e| e.to_string())?;
+        if vm.state.load(Ordering::Acquire) != LOADED {
+            return Err("Browser boot descriptors must precede crosvm start".into());
+        }
+        *vm.boot.lock().map_err(|e| e.to_string())? = Some(boot);
         Ok(())
     }
 
@@ -746,6 +804,14 @@ fn command(
     let root = socket
         .parent()
         .ok_or("Browser crosvm state root is absent")?;
+    // The crosvm child reopens the launch's held checked boot descriptors
+    // through /proc/self/fd, so no session path can be swapped after the
+    // check and still boot.
+    let boot = vm
+        .boot
+        .lock()
+        .map_err(|e| e.to_string())?
+        .ok_or("Browser crosvm requires the launch's held checked boot descriptors")?;
     let pivot = root.join("empty");
     fs::create_dir_all(&pivot).map_err(|e| e.to_string())?;
     fs::create_dir_all(&state_dir).map_err(|e| e.to_string())?;
@@ -766,8 +832,8 @@ fn command(
         .args(["--serial", "type=stdout,hardware=serial,num=1"])
         .arg("--block")
         .arg(format!(
-            "path={},root=true,lock=true,lifecycle-fds=[{lifecycle_fds}]",
-            config.rootfs_path.display()
+            "path=/proc/self/fd/{},root=true,lock=true,lifecycle-fds=[{lifecycle_fds}]",
+            boot.overlay_fd
         ))
         .arg("--pivot-root")
         .arg(&pivot);
@@ -793,21 +859,22 @@ fn command(
             profile.display()
         ));
     }
-    if let Some(initrd) = &config.initramfs_path {
-        command.arg("--initrd").arg(initrd);
-    }
+    command
+        .arg("--initrd")
+        .arg(format!("/proc/self/fd/{}", boot.initrd_fd));
     command
         .arg("-p")
         .arg(&config.boot_args)
-        .arg(&config.kernel_path)
+        .arg(format!("/proc/self/fd/{}", boot.kernel_fd))
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
         .stderr(Stdio::from(log));
-    own_command(&mut command, vm)?;
+    let keep_open = [boot.kernel_fd, boot.initrd_fd, boot.seed_fd, boot.overlay_fd];
+    own_command(&mut command, vm, &keep_open)?;
     Ok(command)
 }
 
-fn own_command(command: &mut Command, vm: &Vm) -> Result<(), String> {
+fn own_command(command: &mut Command, vm: &Vm, keep_open: &[RawFd]) -> Result<(), String> {
     let locks = vm
         .writer_locks
         .lock()
@@ -815,12 +882,13 @@ fn own_command(command: &mut Command, vm: &Vm) -> Result<(), String> {
         .iter()
         .map(AsRawFd::as_raw_fd)
         .collect::<Vec<_>>();
-    own_process_group(command, locks);
+    own_process_group(command, locks, keep_open);
     Ok(())
 }
 
-fn own_process_group(command: &mut Command, locks: Vec<i32>) {
+fn own_process_group(command: &mut Command, locks: Vec<i32>, keep_open: &[RawFd]) {
     let parent = unsafe { libc::getpid() };
+    let keep_open = keep_open.to_vec();
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() < 0
@@ -833,6 +901,13 @@ fn own_process_group(command: &mut Command, locks: Vec<i32>) {
             }
             for (index, fd) in locks.iter().enumerate() {
                 if libc::dup2(*fd, 3 + index as i32) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            // The launch boot descriptors cross exec only after this explicit
+            // CLOEXEC clear; the supervisor holds them open for the boot.
+            for fd in &keep_open {
+                if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
@@ -898,7 +973,9 @@ fn backend_command(vm: &Vm, state_dir: &Path) -> Result<Option<Command>, String>
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone().map_err(|e| e.to_string())?))
         .stderr(Stdio::from(log));
-    own_command(&mut command, vm)?;
+    // The vsock backend needs only its leases; the boot descriptors stay
+    // out of the backend sandbox.
+    own_command(&mut command, vm, &[])?;
     Ok(Some(command))
 }
 
@@ -1532,7 +1609,7 @@ pub(super) mod tests {
         let fd = unsafe { libc::fcntl(lease.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
         assert!(fd >= 64);
         let handle = provider
-            .load_reserved_vm(config, super::super::browser_vm_manifest(2048, 2), unsafe {
+            .load_reserved_vm(config.clone(), super::super::browser_vm_manifest(2048, 2), unsafe {
                 LockFile::new(File::from_raw_fd(fd))
             })
             .unwrap();
@@ -1543,7 +1620,41 @@ pub(super) mod tests {
         provider
             .retain_writer_locks(&handle, vec![profile])
             .unwrap();
+        bind_launch_boot_descriptors(provider, &handle, &config);
         handle
+    }
+
+    /// Binds the crosvm boot to held checked descriptors the way a launch
+    /// does, so `command()` names `/proc/self/fd` instead of session paths.
+    /// The fixture leaks the dup'd files so the test process outlives the
+    /// spawned crosvm children that reopen them.
+    fn bind_launch_boot_descriptors(
+        provider: &CrosvmBrowserProvider,
+        handle: &CapsuleHandle,
+        config: &VmConfig,
+    ) -> LaunchBootDescriptors {
+        fs::write(&config.kernel_path, b"checked-kernel").unwrap();
+        fs::write(config.initramfs_path.as_ref().unwrap(), b"checked-initrd").unwrap();
+        fs::write(&config.rootfs_path, b"checked-seed").unwrap();
+        let overlay = config.rootfs_path.with_extension("qcow2");
+        fs::write(&overlay, b"checked-overlay").unwrap();
+        let hold = |path: &std::path::Path| {
+            let file = File::open(path).unwrap();
+            let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 64) };
+            assert!(fd >= 64);
+            std::mem::forget(unsafe { File::from_raw_fd(fd) });
+            fd
+        };
+        let boot = LaunchBootDescriptors {
+            kernel_fd: hold(&config.kernel_path),
+            initrd_fd: hold(config.initramfs_path.as_ref().unwrap()),
+            seed_fd: hold(&config.rootfs_path),
+            overlay_fd: hold(&overlay),
+        };
+        provider
+            .retain_launch_boot_descriptors(handle, boot)
+            .unwrap();
+        boot
     }
 
     #[tokio::test]
@@ -1563,9 +1674,13 @@ pub(super) mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
+        let boot = vm.boot.lock().unwrap().unwrap();
         assert!(args
             .iter()
-            .any(|a| a.ends_with("root.ext4,root=true,lock=true,lifecycle-fds=[3,4]")));
+            .any(|a| a.starts_with("path=/proc/self/fd/")
+                && a.ends_with(",root=true,lock=true,lifecycle-fds=[3,4]")));
+        assert!(args.contains(&format!("/proc/self/fd/{}", boot.kernel_fd)));
+        assert!(args.contains(&format!("/proc/self/fd/{}", boot.initrd_fd)));
         assert!(args
             .iter()
             .any(|a| a.ends_with("profile.ext4,lock=true,lifecycle-fds=[3,4]")));
@@ -1671,6 +1786,58 @@ pub(super) mod tests {
         unrelated.kill().unwrap();
         unrelated.wait().unwrap();
         assert!(super::super::try_lock_exclusive(&contender).unwrap());
+    }
+
+    #[tokio::test]
+    async fn crosvm_command_boots_the_held_descriptors_after_a_session_swap() {
+        let root = tempfile::tempdir().unwrap();
+        let (provider, config) = fixture(root.path());
+        let handle = load_fixture(&provider, config.clone());
+        let vm = provider.vm(&handle).unwrap();
+        // A same-UID attacker replaces every session boot file after the
+        // check; the command must still name only the held descriptors and
+        // the descriptors must still hold the checked bytes.
+        for path in [
+            &config.rootfs_path,
+            &config.kernel_path,
+            config.initramfs_path.as_ref().unwrap(),
+        ] {
+            fs::remove_file(path).unwrap();
+            fs::write(path, b"forged-after-check").unwrap();
+        }
+        let command = command(
+            &vm,
+            provider.binary.clone(),
+            root.path().join("sockets/v.sock"),
+            root.path().join("state/test-vm"),
+        )
+        .unwrap();
+        let args = command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let boot = vm.boot.lock().unwrap().unwrap();
+        assert!(args
+            .iter()
+            .all(|a| !a.ends_with("root.ext4") && !a.ends_with("/initrd")));
+        assert!(args
+            .iter()
+            .any(|a| a.starts_with("path=/proc/self/fd/")
+                && a.ends_with(",root=true,lock=true,lifecycle-fds=[3,4]")));
+        assert_eq!(
+            args.last().unwrap(),
+            &format!("/proc/self/fd/{}", boot.kernel_fd)
+        );
+        assert!(args.contains(&format!("/proc/self/fd/{}", boot.initrd_fd)));
+        assert_eq!(
+            fs::read(format!("/proc/self/fd/{}", boot.kernel_fd)).unwrap(),
+            b"checked-kernel"
+        );
+        assert_eq!(
+            fs::read(format!("/proc/self/fd/{}", boot.initrd_fd)).unwrap(),
+            b"checked-initrd"
+        );
+        assert!(provider.release_terminal_native_vm(&handle).await);
     }
 
     #[tokio::test]
@@ -2104,7 +2271,7 @@ pub(super) mod tests {
             }
         }
         command.args(&args[split..]).stdin(Stdio::null());
-        own_command(&mut command, &vm).unwrap();
+        own_command(&mut command, &vm, &[]).unwrap();
         let mut child = ChildCleanup(Some(command.spawn_gated().unwrap()));
         let pgid = child.0.as_ref().unwrap().id() as i32;
         let deadline = Instant::now() + Duration::from_secs(5);
