@@ -350,6 +350,7 @@ fn test_free_memory() -> Option<u64> {
         .and_then(|value| value.parse::<u64>().ok())
 }
 
+#[cfg(test)]
 fn observed_memory(
     observation: std::io::Result<HostMemory>,
 ) -> Result<HostMemory, LocalLlamaFault> {

@@ -310,8 +310,7 @@ fn dispatch(
         checked,
         executable,
         args,
-        Some(stdio.stdin),
-        Some(stdio.stdout),
+        (Some(stdio.stdin), Some(stdio.stdout)),
         local_files,
     )
     .map_err(|error| match error {
@@ -1332,7 +1331,7 @@ mod tests {
         assert!(!production.contains("applied_rows"));
         let normalised: String = production.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(normalised.contains(
-            "failure_record::start( provider, admitted, checked, executable, args, Some(stdio.stdin), Some(stdio.stdout), local_files, )"
+            "failure_record::start( provider, admitted, checked, executable, args, (Some(stdio.stdin), Some(stdio.stdout)), local_files, )"
         ));
         assert!(production.contains("render_macos_profile(provider, admitted)"));
         assert!(

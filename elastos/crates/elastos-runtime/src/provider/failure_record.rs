@@ -77,8 +77,7 @@ pub(super) fn start(
     checked: super::CheckedDirectory<'_>,
     executable: &CheckedExecutable,
     args: &[&CStr],
-    stdin_read: Option<i32>,
-    stdout_write: Option<i32>,
+    stdio: (Option<i32>, Option<i32>),
     local_files: &elastos_common::model_landlock_files::LocalModelFiles,
 ) -> Result<libc::pid_t, LaunchError> {
     let _path = CString::new(executable.path().as_os_str().as_bytes()).map_err(|_| {
@@ -117,8 +116,8 @@ pub(super) fn start(
         executable,
         args,
         NORMAL_TEST_HOOK,
-        stdin_read,
-        stdout_write,
+        stdio.0,
+        stdio.1,
         None,
     )
 }
@@ -521,8 +520,7 @@ mod tests {
             opened_directory(Path::new("/")),
             &CheckedExecutable::for_test(bad),
             &[],
-            None,
-            None,
+            (None, None),
             &elastos_common::model_landlock_files::LocalModelFiles::default(),
         );
         assert!(
@@ -613,8 +611,7 @@ mod tests {
             opened_directory(root.path()),
             &CheckedExecutable::for_test(&executable),
             &[],
-            None,
-            None,
+            (None, None),
             &elastos_common::model_landlock_files::LocalModelFiles::default(),
         ) {
             Err(LaunchError::ChildFailed { pid, reason }) => (pid, reason),
@@ -865,8 +862,7 @@ mod tests {
             opened_directory(&root),
             &CheckedExecutable::for_test(Path::new("/bin/true")),
             &[],
-            None,
-            None,
+            (None, None),
             &elastos_common::model_landlock_files::LocalModelFiles::default(),
         );
         let kept = std::fs::read(root.join("kept"))
