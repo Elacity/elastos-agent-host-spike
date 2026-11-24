@@ -272,6 +272,10 @@ test("create refusals keep their status and reason", () => {
   assert.equal(refusalIncludes(200, "agent request is invalid", 409, "agent request is invalid"), false);
   assert.equal(refusalIncludes(403, "admin passkey required", 403, "admin passkey required"), true);
   assert.equal(refusalIncludes(403, "missing home launch token", 403, "missing home launch token"), true);
+  assert.equal(
+    refusalIncludes(403, "Gateway request requires an admitted host and caller", 403, "Gateway request requires an admitted host and caller"),
+    true,
+  );
   assert.equal(refusalIncludes(409, "agents are not turned on for this Home", 409, "agents are not turned on"), true);
 });
 

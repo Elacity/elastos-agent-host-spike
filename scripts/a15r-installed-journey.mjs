@@ -1698,11 +1698,13 @@ async function runU3Create() {
   const noSession = await call("POST", "/api/apps/system/agents/create", "", {
     display_name: "No Session", agent_host: "agent-host", request_id: "u3-no-session",
   });
-  if (!refusalIncludes(noSession.status, noSession.text, 403, "missing home launch token")
+  // The same origin as a signed create, with the launch token omitted. The
+  // frontdoor answers a missing token on this route with its public refusal.
+  if (!refusalIncludes(noSession.status, noSession.text, 403, "Gateway request requires an admitted host and caller")
     || JSON.stringify(storedAgentRecords()) !== beforeSession) {
     halt("u3_no_session_refused", { status: noSession.status, body: noSession.text.slice(0, 240) });
   }
-  pass("u3_no_session_refused", { status: noSession.status });
+  pass("u3_no_session_refused", { status: noSession.status, body: "Gateway request requires an admitted host and caller" });
 
   const identities = JSON.stringify(storedAgentRecords());
   const disabled = await call("POST", "/api/apps/system/agents/disable", state.systemToken, {});
