@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::api::routes::tests::make_admin;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 static DISPATCH_FIXTURES: std::sync::OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
@@ -107,6 +108,16 @@ pub(crate) fn plant_another_dispatch(data_dir: &Path, owner_id: &str, request_id
     )
     .unwrap();
     id
+}
+
+pub(crate) struct HeldAgentFileLock {
+    _lock: WriteLock,
+}
+
+pub(crate) fn hold_agent_file_lock_for_test(data_dir: &Path) -> anyhow::Result<HeldAgentFileLock> {
+    Ok(HeldAgentFileLock {
+        _lock: lock_for_write(data_dir)?,
+    })
 }
 
 /// Retires a planted agent. The spent total stays on the record.
@@ -2129,11 +2140,92 @@ fn the_agent_files_name_no_owner_key_function_and_read_no_environment() {
     assert_eq!(calls, [1, 0, 0]);
 }
 
+#[derive(Serialize, Deserialize)]
+struct FrozenOlderAgentFile {
+    schema: String,
+    sequence: u64,
+    enabled: Option<Value>,
+    agents: Vec<FrozenOlderAgent>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrozenOlderAgent {
+    record: Value,
+    protection: Value,
+    #[serde(default = "frozen_active", skip_serializing_if = "is_frozen_active")]
+    active: bool,
+}
+
+fn frozen_active() -> bool {
+    true
+}
+
+fn is_frozen_active(active: &bool) -> bool {
+    *active
+}
+
+/// The agent-file parser from before `model_tokens_spent`: `parse_strict`'s
+/// round-trip, on a record shape that does not know the field.
+fn frozen_older_agent_parser(bytes: &[u8]) -> Result<(), &'static str> {
+    let file: FrozenOlderAgentFile = serde_json::from_slice(bytes).map_err(|_| DOES_NOT_PARSE)?;
+    let found: Value = serde_json::from_slice(bytes).map_err(|_| DOES_NOT_PARSE)?;
+    let written = serde_json::to_value(file).map_err(|_| DOES_NOT_PARSE)?;
+    if written != found {
+        return Err(NOT_OUR_FORM);
+    }
+    Ok(())
+}
+
+#[test]
+fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-older");
+    write_change(&home, Operation::SetActive, |file| {
+        let slot = &mut file.agents[0];
+        slot.active = true;
+        slot.record.updated_at = 10;
+    })
+    .unwrap();
+    charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64).unwrap();
+    let bytes = home.agent_bytes();
+    assert!(std::str::from_utf8(&bytes)
+        .unwrap()
+        .contains("model_tokens_spent"));
+    assert_eq!(frozen_older_agent_parser(&bytes), Err(NOT_OUR_FORM));
+    let mut without = serde_json::from_slice::<Value>(&bytes).unwrap();
+    without["agents"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("model_tokens_spent");
+    let without = serde_json::to_vec(&without).unwrap();
+    assert_eq!(frozen_older_agent_parser(&without), Ok(()));
+    let state = crate::auth::load_auth_state(home.path()).unwrap();
+    assert!(
+        state
+            .principals
+            .iter()
+            .any(|record| record.principal_id == OWNER_ID),
+        "Home still loads the owner"
+    );
+    assert!(
+        parse_strict(&bytes).is_ok(),
+        "the newer build reads the file"
+    );
+}
+
 #[test]
 fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
     let home = Home::new();
     turn_on(&home);
     let agent = create_one(&home, "request-1");
+    write_change(&home, Operation::SetActive, |file| {
+        let slot = &mut file.agents[0];
+        slot.active = true;
+        slot.record.updated_at = 10;
+    })
+    .unwrap();
+    charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64).unwrap();
     rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 10).unwrap();
     retire_in_any_build(home.path(), &home.caller(), &agent.agent_id, 11).unwrap();
     set_enabled_in_any_build(home.path(), &home.caller(), false, 12).unwrap();
@@ -2156,11 +2248,19 @@ fn an_audit_chain_holding_agent_events_checks_with_the_frozen_code() {
         [
             "agent.records.enable",
             "agent.record.create",
+            "agent.record.active",
+            "agent.record.spend",
             "agent.record.rename",
             "agent.record.retire",
             "agent.records.disable",
         ]
     );
+    let spend = stored
+        .audit
+        .iter()
+        .find(|event| event.event_type == "agent.record.spend")
+        .expect("one spend row");
+    assert!(spend.proof_binding_id.is_none() && spend.session_id.is_none());
     // Each stored event has exactly the frozen event's fields.
     let ours = serde_json::to_value(home.audit()).unwrap();
     assert_eq!(serde_json::to_value(&stored.audit).unwrap(), ours);

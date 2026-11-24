@@ -13,6 +13,10 @@
 //! off in every default build. A separate change adds that protection before
 //! agents can be on by default.
 //!
+//! `model_tokens_spent` stays on the agent record. An older build of this fork
+//! refuses that file by name (`NOT_OUR_FORM`). Home still loads, and agents
+//! stay unavailable until a build that knows the field returns.
+//!
 //! The rules this module keeps:
 //!
 //! - `build_allows` is the only place the cargo feature is read. With the
@@ -29,6 +33,7 @@
 //! - This module never holds the owner's data key. It asks `auth` for a key
 //!   derived from it and wraps the agent's own data key under that.
 
+use std::cell::Cell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -168,7 +173,10 @@ pub(crate) struct StoredAgent {
     // Absent means on: a record stored before this field still launches.
     #[serde(default = "active_when_absent", skip_serializing_if = "is_active")]
     pub(crate) active: bool,
-    /// Model tokens already spent. Absent means zero, and zero is not written.
+    /// Model tokens already charged. Absent means zero, and zero is not written.
+    /// An older build refuses a file that carries this field by name
+    /// (`NOT_OUR_FORM`). Home still loads. Agents stay unavailable until a
+    /// build that knows the field returns.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) model_tokens_spent: u64,
 }
@@ -386,15 +394,43 @@ fn protection_is_sound(agent: &StoredAgent) -> bool {
 
 static AGENT_WRITE: Mutex<()> = Mutex::new(());
 
+thread_local! {
+    static AGENT_FILE_LOCK_HELD: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn agent_file_lock_held() -> bool {
+    AGENT_FILE_LOCK_HELD.with(Cell::get)
+}
+
+struct AgentFileLockFlag;
+
+impl AgentFileLockFlag {
+    fn take() -> Self {
+        AGENT_FILE_LOCK_HELD.with(|held| held.set(true));
+        Self
+    }
+}
+
+impl Drop for AgentFileLockFlag {
+    fn drop(&mut self) {
+        AGENT_FILE_LOCK_HELD.with(|held| held.set(false));
+    }
+}
+
+/// The agent file lock is already held on this thread.
+pub(crate) const LOCK_ORDER: &str = "agent file lock before the budget mutex";
+
 /// The agent lock: one writer in this process, and one across processes.
 struct WriteLock {
     _file: FileLock,
     _process: MutexGuard<'static, ()>,
+    _order: AgentFileLockFlag,
 }
 
 /// Takes the agent lock. The owner's sign-in lock is only ever taken inside
 /// it, by the audit append, and nothing that holds the sign-in lock takes
-/// this one.
+/// this one. The model budget mutex is taken before this lock. Holding this
+/// lock and then that mutex is refused (`LOCK_ORDER`).
 fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
     let process = AGENT_WRITE
         .lock()
@@ -407,6 +443,7 @@ fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
     Ok(WriteLock {
         _file: FileLock::exclusive(file).context("failed to lock agent records")?,
         _process: process,
+        _order: AgentFileLockFlag::take(),
     })
 }
 
@@ -847,7 +884,7 @@ fn set_enabled_in_any_build(
 }
 
 /// The most agents one owner may have that are not retired.
-const MAX_LIVE_AGENTS_PER_OWNER: usize = 8;
+pub(crate) const MAX_LIVE_AGENTS_PER_OWNER: usize = 8;
 
 const BAD_REQUEST: &str = "agent request is invalid: a field is empty, too long or malformed";
 const REQUEST_ID_REUSED: &str = "request id was already used for a different agent";

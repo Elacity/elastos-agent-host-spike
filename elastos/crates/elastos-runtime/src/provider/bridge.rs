@@ -2099,9 +2099,11 @@ impl ProviderBridge {
     #[cfg(target_os = "macos")]
     pub fn confined_model_identity(&self) -> Option<(u32, u64)> {
         let pid = self._local_provider_pid.load(Ordering::Acquire);
-        let birth = self._local_provider_birth.load(Ordering::Acquire);
-        (pid != 0 && super::local_model_broker::process_birth(pid) == Some(birth))
-            .then_some((pid, birth))
+        let stored = self._local_provider_birth.load(Ordering::Acquire);
+        // `from_io` names this process and leaves the birth unset. A provider
+        // process still has to present its own birth.
+        let birth = super::local_model_broker::process_birth(pid)?;
+        ((pid == std::process::id() && stored == 0) || stored == birth).then_some((pid, birth))
     }
 
     #[cfg(target_os = "macos")]
@@ -2629,7 +2631,9 @@ impl ProviderBridge {
         }
     }
 
-    /// Create a bridge from existing I/O handles (for testing).
+    /// Create a bridge from existing I/O handles (for testing). On macOS it
+    /// names this process, with no stored birth, so a fixture can admit a
+    /// hosted run through `send_raw` and then production `handle`.
     pub fn from_io(
         reader: impl AsyncBufRead + Unpin + Send + 'static,
         writer: impl AsyncWrite + Unpin + Send + 'static,
@@ -2652,7 +2656,7 @@ impl ProviderBridge {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_brokers: Mutex::new(BrokerTasks::default()),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(0)),
+            _local_provider_pid: Arc::new(AtomicU32::new(std::process::id())),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_provider_birth: Arc::new(AtomicU64::new(0)),
             #[cfg(target_os = "macos")]

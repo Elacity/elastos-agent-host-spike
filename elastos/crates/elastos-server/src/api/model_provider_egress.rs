@@ -1979,26 +1979,63 @@ pub(crate) fn end_hosted_decision_for_test(
 }
 
 #[cfg(all(test, target_os = "macos"))]
-pub(crate) async fn forward_hosted_text_for_test(
-    data_dir: &Path,
-    offer_id: &str,
-    run_id: &str,
-    request_id: &str,
-) -> anyhow::Result<String> {
-    let request = hosted_text_effect(data_dir, offer_id, run_id, request_id)?;
-    let destination = resolve_effect(data_dir, &request)?;
-    let (mut broker, mut provider) = UnixStream::pair()?;
-    forward(&mut broker, data_dir, &request, &destination, || true).await?;
-    broker.shutdown().await?;
-    let mut response = String::new();
-    provider.read_to_string(&mut response).await?;
-    Ok(response)
-}
+pub(crate) use tests::forward_hosted_text_for_test;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Drives production `send_raw` and then production `handle`. The effect
+    /// is forwarded only when `confined_model_run_matches` is true.
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn forward_hosted_text_for_test(
+        data_dir: &Path,
+        runs_create: &serde_json::Value,
+        run_id: &str,
+        request_id: &str,
+    ) -> anyhow::Result<String> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let (provider_read, bridge_write) = tokio::io::duplex(4096);
+        let (bridge_read, mut provider_write) = tokio::io::duplex(4096);
+        let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(bridge_read), bridge_write);
+        let answered = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(provider_read);
+            let mut line = String::new();
+            reader.read_line(&mut line).await?;
+            provider_write.write_all(b"{\"status\":\"ok\"}\n").await?;
+            provider_write.flush().await?;
+            Ok::<(), std::io::Error>(())
+        });
+        bridge
+            .send_raw(runs_create)
+            .await
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        answered
+            .await
+            .map_err(|err| anyhow::anyhow!("{err}"))?
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        let offer_id = runs_create["offer_id"].as_str().unwrap_or("");
+        let mut effect = hosted_text_effect(data_dir, offer_id, run_id, request_id)?;
+        let mut body: serde_json::Value = serde_json::from_slice(&effect.body)?;
+        body["stream"] = json!(true);
+        effect.body = serde_json::to_vec(&body)?;
+        let (broker, mut provider) = UnixStream::pair()?;
+        let head = format!(
+            "POST /v1/hosted-effect HTTP/1.1\r\nHost: runtime.invalid\r\nContent-Length: {}\r\nX-Elastos-Offer-Id: {}\r\nX-Elastos-Effect: text\r\nX-Elastos-Run-Id: {run_id}\r\nX-Elastos-Request-Id: {request_id}\r\n\r\n",
+            effect.body.len(),
+            effect.offer_id,
+        );
+        provider.write_all(head.as_bytes()).await?;
+        provider.write_all(&effect.body).await?;
+        handle(broker, &bridge, std::process::id(), data_dir)
+            .await
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+        let mut response = String::new();
+        provider.read_to_string(&mut response).await?;
+        Ok(response)
+    }
+
     use std::fs::{self, OpenOptions};
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;

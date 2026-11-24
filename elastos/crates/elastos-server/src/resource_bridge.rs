@@ -9204,7 +9204,7 @@ pub(crate) mod tests {
                 std::time::Duration::from_secs(5),
                 crate::api::model_provider_egress::forward_hosted_text_for_test(
                     &self.data_dir,
-                    &binding.offer_id,
+                    request,
                     &run_id,
                     &binding.request_id,
                 ),
@@ -9308,8 +9308,16 @@ pub(crate) mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    fn hosted_input() -> serde_json::Value {
+        serde_json::json!({
+            "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
+            "prompt": "hi",
+        })
+    }
+
+    #[cfg(target_os = "macos")]
     fn hosted_run_id(agent_id: &str, request_id: &str) -> String {
-        let input = serde_json::json!({"prompt": "hi"});
+        let input = hosted_input();
         let binding = RuntimeCreateBinding {
             schema: RUNTIME_CREATE_BINDING_SCHEMA.to_string(),
             principal_id: agent_id.to_string(),
@@ -9325,12 +9333,10 @@ pub(crate) mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    async fn hosted_agent_home(ceiling: u64) -> Option<HostedHome> {
+    async fn hosted_agent_home(ceiling: u64) -> HostedHome {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if crate::agents::require_build().is_err() {
-            return None;
-        }
+        crate::agents::require_build().expect("hosted rows require the agents build");
         let temp = tempfile::tempdir().unwrap();
         let (owner_id, owner_proof) = enroll_hosted_owner(temp.path());
         let now = crate::auth::now_ts();
@@ -9485,7 +9491,7 @@ pub(crate) mod tests {
             .register_sub_provider("model", provider)
             .await
             .unwrap();
-        Some(HostedHome {
+        HostedHome {
             ctx,
             creates,
             hits,
@@ -9499,7 +9505,7 @@ pub(crate) mod tests {
             agent_key,
             sink,
             _temp: temp,
-        })
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -9511,7 +9517,7 @@ pub(crate) mod tests {
             serde_json::json!({
                 "offer_id": HOSTED_OFFER,
                 "operation": "text.generate",
-                "input": {"prompt": "hi"},
+                "input": hosted_input(),
                 "request_id": request_id,
             }),
         )
@@ -9534,9 +9540,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn agent_hosted_run_reaches_the_egress_broker_once() {
-        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
-            return;
-        };
+        let home = hosted_agent_home(hosted_offer_tokens()).await;
         let listed = model_invoke(
             &home.ctx,
             "offers_list",
@@ -9619,9 +9623,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn agent_hosted_run_without_admin_owner_is_refused() {
-        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
-            return;
-        };
+        let home = hosted_agent_home(hosted_offer_tokens()).await;
         demote_hosted_owner(home.ctx.data_dir.as_deref().unwrap(), &home.owner_id);
         let listed = model_invoke(
             &home.ctx,
@@ -9661,9 +9663,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn agent_hosted_run_over_its_ceiling_is_refused_before_dispatch() {
-        let Some(home) = hosted_agent_home(hosted_offer_tokens() - 1).await else {
-            return;
-        };
+        let home = hosted_agent_home(hosted_offer_tokens() - 1).await;
         let listed = model_invoke(
             &home.ctx,
             "offers_list",
@@ -9690,9 +9690,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn spent_total_survives_a_new_runtime_and_blocks_the_next_create() {
-        let Some(mut home) = hosted_agent_home(hosted_offer_tokens()).await else {
-            return;
-        };
+        let mut home = hosted_agent_home(hosted_offer_tokens()).await;
         let listed = model_invoke(
             &home.ctx,
             "offers_list",
@@ -9731,9 +9729,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn unreadable_agent_record_refuses_the_create_by_name() {
-        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
-            return;
-        };
+        let home = hosted_agent_home(hosted_offer_tokens()).await;
         let listed = model_invoke(
             &home.ctx,
             "offers_list",
@@ -9759,9 +9755,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn two_runtimes_refuse_from_the_stored_total_before_dispatch() {
-        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
-            return;
-        };
+        let home = hosted_agent_home(hosted_offer_tokens()).await;
         let listed = model_invoke(
             &home.ctx,
             "offers_list",
@@ -9786,7 +9780,7 @@ pub(crate) mod tests {
                         request_id: "model-v1:1700000000000:other".to_string(),
                         offer_id: HOSTED_OFFER.to_string(),
                         operation: "text.generate".to_string(),
-                        input_hash: model_input_hash(&serde_json::json!({"prompt": "hi"})).unwrap(),
+                        input_hash: model_input_hash(&hosted_input()).unwrap(),
                     },
                     "other-revision",
                 ),
@@ -9807,9 +9801,7 @@ pub(crate) mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn http_caller_with_an_agent_principal_is_refused() {
-        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
-            return;
-        };
+        let home = hosted_agent_home(hosted_offer_tokens()).await;
         let request = serde_json::json!({
             "offer_id": HOSTED_OFFER,
             "operation": "text.generate",
