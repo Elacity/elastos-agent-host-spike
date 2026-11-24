@@ -28,6 +28,14 @@ import {
   storedOwnerIsCreatingOwner,
   userAreaRouteRefused,
   verifyInstalledAudit,
+  pageLaunchToken,
+  agentIdV2,
+  judgeHomeAsks,
+  lineIsTestOnly,
+  parseGitGrep,
+  classifyMintHit,
+  mintHitsFromRepo,
+  gatewayRestartLoadedChain,
 } from "./a15r-installed-journey.mjs";
 
 const agentA = "agent:v2:" + "a".repeat(32);
@@ -251,6 +259,7 @@ test("a shell failure does not pass a row the node did not check", () => {
 test("u3 create mode names the create rows and no start row", () => {
   assert.equal(U3_NAMES.includes("u3_agent_started"), false);
   assert.equal(U3_NAMES.includes("u3_agent_created"), true);
+  assert.equal(U3_NAMES.includes("u3_home_asks"), true);
   assert.equal(U3_NAMES.at(-1), "u3_create_audit");
   const failed = shellFailStatuses("u3_agent_created", U3_NAMES);
   assert.equal(failed[U3_NAMES.indexOf("u3_agent_created")], "fail");
@@ -292,6 +301,74 @@ test("create route replaced a caller-chosen mint", () => {
     "pub(crate) request_id: String,\n    pub(crate) owner: String,\n}",
   );
   assert.equal(createReplacesMint(accepted, route).ok, false);
+});
+
+test("home asks counts the page posts and refuses a hidden create", () => {
+  const frame = "page-launch-token";
+  const runner = "runner-enrollment-token";
+  const post = (path) => ({ path, token: frame, fromPage: true });
+  const posts = [
+    post("/api/apps/system/agents/enable"),
+    post("/api/apps/system/agents/create"),
+    post("/api/apps/system/agents/create"),
+    post("/api/apps/system/agents/activate"),
+  ];
+  assert.equal(judgeHomeAsks(posts, [frame], runner).ok, true);
+  const hidden = posts.filter((item) => item.path !== "/api/apps/system/agents/create");
+  assert.equal(judgeHomeAsks(hidden, [frame], runner).ok, false);
+  assert.equal(judgeHomeAsks(posts, [runner], runner).ok, false);
+  assert.equal(judgeHomeAsks(posts.map((item) => ({ ...item, fromPage: false })), [frame], runner).ok, false);
+  assert.equal(judgeHomeAsks(posts, ["other-token"], runner).ok, false);
+});
+
+test("a page launch token is the hash, and two v2 ids are not a name hash", () => {
+  assert.equal(pageLaunchToken("https://home.example/apps/system/#home_token=abc"), "abc");
+  assert.equal(pageLaunchToken("https://home.example/apps/system/"), "");
+  assert.equal(agentIdV2("agent:v2:" + "ab".repeat(16)), true);
+  assert.equal(agentIdV2("agent:v1:" + "ab".repeat(16)), false);
+  assert.equal(agentIdV2("agent:v2:" + "ab".repeat(15)), false);
+});
+
+test("restart log shows the binary banner only after shutdown", () => {
+  const banner = "ElastOS Gateway v2.0.1-dev";
+  const log = [
+    "[gateway] ElastOS 2.0.1-dev starting on 127.0.0.1:9",
+    banner,
+    "Shutting down gateway...",
+    "[gateway] ElastOS 2.0.1-dev starting on 127.0.0.1:9",
+    banner,
+  ].join("\n");
+  const loaded = gatewayRestartLoadedChain(log);
+  assert.equal(loaded.ok, true, loaded.reason);
+  assert.equal(loaded.log_line, banner);
+  assert.equal(loaded.command, "elastos gateway --addr");
+  assert.equal(gatewayRestartLoadedChain("Shutting down gateway...\naudit chain rollback detected").ok, false);
+  assert.equal(gatewayRestartLoadedChain(banner).ok, false);
+});
+
+test("mint grep at head has no production hit", () => {
+  const source = [
+    "fn fresh() { let id = agent_v2(); }",
+    "#[cfg(test)]",
+    "mod tests {",
+    "    fn keeps_agent_v1() { let _id = \"agent:v1:abc\"; }",
+    "}",
+  ].join("\n");
+  assert.equal(lineIsTestOnly(source, 1), false);
+  assert.equal(lineIsTestOnly(source, 4), true);
+  const hits = parseGitGrep([
+    "HEAD:elastos/crates/elastos-server/src/auth.rs:4:\"agent:v1:abc\"",
+    "HEAD:elastos/crates/elastos-server/src/agents.rs:1:mint_agent_principal()",
+  ].join("\n"));
+  assert.equal(hits.length, 2);
+  assert.equal(classifyMintHit(hits[0], source), true);
+  assert.equal(classifyMintHit(hits[1], source), false);
+  const live = mintHitsFromRepo(new URL("..", import.meta.url).pathname);
+  assert.equal(live.ok, true, JSON.stringify(live.production));
+  assert.equal(live.production.length, 0);
+  assert.equal(live.defined, false);
+  assert.ok(live.testOnly.length >= 2);
+  assert.ok(live.testOnly.every((hit) => hit.path.endsWith(".rs")));
 });
 
 test("audit bytes match the signed fixture chain", () => {

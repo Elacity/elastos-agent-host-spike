@@ -155,17 +155,19 @@ export A15R_LOG="$LOG"
 export A15R_SOURCE_COMMIT="$SOURCE_COMMIT"
 export A15R_SOURCE_TREE="$SOURCE_TREE"
 
+BROWSERS="${A15R_BROWSERS:-$OUT/tool/browsers}"
 if [[ ! -d "$OUT/tool/node_modules/playwright" ]]; then
   mkdir -p "$OUT/tool"
   if ! (cd "$OUT/tool" && npm init -y >/dev/null && npm install --silent playwright); then
     echo "playwright install failed; passkey screenshots will be skipped" >&2
   else
-    PLAYWRIGHT_BROWSERS_PATH="$OUT/tool/browsers" \
+    mkdir -p "$BROWSERS"
+    PLAYWRIGHT_BROWSERS_PATH="$BROWSERS" \
       "$OUT/tool/node_modules/.bin/playwright" install chromium \
       >"$OUT/playwright-install.log" 2>&1 || echo "chromium download failed" >&2
   fi
 fi
-export PLAYWRIGHT_BROWSERS_PATH="$OUT/tool/browsers"
+export PLAYWRIGHT_BROWSERS_PATH="$BROWSERS"
 if [[ -n "$ONLY" ]]; then
   echo "mode: $ONLY"
 fi
