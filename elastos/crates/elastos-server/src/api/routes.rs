@@ -8393,6 +8393,48 @@ pub(crate) mod tests {
         );
     }
 
+    /// A planted row and its live-run token stay one fact. Ending one planted
+    /// row removes only that row's token.
+    #[tokio::test]
+    async fn a_planted_row_keeps_its_live_run_in_step() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        let other = "agent:v2:fedcba9876543210fedcba9876543210";
+        assert!(!runtime.agent_live_run_held(agent));
+        runtime
+            .plant_open_agent_stop_for_test(agent, "session-held")
+            .await;
+        assert!(
+            runtime.agent_live_run_held(agent),
+            "planting a live row did not admit its run"
+        );
+        assert!(!runtime.agent_live_run_held(other));
+        runtime
+            .plant_open_agent_stop_for_test(agent, "session-other")
+            .await;
+        runtime.end_planted_session_for_test("session-held").await;
+        assert!(
+            runtime.agent_live_run_held(agent),
+            "ending one planted row cleared the other row's run"
+        );
+        runtime.end_planted_session_for_test("session-other").await;
+        assert!(
+            !runtime.agent_live_run_held(agent),
+            "ending the planted rows left the agent live"
+        );
+    }
+
+    #[cfg(unix)]
+    fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+        if let Some(message) = payload.downcast_ref::<String>() {
+            return message.clone();
+        }
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            return (*message).to_string();
+        }
+        "panic payload was not a string".to_string()
+    }
+
     /// A write from a live agent session, through the bridge that session holds.
     /// `uri` may name `UsersAI/self`; the grant is the concrete root that alias
     /// becomes. A precondition is merged into the body, so `append` replaces
@@ -8654,6 +8696,141 @@ pub(crate) mod tests {
         home.wait_running(&winner).await;
         assert_eq!(live_of(&home, &agent).await, 1);
         let (status, _) = stop_route(&home, &winner, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// A launch cancelled at each await after admission frees the agent, and
+    /// the next Start is then admitted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_launch_cancelled_at_each_await_frees_the_agent() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = Arc::new(ProbeLaunch::new(&[]).await);
+        let (spin_dir, spin_cid) = home.spin_host();
+        let agent = home.create_agent_for_host("spinning", &spin_cid);
+        for point in crate::runtime::Runtime::LIVE_RUN_AWAIT_POINTS {
+            let pause = home.runtime.arm_live_run_await(point);
+            let route_home = home.clone();
+            let route_dir = spin_dir.clone();
+            let route_agent = agent.clone();
+            let route =
+                tokio::spawn(async move { route_home.launch_from(&route_dir, &route_agent).await });
+            if tokio::time::timeout(std::time::Duration::from_secs(15), pause.entered.notified())
+                .await
+                .is_err()
+            {
+                route.abort();
+                match route.await {
+                    Ok(Ok(answer)) => panic!("{point} finished as {}", answer.0.status),
+                    Ok(Err((status, body))) => panic!("{point} finished as {status} {body}"),
+                    Err(err) => panic!("{point} was not reached: {err}"),
+                }
+            }
+            route.abort();
+            let _ = route.await;
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if !home.runtime.agent_live_run_held(&agent)
+                        && live_of(&home, &agent).await == 0
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{point} left the agent live"));
+            let started = match home.launch_from(&spin_dir, &agent).await {
+                Ok(answer) => answer.0,
+                Err((status, body)) => panic!("{point} did not free the agent: {status} {body}"),
+            };
+            assert_eq!(started.status, "starting", "{point}");
+            home.wait_running(&started.id).await;
+            let (status, body) = stop_route(&home, &started.id, Some("user")).await;
+            assert_eq!(status, StatusCode::OK, "{point} stop: {body}");
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if !home.runtime.agent_live_run_held(&agent) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{point} stop left the live run set"));
+        }
+    }
+
+    /// A panic after the run is admitted drops that run, and the next Start
+    /// is admitted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_panic_after_admission_frees_the_agent() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = Arc::new(ProbeLaunch::new(&[]).await);
+        let (spin_dir, spin_cid) = home.spin_host();
+        let agent = home.create_agent_for_host("spinning", &spin_cid);
+        let _pause = home.runtime.arm_live_run_panic("entrypoint");
+        let route_home = home.clone();
+        let route_dir = spin_dir.clone();
+        let route_agent = agent.clone();
+        let joined =
+            tokio::spawn(async move { route_home.launch_from(&route_dir, &route_agent).await })
+                .await;
+        let Err(joined) = joined else {
+            panic!("the admitted start returned");
+        };
+        let message = panic_message(joined.into_panic());
+        assert!(
+            message.contains("entrypoint"),
+            "the panic was not the admission hook: {message}"
+        );
+        assert!(
+            !home.runtime.agent_live_run_held(&agent),
+            "the panic left the live run set"
+        );
+        let started = home
+            .launch_from(&spin_dir, &agent)
+            .await
+            .expect("a panic frees the agent")
+            .0;
+        assert_eq!(started.status, "starting");
+        home.wait_running(&started.id).await;
+        let (status, _) = stop_route(&home, &started.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// A start that is refused after its run was admitted frees the agent.
+    /// The next Start, with a new grant, is admitted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_start_after_admission_frees_the_agent() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = Arc::new(ProbeLaunch::new(&[]).await);
+        let (spin_dir, spin_cid) = home.spin_host();
+        let agent = home.create_agent_for_host("spinning", &spin_cid);
+        let _armed = home.runtime.arm_refuse_after_live_admit();
+        let refused = home.launch_from(&spin_dir, &agent).await;
+        assert!(refused.is_err(), "the start after admission was accepted");
+        drop(_armed);
+        assert!(
+            !home.runtime.agent_live_run_held(&agent),
+            "the refused start left the live run set"
+        );
+        let started = home
+            .launch_from(&spin_dir, &agent)
+            .await
+            .expect("a refused start frees the agent")
+            .0;
+        assert_eq!(started.status, "starting");
+        home.wait_running(&started.id).await;
+        let (status, _) = stop_route(&home, &started.id, Some("user")).await;
         assert_eq!(status, StatusCode::OK);
     }
 
