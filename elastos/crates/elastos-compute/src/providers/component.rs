@@ -53,8 +53,8 @@ const COMPONENT_FUEL: u64 = 100_000_000;
 // count already running, so the next slice takes the new fuel.
 const V2_FUEL: u64 = 1_000_000_000_000;
 const V2_FUEL_SLICE: u64 = 10_000_000;
-/// An idle wake spends a few dozen fuel. A tick counts once the guest has
-/// spent this much since the last refill.
+/// One slice of the execution bound. Fuel under a slice adds up, including
+/// a wake of a few dozen. The bound is this many slices times the tick budget.
 const V2_TICK_FUEL: u64 = 100_000;
 const COMPONENT_MEMORY_SIZE: usize = 128 * 1024 * 1024;
 /// The largest component file the Runtime reads or compiles. The largest
@@ -84,10 +84,8 @@ const V2_EPOCH_TICKS: u64 = 1_000;
 const V2_TEST_EPOCH_TICKS: u64 = 30;
 /// The named ending of a run that the deadline stopped.
 const ENDING_EPOCH_DEADLINE: &str = "epoch-deadline";
-/// The named ending of a run whose small slices added up to the tick budget.
+/// The named ending of a run whose spent fuel added up to the tick budget.
 const ENDING_EXECUTION_BOUND: &str = "execution-bound";
-/// Fuel under this is an idle wake. It does not count as work.
-const V2_IDLE_FUEL: u64 = 1_000;
 /// How many v2 guests may run at once. The refusal names this cap.
 #[cfg(test)]
 const V2_RESIDENT_CAP: usize = 2;
@@ -226,7 +224,7 @@ struct ComponentState {
     /// Set by the epoch callback when it interrupts *because* of a stop
     /// request, so a trap is named `stopped` only when the stop caused it.
     ended_by_stop: bool,
-    /// Set when small slices of fuel, each under one tick, add up to the budget.
+    /// Set when spent fuel under one slice adds up to the tick budget.
     execution_bound: bool,
     grants: Arc<Mutex<crate::providers::bus2_ui::GrantBook>>,
     /// The one presented frame, keyed by capsule id, with the principal who
@@ -1004,12 +1002,14 @@ impl ComponentProvider {
         store
             .set_fuel(fuel)
             .map_err(|err| run_error("v2 fuel", err))?;
-        // Count a tick when the guest used fuel. An idle wake, including a
-        // delivered event, leaves the count as it is.
+        // `set_fuel` does not always stick in this callback: the counter keeps
+        // falling, and the fall is the fuel just spent. A counter that sits
+        // or rises has taken the refill, so the distance from the full tank
+        // is the spend. Two equal burns then count, and a few dozen still add.
+        // The sum ends the run at `max_ticks` slices. One slice or more is a tick.
         store.set_epoch_deadline(1);
         let deadline_ticks = Arc::new(AtomicU64::new(0));
         let nibbled = Arc::new(AtomicU64::new(0));
-        // `get_fuel` keeps falling across refills. The delta is this epoch's work.
         let last_remaining = Arc::new(AtomicU64::new(fuel));
         let cancel_requested = control.cancel_requested.clone();
         let max_ticks = control.max_ticks;
@@ -1020,10 +1020,14 @@ impl ComponentProvider {
             }
             let remaining = context.get_fuel()?;
             let previous = last_remaining.swap(remaining, Ordering::AcqRel);
-            let spent = previous.saturating_sub(remaining);
             context.set_fuel(fuel)?;
-            // A slice under one tick still counts. Enough of them end the run.
-            if (V2_IDLE_FUEL..V2_TICK_FUEL).contains(&spent) {
+            let fell = previous.saturating_sub(remaining);
+            let spent = if fell > 0 {
+                fell
+            } else {
+                fuel.saturating_sub(remaining)
+            };
+            if spent > 0 && spent < V2_TICK_FUEL {
                 let sum = nibbled.fetch_add(spent, Ordering::AcqRel) + spent;
                 if sum >= nibble_limit {
                     context.data_mut().execution_bound = true;
@@ -1031,10 +1035,7 @@ impl ComponentProvider {
                 }
                 return Ok(UpdateDeadline::Continue(1));
             }
-            // A full slice counts. So does an epoch whose counter has stuck
-            // after that much work: the busy guest's fuel does not move again.
-            let stuck = spent == 0 && fuel.saturating_sub(remaining) >= V2_TICK_FUEL;
-            if spent < V2_TICK_FUEL && !stuck {
+            if spent < V2_TICK_FUEL {
                 return Ok(UpdateDeadline::Continue(1));
             }
             Ok(
@@ -2219,6 +2220,116 @@ mod tests {
             "work under one tick still ends the guest, got {ending}"
         );
         assert!(provider.threads_live.load(Ordering::Acquire) == 0);
+    }
+
+    fn burn_resident(loop_wat: &str) -> Vec<u8> {
+        let head = format!(
+            "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      {loop_wat}\n      local.get $event i32.const 2 i32.eq"
+        );
+        v2_variant(&[
+            (
+                "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      local.get $event i32.const 2 i32.eq",
+                head.as_str(),
+            ),
+            (
+                "i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n        i32.const 0 return",
+                "call $next return",
+            ),
+        ])
+    }
+
+    /// One epoch's fuel is observed on a later wake. `max_ticks` is 1, so the
+    /// stated total is one slice. The guest must still be up after the first
+    /// wake and must end `execution-bound` once the burns add up.
+    async fn pump_burns(loop_wat: &str, events: usize) -> (bool, Option<String>) {
+        let provider = ComponentProvider::new();
+        let handle = load_v2_fixture(&provider, burn_resident(loop_wat)).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 1;
+        provider.start(&handle).await.unwrap();
+        v2_pending_read(&provider, &handle).await;
+        let mut alive_after_first = false;
+        let mut ending = None;
+        for n in 1..=events {
+            let _ = provider.deliver_grant_revoked(&handle.id, "burn").await;
+            tokio::time::sleep(Duration::from_millis(12)).await;
+            if let Some(text) = provider.endings.read().await.get(&handle.id).cloned() {
+                ending = Some(text);
+                break;
+            }
+            if n == 1 {
+                alive_after_first = true;
+            }
+        }
+        (alive_after_first, ending)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_the_same_burn_each_epoch_ends_at_the_execution_bound() {
+        let (alive, ending) =
+            pump_burns("i32.const 0 i32.const 0 i32.const 600 memory.fill", 220).await;
+        let ending = ending.expect("the same burn every epoch must reach the stated total");
+        assert!(alive, "one epoch is under the stated total, got {ending}");
+        assert!(
+            ending.contains(ENDING_EXECUTION_BOUND),
+            "equal burns end execution-bound at the stated total, got {ending}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_alternating_burns_end_at_the_execution_bound() {
+        let (alive, ending) = pump_burns(
+            "i32.const 900 i32.load i32.eqz if i32.const 900 i32.const 1 i32.store i32.const 0 i32.const 0 i32.const 400 memory.fill else i32.const 900 i32.const 0 i32.store i32.const 0 i32.const 0 i32.const 700 memory.fill end",
+            260,
+        )
+        .await;
+        let ending = ending.expect("alternating burns must reach the stated total");
+        assert!(alive, "one epoch is under the stated total, got {ending}");
+        assert!(
+            ending.contains(ENDING_EXECUTION_BOUND),
+            "alternating burns end execution-bound at the stated total, got {ending}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_an_idle_resident_stays_up_for_many_epochs() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 2;
+        provider.start(&handle).await.unwrap();
+        for _ in 0..24 {
+            let sender = provider
+                .instances
+                .read()
+                .await
+                .get(&handle.id)
+                .and_then(|instance| instance.events.clone());
+            if let Some(sender) = sender {
+                let _ = sender.send(v2::elastos::bus::types::Event::Message(Vec::new()));
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            assert!(
+                !provider.endings.read().await.contains_key(&handle.id),
+                "an idle resident ended during the many epochs"
+            );
+        }
+        provider.stop(&handle).await.unwrap();
+        assert_eq!(v2_ending(&provider, &handle).await, "stopped");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
