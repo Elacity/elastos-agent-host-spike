@@ -16,7 +16,22 @@ fn repo() -> PathBuf {
 }
 
 fn read(relative: &str) -> String {
-    fs::read_to_string(repo().join(relative)).unwrap()
+    // A Windows checkout can hold CRLF text. These checks compare source
+    // content, so they compare it with the one line ending the source states.
+    fs::read_to_string(repo().join(relative))
+        .unwrap()
+        .replace("\r\n", "\n")
+}
+
+/// The repository-relative path as text with `/` separators, so a manifest
+/// inventory reads the same on every platform.
+fn relative_text(path: &Path) -> String {
+    path.strip_prefix(repo())
+        .unwrap()
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn parts(items: &[&str]) -> String {
@@ -82,11 +97,11 @@ fn manifest_inventory() -> (usize, BTreeSet<String>) {
         let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         if let Some(provides) = value.get("provides").and_then(Value::as_str) {
             if strings_with_scheme(&Value::String(provides.to_string()), &schemes) {
-                providers.insert(path.strip_prefix(repo()).unwrap().display().to_string());
+                providers.insert(relative_text(path));
             }
         }
         if strings_with_scheme(&value, &schemes) {
-            naming.insert(path.strip_prefix(repo()).unwrap().display().to_string());
+            naming.insert(relative_text(path));
         }
     }
     let expected_providers = [

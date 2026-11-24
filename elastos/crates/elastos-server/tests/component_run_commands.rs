@@ -1,5 +1,10 @@
 //! CLI rows for the Component commands printed in the authoring guide.
 //! Each command gets its own Home; the signed row stages before it runs.
+//!
+//! Unix only: the rows select their Home through HOME/XDG_DATA_HOME and run the
+//! documented `mkdir`/`cp` shell commands. Windows has neither, so the guide
+//! text check lives in `component_run_guide.rs` and this journey runs on Unix.
+#![cfg(unix)]
 
 use std::fs;
 use std::io::Write;
@@ -67,22 +72,10 @@ fn folder(home: &Path, manifest: &str) -> std::path::PathBuf {
     folder
 }
 
+/// The journey runs the CLI against a Home that HOME/XDG_DATA_HOME select and
+/// uses the documented `mkdir`/`cp` shell commands.
 #[test]
 fn documented_stage_then_run_and_explicit_development_commands() {
-    // Read at run time: Rust sources outside lab/ must not embed notes (scripts/ci-installed-app-paths-test.py).
-    let guide = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/CAPSULE_AUTHORING.md"),
-    )
-    .unwrap();
-    assert!(guide.contains("mkdir my-app-bundle"));
-    assert!(guide.contains("cp my-app/capsule.json my-app/my-app.component.wasm my-app-bundle/"));
-    assert!(guide.contains("elastos config set dev_mode false"));
-    assert!(guide.contains("elastos stage-bundle my-app-bundle\n"));
-    assert!(guide.contains("elastos stage-bundle my-app-bundle --signature my-app-bundle.sig.json"));
-    assert!(guide.contains("elastos run my-app-bundle"));
-    assert!(guide.contains("elastos config set dev_mode true"));
-    assert!(guide.contains("elastos run --dev-unsigned-component my-app"));
-
     let signed_home = tempfile::tempdir().unwrap();
     assert_isolated_home(signed_home.path());
     let signed_folder = folder(signed_home.path(), MANIFEST);

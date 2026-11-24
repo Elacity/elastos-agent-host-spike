@@ -547,19 +547,24 @@ mod tests {
         assert_eq!(ProviderPlane::from_provider_name("dkms-provider"), None);
     }
 
+    /// A path argument as this platform spells one. The host recognises a
+    /// path by this platform's separator, so the fixture uses it too.
+    fn platform_path(parts: &[&str]) -> String {
+        let separator = std::path::MAIN_SEPARATOR.to_string();
+        format!("{separator}{}", parts.join(&separator))
+    }
+
     #[test]
     fn a_path_argument_names_its_plane_by_file_name() {
-        assert_eq!(
-            provider_name_of("/opt/elastos/bin/custody-provider"),
-            "custody-provider"
-        );
+        let path = platform_path(&["opt", "elastos", "bin", "custody-provider"]);
+        assert_eq!(provider_name_of(&path), "custody-provider");
         assert_eq!(provider_name_of("ipfs-provider"), "ipfs-provider");
     }
 
     #[test]
     fn a_missing_provider_binary_path_fails_closed() {
-        let error = resolve_provider("/nonexistent/dir/ipfs-provider")
-            .expect_err("a missing binary must fail closed");
+        let path = platform_path(&["nonexistent", "dir", "ipfs-provider"]);
+        let error = resolve_provider(&path).expect_err("a missing binary must fail closed");
         assert!(error.to_string().contains("is not a file"), "{error}");
     }
 
