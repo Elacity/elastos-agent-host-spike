@@ -771,12 +771,12 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-server/src/setup.rs",
-            function: "ensure_browser_vm_image_in_context",
+            function: "ensure_browser_vm_image_in_context_for_platform",
             call: "component install",
             class: "n/a",
             trust_root: "release-signature",
-            verified_when: "at-install-only",
-            evidence: ["download_", "component("].concat(),
+            verified_when: "at-every-start",
+            evidence: "admit_installed_components(data_dir, context)?".into(),
             os_path: "",
         },
         TrustColumn {
@@ -1653,8 +1653,8 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&25));
     assert_eq!(roots.get("staged-cid"), Some(&8));
-    assert_eq!(times.get("at-every-start"), Some(&32));
-    assert_eq!(times.get("at-install-only"), Some(&8));
+    assert_eq!(times.get("at-every-start"), Some(&33));
+    assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
     assert_eq!(times.get("never"), Some(&56));
     assert_eq!(to_gate, 31);
@@ -1664,7 +1664,7 @@ fn trust_column_counts_and_chokepoint_queue() {
 fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
     let vm_rows: Vec<_> = rows()
         .into_iter()
-        .filter(|row| row.kind == "VM capsule; image check pending 4b")
+        .filter(|row| row.kind == "VM capsule; image check pending 4b-2")
         .collect();
     assert_eq!(vm_rows.len(), 4);
     let columns = columns();
