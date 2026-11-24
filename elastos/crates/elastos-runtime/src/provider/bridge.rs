@@ -1497,71 +1497,7 @@ impl ProviderBridge {
         Self::spawn_with_timeouts(binary_path, config, INIT_TIMEOUT, SHUTDOWN_TIMEOUT).await
     }
 
-    /// Start a rights-declaring provider through the OS entry and return
-    /// `Confined` only after `Init` succeeded.
-    ///
-    /// The Runtime creates the fresh storage root under a parent owned by the
-    /// effective user with no group or other write permission, opens that
-    /// directory without following a symlink, and syncs it. The launcher
-    /// receives that directory's device and inode, opens the path again, and
-    /// refuses when the directory is different. That comparison happens before
-    /// the plan and the fork. The child's stdin and stdout are fresh pipes. A
-    /// refusal returns `Err` and starts nothing; there is no fallback to the
-    /// plain `spawn`.
-    pub async fn spawn_confined(
-        component_key: &str,
-        authority: &ProviderAuthority,
-        binary_path: &CheckedExecutable,
-        storage_root: &Path,
-        config: ProviderConfig,
-    ) -> Result<Confined, BridgeError> {
-        // The Linux model start installs exact files on this thread. Drop the
-        // guard before the first wait so another task on this thread cannot
-        // observe them. A child can only add Landlock and seccomp limits, so
-        // the provider and the engine it execs share this one plan.
-        let _files = elastos_common::model_landlock_files::clear_on_drop();
-        let Some(provider) =
-            super::rights_table::RuntimeProviderId::from_component_key(component_key)
-        else {
-            return Err(BridgeError::Refused(format!(
-                "provider start is refused: component key \"{component_key}\" is not one of did-provider, wallet-provider, model-provider"
-            )));
-        };
-        #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
-        if matches!(provider, super::rights_table::RuntimeProviderId::Model) {
-            return Err(refused(
-                "provider start is refused: the macOS model provider starts from its admitted rights",
-            ));
-        }
-        let created_root = create_storage_root(storage_root)?;
-        let info = stat_fd(created_root.directory.as_raw_fd()).map_err(BridgeError::Io)?;
-        let checked = super::os_entry::CheckedDirectory {
-            path: storage_root,
-            dev: stat_dev(&info),
-            ino: stat_ino(&info),
-        };
-        pause_before_launcher(
-            &created_root.parent,
-            &created_root.directory,
-            &created_root.name,
-        );
-        let (stdin_read, to_child) = pipe_pair()?;
-        let (from_child, stdout_write) = pipe_pair()?;
-        let stdio = super::os_entry::ChildStdio {
-            stdin: stdin_read.as_raw_fd(),
-            stdout: stdout_write.as_raw_fd(),
-            to_child,
-            from_child,
-        };
-        let launched =
-            super::os_entry::start_provider(provider, authority, binary_path, checked, stdio)
-                .map_err(BridgeError::Refused)?;
-        drop(_files);
-        // The child holds its copies; these are the parent's, and must close
-        // so the child sees EOF on stdin and the parent sees EOF on stdout.
-        drop(stdin_read);
-        drop(stdout_write);
-
+    fn bridge_from_launch(launched: super::os_entry::Launched) -> Result<Self, BridgeError> {
         #[cfg(target_os = "macos")]
         let executable_copy = {
             #[cfg(not(elastos_unsupported_os_check))]
@@ -1611,6 +1547,68 @@ impl ProviderBridge {
         };
         #[cfg(target_os = "macos")]
         bridge.watch_confined_executable_copy();
+        Ok(bridge)
+    }
+
+    /// Start a rights-declaring provider through the OS entry and return
+    /// `Confined` only after `Init` succeeded.
+    ///
+    /// The Runtime creates the fresh storage root under a parent owned by the
+    /// effective user with no group or other write permission, opens that
+    /// directory without following a symlink, and syncs it. The launcher
+    /// receives that directory's device and inode, opens the path again, and
+    /// refuses when the directory is different. That comparison happens before
+    /// the plan and the fork. The child's stdin and stdout are fresh pipes. A
+    /// refusal returns `Err` and starts nothing; there is no fallback to the
+    /// plain `spawn`.
+    pub async fn spawn_confined(
+        component_key: &str,
+        authority: &ProviderAuthority,
+        binary_path: &CheckedExecutable,
+        storage_root: &Path,
+        config: ProviderConfig,
+    ) -> Result<Confined, BridgeError> {
+        // The Linux model start installs exact files on this thread. Drop the
+        // guard before the first wait so another task on this thread cannot
+        // observe them. A child can only add Landlock and seccomp limits, so
+        // the provider and the engine it execs share this one plan.
+        let _files = elastos_common::model_landlock_files::clear_on_drop();
+        let Some(provider) =
+            super::rights_table::RuntimeProviderId::from_component_key(component_key)
+        else {
+            return Err(BridgeError::Refused(format!(
+                "provider start is refused: component key \"{component_key}\" is not one of did-provider, wallet-provider, model-provider"
+            )));
+        };
+        #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
+        if matches!(provider, super::rights_table::RuntimeProviderId::Model) {
+            return Err(refused(
+                "provider start is refused: the macOS model provider starts from its admitted rights",
+            ));
+        }
+        let created_root = create_storage_root(storage_root)?;
+        let info = stat_fd(created_root.directory.as_raw_fd()).map_err(BridgeError::Io)?;
+        let checked = super::os_entry::CheckedDirectory {
+            path: storage_root,
+            dev: stat_dev(&info),
+            ino: stat_ino(&info),
+        };
+        pause_before_launcher(
+            &created_root.parent,
+            &created_root.directory,
+            &created_root.name,
+        );
+        let (stdin_read, stdout_write, stdio) = Self::protocol_pipes()?;
+        let launched =
+            super::os_entry::start_provider(provider, authority, binary_path, checked, stdio)
+                .map_err(BridgeError::Refused)?;
+        drop(_files);
+        // The child holds its copies; these are the parent's, and must close
+        // so the child sees EOF on stdin and the parent sees EOF on stdout.
+        drop(stdin_read);
+        drop(stdout_write);
+
+        let bridge = Self::bridge_from_launch(launched)?;
         let mut start = ConfinedStart {
             bridge: Some(bridge),
             root: created_root,
@@ -1627,6 +1625,77 @@ impl ProviderBridge {
             .bridge
             .take()
             .expect("the confined start owns its bridge");
+        Ok(Confined {
+            bridge: Arc::new(bridge),
+        })
+    }
+
+    fn protocol_pipes() -> Result<(OwnedFd, OwnedFd, super::os_entry::ChildStdio), BridgeError> {
+        let (stdin_read, to_child) = pipe_pair()?;
+        let (from_child, stdout_write) = pipe_pair()?;
+        let stdio = super::os_entry::ChildStdio {
+            stdin: stdin_read.as_raw_fd(),
+            stdout: stdout_write.as_raw_fd(),
+            to_child,
+            from_child,
+        };
+        Ok((stdin_read, stdout_write, stdio))
+    }
+
+    /// `chain-provider/` must be a real directory before the path allow-list
+    /// renders. Create it when Home has not yet. A symlink is refused.
+    fn ensure_chain_provider_root(data_dir: &Path) -> Result<(), BridgeError> {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = data_dir.join("chain-provider");
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Err(BridgeError::Refused(
+                "provider start is refused: chain-provider is a symlink".into(),
+            )),
+            Ok(metadata) if !metadata.is_dir() => Err(BridgeError::Refused(
+                "provider start is refused: chain-provider is not a directory".into(),
+            )),
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // Mode at create. `create_dir` follows the umask, so 0755 would
+                // sit on the directory until a later chmod.
+                let mut builder = std::fs::DirBuilder::new();
+                builder.mode(0o700);
+                builder.create(&root).map_err(BridgeError::Io)?;
+                Ok(())
+            }
+            Err(err) => Err(BridgeError::Io(err)),
+        }
+    }
+
+    /// Start localhost, object, or chain on that provider's path allow-list.
+    ///
+    /// There is no single storage root. A refusal starts nothing.
+    pub async fn spawn_path_allow(
+        component_key: &str,
+        authority: &ProviderAuthority,
+        binary_path: &CheckedExecutable,
+        data_dir: &Path,
+        config: ProviderConfig,
+    ) -> Result<Confined, BridgeError> {
+        // Admission is the first refusal, before a chain directory is created.
+        super::os_entry::admit_path_allow(component_key, authority)
+            .map_err(BridgeError::Refused)?;
+        if component_key == "chain-provider" {
+            Self::ensure_chain_provider_root(data_dir)?;
+        }
+        let (stdin_read, stdout_write, stdio) = Self::protocol_pipes()?;
+        let launched = super::os_entry::start_path_allow(
+            component_key,
+            authority,
+            binary_path,
+            data_dir,
+            stdio,
+        )
+        .map_err(BridgeError::Refused)?;
+        drop(stdin_read);
+        drop(stdout_write);
+        let bridge = Self::bridge_from_launch(launched)?;
+        bridge.init_provider(config, INIT_TIMEOUT).await?;
         Ok(Confined {
             bridge: Arc::new(bridge),
         })

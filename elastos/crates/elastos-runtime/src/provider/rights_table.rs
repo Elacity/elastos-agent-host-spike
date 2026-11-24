@@ -58,15 +58,24 @@ const MODEL_RIGHT_IDS: &[&str] = &[
     "model-gpu",
     "local-model-files",
 ];
+/// Localhost, object, and chain use the same file and exec rows. A helper's
+/// extra calls live in `measured_syscalls`, not in a second storage root.
+const HELPER_RIGHT_IDS: &[&str] = DID_RIGHT_IDS;
 
-/// The later caller derives this id from the Runtime's `components.json` key,
+/// The caller derives this id from the Runtime's `components.json` key,
 /// never from the package manifest's `name`.
-#[allow(dead_code)] // The spawn caller is added in a later slice.
+// This module is `#[cfg(unix)]`, so Windows never compiles it. The allow
+// is for macOS: the Linux seccomp installer is not compiled there, and the
+// ids that installer constructs are otherwise unused on that cfg.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(super) enum RuntimeProviderId {
     Did,
     Wallet,
     Model,
+    Localhost,
+    Object,
+    Chain,
 }
 
 impl RuntimeProviderId {
@@ -77,6 +86,18 @@ impl RuntimeProviderId {
             "did-provider" => Some(Self::Did),
             "wallet-provider" => Some(Self::Wallet),
             "model-provider" => Some(Self::Model),
+            // These three use the path allow-list, not the single storage root.
+            _ => None,
+        }
+    }
+
+    /// Localhost, object, and chain. `from_component_key` stays empty for them
+    /// so `spawn_confined` cannot start them on one storage root.
+    pub(super) fn path_allow(key: &str) -> Option<Self> {
+        match key {
+            "localhost-provider" => Some(Self::Localhost),
+            "object-provider" => Some(Self::Object),
+            "chain-provider" => Some(Self::Chain),
             _ => None,
         }
     }
@@ -86,6 +107,34 @@ impl RuntimeProviderId {
             Self::Did => DID_RIGHT_IDS,
             Self::Wallet => WALLET_RIGHT_IDS,
             Self::Model => MODEL_RIGHT_IDS,
+            Self::Localhost | Self::Object | Self::Chain => HELPER_RIGHT_IDS,
+        }
+    }
+
+    /// Calls measured for this helper and absent from its file rows.
+    /// `unlinkat` and `fchmod` stay on the storage row. `chmod` and
+    /// `fchmodat` are not granted: Landlock does not mediate them, so a path
+    /// chmod would reach any same-user file. Mode is `fchmod` on the held
+    /// descriptor, or the mode passed at create. Chain's names are its own
+    /// row: reqwest 0.12.28, tokio 1.52.1, mio 1.2.0. `fcntl`, `clone`,
+    /// `socket`, `setsockopt`, and `getsockopt` are argument-checked, so they
+    /// stay off this list. Object's check allows only `F_GETFL` and `F_SETFD`
+    /// of `FD_CLOEXEC`: glibc `fdopendir` needs those for `remove_dir_all`.
+    ///
+    /// `readlink` is x86_64 glibc `realpath`: `__readlink` is syscall
+    /// `readlink` (89). Landlock does not mediate it. This filter's deny is
+    /// EACCES, and `realpath` treats that errno as failure. aarch64 glibc
+    /// uses `readlinkat`, which the baseline already allows; the number table
+    /// has no `readlink` on that arch. Localhost calls `canonicalize` on its
+    /// base path and on later paths, inside the fence. Object calls it for
+    /// the auth-state cache key, also inside the fence. Chain does not, and
+    /// its Linux run already passed, so `readlink` stays off the chain row.
+    pub(super) fn measured_syscalls(self) -> &'static str {
+        match self {
+            Self::Localhost => "readlink rmdir",
+            Self::Object => "flock readlink rename renameat rmdir",
+            Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit rseq rt_sigprocmask rename renameat",
+            Self::Did | Self::Wallet | Self::Model => "",
         }
     }
 }
@@ -166,6 +215,9 @@ mod tests {
             RuntimeProviderId::Did,
             RuntimeProviderId::Wallet,
             RuntimeProviderId::Model,
+            RuntimeProviderId::Localhost,
+            RuntimeProviderId::Object,
+            RuntimeProviderId::Chain,
         ] {
             assert_eq!(
                 resolve(provider, &expanded)

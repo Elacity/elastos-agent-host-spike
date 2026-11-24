@@ -190,9 +190,72 @@ pub fn decode_did_key(did: &str) -> anyhow::Result<ed25519_dalek::VerifyingKey> 
 ///
 /// Derivation: `SHA-256("elastos-did-v1" || device_key)` → Ed25519 SigningKey.
 pub fn load_or_create_did(data_dir: &Path) -> anyhow::Result<(ed25519_dalek::SigningKey, String)> {
+    #[cfg(unix)]
+    if object_helper_process() {
+        return object_helper_runtime_did();
+    }
     let device_key = load_or_create_device_key(data_dir)?;
     let (signing_key, did) = derive_did(&device_key);
     Ok((signing_key, did))
+}
+
+/// True only inside the object-provider process. The macOS launcher runs a
+/// copy named `provider`, so the binary also sets `ELASTOS_OBJECT_HELPER`.
+/// The launcher clears the inherited environment, and the runtime binary's
+/// name is not `provider`.
+pub(super) fn object_helper_process() -> bool {
+    #[cfg(unix)]
+    {
+        let marked = std::env::var_os("ELASTOS_OBJECT_HELPER").is_some_and(|value| value == "1");
+        if !marked {
+            return false;
+        }
+        std::env::args_os().next().is_some_and(|arg0| {
+            matches!(
+                Path::new(&arg0).file_name().and_then(|name| name.to_str()),
+                Some("object-provider") | Some("provider")
+            )
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// The public runtime DID Home passed in the object helper's init config.
+/// There is no `runtime-did` file. A signature from the zero key does not
+/// verify as this DID.
+#[cfg(unix)]
+static OBJECT_HELPER_RUNTIME_DID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Remember the public runtime DID from the object helper's init config.
+/// A second call with the same DID is the same init. A different DID is refused.
+#[cfg(unix)]
+pub fn install_object_helper_runtime_did(did: &str) -> anyhow::Result<()> {
+    let did = did.trim();
+    decode_did_key(did)?;
+    if let Some(existing) = OBJECT_HELPER_RUNTIME_DID.get() {
+        if existing == did {
+            return Ok(());
+        }
+        anyhow::bail!("the object helper runtime DID is already set");
+    }
+    OBJECT_HELPER_RUNTIME_DID
+        .set(did.to_string())
+        .map_err(|_| anyhow::anyhow!("the object helper runtime DID is already set"))
+}
+
+/// The public runtime DID, and a signing key that is not the device key.
+#[cfg(unix)]
+fn object_helper_runtime_did() -> anyhow::Result<(ed25519_dalek::SigningKey, String)> {
+    let did = OBJECT_HELPER_RUNTIME_DID
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("the object helper has no public runtime DID"))?;
+    Ok((
+        ed25519_dalek::SigningKey::from_bytes(&[0u8; 32]),
+        did.clone(),
+    ))
 }
 
 /// Read the existing device identity for authority checks. Initialization and
@@ -353,7 +416,16 @@ pub fn derive_did(secret: &[u8; 32]) -> (ed25519_dalek::SigningKey, String) {
 }
 
 /// Canonical shared device-key path at `{data_dir}/identity/device.key`.
+/// The object helper returns a path it does not use, under a file root, so a
+/// stat is not-found and does not touch `identity/`.
 pub fn device_key_path(data_dir: &Path) -> PathBuf {
+    if object_helper_process() {
+        return data_dir
+            .join("ElastOS")
+            .join("System")
+            .join("Auth")
+            .join(".object-helper-device-key-not-used");
+    }
     data_dir.join("identity").join("device.key")
 }
 

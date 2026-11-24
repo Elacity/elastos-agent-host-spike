@@ -32,11 +32,15 @@ mod local_model_broker;
 mod macos_profile;
 #[cfg(unix)]
 mod os_entry;
+#[cfg(unix)]
+mod path_allow;
 mod registry;
 #[cfg(unix)]
 mod rights;
 #[cfg(unix)]
 mod rights_table;
+#[cfg(unix)]
+mod root_pin;
 #[cfg(unix)]
 mod seccomp_list;
 #[cfg(unix)]

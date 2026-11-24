@@ -3,12 +3,21 @@
 
 use super::rights::AdmittedRights;
 use super::rights_table::RuntimeProviderId;
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 // The lab's STORAGE_ROOT, executable, and ABI-5 handled masks (confine.rs:8560-8582, 8685).
 const STORAGE: u64 = 0x41be;
 const BINARY: u64 = 0x5;
 const HANDLED: u64 = 0xffff;
+/// `LANDLOCK_ACCESS_FS_READ_FILE` (1 << 2). A resolver file is not a storage root.
+const READ_FILE: u64 = 4;
+/// glibc NSS and the resolver. Optional files stay closed: the note measured
+/// `/etc/gai.conf` and `/etc/host.conf` as nonfatal, and glibc 2.39 does not
+/// open `ld.so.cache` or `libnss`.
+const CHAIN_RESOLVER_FILES: &[&str] = &["/etc/nsswitch.conf", "/etc/hosts", "/etc/resolv.conf"];
 const NO_LANDLOCK: &str = "linux confinement refused: the kernel has no Landlock";
 
 #[derive(Clone, Copy, Debug)]
@@ -55,7 +64,7 @@ fn loader_paths(provider: RuntimeProviderId, arch: LoaderArch) -> Vec<&'static s
     paths
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PathRule(pub &'static str, pub PathBuf, pub u64);
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Plan {
@@ -63,8 +72,12 @@ pub(super) struct Plan {
     pub handled: u64,
     pub rules: Vec<PathRule>,
     /// Device and inode of the storage directory opened before launch.
+    /// A helper with no file root leaves these zero. Its directory identities
+    /// are `root_dev` and `root_ino`, in rule order.
     pub storage_dev: u64,
     pub storage_ino: u64,
+    pub root_dev: Vec<u64>,
+    pub root_ino: Vec<u64>,
 }
 
 /// The storage directory opened before launch, with that directory's identity.
@@ -169,6 +182,82 @@ fn build_for_arch(
         rules,
         storage_dev: bindings.storage_dev,
         storage_ino: bindings.storage_ino,
+        root_dev: Vec::new(),
+        root_ino: Vec::new(),
+    })
+}
+
+/// One helper directory, with the device and inode of that directory.
+pub(super) struct AllowRoot {
+    pub name: &'static str,
+    pub path: PathBuf,
+    pub dev: u64,
+    pub ino: u64,
+}
+
+pub(super) fn build_path_allow_plan(
+    provider: RuntimeProviderId,
+    admitted: &AdmittedRights,
+    roots: &[AllowRoot],
+    executable: &Path,
+    abi: u32,
+) -> Result<Plan, String> {
+    let abi = require_abi(Ok(abi))?;
+    let storage = admitted.admits("storage");
+    if storage && roots.is_empty() {
+        return Err("provider start is refused: the path allow-list has no file roots".to_string());
+    }
+    let mut rules = Vec::with_capacity(roots.len() + 4);
+    let mut root_dev = Vec::with_capacity(roots.len());
+    let mut root_ino = Vec::with_capacity(roots.len());
+    if storage {
+        for root in roots {
+            if !root.path.is_absolute() {
+                return Err(format!(
+                    "provider start is refused: {} is not an absolute Landlock root",
+                    root.name
+                ));
+            }
+            rules.push(PathRule(root.name, root.path.clone(), STORAGE));
+            root_dev.push(root.dev);
+            root_ino.push(root.ino);
+        }
+    }
+    if admitted.admits("bound-executable") {
+        if !executable.is_absolute() {
+            return Err(
+                "provider start is refused: the provider executable path is not absolute"
+                    .to_string(),
+            );
+        }
+        rules.push(PathRule(
+            "PROVIDER_EXECUTABLE",
+            executable.to_path_buf(),
+            BINARY,
+        ));
+        for path in loader_paths(provider, LoaderArch::host()) {
+            rules.push(PathRule("LANDLOCK_LOADER_PATHS", path.into(), BINARY));
+        }
+    }
+    if matches!(provider, RuntimeProviderId::Chain) {
+        for path in CHAIN_RESOLVER_FILES {
+            // Follow the symlink for existence, and store the literal path.
+            // The installer opens that literal with O_PATH, which lands on the target inode.
+            if std::fs::metadata(path).is_ok() {
+                rules.push(PathRule("READ_ONLY_FILE", (*path).into(), READ_FILE));
+            }
+        }
+    }
+    let storage_dev = root_dev.first().copied().unwrap_or(0);
+    let storage_ino = root_ino.first().copied().unwrap_or(0);
+    Ok(Plan {
+        abi,
+        handled: HANDLED,
+        rules,
+        storage_dev,
+        storage_ino,
+        root_dev,
+        root_ino,
     })
 }
 
@@ -343,6 +432,9 @@ mod tests {
             Did => "DID_PROVIDER",
             Wallet => "WALLET_PROVIDER",
             Model => "MODEL_PROVIDER",
+            Localhost => "LOCALHOST_PROVIDER",
+            Object => "OBJECT_PROVIDER",
+            Chain => "CHAIN_PROVIDER",
         };
         if users.contains(name) {
             result.extend(paths(lab_section(
@@ -409,6 +501,9 @@ mod tests {
                 Did => "did-provider",
                 Wallet => "wallet-provider",
                 Model => "model-provider",
+                Localhost => "localhost-provider",
+                Object => "object-provider",
+                Chain => "chain-provider",
             };
             let fixture = format!(
                 "{}/../../../capsules/{name}/tests/fixtures/confine/declared-rights.json",
@@ -645,5 +740,57 @@ mod tests {
         assert!(narrowed.rules.iter().all(|rule| rule.0 != "MODEL"));
         assert!(narrowed.rules.iter().all(|rule| rule.1 != model));
         assert!(narrowed.rules.iter().all(|rule| rule.1 != engine));
+    }
+
+    #[test]
+    fn chain_read_only_files_are_the_three_resolver_paths() {
+        let root = AllowRoot {
+            name: "chain-provider",
+            path: "/data/chain-provider".into(),
+            dev: 1,
+            ino: 2,
+        };
+        let plan = build_path_allow_plan(
+            Chain,
+            &super::super::rights::admit_runtime_grant(Chain),
+            &[root],
+            Path::new("/bin/chain-provider"),
+            5,
+        )
+        .unwrap();
+        assert_eq!(plan.rules[0].0, "chain-provider");
+        let files: Vec<_> = plan
+            .rules
+            .iter()
+            .filter(|rule| rule.0 == "READ_ONLY_FILE")
+            .collect();
+        for rule in &files {
+            let path = rule.1.to_str().unwrap();
+            assert!(
+                CHAIN_RESOLVER_FILES.contains(&path),
+                "unexpected resolver file {path}"
+            );
+            assert_eq!(rule.2, READ_FILE);
+            assert!(!path.contains("identity") && !path.contains("gai.conf"));
+            assert!(!path.contains("host.conf") && !path.contains("ld.so"));
+        }
+        let local = AllowRoot {
+            name: "ElastOS",
+            path: "/data/ElastOS".into(),
+            dev: 1,
+            ino: 2,
+        };
+        let local_plan = build_path_allow_plan(
+            Localhost,
+            &super::super::rights::admit_runtime_grant(Localhost),
+            &[local],
+            Path::new("/bin/localhost-provider"),
+            5,
+        )
+        .unwrap();
+        assert!(local_plan
+            .rules
+            .iter()
+            .all(|rule| rule.0 != "READ_ONLY_FILE"));
     }
 }

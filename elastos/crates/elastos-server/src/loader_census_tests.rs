@@ -39,6 +39,28 @@ fn row(
 
 /// The authority input is local to the entry, not inherited from a caller's
 /// name. `none` and `checksum` document paths that later slices must gate.
+fn own_command_checks() -> &'static str {
+    #[cfg(windows)]
+    {
+        "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
+    }
+    #[cfg(not(windows))]
+    {
+        "checksum"
+    }
+}
+
+fn managed_runtime_checks() -> &'static str {
+    #[cfg(windows)]
+    {
+        "managed Runtime process ownership is unsupported on Windows"
+    }
+    #[cfg(not(windows))]
+    {
+        "checksum"
+    }
+}
+
 fn rows() -> Vec<Row> {
     let confined_spawn = ["ProviderBridge::spawn", "_confined"].concat();
     vec![
@@ -123,18 +145,28 @@ fn rows() -> Vec<Row> {
             "P2-8",
             1,
         ),
+        // C2 round 2 (6448d2257) moved Command::new(launcher) out of
+        // macos_command into macos_sandbox_command. Both the single-root
+        // start and the path-allow start call that function. It clears the
+        // environment and runs /usr/bin/sandbox-exec. It does not check the
+        // executable bytes; the caller admits the binary first.
         row(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_command",
+            "macos_sandbox_command",
             "command",
             "native provider",
             "none",
             "P2-8",
             1,
         ),
+        // C2 round 2 (6448d2257) moved .spawn() out of macos_start into
+        // macos_launch. macos_start still checks the storage directory and
+        // builds the Seatbelt command. macos_launch sets the child's
+        // descriptors and spawns that command. The spawn does not check the
+        // executable bytes.
         row(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_start",
+            "macos_launch",
             "spawn()",
             "native provider",
             "checked storage+Seatbelt profile",
@@ -227,7 +259,7 @@ fn rows() -> Vec<Row> {
             "return_to_home_if_requested",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -245,7 +277,7 @@ fn rows() -> Vec<Row> {
             "run_action",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -254,7 +286,7 @@ fn rows() -> Vec<Row> {
             "run_capsule_action",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -569,7 +601,7 @@ fn rows() -> Vec<Row> {
             "ensure_managed_runtime",
             "command",
             "host process",
-            "none",
+            managed_runtime_checks(),
             "P2-8",
             1,
         ),
@@ -578,7 +610,7 @@ fn rows() -> Vec<Row> {
             "ensure_managed_runtime",
             "spawn()",
             "host process",
-            "none",
+            managed_runtime_checks(),
             "P2-8",
             1,
         ),
@@ -670,7 +702,7 @@ fn rows() -> Vec<Row> {
             "native provider",
             "checksum",
             "P2-8",
-            13,
+            10,
         ),
         row(
             "elastos-server/src/server_infra.rs",
@@ -679,6 +711,19 @@ fn rows() -> Vec<Row> {
             "native provider",
             "admitted rights+checked directory+bound executable",
             "B3 S10",
+            2,
+        ),
+        // Unix calls spawn_path_allow. Windows calls ProviderBridge::spawn.
+        // The scanner labels both ProviderBridge::spawn, because
+        // spawn_path_allow starts with that prefix. The start census already
+        // counts these two arms.
+        row(
+            "elastos-server/src/server_infra.rs",
+            "spawn_allow_listed_provider",
+            "ProviderBridge::spawn",
+            "native provider",
+            "admitted rights+checked directory+bound executable",
+            "P2-8",
             2,
         ),
         row(
@@ -1072,6 +1117,8 @@ fn every_executable_loader_has_an_authority_row() {
                 | "CID"
                 | "DID"
                 | "checksum"
+                | "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
+                | "managed Runtime process ownership is unsupported on Windows"
                 | "admitted binary+OS gate+confined storage"
                 | "checked storage+Seatbelt profile"
                 | "none"

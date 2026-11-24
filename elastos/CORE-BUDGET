@@ -35,4 +35,10 @@
 # authority, noted in #1802's description. Measured on main after the merge.
 # +5 for #1804 (P2-8 slice 4a: a capsule start requires the component closure; the gate in
 # capsule/manager.rs component_closure_required). Measured 23 Nov 2026 after merging main.
-13122
+# +775 for the P2-4 path-allow fences after an honest trim of repeated checks, one shared
+# plan for both start paths, and one signed-authority admission for localhost, object, and
+# chain. This raise is larger than any earlier raise. The object helper still receives the
+# ElastOS directory: Landlock cannot exclude recovery-archive.key while auth locks and
+# atomic writes stay in that directory, and auth.rs is unchanged. Owner: Claude, CTO.
+# Review date 8 Dec 2026. Measured on this branch.
+13897

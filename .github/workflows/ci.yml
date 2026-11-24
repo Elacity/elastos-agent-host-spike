@@ -683,10 +683,7 @@ jobs:
           cache-directories: ${{ env.SCCACHE_DIR }}
           save-if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host') }}
       - name: build provider process binaries for tests
-        run: |
-          cargo build --release --manifest-path capsules/protected-content-protect-provider/Cargo.toml --target-dir capsules/protected-content-protect-provider/target
-          cargo build --release --manifest-path capsules/protected-content-decrypt-provider/Cargo.toml --target-dir capsules/protected-content-decrypt-provider/target
-          cargo build --release --manifest-path capsules/custody-provider/Cargo.toml --target-dir capsules/custody-provider/target
+        run: bash scripts/prepare-providers.sh
       - name: cargo test
         working-directory: elastos
         env:

@@ -14,12 +14,14 @@ const NUMBERS: &str = concat!(
     "lseek:8:62 mkdir:83:- mkdirat:258:34 mmap:9:222 mprotect:10:226 munmap:11:215 ",
     "newfstatat:262:79 openat:257:56 openat2:437:437 poll:7:- ppoll:271:73 pread64:17:67 ",
     "prlimit64:302:261 pwrite64:18:68 read:0:63 readlinkat:267:78 readv:19:65 rename:82:- ",
-    "renameat:-:38 renameat2:316:276 rseq:334:293 rt_sigaction:13:134 socketpair:53:199 statx:332:291 ",
+    "renameat:-:38 renameat2:316:276 rmdir:84:- rseq:334:293 rt_sigaction:13:134 socketpair:53:199 statx:332:291 ",
     "sysinfo:99:179 uname:63:160 unlink:87:- unlinkat:263:35 write:1:64 writev:20:66 ",
     "clone:56:220 clone3:435:435 ",
     // Linux probe rows. The measured x86-only dup2, getpgrp, and readlink
     // have no AArch64 syscall or libc::SYS_* constant; '-' excludes each there.
-    "accept4:288:242 bind:49:200 connect:42:203 dup2:33:- getpgrp:111:- getpid:39:172 getsockopt:55:209 kill:62:129 listen:50:201 pipe2:293:59 readlink:89:- recvfrom:45:207 rt_sigprocmask:14:135 sendto:44:206 setpgid:109:154 socket:41:198 waitid:247:95",
+    "accept4:288:242 bind:49:200 connect:42:203 dup2:33:- getpgrp:111:- getpid:39:172 getsockopt:55:209 kill:62:129 listen:50:201 pipe2:293:59 readlink:89:- recvfrom:45:207 rt_sigprocmask:14:135 sendto:44:206 setpgid:109:154 socket:41:198 waitid:247:95 ",
+    // Chain network stack. `sendmmsg` is glibc DNS; `setsockopt` is argument-checked.
+    "sendmmsg:307:269 setsockopt:54:208",
 );
 
 // An absent cell excludes that call by policy on this architecture. An absent row is an error.
@@ -77,20 +79,111 @@ pub(super) fn program(
         code.extend([jump(0x15, nr, 0, 1), stmt(6, ALLOW)]);
     }
     if matches!(provider, RuntimeProviderId::Model) {
-        let mut rules: Vec<Instruction> = MODEL_RULES.split_whitespace().map(|packed| {
-            let bits = u64::from_str_radix(packed, 16).expect("model rule encoding");
-            [(bits >> 48) as u32, ((bits >> 40) & 255) as u32,
-             ((bits >> 32) & 255) as u32, bits as u32]
-        }).collect();
-        for (at, name) in [(0, "clone3"), (2, "clone"), (9, "socketpair"),
-                           (14, "fcntl"), (22, "prlimit64"), (33, "futex"),
-                           (42, "socket")] {
-            rules[at][3] = number(name, arch).expect("model rule needs an architecture number");
-        }
-        code.extend(rules);
+        code.extend(measured_argument_rules(arch));
+    } else if matches!(provider, RuntimeProviderId::Chain) {
+        code.extend(chain_argument_rules(arch));
     } else {
+        // Object only. Localhost deletes an empty directory with rmdir, which
+        // does not call fcntl. Chain keeps its own fcntl commands.
+        if matches!(provider, RuntimeProviderId::Object) {
+            code.extend(object_directory_fcntl(arch));
+        }
         code.push(stmt(6, DENY));
     }
+    code
+}
+
+/// `fcntl` commands glibc `fdopendir` uses for Rust `remove_dir_all`.
+///
+/// On x86_64 and aarch64, glibc 2.35 and 2.39 `fdopendir` calls `F_GETFL`,
+/// then `__alloc_dir` with `close_fd = false` calls `F_SETFD` of `FD_CLOEXEC`.
+/// Rust 1.95 `remove_dir_all` opens with `openat(O_DIRECTORY|O_NOFOLLOW)` and
+/// passes that descriptor to `fdopendir`. `opendir` (list, and `rmdir` of an
+/// empty directory) sets `close_fd` and does not call `fcntl`, which is why
+/// trash of a directory already succeeds. The filter's deny is `EACCES` and
+/// does not name the call. Landlock `REMOVE_DIR` is already on the storage
+/// mask; this is not a path rule.
+fn object_directory_fcntl(arch: AuditArch) -> Vec<Instruction> {
+    let nr = number("fcntl", arch).expect("object fcntl rule needs a number");
+    // F_GETFL = 3, F_SETFD = 2, FD_CLOEXEC = 1. Same numbers on both arches.
+    vec![
+        jump(0x15, nr, 0, 7),
+        stmt(0x20, 24),
+        jump(0x15, 3, 3, 0),
+        jump(0x15, 2, 0, 3),
+        stmt(0x20, 32),
+        jump(0x15, 1, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]
+}
+
+/// The model's measured argument rules, with syscall numbers filled in.
+/// Chain uses the clone3, clone, fcntl, futex, and prlimit64 blocks. Those
+/// blocks jump only inside themselves, so chain can place them in its order.
+#[rustfmt::skip]
+fn measured_argument_rules(arch: AuditArch) -> Vec<Instruction> {
+    let mut rules: Vec<Instruction> = MODEL_RULES.split_whitespace().map(|packed| {
+        let bits = u64::from_str_radix(packed, 16).expect("model rule encoding");
+        [(bits >> 48) as u32, ((bits >> 40) & 255) as u32,
+         ((bits >> 32) & 255) as u32, bits as u32]
+    }).collect();
+    for (at, name) in [(0, "clone3"), (2, "clone"), (9, "socketpair"),
+                       (14, "fcntl"), (22, "prlimit64"), (33, "futex"),
+                       (42, "socket")] {
+        rules[at][3] = number(name, arch).expect("measured rule needs an architecture number");
+    }
+    rules
+}
+
+/// Chain argument tail. Allow-list entries win on the first match, so these
+/// names stay out of `measured_syscalls`. Pinned to reqwest 0.12.28, tokio
+/// 1.52.1, mio 1.2.0, hyper-util 0.1.20, and socket2 0.6.3
+/// (`chain_filter_names_the_pinned_network_stack`).
+fn chain_argument_rules(arch: AuditArch) -> Vec<Instruction> {
+    let measured = measured_argument_rules(arch);
+    let nr = |name: &str| number(name, arch).expect("chain rule needs an architecture number");
+    let mut code = Vec::new();
+    // clone3 and clone, then fcntl, futex, and prlimit64. Same instructions as
+    // the model blocks. Chain's order is fcntl, futex, prlimit64.
+    code.extend_from_slice(&measured[0..9]);
+    code.extend_from_slice(&measured[14..22]);
+    code.extend_from_slice(&measured[33..42]);
+    code.extend_from_slice(&measured[22..33]);
+    // socket: AF_INET and AF_INET6. AF_UNIX and AF_NETLINK stay denied.
+    code.extend([
+        jump(0x15, nr("socket"), 0, 5),
+        stmt(0x20, 16),
+        jump(0x15, 2, 1, 0),
+        jump(0x15, 10, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // setsockopt: IP_RECVERR and IPV6_RECVERR only. TCP options stay denied.
+    code.extend([
+        jump(0x15, nr("setsockopt"), 0, 10),
+        stmt(0x20, 24),
+        jump(0x15, 0, 0, 3),
+        stmt(0x20, 32),
+        jump(0x15, 11, 0, 5),
+        stmt(6, ALLOW),
+        jump(0x15, 41, 0, 3),
+        stmt(0x20, 32),
+        jump(0x15, 25, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    // getsockopt: SO_ERROR. take_error fails closed without it.
+    code.extend([
+        jump(0x15, nr("getsockopt"), 0, 6),
+        stmt(0x20, 24),
+        jump(0x15, 1, 0, 3),
+        stmt(0x20, 32),
+        jump(0x15, 4, 0, 1),
+        stmt(6, ALLOW),
+        stmt(6, DENY),
+    ]);
+    code.push(stmt(6, DENY));
     code
 }
 
@@ -272,6 +365,159 @@ mod tests {
                 assert!(!super::super::rights::git_show(&spec).status.success(), "{provider} golden is absent at pin d0dd5693; added at {added}");
             }
             assert!(super::super::rights::git_show(&format!("{added}:capsules/wallet-provider/tests/{provider}-seccomp-x86_64.golden")).status.success(), "{provider} golden is the post-pin addition at {added}");
+        }
+    }
+
+    /// Chain's own argument rules. An unconditional allow of `socket` would
+    /// accept AF_UNIX here, and a missing `clone3` rule would return EACCES.
+    #[test]
+    fn chain_filter_decides_the_argument_cases() {
+        let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Chain);
+        let cases: &[(&str, &str, [u64; 6], u32)] = &[
+            ("thread clone", "clone", [0x3d_0f00, 0, 0, 0, 0, 0], super::ALLOW),
+            ("measured vfork", "clone", [0x4111, 0, 0, 0, 0, 0], super::ALLOW),
+            ("plain fork", "clone", [0x11, 0, 0, 0, 0, 0], super::DENY),
+            ("clone3", "clone3", [0, 0, 0, 0, 0, 0], 0x0005_0026),
+            ("fcntl getfd", "fcntl", [3, 1, 0, 0, 0, 0], super::ALLOW),
+            ("fcntl dupfd_cloexec", "fcntl", [3, 0x406, 0, 0, 0, 0], super::ALLOW),
+            ("fcntl getfl", "fcntl", [3, 3, 0, 0, 0, 0], super::ALLOW),
+            ("fcntl setfl", "fcntl", [3, 4, 0, 0, 0, 0], super::ALLOW),
+            ("fcntl setfd", "fcntl", [3, 2, 0, 0, 0, 0], super::DENY),
+            ("futex wait", "futex", [0, 0, 0, 0, 0, 0], super::ALLOW),
+            ("futex wake", "futex", [0, 1, 0, 0, 0, 0], super::ALLOW),
+            ("futex lock", "futex", [0, 9, 0, 0, 0, 0], super::ALLOW),
+            ("futex unlock", "futex", [0, 10, 0, 0, 0, 0], super::ALLOW),
+            ("futex private wait", "futex", [0, 128, 0, 0, 0, 0], super::ALLOW),
+            ("futex requeue", "futex", [0, 3, 0, 0, 0, 0], super::DENY),
+            ("prlimit64", "prlimit64", [0, 0, 0, 0, 0, 0], super::ALLOW),
+            ("prlimit64 other pid", "prlimit64", [1, 0, 0, 0, 0, 0], super::DENY),
+            ("prlimit64 new limit", "prlimit64", [0, 0, 1, 0, 0, 0], super::DENY),
+            ("socket inet", "socket", [2, 1, 0, 0, 0, 0], super::ALLOW),
+            ("socket inet6", "socket", [10, 1, 0, 0, 0, 0], super::ALLOW),
+            ("socket unix", "socket", [1, 1, 0, 0, 0, 0], super::DENY),
+            ("socket netlink", "socket", [16, 3, 0, 0, 0, 0], super::DENY),
+            ("setsockopt ip recverr", "setsockopt", [6, 0, 11, 0, 0, 0], super::ALLOW),
+            ("setsockopt ipv6 recverr", "setsockopt", [6, 41, 25, 0, 0, 0], super::ALLOW),
+            ("setsockopt keepalive", "setsockopt", [6, 1, 9, 0, 0, 0], super::DENY),
+            ("setsockopt nodelay", "setsockopt", [6, 6, 1, 0, 0, 0], super::DENY),
+            ("getsockopt so_error", "getsockopt", [6, 1, 4, 0, 0, 0], super::ALLOW),
+            ("getsockopt other", "getsockopt", [6, 1, 7, 0, 0, 0], super::DENY),
+            ("connect", "connect", [6, 0, 0, 0, 0, 0], super::ALLOW),
+            ("sendmmsg", "sendmmsg", [6, 0, 0, 0, 0, 0], super::ALLOW),
+            ("sendto", "sendto", [6, 0, 0, 0, 0, 0], super::DENY),
+            ("pipe2", "pipe2", [0, 0, 0, 0, 0, 0], super::DENY),
+        ];
+        for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+            let audit = match arch { AuditArch::X86_64 => 0xc000_003e, AuditArch::Aarch64 => 0xc000_00b7 };
+            let prog = program(RuntimeProviderId::Chain, &admitted, arch);
+            assert!(prog.len() <= 256, "{arch:?} chain filter is {} instructions", prog.len());
+            for (label, name, args, want) in cases {
+                let Some(nr) = number(name, arch) else { continue };
+                let got = interpret(&prog, nr, *args, audit);
+                assert_eq!(got, *want, "{arch:?} {label} returned {got:#x}");
+            }
+        }
+    }
+
+    /// The chain filter is coupled to these crate versions. A lockfile bump
+    /// fails here instead of becoming EACCES inside a running helper.
+    #[test]
+    fn chain_filter_names_the_pinned_network_stack() {
+        const PINNED: &[(&str, &str)] = &[
+            ("reqwest", "0.12.28"),
+            ("tokio", "1.52.1"),
+            ("mio", "1.2.0"),
+            ("hyper-util", "0.1.20"),
+            ("socket2", "0.6.3"),
+        ];
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../capsules/chain-provider/Cargo.lock"
+        );
+        let lock = std::fs::read_to_string(path).unwrap_or_else(|err| panic!("{path}: {err}"));
+        for (name, version) in PINNED {
+            let mut found = Vec::new();
+            let mut lines = lock.lines();
+            while let Some(line) = lines.next() {
+                if line == "[[package]]" {
+                    let crate_name = lines.next().unwrap_or("");
+                    let crate_version = lines.next().unwrap_or("");
+                    if crate_name == format!("name = \"{name}\"") {
+                        found.push(
+                            crate_version
+                                .strip_prefix("version = \"")
+                                .and_then(|rest| rest.strip_suffix('"'))
+                                .unwrap_or(crate_version)
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            assert_eq!(found, vec![(*version).to_string()], "{name} left the pinned chain stack");
+        }
+    }
+
+    /// Names the fcntl commands `remove_dir_all` needs. Seccomp's deny is
+    /// EACCES and the kernel does not put the syscall number in that errno,
+    /// so this interpreter is the name. `--nocapture` prints each decision.
+    #[test]
+    fn object_directory_delete_names_the_fdopendir_fcntl_commands() {
+        let admitted = super::super::rights::admit_runtime_grant(RuntimeProviderId::Object);
+        let local = super::super::rights::admit_runtime_grant(RuntimeProviderId::Localhost);
+        let cases: &[(&str, [u64; 6], bool)] = &[
+            ("fcntl F_GETFL", [7, 3, 0, 0, 0, 0], true),
+            ("fcntl F_SETFD FD_CLOEXEC", [7, 2, 1, 0, 0, 0], true),
+            ("fcntl F_SETFD other", [7, 2, 0, 0, 0, 0], false),
+            ("fcntl F_GETFD", [7, 1, 0, 0, 0, 0], false),
+            ("fcntl F_SETFL", [7, 4, 0, 0, 0, 0], false),
+            ("fcntl F_DUPFD_CLOEXEC", [7, 0x406, 0, 0, 0, 0], false),
+        ];
+        for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
+            let audit = match arch {
+                AuditArch::X86_64 => 0xc000_003e,
+                AuditArch::Aarch64 => 0xc000_00b7,
+            };
+            let object = program(RuntimeProviderId::Object, &admitted, arch);
+            let localhost = program(RuntimeProviderId::Localhost, &local, arch);
+            assert!(
+                object.len() <= 256,
+                "{arch:?} object filter is {} instructions",
+                object.len()
+            );
+            for (label, args, allow) in cases {
+                let nr = number("fcntl", arch).expect("fcntl");
+                let got = interpret(&object, nr, *args, audit);
+                let want = if *allow { super::ALLOW } else { super::DENY };
+                let decision = if got == super::ALLOW { "allow" } else { "deny" };
+                eprintln!("{arch:?} object {label}: {decision}");
+                assert_eq!(got, want, "{arch:?} object {label} returned {got:#x}");
+                assert_eq!(
+                    interpret(&localhost, nr, *args, audit),
+                    super::DENY,
+                    "{arch:?} localhost {label} must stay denied"
+                );
+            }
+            let unlinkat = number("unlinkat", arch).expect("unlinkat");
+            assert_eq!(
+                interpret(&object, unlinkat, [0; 6], audit),
+                super::ALLOW,
+                "{arch:?} unlinkat AT_REMOVEDIR stays allowed"
+            );
+            if let Some(rmdir) = number("rmdir", arch) {
+                assert_eq!(
+                    interpret(&object, rmdir, [0; 6], audit),
+                    super::ALLOW,
+                    "{arch:?} rmdir stays allowed"
+                );
+            }
+        }
+        for name in ["chmod", "fchmodat"] {
+            assert!(
+                !super::NUMBERS
+                    .split_whitespace()
+                    .any(|row| row.split(':').next() == Some(name)),
+                "{name} is not a helper syscall number"
+            );
         }
     }
 }

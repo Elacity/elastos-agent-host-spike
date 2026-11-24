@@ -998,7 +998,7 @@ fn missing_manifest_message() -> String {
 
 /// The owner's explicit opt-in: `dev_mode = true` (a TOML bool) in a regular,
 /// non-symlink `{data_dir}/config.toml`. Read-only; anything else is no opt-in.
-fn source_home_dev_mode(data_dir: &Path) -> bool {
+pub(crate) fn source_home_dev_mode(data_dir: &Path) -> bool {
     const MAX_CONFIG: u64 = 64 * 1024;
     #[cfg(windows)]
     {
@@ -1024,12 +1024,12 @@ fn source_home_dev_mode(data_dir: &Path) -> bool {
     read().unwrap_or(false)
 }
 
-fn missing_trusted_source_error() -> anyhow::Error {
+pub(crate) fn missing_trusted_source_error() -> anyhow::Error {
     anyhow::anyhow!(
         "No trusted source configured.\n\
          `elastos setup` installs first-party artifacts from a trusted source over Carrier.\n\
          For a published install, run the stamped installer first.\n\
-         For a source checkout, create your own trusted source or add one with `elastos source add ...`."
+         For a source checkout, set `dev_mode = true` in config.toml, or create your own trusted source or add one with `elastos source add ...`."
     )
 }
 
@@ -1536,7 +1536,6 @@ async fn ensure_browser_vm_image_in_context_for_platform(
             Err(error) => return Err(BrowserVmImageInvalid::new(error).into()),
         }
         let dest = data_dir.join(browser_vm_image::INSTALL_PATH);
-        let existing_image = dest.is_dir();
         if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
             return Ok(());
         }
@@ -1547,15 +1546,7 @@ async fn ensure_browser_vm_image_in_context_for_platform(
             browser_vm_image::NAME,
             info,
         )?;
-        return download_component(data_dir, &row, &dest, context)
-            .await
-            .map_err(|error| {
-                if existing_image {
-                    BrowserVmImageInvalid::new(error).into()
-                } else {
-                    error
-                }
-            });
+        return download_component(data_dir, &row, &dest, context).await;
     }
     let check_dir = data_dir.to_path_buf();
     let check_platform = platform.clone();
@@ -4953,6 +4944,12 @@ async fn download_component(
     install_first_party_component_via_carrier(data_dir, row, dest, carrier_context)
         .await
         .map_err(|err| {
+            // An invalid-image refusal keeps its typed error so the gateway's
+            // Engine gate reports ArtifactInvalid; only a fetch-phase failure
+            // is reported as a Carrier fetch failure.
+            if err.downcast_ref::<BrowserVmImageInvalid>().is_some() {
+                return err;
+            }
             anyhow::anyhow!(
                 "Trusted source Carrier fetch failed for {} ({}): {}",
                 name,
@@ -6822,6 +6819,7 @@ pub(crate) mod tests {
         let err = missing_trusted_source_error();
         let message = err.to_string();
         assert!(message.contains("elastos setup"));
+        assert!(message.contains("dev_mode = true"));
         assert!(message.contains("elastos source add"));
     }
 

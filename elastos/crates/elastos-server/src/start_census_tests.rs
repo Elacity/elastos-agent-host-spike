@@ -174,7 +174,7 @@ fn places() -> Vec<Place> {
         ),
         place(
             "elastos-runtime/src/provider/os_entry.rs",
-            "macos_start",
+            "macos_launch",
             "spawn()".to_string(),
             1,
             "admitted grant, checked storage, Seatbelt profile",
@@ -261,7 +261,7 @@ fn places() -> Vec<Place> {
             "ensure_managed_runtime",
             "spawn()".to_string(),
             1,
-            "managed Runtime process: gateway owner start lock",
+            "signed release binary held at start; source Home dev_mode = true",
         ),
         place(
             "elastos-server/src/server_infra.rs",
@@ -352,7 +352,7 @@ fn places() -> Vec<Place> {
             "elastos-server/src/server_infra.rs",
             "setup_server_infrastructure_impl",
             spawn.clone(),
-            13,
+            10,
             P2_2,
         ),
         place(
@@ -361,6 +361,13 @@ fn places() -> Vec<Place> {
             spawn.clone(),
             2,
             "B3 S10 admitted rights and bound executable",
+        ),
+        place(
+            "elastos-server/src/server_infra.rs",
+            "spawn_allow_listed_provider",
+            spawn.clone(),
+            2,
+            "localhost, object, and chain path allow-list; windows stays plain",
         ),
         place(
             "elastos-server/src/server_infra.rs",

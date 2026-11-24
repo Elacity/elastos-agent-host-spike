@@ -23,9 +23,10 @@ const BASELINE: &str = concat!(
     "arch_prctl close exit_group getrandom mmap mprotect ppoll poll rt_sigaction",
 );
 
-// Linux probe rows follow the original model names. `socket` is absent here:
-// the program admits it only for AF_UNIX. `connect`, `sendto` and `bind` stay,
-// because the probe measured them and they do not carry an address family.
+// Linux probe rows follow the original model names. `socket` is absent from
+// this model list: the model program admits it only for AF_UNIX, in the
+// argument rules. `connect`, `sendto` and `bind` stay, because the probe
+// measured them and they do not carry an address family.
 const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
 /// The lab sorts names after it joins declared rights and the baseline.
@@ -39,9 +40,13 @@ pub(super) fn linux_seccomp_list(
         .iter()
         .flat_map(|row| row.linux_syscalls.split_whitespace())
         .chain(BASELINE.split_whitespace())
+        .chain(provider.measured_syscalls().split_whitespace())
         .collect();
     match provider {
-        RuntimeProviderId::Did => {}
+        RuntimeProviderId::Did
+        | RuntimeProviderId::Localhost
+        | RuntimeProviderId::Object
+        | RuntimeProviderId::Chain => {}
         RuntimeProviderId::Wallet => names.extend(["rename", "renameat"]),
         RuntimeProviderId::Model => names.extend(MODEL.split_whitespace()),
     }
@@ -153,7 +158,7 @@ mod tests {
     ];
 
     fn slug(provider: RuntimeProviderId) -> &'static str {
-        match provider { RuntimeProviderId::Did => "did", RuntimeProviderId::Wallet => "wallet", RuntimeProviderId::Model => "model" }
+        match provider { RuntimeProviderId::Did => "did", RuntimeProviderId::Wallet => "wallet", RuntimeProviderId::Model => "model", RuntimeProviderId::Localhost => "localhost", RuntimeProviderId::Object => "object", RuntimeProviderId::Chain => "chain" }
     }
     fn same_arch(left: AuditArch, right: AuditArch) -> bool {
         matches!((left, right), (AuditArch::X86_64, AuditArch::X86_64) | (AuditArch::Aarch64, AuditArch::Aarch64))
@@ -266,5 +271,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn each_helper_keeps_its_own_measured_calls() {
+        let local = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Localhost);
+        let object = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Object);
+        let chain = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Chain);
+        let did = crate::provider::rights::admit_runtime_grant(RuntimeProviderId::Did);
+        let local_x86 = linux_seccomp_list(RuntimeProviderId::Localhost, &local, AuditArch::X86_64);
+        let object_x86 = linux_seccomp_list(RuntimeProviderId::Object, &object, AuditArch::X86_64);
+        let chain_x86 = linux_seccomp_list(RuntimeProviderId::Chain, &chain, AuditArch::X86_64);
+        let chain_arm = linux_seccomp_list(RuntimeProviderId::Chain, &chain, AuditArch::Aarch64);
+        let did_x86 = linux_seccomp_list(RuntimeProviderId::Did, &did, AuditArch::X86_64);
+        assert_ne!(chain_x86, did_x86, "chain keeps its own grant");
+        for name in ["connect", "recvfrom", "sendmmsg", "epoll_create1", "epoll_ctl", "epoll_pwait", "epoll_wait", "eventfd2", "exit", "rseq", "rt_sigprocmask", "rename"] {
+            assert!(chain_x86.contains(&name), "chain x86_64 is missing {name}");
+        }
+        assert!(!chain_x86.contains(&"renameat"));
+        assert!(chain_arm.contains(&"renameat") && chain_arm.contains(&"epoll_pwait"));
+        assert!(!chain_arm.contains(&"rename") && !chain_arm.contains(&"epoll_wait"));
+        for name in ["socket", "getsockopt", "sendto", "fcntl", "clone", "clone3", "setsockopt", "bind", "listen", "pipe2"] {
+            assert!(!chain_x86.contains(&name) && !chain_arm.contains(&name), "{name} is not an unconditional chain allow");
+            assert!(!local_x86.contains(&name) && !object_x86.contains(&name), "{name} leaked onto another helper");
+        }
+        assert!(!local_x86.contains(&"sendmmsg") && !object_x86.contains(&"sendmmsg"));
+        assert!(local_x86.contains(&"rmdir"));
+        assert!(local_x86.contains(&"readlink"), "x86_64 realpath uses syscall readlink");
+        assert!(local_x86.contains(&"readlinkat"));
+        assert!(!local_x86.contains(&"chmod"));
+        assert!(!local_x86.contains(&"fchmodat"));
+        assert!(!local_x86.contains(&"flock"));
+        assert!(!local_x86.contains(&"socket"));
+        assert!(!local_x86.contains(&"connect"));
+        assert!(!chain_x86.contains(&"readlink"), "chain does not canonicalize");
+        assert!(!chain_arm.contains(&"readlink"), "chain does not canonicalize");
+        assert!(object_x86.contains(&"readlink"), "x86_64 realpath uses syscall readlink");
+        assert!(object_x86.contains(&"readlinkat"));
+        assert!(object_x86.contains(&"flock"));
+        assert!(object_x86.contains(&"fchmod"), "mode uses fchmod on the held descriptor");
+        assert!(!object_x86.contains(&"chmod"), "path chmod is not mediated by Landlock");
+        assert!(!object_x86.contains(&"fchmodat"), "path chmod is not mediated by Landlock");
+        assert!(object_x86.contains(&"rename"));
+        assert!(object_x86.contains(&"rmdir"));
+        assert!(!object_x86.contains(&"socket"));
+        assert!(!object_x86.contains(&"clone"));
+        let local_arm = linux_seccomp_list(RuntimeProviderId::Localhost, &local, AuditArch::Aarch64);
+        let object_arm = linux_seccomp_list(RuntimeProviderId::Object, &object, AuditArch::Aarch64);
+        assert!(!local_arm.contains(&"rmdir"));
+        assert!(!local_arm.contains(&"readlink"), "aarch64 realpath uses readlinkat");
+        assert!(local_arm.contains(&"readlinkat"));
+        assert!(!local_arm.contains(&"chmod"));
+        assert!(!local_arm.contains(&"fchmodat"));
+        assert!(local_arm.contains(&"unlinkat"));
+        assert!(!object_arm.contains(&"readlink"), "aarch64 realpath uses readlinkat");
+        assert!(object_arm.contains(&"readlinkat"));
+        assert!(object_arm.contains(&"flock"));
+        assert!(object_arm.contains(&"fchmod"), "mode uses fchmod on the held descriptor");
+        assert!(!object_arm.contains(&"fchmodat"), "path chmod is not mediated by Landlock");
+        assert!(object_arm.contains(&"renameat"));
+        assert!(!object_arm.contains(&"chmod"));
+        assert!(!object_arm.contains(&"rename"));
+        assert_ne!(object_x86, local_x86);
+        assert_ne!(object_arm, local_arm);
     }
 }

@@ -10,6 +10,8 @@
 pub mod store;
 pub mod webauthn;
 
+#[cfg(unix)]
+pub use store::install_object_helper_runtime_did;
 pub use store::{
     decode_did_key, derive_did, derive_did_seed, derive_storage_key, device_key_path,
     encode_did_key, encode_signing_key_did, load_existing_did, load_nickname,

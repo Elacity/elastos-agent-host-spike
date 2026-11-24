@@ -451,17 +451,26 @@ fn prepare_wallet_storage_parent(wallet_root: &Path) -> anyhow::Result<()> {
 
 /// Object-provider init config. The encryption field is empty.
 ///
-/// `init` reads `base_path` only. Existing object bytes are not encrypted
-/// under Home's device key. The child is still unconfined, and `base_path`
-/// is the data directory, so it can open `identity/device.key`.
-fn object_provider_bridge_config(data_dir: &Path) -> provider::BridgeProviderConfig {
-    provider::BridgeProviderConfig {
+/// `init` reads `base_path` and the public runtime DID in `extra.runtime_did`.
+/// Existing object bytes are not encrypted under Home's device key. The child
+/// is confined to its file roots, so it cannot open `identity/device.key`.
+/// Home passes that public DID in the init config. There is no runtime-did file.
+/// The helper receives no signing key. A missing DID refuses the spawn.
+fn object_provider_bridge_config(
+    data_dir: &Path,
+    device_key: &[u8; 32],
+) -> anyhow::Result<provider::BridgeProviderConfig> {
+    let (_, did) = elastos_identity::derive_did(device_key);
+    if elastos_identity::decode_did_key(&did).is_err() {
+        anyhow::bail!("no public runtime DID");
+    }
+    Ok(provider::BridgeProviderConfig {
         base_path: data_dir.to_string_lossy().to_string(),
         allowed_paths: file_backed_prefixes(),
         read_only: false,
         encryption_key: String::new(),
-        ..Default::default()
-    }
+        extra: serde_json::json!({ "runtime_did": did }),
+    })
 }
 
 /// Wallet-provider init config. The encryption field is empty.
@@ -531,6 +540,57 @@ async fn request_model_provider_status(
     .await
     .map_err(|_| anyhow::anyhow!("model-provider status request timed out"))?
     .map_err(|err| anyhow::anyhow!("model-provider status request failed: {err}"))
+}
+
+/// Start localhost, object, or chain on that provider's path allow-list.
+/// Windows stays on the plain spawn.
+#[cfg(unix)]
+async fn spawn_allow_listed_provider(
+    component_key: &str,
+    binary: &provider::CheckedExecutable,
+    data_dir: &Path,
+    config: provider::BridgeProviderConfig,
+) -> Result<Arc<provider::ProviderBridge>, provider::bridge::BridgeError> {
+    if component_key == "object-provider" {
+        let did = config
+            .extra
+            .get("runtime_did")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if elastos_identity::decode_did_key(did.trim()).is_err() {
+            return Err(provider::bridge::BridgeError::Refused(
+                "object helper spawn refused: no public runtime DID".into(),
+            ));
+        }
+    }
+    let authority = binaries::AdmittedProvider::admit(data_dir, component_key)
+        .map_err(|err| provider::bridge::BridgeError::Refused(err.to_string()))?
+        .ok_or_else(|| {
+            provider::bridge::BridgeError::Refused(format!(
+                "provider start is refused: {component_key} has no admitted authority"
+            ))
+        })?;
+    let confined = provider::ProviderBridge::spawn_path_allow(
+        component_key,
+        authority.authority(),
+        binary,
+        data_dir,
+        config,
+    )
+    .await?;
+    Ok(Arc::clone(confined.bridge()))
+}
+
+#[cfg(not(unix))]
+async fn spawn_allow_listed_provider(
+    _component_key: &str,
+    binary: &provider::CheckedExecutable,
+    _data_dir: &Path,
+    config: provider::BridgeProviderConfig,
+) -> Result<Arc<provider::ProviderBridge>, provider::bridge::BridgeError> {
+    Ok(Arc::new(
+        provider::ProviderBridge::spawn(binary, config).await?,
+    ))
 }
 
 fn local_model_paths(
@@ -1119,12 +1179,20 @@ pub(crate) async fn register_chain_provider_plane(
     }
     let generic_config = chain_provider_bridge_config_without_protected_network(&runtime_issuer);
     // Admit against the signed release of the Home this chain plane serves.
-    let bridge = provider::ProviderBridge::spawn(
+    // The chain process starts inside its own path allow-list.
+    let authority = binaries::AdmittedProvider::admit(data_dir, "chain-provider")
+        .map_err(|err| anyhow::anyhow!("failed to admit chain-provider: {err}"))?
+        .ok_or_else(|| anyhow::anyhow!("failed to admit chain-provider: no signed authority"))?;
+    let confined = provider::ProviderBridge::spawn_path_allow(
+        "chain-provider",
+        authority.authority(),
         &checked_native_provider_with_data_dir(data_dir, binary_path),
+        data_dir,
         generic_config,
     )
     .await
     .map_err(|err| anyhow::anyhow!("failed to spawn chain-provider: {err}"))?;
+    let bridge = std::sync::Arc::clone(confined.bridge());
     match bridge
         .request(provider::bridge::ProviderRequest::Init { config })
         .await
@@ -1141,9 +1209,8 @@ pub(crate) async fn register_chain_provider_plane(
             anyhow::bail!("chain-provider transport failed while applying configuration: {err}");
         }
     }
-    let chain_provider: Arc<dyn provider::Provider> = Arc::new(
-        provider::CapsuleProvider::with_scheme(Arc::new(bridge), "chain"),
-    );
+    let chain_provider: Arc<dyn provider::Provider> =
+        Arc::new(provider::CapsuleProvider::with_scheme(bridge, "chain"));
     provider_registry
         .register_sub_provider("chain", chain_provider)
         .await
@@ -1410,26 +1477,29 @@ async fn setup_server_infrastructure_impl(
             base_path: data_dir.to_string_lossy().to_string(),
             allowed_paths: file_backed_prefixes(),
             read_only: false,
+            // Home hands this helper the raw device key at init. The fence
+            // blocks the key file. Slice L is the follow-up that stops the hand-off.
             encryption_key: device_key_hex.clone(),
             ..Default::default()
         };
-        let bridge = provider::ProviderBridge::spawn(&binary_path, config)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to spawn localhost-provider capsule: {}.\n  \
+        let bridge =
+            spawn_allow_listed_provider("localhost-provider", &binary_path, &data_dir, config)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to spawn localhost-provider capsule: {}.\n  \
                      Reinstall with:\n  \
                        elastos setup --with localhost-provider",
-                    e
-                )
-            })?;
+                        e
+                    )
+                })?;
         tracing::info!(
             "localhost-provider capsule {} from {}",
             provider_cid,
             binary_path.display()
         );
         let provider: Arc<dyn provider::Provider> =
-            Arc::new(provider::CapsuleProvider::new(Arc::new(bridge)));
+            Arc::new(provider::CapsuleProvider::new(bridge));
         provider_registry.register(provider).await;
 
         if let Some(availability_config) = availability_provider_config_from_env() {
@@ -1507,25 +1577,38 @@ async fn setup_server_infrastructure_impl(
     }
 
     match binaries::resolve_verified_native_provider_binary("object-provider") {
-        Ok(Some(path)) => {
-            let object_config = object_provider_bridge_config(&data_dir);
-            match provider::ProviderBridge::spawn(&path, object_config).await {
-                Ok(bridge) => {
-                    let bridge = Arc::new(bridge);
-                    let object_provider: Arc<dyn provider::Provider> = Arc::new(
-                        provider::CapsuleProvider::with_scheme(bridge.clone(), "object"),
-                    );
-                    if let Err(e) = provider_registry
-                        .register_sub_provider("object", object_provider)
-                        .await
-                    {
-                        tracing::warn!("Failed to register elastos://object sub-provider: {}", e);
+        Ok(Some(path)) => match object_provider_bridge_config(&data_dir, &device_key) {
+            Err(err) => tracing::error!("object helper spawn refused: {err}"),
+            Ok(object_config) => {
+                // One line: the loader census names this exact call.
+                #[rustfmt::skip]
+                let object_bridge = spawn_allow_listed_provider("object-provider", &path, &data_dir, object_config);
+                match object_bridge.await {
+                    Ok(bridge) => {
+                        let object_provider: Arc<dyn provider::Provider> = Arc::new(
+                            provider::CapsuleProvider::with_scheme(bridge.clone(), "object"),
+                        );
+                        if let Err(e) = provider_registry
+                            .register_sub_provider("object", object_provider)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to register elastos://object sub-provider: {}",
+                                e
+                            );
+                        }
+                        tracing::info!("object-provider capsule from {}", path.display());
                     }
-                    tracing::info!("object-provider capsule from {}", path.display());
+                    Err(e) => {
+                        if e.to_string().contains("no public runtime DID") {
+                            tracing::error!("{e}");
+                        } else {
+                            tracing::warn!("Failed to spawn object-provider: {e}");
+                        }
+                    }
                 }
-                Err(e) => tracing::warn!("Failed to spawn object-provider: {}", e),
             }
-        }
+        },
         Ok(None) => {
             report_missing_home_provider(
                 &data_dir,
@@ -1664,9 +1747,11 @@ async fn setup_server_infrastructure_impl(
             let generic_chain_config = chain_provider_bridge_config_without_protected_network(
                 &protected_content_runtime_issuer,
             );
-            match provider::ProviderBridge::spawn(&path, generic_chain_config).await {
+            let chain_config = generic_chain_config;
+            match spawn_allow_listed_provider("chain-provider", &path, &data_dir, chain_config)
+                .await
+            {
                 Ok(bridge) => {
-                    let bridge = Arc::new(bridge);
                     let mut transport_ready = true;
                     if let Some(config) = protected_chain_config {
                         match bridge
@@ -4819,7 +4904,36 @@ mod tests {
         assert!(region.contains("object_provider_bridge_config("));
         assert!(!region.contains("device_key_hex"));
         assert!(!region.contains("encryption_key:"));
-        assert_init_omits_device_key(object_provider_bridge_config(temp.path()), &device_key);
+        let config = object_provider_bridge_config(temp.path(), &device_key).unwrap();
+        let did = config.extra["runtime_did"].as_str().unwrap();
+        assert!(did.starts_with("did:key:z"), "{did}");
+        assert_init_omits_device_key(config, &device_key);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn object_helper_spawn_refuses_a_missing_public_runtime_did() {
+        use sha2::Digest as _;
+        let temp = TempDir::new().unwrap();
+        let binary = temp.path().join("object-provider");
+        fs::write(&binary, b"not-run").unwrap();
+        let digest = hex::encode(sha2::Sha256::digest(b"not-run"));
+        let checked =
+            provider::CheckedExecutable::pinned(&binary, &format!("sha256:{digest}")).unwrap();
+        let started = spawn_allow_listed_provider(
+            "object-provider",
+            &checked,
+            temp.path(),
+            provider::BridgeProviderConfig::default(),
+        )
+        .await;
+        let Err(err) = started else {
+            panic!("a missing public runtime DID must refuse the spawn");
+        };
+        assert_eq!(
+            err.to_string(),
+            "object helper spawn refused: no public runtime DID"
+        );
     }
 
     #[cfg(unix)]

@@ -64,7 +64,11 @@ pub(super) fn render_macos_profile(
     }
     forms.push(match provider {
         RuntimeProviderId::Model => "(allow file-read-data (literal \"/\"))",
-        RuntimeProviderId::Did | RuntimeProviderId::Wallet => "(allow file-read* (literal \"/\"))",
+        RuntimeProviderId::Did
+        | RuntimeProviderId::Wallet
+        | RuntimeProviderId::Localhost
+        | RuntimeProviderId::Object
+        | RuntimeProviderId::Chain => "(allow file-read* (literal \"/\"))",
     });
     forms.push("(allow sysctl-read)");
     for row in admitted
@@ -81,6 +85,68 @@ pub(super) fn render_macos_profile(
     }
     rendered.push('\n');
     rendered
+}
+
+/// Seatbelt text for a helper allow-list. Parameters are the file-root names
+/// and `META_n` metadata literals. There is no `STORAGE_ROOT` and no
+/// `STORAGE_PARENT`: those parents would be the data directory, which contains
+/// `identity/device.key`. Metadata literals are the data directory and its
+/// ancestors only. They are not a read of that directory's children.
+pub(super) fn render_path_allow_profile(
+    roots: &[&str],
+    metadata_slots: usize,
+    chain: bool,
+    storage: bool,
+    executable: bool,
+) -> Result<String, String> {
+    if storage && roots.is_empty() {
+        return Err("provider start is refused: the path allow-list has no file roots".to_string());
+    }
+    let mut lines = Vec::with_capacity(HEAD.len() + 3 + roots.len() + metadata_slots);
+    for line in HEAD {
+        lines.push((*line).to_string());
+    }
+    if executable {
+        lines.push(r#"(allow process-exec (literal (param "PROVIDER_EXECUTABLE")))"#.to_string());
+    }
+    lines.push(r#"(allow file-read* (literal "/"))"#.to_string());
+    lines.push("(allow sysctl-read)".to_string());
+    if storage {
+        for name in roots {
+            let plain = name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && !name.is_empty();
+            if !plain || *name == "STORAGE_ROOT" || *name == "STORAGE_PARENT" || *name == "identity"
+            {
+                return Err(format!(
+                    "provider start is refused: {name} cannot be a Seatbelt allow-list parameter"
+                ));
+            }
+            lines.push(format!(
+                "(allow file-read* file-write* (subpath (param \"{name}\")))"
+            ));
+        }
+        for index in 0..metadata_slots {
+            lines.push(format!(
+                "(allow file-read-metadata (literal (param \"META_{index}\")))"
+            ));
+        }
+    }
+    if chain {
+        // Measured on this Mac against the real chain-provider binary.
+        // `(deny network*)` stays; outbound is this scoped line only.
+        lines.push(
+            "(allow network-outbound (remote unix-socket (literal \"/private/var/run/mDNSResponder\")) (remote ip))"
+                .to_string(),
+        );
+        lines.push(
+            "(allow file-read* (literal \"/var\") (literal \"/var/run/resolv.conf\"))".to_string(),
+        );
+    }
+    let mut rendered = lines.join("\n");
+    rendered.push('\n');
+    Ok(rendered)
 }
 
 #[cfg(test)]
@@ -318,5 +384,30 @@ mod tests {
         assert_eq!(disk["rights"][1], pinned["rights"][1], "pin d0dd5693 model executable");
         assert_eq!(disk["platform_baseline"]["rules"][0], pinned["platform_baseline"]["rules"][0], "pin d0dd5693 model startup root");
         assert_eq!(disk["platform_baseline"]["rules"][1], pinned["platform_baseline"]["rules"][1], "pin d0dd5693 model sysctl");
+    }
+
+    #[test]
+    fn chain_seatbelt_is_the_measured_outbound_set() {
+        let chain = render_path_allow_profile(&["chain-provider"], 0, true, true, true).unwrap();
+        assert_eq!(
+            chain,
+            "\
+(version 1)
+(deny default)
+(deny network*)
+(allow process-exec (literal (param \"PROVIDER_EXECUTABLE\")))
+(allow file-read* (literal \"/\"))
+(allow sysctl-read)
+(allow file-read* file-write* (subpath (param \"chain-provider\")))
+(allow network-outbound (remote unix-socket (literal \"/private/var/run/mDNSResponder\")) (remote ip))
+(allow file-read* (literal \"/var\") (literal \"/var/run/resolv.conf\"))
+"
+        );
+        assert!(!chain.contains("mach-lookup"));
+        assert!(!chain.contains("/etc"));
+        let other = render_path_allow_profile(&["ElastOS"], 1, false, true, true).unwrap();
+        assert!(!other.contains("network-outbound"));
+        assert!(!other.contains("/var"));
+        assert!(other.contains("META_0"));
     }
 }
