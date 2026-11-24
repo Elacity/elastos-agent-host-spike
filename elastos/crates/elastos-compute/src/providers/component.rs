@@ -2073,6 +2073,31 @@ mod tests {
         assert!(rx.await.expect("trailer").is_ok());
     }
 
+    #[test]
+    fn v2_guest_max_bytes_above_the_host_cap_is_the_host_cap() {
+        let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
+        let object = vec![1u8; host + 1];
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut state = state_for(object, calls.clone());
+        let err = match state.windowed_read(&read_request((host as u64) + 1), false) {
+            Ok(prepared) => {
+                let chunks = opened_chunks(prepared);
+                panic!("a guest ask above the host cap must not open a chunk, opened {chunks}");
+            }
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, V2BusError::Invalid(ref message)
+                if *message == format!("object is {} bytes, over the cap of {host}", host + 1)),
+            "{err:?}"
+        );
+        let lengths = calls.lock().unwrap().clone();
+        assert!(!lengths.is_empty(), "the size is learned from a window");
+        assert!(lengths
+            .iter()
+            .all(|length| *length <= crate::providers::bus2_stream::READ_CHUNK as u64));
+    }
+
     /// A v2 guest calls `providers.invoke`, reads the stream four bytes at a
     /// time, and records those bytes only after the trailer is ok. The same
     /// run then asks over the cap and sees an error with no chunk, and drops

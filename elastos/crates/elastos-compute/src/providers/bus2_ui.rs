@@ -174,4 +174,54 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn v2_ui_refuses_the_wrong_media_type() {
+        let good = br#"{"frame":[{"text":"hi"}]}"#;
+        for media in ["text/html", "application/vnd.elastos.ui+json;v=1", ""] {
+            let err = check_document(media, good).unwrap_err();
+            assert!(err.contains("media type"), "{media}: {err}");
+        }
+    }
+
+    #[test]
+    fn v2_ui_refuses_src_html_href_and_bytes() {
+        for (key, value) in [
+            ("src", "https://example.com/a.png"),
+            ("html", "<b>hi</b>"),
+            ("href", "https://example.com"),
+            ("bytes", "iVBORw0KGgo="),
+        ] {
+            let document =
+                format!(r#"{{"frame":[{{"image":{{"grant":"g1","{key}":"{value}"}}}}]}}"#);
+            let err = check_document(UI_MEDIA_TYPE, document.as_bytes()).unwrap_err();
+            assert!(err.contains("never by a URI or bytes"), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn v2_ui_refuses_over_32_nodes_and_1000_characters() {
+        let mut nodes = (0..MAX_NODES)
+            .map(|_| r#"{"text":"ok"}"#)
+            .collect::<Vec<_>>();
+        let at_limit = format!(r#"{{"frame":[{}]}}"#, nodes.join(","));
+        assert_eq!(
+            check_document(UI_MEDIA_TYPE, at_limit.as_bytes())
+                .unwrap()
+                .len(),
+            MAX_NODES
+        );
+        nodes.push(r#"{"text":"over"}"#);
+        let over = format!(r#"{{"frame":[{}]}}"#, nodes.join(","));
+        let err = check_document(UI_MEDIA_TYPE, over.as_bytes()).unwrap_err();
+        assert!(err.contains("32"), "{err}");
+
+        let text = "x".repeat(MAX_TEXT_CHARS);
+        let at_chars = format!(r#"{{"frame":[{{"text":"{text}"}}]}}"#);
+        assert!(check_document(UI_MEDIA_TYPE, at_chars.as_bytes()).is_ok());
+        let text = "x".repeat(MAX_TEXT_CHARS + 1);
+        let over_chars = format!(r#"{{"frame":[{{"text":"{text}"}}]}}"#);
+        let err = check_document(UI_MEDIA_TYPE, over_chars.as_bytes()).unwrap_err();
+        assert!(err.contains("1000"), "{err}");
+    }
 }
