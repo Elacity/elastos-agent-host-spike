@@ -31,24 +31,32 @@ static HOST_PANIC_HOLD: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 static HOST_PANIC_RELEASE: AtomicBool = AtomicBool::new(false);
 
-crate::agents::cfg_prototype_agents! {
-    /// Plant one panic in the next host call a guest makes. The flag is consumed
-    /// by that call. Release builds do not carry this.
-    pub(crate) fn plant_host_panic() {
-        PLANT_HOST_PANIC.store(true, Ordering::Release);
-    }
-
-    /// Keep that panic inside the host call until [`release_planted_host_panic`].
-    /// The wait is the host thread, at most 20 seconds, and it is not guest fuel.
-    pub(crate) fn hold_planted_host_panic() {
-        HOST_PANIC_RELEASE.store(false, Ordering::Release);
-        HOST_PANIC_HOLD.store(true, Ordering::Release);
-    }
-
-    pub(crate) fn release_planted_host_panic() {
-        HOST_PANIC_RELEASE.store(true, Ordering::Release);
-    }
+/// Plant one panic in the next host call a guest makes. The flag is consumed
+/// by that call. Release builds do not carry this.
+#[cfg(test)]
+pub(crate) fn plant_host_panic() {
+    PLANT_HOST_PANIC.store(true, Ordering::Release);
 }
+
+/// Keep that panic inside the host call until [`release_planted_host_panic`].
+/// The wait is the host thread, at most 20 seconds, and it is not guest fuel.
+#[cfg(test)]
+pub(crate) fn hold_planted_host_panic() {
+    HOST_PANIC_RELEASE.store(false, Ordering::Release);
+    HOST_PANIC_HOLD.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(crate) fn release_planted_host_panic() {
+    HOST_PANIC_RELEASE.store(true, Ordering::Release);
+}
+
+#[cfg(test)]
+const _PLANT_HOST_PANIC_LINKED: fn() = plant_host_panic;
+#[cfg(test)]
+const _HOLD_HOST_PANIC_LINKED: fn() = hold_planted_host_panic;
+#[cfg(test)]
+const _RELEASE_HOST_PANIC_LINKED: fn() = release_planted_host_panic;
 
 #[cfg(test)]
 fn take_planted_host_panic() -> bool {
@@ -852,6 +860,11 @@ impl ActivationContextHeld {
         let (status, cause) = match self.settled.clone() {
             Some(settled) => settled,
             None => {
+                // The instance has ended. Raise the stop flag before any
+                // revoke, so a dispatch that has not minted its one-use token
+                // sees this end and does not mint. The recorded cause stays
+                // the one this end was given: the flag is not that cause.
+                self.stop.flag.requested.store(true, Ordering::Release);
                 // An activation that already ended has no entry to stop; an
                 // ending one keeps it until its worker sees the stop flag.
                 let _ = self.component.stop(&self.handle).await;

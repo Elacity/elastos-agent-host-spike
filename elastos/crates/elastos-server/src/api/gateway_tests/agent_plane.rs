@@ -804,6 +804,20 @@ async fn agent_runtime_refuses_every_non_agent_start() {
 async fn a_restart_shows_no_orphan_ask() {
     let home = Home::open();
     let plane = home.plane().await;
+    let (store, _, _) = plane
+        .plane
+        .runtime
+        .instance_authority_plane()
+        .expect("the plane set its instance authority");
+    let request = store
+        .create_request_with_reason(
+            elastos_runtime::session::SessionId::from_string("capsule:restart-ask"),
+            elastos_runtime::capability::ResourceId::new("localhost://UsersAI/orphan/journal"),
+            elastos_runtime::capability::Action::Write,
+            "orphan-restart".to_string(),
+        )
+        .await;
+    let id = request.id.to_string();
     let token = plane.token().await;
     let client = reqwest::Client::new();
     let pending = client
@@ -816,15 +830,11 @@ async fn a_restart_shows_no_orphan_ask() {
         .await
         .unwrap();
     assert!(
-        pending.contains("\"requests\":[]") || pending.contains("\"requests\": []"),
-        "{pending}"
+        pending.contains(&id),
+        "the live ask is missing before restart: {pending}"
     );
+    assert!(pending.contains("orphan-restart"), "{pending}");
     plane.shutdown().await;
-    std::fs::write(
-        home.data.join("capability-pending.json"),
-        br#"{"requests":[{"request_id":"orphan","resource":"localhost://UsersAI/orphan/journal","action":"write"}]}"#,
-    )
-    .unwrap();
     let plane = home.plane().await;
     let token = plane.token().await;
     let pending = client
@@ -836,7 +846,11 @@ async fn a_restart_shows_no_orphan_ask() {
         .text()
         .await
         .unwrap();
-    assert!(!pending.contains("orphan"), "{pending}");
+    assert!(
+        !pending.contains(&id),
+        "restart restored the ask: {pending}"
+    );
+    assert!(!pending.contains("orphan-restart"), "{pending}");
     plane.shutdown().await;
 }
 

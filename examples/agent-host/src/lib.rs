@@ -17732,6 +17732,19 @@ mod tests {
         assert_eq!(grants.read_reason, Some("grant denied"));
         assert_ne!(grants.write_reason, grants.read_reason);
         assert_eq!(
+            bus.asks
+                .iter()
+                .filter(|ask| ask.as_str() == "write")
+                .count(),
+            1,
+            "a grant the provider calls invalid is one ask"
+        );
+        assert_eq!(
+            bus.asks.iter().filter(|ask| ask.as_str() == "read").count(),
+            1,
+            "a grant the provider denies is one ask"
+        );
+        assert_eq!(
             refusal_records(&journal),
             vec![
                 format!("refused: grant invalid (write {})", cursor.resource),
@@ -17767,6 +17780,11 @@ mod tests {
                 .count(),
             8,
             "an unknown grant outcome asks eight times and then stops"
+        );
+        assert_eq!(
+            bus.asks.iter().filter(|ask| ask.as_str() == "read").count(),
+            1,
+            "a grant the provider returns empty is one ask"
         );
 
         let mut journal = empty_journal();

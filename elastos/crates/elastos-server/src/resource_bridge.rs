@@ -564,6 +564,40 @@ pub(crate) async fn revoke_plan_one_use_tokens(
     }
 }
 
+fn instance_has_ended(ctx: &BridgeContext) -> bool {
+    ctx.stop
+        .as_ref()
+        .is_some_and(|flag| flag.requested.load(Ordering::Acquire))
+}
+
+fn stopped_before_send() -> serde_json::Value {
+    resource_error_response("stopped", "the agent was stopped before this step was sent")
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn an_ended_instance_revokes_its_one_use_plan_token() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let manager = std::sync::Arc::new(elastos_runtime::capability::CapabilityManager::new(
+        std::sync::Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+        std::sync::Arc::new(elastos_runtime::primitives::audit::AuditLog::new()),
+        std::sync::Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+    ));
+    let capsule = "capsule:one-use";
+    let token = manager.grant(
+        capsule,
+        ResourceId::new("localhost://UsersAI/notes/journal"),
+        elastos_runtime::capability::Action::Write,
+        elastos_runtime::capability::TokenConstraints::new(0, false, None, Some(1)),
+        None,
+    );
+    note_plan_one_use(dir.path(), capsule, &token);
+    assert_eq!(plan_one_use_count(dir.path(), capsule), 1);
+    revoke_plan_one_use_tokens(&manager, dir.path(), capsule).await;
+    assert_eq!(plan_one_use_count(dir.path(), capsule), 0);
+    assert!(!manager.can_still_validate(&token).await);
+}
+
 fn plan_result_value(
     data_dir: &Path,
     request_id: &str,
@@ -618,11 +652,11 @@ fn park_for_agent_plan_result(
     if !plan_result_is_unsettled(&first) {
         return first;
     }
-    if bridge_ctx
-        .stop
-        .as_ref()
-        .is_some_and(|flag| flag.requested.load(Ordering::Acquire))
-    {
+    if instance_has_ended(bridge_ctx) {
+        let settled = read();
+        if !plan_result_is_unsettled(&settled) {
+            return settled;
+        }
         return resource_error_response("stopped", "the agent was stopped");
     }
     let Some(_permit) = try_acquire_plan_wait(data_dir) else {
@@ -635,11 +669,11 @@ fn park_for_agent_plan_result(
         if !plan_result_is_unsettled(&current) {
             return current;
         }
-        if bridge_ctx
-            .stop
-            .as_ref()
-            .is_some_and(|flag| flag.requested.load(Ordering::Acquire))
-        {
+        if instance_has_ended(bridge_ctx) {
+            let settled = read();
+            if !plan_result_is_unsettled(&settled) {
+                return settled;
+            }
             return resource_error_response("stopped", "the agent was stopped");
         }
         let _ = crate::api::gateway::expire_pending_agent_plans(data_dir);
@@ -753,16 +787,10 @@ pub(crate) async fn dispatch_agent_plan_step(
     let ctx = held.context;
     // Stop is read before any later check can mint. The admission was already
     // taken, so this refusal is not a second dispatch. An effect that has
-    // already entered the provider is still tracked to its outcome.
-    if ctx
-        .stop
-        .as_ref()
-        .is_some_and(|flag| flag.requested.load(Ordering::Acquire))
-    {
-        return resource_error_response(
-            "stopped",
-            "the agent was stopped before this step was sent",
-        );
+    // already entered the provider is still tracked to its outcome. The same
+    // flag is read again under the one-use lock, immediately before the mint.
+    if instance_has_ended(&ctx) {
+        return stopped_before_send();
     }
     if held.owner_id != owner_id
         || ctx.principal_id.as_deref() != Some(requester_id)
@@ -813,6 +841,14 @@ pub(crate) async fn dispatch_agent_plan_step(
     let token = if own_root {
         // The retained record binds this one-use grant to its exact approved
         // scheme, operation and body hash; the bridge consumes it on send.
+        // The stop flag is read while this lock is held, and the token id is
+        // noted before the lock is released. end_instance raises that flag
+        // before it takes the same lock to revoke, so an ended instance
+        // cannot mint a token this revoke misses.
+        let mut one_use = plan_one_use().lock().unwrap_or_else(|err| err.into_inner());
+        if instance_has_ended(&ctx) {
+            return stopped_before_send();
+        }
         let token = ctx.capability_manager.grant(
             &ctx.capsule_id,
             ResourceId::new(&dispatch.resource),
@@ -820,6 +856,14 @@ pub(crate) async fn dispatch_agent_plan_step(
             elastos_runtime::capability::TokenConstraints::new(0, false, None, Some(1)),
             None,
         );
+        if let Some(dir) = ctx.data_dir.as_deref() {
+            let key = PlanUseKey {
+                data_dir: dir.to_path_buf(),
+                capsule_id: ctx.capsule_id.clone(),
+            };
+            one_use.entry(key).or_default().push(*token.id());
+        }
+        drop(one_use);
         #[cfg(test)]
         AGENT_PLAN_ONE_USE_TOKENS
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -829,8 +873,8 @@ pub(crate) async fn dispatch_agent_plan_step(
                 request_id.to_string(),
                 (ctx.capability_manager.clone(), token.clone()),
             );
-        if let Some(dir) = ctx.data_dir.as_deref() {
-            note_plan_one_use(dir, &ctx.capsule_id, &token);
+        if instance_has_ended(&ctx) {
+            return stopped_before_send();
         }
         token
     } else {
@@ -861,6 +905,9 @@ pub(crate) async fn dispatch_agent_plan_step(
         };
         token
     };
+    if instance_has_ended(&ctx) {
+        return stopped_before_send();
+    }
     let request = serde_json::json!({
         "uri": uri,
         "operation": operation,

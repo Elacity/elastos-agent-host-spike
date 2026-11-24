@@ -2010,11 +2010,7 @@ fn the_cargo_feature_is_read_in_one_place() {
         })
         .filter(|(_, count)| *count > 0)
         .collect();
-    assert_eq!(
-        readers,
-        [("agents.rs".to_string(), 2)],
-        "the cfg! read and the test compile gate are the two spellings, both in agents.rs"
-    );
+    assert_eq!(readers, [("agents.rs".to_string(), 1)]);
 }
 
 #[test]

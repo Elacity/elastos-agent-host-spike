@@ -56,15 +56,20 @@ fn clear_fault(data_dir: &Path) {
     }
 }
 
-crate::agents::cfg_prototype_agents! {
-    pub(crate) fn plant_task_panic() {
-        PLANT_TASK_PANIC.store(true, Ordering::Release);
-    }
-
-    pub(crate) fn dirs_lock_works() -> bool {
-        dirs().lock().is_ok()
-    }
+#[cfg(test)]
+pub(crate) fn plant_task_panic() {
+    PLANT_TASK_PANIC.store(true, Ordering::Release);
 }
+
+#[cfg(test)]
+pub(crate) fn dirs_lock_works() -> bool {
+    dirs().lock().is_ok()
+}
+
+#[cfg(test)]
+const _PLANT_TASK_PANIC_LINKED: fn() = plant_task_panic;
+#[cfg(test)]
+const _DIRS_LOCK_LINKED: fn() -> bool = dirs_lock_works;
 
 #[cfg(test)]
 static REGISTRIES: OnceLock<
@@ -94,14 +99,20 @@ fn clear_registry(data_dir: &Path) {
     }
 }
 
-crate::agents::cfg_prototype_agents! {
-    /// The provider registry this process installed for the agent Runtime.
-    pub(crate) fn installed_provider_registry(
-        data_dir: &Path,
-    ) -> Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>> {
-        registries().lock().ok()?.get(data_dir).cloned()
-    }
+/// The provider registry this process installed for the agent Runtime.
+#[cfg(test)]
+pub(crate) fn installed_provider_registry(
+    data_dir: &Path,
+) -> Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>> {
+    registries().lock().ok()?.get(data_dir).cloned()
 }
+
+#[cfg(test)]
+const _INSTALLED_REGISTRY_LINKED: fn(
+    &Path,
+) -> Option<
+    std::sync::Arc<elastos_runtime::provider::ProviderRegistry>,
+> = installed_provider_registry;
 #[cfg(unix)]
 const KIND: &str = "agent";
 #[cfg(unix)]
