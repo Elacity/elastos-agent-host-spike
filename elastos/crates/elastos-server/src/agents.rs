@@ -8,19 +8,23 @@
 //! `ElastOS/System/Auth/agent-records.json`. The owner's sign-in file never
 //! holds one.
 //!
-//! Known gap. Nothing yet detects an agent file that someone with write
-//! access to the data folder replaces, rolls back or deletes. The feature is
-//! off in every default build. A separate change adds that protection before
-//! agents can be on by default.
-//!
 //! The rules this module keeps:
 //!
 //! - `build_allows` is the only place the cargo feature is read. With the
 //!   feature off every operation refuses by name, whatever is on disk.
-//! - A load takes no lock and writes nothing. A missing file means no agents.
-//!   A file that fails any rule makes agents unavailable, with a named
-//!   reason; it is never rewritten or deleted, and the owner's own sign-in
-//!   file is read exactly as before.
+//! - A load takes no lock and writes nothing. It compares the file's sequence
+//!   and the sha256 of the bytes it read with the newest agent event in the
+//!   verified audit chain. A missing file means no agents when that chain
+//!   holds no agent event. A missing file while an agent event is there, or
+//!   a file that fails any rule, makes agents unavailable, with a named
+//!   reason. The file is never rewritten or deleted, and the owner's own
+//!   sign-in file is read exactly as before.
+//! - A file exactly one write ahead of that event, or the first file when
+//!   the full chain has no agent event, loads when this Runtime's signature
+//!   is on those bytes. The next open appends that signed record, under the
+//!   agent lock and then the sign-in lock.
+//! - When the newest agent event is no longer among the chain's retained
+//!   events, a present file has no signed record and agents are unavailable.
 //! - A write holds the agent lock, raises `sequence` by exactly one, replaces
 //!   the file in one step at mode 0600, and then appends one audit event to
 //!   the owner's audit chain.
@@ -83,6 +87,65 @@ const REPEATED_ROOT: &str = "agent root is repeated";
 const HELD_BY_OWNER_FILE: &str =
     "agent id, root or binding is held by a record in the sign-in file";
 const BAD_PROTECTION: &str = "agent storage protection is invalid";
+const FILE_MISSING: &str = "agent file is missing";
+const FILE_OLDER: &str = "agent file is older than its signed record";
+const FILE_MISMATCH: &str = "agent file does not match its signed record";
+const FILE_AHEAD: &str = "agent file is ahead of its signed record";
+const FILE_UNANCHORED: &str = "agent file has no signed record in the retained chain";
+const FILE_RECORD: &str = "agent file signed record cannot be read";
+const ANCHOR_EVENT: &str = "agent.records.anchor";
+const COMMIT_DOMAIN: &str = "elastos.agent.file-commit.v1";
+const COMMIT_XATTR: &std::ffi::CStr = c"user.elastos.agent.file-commit";
+
+const AGENT_EVENT_TYPES: &[&str] = &[
+    "agent.records.enable",
+    "agent.records.disable",
+    "agent.record.create",
+    "agent.record.rename",
+    "agent.record.retire",
+    "agent.record.active",
+    ANCHOR_EVENT,
+];
+
+#[cfg(test)]
+thread_local! {
+    static LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
+    static CHAIN_REQUEST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static VERIFIED_CHAIN: std::cell::RefCell<Option<(PathBuf, Vec<RuntimeAuditEventV1>, bool)>> =
+        const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+static SUPPRESS_AUDIT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn load_count() -> usize {
+    LOAD_COUNT.with(|count| count.get())
+}
+
+#[cfg(test)]
+pub(crate) fn suppress_audit_append(data_dir: &Path) {
+    SUPPRESS_AUDIT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(data_dir.to_path_buf());
+}
+
+#[cfg(test)]
+fn audit_append_suppressed(data_dir: &Path) -> bool {
+    SUPPRESS_AUDIT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .any(|path| path == data_dir)
+}
+
+#[cfg(not(test))]
+fn audit_append_suppressed(_data_dir: &Path) -> bool {
+    false
+}
 
 /// Whether this build carries agents at all. The only place the cargo
 /// feature is read.
@@ -176,66 +239,173 @@ pub(crate) fn agent_file_path(data_dir: &Path) -> anyhow::Result<PathBuf> {
 enum AgentFile {
     Missing,
     Loaded(AgentRecordsFile),
+    /// The bytes on disk are one write ahead of the newest agent event, and
+    /// this Runtime's signature covers them.
+    SignedAhead {
+        file: AgentRecordsFile,
+        sha256: String,
+    },
     Unavailable(&'static str),
+}
+
+/// The verified audit chain a load compares the file with. The caller verified
+/// it. `trimmed` is true when the chain has dropped events older than its tail.
+struct ChainView<'a> {
+    audit: &'a [RuntimeAuditEventV1],
+    trimmed: bool,
+}
+
+struct ReadFile {
+    bytes: Vec<u8>,
+    commit: Option<String>,
 }
 
 /// Reads the agent file. Takes no lock and writes nothing. `owner_file` is
 /// every record of the owner's sign-in file, as its own load returned it.
-fn load(data_dir: &Path, owner_file: &[PrincipalRecord]) -> anyhow::Result<AgentFile> {
-    let bytes = match read_agent_file(data_dir, &agent_file_path(data_dir)?) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return Ok(AgentFile::Missing),
+fn load(
+    data_dir: &Path,
+    owner_file: &[PrincipalRecord],
+    chain: &ChainView<'_>,
+) -> anyhow::Result<AgentFile> {
+    #[cfg(test)]
+    LOAD_COUNT.with(|count| count.set(count.get() + 1));
+    let read = match read_agent_file(data_dir, &agent_file_path(data_dir)?) {
+        Ok(Some(read)) => read,
+        Ok(None) => {
+            return Ok(match newest_agent_anchor(chain.audit) {
+                Ok(None) => AgentFile::Missing,
+                Ok(Some(_)) => AgentFile::Unavailable(FILE_MISSING),
+                Err(reason) => AgentFile::Unavailable(reason),
+            });
+        }
         Err(reason) => return Ok(AgentFile::Unavailable(reason)),
     };
-    Ok(
-        match parse_strict(&bytes).and_then(|file| check(&file, owner_file).map(|()| file)) {
-            Ok(file) => AgentFile::Loaded(file),
-            Err(reason) => AgentFile::Unavailable(reason),
-        },
-    )
+    let file =
+        match parse_strict(&read.bytes).and_then(|file| check(&file, owner_file).map(|()| file)) {
+            Ok(file) => file,
+            Err(reason) => return Ok(AgentFile::Unavailable(reason)),
+        };
+    let sha256 = hex::encode(Sha256::digest(&read.bytes));
+    let signed = read
+        .commit
+        .as_deref()
+        .is_some_and(|mark| commit_mark_verifies(data_dir, &read.bytes, mark));
+    Ok(match judge_anchor(file.sequence, &sha256, signed, chain) {
+        Anchor::Matches => AgentFile::Loaded(file),
+        Anchor::SignedAhead => AgentFile::SignedAhead { file, sha256 },
+        Anchor::Refused(reason) => AgentFile::Unavailable(reason),
+    })
+}
+
+enum Anchor {
+    Matches,
+    SignedAhead,
+    Refused(&'static str),
+}
+
+fn judge_anchor(sequence: u64, sha256: &str, signed: bool, chain: &ChainView<'_>) -> Anchor {
+    let newest = match newest_agent_anchor(chain.audit) {
+        Ok(newest) => newest,
+        Err(reason) => return Anchor::Refused(reason),
+    };
+    match newest {
+        Some((signed_sequence, signed_sha))
+            if sequence == signed_sequence && sha256 == signed_sha =>
+        {
+            Anchor::Matches
+        }
+        Some((signed_sequence, _)) if sequence < signed_sequence => Anchor::Refused(FILE_OLDER),
+        Some((signed_sequence, _)) if sequence == signed_sequence => Anchor::Refused(FILE_MISMATCH),
+        Some((signed_sequence, _)) if sequence == signed_sequence.saturating_add(1) && signed => {
+            Anchor::SignedAhead
+        }
+        Some(_) => Anchor::Refused(FILE_AHEAD),
+        None if signed && sequence == 1 && !chain.trimmed => Anchor::SignedAhead,
+        None if chain.trimmed => Anchor::Refused(FILE_UNANCHORED),
+        None => Anchor::Refused(FILE_AHEAD),
+    }
+}
+
+fn newest_agent_anchor(
+    audit: &[RuntimeAuditEventV1],
+) -> Result<Option<(u64, String)>, &'static str> {
+    let Some(event) = audit
+        .iter()
+        .rev()
+        .find(|event| AGENT_EVENT_TYPES.contains(&event.event_type.as_str()))
+    else {
+        return Ok(None);
+    };
+    match parse_anchor_reason(&event.reason) {
+        Some(anchor) => Ok(Some(anchor)),
+        None => Err(FILE_RECORD),
+    }
+}
+
+fn parse_anchor_reason(reason: &str) -> Option<(u64, String)> {
+    let (sequence, sha) = reason.split_once(' ')?;
+    let sequence = sequence.strip_prefix("seq=")?;
+    let sha = sha.strip_prefix("sha256=")?;
+    if sequence.is_empty()
+        || sha.len() != 64
+        || !sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let sequence = sequence.parse().ok()?;
+    (sequence > 0).then_some((sequence, sha.to_string()))
 }
 
 /// The file's bytes, read through one handle, or `None` when there is no
 /// file. Refuses a path that is not a regular file under regular
 /// directories, and a file anyone but its owner can read or write.
-fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, &'static str> {
+fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<ReadFile>, &'static str> {
     #[cfg(windows)]
-    Err::<(), _>("agent file custody is unsupported on Windows")?;
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => return Err(NOT_REGULAR),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(CANNOT_READ),
-    }
-    // The file exists, so each parent exists: this only checks them.
-    let parents_regular = path.parent().is_some_and(|parent| {
-        crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent).is_ok()
-    });
-    if !parents_regular {
-        return Err(NOT_REGULAR);
-    }
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        let _ = (data_dir, path);
+        return Err("agent file custody is unsupported on Windows");
     }
-    let mut file = options.open(path).map_err(|_| NOT_REGULAR)?;
-    let metadata = file.metadata().map_err(|_| CANNOT_READ)?;
-    if !metadata.is_file() {
-        return Err(NOT_REGULAR);
-    }
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o7777 & !0o600 != 0 {
-            return Err(MODE_TOO_WIDE);
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(NOT_REGULAR),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(CANNOT_READ),
         }
+        // The file exists, so each parent exists: this only checks them.
+        let parents_regular = path.parent().is_some_and(|parent| {
+            crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent).is_ok()
+        });
+        if !parents_regular {
+            return Err(NOT_REGULAR);
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(path).map_err(|_| NOT_REGULAR)?;
+        let metadata = file.metadata().map_err(|_| CANNOT_READ)?;
+        if !metadata.is_file() {
+            return Err(NOT_REGULAR);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o7777 & !0o600 != 0 {
+                return Err(MODE_TOO_WIDE);
+            }
+        }
+        let commit = commit_mark_of(&file);
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).map_err(|_| CANNOT_READ)?;
+        Ok(Some(ReadFile { bytes, commit }))
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).map_err(|_| CANNOT_READ)?;
-    Ok(Some(bytes))
 }
 
 /// Parses the file and refuses anything this Runtime would not have written:
@@ -509,34 +679,115 @@ struct Opened {
     file: AgentRecordsFile,
 }
 
-/// Loads both files, under the agent lock when the operation will write.
-/// Refuses when the agent file fails a rule.
-fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
-    let lock = match for_write {
-        true => Some(lock_for_write(data_dir)?),
-        false => None,
-    };
-    // The sign-in loader hands agents through too. The sign-in file itself
-    // holds none, and every rule below compares this file with the records
-    // that file holds, so agent records are left out here.
-    let owner_file: Vec<PrincipalRecord> = crate::auth::load_owner_principals(data_dir)?
-        .into_iter()
+/// People in the sign-in file. Agent records are left out: the sign-in loader
+/// hands them through, and that file holds none.
+fn owner_people(principals: &[PrincipalRecord]) -> Vec<PrincipalRecord> {
+    principals
+        .iter()
         .filter(|record| {
             record.kind != PrincipalKind::Agent
                 && record.proof_binding.kind != ProofBindingKind::AgentAdmission
         })
-        .collect();
-    let file = match load(data_dir, &owner_file)? {
-        AgentFile::Missing => AgentRecordsFile::unwritten(),
-        AgentFile::Loaded(file) => file,
-        AgentFile::Unavailable(reason) => {
-            return refused(format!("agents are unavailable: {reason}"))
+        .cloned()
+        .collect()
+}
+
+fn read_for_open(data_dir: &Path) -> anyhow::Result<(Vec<PrincipalRecord>, AgentFile)> {
+    let chain = verified_chain(data_dir)?;
+    let owner = owner_people(&chain.principals);
+    let found = load(
+        data_dir,
+        &owner,
+        &ChainView {
+            audit: &chain.audit,
+            trimmed: chain.trimmed,
+        },
+    )?;
+    Ok((owner, found))
+}
+
+struct VerifiedChain {
+    principals: Vec<PrincipalRecord>,
+    audit: Vec<RuntimeAuditEventV1>,
+    trimmed: bool,
+}
+
+/// The owner's principals, plus the verified chain the sign-in loader already
+/// checked on this call. The chain is kept only for the caller that asked.
+fn verified_chain(data_dir: &Path) -> anyhow::Result<VerifiedChain> {
+    struct Requested;
+    impl Drop for Requested {
+        fn drop(&mut self) {
+            CHAIN_REQUEST.with(|flag| flag.set(false));
         }
+    }
+    CHAIN_REQUEST.with(|flag| flag.set(true));
+    VERIFIED_CHAIN.with(|slot| *slot.borrow_mut() = None);
+    let _requested = Requested;
+    let principals = crate::auth::load_owner_principals(data_dir)?;
+    let Some((audit, trimmed)) = VERIFIED_CHAIN.with(|slot| {
+        let stored = slot.borrow_mut().take()?;
+        (stored.0 == data_dir).then_some((stored.1, stored.2))
+    }) else {
+        anyhow::bail!("agent file has no verified chain for this read");
     };
+    Ok(VerifiedChain {
+        principals,
+        audit,
+        trimmed,
+    })
+}
+
+fn remember_verified_chain(data_dir: &Path, state: &crate::auth::AuthState) {
+    if !CHAIN_REQUEST.with(|flag| flag.get()) {
+        return;
+    }
+    CHAIN_REQUEST.with(|flag| flag.set(false));
+    VERIFIED_CHAIN.with(|slot| {
+        *slot.borrow_mut() = Some((
+            data_dir.to_path_buf(),
+            state.audit.clone(),
+            state.audit_chain_anchor.is_some(),
+        ));
+    });
+}
+
+fn usable_file(found: AgentFile) -> anyhow::Result<AgentRecordsFile> {
+    match found {
+        AgentFile::Missing => Ok(AgentRecordsFile::unwritten()),
+        AgentFile::Loaded(file) | AgentFile::SignedAhead { file, .. } => Ok(file),
+        AgentFile::Unavailable(reason) => refused(format!("agents are unavailable: {reason}")),
+    }
+}
+
+/// Loads both files, under the agent lock when the operation will write.
+/// Refuses when the agent file fails a rule. A signed file one write ahead
+/// of its chain is recorded here, then read again.
+fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
+    let mut lock = match for_write {
+        true => Some(lock_for_write(data_dir)?),
+        false => None,
+    };
+    let (mut owner_file, mut found) = read_for_open(data_dir)?;
+    if matches!(found, AgentFile::SignedAhead { .. }) {
+        if lock.is_none() {
+            lock = Some(lock_for_write(data_dir)?);
+        }
+        let (_, again) = read_for_open(data_dir)?;
+        if let AgentFile::SignedAhead { file, sha256 } = again {
+            append_anchor(data_dir, &file, &sha256)?;
+        }
+        if !for_write {
+            lock = None;
+        }
+        let (owner, again) = read_for_open(data_dir)?;
+        owner_file = owner;
+        found = again;
+    }
     Ok(Opened {
         lock,
         owner_file,
-        file,
+        file: usable_file(found)?,
     })
 }
 
@@ -561,26 +812,290 @@ fn write(
         anyhow::bail!("agent file change refused: {reason}");
     }
     let bytes = serde_json::to_vec_pretty(after)?;
-    crate::auth::atomic_write(&agent_file_path(data_dir)?, &bytes)?;
+    let path = agent_file_path(data_dir)?;
+    publish_agent_file(data_dir, &path, &bytes)?;
+    if audit_append_suppressed(data_dir) {
+        return Ok(());
+    }
     let digest = hex::encode(Sha256::digest(&bytes));
+    append_agent_event(
+        data_dir,
+        AgentEvent {
+            event_id: &format!("audit:agent-records:{}:{}", after.sequence, &digest[..16]),
+            event_type: operation.event_type(),
+            principal_id: Some(subject),
+            proof_binding_id: Some(caller.proof_binding_id),
+            session_id: Some(caller.session_id),
+            reason: &format!("seq={} sha256={digest}", after.sequence),
+            now,
+        },
+    )
+}
+
+fn append_anchor(data_dir: &Path, file: &AgentRecordsFile, sha256: &str) -> anyhow::Result<()> {
+    let subject = file
+        .enabled
+        .as_ref()
+        .map(|enabled| enabled.by.clone())
+        .or_else(|| {
+            file.agents
+                .first()
+                .and_then(|agent| agent.record.owner.clone())
+        });
+    append_agent_event(
+        data_dir,
+        AgentEvent {
+            event_id: &format!("audit:agent-records:{}:{}", file.sequence, &sha256[..16]),
+            event_type: ANCHOR_EVENT,
+            principal_id: subject.as_deref(),
+            proof_binding_id: None,
+            session_id: None,
+            reason: &format!("seq={} sha256={sha256}", file.sequence),
+            now: crate::auth::now_ts(),
+        },
+    )
+}
+
+struct AgentEvent<'a> {
+    event_id: &'a str,
+    event_type: &'a str,
+    principal_id: Option<&'a str>,
+    proof_binding_id: Option<&'a str>,
+    session_id: Option<&'a str>,
+    reason: &'a str,
+    now: u64,
+}
+
+fn append_agent_event(data_dir: &Path, event: AgentEvent<'_>) -> anyhow::Result<()> {
     crate::auth::append_audit_event(
         data_dir,
         RuntimeAuditEventV1 {
             schema: RuntimeAuditEventV1::SCHEMA.to_string(),
-            event_id: format!("audit:agent-records:{}:{}", after.sequence, &digest[..16]),
-            event_type: operation.event_type().to_string(),
-            principal_id: Some(subject.to_string()),
-            proof_binding_id: Some(caller.proof_binding_id.to_string()),
-            session_id: Some(caller.session_id.to_string()),
+            event_id: event.event_id.to_string(),
+            event_type: event.event_type.to_string(),
+            principal_id: event.principal_id.map(str::to_string),
+            proof_binding_id: event.proof_binding_id.map(str::to_string),
+            session_id: event.session_id.map(str::to_string),
             challenge_id: None,
             capsule_id: None,
             result: "ok".to_string(),
-            reason: format!("seq={} sha256={digest}", after.sequence),
-            occurred_at: now,
+            reason: event.reason.to_string(),
+            occurred_at: event.now,
             signer_did: None,
             signature: None,
         },
     )
+}
+
+fn publish_agent_file(data_dir: &Path, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        publish_agent_file_unix(data_dir, path, bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (data_dir, path, bytes);
+        anyhow::bail!("agent file custody is unsupported on Windows");
+    }
+}
+
+#[cfg(unix)]
+fn publish_agent_file_unix(data_dir: &Path, path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow::anyhow!("agent file path has no file name"))?;
+    let temp = path.with_file_name(format!(
+        ".{file_name}.{:016x}.tmp",
+        rand::thread_rng().next_u64()
+    ));
+    let write_result = (|| -> anyhow::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW);
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        let mark = sign_commit(data_dir, bytes)?;
+        set_commit_mark(&file, &mark)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err.into());
+    }
+    crate::auth_state_files::sync_parent_directory(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sign_commit(data_dir: &Path, bytes: &[u8]) -> anyhow::Result<String> {
+    let (key, _) = elastos_identity::load_or_create_did(data_dir)?;
+    let (signature, _) = crate::crypto::domain_separated_sign(&key, COMMIT_DOMAIN, bytes);
+    Ok(signature)
+}
+
+fn commit_mark_verifies(data_dir: &Path, bytes: &[u8], mark: &str) -> bool {
+    let Ok((_, did)) = elastos_identity::load_existing_did(data_dir) else {
+        return false;
+    };
+    crate::crypto::verify_domain_separated_signature(&did, COMMIT_DOMAIN, bytes, mark).is_ok()
+}
+
+#[cfg(unix)]
+fn set_commit_mark(file: &std::fs::File, mark: &str) -> anyhow::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let name = COMMIT_XATTR.as_ptr();
+    let value = mark.as_bytes();
+    let result = unsafe { commit_mark_set(file.as_raw_fd(), name, value.as_ptr(), value.len()) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("agent file commit mark was not stored")
+    }
+}
+
+#[cfg(unix)]
+fn commit_mark_of(file: &std::fs::File) -> Option<String> {
+    use std::os::unix::io::AsRawFd;
+    let mut buf = [0u8; 256];
+    let name = COMMIT_XATTR.as_ptr();
+    let read = unsafe { commit_mark_get(file.as_raw_fd(), name, buf.as_mut_ptr(), buf.len()) };
+    if read < 0 {
+        return None;
+    }
+    let bytes = &buf[..usize::try_from(read).ok()?];
+    let mark = std::str::from_utf8(bytes).ok()?;
+    Some(mark.to_string())
+}
+
+#[cfg(all(unix, test))]
+pub(crate) fn commit_mark_hex(path: &Path) -> Option<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    commit_mark_of(&options.open(path).ok()?)
+}
+
+#[cfg(all(unix, test))]
+pub(crate) fn set_commit_mark_hex(path: &Path, mark: &str) -> bool {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(path)
+        .ok()
+        .and_then(|file| set_commit_mark(&file, mark).ok())
+        .is_some()
+}
+
+#[cfg(all(unix, test))]
+pub(crate) fn clear_commit_mark(path: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let Ok(file) = options.open(path) else {
+        return false;
+    };
+    unsafe { commit_mark_clear(file.as_raw_fd()) == 0 }
+}
+
+#[cfg(all(target_os = "macos", test))]
+unsafe fn commit_mark_clear(fd: std::os::unix::io::RawFd) -> i32 {
+    libc::fremovexattr(fd, COMMIT_XATTR.as_ptr(), 0)
+}
+
+#[cfg(all(target_os = "linux", test))]
+unsafe fn commit_mark_clear(fd: std::os::unix::io::RawFd) -> i32 {
+    libc::fremovexattr(fd, COMMIT_XATTR.as_ptr())
+}
+
+#[cfg(all(unix, test, not(any(target_os = "macos", target_os = "linux"))))]
+unsafe fn commit_mark_clear(_fd: std::os::unix::io::RawFd) -> i32 {
+    -1
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn commit_mark_set(
+    fd: std::os::unix::io::RawFd,
+    name: *const libc::c_char,
+    value: *const u8,
+    len: usize,
+) -> i32 {
+    libc::fsetxattr(fd, name, value.cast::<libc::c_void>(), len, 0, 0)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn commit_mark_set(
+    fd: std::os::unix::io::RawFd,
+    name: *const libc::c_char,
+    value: *const u8,
+    len: usize,
+) -> i32 {
+    libc::fsetxattr(fd, name, value.cast::<libc::c_void>(), len, 0)
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+unsafe fn commit_mark_set(
+    _fd: std::os::unix::io::RawFd,
+    _name: *const libc::c_char,
+    _value: *const u8,
+    _len: usize,
+) -> i32 {
+    -1
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn commit_mark_get(
+    fd: std::os::unix::io::RawFd,
+    name: *const libc::c_char,
+    buf: *mut u8,
+    len: usize,
+) -> isize {
+    libc::fgetxattr(fd, name, buf.cast::<libc::c_void>(), len, 0, 0)
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn commit_mark_get(
+    fd: std::os::unix::io::RawFd,
+    name: *const libc::c_char,
+    buf: *mut u8,
+    len: usize,
+) -> isize {
+    libc::fgetxattr(fd, name, buf.cast::<libc::c_void>(), len)
+}
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+unsafe fn commit_mark_get(
+    _fd: std::os::unix::io::RawFd,
+    _name: *const libc::c_char,
+    _buf: *mut u8,
+    _len: usize,
+) -> isize {
+    -1
 }
 
 /// Wraps an agent's data key under the key `auth` derived for it. The nonce
@@ -1229,10 +1744,21 @@ pub(crate) fn stored_wrap(
 /// while agents are on for this Home. It never fails: an agent fault leaves the
 /// owner's own load exactly as it was. A record already present stays one.
 pub(crate) fn merge_into(data_dir: &Path, state: &mut crate::auth::AuthState) {
+    remember_verified_chain(data_dir, state);
     if !build_allows_for_home(data_dir) {
         return;
     }
-    let Ok(AgentFile::Loaded(file)) = load(data_dir, &state.principals) else {
+    let Ok(found) = load(
+        data_dir,
+        &state.principals,
+        &ChainView {
+            audit: &state.audit,
+            trimmed: state.audit_chain_anchor.is_some(),
+        },
+    ) else {
+        return;
+    };
+    let (AgentFile::Loaded(file) | AgentFile::SignedAhead { file, .. }) = found else {
         return;
     };
     if file.enabled.is_none() {
@@ -1262,13 +1788,18 @@ pub(crate) fn without_agent_roots(
     }
     // The file's records are read here, never through the sign-in loader: a
     // save holds the sign-in lock while it asks, and the loader needs it.
+    // The chain compared here is the one this save is writing.
     let mut stored = Vec::new();
-    if let Ok(path) = agent_file_path(data_dir) {
-        if let Ok(Some(bytes)) = read_agent_file(data_dir, &path) {
-            if let Ok(file) = parse_strict(&bytes) {
-                stored = file.agents;
-            }
-        }
+    let owner = owner_people(&state.principals);
+    if let Ok(AgentFile::Loaded(file) | AgentFile::SignedAhead { file, .. }) = load(
+        data_dir,
+        &owner,
+        &ChainView {
+            audit: &state.audit,
+            trimmed: state.audit_chain_anchor.is_some(),
+        },
+    ) {
+        stored = file.agents;
     }
     let is_agent = |record: &PrincipalRecord| stored.iter().any(|agent| agent.record == *record);
     if !state.principals.iter().any(is_agent) {

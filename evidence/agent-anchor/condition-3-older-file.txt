@@ -1,0 +1,19 @@
+   Compiling elastos-server v2.0.1 (/Users/sash/code/wt-agent-anchor/elastos/crates/elastos-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 50s
+     Running unittests src/lib.rs (/Users/sash/code/wt-agent-anchor/target-build/debug/deps/elastos_server-71f954b274f1d8ae)
+
+running 1 test
+
+thread 'agents::tests::a_file_older_than_its_signed_record_is_refused' (85619414) panicked at crates/elastos-server/src/agents/tests.rs:186:22:
+the file was not refused: Loaded(AgentRecordsFile { schema: "elastos.agent.records/v1", sequence: 1, enabled: Some(Enabled { by: "person:local:agents-owner", at: 9 }), agents: [] })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test agents::tests::a_file_older_than_its_signed_record_is_refused ... FAILED
+
+failures:
+
+failures:
+    agents::tests::a_file_older_than_its_signed_record_is_refused
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4518 filtered out; finished in 0.21s
+
+error: test failed, to rerun pass `-p elastos-server --lib`

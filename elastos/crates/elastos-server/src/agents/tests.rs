@@ -149,7 +149,25 @@ impl Home {
     }
 
     fn load(&self) -> AgentFile {
-        load(self.path(), &self.owner_file()).unwrap()
+        let state = crate::auth::load_auth_state(self.path()).unwrap();
+        let owner = state
+            .principals
+            .iter()
+            .filter(|record| {
+                record.kind != PrincipalKind::Agent
+                    && record.proof_binding.kind != ProofBindingKind::AgentAdmission
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        load(
+            self.path(),
+            &owner,
+            &ChainView {
+                audit: &state.audit,
+                trimmed: state.audit_chain_anchor.is_some(),
+            },
+        )
+        .unwrap()
     }
 
     /// The reason a load refuses the file on disk, and proof the load left
@@ -370,7 +388,7 @@ fn a_write_appends_one_audit_event_and_leaves_the_owner_file_otherwise_unchanged
 fn an_unknown_field_refuses_the_file() {
     let home = Home::new();
     let valid = as_json(&enabled_file(vec![stored_agent(OWNER_ID, AGENT_A)]));
-    home.plant(&valid);
+    enable(&home);
     assert!(matches!(home.load(), AgentFile::Loaded(_)), "the control");
 
     let mut top = valid.clone();
@@ -436,7 +454,7 @@ fn a_repeated_root_refuses_the_file() {
 #[test]
 fn a_mode_wider_than_0600_refuses_the_file() {
     let home = Home::new();
-    home.plant(&as_json(&enabled_file(Vec::new())));
+    enable(&home);
     assert!(matches!(home.load(), AgentFile::Loaded(_)), "the control");
     for mode in [0o640, 0o604, 0o700] {
         set_mode(&home.agent_file(), mode);
@@ -462,15 +480,32 @@ fn a_path_that_is_not_a_regular_file_refuses() {
 #[test]
 fn a_linked_parent_folder_of_the_agent_file_refuses_the_file() {
     let home = Home::new();
-    home.plant(&as_json(&enabled_file(Vec::new())));
-    let owner_file = home.owner_file();
+    enable(&home);
+    let state = crate::auth::load_auth_state(home.path()).unwrap();
+    let owner_file = state
+        .principals
+        .iter()
+        .filter(|record| record.kind != PrincipalKind::Agent)
+        .cloned()
+        .collect::<Vec<_>>();
+    let audit = state.audit.clone();
+    let trimmed = state.audit_chain_anchor.is_some();
     assert!(matches!(home.load(), AgentFile::Loaded(_)), "the control");
     // The file stays a regular file at mode 0600; only its folder is a link.
     let folder = home.agent_file().parent().unwrap().to_path_buf();
     let moved = folder.with_file_name("Auth-moved");
     std::fs::rename(&folder, &moved).unwrap();
     std::os::unix::fs::symlink(&moved, &folder).unwrap();
-    match load(home.path(), &owner_file).unwrap() {
+    match load(
+        home.path(),
+        &owner_file,
+        &ChainView {
+            audit: &audit,
+            trimmed,
+        },
+    )
+    .unwrap()
+    {
         AgentFile::Unavailable(reason) => assert_eq!(reason, NOT_REGULAR),
         other => panic!("the file was not refused: {other:?}"),
     }
@@ -2719,6 +2754,341 @@ fn an_owner_root_protection_the_agent_file_does_not_store_opens_nothing() {
         crate::auth::principal_data_key_id(&key),
         stored.data_key_id.as_str()
     );
+}
+
+fn put_bytes(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    set_mode(path, 0o600);
+}
+
+fn append_note(home: &Home, n: u64) {
+    crate::auth::append_audit_event(
+        home.path(),
+        RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: format!("audit:note:{n}"),
+            event_type: "auth.note".to_string(),
+            principal_id: Some(OWNER_ID.to_string()),
+            proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+            session_id: Some(SESSION_ID.to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "ok".to_string(),
+            reason: format!("note {n}"),
+            occurred_at: 1_000 + n,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dest = to.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}
+
+/// (e) A Home with no agent file and no agent event has no agents. The first
+/// successful write stores sequence 1 and one matching event.
+#[test]
+fn a_first_file_is_sequence_one_and_matches_its_event() {
+    let home = Home::new();
+    assert!(matches!(home.load(), AgentFile::Missing));
+    assert!(home.agent_events().is_empty());
+    enable(&home);
+    let bytes = home.agent_bytes();
+    match home.load() {
+        AgentFile::Loaded(file) => assert_eq!(file.sequence, 1),
+        other => panic!("the first file did not load: {other:?}"),
+    }
+    let event = home.agent_events().pop().unwrap();
+    assert_eq!(event.event_type, "agent.records.enable");
+    assert_eq!(
+        event.reason,
+        format!("seq=1 sha256={}", hex::encode(Sha256::digest(&bytes)))
+    );
+}
+
+/// (a) A file older than the newest agent event is refused by name. The file
+/// and the owner's sign-in file stay as they were.
+#[test]
+fn a_file_older_than_its_signed_record_is_refused() {
+    let home = Home::new();
+    enable(&home);
+    let older = home.agent_bytes();
+    write_change(&home, Operation::Disable, |file| file.enabled = None).unwrap();
+    let owner = home.owner_json_without_audit();
+    let events = home.audit().len();
+    put_bytes(&home.agent_file(), &older);
+    assert_eq!(home.refusal(), FILE_OLDER);
+    assert_eq!(home.agent_bytes(), older);
+    assert_eq!(home.owner_json_without_audit(), owner);
+    assert_eq!(home.audit().len(), events);
+}
+
+/// (a) The same sequence with a different sha256 is refused by name.
+#[test]
+fn a_file_with_the_same_sequence_and_a_different_sha256_is_refused() {
+    let home = Home::new();
+    enable(&home);
+    let owner = home.owner_json_without_audit();
+    let mut bytes = home.agent_bytes();
+    bytes.push(b'\n');
+    put_bytes(&home.agent_file(), &bytes);
+    assert_eq!(home.refusal(), FILE_MISMATCH);
+    assert_eq!(home.owner_json_without_audit(), owner);
+}
+
+/// (b) No file, while the chain has an agent event, is a named refusal.
+#[test]
+fn a_missing_file_with_a_signed_record_is_refused() {
+    let home = Home::new();
+    enable(&home);
+    let owner = home.owner_json_without_audit();
+    let events = home.audit().len();
+    std::fs::remove_file(home.agent_file()).unwrap();
+    assert_eq!(home.refusal(), FILE_MISSING);
+    assert!(!home.agent_file().exists());
+    assert_eq!(home.owner_json_without_audit(), owner);
+    assert_eq!(home.audit().len(), events);
+}
+
+/// (c) A file one write ahead, with this Runtime's signature, is recorded on
+/// the next open. A different file at that sequence is refused.
+#[test]
+fn a_file_one_write_ahead_is_recorded_and_a_replacement_is_refused() {
+    let home = Home::new();
+    enable(&home);
+    let owner = home.owner_json_without_audit();
+    suppress_audit_append(home.path());
+    write_change(&home, Operation::Disable, |file| file.enabled = None).unwrap();
+    assert!(
+        home.agent_events().len() == 1,
+        "the second write has no event yet"
+    );
+    let bytes = home.agent_bytes();
+    let mark = commit_mark_hex(&home.agent_file()).expect("the write stored its signature");
+    assert!(matches!(home.load(), AgentFile::SignedAhead { .. }));
+
+    let mut replaced = bytes.clone();
+    replaced.push(b'\n');
+    put_bytes(&home.agent_file(), &replaced);
+    assert!(set_commit_mark_hex(&home.agent_file(), &mark));
+    assert_eq!(home.refusal(), FILE_AHEAD);
+    assert_eq!(home.agent_events().len(), 1, "a refusal appends nothing");
+
+    put_bytes(&home.agent_file(), &bytes);
+    assert!(set_commit_mark_hex(&home.agent_file(), &mark));
+    list_in_any_build(home.path(), &home.caller()).unwrap_err();
+    match home.load() {
+        AgentFile::Loaded(file) => assert_eq!(file.sequence, 2),
+        other => panic!("the recorded file did not load: {other:?}"),
+    }
+    let events = home.agent_events();
+    assert_eq!(events.len(), 2);
+    let anchor = events.last().unwrap();
+    assert_eq!(anchor.event_type, ANCHOR_EVENT);
+    assert_eq!(
+        anchor.reason,
+        format!("seq=2 sha256={}", hex::encode(Sha256::digest(&bytes)))
+    );
+    assert!(clear_commit_mark(&home.agent_file()));
+    assert!(matches!(home.load(), AgentFile::Loaded(_)));
+    let mut again = bytes.clone();
+    again.push(b'\n');
+    put_bytes(&home.agent_file(), &again);
+    assert_eq!(home.refusal(), FILE_MISMATCH);
+    assert_eq!(home.owner_json_without_audit(), owner);
+}
+
+/// (f) A copy of the Home loads the matching file. An earlier file on the
+/// newer chain is row (a).
+#[test]
+fn a_restored_home_keeps_a_matching_file_and_an_older_file_is_refused() {
+    let home = Home::new();
+    enable(&home);
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(home.path(), copy.path());
+    let state = crate::auth::load_auth_state(copy.path()).unwrap();
+    let owner = state
+        .principals
+        .iter()
+        .filter(|record| record.kind != PrincipalKind::Agent)
+        .cloned()
+        .collect::<Vec<_>>();
+    match load(
+        copy.path(),
+        &owner,
+        &ChainView {
+            audit: &state.audit,
+            trimmed: state.audit_chain_anchor.is_some(),
+        },
+    )
+    .unwrap()
+    {
+        AgentFile::Loaded(file) => assert_eq!(file.sequence, 1),
+        other => panic!("the restored Home did not load: {other:?}"),
+    }
+
+    let older = home.agent_bytes();
+    write_change(&home, Operation::Disable, |file| file.enabled = None).unwrap();
+    put_bytes(&home.agent_file(), &older);
+    assert_eq!(home.refusal(), FILE_OLDER);
+}
+
+/// (g) An audit event of the recovery import leaves the agent file and its
+/// newest agent event in place.
+#[test]
+fn a_recovery_import_on_the_same_home_keeps_the_agent_anchor() {
+    let home = Home::new();
+    enable(&home);
+    let bytes = home.agent_bytes();
+    let agent_event = home.agent_events().pop().unwrap();
+    crate::auth::append_audit_event(
+        home.path(),
+        RuntimeAuditEventV1 {
+            schema: RuntimeAuditEventV1::SCHEMA.to_string(),
+            event_id: "audit:recovery-import:agent-anchor".to_string(),
+            event_type: "auth.full_recovery_bundle.imported".to_string(),
+            principal_id: Some(OWNER_ID.to_string()),
+            proof_binding_id: Some(home.owner.proof_binding_id.clone()),
+            session_id: Some(SESSION_ID.to_string()),
+            challenge_id: None,
+            capsule_id: None,
+            result: "ok".to_string(),
+            reason: "full recovery bundle imported on this Home".to_string(),
+            occurred_at: 40,
+            signer_did: None,
+            signature: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(home.agent_bytes(), bytes);
+    match home.load() {
+        AgentFile::Loaded(file) => assert_eq!(file.sequence, 1),
+        other => panic!("the file did not load after the import event: {other:?}"),
+    }
+    let newest = home.agent_events().pop().unwrap();
+    assert_eq!(newest.event_id, agent_event.event_id);
+    assert_eq!(newest.reason, agent_event.reason);
+}
+
+/// (d) The newest agent event stays through 511 later events and is gone on
+/// the 512th. A present file then has no signed record. A missing file with
+/// no agent event left is no agents.
+#[test]
+fn a_trimmed_chain_keeps_the_agent_event_for_511_later_events() {
+    let home = Home::new();
+    enable(&home);
+    let bytes = home.agent_bytes();
+    let owner = home.owner_json_without_audit();
+    for n in 1..=511 {
+        append_note(&home, n);
+    }
+    match home.load() {
+        AgentFile::Loaded(file) => assert_eq!(file.sequence, 1),
+        other => panic!("the agent event was not retained: {other:?}"),
+    }
+    append_note(&home, 512);
+    assert_eq!(home.refusal(), FILE_UNANCHORED);
+    assert_eq!(home.agent_bytes(), bytes);
+    assert_eq!(home.owner_json_without_audit(), owner);
+
+    std::fs::remove_file(home.agent_file()).unwrap();
+    assert!(
+        matches!(home.load(), AgentFile::Missing),
+        "a missing file with no agent event left is no agents"
+    );
+}
+
+/// A first file written after the chain has already dropped events has no
+/// agent event in the retained tail, so it is not accepted from the mark.
+#[test]
+fn a_first_file_on_a_trimmed_chain_is_refused() {
+    let home = Home::new();
+    for n in 1..=513 {
+        append_note(&home, n);
+    }
+    assert!(
+        crate::auth::load_auth_state(home.path())
+            .unwrap()
+            .audit_chain_anchor
+            .is_some(),
+        "the chain has dropped events"
+    );
+    assert!(matches!(home.load(), AgentFile::Missing));
+    suppress_audit_append(home.path());
+    enable(&home);
+    assert!(commit_mark_hex(&home.agent_file()).is_some());
+    assert_eq!(home.refusal(), FILE_UNANCHORED);
+    assert!(home.agent_events().is_empty());
+}
+
+#[test]
+fn list_loads_the_agent_file() {
+    let home = Home::new();
+    enable(&home);
+    let older = home.agent_bytes();
+    write_change(&home, Operation::Disable, |file| file.enabled = None).unwrap();
+    put_bytes(&home.agent_file(), &older);
+    let before = load_count();
+    let error = list_in_any_build(home.path(), &home.caller()).unwrap_err();
+    assert!(error.to_string().contains(FILE_OLDER), "{error:#}");
+    assert!(load_count() > before, "list did not load the agent file");
+}
+
+#[cfg(feature = "prototype-agents")]
+#[test]
+fn merge_without_and_launch_load_the_agent_file() {
+    let home = Home::new();
+    turn_on(&home);
+    let agent = create_one(&home, "request-anchor");
+    let older = home.agent_bytes();
+    rename_in_any_build(home.path(), &home.caller(), &agent.agent_id, "Helper 2", 12).unwrap();
+    put_bytes(&home.agent_file(), &older);
+
+    let mut state = crate::auth::load_auth_state(home.path()).unwrap();
+    state
+        .principals
+        .retain(|record| record.kind != PrincipalKind::Agent);
+    let before = load_count();
+    merge_into(home.path(), &mut state);
+    assert!(load_count() > before, "merge_into did not load");
+    assert!(state
+        .principals
+        .iter()
+        .all(|record| record.kind != PrincipalKind::Agent));
+
+    let before = load_count();
+    assert!(without_agent_roots(home.path(), &state).is_none());
+    assert!(load_count() > before, "without_agent_roots did not load");
+
+    let before = load_count();
+    let error = super::stored_agent(home.path(), OWNER_ID, &agent.agent_id).unwrap_err();
+    assert!(error.to_string().contains(FILE_OLDER), "{error:#}");
+    assert!(load_count() > before, "launch did not load");
+}
+
+#[test]
+fn a_load_of_the_agent_file_is_measured() {
+    let home = Home::new();
+    enable(&home);
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+        assert!(matches!(home.load(), AgentFile::Loaded(_)));
+    }
+    let per = started.elapsed() / 20;
+    eprintln!("agent file load: {} us", per.as_micros());
+    assert!(per.as_millis() < 500, "one load took {per:?}");
 }
 
 /// With the feature off the owner's load carries no agent and no agent's
