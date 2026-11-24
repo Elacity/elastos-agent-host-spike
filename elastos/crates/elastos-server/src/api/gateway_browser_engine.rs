@@ -1115,6 +1115,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_gate_maps_a_real_invalid_image_manifest_to_artifact_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        std::fs::write(
+            dir.path().join("components.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "external": {
+                    "browser-vm-image": {"install_path": "browser-vm", "platforms": {}}
+                },
+                "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (registry, calls) = image_registry(
+            "capsule-provider",
+            vec![image_adapter("local", "local_microvm", true)],
+            std::time::Duration::ZERO,
+        )
+        .await;
+        let error = resolve_browser_engine_adapter_with_preparation(
+            &registry,
+            "person:test",
+            Some("local"),
+            BrowserDisplayMode::WebrtcRemoteDisplay,
+            BrowserGuaranteeLevel::MechanismMicrovm,
+            || crate::setup::ensure_browser_vm_image_for_local_engine(dir.path()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            BrowserCompatibilityError::EngineNotReady {
+                reason: BrowserEngineReadinessReason::ArtifactInvalid
+            }
+        );
+        assert_eq!(*calls.lock().unwrap(), ["status"]);
+    }
+
+    #[tokio::test]
     async fn invalid_local_image_reports_artifact_invalid_before_probe() {
         let (registry, calls) = image_registry(
             "capsule-provider",

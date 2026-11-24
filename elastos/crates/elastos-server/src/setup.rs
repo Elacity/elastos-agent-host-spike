@@ -4944,6 +4944,12 @@ async fn download_component(
     install_first_party_component_via_carrier(data_dir, row, dest, carrier_context)
         .await
         .map_err(|err| {
+            // An invalid-image refusal keeps its typed error so the gateway's
+            // Engine gate reports ArtifactInvalid; only a fetch-phase failure
+            // is reported as a Carrier fetch failure.
+            if err.downcast_ref::<BrowserVmImageInvalid>().is_some() {
+                return err;
+            }
             anyhow::anyhow!(
                 "Trusted source Carrier fetch failed for {} ({}): {}",
                 name,

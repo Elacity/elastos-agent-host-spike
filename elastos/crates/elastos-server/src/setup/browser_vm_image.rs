@@ -1004,6 +1004,7 @@ pub(super) async fn install_via_carrier(
         install_archive_reader(&data, file, &info, &platform, &cancelled)
     })
     .await?
+    .map_err(|error| BrowserVmImageInvalid::new(error).into())
 }
 
 #[cfg(test)]
@@ -2335,6 +2336,142 @@ JSON
             .unwrap();
         runtime.close().await;
         publisher.close().await;
+    }
+    /// The engine gate the gateway queries must see a corrupt re-download as a
+    /// typed invalid-image error, while a fetch-phase failure stays untyped.
+    #[tokio::test]
+    async fn browser_image_corrupt_redownload_reports_an_invalid_artifact_to_the_engine_gate() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let target = tempfile::tempdir().unwrap();
+        install_signed_browser_vm_image_fixture(target.path());
+        // A damaged installed set forces the engine gate to repair by re-download.
+        fs::write(
+            target.path().join(INSTALL_PATH).join("rootfs.ext4"),
+            b"damaged-image",
+        )
+        .unwrap();
+        // The archive helper is deterministic, so the same-length payload keeps
+        // the fetch's size contract and fails only the signed checksum.
+        let (bytes, info) = archive(&fixture(b"signed-image"));
+        let mut corrupt_bytes = bytes.clone();
+        corrupt_bytes[0] = corrupt_bytes[0].wrapping_add(1);
+        let publisher = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .alpns(vec![b"elastos/carrier/1".to_vec()])
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let runtime = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .clear_ip_transports()
+            .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
+            .bind_addr("127.0.0.1:0".parse::<std::net::SocketAddr>().unwrap())
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let bind_addr = runtime.bound_sockets()[0];
+        fs::write(
+            target.path().join("config.toml"),
+            format!("carrier_bind_addr = \"{bind_addr}\"\n"),
+        )
+        .unwrap();
+        let address = crate::carrier::tests::wait_for_direct_endpoint_addr(&publisher).await;
+        let ticket = data_encoding::BASE32_NOPAD
+            .encode(&serde_json::to_vec(&json!({"endpoints":[address]})).unwrap())
+            .to_ascii_lowercase();
+        // The fixture's installed release drives admission; merge the Carrier
+        // transport into its default source so one source serves both roles.
+        let mut sources = crate::sources::load_trusted_sources(target.path()).unwrap();
+        let mut source = sources.default_source().cloned().unwrap();
+        source.publisher_node_id = publisher.id().to_string();
+        source.connect_ticket = ticket;
+        sources.sources = vec![source];
+        crate::sources::save_trusted_sources(target.path(), &sources).unwrap();
+        let server = publisher.clone();
+        let release_path = info.release_path.clone().unwrap();
+        let serving = tokio::spawn(async move {
+            let incoming = server.accept().await.unwrap();
+            let connection = incoming.await.unwrap();
+            let (mut send, recv) = connection.accept_bi().await.unwrap();
+            let mut request = String::new();
+            BufReader::new(recv).read_line(&mut request).await.unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&request).unwrap()["path"],
+                release_path
+            );
+            send.write_all(&(corrupt_bytes.len() as u64).to_be_bytes())
+                .await
+                .unwrap();
+            send.write_all(&corrupt_bytes).await.unwrap();
+            send.finish().unwrap();
+            assert!(matches!(
+                connection.closed().await,
+                iroh::endpoint::ConnectionError::ApplicationClosed(_)
+            ));
+        });
+        let error = super::super::ensure_browser_vm_image_for_local_engine(target.path())
+            .await
+            .unwrap_err();
+        serving.abort();
+        runtime.close().await;
+        publisher.close().await;
+        assert!(
+            error.downcast_ref::<BrowserVmImageInvalid>().is_some(),
+            "a corrupt re-download must reach the engine gate as an invalid image: {error:#}"
+        );
+    }
+
+    /// A fetch-phase failure keeps its raw error so the gateway reports
+    /// PreparationRequired instead of an invalid artifact.
+    #[tokio::test]
+    async fn browser_image_failed_carrier_fetch_stays_untyped_for_the_engine_gate() {
+        let target = tempfile::tempdir().unwrap();
+        install_signed_browser_vm_image_fixture(target.path());
+        fs::write(
+            target.path().join(INSTALL_PATH).join("rootfs.ext4"),
+            b"damaged-image",
+        )
+        .unwrap();
+        // No trusted source: the Carrier fetch phase fails before any archive check.
+        let error = super::super::ensure_browser_vm_image_for_local_engine(target.path())
+            .await
+            .unwrap_err();
+        assert!(
+            error.downcast_ref::<BrowserVmImageInvalid>().is_none(),
+            "a fetch-phase failure must stay untyped for the engine gate: {error:#}"
+        );
+        assert!(format!("{error:#}").contains("Trusted source Carrier fetch failed"));
+    }
+
+    /// An image row with neither a signed vm_image entry nor a cid is refused
+    /// by name before any Carrier fetch or filesystem write.
+    #[tokio::test]
+    async fn download_component_refuses_an_unverifiable_image_row_before_any_fetch_or_write() {
+        let target = tempfile::tempdir().unwrap();
+        let (_, info) = archive(&fixture(b"unverifiable-image"));
+        let row = crate::capsule_record::AdmittedRow::for_test(NAME, &info);
+        let dest = target.path().join(INSTALL_PATH);
+        let error = super::super::download_component(
+            target.path(),
+            &row,
+            &dest,
+            super::super::FirstPartyCarrierContext::Setup,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Browser image has no signed VM image entry"),
+            "the refusal must name the missing signed entry: {error:#}"
+        );
+        assert!(!dest.exists());
+        assert_eq!(
+            fs::read_dir(target.path()).unwrap().count(),
+            0,
+            "the refusal must leave no fetch or write behind"
+        );
     }
 
     #[test]
