@@ -399,7 +399,11 @@ pub async fn run_serve(
     };
 
     println!("ElastOS Runtime");
-    println!("  Capsule  localhost-provider  {}", infra.provider_cid);
+    if let Some(sentence) = elastos_server::local_apps::local_apps_refusal() {
+        println!("  Local apps are off. {sentence}");
+    } else {
+        println!("  Capsule  localhost-provider  {}", infra.provider_cid);
+    }
     if let Some(ref cid) = infra.shell_cid {
         println!("  Capsule  shell           {}", cid);
     }

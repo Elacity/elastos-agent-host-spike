@@ -2103,7 +2103,7 @@ function renderTechnicalInspectList(entries) {
 
     const state = document.createElement("span");
     state.className = "technical-inspect-state";
-    state.textContent = humanizeName(readText(entry.state));
+    state.textContent = technicalStateText(entry.state);
     button.append(body, state);
     technicalInspectListNode.append(button);
   }
@@ -2143,7 +2143,7 @@ function renderTechnicalObject(object) {
   appendTechnicalSection(technicalInspectDetailNode, "Identity", [
     ["Identifier", readText(object && object.id)],
     ["Author", readText(provenance.author)],
-    ["State", humanizeName(readText(object && object.state))],
+    ["State", technicalStateText(object && object.state)],
     ["Type", humanizeName(readText(object && object.type))],
     ["Role", humanizeName(readText(manifest.role))],
     ["Version", readText(manifest.version)],
@@ -2463,6 +2463,11 @@ function showTechnicalApprovalStatus(section, message, tone) {
   status.textContent = text;
   status.dataset.tone = tone;
   status.hidden = !text;
+}
+
+function technicalStateText(state) {
+  const text = readText(state);
+  return text.includes(". ") ? text : humanizeName(text);
 }
 
 function humanizeName(value) {

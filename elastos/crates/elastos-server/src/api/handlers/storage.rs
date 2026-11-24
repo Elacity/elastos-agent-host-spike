@@ -44,6 +44,7 @@ pub enum StorageApiError {
     PermissionDenied(String),
     InvalidPath(String),
     QuotaExceeded(String),
+    LocalApps(String),
     Internal(String),
 }
 
@@ -63,6 +64,7 @@ impl IntoResponse for StorageApiError {
                 StatusCode::INSUFFICIENT_STORAGE,
                 format!("Storage quota exceeded: {}", msg),
             ),
+            StorageApiError::LocalApps(sentence) => (StatusCode::SERVICE_UNAVAILABLE, sentence),
             StorageApiError::Internal(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Storage error: {}", msg),
@@ -82,6 +84,11 @@ impl From<ProviderError> for StorageApiError {
             ProviderError::NoProvider(m) => {
                 StorageApiError::Internal(format!("No provider: {}", m))
             }
+            ProviderError::Provider(m)
+                if m.contains("Make it readable or move it out of the folder, then restart.") =>
+            {
+                StorageApiError::LocalApps(m)
+            }
             ProviderError::Provider(m) => StorageApiError::Internal(m),
             ProviderError::Unavailable(m) => {
                 StorageApiError::Internal(format!("Peer unavailable: {}", m))
@@ -98,12 +105,20 @@ impl From<ProviderError> for StorageApiError {
 ///
 /// Read a file from a file-backed localhost root.
 /// Returns the file contents with appropriate content-type.
+fn refuse_local_apps() -> Result<(), StorageApiError> {
+    match crate::local_apps::local_apps_refusal() {
+        Some(sentence) => Err(StorageApiError::LocalApps(sentence)),
+        None => Ok(()),
+    }
+}
+
 pub async fn read_file(
     State(state): State<ProviderStorageState>,
     Extension(session): Extension<Session>,
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
+    refuse_local_apps()?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -139,6 +154,7 @@ pub async fn write_file(
     Path(path): Path<String>,
     body: Bytes,
 ) -> Result<Json<WriteOutput>, StorageApiError> {
+    refuse_local_apps()?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -202,6 +218,7 @@ pub async fn delete_path(
     Path(path): Path<String>,
     Query(query): Query<DeleteQuery>,
 ) -> Result<Json<DeleteOutput>, StorageApiError> {
+    refuse_local_apps()?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -254,6 +271,7 @@ pub async fn list_dir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<ListOutput>, StorageApiError> {
+    refuse_local_apps()?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -336,6 +354,7 @@ pub async fn stat_path(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Response, StorageApiError> {
+    refuse_local_apps()?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -385,6 +404,7 @@ pub async fn mkdir(
     headers: HeaderMap,
     Path(path): Path<String>,
 ) -> Result<Json<MkdirOutput>, StorageApiError> {
+    refuse_local_apps()?;
     let user_id = session_user_id(&session);
     let path = normalize_path(&path);
     reject_principal_root_storage_path(&path)?;
@@ -563,6 +583,7 @@ pub async fn handle_get_root(
     headers: HeaderMap,
     Query(query): Query<StorageQuery>,
 ) -> Result<Response, StorageApiError> {
+    refuse_local_apps()?;
     let path = Path(String::new());
     if query.list.unwrap_or(false) {
         list_dir(state, session, headers, path)
@@ -1128,5 +1149,115 @@ mod tests {
             reject_principal_root_storage_path("Public/../Users/a.md"),
             Err(StorageApiError::InvalidPath(_))
         ));
+    }
+
+    async fn refusal_body(err: StorageApiError) -> (StatusCode, String) {
+        let response = err.into_response();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_app_routes_refuse_with_the_migration_sentence() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let sentence = "MyWebSite/index.html is not readable. Make it readable or move it out of the folder, then restart.";
+        crate::local_apps::set_local_apps_refusal_for_test(Some(sentence.to_string()));
+        let state = || State(make_state(None));
+        let session = || Extension(make_session(SessionType::Shell));
+        let headers = || HeaderMap::new();
+        let path = || -> Path<String> { Path("MyWebSite/index.html".to_string()) };
+        let mut errors = Vec::new();
+        errors.push(
+            read_file(state(), session(), headers(), path())
+                .await
+                .unwrap_err(),
+        );
+        errors.push(
+            write_file(
+                state(),
+                session(),
+                headers(),
+                path(),
+                Bytes::from_static(b"no"),
+            )
+            .await
+            .unwrap_err(),
+        );
+        errors.push(
+            delete_path(
+                state(),
+                session(),
+                headers(),
+                path(),
+                Query(DeleteQuery { recursive: None }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        errors.push(
+            list_dir(state(), session(), headers(), path())
+                .await
+                .unwrap_err(),
+        );
+        errors.push(
+            stat_path(state(), session(), headers(), path())
+                .await
+                .unwrap_err(),
+        );
+        errors.push(
+            mkdir(state(), session(), headers(), path())
+                .await
+                .unwrap_err(),
+        );
+        errors.push(
+            handle_get(
+                state(),
+                session(),
+                headers(),
+                path(),
+                Query(StorageQuery {
+                    list: Some(true),
+                    mkdir: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        errors.push(
+            handle_post(
+                state(),
+                session(),
+                headers(),
+                path(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: Some(true),
+                }),
+                Bytes::from_static(b"no"),
+            )
+            .await
+            .unwrap_err(),
+        );
+        errors.push(
+            handle_get_root(
+                state(),
+                session(),
+                headers(),
+                Query(StorageQuery {
+                    list: None,
+                    mkdir: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+        for err in errors {
+            let (status, body) = refusal_body(err).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(body, sentence);
+        }
     }
 }

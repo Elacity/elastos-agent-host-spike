@@ -1,28 +1,21 @@
 //! The localhost file-key walker.
 //!
-//! Before the localhost provider starts, every envelope under the five
-//! encrypted roots is rewritten onto the HKDF file key derived from the
-//! device key, and the marker `identity/localhost-file-key-v1` records the
-//! finished migration. The marker counts as finished only when it carries the
-//! fixed record written by the migration; any other content stops local apps.
+//! A migration problem does not stop Home (`api/routes.rs` `health`,
+//! `api/server.rs` `ServeDir`). The helper stays down, including `MyWebSite`
+//! and `Public`, and every localhost route refuses with one sentence: the
+//! relative path, the cause, and what to do. Nothing starts unfenced.
 //!
-//! One lock on `identity/localhost-file-key.lock` covers the walk, so two
-//! Homes on one data folder take turns. Each new envelope is written to a
-//! temp file in the same directory, fsynced, and renamed. A crash at any of
-//! those writes leaves the previous bytes or the new bytes. The next start
-//! finishes the walk. A finished file opens with the file key only.
-//!
-//! A symlink or a hard link stops the walk. A file that changes while the
-//! walk is reading it stops the walk and keeps the new bytes. After the
-//! marker is the fixed record, the raw device key is not used to open or
-//! rewrite local-app files.
-//!
-//! An older build still passes that raw device key to the helper and does not
-//! read the marker. Rewritten files then fail to open. Files that older build
-//! writes afterwards stay under the device key. A later start of this build
-//! does not rewrite them, because the marker is already present. The helper
-//! has only the file key, so those later files fail to open too. Start itself
-//! still proceeds, because the walk is skipped.
+//! `identity/localhost-file-key-v1` is format `1` plus
+//! SHA-256(`elastos-localhost-file-key-fingerprint-v1\0` || file key). A
+//! different fingerprint leaves files untouched (restored or copied folder,
+//! changed device key). A matching marker still walks, so an older build's
+//! later device-key file is rewritten. Only a file starting with
+//! `{"version":1,"nonce":"` is read past those bytes. Above 32 MiB is refused
+//! by name. The walk logs a count every few seconds. A waiter on
+//! `identity/localhost-file-key.lock` logs that. A second live Home stops in
+//! `host_lock.rs` `acquire_host_process_lock_inner` ("another ElastOS host
+//! already owns"). A new inode keeps a mode that is a subset of `0600`, else
+//! `0600`, and drops ACLs and extended attributes. Plaintext is zeroized.
 
 use std::path::Path;
 
@@ -41,6 +34,16 @@ const LOCALHOST_MIGRATION_LOCK: &str = "localhost-file-key.lock";
 const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
 #[cfg(unix)]
 const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
+#[cfg(unix)]
+const LOCALHOST_ENVELOPE_LIMIT: u64 = 32 * 1024 * 1024;
+#[cfg(unix)]
+const ENVELOPE_PREFIX: &[u8] = b"{\"version\":1,\"nonce\":\"";
+#[cfg(unix)]
+const _: () = assert!(ENVELOPE_PREFIX.len() == 22);
+#[cfg(unix)]
+const RECOVERY: &str = "Make it readable or move it out of the folder, then restart.";
+#[cfg(unix)]
+const FINGERPRINT_DOMAIN: &[u8] = b"elastos-localhost-file-key-fingerprint-v1\0";
 /// Local-app roots whose files are sealed. `MyWebSite` and `Public` stay
 /// plaintext. `identity/` and `did/` are not in this list.
 #[cfg(unix)]
@@ -102,19 +105,128 @@ fn run_before_replace(path: &Path) {
 #[cfg(all(unix, not(test)))]
 fn run_before_replace(_path: &Path) {}
 
-#[cfg(unix)]
-fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "localhost file {} {why}; local apps were not started",
-        path.display()
-    )
+#[cfg(all(unix, test))]
+fn note_migration_lock_wait() {
+    if let Ok(path) = std::env::var("ELASTOS_LOCALHOST_MIGRATION_WAIT_PROBE") {
+        let _ = std::fs::write(path, b"waiting");
+    }
 }
 
-/// HKDF-SHA256 file key for localhost envelopes.
-///
-/// `ikm` is the device key, salt is empty, and info is
-/// `elastos-localhost-file-v1`. The provider uses these 32 bytes as AES-256,
-/// with no further expansion.
+#[cfg(all(unix, test))]
+fn kill_checkpoint(point: &str) {
+    let Ok(want) = std::env::var("ELASTOS_LOCALHOST_MIGRATION_KILL_AT") else {
+        return;
+    };
+    if want != point {
+        return;
+    }
+    if let Ok(root) = std::env::var("ELASTOS_LOCALHOST_MIGRATION_CHILD_ROOT") {
+        let _ = std::fs::write(Path::new(&root).join("kill-probe"), point);
+    }
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+}
+
+#[cfg(unix)]
+thread_local! {
+    static MIGRATION_ROOT: std::cell::RefCell<std::path::PathBuf> =
+        std::cell::RefCell::new(std::path::PathBuf::new());
+    static PROGRESS_AT: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(unix)]
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+#[cfg(unix)]
+fn set_migration_root(root: &Path) {
+    MIGRATION_ROOT.with(|slot| *slot.borrow_mut() = root.to_path_buf());
+    PROGRESS_AT.with(|slot| slot.set((0, unix_secs())));
+}
+
+#[cfg(unix)]
+fn relative_path(path: &Path) -> String {
+    MIGRATION_ROOT.with(|root| {
+        path.strip_prefix(root.borrow().as_path())
+            .unwrap_or(path)
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/")
+    })
+}
+
+#[cfg(unix)]
+fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
+    let rel = relative_path(path);
+    let cause = if why == "forged" {
+        return anyhow::anyhow!("{rel} is not the migration record. {RECOVERY}");
+    } else if why == "mismatch" {
+        return anyhow::anyhow!(
+            "{rel} does not match this Home (restored or copied folder, changed device key). {RECOVERY}"
+        );
+    } else if why.starts_with("larger") {
+        why
+    } else if why.contains("link") {
+        "linked"
+    } else if why.contains("changed") {
+        "changed while read"
+    } else if why.contains("decrypt") {
+        "not decryptable"
+    } else {
+        "not readable"
+    };
+    anyhow::anyhow!("{rel} is {cause}. {RECOVERY}")
+}
+
+#[cfg(unix)]
+fn note_progress() {
+    PROGRESS_AT.with(|slot| {
+        let (count, last) = slot.get();
+        let count = count + 1;
+        let now = unix_secs();
+        if now.saturating_sub(last) >= 3 {
+            tracing::info!(target: "elastos", "localhost file migration checked {count} files");
+            slot.set((count, now));
+        } else {
+            slot.set((count, last));
+        }
+    });
+}
+
+#[cfg(unix)]
+fn file_key_fingerprint(file_key: &[u8; 32]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(FINGERPRINT_DOMAIN);
+    hasher.update(file_key);
+    hasher.finalize().into()
+}
+
+#[cfg(unix)]
+pub(crate) fn localhost_marker_record(file_key: &[u8; 32]) -> Vec<u8> {
+    format!(
+        "elastos-localhost-file-v1 1 {}\n",
+        hex::encode(file_key_fingerprint(file_key))
+    )
+    .into_bytes()
+}
+
+#[cfg(unix)]
+fn kept_mode(mode: u32) -> u32 {
+    let perm = mode & 0o777;
+    if perm & !0o600 == 0 {
+        perm
+    } else {
+        0o600
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn localhost_file_key(device_key: &[u8; 32]) -> anyhow::Result<[u8; 32]> {
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, device_key);
@@ -124,7 +236,6 @@ pub(crate) fn localhost_file_key(device_key: &[u8; 32]) -> anyhow::Result<[u8; 3
     Ok(okm)
 }
 
-/// Holds the exclusive migration lock until dropped.
 #[cfg(unix)]
 pub(crate) struct LocalhostMigrationLock {
     _file: std::fs::File,
@@ -137,12 +248,10 @@ pub(crate) fn hold_localhost_migration_lock(
     acquire_migration_lock(data_dir)
 }
 
-/// Write `bytes` by creating a temp file in the same directory, calling
-/// `fsync`, then `rename` over `path`. A crash keeps the previous bytes.
 #[cfg(unix)]
-fn replace_file_fsync_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn replace_file_fsync_rename(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -165,8 +274,11 @@ fn replace_file_fsync_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(0o600)
+        .mode(mode)
         .open(&tmp)?;
+    #[cfg(test)]
+    kill_checkpoint("temp-created");
+    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
     if let Err(err) = (|| {
         charge_migration_write().map_err(io_error)?;
         file.write_all(bytes)?;
@@ -183,6 +295,8 @@ fn replace_file_fsync_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
+    #[cfg(test)]
+    kill_checkpoint("renamed");
     charge_migration_write().map_err(io_error)?;
     let dir = std::fs::File::open(parent)?;
     dir.sync_all()?;
@@ -192,6 +306,16 @@ fn replace_file_fsync_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(unix)]
 fn io_error(err: anyhow::Error) -> std::io::Error {
     std::io::Error::other(err)
+}
+
+#[cfg(unix)]
+fn migration_io(path: &Path, why: &str, err: std::io::Error) -> anyhow::Error {
+    let text = err.to_string();
+    if text.contains("local apps were not started") {
+        anyhow::anyhow!(text)
+    } else {
+        localhost_refused(path, why)
+    }
 }
 
 #[cfg(unix)]
@@ -245,14 +369,6 @@ fn opened_file_still_matches(
     Ok(())
 }
 
-/// Rewrite one envelope onto the file key.
-///
-/// A file that is not the JSON envelope is left as it is. An envelope that
-/// opens with the raw device key is sealed again under the file key. An
-/// envelope that opens only with the file key was written by an earlier pass
-/// that crashed before the marker; it is left as it is. Any other envelope
-/// stops local apps and is not written. A file that changes after it is read
-/// is not written either.
 #[cfg(unix)]
 fn migrate_localhost_envelope(
     path: &Path,
@@ -261,12 +377,20 @@ fn migrate_localhost_envelope(
 ) -> anyhow::Result<()> {
     use std::io::Read;
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use zeroize::Zeroize;
 
+    note_progress();
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
-        .with_context(|| localhost_refused(path, "cannot be read"))?;
+        .map_err(|err| {
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                localhost_refused(path, "is a link")
+            } else {
+                localhost_refused(path, "cannot be read")
+            }
+        })?;
     let meta = file
         .metadata()
         .with_context(|| localhost_refused(path, "cannot be read"))?;
@@ -276,26 +400,42 @@ fn migrate_localhost_envelope(
     if meta.nlink() > 1 {
         return Err(localhost_refused(path, "is linked from another path"));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    if meta.len() > LOCALHOST_ENVELOPE_LIMIT {
+        return Err(localhost_refused(path, "larger than 32 MiB"));
+    }
+    if (meta.len() as usize) < ENVELOPE_PREFIX.len() {
+        return Ok(());
+    }
+    let mut header = [0u8; 22];
+    file.read_exact(&mut header)
         .with_context(|| localhost_refused(path, "cannot be read"))?;
+    if header.as_slice() != ENVELOPE_PREFIX {
+        return Ok(());
+    }
+    let mut bytes = header.to_vec();
+    file.by_ref()
+        .take(LOCALHOST_ENVELOPE_LIMIT + 1 - header.len() as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| localhost_refused(path, "cannot be read"))?;
+    if bytes.len() as u64 > LOCALHOST_ENVELOPE_LIMIT {
+        return Err(localhost_refused(path, "larger than 32 MiB"));
+    }
     run_before_replace(path);
     opened_file_still_matches(path, &file, bytes.len() as u64)?;
     if !localhost_provider::is_encrypted_envelope(&bytes) {
         return Ok(());
     }
-    if let Ok(plaintext) = localhost_provider::decrypt_bytes(device_key, &bytes) {
-        let sealed = localhost_provider::encrypt_bytes(file_key, &plaintext)
-            .with_context(|| localhost_refused(path, "cannot be sealed"))?;
+    if let Ok(mut plaintext) = localhost_provider::decrypt_bytes(device_key, &bytes) {
+        let sealed = localhost_provider::encrypt_bytes(file_key, &plaintext);
+        plaintext.zeroize();
+        let sealed = sealed.with_context(|| localhost_refused(path, "cannot be sealed"))?;
         opened_file_still_matches(path, &file, bytes.len() as u64)?;
-        replace_file_fsync_rename(path, &sealed)
-            .with_context(|| localhost_refused(path, "cannot be replaced"))?;
+        replace_file_fsync_rename(path, &sealed, kept_mode(meta.mode()))
+            .map_err(|err| migration_io(path, "cannot be replaced", err))?;
         return Ok(());
     }
-    // The file key recognizes a file already replaced. The raw device key is
-    // not tried again after the file key fails, and it is not a fallback once
-    // the marker says migration finished.
-    if localhost_provider::decrypt_bytes(file_key, &bytes).is_ok() {
+    if let Ok(mut plaintext) = localhost_provider::decrypt_bytes(file_key, &bytes) {
+        plaintext.zeroize();
         return Ok(());
     }
     Err(localhost_refused(path, "does not decrypt"))
@@ -361,29 +501,60 @@ fn migrate_localhost_tree(
     Ok(())
 }
 
-/// The marker says migration finished only when it is a regular file carrying
-/// the fixed record the migration writes. A marker with any other content
-/// stops local apps: the walk cannot know which key sealed the files, so it
-/// must neither skip the migration nor fall back to the raw device key.
 #[cfg(unix)]
-fn localhost_marker_finished(marker: &Path) -> anyhow::Result<bool> {
-    match std::fs::symlink_metadata(marker) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(localhost_refused(marker, "is a link")),
-        Ok(meta) if meta.is_file() => {
-            let bytes = read_nofollow(marker)
-                .with_context(|| localhost_refused(marker, "cannot be read"))?;
-            if bytes == LOCALHOST_MIGRATION_RECORD {
-                Ok(true)
-            } else {
-                Err(localhost_refused(
-                    marker,
-                    "does not carry the migration record",
-                ))
-            }
-        }
-        Ok(_) => Err(localhost_refused(marker, "is not a file")),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err).with_context(|| localhost_refused(marker, "cannot be read")),
+enum MarkerPlan {
+    Write,
+    Keep,
+}
+
+#[cfg(unix)]
+fn read_marker_plan(marker: &Path, file_key: &[u8; 32]) -> anyhow::Result<MarkerPlan> {
+    let meta = match std::fs::symlink_metadata(marker) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(MarkerPlan::Write),
+        Err(_) => return Err(localhost_refused(marker, "cannot be read")),
+    };
+    if meta.file_type().is_symlink() {
+        return Err(localhost_refused(marker, "is a link"));
+    }
+    if !meta.is_file() {
+        return Err(localhost_refused(marker, "is not a file"));
+    }
+    if meta.len() > 256 {
+        return Err(localhost_refused(marker, "forged"));
+    }
+    let bytes = read_nofollow(marker).map_err(|_| localhost_refused(marker, "cannot be read"))?;
+    if bytes == LOCALHOST_MIGRATION_RECORD {
+        return Ok(MarkerPlan::Write);
+    }
+    let text = std::str::from_utf8(&bytes).unwrap_or("");
+    let Some(rest) = text
+        .strip_prefix("elastos-localhost-file-v1 ")
+        .and_then(|rest| rest.strip_suffix('\n'))
+    else {
+        return Err(localhost_refused(marker, "forged"));
+    };
+    let Some(("1", hex_fingerprint)) = rest.split_once(' ') else {
+        return Err(localhost_refused(marker, "forged"));
+    };
+    let Ok(found) = hex::decode(hex_fingerprint) else {
+        return Err(localhost_refused(marker, "forged"));
+    };
+    if found.as_slice() == file_key_fingerprint(file_key) {
+        Ok(MarkerPlan::Keep)
+    } else {
+        Err(localhost_refused(marker, "mismatch"))
+    }
+}
+
+#[cfg(unix)]
+fn identity_is_directory_or_absent(identity: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(identity) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(localhost_refused(identity, "is a link")),
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(localhost_refused(identity, "is not a directory")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(localhost_refused(identity, "cannot be read")),
     }
 }
 
@@ -450,40 +621,46 @@ fn acquire_migration_lock(data_dir: &Path) -> anyhow::Result<LocalhostMigrationL
     if !meta.is_file() || meta.nlink() > 1 {
         return Err(localhost_refused(&lock_path, "is linked from another path"));
     }
-    file.lock()
-        .with_context(|| localhost_refused(&lock_path, "cannot be locked"))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            tracing::info!(target: "elastos", "localhost file migration is waiting");
+            #[cfg(test)]
+            note_migration_lock_wait();
+            file.lock()
+                .with_context(|| localhost_refused(&lock_path, "cannot be locked"))?;
+        }
+        Err(err) => {
+            return Err(err).with_context(|| localhost_refused(&lock_path, "cannot be locked"));
+        }
+    }
     Ok(LocalhostMigrationLock { _file: file })
 }
 
 #[cfg(unix)]
-fn write_localhost_marker(marker: &Path) -> anyhow::Result<()> {
+fn write_localhost_marker(marker: &Path, record: &[u8]) -> anyhow::Result<()> {
     let identity = marker.parent().ok_or_else(|| {
-        anyhow::anyhow!("localhost file key marker has no directory; local apps were not started")
+        anyhow::anyhow!("identity/localhost-file-key-v1 is not readable. {RECOVERY}")
     })?;
     ensure_identity_dir(identity)?;
-    replace_file_fsync_rename(marker, LOCALHOST_MIGRATION_RECORD)
-        .with_context(|| localhost_refused(marker, "cannot be replaced"))?;
+    replace_file_fsync_rename(marker, record, 0o600)
+        .map_err(|err| migration_io(marker, "cannot be replaced", err))?;
     Ok(())
 }
 
-/// Rewrite local-app envelopes under the five encrypted roots onto the file key.
-///
-/// When `identity/localhost-file-key-v1` is a regular file carrying the fixed
-/// migration record, migration has finished. This returns without reading
-/// those roots and without opening any file with the raw device key. A marker
-/// holding any other content is an error. The raw device key is never a
-/// fallback after that marker exists.
 #[cfg(unix)]
 fn migrate_localhost_files_to_file_key(
     data_dir: &Path,
     device_key: &[u8; 32],
 ) -> anyhow::Result<()> {
-    let _lock = acquire_migration_lock(data_dir)?;
-    let marker = data_dir.join("identity").join(LOCALHOST_MIGRATION_MARKER);
-    if localhost_marker_finished(&marker)? {
-        return Ok(());
-    }
+    set_migration_root(data_dir);
+    let identity = data_dir.join("identity");
+    identity_is_directory_or_absent(&identity)?;
     let file_key = zeroize::Zeroizing::new(localhost_file_key(device_key)?);
+    let marker = identity.join(LOCALHOST_MIGRATION_MARKER);
+    read_marker_plan(&marker, &file_key)?;
+    let _lock = acquire_migration_lock(data_dir)?;
+    let plan = read_marker_plan(&marker, &file_key)?;
     for root in LOCALHOST_ENCRYPTED_ROOTS {
         let path = data_dir.join(root);
         match std::fs::symlink_metadata(&path) {
@@ -500,7 +677,10 @@ fn migrate_localhost_files_to_file_key(
             }
         }
     }
-    write_localhost_marker(&marker)
+    if matches!(plan, MarkerPlan::Write) {
+        write_localhost_marker(&marker, &localhost_marker_record(&file_key))?;
+    }
+    Ok(())
 }
 
 /// Localhost-provider init config.
@@ -536,4 +716,23 @@ pub(crate) fn localhost_provider_bridge_config(
         encryption_key: device_key_hex,
         ..Default::default()
     })
+}
+
+pub(crate) enum LocalhostBringup {
+    Start(provider::BridgeProviderConfig),
+    Refuse(String),
+}
+
+pub(crate) fn localhost_bringup(data_dir: &Path, device_key: &[u8; 32]) -> LocalhostBringup {
+    match localhost_provider_bridge_config(data_dir, device_key) {
+        Ok(config) => {
+            elastos_server::local_apps::set_local_apps_refusal(None);
+            LocalhostBringup::Start(config)
+        }
+        Err(err) => {
+            let sentence = err.to_string();
+            elastos_server::local_apps::set_local_apps_refusal(Some(sentence.clone()));
+            LocalhostBringup::Refuse(sentence)
+        }
+    }
 }

@@ -6,6 +6,15 @@ use async_trait::async_trait;
 use elastos_common::CapsuleManifest;
 use elastos_runtime::provider::ProviderRegistry;
 
+fn localhost_provider_status(scheme: &str, fallback: &str) -> String {
+    if scheme == "localhost" {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal() {
+            return sentence;
+        }
+    }
+    fallback.to_string()
+}
+
 #[derive(Debug, Clone)]
 pub struct InspectEntry {
     pub id: String,
@@ -32,10 +41,11 @@ impl RegistryInspectSource {
     }
 
     fn scheme_entry(scheme: String) -> InspectEntry {
+        let status = localhost_provider_status(&scheme, "running");
         InspectEntry {
             id: format!("provider:{scheme}"),
             name: scheme,
-            status: "running".to_string(),
+            status,
             capsule_type: "provider".to_string(),
             manifest: None,
             cid: None,
@@ -139,10 +149,21 @@ impl CatalogInspectSource {
         let is_running = Self::provided_scheme(&manifest)
             .map(|scheme| running.contains(&scheme))
             .unwrap_or(false);
+        let fallback = if is_running { "running" } else { "installed" };
+        let status = if manifest.name == "localhost-provider"
+            || manifest
+                .provides
+                .as_deref()
+                .is_some_and(|provides| provides.starts_with("localhost://"))
+        {
+            localhost_provider_status("localhost", fallback)
+        } else {
+            fallback.to_string()
+        };
         Some(InspectEntry {
             id: format!("capsule:{name}"),
             name: manifest.name.clone(),
-            status: if is_running { "running" } else { "installed" }.to_string(),
+            status,
             capsule_type: format!("{:?}", manifest.capsule_type).to_lowercase(),
             manifest: Some(manifest),
             cid,
@@ -217,5 +238,37 @@ impl InspectSource for AggregateInspectSource {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn localhost_refusal_is_the_provider_status() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let sentence = "Users/note.bin is not readable. Make it readable or move it out of the folder, then restart.";
+        crate::local_apps::set_local_apps_refusal_for_test(Some(sentence.to_string()));
+        let registry = Arc::new(ProviderRegistry::new());
+        registry
+            .register(Arc::new(crate::local_apps::RefusingLocalhostProvider::new(
+                sentence.to_string(),
+            )))
+            .await;
+        let registry_source = RegistryInspectSource::new(Arc::downgrade(&registry));
+        let entry = registry_source
+            .inspect_get("provider:localhost")
+            .await
+            .unwrap();
+        assert_eq!(entry.status, sentence);
+        let capsules = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../capsules");
+        let catalog = CatalogInspectSource::new(capsules, Arc::downgrade(&registry));
+        let entry = catalog
+            .inspect_get("capsule:localhost-provider")
+            .await
+            .unwrap();
+        assert_eq!(entry.status, sentence);
     }
 }

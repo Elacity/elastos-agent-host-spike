@@ -18,11 +18,27 @@ struct EncryptedEnvelope {
     ciphertext: String,
 }
 
-/// Whether `data` parses as the JSON envelope this crate encrypts.
+/// Version 1, a 12-byte hex nonce, and hex ciphertext of at least 16 bytes.
 ///
-/// Extra JSON fields are ignored, matching `decrypt_bytes`.
+/// Field names alone are not the envelope. `encrypt_bytes` writes hex.
 pub fn is_encrypted_envelope(data: &[u8]) -> bool {
-    serde_json::from_slice::<EncryptedEnvelope>(data).is_ok()
+    let Ok(object) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(data)
+    else {
+        return false;
+    };
+    if object.len() != 3 || object.get("version").and_then(|value| value.as_u64()) != Some(1) {
+        return false;
+    }
+    let decode = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|text| hex::decode(text).ok())
+    };
+    matches!(
+        (decode("nonce"), decode("ciphertext")),
+        (Some(nonce), Some(ciphertext)) if nonce.len() == 12 && ciphertext.len() >= 16
+    )
 }
 
 /// Encrypt raw bytes with AES-256-GCM, returning JSON envelope bytes.
@@ -31,12 +47,10 @@ pub fn encrypt_bytes(key: &[u8; 32], plaintext: &[u8]) -> io::Result<Vec<u8>> {
         .map_err(|e| io::Error::other(format!("AES key init: {e}")))?;
     let mut nonce_bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    // Keep the current aes-gcm API until the upstream generic-array 1.x
-    // migration is available through a compatible aes-gcm release.
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| io::Error::other(format!("encryption: {e}")))?;
 
     let envelope = EncryptedEnvelope {
@@ -74,10 +88,33 @@ pub fn decrypt_bytes(key: &[u8; 32], data: &[u8]) -> io::Result<Vec<u8>> {
 
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| io::Error::other(format!("AES key init: {e}")))?;
-    // See encrypt_bytes above for the aes-gcm/generic-array migration context.
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce_array: [u8; 12] = nonce_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid nonce length"))?;
+    let nonce = Nonce::from(nonce_array);
 
     cipher
-        .decrypt(nonce, ct.as_ref())
+        .decrypt(&nonce, ct.as_ref())
         .map_err(|e| io::Error::other(format!("decryption: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn envelope_recognition_uses_the_full_hex_form() {
+        let key = [7u8; 32];
+        let bytes = encrypt_bytes(&key, b"secret").unwrap();
+        assert!(is_encrypted_envelope(&bytes));
+        assert_eq!(decrypt_bytes(&key, &bytes).unwrap(), b"secret");
+        assert!(!is_encrypted_envelope(
+            br#"{"version":1,"nonce":"abcd","ciphertext":"deadbeef"}"#
+        ));
+        assert!(!is_encrypted_envelope(
+            br#"{"ciphertext":"00112233445566778899aabbccddeeff","nonce":"00112233445566778899aabb","version":1,"extra":1}"#
+        ));
+        assert!(!is_encrypted_envelope(br#"{"version":1,"note":"plain"}"#));
+    }
 }

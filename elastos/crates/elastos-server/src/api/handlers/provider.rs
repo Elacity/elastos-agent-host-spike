@@ -58,6 +58,11 @@ pub async fn provider_proxy(
             format!("{OBJECT_SESSION_PROXY_DENIED}: Runtime owns object storage access"),
         ));
     }
+    if scheme.eq_ignore_ascii_case("localhost") {
+        if let Some(sentence) = crate::local_apps::local_apps_refusal() {
+            return Err((StatusCode::SERVICE_UNAVAILABLE, sentence));
+        }
+    }
 
     // Build request JSON first (need body for AI resource construction)
     let mut request: Value = if body.is_empty() {
@@ -1664,5 +1669,39 @@ mod tests {
             *provider.requests.lock().await,
             vec![serde_json::json!({ "op": "publish" })]
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn localhost_proxy_returns_the_migration_sentence_before_json_parse() {
+        let _guard = crate::local_apps::lock_local_apps_for_test();
+        let sentence = "Users/note.bin is not readable. Make it readable or move it out of the folder, then restart.";
+        crate::local_apps::set_local_apps_refusal_for_test(Some(sentence.to_string()));
+        let state = ProviderProxyState {
+            registry: Arc::new(ProviderRegistry::new()),
+            capability_manager: None,
+        };
+        let session = Session::new(SessionType::Shell, None);
+        let err = provider_proxy(
+            State(state.clone()),
+            Extension(session.clone()),
+            Path(("LocalHost".to_string(), "read".to_string())),
+            HeaderMap::new(),
+            "{".to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1, sentence);
+        let err = provider_proxy(
+            State(state),
+            Extension(session),
+            Path(("ipfs".to_string(), "read".to_string())),
+            HeaderMap::new(),
+            "{}".to_string(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert!(err.1.contains(IPFS_SESSION_PROXY_DENIED));
     }
 }
