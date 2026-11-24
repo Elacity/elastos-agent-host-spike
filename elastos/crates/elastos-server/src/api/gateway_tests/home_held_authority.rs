@@ -89,10 +89,18 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
     ),
+    (
+        "elastos-runtime/src/provider/path_allow.rs",
+        "file_roots",
+        "RuntimeProviderId::Object => OBJECT_ROOTS",
+    ),
 ];
 
 /// Localhost stays open until slice L. Home still passes the raw device key.
 const LOCALHOST_OPEN_REASON: &str = "Home still passes the raw device key to the localhost provider. The row stays open until slice L.";
+
+/// The object helper's allowed root still contains the owner's recovery archive key.
+const OBJECT_ROOT_OPEN_REASON: &str = "The object helper's allowed root contains the folder where the owner's recovery archive key lives. The row closes when that key moves out of the helper's root or the key step (slice L) lands.";
 
 fn rows() -> Vec<HeldRow> {
     vec![
@@ -151,6 +159,18 @@ fn rows() -> Vec<HeldRow> {
         "capability_manager.grant",
         1,
         mark("runtime-own", "capsule capability", "capsule", "The request handler grants a capsule capability"),
+    ),
+    row(
+        "elastos-runtime/src/provider/path_allow.rs",
+        "file_roots",
+        "RuntimeProviderId::Object => OBJECT_ROOTS",
+        1,
+        mark(
+            "open",
+            "object helper file root",
+            "object provider",
+            OBJECT_ROOT_OPEN_REASON,
+        ),
     ),
     row(
         "elastos-server/src/api/auth_gateway.rs",
@@ -1473,6 +1493,7 @@ fn needles() -> Vec<(String, String)> {
         call(&["require_home_", "runtime_wallet_authority"]),
         call(&["require_home_", "wallet_connector_authority"]),
         text(&["encryption_key: ", "device_key_hex"]),
+        text(&["RuntimeProviderId::Object => ", "OBJECT_ROOTS"]),
         call(&["read_", "hosted_secret"]),
         call(&["write_", "hosted_secret"]),
         call(&["hosted_", "secret_path"]),
@@ -2036,6 +2057,8 @@ fn open_rows_are_an_explicit_list() {
 
 /// Localhost, object, and chain start through the path allow-list. Home derives
 /// the chain issuer itself. The localhost device-key hand-off stays open.
+/// The object helper's allowed root stays open: that root contains the folder
+/// where the owner's recovery archive key lives.
 #[test]
 fn localhost_object_and_chain_start_on_the_path_allow_list() {
     let raw = sources()
@@ -2111,7 +2134,27 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
             assert_eq!(row.status, "open");
             assert_eq!(row.reason, LOCALHOST_OPEN_REASON);
         }
+        if (row.file, row.function, row.mechanism)
+            == (
+                "elastos-runtime/src/provider/path_allow.rs",
+                "file_roots",
+                "RuntimeProviderId::Object => OBJECT_ROOTS",
+            )
+        {
+            assert_eq!(row.status, "open");
+            assert_eq!(row.count, 1);
+            assert_eq!(row.reason, OBJECT_ROOT_OPEN_REASON);
+        }
     }
+    let roots = sources()
+        .get("elastos-runtime/src/provider/path_allow.rs")
+        .expect("path_allow");
+    let bodies = function_raw_bodies(roots, "file_roots");
+    assert_eq!(bodies.len(), 1);
+    assert!(
+        bodies[0].contains("RuntimeProviderId::Object => OBJECT_ROOTS"),
+        "the object helper root grant left file_roots"
+    );
 }
 
 fn helper_component_keys(body: &str) -> Vec<&str> {
