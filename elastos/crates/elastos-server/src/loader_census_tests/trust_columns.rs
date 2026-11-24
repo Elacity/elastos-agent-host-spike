@@ -83,13 +83,13 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-runtime/src/provider/bridge.rs",
-            function: "spawn_confined_model_with_engine_bundle",
+            function: "spawn_confined_model_from_rights",
             call: "command",
-            class: "os-tool",
+            class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::new(\"/usr", "/bin/sandbox-exec\")"].concat(),
-            os_path: "/usr/bin/sandbox-exec",
+            evidence: ["Command::from", "(command)"].concat(),
+            os_path: "",
         },
         TrustColumn {
             file: "elastos-runtime/src/provider/bridge.rs",
@@ -722,6 +722,16 @@ fn columns() -> Vec<TrustColumn> {
             call: "ProviderBridge::spawn",
             class: "n/a",
             trust_root: "components-json-in-data-dir",
+            verified_when: "at-every-start",
+            evidence: ["ProviderBr", "idge::spawn"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/server_infra.rs",
+            function: "launch_admitted_model",
+            call: "ProviderBridge::spawn",
+            class: "n/a",
+            trust_root: "release-signature",
             verified_when: "at-every-start",
             evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
@@ -1641,19 +1651,19 @@ fn trust_column_counts_and_chokepoint_queue() {
         })
         .count();
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 105);
-    assert_eq!(classes.get("n/a"), Some(&56));
-    assert_eq!(classes.get("os-tool"), Some(&2));
-    assert_eq!(classes.get("other"), Some(&37));
+    assert_eq!(columns.len(), 106);
+    assert_eq!(classes.get("n/a"), Some(&57));
+    assert_eq!(classes.get("os-tool"), Some(&1));
+    assert_eq!(classes.get("other"), Some(&38));
     assert_eq!(classes.get("own-binary"), Some(&5));
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("none"), Some(&56));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&25));
+    assert_eq!(roots.get("release-signature"), Some(&26));
     assert_eq!(roots.get("staged-cid"), Some(&8));
-    assert_eq!(times.get("at-every-start"), Some(&33));
+    assert_eq!(times.get("at-every-start"), Some(&34));
     assert_eq!(times.get("at-install-only"), Some(&7));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
     assert_eq!(times.get("never"), Some(&56));

@@ -3502,6 +3502,50 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    async fn start_hosted_model_probe(
+        base: &std::path::Path,
+        script: &std::path::Path,
+        config: elastos_runtime::provider::bridge::ProviderConfig,
+    ) -> (
+        Arc<ProviderBridge>,
+        tokio::net::UnixListener,
+        elastos_runtime::provider::bridge::ProviderConfig,
+    ) {
+        let root = base.join("providers/model-provider/hosted-binding");
+        let bundle = root.join("bundle");
+        fs::create_dir_all(&bundle).unwrap();
+        let engine = bundle.join("engine");
+        let model = root.join("model");
+        fs::write(&engine, b"").unwrap();
+        fs::write(&model, b"").unwrap();
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(
+            &fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../capsules/model-provider/capsule.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let (confined, _, _, returned) = ProviderBridge::spawn_confined_model_from_rights(
+            manifest.authority.as_ref().unwrap(),
+            &crate::test_support::fixture_executable(script),
+            config,
+            &fs::canonicalize(&engine).unwrap(),
+            &fs::canonicalize(&model).unwrap(),
+            &fs::canonicalize(&bundle).unwrap(),
+        )
+        .await
+        .unwrap();
+        let hosted = returned.extra["runtime_hosted_socket"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let listener = tokio::net::UnixListener::bind(&hosted).unwrap();
+        let bridge = Arc::clone(confined.bridge());
+        (bridge, listener, returned)
+    }
+
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn confined_broker_rejects_changed_prompt_for_active_run() {
         confined_broker_text_fixture(false).await;
@@ -3631,14 +3675,8 @@ mod tests {
             extra: json!({"offers":[], "journal_dir":base.join("providers/model-provider/journal")}),
             ..Default::default()
         };
-        let (bridge, _, _, confined_config, hosted_listener) =
-            ProviderBridge::spawn_confined_model(
-                &crate::test_support::fixture_executable(&script),
-                config,
-            )
-            .await
-            .unwrap();
-        let bridge = Arc::new(bridge);
+        let (bridge, hosted_listener, confined_config) =
+            start_hosted_model_probe(&base, &script, config).await;
         start(hosted_listener, bridge.clone(), dir.path().to_path_buf()).unwrap();
         bridge
             .send_raw(&json!({"op":"runs_create","offer_id":offer_id,
@@ -3859,14 +3897,8 @@ mod tests {
             extra: json!({"offers":[], "journal_dir":base.join("providers/model-provider/journal")}),
             ..Default::default()
         };
-        let (bridge, _, _, confined_config, hosted_listener) =
-            ProviderBridge::spawn_confined_model(
-                &crate::test_support::fixture_executable(&script),
-                config,
-            )
-            .await
-            .unwrap();
-        let bridge = Arc::new(bridge);
+        let (bridge, hosted_listener, confined_config) =
+            start_hosted_model_probe(&base, &script, config).await;
         start(hosted_listener, bridge.clone(), dir.path().to_path_buf()).unwrap();
         let sink_task = tokio::spawn(async move {
             loop {

@@ -98,7 +98,7 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-runtime/src/provider/bridge.rs",
-            "spawn_confined_model_with_engine_bundle",
+            "spawn_confined_model_from_rights",
             "command",
             "host process",
             "CID+DID",
@@ -670,7 +670,16 @@ fn rows() -> Vec<Row> {
             "native provider",
             "checksum",
             "P2-8",
-            15,
+            13,
+        ),
+        row(
+            "elastos-server/src/server_infra.rs",
+            "launch_admitted_model",
+            "ProviderBridge::spawn",
+            "native provider",
+            "admitted rights+checked directory+bound executable",
+            "B3 S10",
+            2,
         ),
         row(
             "elastos-server/src/server_infra.rs",
@@ -1011,6 +1020,7 @@ fn found(sources: &BTreeMap<String, String>) -> BTreeMap<(String, String, String
         let staged_folder = ["::run_staged", "_folder("].concat();
         for (label, needle) in [
             ("command", "Command::new("),
+            ("command", "Command::from("),
             ("content import", "prepare_capsule_from_content_provider("),
             ("bundle start", bundle_start.as_str()),
             ("bundle start", bundle_run.as_str()),
@@ -1109,17 +1119,17 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
-            "spawn_confined_model_with_engine_bundle",
+            "spawn_confined_model_from_rights",
             "verify_at_spawn()",
         ),
         (
-            "elastos-runtime/src/provider/bridge.rs",
-            "spawn_confined_model_with_engine_bundle",
-            "command.arg(\"-p\").arg(policy).arg(prepared.exec_path())",
+            "elastos-runtime/src/provider/os_entry.rs",
+            "model_rights_command",
+            "Path::new(\"/usr/bin/sandbox-exec\")",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
-            "spawn_confined_model_with_engine_bundle",
+            "spawn_confined_model_from_rights",
             "Self::spawn_command(",
         ),
         (

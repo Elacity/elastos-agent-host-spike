@@ -70,19 +70,6 @@ const HOSTED_RUN_BINDING_TTL: std::time::Duration = std::time::Duration::from_se
 const MAX_HOSTED_RUN_BINDINGS: usize = 4096;
 
 #[cfg(target_os = "macos")]
-fn model_capsule_authority() -> Result<ProviderAuthority, BridgeError> {
-    let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../capsules/model-provider/capsule.json");
-    let bytes = std::fs::read(&path)
-        .map_err(|_| BridgeError::InitFailed("model authority unavailable".into()))?;
-    let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&bytes)
-        .map_err(|_| BridgeError::InitFailed("model authority unavailable".into()))?;
-    manifest
-        .authority
-        .ok_or_else(|| BridgeError::InitFailed("model authority unavailable".into()))
-}
-
-#[cfg(target_os = "macos")]
 fn model_journal_for_sandbox(config: &ProviderConfig) -> Result<std::path::PathBuf, BridgeError> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
@@ -1844,138 +1831,6 @@ impl ProviderBridge {
         Ok(Confined {
             bridge: Arc::new(bridge),
         })
-    }
-
-    /// Admit only Runtime-selected private engine sockets for the native model provider.
-    #[cfg(target_os = "macos")]
-    pub async fn spawn_confined_model(
-        binary_path: &CheckedExecutable,
-        config: ProviderConfig,
-    ) -> Result<
-        (
-            Self,
-            BTreeMap<String, String>,
-            Vec<String>,
-            ProviderConfig,
-            tokio::net::UnixListener,
-        ),
-        BridgeError,
-    > {
-        Self::spawn_confined_model_with_engine_bundle(binary_path, config, None).await
-    }
-
-    /// Predeclare the current component-pinned engine bundle for later admission.
-    /// Runtime retains verification and offer authority through every Init.
-    #[cfg(target_os = "macos")]
-    pub async fn spawn_confined_model_with_engine_bundle(
-        binary_path: &CheckedExecutable,
-        config: ProviderConfig,
-        pinned_engine_bundle: Option<&Path>,
-    ) -> Result<
-        (
-            Self,
-            BTreeMap<String, String>,
-            Vec<String>,
-            ProviderConfig,
-            tokio::net::UnixListener,
-        ),
-        BridgeError,
-    > {
-        let authority = model_capsule_authority()?;
-        let base = std::path::PathBuf::from(&config.base_path);
-        let offers = config
-            .extra
-            .get("offers")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?;
-        let local: Vec<_> = offers
-            .iter()
-            .filter(|offer| {
-                offer
-                    .pointer("/adapter/kind")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("local_llama_cpp_text")
-            })
-            .collect();
-        if local.len() > 1 {
-            return Err(BridgeError::InitFailed(
-                "too many local model offers".into(),
-            ));
-        }
-        let (engine, model, bundle) = if let Some(offer) = local.first() {
-            let engine = std::path::PathBuf::from(
-                offer
-                    .pointer("/adapter/engine/path")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        BridgeError::InitFailed("model engine path unavailable".into())
-                    })?,
-            );
-            let model = std::path::PathBuf::from(
-                offer
-                    .pointer("/adapter/model/path")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        BridgeError::InitFailed("model weights path unavailable".into())
-                    })?,
-            );
-            let bundle = pinned_engine_bundle
-                .map(Path::to_path_buf)
-                .or_else(|| engine.parent().map(Path::to_path_buf))
-                .ok_or_else(|| {
-                    BridgeError::InitFailed("model engine directory unavailable".into())
-                })?;
-            model_file_policy(&config, Some(&bundle))?;
-            (engine, model, bundle)
-        } else if let Some(pinned) = pinned_engine_bundle {
-            model_file_policy(&config, Some(pinned))?;
-            let engine = std::fs::canonicalize(binary_path.path()).map_err(BridgeError::Spawn)?;
-            if !engine.starts_with(pinned) {
-                return Err(BridgeError::InitFailed("unsafe model artifact path".into()));
-            }
-            let model = base.join("providers/model-provider/hosted-binding/model");
-            if let Some(parent) = model.parent() {
-                std::fs::create_dir_all(parent).map_err(BridgeError::Spawn)?;
-            }
-            std::fs::write(&model, b"").map_err(BridgeError::Spawn)?;
-            let model = std::fs::canonicalize(&model).map_err(BridgeError::Spawn)?;
-            (engine, model, pinned.to_path_buf())
-        } else {
-            let root = base.join("providers/model-provider/hosted-binding");
-            let bundle = root.join("bundle");
-            std::fs::create_dir_all(&bundle).map_err(BridgeError::Spawn)?;
-            let engine = bundle.join("engine");
-            let model = root.join("model");
-            std::fs::write(&engine, b"").map_err(BridgeError::Spawn)?;
-            std::fs::write(&model, b"").map_err(BridgeError::Spawn)?;
-            (
-                std::fs::canonicalize(&engine).map_err(BridgeError::Spawn)?,
-                std::fs::canonicalize(&model).map_err(BridgeError::Spawn)?,
-                std::fs::canonicalize(&bundle).map_err(BridgeError::Spawn)?,
-            )
-        };
-        let (confined, sockets, vacant, returned) = Self::spawn_confined_model_from_rights(
-            &authority,
-            binary_path,
-            config,
-            &engine,
-            &model,
-            &bundle,
-        )
-        .await?;
-        let hosted = returned
-            .extra
-            .get("runtime_hosted_socket")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| BridgeError::InitFailed("model hosted socket unavailable".into()))?
-            .to_string();
-        let hosted_listener =
-            tokio::net::UnixListener::bind(&hosted).map_err(BridgeError::Spawn)?;
-        let bridge_arc = Arc::clone(confined.bridge());
-        drop(confined);
-        let bridge = Arc::try_unwrap(bridge_arc)
-            .map_err(|_| BridgeError::InitFailed("model bridge is shared".into()))?;
-        Ok((bridge, sockets, vacant, returned, hosted_listener))
     }
 
     /// macOS model start from the admitted rights. The server binds the hosted socket.
@@ -4940,6 +4795,49 @@ int main(void) {
     }
 
     #[cfg(target_os = "macos")]
+    async fn start_admitted_model_for_test(
+        binary: &CheckedExecutable,
+        config: ProviderConfig,
+        engine: &Path,
+        model: &Path,
+        bundle: &Path,
+    ) -> (
+        ProviderBridge,
+        BTreeMap<String, String>,
+        Vec<String>,
+        ProviderConfig,
+        tokio::net::UnixListener,
+    ) {
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../capsules/model-provider/capsule.json");
+        let manifest: elastos_common::CapsuleManifest =
+            serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+        let (confined, sockets, vacant, returned) =
+            ProviderBridge::spawn_confined_model_from_rights(
+                &manifest.authority.unwrap(),
+                binary,
+                config,
+                engine,
+                model,
+                bundle,
+            )
+            .await
+            .unwrap();
+        let hosted = returned.extra["runtime_hosted_socket"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let listener = tokio::net::UnixListener::bind(&hosted).unwrap();
+        let bridge_arc = Arc::clone(confined.bridge());
+        drop(confined);
+        let bridge = match Arc::try_unwrap(bridge_arc) {
+            Ok(bridge) => bridge,
+            Err(_) => panic!("the model bridge stays one value"),
+        };
+        (bridge, sockets, vacant, returned, listener)
+    }
+
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn test_confined_model_child_and_descendant_cannot_open_external_socket() {
         use sha2::{Digest as _, Sha256};
@@ -5005,9 +4903,14 @@ int main(void) {
         let policy_config = config.clone();
         model_file_policy(&config, Some(&engine_dir)).unwrap();
         let (bridge, sockets, vacant, confined_config, _hosted_listener) =
-            ProviderBridge::spawn_confined_model(&CheckedExecutable::for_test(&script), config)
-                .await
-                .unwrap();
+            start_admitted_model_for_test(
+                &CheckedExecutable::for_test(&script),
+                config,
+                &script,
+                &model,
+                &engine_dir,
+            )
+            .await;
         assert_eq!(
             confined_config.extra["runtime_local_sockets"]["fixture-local"],
             sockets["fixture-local"]
@@ -5077,14 +4980,18 @@ int main(void) {
             extra: serde_json::json!({"offers":[], "journal_dir":journal}),
             ..Default::default()
         };
-        let (empty_bridge, _, vacant, _, _hosted_listener) =
-            ProviderBridge::spawn_confined_model_with_engine_bundle(
-                &CheckedExecutable::for_test(&script),
-                empty_config,
-                Some(&engine_dir),
-            )
-            .await
-            .unwrap();
+        let hosted_model = base.join("providers/model-provider/hosted-binding/model");
+        std::fs::create_dir_all(hosted_model.parent().unwrap()).unwrap();
+        std::fs::write(&hosted_model, b"").unwrap();
+        let hosted_model = std::fs::canonicalize(&hosted_model).unwrap();
+        let (empty_bridge, _, vacant, _, _hosted_listener) = start_admitted_model_for_test(
+            &CheckedExecutable::for_test(&script),
+            empty_config,
+            &script,
+            &hosted_model,
+            &engine_dir,
+        )
+        .await;
         let preparation = base.join("model-preparation");
         let admitted = preparation.join(format!("admitted-{}", "a".repeat(64)));
         std::fs::create_dir_all(&admitted).unwrap();
@@ -5171,10 +5078,44 @@ int main(void) {
             serde_json::from_value(fixture["provider_config"].clone()).unwrap();
         let offer_id = fixture["offer_id"].as_str().unwrap();
         #[cfg(target_os = "macos")]
-        let (bridge, sockets, _, _, _hosted_listener) =
-            ProviderBridge::spawn_confined_model(&CheckedExecutable::for_test(binary), config)
-                .await
-                .unwrap();
+        let local_offer = config.extra["offers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|offer| {
+                offer
+                    .pointer("/adapter/kind")
+                    .and_then(|value| value.as_str())
+                    == Some("local_llama_cpp_text")
+            })
+            .unwrap();
+        #[cfg(target_os = "macos")]
+        let engine = PathBuf::from(
+            local_offer
+                .pointer("/adapter/engine/path")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+        );
+        #[cfg(target_os = "macos")]
+        let model = PathBuf::from(
+            local_offer
+                .pointer("/adapter/model/path")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+        );
+        #[cfg(target_os = "macos")]
+        let bundle = engine.parent().unwrap().to_path_buf();
+        #[cfg(target_os = "macos")]
+        let (bridge, sockets, _, _, _hosted_listener) = start_admitted_model_for_test(
+            &CheckedExecutable::for_test(binary),
+            config,
+            &engine,
+            &model,
+            &bundle,
+        )
+        .await;
         #[cfg(target_os = "linux")]
         let (bridge, sockets, _, _) = ProviderBridge::spawn_confined_model_linux(
             &CheckedExecutable::for_test(binary),
@@ -6822,6 +6763,15 @@ __attribute__((used)) void run(void) {
         std::fs::write(&engine, b"engine").unwrap();
         std::fs::write(&model, b"gguf").unwrap();
         (temp, base, engine, model, bundle)
+    }
+
+    #[test]
+    fn the_old_macos_model_entries_are_gone() {
+        let source = include_str!("bridge.rs");
+        let plain = ["fn spawn_confined_", "model("].concat();
+        let bundled = ["fn spawn_confined_model_with_", "engine_bundle"].concat();
+        assert!(!source.contains(&plain));
+        assert!(!source.contains(&bundled));
     }
 
     #[test]
