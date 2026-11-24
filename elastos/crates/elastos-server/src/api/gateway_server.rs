@@ -108,6 +108,7 @@ async fn start_gateway_server_with_shutdown(
         std::io::ErrorKind::Unsupported,
         "gateway child ownership and private local control are unsupported on Windows",
     ))?;
+    super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)?;
     crate::auth::verify_auth_audit_chain_ready(&data_dir)?;
     let listener = TcpListener::bind(addr).await?;
     let local_control_registry = provider_registry.clone();
@@ -812,6 +813,141 @@ mod trusted_gateway_tests {
         assert_eq!(
             trusted_gateway_api_url("0.0.0.0:8090").unwrap(),
             "http://localhost:8090"
+        );
+    }
+
+    /// Approved and dispatching agent plans survive a crash. A gateway start
+    /// must settle them to unknown. Today they stay as written, so the
+    /// requester's result call has nothing to answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stranded_agent_plan_is_unknown_after_gateway_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = "person:owner";
+        let requester = "agent:v2:0123456789abcdef0123456789abcdef";
+        let capsule = "capsule:agent-host";
+        let session = "session:agent-1";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let mut ids = Vec::new();
+        for now in [1_u64, 2, 3] {
+            let created = super::super::submit_pending_agent_plan(
+                temp.path(),
+                owner,
+                requester,
+                capsule,
+                session,
+                &plan,
+                now,
+            )
+            .unwrap();
+            ids.push(created["request_id"].as_str().unwrap().to_string());
+        }
+        for (id, status) in [(&ids[0], "approved"), (&ids[1], "dispatching")] {
+            let path = temp
+                .path()
+                .join("inspect-actions")
+                .join(format!("{id}.json"));
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            value["status"] = serde_json::json!(status);
+            std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        }
+        let addr = unused_localhost_address();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task_addr = addr.clone();
+        let data = temp.path().to_path_buf();
+        let task_data = data.clone();
+        let server = tokio::spawn(async move {
+            start_gateway_server_with_shutdown(
+                &task_addr,
+                None,
+                GatewayCollaborationContext::default(),
+                task_data.join("cache"),
+                task_data,
+                None,
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
+        });
+        let mut listened = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                listened = true;
+                break;
+            }
+            if server.is_finished() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let statuses: Vec<String> = ids
+            .iter()
+            .map(|id| {
+                let path = data.join("inspect-actions").join(format!("{id}.json"));
+                let value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                value["status"].as_str().unwrap().to_string()
+            })
+            .collect();
+        let result = super::super::agent_plan_result_for_requester(
+            &data, &ids[0], owner, requester, capsule, session,
+        );
+        let state = super::super::GatewayState {
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            carrier_endpoint: None,
+            collaboration_discovery_service: None,
+            browser_internet: Default::default(),
+            identity_manager: Arc::new(std::sync::OnceLock::new()),
+            cache_dir: data.join("cache"),
+            data_dir: data.clone(),
+        };
+        let context = super::super::HomeLaunchTokenContext::for_test(
+            owner,
+            "session:owner",
+            None,
+            "grant:owner",
+            crate::auth::PrincipalKind::Human,
+        );
+        let dispatch = super::super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state, &context, &ids[0],
+        )
+        .await;
+        let after = {
+            let path = data
+                .join("inspect-actions")
+                .join(format!("{}.json", ids[0]));
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            value["status"].as_str().unwrap().to_string()
+        };
+        let _ = stop_tx.send(());
+        let joined = tokio::time::timeout(Duration::from_secs(20), server).await;
+        let result_text = match &result {
+            Ok(value) => value.to_string(),
+            Err(error) => error.to_string(),
+        };
+        let dispatch_text = match &dispatch {
+            Ok(value) => format!("dispatched: {value}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            listened
+                && statuses == ["unknown", "unknown", "pending"]
+                && result.as_ref().is_ok_and(|value| {
+                    value["status"] == "unknown"
+                        && value["dispatch_result"]["reason"]
+                            == "a dispatch cannot survive a restart"
+                })
+                && dispatch_text.contains("not approved")
+                && after == "unknown",
+            "stranded plans stayed {statuses:?}; result {result_text}; dispatch {dispatch_text}; after {after}; listened {listened}; server {joined:?}"
         );
     }
 }

@@ -310,6 +310,27 @@ fn load_inspect_action_records(data_dir: &Path) -> anyhow::Result<Vec<InspectAct
     Ok(records)
 }
 
+pub(super) fn settle_agent_plans_lost_before_start(
+    data_dir: &Path,
+    updated_at: u64,
+) -> anyhow::Result<()> {
+    let _guard = inspect_action_store_lock()?;
+    let reason = "a dispatch cannot survive a restart";
+    for mut record in load_inspect_action_records(data_dir)? {
+        if record.kind != AGENT_PLAN_KIND
+            || !matches!(record.status.as_str(), "approved" | "dispatching")
+        {
+            continue;
+        }
+        record.status = "unknown".into();
+        record.error = Some(reason.into());
+        record.result = Some(serde_json::json!({ "status": "unknown", "reason": reason }));
+        record.updated_at = updated_at;
+        write_inspect_action_record_unlocked(data_dir, &record)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Barrier};
