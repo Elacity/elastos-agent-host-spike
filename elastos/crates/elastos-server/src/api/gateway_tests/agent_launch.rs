@@ -23,6 +23,7 @@ const CREATE: &str = "/api/apps/system/agents/create";
 const ACTIVATE: &str = "/api/apps/system/agents/activate";
 const LAUNCH: &str = "/api/apps/system/agents/launch";
 const STOP: &str = "/api/apps/system/agents/stop";
+const RETIRE: &str = "/api/apps/system/agents/retire";
 const HOST: &str = "agent-host";
 const ORIGIN: &str = "http://localhost:61180";
 
@@ -704,6 +705,20 @@ async fn system_agent_launch_replayed_step_up_fails() {
         "a replayed step-up started another guest"
     );
     assert_eq!(mints(&world), 1, "a replayed step-up minted another grant");
+    // The replay is refused before any signed start row: the chain still
+    // holds one requested and one completed row, both bound to the one
+    // step-up the first Start spent.
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    let step_up_id = latest_step_up_id(&world);
+    assert_eq!(
+        requested[0].challenge_id.as_deref(),
+        Some(step_up_id.as_str()),
+        "the start rows do not bind to the spent step-up"
+    );
+    assert_eq!(completed[0].challenge_id, requested[0].challenge_id);
 }
 
 #[tokio::test]
@@ -1272,4 +1287,296 @@ async fn one_owners_stop_leaves_the_other_owners_agent_running() {
             && rows.iter().any(|row| row.name == HOST),
         "one owner's stop ended the other owner's agent: {status} {body} rows={rows:?}"
     );
+}
+
+/// The signed audit rows of one event type, read the way a new process
+/// reads them: from the Home's signed chain on disk.
+fn signed_audit_rows(world: &World, event_type: &str) -> Vec<RuntimeAuditEventV1> {
+    crate::auth::load_auth_state(&world.home.data)
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|event| event.event_type == event_type)
+        .collect()
+}
+
+/// Every signed audit row, in chain order.
+fn signed_audit_events(world: &World) -> Vec<RuntimeAuditEventV1> {
+    crate::auth::load_auth_state(&world.home.data)
+        .unwrap()
+        .audit
+}
+
+/// The step-up id the latest completed step-up ceremony spent, read from
+/// that ceremony's own signed row.
+fn latest_step_up_id(world: &World) -> String {
+    let row = signed_audit_events(&world)
+        .into_iter()
+        .filter(|event| event.event_type == "auth.passkey_step_up.completed")
+        .last()
+        .unwrap();
+    serde_json::from_str::<Value>(&row.reason).unwrap()["step_up_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Plants which occurrence numbers of this Home's signed agent appends
+/// fail, so a test can reach a Start whose later row cannot be recorded
+/// while the rows before and after it succeed.
+fn fail_agent_lifecycle_audit_append_for_test(data_dir: &std::path::Path, occurrence: usize) {
+    crate::api::gateway::gateway_agents::AGENT_AUDIT_APPEND_FAILURES
+        .lock()
+        .unwrap()
+        .entry(data_dir.to_path_buf())
+        .or_default()
+        .insert(occurrence);
+}
+
+#[tokio::test]
+async fn agents_audit_start_writes_requested_then_completed_ok_in_order() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::OK, "start: {body}");
+    let answer: Value = serde_json::from_str(&body).unwrap();
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(requested.len(), 1, "one requested row: {requested:?}");
+    assert_eq!(completed.len(), 1, "one completed row: {completed:?}");
+    let (requested, completed) = (&requested[0], &completed[0]);
+    let events = signed_audit_events(&world);
+    let position = |row: &RuntimeAuditEventV1| {
+        events
+            .iter()
+            .position(|event| event.event_id == row.event_id)
+            .unwrap()
+    };
+    assert!(
+        position(requested) < position(completed),
+        "the requested row must come first"
+    );
+    assert_eq!(
+        requested.principal_id.as_deref(),
+        Some(world.admin.principal_id.as_str())
+    );
+    assert_eq!(
+        completed.principal_id.as_deref(),
+        Some(world.admin.principal_id.as_str())
+    );
+    let step_up_id = latest_step_up_id(&world);
+    assert_eq!(
+        requested.challenge_id.as_deref(),
+        Some(step_up_id.as_str()),
+        "the start rows bind to the spent step-up"
+    );
+    assert_eq!(completed.challenge_id, requested.challenge_id);
+    let reason: Value = serde_json::from_str(&requested.reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert!(reason["launch_id"].as_str().unwrap().starts_with("launch:"));
+    assert_eq!(reason["host_package"], HOST);
+    let digest = reason["host_package_sha256"].as_str().unwrap();
+    assert_eq!(digest.len(), 64, "{digest}");
+    assert!(digest
+        .chars()
+        .all(|character| character.is_ascii_hexdigit()));
+    assert_eq!(requested.capsule_id.as_deref(), Some(HOST));
+    assert_eq!(
+        completed.session_id.as_deref(),
+        Some(answer["session_id"].as_str().unwrap())
+    );
+    assert_eq!(completed.result, "ok");
+}
+
+#[tokio::test]
+async fn agents_audit_refused_start_when_the_signed_row_cannot_be_appended() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    // Every signed append opens the auth state's lock file first. A
+    // directory there fails every mutation while every read still works, so
+    // the owner reaches a Start whose signed row cannot be written.
+    let state_path = crate::auth::auth_state_path(&world.home.data).unwrap();
+    let lock_path = state_path.with_file_name(format!(
+        "{}.lock",
+        state_path.file_name().unwrap().to_str().unwrap()
+    ));
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::create_dir(&lock_path).unwrap();
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains(world.agent_a.as_str()),
+        "the refusal names the agent: {body}"
+    );
+    assert_eq!(mints(&world), 0, "a refused start minted a grant");
+    assert_eq!(guests(&world).await, 0, "a refused start launched a guest");
+    assert!(signed_audit_rows(&world, "agent.start.requested").is_empty());
+    assert!(signed_audit_rows(&world, "agent.start.completed").is_empty());
+    // The chain itself still verifies: reads need no lock.
+    assert!(!latest_step_up_id(&world).is_empty());
+    std::fs::remove_dir(&lock_path).unwrap();
+}
+
+#[tokio::test]
+async fn agents_audit_stops_the_agent_when_its_completion_row_cannot_be_appended() {
+    let world = world().await;
+    // The plant: the second signed agent append of this Start, the
+    // completion row, fails; the rows before and after it succeed.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 2);
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains(world.agent_a.as_str()),
+        "the refusal names the agent: {body}"
+    );
+    assert_eq!(
+        mints(&world),
+        1,
+        "the launch minted its grant before the completion row failed"
+    );
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        0,
+        "the unrecordable start left the agent running"
+    );
+    assert_eq!(
+        world.runtime.stops.lock().unwrap().len(),
+        1,
+        "the settle did not stop the agent through the runtime stop route"
+    );
+    // The chain keeps the requested row and the signed stop the settle
+    // wrote; the completion row it could not write is absent.
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert!(completed.is_empty(), "{completed:?}");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0].result, "ok");
+    assert_eq!(stopped[0].capsule_id.as_deref(), Some(HOST));
+    let reason: Value = serde_json::from_str(&stopped[0].reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert_eq!(reason["cause"], "unrecorded_start");
+    assert!(!stopped[0]
+        .session_id
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn agents_audit_failed_launch_writes_completed_failed() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    // The grant is minted before the Runtime is asked, so ending the Runtime
+    // after the token is spent fails the launch and not the gate.
+    world.runtime.task.abort();
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(mints(&world), 1, "the grant was minted before the launch");
+    assert_eq!(guests(&world).await, 0);
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(requested[0].result, "ok");
+    assert_eq!(completed[0].result, "failed");
+    let reason: Value = serde_json::from_str(&completed[0].reason).unwrap();
+    assert!(!reason["error"].as_str().unwrap_or_default().is_empty());
+    assert_eq!(reason["agent_id"], world.agent_a);
+}
+
+#[tokio::test]
+async fn agents_audit_owner_stop_writes_a_signed_stopped_row() {
+    let world = world().await;
+    let started = started(&world, &world.agent_a).await;
+    let session = started["session_id"].as_str().unwrap().to_string();
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "owner stop: {body}");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(stopped.len(), 1, "one signed stop row: {stopped:?}");
+    let row = &stopped[0];
+    assert_eq!(
+        row.principal_id.as_deref(),
+        Some(world.admin.principal_id.as_str())
+    );
+    assert_eq!(row.session_id.as_deref(), Some(session.as_str()));
+    assert_eq!(row.capsule_id.as_deref(), Some(HOST));
+    assert_eq!(row.result, "ok");
+    let reason: Value = serde_json::from_str(&row.reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert_eq!(reason["cause"], "owner");
+}
+
+#[tokio::test]
+async fn agents_audit_rows_verify_after_a_restart() {
+    let world = world().await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::OK, "start: {body}");
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "stop: {body}");
+    // A new process reads the same data dir cold. Its view of the auth
+    // state file is a changed identity, so the next load re-reads the disk
+    // and verifies the whole chain before any row is answered.
+    let state_path = crate::auth::auth_state_path(&world.home.data).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&state_path)
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now()).unwrap();
+    drop(file);
+    let step_up_id = latest_step_up_id(&world);
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(
+        requested[0].challenge_id.as_deref(),
+        Some(step_up_id.as_str())
+    );
+    assert_eq!(requested[0].principal_id, completed[0].principal_id);
+    assert_eq!(stopped[0].principal_id, requested[0].principal_id);
+}
+
+#[tokio::test]
+async fn agents_audit_retire_is_recorded_by_its_record_write_row() {
+    let world = world().await;
+    let (status, body) = call(
+        &world.app,
+        RETIRE,
+        &world.admin.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retire: {body}");
+    // The record write that performed the retire signed its own row, in the
+    // agent's name, and the route added no second `agent.retired` row.
+    let record_rows = signed_audit_rows(&world, "agent.record.retire");
+    assert_eq!(
+        record_rows.len(),
+        1,
+        "one signed retire record: {record_rows:?}"
+    );
+    assert_eq!(
+        record_rows[0].principal_id.as_deref(),
+        Some(world.agent_a.as_str())
+    );
+    assert!(signed_audit_rows(&world, "agent.retired").is_empty());
+    // A second retire is refused and writes no new chain row.
+    let (status, body) = call(
+        &world.app,
+        RETIRE,
+        &world.admin.system_token,
+        "null",
+        Some(json!({ "agent_id": world.agent_a })),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert_eq!(signed_audit_rows(&world, "agent.record.retire").len(), 1);
+    assert!(signed_audit_rows(&world, "agent.retired").is_empty());
 }
