@@ -532,7 +532,7 @@ mod tests {
                     for form in claim["rules"].as_array().unwrap() {
                         let form = form.as_str().unwrap();
                         let Some(mask) = masks.get(form).copied() else {
-                            assert!(form.starts_with("(allow iokit-open") || form.starts_with("(allow mach-lookup") || form == r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"#, "lab form has no mask: {form}");
+                            assert!(form.starts_with("(allow iokit-open") || form.starts_with("(allow mach-lookup") || form == r#"(allow file-read* (regex "^/System/Library/Extensions/AGXMetal[A-Za-z0-9_]+\\.bundle(/.*)?$"))"# || form == elastos_common::model_landlock_files::MODEL_RULE || form == elastos_common::model_landlock_files::ENGINE_RULE || form == elastos_common::model_landlock_files::LIBRARY_RULE || form == elastos_common::model_landlock_files::SOCKET_RULE, "lab form has no mask: {form}");
                             continue;
                         };
                         if mask == 0 {

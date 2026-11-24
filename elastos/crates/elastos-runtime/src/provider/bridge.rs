@@ -4724,6 +4724,7 @@ int main(void) {
         std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o400)).unwrap();
         let model = model_dir.join("weights.gguf");
         std::fs::write(&model, b"synthetic model").unwrap();
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o600)).unwrap();
         let canary = base.join("canary");
         std::fs::write(&canary, b"synthetic canary").unwrap();
         let data_alias = format!("/System/Volumes/Data{}", canary.display());
@@ -4823,6 +4824,7 @@ int main(void) {
         let hosted_model = base.join("providers/model-provider/hosted-binding/model");
         std::fs::create_dir_all(hosted_model.parent().unwrap()).unwrap();
         std::fs::write(&hosted_model, b"").unwrap();
+        std::fs::set_permissions(&hosted_model, std::fs::Permissions::from_mode(0o600)).unwrap();
         let hosted_model = std::fs::canonicalize(&hosted_model).unwrap();
         let (empty_bridge, _, vacant, _, _hosted_listener) = start_admitted_model_for_test(
             &CheckedExecutable::for_test(&script),
@@ -4837,6 +4839,7 @@ int main(void) {
         std::fs::create_dir_all(&admitted).unwrap();
         let late_model = admitted.join("weights.gguf");
         std::fs::write(&late_model, b"late synthetic model").unwrap();
+        std::fs::set_permissions(&late_model, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::os::unix::fs::symlink(&canary, format!("{}.external", late_model.display())).unwrap();
         for name in [
             format!("admitted-{}", "0".repeat(63)),
@@ -5779,7 +5782,9 @@ __attribute__((used)) void run(void) {
         let another = base.join("another-users-file");
         let not_engine = base.join("not-engine");
         std::fs::write(&model, b"gguf").unwrap();
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(&other, b"other").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(&device, b"key").unwrap();
         std::fs::write(&another, b"readable").unwrap();
         std::fs::set_permissions(&another, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -6688,6 +6693,7 @@ __attribute__((used)) void run(void) {
         let model = base.join("model.gguf");
         std::fs::write(&engine, b"engine").unwrap();
         std::fs::write(&model, b"gguf").unwrap();
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o600)).unwrap();
         let journal = base.join("providers/model-provider/journal");
         let mut config = ProviderConfig {
             base_path: base.to_string_lossy().into_owned(),
@@ -6728,6 +6734,7 @@ __attribute__((used)) void run(void) {
         let model = base.join("model.gguf");
         std::fs::write(&engine, b"engine").unwrap();
         std::fs::write(&model, b"gguf").unwrap();
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o600)).unwrap();
         (temp, base, engine, model, bundle)
     }
 
@@ -6808,6 +6815,8 @@ __attribute__((used)) void run(void) {
         let model_2 = admitted_2.join("other.gguf");
         std::fs::write(&model, b"gguf").unwrap();
         std::fs::write(&model_2, b"gguf").unwrap();
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&model_2, std::fs::Permissions::from_mode(0o600)).unwrap();
         let config = ProviderConfig {
             base_path: base.to_string_lossy().into_owned(),
             extra: serde_json::json!({
@@ -6853,6 +6862,7 @@ __attribute__((used)) void run(void) {
         std::fs::create_dir_all(&admitted).unwrap();
         let model = admitted.join("weights.gguf");
         std::fs::write(&model, b"gguf").unwrap();
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::write(admitted.join("tokenizer.json"), b"{}").unwrap();
         let config = ProviderConfig {
             base_path: base.to_string_lossy().into_owned(),

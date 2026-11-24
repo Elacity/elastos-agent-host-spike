@@ -1918,7 +1918,7 @@ mod tests {
     use serde_json::json;
     use std::fs::{self, OpenOptions};
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
     #[test]
     fn retired_operator_setting_requires_inbox_for_saved_routes() {
@@ -3518,6 +3518,7 @@ mod tests {
         let model = root.join("model");
         fs::write(&engine, b"").unwrap();
         fs::write(&model, b"").unwrap();
+        fs::set_permissions(&model, fs::Permissions::from_mode(0o600)).unwrap();
         let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(
             &fs::read(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

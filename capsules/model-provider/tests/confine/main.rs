@@ -4747,6 +4747,11 @@ fn allow_rules_trace_to_declared_rights() {
     for line in allow_lines.iter() {
         let mut claimants = Vec::new();
         for entry in rights.iter().chain(baseline.iter()) {
+            // The platform baseline expands this right. Its literals are not
+            // a second claim on the model file line.
+            if entry_id(entry) == "local-model-files" {
+                continue;
+            }
             if rule_strings(entry).contains(line) {
                 claimants.push(entry_id(entry));
             }
@@ -4762,6 +4767,9 @@ fn allow_rules_trace_to_declared_rights() {
     }
 
     for entry in rights.iter().chain(baseline.iter()) {
+        if entry_id(entry) == "local-model-files" {
+            continue;
+        }
         for rule in rule_strings(entry) {
             if let Err(reason) = declared_rule_match(&allow_lines, rule) {
                 panic!("{reason}");
@@ -4787,7 +4795,15 @@ fn allow_rules_trace_to_declared_rights() {
         )
     );
     let right_ids: Vec<&str> = rights.iter().map(entry_id).collect();
-    assert_eq!(right_ids, ["storage", "bound-executable", "model-gpu"]);
+    assert_eq!(
+        right_ids,
+        [
+            "storage",
+            "bound-executable",
+            "model-gpu",
+            "local-model-files"
+        ]
+    );
     let baseline_ids: Vec<&str> = baseline.iter().map(entry_id).collect();
     assert_eq!(
         baseline_ids,

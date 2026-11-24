@@ -135,7 +135,9 @@ pub(crate) fn declared_entries(
 /// rule of every rights claim in file order, then every rule of every
 /// platform-baseline claim in file order, one form per line. It emits no
 /// comment and nothing else, it reads and writes no file, and it refuses an id
-/// the shared contract does not name through `declared_entries`.
+/// the shared contract does not name through `declared_entries`. The signed
+/// `local-model-files` claim is the exception: the platform baseline expands
+/// it, so the generator does not paste its unbound literals.
 pub(crate) fn generate_profile(name: &str, declared: &Value) -> Result<String, String> {
     let (rights, baseline) = declared_entries(name, declared)?;
     let mut profile = String::new();
@@ -144,6 +146,12 @@ pub(crate) fn generate_profile(name: &str, declared: &Value) -> Result<String, S
         profile.push('\n');
     }
     for claim in rights.iter().chain(&baseline) {
+        // The signed local-model-files literals are expanded by the platform
+        // baseline. Emitting them here would duplicate the model file and add
+        // unbound library and socket parameters.
+        if claim.id == "local-model-files" {
+            continue;
+        }
         for rule in &claim.rules {
             profile.push_str(rule);
             profile.push('\n');

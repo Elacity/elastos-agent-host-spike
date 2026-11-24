@@ -1105,8 +1105,8 @@ mod tests {
             production
                 .matches("check_rights_against_runtime_templates")
                 .count(),
-            2,
-            "start_provider and admit_path_allow are the only gates"
+            4,
+            "start_provider, admit_path_allow, and the two model starts are the gates"
         );
         let installer = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),

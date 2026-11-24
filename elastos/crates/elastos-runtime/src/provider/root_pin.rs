@@ -155,25 +155,21 @@ mod tests {
         }
 
         let installer = include_str!("preexec_installer.rs");
-        let add = installer
-            .split_once("let directory = if let Some(pin) = pinned")
-            .expect("pinned root open")
+        assert!(
+            installer.contains("elastos_common::model_landlock_files::open_rule"),
+            "the parent opens each rule before the child adds it"
+        );
+        let child = installer
+            .split_once("prepared.rule_fds.get(index)")
+            .expect("the child adds the opened descriptor")
             .1;
-        let add = add
-            .split_once("SYS_landlock_add_rule")
-            .expect("landlock add")
-            .0;
         assert!(
-            add.contains("open_pinned_directory"),
-            "every pinned root is identified before its Landlock rule is added"
+            child.contains("SYS_landlock_add_rule"),
+            "the child adds the descriptor the parent opened"
         );
         assert!(
-            add.contains("DIRECTORY_OPEN_FLAGS"),
-            "the installer opens pinned roots with the no-follow directory flags"
-        );
-        assert!(
-            !add.contains("STORAGE_ROOT"),
-            "the identity check is every pinned root, not only STORAGE_ROOT"
+            !child.contains("open_pinned_directory"),
+            "the child does not reopen a pinned root"
         );
         let flags = include_str!("root_pin.rs");
         assert!(
