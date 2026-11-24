@@ -401,7 +401,7 @@ struct StagedDirectory {
     total_bytes: u64,
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(not(windows))]
 fn valid_root(root: &Path) -> bool {
     root.to_str().is_some_and(|root| {
         root.starts_with('/')
@@ -5829,7 +5829,7 @@ mod tests {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(test, windows))]
 mod windows_object_open_tests {
     use super::*;
     use std::process::Command;

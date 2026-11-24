@@ -136,9 +136,6 @@ x-wing = { version = "=0.1.0", features = ["hazmat", "zeroize"] }
 # Community hub test drives that state machine directly.
 gossip-rand = { package = "rand", version = "0.10", default-features = false, features = ["std_rng"] }
 
-[target.'cfg(windows)'.dependencies]
-elastos-win-custody = { path = "../elastos-win-custody" }
-
 [target.'cfg(unix)'.dependencies]
 elastos-crosvm = { path = "../elastos-crosvm" }
 
