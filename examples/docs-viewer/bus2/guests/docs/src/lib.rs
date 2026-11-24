@@ -9,7 +9,7 @@
 //! - uses the bytes only once the read's trailing future says `ok`;
 //! - checks they are text and parses them into blocks (`docs-model`, the same
 //!   model as the Bus v1 core);
-//! - draws one frame with `ui.present`, a text node per block.
+//! - draws one frame with `ui.present`, one typed block per model block.
 //!
 //! A refused grant or a denied read ends the run with its reason (pattern 1:
 //! authority stops). A document that is not shown (the wrong kind, not text,
@@ -20,8 +20,9 @@
 wit_bindgen::generate!({ path: "../../../../bus2-proof/wit", world: "product-capsule-v2" });
 
 use docs_model::text;
-use docs_model::{Block, Kind, ModelError, Span};
+use docs_model::{Block, Kind, ModelError, Span, Style};
 use elastos::bus::types::{BusError, Event, InvokeRequest};
+use elastos::bus::ui::{Block as UiBlock, Image, Item, Span as UiSpan};
 use elastos::bus::{capabilities, providers, ui};
 use wit_bindgen::StreamResult;
 
@@ -29,32 +30,28 @@ use wit_bindgen::StreamResult;
 pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024;
 /// Bytes the guest asks for per read of the stream.
 const READ_BUFFER: usize = 16 * 1024;
-const MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
 /// What the proof host's `ui.present` takes (`bus2-proof/host/src/ui.rs`).
 const MAX_NODES: usize = 32;
-const MAX_TEXT_CHARS: usize = 1000;
-const MAX_FRAME_BYTES: usize = 16 * 1024;
+const MAX_TEXT_BYTES: usize = 1000;
 
 struct Reader;
 
 /// Why a document is not shown. Authority failures are not here: they end
 /// the run.
-fn not_shown(uri: &str, why: &str) -> Vec<String> {
-    vec![docs_model::cut(
-        &format!("Not shown: {uri} {why}"),
-        MAX_TEXT_CHARS - 1,
-    )]
+fn not_shown(uri: &str, why: &str) -> Vec<UiBlock> {
+    vec![paragraph(&format!("Not shown: {uri} {why}"))]
 }
 
 /// The whole object, a refusal that ends the run (`Err`), or one that only
 /// means this document is not shown (`Ok(Err)`). Nothing partial is returned.
-async fn read_document(uri: &str) -> Result<Result<Vec<u8>, String>, BusError> {
+async fn read_document(uri: &str) -> Result<Result<(String, Vec<u8>), String>, BusError> {
     let grant = capabilities::request(
         uri.to_string(),
         vec!["read".to_string()],
         "show this document".to_string(),
     )
     .await?;
+    let grant_id = grant.id.clone();
     let request = InvokeRequest {
         resource: uri.to_string(),
         operation: "read".to_string(),
@@ -83,7 +80,7 @@ async fn read_document(uri: &str) -> Result<Result<Vec<u8>, String>, BusError> {
     }
     // Only the trailing future says whether these bytes are the document.
     match trailer.await {
-        Ok(()) => Ok(Ok(bytes)),
+        Ok(()) => Ok(Ok((grant_id, bytes))),
         Err(BusError::Denied(why)) => Err(BusError::Denied(why)),
         Err(other) => Ok(Err(reason(&other))),
     }
@@ -102,99 +99,159 @@ fn reason(error: &BusError) -> String {
     }
 }
 
-fn spans_text(spans: &[Span]) -> String {
-    spans.iter().map(|span| span.text.as_str()).collect()
+fn cut_bytes(text: &str) -> String {
+    if text.len() <= MAX_TEXT_BYTES {
+        return text.to_string();
+    }
+    let mark = "…";
+    let mut end = MAX_TEXT_BYTES - mark.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{mark}", &text[..end])
 }
 
-/// One block as one line of text. The frame has text and image nodes only, so
-/// the kind of a block is lost here (a heading is just its text).
-fn block_text(block: &Block) -> String {
+fn paragraph(text: &str) -> UiBlock {
+    UiBlock::Paragraph(vec![UiSpan::Plain(cut_bytes(text))])
+}
+
+fn ui_spans(spans: &[Span]) -> Vec<UiSpan> {
+    spans
+        .iter()
+        .map(|span| {
+            let text = cut_bytes(&span.text);
+            match span.style {
+                Style::Plain => UiSpan::Plain(text),
+                Style::Strong => UiSpan::Strong(text),
+                Style::Em => UiSpan::Emphasis(text),
+                Style::Code => UiSpan::Code(text),
+            }
+        })
+        .collect()
+}
+
+fn ui_block(block: &Block) -> UiBlock {
     match block {
-        Block::Heading { spans, .. } | Block::Paragraph { spans } => spans_text(spans),
-        Block::Quote { spans } => format!("> {}", spans_text(spans)),
-        Block::List { ordered, items } => items
-            .iter()
-            .enumerate()
-            .map(|(at, item)| {
-                if *ordered {
-                    format!("{}. {}", at + 1, spans_text(item))
-                } else {
-                    format!("• {}", spans_text(item))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Block::Code { text } => text.clone(),
-        Block::Rule => "—".to_string(),
+        Block::Heading { level, spans } => UiBlock::Heading((*level, ui_spans(spans))),
+        Block::Paragraph { spans } => UiBlock::Paragraph(ui_spans(spans)),
+        Block::Quote { spans } => UiBlock::Quote(vec![ui_spans(spans)]),
+        Block::List { ordered, items } => UiBlock::List((
+            *ordered,
+            items
+                .iter()
+                .map(|item| Item::Spans(ui_spans(item)))
+                .collect(),
+        )),
+        Block::Code { text } => UiBlock::CodeBlock(cut_bytes(text)),
+        Block::Rule => UiBlock::Rule,
     }
 }
 
-/// The text nodes of one document: a node per block, each cut to what a
-/// node may hold, as many as fit in one frame, and a last node that says how
-/// many blocks did not fit.
-fn document_nodes(blocks: &[Block]) -> Vec<String> {
-    // Room kept for the last node and the frame around the nodes.
-    const RESERVE: usize = 256;
-    let mut nodes = Vec::new();
-    let mut size = 0;
-    for (at, block) in blocks.iter().enumerate() {
-        let node = docs_model::cut(&block_text(block), MAX_TEXT_CHARS - 1);
-        let node_size = json_size(&node);
-        if nodes.len() == MAX_NODES - 1 || size + node_size + RESERVE > MAX_FRAME_BYTES {
-            nodes.push(format!(
-                "… {} more blocks are not shown: a frame holds {MAX_NODES} text nodes of \
-                 {MAX_TEXT_CHARS} characters, {MAX_FRAME_BYTES} bytes in all",
-                blocks.len() - at
-            ));
-            return nodes;
-        }
-        size += node_size;
-        nodes.push(node);
+/// A whole line `![alt](localhost://...)`. An http target stays text.
+fn localhost_image(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("![")?;
+    let (alt, after) = rest.split_once("](")?;
+    let uri = after.strip_suffix(')')?;
+    if alt.is_empty() || uri.len() <= "localhost://".len() || !uri.starts_with("localhost://") {
+        return None;
     }
-    if nodes.is_empty() {
-        nodes.push("(this document is empty)".to_string());
+    if uri
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '\\' | ')'))
+    {
+        return None;
     }
-    nodes
+    Some((alt.to_string(), uri.to_string()))
 }
 
-fn json_size(text: &str) -> usize {
+fn is_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(b"\xFF\xD8\xFF")
+        || (bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP")
+}
+
+fn fit(mut blocks: Vec<UiBlock>) -> Vec<UiBlock> {
+    if blocks.is_empty() {
+        return vec![paragraph("(this document is empty)")];
+    }
+    if blocks.len() <= MAX_NODES {
+        return blocks;
+    }
+    let left = blocks.len() - (MAX_NODES - 1);
+    blocks.truncate(MAX_NODES - 1);
+    blocks.push(paragraph(&format!(
+        "… {left} more blocks are not shown: a frame holds {MAX_NODES} blocks"
+    )));
+    blocks
+}
+
+enum Segment {
+    Text(String),
+    Image { alt: String, uri: String },
+}
+
+fn segments(text: &str) -> Vec<Segment> {
     let mut out = Vec::new();
-    docs_model::write_str(&mut out, text);
-    out.len() + r#"{"text":},"#.len()
-}
-
-/// `{"frame":[{"text":"..."},...]}`, every text escaped as JSON.
-fn frame(nodes: &[String]) -> Vec<u8> {
-    let mut out = br#"{"frame":["#.to_vec();
-    for (at, node) in nodes.iter().enumerate() {
-        if at > 0 {
-            out.push(b',');
+    let mut chunk = String::new();
+    for line in text.split_inclusive('\n') {
+        let bare = line.trim_end_matches(['\n', '\r']);
+        if let Some((alt, uri)) = localhost_image(bare) {
+            if !chunk.is_empty() {
+                out.push(Segment::Text(std::mem::take(&mut chunk)));
+            }
+            out.push(Segment::Image { alt, uri });
+        } else {
+            chunk.push_str(line);
         }
-        out.extend_from_slice(br#"{"text":"#);
-        docs_model::write_str(&mut out, node);
-        out.push(b'}');
     }
-    out.extend_from_slice(b"]}");
+    if !chunk.is_empty() {
+        out.push(Segment::Text(chunk));
+    }
     out
 }
 
+fn parse_chunk(kind: Kind, text: &str) -> Result<Vec<UiBlock>, ModelError> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(docs_model::blocks(kind, text)?
+        .iter()
+        .map(ui_block)
+        .collect())
+}
+
 /// What to show for one message.
-async fn nodes_for(uri: &str) -> Result<Vec<String>, BusError> {
+async fn nodes_for(uri: &str) -> Result<Vec<UiBlock>, BusError> {
     let Some(kind) = Kind::from_name(uri) else {
         return Ok(not_shown(uri, "is not a .md, .markdown or .txt document"));
     };
     let bytes = match read_document(uri).await? {
-        Ok(bytes) => bytes,
+        Ok((_grant, bytes)) => bytes,
         Err(why) => return Ok(not_shown(uri, &why)),
     };
     let text = match text::check_whole(&bytes) {
         Ok(text) => text,
         Err(_) => return Ok(not_shown(uri, "is not UTF-8 text")),
     };
-    match docs_model::blocks(kind, text) {
-        Ok(blocks) => Ok(document_nodes(&blocks)),
-        Err(ModelError::TooLong) => Ok(not_shown(uri, "has too many blocks or spans")),
+    let mut blocks = Vec::new();
+    for segment in segments(text) {
+        match segment {
+            Segment::Text(chunk) => match parse_chunk(kind, &chunk) {
+                Ok(parsed) => blocks.extend(parsed),
+                Err(ModelError::TooLong) => {
+                    return Ok(not_shown(uri, "has too many blocks or spans"));
+                }
+            },
+            Segment::Image { alt, uri: image } => match read_document(&image).await? {
+                Ok((grant, bytes)) if is_image(&bytes) => {
+                    blocks.push(UiBlock::Image(Image { grant, alt }));
+                }
+                Ok(_) => blocks.extend(not_shown(&image, "is not an image")),
+                Err(why) => blocks.extend(not_shown(&image, &why)),
+            },
+        }
     }
+    Ok(fit(blocks))
 }
 
 impl exports::elastos::bus::lifecycle::Guest for Reader {
@@ -204,7 +261,7 @@ impl exports::elastos::bus::lifecycle::Guest for Reader {
                 let uri = String::from_utf8(uri)
                     .map_err(|_| BusError::Invalid("a document URI is UTF-8".to_string()))?;
                 let nodes = nodes_for(&uri).await?;
-                ui::present(MEDIA_TYPE.to_string(), frame(&nodes)).await?;
+                ui::present(nodes).await?;
             }
         }
         Ok(())

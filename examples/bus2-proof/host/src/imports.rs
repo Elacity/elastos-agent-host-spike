@@ -136,12 +136,11 @@ impl ui::Host for HostState {}
 impl ui::HostWithStore<HostState> for HasSelf<HostState> {
     async fn present(
         accessor: &Accessor<HostState, Self>,
-        media_type: String,
-        document: Vec<u8>,
+        document: Vec<ui::Block>,
     ) -> Result<(), BusError> {
         accessor.with(|mut access| {
             let state = access.get();
-            let frame = crate::ui::check_document(state, &media_type, &document)?;
+            let frame = crate::ui::check_document(state, &document)?;
             state.frames.push(frame);
             Ok(())
         })

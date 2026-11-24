@@ -166,12 +166,6 @@ pub(crate) struct PreparedRead {
 /// The guest's `params`: `{"max_bytes": N}` and nothing else, then the host cap.
 pub(crate) fn read_cap(params: &[u8]) -> Result<usize, String> {
     let bad = |why: &str| format!("read params {why}; expected {{\"max_bytes\": N}}");
-    // Same depth cap as a UI document, before serde_json parses.
-    if let Err(err) = super::bus2_ui::reject_guest_json(params) {
-        if err.contains("depth cap") {
-            return Err(bad("are nested past the depth cap"));
-        }
-    }
     let value: serde_json::Value =
         serde_json::from_slice(params).map_err(|_| bad("are not JSON"))?;
     let object = value.as_object().ok_or_else(|| bad("are not an object"))?;

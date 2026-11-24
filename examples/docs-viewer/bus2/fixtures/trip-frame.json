@@ -1,0 +1,49 @@
+{
+  "nodes": [
+    {
+      "kind": "heading",
+      "level": 1,
+      "spans": [{ "style": "plain", "text": "Trip notes" }]
+    },
+    {
+      "kind": "paragraph",
+      "spans": [
+        { "style": "plain", "text": "Pack " },
+        { "style": "strong", "text": "boots" },
+        { "style": "plain", "text": ", " },
+        { "style": "emphasis", "text": "socks" },
+        { "style": "plain", "text": " and a " },
+        { "style": "code", "text": "map" },
+        { "style": "plain", "text": "." }
+      ]
+    },
+    {
+      "kind": "list",
+      "ordered": false,
+      "items": [
+        { "spans": [{ "style": "plain", "text": "tent" }] },
+        { "spans": [{ "style": "plain", "text": "stove" }] }
+      ]
+    },
+    {
+      "kind": "list",
+      "ordered": true,
+      "items": [
+        { "spans": [{ "style": "plain", "text": "drive" }] },
+        { "spans": [{ "style": "plain", "text": "walk" }] }
+      ]
+    },
+    {
+      "kind": "quote",
+      "paragraphs": [[{ "style": "plain", "text": "Leave early." }]]
+    },
+    { "kind": "rule" },
+    { "kind": "code", "text": "fn go() {}" },
+    {
+      "kind": "image",
+      "resource": "localhost://Users/self/Pictures/cat.png",
+      "alt": "a cat",
+      "empty": false
+    }
+  ]
+}

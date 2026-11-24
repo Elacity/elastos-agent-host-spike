@@ -31,10 +31,7 @@ wasmtime::component::bindgen!({
 pub use elastos::bus::types::{BusError, Credential, Event, Grant};
 pub use objects::{ReadRecord, StubObject, HOST_MAX_READ_BYTES, READ_CHUNK};
 pub use run::{run_resident, run_resident_watched, Ending, Events, Limits, Outcome, Progress};
-pub use ui::{Frame, Node};
-
-/// The one media type `ui.present` takes in this proof.
-pub const UI_MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
+pub use ui::{Frame, ListItem, Node, Piece};
 
 /// The store data for one guest.
 pub struct HostState {

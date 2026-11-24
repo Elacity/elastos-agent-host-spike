@@ -46,7 +46,7 @@ fn texts(outcome: &Outcome) -> Vec<String> {
         .frames
         .iter()
         .map(|frame| match frame.nodes.as_slice() {
-            [Node::Text(text)] => text.clone(),
+            [Node::Paragraph { spans }] => spans.iter().map(|span| span.text.clone()).collect(),
             other => panic!("expected one text node, got {other:?}"),
         })
         .collect()

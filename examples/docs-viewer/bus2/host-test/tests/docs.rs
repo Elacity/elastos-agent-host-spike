@@ -9,12 +9,15 @@ mod common;
 use std::time::{Duration, Instant};
 
 use bus2_host::{
-    run_resident, BusError, Ending, Event, HostState, Limits, Node, Outcome, StubObject, Ticker,
+    run_resident, BusError, Ending, Event, HostState, Limits, ListItem, Node, Outcome, StubObject,
+    Ticker,
 };
 use wasmtime::component::Component;
 
 const NOTES: &str = "localhost://Users/self/Documents/notes.md";
 const TODO: &str = "localhost://Users/self/Documents/todo.txt";
+const TRIP: &str = "localhost://Users/self/Documents/trip.md";
+const CAT: &str = "localhost://Users/self/Pictures/cat.png";
 const GUEST_CAP: usize = 16 * 1024;
 
 /// A guest built in the Bus v2 proof's own workspace (`verify.sh` builds it),
@@ -66,22 +69,55 @@ fn read(state: HostState, uris: Vec<&'static str>, hold: Duration) -> (Outcome, 
     })
 }
 
+fn piece_text(spans: &[bus2_host::Piece]) -> String {
+    spans.iter().map(|span| span.text.as_str()).collect()
+}
+
+fn node_line(node: &Node) -> String {
+    match node {
+        Node::Heading { spans, .. } | Node::Paragraph { spans } => piece_text(spans),
+        Node::Code { text } => text.clone(),
+        Node::Quote { paragraphs } => paragraphs
+            .iter()
+            .map(|paragraph| format!("> {}", piece_text(paragraph)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Node::List { ordered, items } => items
+            .iter()
+            .enumerate()
+            .map(|(at, item)| {
+                let text = match item {
+                    ListItem::Spans(spans) => piece_text(spans),
+                    ListItem::Blocks(blocks) => {
+                        blocks.iter().map(node_line).collect::<Vec<_>>().join("\n")
+                    }
+                };
+                if *ordered {
+                    format!("{}. {text}", at + 1)
+                } else {
+                    format!("• {text}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Node::Rule => "—".to_string(),
+        Node::Image { alt, resource, .. } => {
+            if alt.is_empty() {
+                resource.clone()
+            } else {
+                alt.clone()
+            }
+        }
+    }
+}
+
 /// The text of each node of each frame.
 fn frames(outcome: &Outcome) -> Vec<Vec<String>> {
     outcome
         .state
         .frames
         .iter()
-        .map(|frame| {
-            frame
-                .nodes
-                .iter()
-                .map(|node| match node {
-                    Node::Text(text) => text.clone(),
-                    other => panic!("the reader draws text only, not {other:?}"),
-                })
-                .collect()
-        })
+        .map(|frame| frame.nodes.iter().map(node_line).collect())
         .collect()
 }
 
@@ -98,6 +134,48 @@ fn the_guest_imports_only_the_bus_v2_interfaces_it_uses() {
             "{used}"
         );
     }
+}
+
+/// The surface fixture's trip notes, plus the cat that fixture names, as a
+/// localhost image the guest can be granted.
+#[test]
+fn the_trip_notes_are_the_surface_document_and_home_can_paint_them() {
+    let kinds = "# Trip notes\n\nPack **boots**, *socks* and a `map`.\n\n- tent\n- stove\n\n\
+                 1. drive\n2. walk\n\n> Leave early.\n\n---\n\n```\nfn go() {}\n```\n";
+    let mut document = kinds.as_bytes().to_vec();
+    document.extend(format!("![a cat]({CAT})\n").into_bytes());
+    let png = b"\x89PNG\r\n\x1a\ncat".to_vec();
+    let (outcome, _) = read(
+        reader_state(&[(TRIP, document), (CAT, png)]),
+        vec![TRIP],
+        Duration::from_millis(100),
+    );
+    assert_eq!(outcome.ending, Ending::Stopped);
+    let nodes = &outcome.state.frames[0].nodes;
+    assert!(matches!(nodes[0], Node::Heading { level: 1, .. }));
+    assert!(matches!(nodes[1], Node::Paragraph { .. }));
+    assert!(matches!(nodes[2], Node::List { ordered: false, .. }));
+    assert!(matches!(nodes[3], Node::List { ordered: true, .. }));
+    assert!(matches!(nodes[4], Node::Quote { .. }));
+    assert!(matches!(nodes[5], Node::Rule));
+    assert!(matches!(nodes[6], Node::Code { .. }));
+    assert!(matches!(
+        &nodes[7],
+        Node::Image { alt, resource, .. } if alt == "a cat" && resource == CAT
+    ));
+    assert_eq!(
+        frames(&outcome)[0],
+        [
+            "Trip notes",
+            "Pack boots, socks and a map.",
+            "• tent\n• stove",
+            "1. drive\n2. walk",
+            "> Leave early.",
+            "—",
+            "fn go() {}",
+            "a cat",
+        ]
+    );
 }
 
 #[test]

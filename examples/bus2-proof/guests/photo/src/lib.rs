@@ -14,13 +14,13 @@ wit_bindgen::generate!({ path: "../../wit", world: "product-capsule-v2" });
 include!(concat!(env!("OUT_DIR"), "/manifest.rs"));
 
 use elastos::bus::types::{BusError, Event, InvokeRequest};
+use elastos::bus::ui::{Block, Image, Span};
 use elastos::bus::{capabilities, credentials, providers, ui};
 use sha2::{Digest, Sha256};
 use wit_bindgen::StreamResult;
 
 /// Bytes the guest asks for per read of the stream.
 const READ_BUFFER: usize = 64 * 1024;
-const MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
 /// The domain tag at the start of every signed credential message.
 const CREDENTIAL_TAG: &str = "elastos:bus2-proof:credential:v1";
 
@@ -125,17 +125,14 @@ fn check_credential(bytes: &[u8]) -> Result<(), BusError> {
 /// One frame: the photo, by its grant (never its bytes or URI), and a line
 /// of text.
 async fn draw(read: &Read) -> Result<(), BusError> {
-    if read.grant.contains(['"', '\\']) {
-        return Err(BusError::Invalid(
-            "a grant id the guest cannot quote".to_string(),
-        ));
-    }
-    let document = format!(
-        r#"{{"frame":[{{"image":{{"grant":"{}"}}}},{{"text":"{} bytes"}}]}}"#,
-        read.grant,
-        read.bytes.len()
-    );
-    ui::present(MEDIA_TYPE.to_string(), document.into_bytes()).await
+    ui::present(vec![
+        Block::Image(Image {
+            grant: read.grant.clone(),
+            alt: String::new(),
+        }),
+        Block::Paragraph(vec![Span::Plain(format!("{} bytes", read.bytes.len()))]),
+    ])
+    .await
 }
 
 impl exports::elastos::bus::lifecycle::Guest for Photo {

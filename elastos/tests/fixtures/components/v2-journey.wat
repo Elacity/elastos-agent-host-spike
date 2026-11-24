@@ -18,7 +18,8 @@
     (type $grant-id string)
     (export "grant-id" (type (eq $grant-id)))
     (type $event (variant (case "stop-requested") (case "user-input" (list u8))
-      (case "message" (list u8)) (case "grant-revoked" $grant-id)))
+      (case "message" (list u8)) (case "grant-revoked" $grant-id)
+      (case "opened") (case "closed")))
     (export "event" (type (eq $event)))))
   (alias export $types "invoke-request" (type $request))
   (alias export $types "invoke-status" (type $status))
@@ -44,10 +45,37 @@
     (export "bus-error" (type (eq $error)))
     (export "request" (func (type $cap-request)))))
   (alias export $caps "request" (func $request-f))
-  (type $present (func async (param "media-type" string) (param "document" (list u8)) (result $unit-result)))
+  ;; Type exports take the next index. Later types name that index, which is
+  ;; the exported type, so a variant may contain another variant.
   (import "elastos:bus/ui@2.0.0" (instance $ui
+    (type (variant
+      (case "plain" string) (case "strong" string)
+      (case "emphasis" string) (case "code" string)))
+    (export "span" (type (eq 0)))
+    (type (list 1))
+    (type (tuple u8 2))
+    (type (list 2))
+    (type (tuple bool 4))
+    (type (record (field "grant" string) (field "alt" string)))
+    (export "image" (type (eq 6)))
+    (type (variant
+      (case "heading" 3) (case "paragraph" 2) (case "code-block" string)
+      (case "quote" 4) (case "list" 5) (case "rule") (case "image" 7)))
+    (export "nested" (type (eq 8)))
+    (type (list 9))
+    (type (variant (case "spans" 2) (case "blocks" 10)))
+    (export "item" (type (eq 11)))
+    (type (list 12))
+    (type (tuple bool 13))
+    (type (variant
+      (case "heading" 3) (case "paragraph" 2) (case "code-block" string)
+      (case "quote" 4) (case "list" 14) (case "rule") (case "image" 7)))
+    (export "block" (type (eq 15)))
+    (type (list 16))
     (export "bus-error" (type (eq $error)))
-    (export "present" (func (type $present)))))
+    (type (result (error 19)))
+    (type (func async (param "document" 17) (result 20)))
+    (export "present" (func (type 21)))))
   (alias export $ui "present" (func $present-f))
   (type $events (stream $event))
   (type $reply (result (error $error)))
@@ -60,7 +88,7 @@
     (type $new-set (func (result i32)))
     (type $join (func (param i32 i32)))
     (type $request-call (func (param i32 i32) (result i32)))
-    (type $present-call (func (param i32 i32 i32 i32 i32) (result i32)))
+    (type $present-call (func (param i32 i32 i32) (result i32)))
     (table (export "table") 10 funcref)
     (func (export "invoke") (type $call)
       local.get 0 local.get 1 i32.const 0 call_indirect (type $call))
@@ -79,7 +107,7 @@
     (func (export "request") (type $request-call)
       local.get 0 local.get 1 i32.const 7 call_indirect (type $request-call))
     (func (export "present") (type $present-call)
-      local.get 0 local.get 1 local.get 2 local.get 3 local.get 4 i32.const 8 call_indirect (type $present-call))
+      local.get 0 local.get 1 local.get 2 i32.const 8 call_indirect (type $present-call))
     (func (export "eread") (type $read)
       local.get 0 local.get 1 local.get 2 i32.const 9 call_indirect (type $read)))
   (core instance $shim-i (instantiate $shim))
@@ -108,7 +136,7 @@
     (import "host" "new-set" (func $new-set (result i32)))
     (import "host" "join" (func $join (param i32 i32)))
     (import "host" "request" (func $request (param i32 i32) (result i32)))
-    (import "host" "present" (func $present (param i32 i32 i32 i32 i32) (result i32)))
+    (import "host" "present" (func $present (param i32 i32 i32) (result i32)))
     (import "host" "eread" (func $eread (param i32 i32 i32) (result i32)))
     (memory (export "memory") 1)
     ;; 128 resource (57), 192 "read", 208 reason, 224 params, 400 one action.
@@ -134,6 +162,7 @@
     (global $glen (mut i32) (i32.const 0))
     (global $events (mut i32) (i32.const 0))
     (global $dlen (mut i32) (i32.const 0))
+    (global $denied (mut i32) (i32.const 0))
     (func (export "realloc") (param i32 i32 i32 i32) (result i32)
       (local $ptr i32) (local $mask i32)
       local.get 2 i32.const 1 i32.sub local.set $mask
@@ -285,15 +314,17 @@
         local.get $i i32.const 1 i32.add local.set $i
         br $bytes)
       unreachable)
-    (func $build-doc
-      i32.const 10240 i32.const 2300 i32.const 29 call $put
-      i32.const 10240 i32.const 29 i32.add i32.const 8192 global.get $glen call $put
-      i32.const 10240 i32.const 29 i32.add global.get $glen i32.add i32.const 2340 i32.const 5 call $put
-      i32.const 34 global.get $glen i32.add global.set $dlen)
+    (func $present-image (result i32)
+      ;; One image block at 10240. The grant id already sits at 8192.
+      i32.const 10240 i32.const 6 i32.store8
+      i32.const 10244 i32.const 8192 i32.store
+      i32.const 10248 global.get $glen i32.store
+      i32.const 10252 i32.const 0 i32.store
+      i32.const 10256 i32.const 0 i32.store
+      i32.const 10240 i32.const 1 i32.const 4608 call $present)
     (func $begin-present (result i32)
       (local $code i32)
-      call $build-doc
-      i32.const 2500 i32.const 35 i32.const 10240 global.get $dlen i32.const 4608 call $present local.set $code
+      call $present-image local.set $code
       local.get $code i32.const 15 i32.and i32.const 2 i32.eq
       if call $after-present return end
       i32.const 3 global.set $kind
@@ -314,12 +345,17 @@
       end
       local.get $code call $on-event)
     (func $on-event (param $code i32) (result i32)
-      local.get $code i32.const 15 i32.and i32.eqz
-      if call $begin-present2 return end
-      i32.const 8 call $fail)
+      ;; The second present was denied. Any later event, including the close,
+      ;; ends the guest. The empty place stays until then.
+      global.get $denied i32.eqz if else call $finish return end
+      local.get $code i32.const 15 i32.and i32.const 0 i32.ne if i32.const 8 call $fail return end
+      ;; opened and closed carry no text. Only grant-revoked (tag 3) continues.
+      i32.const 22000 i32.load8_u i32.const 3 i32.ne
+      if call $begin-event return end
+      call $begin-present2)
     (func $begin-present2 (result i32)
       (local $code i32)
-      i32.const 2500 i32.const 35 i32.const 10240 global.get $dlen i32.const 4608 call $present local.set $code
+      i32.const 10240 i32.const 1 i32.const 4608 call $present local.set $code
       local.get $code i32.const 15 i32.and i32.const 2 i32.eq
       if call $after-present2 return end
       i32.const 6 global.set $kind
@@ -327,7 +363,8 @@
       local.get $code i32.const 4 i32.shr_u call $park)
     (func $after-present2 (result i32)
       i32.const 4608 i32.load8_u i32.const 0 i32.eq if i32.const 7 call $fail return end
-      call $finish)
+      i32.const 1 global.set $denied
+      call $begin-event)
     (func (export "run") (param $events i32) (result i32)
       local.get $events global.set $events
       call $new-set global.set $set
@@ -384,7 +421,7 @@
     (import "" "5" (func $new-set (result i32)))
     (import "" "6" (func $join (param i32 i32)))
     (import "" "7" (func $request (param i32 i32) (result i32)))
-    (import "" "8" (func $present (param i32 i32 i32 i32 i32) (result i32)))
+    (import "" "8" (func $present (param i32 i32 i32) (result i32)))
     (import "" "9" (func $eread (param i32 i32 i32) (result i32)))
     (import "" "$imports" (table 10 funcref))
     (elem (i32.const 0) func $invoke $read $future $drop $done $new-set $join $request $present $eread))

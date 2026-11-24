@@ -2030,7 +2030,7 @@ mod tests {
     fn v2_manifest_requires_the_v2_wit_hash() {
         assert_eq!(
             elastos_bus_v2_wit_sha256(),
-            "57984328b78a964d79d89e121a90bb6e1d775f9ec302a74fb27fb4695ee1c1a3"
+            "4c58947b5816e2b1663d80f7f6cfd8fed95bf4ac56b5ebb92e38aa588ce3a08b"
         );
         let mut value = serde_json::json!({
             "schema": SCHEMA_V1, "version": "0.1.0", "name": "v2-fixture",

@@ -1,322 +1,88 @@
-//! UI document check. One pure function. It does not see a grant or a host.
+//! Typed UI document. The guest sends blocks. The host stores blocks.
 //!
-//! Media type `application/vnd.elastos.ui+json;v=0`. A document is
-//! `{"frame":[node, ...]}`. A node is `{"text":"..."}` or
-//! `{"image":{"grant":"..."}}`. Script, a handler, a URI, and raw bytes are
-//! refused by name. The size cap is checked before JSON, and the depth cap
-//! before a key, so those refusals stay the ones named here.
+//! There is no media type and no document JSON, so there is no key scan and
+//! no blocklist. A string is text. An image is a grant id. Script, a URI,
+//! and raw bytes are not values of this type.
+//!
+//! Bounds: 32 blocks, 64 spans, 32 list items, depth 2, 1000 text bytes in
+//! one string, 16 KiB of text in one document. Depth 1 is the document. A
+//! list item's blocks are depth 2. A list at depth 2 holds spans only.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
-pub const UI_MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
+pub const MAX_BLOCKS: usize = 32;
+pub const MAX_SPANS: usize = 64;
+pub const MAX_ITEMS: usize = 32;
+pub const MAX_DEPTH: usize = 2;
+pub const MAX_TEXT_BYTES: usize = 1000;
 pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024;
-pub const MAX_NODES: usize = 32;
-pub const MAX_TEXT_CHARS: usize = 1000;
-/// A drawn image document is four containers deep. Eight still fits that
-/// shape and stops a nested document.
-pub const MAX_DEPTH: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Node {
-    Text(String),
-    Image { grant: String },
+pub enum Span {
+    Plain(String),
+    Strong(String),
+    Emphasis(String),
+    Code(String),
 }
 
-/// `None` accepts a known key. Script, a handler, a URI, bytes, and any other
-/// key are refused.
-fn refused_key(key: &str) -> Option<&'static str> {
-    let lower = key.to_ascii_lowercase();
-    if lower == "script" || lower.starts_with("on") {
-        return Some("scripts and event handlers are not allowed");
-    }
-    if matches!(
-        lower.as_str(),
-        "html" | "src" | "url" | "uri" | "href" | "bytes" | "data"
-    ) {
-        return Some("images are named by a grant, never by a URI or bytes");
-    }
-    if matches!(lower.as_str(), "frame" | "text" | "image" | "grant") {
-        return None;
-    }
-    Some("unknown key")
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Item {
+    Spans(Vec<Span>),
+    Blocks(Vec<Block>),
 }
 
-fn walk(value: &Value, depth: usize) -> Result<(), String> {
-    if depth > MAX_DEPTH {
-        return Err(format!("depth cap {MAX_DEPTH}"));
-    }
-    match value {
-        Value::Object(map) => {
-            for (key, inner) in map {
-                if let Some(why) = refused_key(key) {
-                    return Err(format!("key {key:?}: {why}"));
-                }
-                walk(inner, depth + 1)?;
-            }
-            Ok(())
-        }
-        Value::Array(items) => {
-            for item in items {
-                walk(item, depth + 1)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Block {
+    Heading {
+        level: u8,
+        spans: Vec<Span>,
+    },
+    Paragraph {
+        spans: Vec<Span>,
+    },
+    Code {
+        text: String,
+    },
+    Quote {
+        paragraphs: Vec<Vec<Span>>,
+    },
+    List {
+        ordered: bool,
+        items: Vec<Item>,
+    },
+    Rule,
+    Image {
+        grant: String,
+        alt: String,
+        resource: String,
+        empty: bool,
+        expires_at_ms: Option<u64>,
+    },
 }
 
-fn one_node(value: &Value) -> Result<Node, String> {
-    let object = value.as_object().ok_or("a node is an object")?;
-    let text = object.contains_key("text");
-    let image = object.contains_key("image");
-    if text == image || object.len() != 1 {
-        return Err("a node is text or an image, with no other keys".to_string());
-    }
-    if text {
-        let text = object
-            .get("text")
-            .and_then(Value::as_str)
-            .ok_or("text is a string")?;
-        if text.chars().count() > MAX_TEXT_CHARS {
-            return Err(format!(
-                "a text node has at most {MAX_TEXT_CHARS} characters"
-            ));
-        }
-        return Ok(Node::Text(text.to_string()));
-    }
-    let image = object
-        .get("image")
-        .and_then(Value::as_object)
-        .ok_or("an image names a grant")?;
-    if image.len() != 1 {
-        return Err("an image names a grant, with no other keys".to_string());
-    }
-    let grant = image
-        .get("grant")
-        .and_then(Value::as_str)
-        .filter(|grant| !grant.is_empty())
-        .ok_or("an image names a grant")?;
-    Ok(Node::Image {
-        grant: grant.to_string(),
-    })
-}
-
-/// serde_json keeps the last copy of a repeated key. This walk refuses that
-/// before the value is built. Keys are compared after string escapes.
-/// Guest JSON, bounded before any recursive walk. `read` params use this too.
-pub(crate) fn reject_guest_json(bytes: &[u8]) -> Result<(), String> {
-    reject_duplicate_keys(bytes)
-}
-
-fn reject_duplicate_keys(bytes: &[u8]) -> Result<(), String> {
-    let mut i = 0;
-    scan_value(bytes, &mut i, 1)?;
-    skip_ws(bytes, &mut i);
-    if i != bytes.len() {
-        return Err("document is not JSON".to_string());
-    }
-    Ok(())
-}
-
-fn skip_ws(bytes: &[u8], i: &mut usize) {
-    while bytes.get(*i).is_some_and(|byte| byte.is_ascii_whitespace()) {
-        *i += 1;
-    }
-}
-
-fn scan_value(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> {
-    // Checked before any further call. Eight is this checker's own cap.
-    if depth > MAX_DEPTH {
-        return Err(format!("depth cap {MAX_DEPTH}"));
-    }
-    skip_ws(bytes, i);
-    match bytes.get(*i).copied() {
-        Some(b'{') => scan_object(bytes, i, depth),
-        Some(b'[') => scan_array(bytes, i, depth),
-        Some(b'"') => {
-            scan_string(bytes, i)?;
-            Ok(())
-        }
-        Some(b't') => scan_lit(bytes, i, b"true"),
-        Some(b'f') => scan_lit(bytes, i, b"false"),
-        Some(b'n') => scan_lit(bytes, i, b"null"),
-        Some(b'-') | Some(b'0'..=b'9') => scan_number(bytes, i),
-        _ => Err("document is not JSON".to_string()),
-    }
-}
-
-fn scan_object(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> {
-    *i += 1;
-    let mut keys = Vec::new();
-    loop {
-        skip_ws(bytes, i);
-        if bytes.get(*i) == Some(&b'}') {
-            *i += 1;
-            return Ok(());
-        }
-        if !keys.is_empty() {
-            if bytes.get(*i) != Some(&b',') {
-                return Err("document is not JSON".to_string());
-            }
-            *i += 1;
-            skip_ws(bytes, i);
-        }
-        let key = scan_string(bytes, i)?;
-        if keys.iter().any(|seen| seen == &key) {
-            return Err(format!("duplicate key {key:?}"));
-        }
-        keys.push(key);
-        skip_ws(bytes, i);
-        if bytes.get(*i) != Some(&b':') {
-            return Err("document is not JSON".to_string());
-        }
-        *i += 1;
-        scan_value(bytes, i, depth + 1)?;
-    }
-}
-
-fn scan_array(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> {
-    *i += 1;
-    let mut seen = false;
-    loop {
-        skip_ws(bytes, i);
-        if bytes.get(*i) == Some(&b']') {
-            *i += 1;
-            return Ok(());
-        }
-        if seen {
-            if bytes.get(*i) != Some(&b',') {
-                return Err("document is not JSON".to_string());
-            }
-            *i += 1;
-        }
-        scan_value(bytes, i, depth + 1)?;
-        seen = true;
-    }
-}
-
-fn scan_string(bytes: &[u8], i: &mut usize) -> Result<String, String> {
-    if bytes.get(*i) != Some(&b'"') {
-        return Err("document is not JSON".to_string());
-    }
-    *i += 1;
-    let mut raw = Vec::new();
-    while let Some(byte) = bytes.get(*i).copied() {
-        *i += 1;
-        match byte {
-            b'"' => {
-                return String::from_utf8(raw).map_err(|_| "document is not JSON".to_string());
-            }
-            b'\\' => {
-                let esc = bytes.get(*i).copied().ok_or("document is not JSON")?;
-                *i += 1;
-                let ch = match esc {
-                    b'"' => '"',
-                    b'\\' => '\\',
-                    b'/' => '/',
-                    b'b' => '\u{0008}',
-                    b'f' => '\u{000c}',
-                    b'n' => '\n',
-                    b'r' => '\r',
-                    b't' => '\t',
-                    b'u' => {
-                        let hex = bytes.get(*i..*i + 4).ok_or("document is not JSON")?;
-                        *i += 4;
-                        let text = std::str::from_utf8(hex).map_err(|_| "document is not JSON")?;
-                        let code = u32::from_str_radix(text, 16)
-                            .map_err(|_| "document is not JSON".to_string())?;
-                        char::from_u32(code).ok_or("document is not JSON")?
-                    }
-                    _ => return Err("document is not JSON".to_string()),
-                };
-                raw.extend(ch.encode_utf8(&mut [0; 4]).as_bytes());
-            }
-            byte if byte < 0x20 => return Err("document is not JSON".to_string()),
-            byte => raw.push(byte),
+impl Block {
+    pub fn text(text: impl Into<String>) -> Self {
+        Block::Paragraph {
+            spans: vec![Span::Plain(text.into())],
         }
     }
-    Err("document is not JSON".to_string())
-}
 
-fn scan_lit(bytes: &[u8], i: &mut usize, lit: &[u8]) -> Result<(), String> {
-    if bytes.get(*i..).is_some_and(|rest| rest.starts_with(lit)) {
-        *i += lit.len();
-        Ok(())
-    } else {
-        Err("document is not JSON".to_string())
-    }
-}
-
-fn scan_number(bytes: &[u8], i: &mut usize) -> Result<(), String> {
-    if bytes.get(*i) == Some(&b'-') {
-        *i += 1;
-    }
-    if !take_digits(bytes, i) {
-        return Err("document is not JSON".to_string());
-    }
-    if bytes.get(*i) == Some(&b'.') {
-        *i += 1;
-        if !take_digits(bytes, i) {
-            return Err("document is not JSON".to_string());
+    pub fn image(grant: impl Into<String>, resource: impl Into<String>) -> Self {
+        Block::Image {
+            grant: grant.into(),
+            alt: String::new(),
+            resource: resource.into(),
+            empty: false,
+            expires_at_ms: None,
         }
     }
-    if matches!(bytes.get(*i), Some(b'e' | b'E')) {
-        *i += 1;
-        if matches!(bytes.get(*i), Some(b'+' | b'-')) {
-            *i += 1;
-        }
-        if !take_digits(bytes, i) {
-            return Err("document is not JSON".to_string());
-        }
-    }
-    Ok(())
 }
 
-fn take_digits(bytes: &[u8], i: &mut usize) -> bool {
-    let start = *i;
-    while bytes.get(*i).is_some_and(|byte| byte.is_ascii_digit()) {
-        *i += 1;
-    }
-    *i > start
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub nodes: Vec<Block>,
 }
 
-/// Checks one document. The frame it returns names text and grant ids.
-pub fn check_document(media_type: &str, document: &[u8]) -> Result<Vec<Node>, String> {
-    if media_type != UI_MEDIA_TYPE {
-        return Err(format!(
-            "media type {media_type:?}; expected {UI_MEDIA_TYPE}"
-        ));
-    }
-    if document.len() > MAX_DOCUMENT_BYTES {
-        return Err(format!(
-            "size cap {MAX_DOCUMENT_BYTES}: document is {} bytes",
-            document.len()
-        ));
-    }
-    reject_duplicate_keys(document)?;
-    // serde_json::from_slice keeps its own depth limit (128). This crate does
-    // not turn that limit off. The scan above already refused anything past 8,
-    // so this parse never walks a deeper tree.
-    let value: Value =
-        serde_json::from_slice(document).map_err(|err| format!("document is not JSON: {err}"))?;
-    walk(&value, 1)?;
-    let root = value.as_object().ok_or("a document is one frame")?;
-    if root.len() != 1 || !root.contains_key("frame") {
-        return Err("a document has other keys besides frame".to_string());
-    }
-    let frame = value
-        .get("frame")
-        .and_then(Value::as_array)
-        .ok_or("a document is one frame")?;
-    if frame.is_empty() || frame.len() > MAX_NODES {
-        return Err(format!("a frame has 1 to {MAX_NODES} nodes"));
-    }
-    frame.iter().map(one_node).collect()
-}
-
-/// A grant the guest already holds. Present reads this record. It does not
-/// ask for a new grant.
-/// Revoked ids kept so a later present can still say the grant was revoked.
 const MAX_REVOKED_GRANTS: usize = 32;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -330,19 +96,41 @@ struct HeldGrant {
     id: String,
     resource: String,
     actions: Vec<String>,
+    image: bool,
+    expires_at_ms: Option<u64>,
 }
 
 impl GrantBook {
     pub fn hold(&mut self, id: &str, resource: &str, action: &str) {
+        self.hold_until(id, resource, action, None);
+    }
+
+    pub fn hold_until(
+        &mut self,
+        id: &str,
+        resource: &str,
+        action: &str,
+        expires_at_ms: Option<u64>,
+    ) {
         self.revoked.retain(|kept| kept != id);
-        if self.grants.iter().any(|grant| grant.id == id) {
+        if let Some(grant) = self.grants.iter_mut().find(|grant| grant.id == id) {
+            grant.expires_at_ms = expires_at_ms;
             return;
         }
         self.grants.push(HeldGrant {
             id: id.to_string(),
             resource: resource.to_string(),
             actions: vec![action.to_string()],
+            image: false,
+            expires_at_ms,
         });
+    }
+
+    /// The bytes of a read this guest finished. An image is PNG, JPEG, or WebP.
+    pub fn note_bytes(&mut self, id: &str, bytes: &[u8]) {
+        if let Some(grant) = self.grants.iter_mut().find(|grant| grant.id == id) {
+            grant.image = is_image(bytes);
+        }
     }
 
     pub fn revoke(&mut self, id: &str) {
@@ -359,8 +147,14 @@ impl GrantBook {
         self.revoked.push(id.to_string());
     }
 
-    /// Drops every grant this guest holds, including the revoked ids. A stop
-    /// does this. A revoke of one grant does not.
+    pub fn due(&self, now_ms: u64) -> Vec<String> {
+        self.grants
+            .iter()
+            .filter(|grant| grant.expires_at_ms.is_some_and(|at| now_ms >= at))
+            .map(|grant| grant.id.clone())
+            .collect()
+    }
+
     pub fn clear(&mut self) {
         self.grants.clear();
         self.revoked.clear();
@@ -376,16 +170,10 @@ impl GrantBook {
     }
 }
 
-/// One frame. An image is a grant id and a resource name. It holds no bytes.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Frame {
-    pub nodes: Vec<FrameNode>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FrameNode {
-    Text(String),
-    Image { grant: String, resource: String },
+pub fn is_image(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(b"\xFF\xD8\xFF")
+        || (bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP")
 }
 
 #[derive(Debug)]
@@ -394,259 +182,619 @@ pub enum PresentError {
     Denied(String),
 }
 
-/// The slice 10 checker runs first. A grant that is unknown, revoked, or not
-/// read is denied and stores nothing.
-pub fn present_frame(
-    media: &str,
-    document: &[u8],
+struct Counts {
+    blocks: usize,
+    spans: usize,
+    items: usize,
+    text: usize,
+}
+
+/// Checks one document and fills each image from a grant this guest holds.
+pub fn present_blocks(
+    blocks: Vec<Block>,
     book: &GrantBook,
+    now_ms: u64,
 ) -> Result<Frame, PresentError> {
-    let nodes = check_document(media, document).map_err(PresentError::Invalid)?;
-    let mut out = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        out.push(match node {
-            Node::Text(text) => FrameNode::Text(text),
-            Node::Image { grant } => {
-                if book.revoked.iter().any(|id| id == &grant) {
-                    return Err(PresentError::Denied(format!("{grant} was revoked")));
-                }
-                let Some(held) = book.grants.iter().find(|item| item.id == grant) else {
-                    if book.revoked.len() == MAX_REVOKED_GRANTS
-                        && !book.revoked.iter().any(|id| id == &grant)
-                    {
-                        return Err(PresentError::Denied(format!(
-                            "{grant} is not among the {MAX_REVOKED_GRANTS} revokes still recorded"
-                        )));
-                    }
-                    return Err(PresentError::Denied(format!(
-                        "{grant} is not a grant this guest holds"
-                    )));
-                };
-                if !held.actions.iter().any(|action| action == "read") {
-                    return Err(PresentError::Denied(format!("{grant} does not allow read")));
-                }
-                FrameNode::Image {
-                    grant,
-                    resource: held.resource.clone(),
-                }
-            }
-        });
+    if blocks.is_empty() || blocks.len() > MAX_BLOCKS {
+        return Err(PresentError::Invalid(format!(
+            "a document has 1 to {MAX_BLOCKS} blocks"
+        )));
+    }
+    let mut counts = Counts {
+        blocks: 0,
+        spans: 0,
+        items: 0,
+        text: 0,
+    };
+    let mut out = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        out.push(check_block(block, 1, book, now_ms, &mut counts)?);
     }
     Ok(Frame { nodes: out })
+}
+
+fn check_block(
+    block: Block,
+    depth: usize,
+    book: &GrantBook,
+    now_ms: u64,
+    counts: &mut Counts,
+) -> Result<Block, PresentError> {
+    if depth > MAX_DEPTH {
+        return Err(PresentError::Invalid(format!("depth cap {MAX_DEPTH}")));
+    }
+    counts.blocks += 1;
+    if counts.blocks > MAX_BLOCKS {
+        return Err(PresentError::Invalid(format!(
+            "a document has at most {MAX_BLOCKS} blocks"
+        )));
+    }
+    match block {
+        Block::Heading { level, spans } => {
+            if !(1..=6).contains(&level) {
+                return Err(PresentError::Invalid("a heading level is 1 to 6".into()));
+            }
+            Ok(Block::Heading {
+                level,
+                spans: check_spans(spans, counts)?,
+            })
+        }
+        Block::Paragraph { spans } => Ok(Block::Paragraph {
+            spans: check_spans(spans, counts)?,
+        }),
+        Block::Code { text } => {
+            count_text(&text, counts)?;
+            Ok(Block::Code { text })
+        }
+        Block::Quote { paragraphs } => {
+            let mut out = Vec::with_capacity(paragraphs.len());
+            for paragraph in paragraphs {
+                out.push(check_spans(paragraph, counts)?);
+            }
+            Ok(Block::Quote { paragraphs: out })
+        }
+        Block::List { ordered, items } => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                counts.items += 1;
+                if counts.items > MAX_ITEMS {
+                    return Err(PresentError::Invalid(format!(
+                        "a document has at most {MAX_ITEMS} list items"
+                    )));
+                }
+                out.push(match item {
+                    Item::Spans(spans) => Item::Spans(check_spans(spans, counts)?),
+                    Item::Blocks(blocks) => {
+                        if depth == MAX_DEPTH {
+                            return Err(PresentError::Invalid(format!("depth cap {MAX_DEPTH}")));
+                        }
+                        let mut nested = Vec::with_capacity(blocks.len());
+                        for block in blocks {
+                            nested.push(check_block(block, depth + 1, book, now_ms, counts)?);
+                        }
+                        Item::Blocks(nested)
+                    }
+                });
+            }
+            Ok(Block::List {
+                ordered,
+                items: out,
+            })
+        }
+        Block::Rule => Ok(Block::Rule),
+        Block::Image { grant, alt, .. } => {
+            count_text(&alt, counts)?;
+            let (resource, expires_at_ms) = image_grant(&grant, book, now_ms)?;
+            Ok(Block::Image {
+                grant,
+                alt,
+                resource,
+                empty: false,
+                expires_at_ms,
+            })
+        }
+    }
+}
+
+fn check_spans(spans: Vec<Span>, counts: &mut Counts) -> Result<Vec<Span>, PresentError> {
+    for span in &spans {
+        counts.spans += 1;
+        if counts.spans > MAX_SPANS {
+            return Err(PresentError::Invalid(format!(
+                "a document has at most {MAX_SPANS} spans"
+            )));
+        }
+        count_text(span_text(span), counts)?;
+    }
+    Ok(spans)
+}
+
+fn span_text(span: &Span) -> &str {
+    match span {
+        Span::Plain(text) | Span::Strong(text) | Span::Emphasis(text) | Span::Code(text) => text,
+    }
+}
+
+fn count_text(text: &str, counts: &mut Counts) -> Result<(), PresentError> {
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(PresentError::Invalid(format!(
+            "a text has at most {MAX_TEXT_BYTES} bytes"
+        )));
+    }
+    counts.text += text.len();
+    if counts.text > MAX_DOCUMENT_BYTES {
+        return Err(PresentError::Invalid(format!(
+            "size cap {MAX_DOCUMENT_BYTES}"
+        )));
+    }
+    Ok(())
+}
+
+fn image_grant(
+    grant: &str,
+    book: &GrantBook,
+    now_ms: u64,
+) -> Result<(String, Option<u64>), PresentError> {
+    if grant.is_empty() {
+        return Err(PresentError::Invalid("an image names a grant".into()));
+    }
+    if book.revoked.iter().any(|id| id == grant) {
+        return Err(PresentError::Denied(format!("{grant} was revoked")));
+    }
+    let Some(held) = book.grants.iter().find(|item| item.id == grant) else {
+        if book.revoked.len() == MAX_REVOKED_GRANTS {
+            return Err(PresentError::Denied(format!(
+                "{grant} is not among the {MAX_REVOKED_GRANTS} revokes still recorded"
+            )));
+        }
+        return Err(PresentError::Denied(format!(
+            "{grant} is not a grant this guest holds"
+        )));
+    };
+    if !held.actions.iter().any(|action| action == "read") {
+        return Err(PresentError::Denied(format!("{grant} does not allow read")));
+    }
+    if held.expires_at_ms.is_some_and(|at| now_ms >= at) {
+        return Err(PresentError::Denied(format!("{grant} expired")));
+    }
+    if !held.image {
+        return Err(PresentError::Denied(format!(
+            "{} is not an image",
+            held.resource
+        )));
+    }
+    Ok((held.resource.clone(), held.expires_at_ms))
+}
+
+/// The named place stays. The picture is gone.
+pub fn blank_grant(frame: &mut Frame, grant: &str) -> bool {
+    let mut hit = false;
+    blank_nodes(&mut frame.nodes, &mut |image_grant, empty| {
+        if image_grant == grant && !*empty {
+            *empty = true;
+            hit = true;
+        }
+    });
+    hit
+}
+
+/// An image whose grant time has passed becomes a named empty place.
+pub fn blank_expired(frame: &mut Frame, now_ms: u64) -> Vec<String> {
+    let mut due = Vec::new();
+    fn walk(nodes: &mut [Block], now_ms: u64, due: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                Block::List { items, .. } => {
+                    for item in items {
+                        if let Item::Blocks(nested) = item {
+                            walk(nested, now_ms, due);
+                        }
+                    }
+                }
+                Block::Image {
+                    grant,
+                    empty,
+                    expires_at_ms,
+                    ..
+                } if expires_at_ms.is_some_and(|at| now_ms >= at) && !*empty => {
+                    *empty = true;
+                    due.push(grant.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(&mut frame.nodes, now_ms, &mut due);
+    due
+}
+
+fn blank_nodes(nodes: &mut [Block], hit: &mut dyn FnMut(&str, &mut bool)) {
+    for node in nodes {
+        match node {
+            Block::List { items, .. } => {
+                for item in items {
+                    if let Item::Blocks(nested) = item {
+                        blank_nodes(nested, hit);
+                    }
+                }
+            }
+            Block::Image { grant, empty, .. } => hit(grant, empty),
+            _ => {}
+        }
+    }
+}
+
+pub fn image_grant_ids(frame: &Frame) -> Vec<String> {
+    let mut ids = Vec::new();
+    fn walk(nodes: &[Block], ids: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                Block::List { items, .. } => {
+                    for item in items {
+                        if let Item::Blocks(nested) = item {
+                            walk(nested, ids);
+                        }
+                    }
+                }
+                Block::Image { grant, empty, .. } if !empty && !grant.is_empty() => {
+                    ids.push(grant.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(&frame.nodes, &mut ids);
+    ids
+}
+
+/// Home's frame. No grant id and no image bytes.
+pub fn encode_frame(nodes: &[Block]) -> Vec<u8> {
+    serde_json::to_vec(&json!({ "nodes": nodes.iter().map(encode_block).collect::<Vec<_>>() }))
+        .unwrap_or_else(|_| b"{\"nodes\":[]}".to_vec())
+}
+
+fn encode_block(block: &Block) -> Value {
+    match block {
+        Block::Heading { level, spans } => json!({
+            "kind": "heading",
+            "level": level,
+            "spans": encode_spans(spans),
+        }),
+        Block::Paragraph { spans } => json!({ "kind": "paragraph", "spans": encode_spans(spans) }),
+        Block::Code { text } => json!({ "kind": "code", "text": text }),
+        Block::Quote { paragraphs } => json!({
+            "kind": "quote",
+            "paragraphs": paragraphs.iter().map(|spans| encode_spans(spans)).collect::<Vec<_>>(),
+        }),
+        Block::List { ordered, items } => json!({
+            "kind": "list",
+            "ordered": ordered,
+            "items": items.iter().map(encode_item).collect::<Vec<_>>(),
+        }),
+        Block::Rule => json!({ "kind": "rule" }),
+        Block::Image {
+            resource,
+            alt,
+            empty,
+            ..
+        } => json!({
+            "kind": "image",
+            "resource": resource,
+            "alt": alt,
+            "empty": empty,
+        }),
+    }
+}
+
+fn encode_spans(spans: &[Span]) -> Vec<Value> {
+    spans
+        .iter()
+        .map(|span| {
+            let (style, text) = match span {
+                Span::Plain(text) => ("plain", text),
+                Span::Strong(text) => ("strong", text),
+                Span::Emphasis(text) => ("emphasis", text),
+                Span::Code(text) => ("code", text),
+            };
+            json!({ "style": style, "text": text })
+        })
+        .collect()
+}
+
+fn encode_item(item: &Item) -> Value {
+    match item {
+        Item::Spans(spans) => json!({ "spans": encode_spans(spans) }),
+        Item::Blocks(blocks) => {
+            json!({ "blocks": blocks.iter().map(encode_block).collect::<Vec<_>>() })
+        }
+    }
+}
+
+/// A Home answer. One bad node refuses the whole answer. Grant ids are not a field.
+pub fn accept_frame(bytes: &[u8], max: usize) -> Vec<Value> {
+    if bytes.len() > max {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    if object.len() != 1 {
+        return Vec::new();
+    }
+    let Some(nodes) = object.get("nodes").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for node in nodes {
+        let Some(clean) = clean_block(node, 1) else {
+            return Vec::new();
+        };
+        out.push(clean);
+    }
+    out
+}
+
+fn clean_block(value: &Value, depth: usize) -> Option<Value> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let object = value.as_object()?;
+    let kind = object.get("kind")?.as_str()?;
+    match kind {
+        "heading" if object.len() == 3 => {
+            let level = object.get("level")?.as_u64()?;
+            if !(1..=6).contains(&level) {
+                return None;
+            }
+            Some(json!({
+                "kind": "heading",
+                "level": level,
+                "spans": clean_spans(object.get("spans")?)?,
+            }))
+        }
+        "paragraph" if object.len() == 2 => Some(json!({
+            "kind": "paragraph",
+            "spans": clean_spans(object.get("spans")?)?,
+        })),
+        "code" if object.len() == 2 => Some(json!({
+            "kind": "code",
+            "text": object.get("text")?.as_str()?,
+        })),
+        "quote" if object.len() == 2 => {
+            let paragraphs = object.get("paragraphs")?.as_array()?;
+            let mut clean = Vec::new();
+            for paragraph in paragraphs {
+                clean.push(clean_spans(paragraph)?);
+            }
+            Some(json!({ "kind": "quote", "paragraphs": clean }))
+        }
+        "list" if object.len() == 3 => {
+            if !object.get("ordered")?.is_boolean() {
+                return None;
+            }
+            let items = object.get("items")?.as_array()?;
+            let mut clean = Vec::new();
+            for item in items {
+                clean.push(clean_item(item, depth)?);
+            }
+            Some(json!({
+                "kind": "list",
+                "ordered": object.get("ordered")?.as_bool()?,
+                "items": clean,
+            }))
+        }
+        "rule" if object.len() == 1 => Some(json!({ "kind": "rule" })),
+        "image" if object.len() == 4 => {
+            if !object.get("empty")?.is_boolean() {
+                return None;
+            }
+            Some(json!({
+                "kind": "image",
+                "resource": object.get("resource")?.as_str()?,
+                "alt": object.get("alt")?.as_str()?,
+                "empty": object.get("empty")?.as_bool()?,
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn clean_spans(value: &Value) -> Option<Vec<Value>> {
+    let spans = value.as_array()?;
+    let mut out = Vec::new();
+    for span in spans {
+        let object = span.as_object()?;
+        if object.len() != 2 {
+            return None;
+        }
+        let style = object.get("style")?.as_str()?;
+        if !matches!(style, "plain" | "strong" | "emphasis" | "code") {
+            return None;
+        }
+        out.push(json!({
+            "style": style,
+            "text": object.get("text")?.as_str()?,
+        }));
+    }
+    Some(out)
+}
+
+fn clean_item(value: &Value, depth: usize) -> Option<Value> {
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    if let Some(spans) = object.get("spans") {
+        return Some(json!({ "spans": clean_spans(spans)? }));
+    }
+    let blocks = object.get("blocks")?.as_array()?;
+    let mut nested = Vec::new();
+    for block in blocks {
+        nested.push(clean_block(block, depth + 1)?);
+    }
+    Some(json!({ "blocks": nested }))
+}
+
+/// Wall time when the test clock is unset. `0` on the provider clock means this.
+pub fn host_now(set: u64) -> u64 {
+    if set != 0 {
+        return set;
+    }
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn book_with_photo() -> (GrantBook, &'static str) {
+        let mut book = GrantBook::default();
+        let photo = "localhost://Users/self/Pictures/a.png";
+        book.hold("g1", photo, "read");
+        book.note_bytes("g1", b"\x89PNG\r\n\x1a\n");
+        (book, photo)
+    }
+
     #[test]
-    fn v2_ui_refuses_a_script_key() {
-        let err = check_document(
-            UI_MEDIA_TYPE,
-            br#"{"frame":[{"text":"hi","script":"alert(1)"}]}"#,
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("scripts and event handlers are not allowed"),
-            "{err}"
+    fn a_script_shaped_string_is_text() {
+        let (book, _) = book_with_photo();
+        let frame =
+            present_blocks(vec![Block::text("<script>alert(1)</script>")], &book, 0).unwrap();
+        assert_eq!(frame.nodes, vec![Block::text("<script>alert(1)</script>")]);
+        let answer = encode_frame(&frame.nodes);
+        let accepted = accept_frame(&answer, 48 * 1024);
+        assert_eq!(accepted[0]["spans"][0]["text"], "<script>alert(1)</script>");
+        let mut with_grant = serde_json::from_slice::<Value>(&answer).unwrap();
+        with_grant["nodes"][0]["grant"] = json!("g1");
+        assert!(accept_frame(&serde_json::to_vec(&with_grant).unwrap(), 48 * 1024).is_empty());
+    }
+
+    #[test]
+    fn an_image_needs_a_read_grant_on_an_image() {
+        let (mut book, photo) = book_with_photo();
+        book.hold("g-write", photo, "write");
+        book.hold(
+            "g-text",
+            "localhost://Users/self/Documents/note.txt",
+            "read",
         );
-        let err = check_document(UI_MEDIA_TYPE, br#"{"frame":[{"text":"hi","onclick":"x"}]}"#)
+        book.note_bytes("g-text", b"note");
+        book.hold_until("g-old", photo, "read", Some(5));
+        book.note_bytes("g-old", b"\x89PNG\r\n\x1a\n");
+        let now = 10;
+        let show = present_blocks(vec![Block::image("g1", "")], &book, now).unwrap();
+        assert_eq!(show.nodes, vec![Block::image("g1", photo)]);
+        let missing = present_blocks(vec![Block::image("g-missing", "")], &book, now).unwrap_err();
+        assert!(
+            matches!(missing, PresentError::Denied(ref message) if message.contains("not a grant"))
+        );
+        book.revoke("g1");
+        let revoked = present_blocks(vec![Block::image("g1", "")], &book, now).unwrap_err();
+        assert!(
+            matches!(revoked, PresentError::Denied(ref message) if message.contains("was revoked"))
+        );
+        let write = present_blocks(vec![Block::image("g-write", "")], &book, now).unwrap_err();
+        assert!(
+            matches!(write, PresentError::Denied(ref message) if message.contains("does not allow read"))
+        );
+        let text = present_blocks(vec![Block::image("g-text", "")], &book, now).unwrap_err();
+        assert!(
+            matches!(text, PresentError::Denied(ref message) if message.contains("is not an image"))
+        );
+        let expired = present_blocks(vec![Block::image("g-old", "")], &book, now).unwrap_err();
+        assert!(
+            matches!(expired, PresentError::Denied(ref message) if message.contains("expired"))
+        );
+    }
+
+    #[test]
+    fn revoke_and_expiry_leave_a_named_empty_place() {
+        let mut frame = Frame {
+            nodes: vec![
+                Block::text("stay"),
+                Block::Image {
+                    grant: "g1".into(),
+                    alt: "a cat".into(),
+                    resource: "localhost://Users/self/Pictures/a.png".into(),
+                    empty: false,
+                    expires_at_ms: Some(10),
+                },
+            ],
+        };
+        assert!(blank_grant(&mut frame, "g1"));
+        match &frame.nodes[1] {
+            Block::Image {
+                empty,
+                alt,
+                resource,
+                ..
+            } => {
+                assert!(*empty);
+                assert_eq!(alt, "a cat");
+                assert_eq!(resource, "localhost://Users/self/Pictures/a.png");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(frame.nodes[0], Block::text("stay"));
+        frame.nodes[1] = Block::Image {
+            grant: "g1".into(),
+            alt: "a cat".into(),
+            resource: "localhost://Users/self/Pictures/a.png".into(),
+            empty: false,
+            expires_at_ms: Some(10),
+        };
+        assert_eq!(blank_expired(&mut frame, 10), vec!["g1".to_string()]);
+        assert!(matches!(frame.nodes[1], Block::Image { empty: true, .. }));
+    }
+
+    #[test]
+    fn bounds_refuse_depth_size_and_level() {
+        let (book, _) = book_with_photo();
+        let deep = Block::List {
+            ordered: false,
+            items: vec![Item::Blocks(vec![Block::List {
+                ordered: false,
+                items: vec![Item::Blocks(vec![Block::text("too deep")])],
+            }])],
+        };
+        let err = present_blocks(vec![deep], &book, 0).unwrap_err();
+        assert!(matches!(err, PresentError::Invalid(ref message) if message.contains("depth cap")));
+        let err = present_blocks(vec![Block::text("x".repeat(MAX_TEXT_BYTES + 1))], &book, 0)
             .unwrap_err();
-        assert!(
-            err.contains("scripts and event handlers are not allowed"),
-            "{err}"
-        );
-        let big = vec![b' '; MAX_DOCUMENT_BYTES + 1];
-        let err = check_document(UI_MEDIA_TYPE, &big).unwrap_err();
-        assert!(err.contains("size cap"), "{err}");
-        let deep = br#"{"frame":{"frame":{"frame":{"frame":{"frame":{"frame":{"frame":{"frame":{"frame":{}}}}}}}}}}"#;
-        let err = check_document(UI_MEDIA_TYPE, deep).unwrap_err();
-        assert!(err.contains("depth cap"), "{err}");
-    }
-
-    #[test]
-    fn v2_ui_refuses_an_image_uri() {
-        let err = check_document(
-            UI_MEDIA_TYPE,
-            br#"{"frame":[{"image":{"grant":"g1","uri":"https://example.com/a.png"}}]}"#,
+        assert!(matches!(err, PresentError::Invalid(ref message) if message.contains("1000")));
+        let err = present_blocks(
+            vec![Block::Heading {
+                level: 0,
+                spans: vec![Span::Plain("x".into())],
+            }],
+            &book,
+            0,
         )
         .unwrap_err();
-        assert!(err.contains("never by a URI or bytes"), "{err}");
-        let nodes = check_document(
-            UI_MEDIA_TYPE,
-            br#"{"frame":[{"text":"hi"},{"image":{"grant":"g1"}}]}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            nodes,
-            vec![
-                Node::Text("hi".to_string()),
-                Node::Image {
-                    grant: "g1".to_string()
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn v2_ui_refuses_the_wrong_media_type() {
-        let good = br#"{"frame":[{"text":"hi"}]}"#;
-        for media in ["text/html", "application/vnd.elastos.ui+json;v=1", ""] {
-            let err = check_document(media, good).unwrap_err();
-            assert!(err.contains("media type"), "{media}: {err}");
-        }
-    }
-
-    #[test]
-    fn v2_ui_refuses_src_html_href_and_bytes() {
-        for (key, value) in [
-            ("src", "https://example.com/a.png"),
-            ("html", "<b>hi</b>"),
-            ("href", "https://example.com"),
-            ("bytes", "iVBORw0KGgo="),
-        ] {
-            let document =
-                format!(r#"{{"frame":[{{"image":{{"grant":"g1","{key}":"{value}"}}}}]}}"#);
-            let err = check_document(UI_MEDIA_TYPE, document.as_bytes()).unwrap_err();
-            assert!(err.contains("never by a URI or bytes"), "{key}: {err}");
-        }
-    }
-
-    #[test]
-    fn duplicate_keys_and_stray_keys_are_refused() {
-        let err =
-            check_document(UI_MEDIA_TYPE, br#"{"frame":[{"text":"a","text":"b"}]}"#).unwrap_err();
-        assert!(err.contains("duplicate key"), "{err}");
-        let err =
-            check_document(UI_MEDIA_TYPE, br#"{"frame":[{"text":"x","grant":"y"}]}"#).unwrap_err();
-        assert!(err.contains("other keys"), "{err}");
-        let err =
-            check_document(UI_MEDIA_TYPE, br#"{"grant":"y","frame":[{"text":"x"}]}"#).unwrap_err();
-        assert!(err.contains("other keys"), "{err}");
-    }
-
-    #[test]
-    fn revoked_ids_stay_bounded_and_still_say_revoked() {
+        assert!(matches!(err, PresentError::Invalid(ref message) if message.contains("1 to 6")));
         let mut book = GrantBook::default();
         for n in 0..40 {
             let id = format!("g{n}");
             book.hold(&id, "localhost://Users/self/Pictures/a.png", "read");
+            book.note_bytes(&id, b"\x89PNG\r\n\x1a\n");
             book.revoke(&id);
         }
-        assert!(
-            book.grant_slots() <= 32,
-            "revoked ids stay in a bounded list, have {}",
-            book.grant_slots()
-        );
-        let media = UI_MEDIA_TYPE;
-        let latest =
-            present_frame(media, br#"{"frame":[{"image":{"grant":"g39"}}]}"#, &book).unwrap_err();
+        assert!(book.grant_slots() <= 32);
+        let latest = present_blocks(vec![Block::image("g39", "")], &book, 0).unwrap_err();
         assert!(
             matches!(latest, PresentError::Denied(ref message) if message.contains("was revoked")),
             "{latest:?}"
         );
-        let oldest =
-            present_frame(media, br#"{"frame":[{"image":{"grant":"g0"}}]}"#, &book).unwrap_err();
+        let oldest = present_blocks(vec![Block::image("g0", "")], &book, 0).unwrap_err();
         assert!(
             matches!(oldest, PresentError::Denied(ref message) if message.contains("not among the 32")),
             "{oldest:?}"
         );
-    }
-
-    /// 16,384 `[`, the same many `{"a":`, and a 16 KiB string. Each ends
-    /// Invalid. The check runs in a child: a stack overflow there fails this
-    /// row, and the suite process stays up.
-    #[test]
-    fn deep_documents_end_invalid_and_the_process_lives() {
-        const NAME: &str =
-            "providers::bus2_ui::tests::deep_documents_end_invalid_and_the_process_lives";
-        if std::env::var("RA2_DEPTH_CHILD").is_err() {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-            child
-                .arg(NAME)
-                .arg("--exact")
-                .arg("--test-threads=1")
-                .arg("--nocapture")
-                .env("RA2_DEPTH_CHILD", "1");
-            let output = child.output().expect("depth child starts");
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                output.status.success(),
-                "deep document must end Invalid in a live process, status {:?}\n{stdout}\n{stderr}",
-                output.status
-            );
-            assert!(
-                stdout.contains("deep document: Invalid")
-                    || stderr.contains("deep document: Invalid"),
-                "child did not report Invalid\n{stdout}\n{stderr}"
-            );
-            return;
-        }
-        for document in deep_documents() {
-            let err = check_document(UI_MEDIA_TYPE, &document).expect_err("deep document");
-            assert!(!err.is_empty(), "{err}");
-            let read =
-                super::super::bus2_stream::read_cap(&document).expect_err("deep read params");
-            assert!(
-                read.contains("depth cap")
-                    || read.contains("not JSON")
-                    || read.contains("expected"),
-                "{read}"
-            );
-            eprintln!("deep document: Invalid");
-        }
-        let mut nested = Vec::new();
-        for _ in 0..200 {
-            nested.extend_from_slice(br#"{"a":"#);
-        }
-        nested.extend_from_slice(br#"null"#);
-        nested.extend(std::iter::repeat_n(b'}', 200));
-        let err = serde_json::from_slice::<serde_json::Value>(&nested).expect_err("serde depth");
-        assert!(
-            err.to_string().contains("recursion"),
-            "serde_json keeps its own depth limit, got {err}"
-        );
-        eprintln!("deep document: Invalid");
-    }
-
-    fn deep_documents() -> [Vec<u8>; 3] {
-        let brackets = vec![b'['; MAX_DOCUMENT_BYTES];
-        let mut objects = Vec::new();
-        while objects.len() + 5 <= MAX_DOCUMENT_BYTES {
-            objects.extend_from_slice(br#"{"a":"#);
-        }
-        let mut deep_string = vec![b'"'];
-        while deep_string.len() + 7 <= MAX_DOCUMENT_BYTES {
-            deep_string.extend_from_slice(br#"\u0041"#);
-        }
-        deep_string.push(b'"');
-        [brackets, objects, deep_string]
-    }
-
-    #[test]
-    fn v2_ui_refuses_over_32_nodes_and_1000_characters() {
-        let mut nodes = (0..MAX_NODES)
-            .map(|_| r#"{"text":"ok"}"#)
-            .collect::<Vec<_>>();
-        let at_limit = format!(r#"{{"frame":[{}]}}"#, nodes.join(","));
-        assert_eq!(
-            check_document(UI_MEDIA_TYPE, at_limit.as_bytes())
-                .unwrap()
-                .len(),
-            MAX_NODES
-        );
-        nodes.push(r#"{"text":"over"}"#);
-        let over = format!(r#"{{"frame":[{}]}}"#, nodes.join(","));
-        let err = check_document(UI_MEDIA_TYPE, over.as_bytes()).unwrap_err();
-        assert!(err.contains("32"), "{err}");
-
-        let text = "x".repeat(MAX_TEXT_CHARS);
-        let at_chars = format!(r#"{{"frame":[{{"text":"{text}"}}]}}"#);
-        assert!(check_document(UI_MEDIA_TYPE, at_chars.as_bytes()).is_ok());
-        let text = "x".repeat(MAX_TEXT_CHARS + 1);
-        let over_chars = format!(r#"{{"frame":[{{"text":"{text}"}}]}}"#);
-        let err = check_document(UI_MEDIA_TYPE, over_chars.as_bytes()).unwrap_err();
-        assert!(err.contains("1000"), "{err}");
     }
 }

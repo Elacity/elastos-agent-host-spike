@@ -1490,43 +1490,7 @@ async fn managed_frame_nodes(
 }
 
 fn accepted_frame_nodes(bytes: &[u8]) -> Vec<serde_json::Value> {
-    if bytes.len() > crate::component::V2_FRAME_ANSWER_MAX {
-        return Vec::new();
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return Vec::new();
-    };
-    let Some(object) = value.as_object() else {
-        return Vec::new();
-    };
-    if object.len() != 1 {
-        return Vec::new();
-    }
-    let Some(nodes) = object.get("nodes").and_then(|node| node.as_array()) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for node in nodes {
-        let Some(node) = node.as_object() else {
-            return Vec::new();
-        };
-        let clean = match node.get("kind").and_then(|kind| kind.as_str()) {
-            Some("text") if node.len() == 2 => node
-                .get("text")
-                .and_then(|text| text.as_str())
-                .map(|text| serde_json::json!({ "kind": "text", "text": text })),
-            Some("image") if node.len() == 2 => node
-                .get("resource")
-                .and_then(|resource| resource.as_str())
-                .map(|resource| serde_json::json!({ "kind": "image", "resource": resource })),
-            _ => None,
-        };
-        let Some(clean) = clean else {
-            return Vec::new();
-        };
-        out.push(clean);
-    }
-    out
+    elastos_compute::providers::bus2_ui::accept_frame(bytes, crate::component::V2_FRAME_ANSWER_MAX)
 }
 
 #[cfg(unix)]

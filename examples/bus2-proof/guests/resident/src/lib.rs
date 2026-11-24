@@ -11,16 +11,13 @@
 wit_bindgen::generate!({ path: "../../wit", world: "product-capsule-v2" });
 
 use elastos::bus::types::{BusError, Event};
+use elastos::bus::ui::{Block, Span};
 use elastos::bus::{clock, ui};
-
-const MEDIA_TYPE: &str = "application/vnd.elastos.ui+json;v=0";
 
 struct Resident;
 
 async fn draw(text: &str) -> Result<(), BusError> {
-    // `text` is made here and holds no quote or backslash.
-    let document = format!(r#"{{"frame":[{{"text":"{text}"}}]}}"#);
-    ui::present(MEDIA_TYPE.to_string(), document.into_bytes()).await
+    ui::present(vec![Block::Paragraph(vec![Span::Plain(text.to_string())])]).await
 }
 
 impl exports::elastos::bus::lifecycle::Guest for Resident {
@@ -31,7 +28,7 @@ impl exports::elastos::bus::lifecycle::Guest for Resident {
                 Event::Message(bytes) if bytes == b"linger" => linger = true,
                 Event::Message(bytes) if bytes == b"fail-on-stop" => fail = true,
                 Event::Message(bytes) if bytes == b"return-now" => return Ok(()),
-                Event::StopRequested | Event::GrantRevoked(_) => {}
+                Event::StopRequested | Event::GrantRevoked(_) | Event::Opened | Event::Closed => {}
                 Event::UserInput(bytes) | Event::Message(bytes) => {
                     seen += 1;
                     draw(&format!("event {seen}: {} bytes", bytes.len())).await?;

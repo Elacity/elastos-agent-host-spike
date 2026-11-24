@@ -234,6 +234,27 @@ struct ComponentState {
     frames: Arc<Mutex<HashMap<String, StoredFrame>>>,
     /// This guest's provider budget. Guests of one provider share it.
     reads: Arc<super::bus2_stream::ReadBudget>,
+    /// The one sender for this guest. `stop` takes it after the closing
+    /// events, so the stream ends and the guest can finish.
+    ui_events: Arc<Mutex<Option<mpsc::UnboundedSender<v2::elastos::bus::types::Event>>>>,
+    /// Shared with the provider. `0` means wall time.
+    ui_now: Arc<AtomicU64>,
+}
+
+/// How a stored frame tells its guest that a grant ended.
+#[derive(Clone)]
+struct UiPipe {
+    events: Arc<Mutex<Option<mpsc::UnboundedSender<v2::elastos::bus::types::Event>>>>,
+    grants: Arc<Mutex<crate::providers::bus2_ui::GrantBook>>,
+}
+
+fn send_ui_event(
+    slot: &Mutex<Option<mpsc::UnboundedSender<v2::elastos::bus::types::Event>>>,
+    event: v2::elastos::bus::types::Event,
+) {
+    if let Some(sender) = slot.lock().expect("events").as_ref() {
+        let _ = sender.send(event);
+    }
 }
 
 /// The host's copy of one presented frame. The principal is the caller the
@@ -256,6 +277,11 @@ pub struct ComponentProvider {
     bus_hostcall: std::sync::RwLock<Option<BridgeHostcall>>,
     bridge_principals: Arc<RwLock<HashMap<CapsuleId, Option<String>>>>,
     frames: Arc<Mutex<HashMap<String, StoredFrame>>>,
+    /// The guest's event sender and grant book, so a paint can tell the guest
+    /// that an image grant expired without taking the async instance lock.
+    ui_pipes: Arc<Mutex<HashMap<String, UiPipe>>>,
+    /// `0` means wall time. A test stores the instant it wants expiry to use.
+    ui_now: Arc<AtomicU64>,
     read_budget: Arc<super::bus2_stream::ReadBudget>,
     compile_slot: Arc<Semaphore>,
     /// Test only: holds the next compile job just after its worker has taken
@@ -278,6 +304,8 @@ impl ComponentProvider {
             bus_hostcall: std::sync::RwLock::new(None),
             bridge_principals: Arc::new(RwLock::new(HashMap::new())),
             frames: Arc::new(Mutex::new(HashMap::new())),
+            ui_pipes: Arc::new(Mutex::new(HashMap::new())),
+            ui_now: Arc::new(AtomicU64::new(0)),
             read_budget: super::bus2_stream::ReadBudget::new(),
             // One compile at a time: a burst of loads queues instead of
             // starting competing compiler jobs.
@@ -303,12 +331,24 @@ impl ComponentProvider {
         caller: Option<&str>,
         id: &str,
     ) -> Option<crate::providers::bus2_ui::Frame> {
-        let frames = self.frames.lock().expect("frames");
-        let stored = frames.get(id)?;
-        if stored.principal.as_deref() != caller {
-            return None;
+        let now = crate::providers::bus2_ui::host_now(self.ui_now.load(Ordering::Acquire));
+        let (frame, due) = {
+            let mut frames = self.frames.lock().expect("frames");
+            let stored = frames.get_mut(id)?;
+            if stored.principal.as_deref() != caller {
+                return None;
+            }
+            let due = crate::providers::bus2_ui::blank_expired(&mut stored.frame, now);
+            (stored.frame.clone(), due)
+        };
+        if !due.is_empty() {
+            if let Some(pipe) = self.ui_pipes.lock().expect("ui").get(id).cloned() {
+                for grant in due {
+                    notify_grant_revoked(&pipe, &grant);
+                }
+            }
         }
-        Some(stored.frame.clone())
+        Some(frame)
     }
 
     /// Stores one frame so a same-process Home test can read it back.
@@ -317,7 +357,7 @@ impl ComponentProvider {
         &self,
         id: &str,
         principal: Option<&str>,
-        nodes: Vec<crate::providers::bus2_ui::FrameNode>,
+        nodes: Vec<crate::providers::bus2_ui::Block>,
     ) {
         self.frames.lock().expect("frames").insert(
             id.to_string(),
@@ -328,23 +368,29 @@ impl ComponentProvider {
         );
     }
 
-    /// Delivers `grant-revoked` on the guest's event stream. The next present
-    /// of that grant is denied. This uses the stream the guest is already reading.
-    /// A host frame whose image names the grant is dropped here, before the guest reads.
+    /// A test clock. `0` returns this provider to wall time.
+    pub fn testing_set_now_ms(&self, now_ms: u64) {
+        self.ui_now.store(now_ms, Ordering::Release);
+    }
+
+    /// The image that names `grant` becomes a named empty place at once, and
+    /// the running guest is told `grant-revoked`. The next present of that
+    /// grant is denied. A guest that is not running still loses the picture.
     pub async fn deliver_grant_revoked(&self, id: &CapsuleId, grant: &str) -> Result<()> {
-        drop_frame_naming(&self.frames, &id.0, grant);
-        let sender = self
-            .instances
-            .read()
-            .await
-            .get(id)
-            .and_then(|instance| instance.events.clone())
+        {
+            let mut frames = self.frames.lock().expect("frames");
+            if let Some(stored) = frames.get_mut(&id.0) {
+                crate::providers::bus2_ui::blank_grant(&mut stored.frame, grant);
+            }
+        }
+        let pipe = self
+            .ui_pipes
+            .lock()
+            .expect("ui")
+            .get(&id.0)
+            .cloned()
             .ok_or_else(|| ElastosError::CapsuleNotFound(id.0.clone()))?;
-        sender
-            .send(v2::elastos::bus::types::Event::GrantRevoked(
-                grant.to_string(),
-            ))
-            .map_err(|_| ElastosError::Compute("the guest is not reading events".into()))?;
+        notify_grant_revoked(&pipe, grant);
         Ok(())
     }
 
@@ -377,6 +423,7 @@ impl ComponentProvider {
         if let Some(instance) = self.instances.write().await.remove(capsule_id) {
             instance.grants.lock().expect("grant book").clear();
         }
+        self.ui_pipes.lock().expect("ui").remove(&capsule_id.0);
         self.frames.lock().expect("frames").remove(&capsule_id.0);
         self.clear_bridge_principal(capsule_id).await;
     }
@@ -650,11 +697,21 @@ impl ComponentProvider {
             ));
         }
         let reads = self.read_budget.clone();
+        let events = Arc::new(Mutex::new(Some(sender.clone())));
+        self.ui_pipes.lock().expect("ui").insert(
+            handle.id.0.clone(),
+            UiPipe {
+                events: events.clone(),
+                grants: instance.grants.clone(),
+            },
+        );
         let state = ComponentState {
             sealed: instance.sealed,
             grants: instance.grants.clone(),
             frames,
             reads,
+            ui_events: events,
+            ui_now: self.ui_now.clone(),
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
         let (engine, component) = (instance.engine.clone(), instance.component.clone());
@@ -734,6 +791,7 @@ impl ComponentProvider {
                 if let Some(instance) = self.instances.write().await.remove(&handle.id) {
                     instance.grants.lock().expect("grant book").clear();
                 }
+                self.ui_pipes.lock().expect("ui").remove(&handle.id.0);
                 self.frames.lock().expect("frames").remove(&handle.id.0);
                 return Err(ElastosError::Compute(format!("v2 guest thread: {err}")));
             }
@@ -741,6 +799,7 @@ impl ComponentProvider {
 
         let id_for_end = handle.id.clone();
         let frames_for_end = self.frames.clone();
+        let pipes_for_end = self.ui_pipes.clone();
         tokio::spawn(async move {
             let ending = done_rx
                 .await
@@ -755,6 +814,7 @@ impl ComponentProvider {
             if let Some(instance) = instances.write().await.remove(&id_for_end) {
                 instance.grants.lock().expect("grant book").clear();
             }
+            pipes_for_end.lock().expect("ui").remove(&id_for_end.0);
             frames_for_end.lock().expect("frames").remove(&id_for_end.0);
             #[cfg(test)]
             endings.write().await.insert(id_for_end, ending);
@@ -764,6 +824,7 @@ impl ComponentProvider {
             Ok(abort) => abort,
             Err(_) => {
                 self.instances.write().await.remove(&handle.id);
+                self.ui_pipes.lock().expect("ui").remove(&handle.id.0);
                 return Err(ElastosError::Compute(
                     "v2 guest thread ended before it started".into(),
                 ));
@@ -1211,20 +1272,45 @@ impl ComputeProvider for ComponentProvider {
             instance.stop_requested.store(true, Ordering::Release);
             return Ok(());
         }
-        // Dropping the sole sender closes the v2 events stream. The guest
-        // receives no separate stop event.
+        // The guest is told that each shown image's grant ended, then that
+        // the surface closed. The stored frame is removed after that, so the
+        // next paint is an empty panel. Dropping the sender then closes the
+        // events stream.
         let mut task = None;
         let mut cancel = None;
         let mut worker = None;
         if let Some(instance) = instances.get_mut(&handle.id) {
             if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
                 instance.stop_requested.store(true, Ordering::Release);
+                let pipe = self.ui_pipes.lock().expect("ui").get(&handle.id.0).cloned();
+                let shown = self
+                    .frames
+                    .lock()
+                    .expect("frames")
+                    .get(&handle.id.0)
+                    .map(|stored| crate::providers::bus2_ui::image_grant_ids(&stored.frame))
+                    .unwrap_or_default();
+                if let Some(pipe) = pipe {
+                    for grant in shown {
+                        send_ui_event(
+                            &pipe.events,
+                            v2::elastos::bus::types::Event::GrantRevoked(grant.clone()),
+                        );
+                        pipe.grants.lock().expect("grant book").revoke(&grant);
+                    }
+                    send_ui_event(&pipe.events, v2::elastos::bus::types::Event::Closed);
+                    // Drop every sender. The queued events stay readable, then
+                    // the stream ends and a waiting guest can return.
+                    pipe.events.lock().expect("events").take();
+                }
+                instance.events.take();
                 instance.grants.lock().expect("grant book").clear();
                 task = instance.task.take();
                 cancel = Some(instance.cancel_requested.clone());
                 worker = instance.worker.take();
             }
         }
+        self.ui_pipes.lock().expect("ui").remove(&handle.id.0);
         self.frames.lock().expect("frames").remove(&handle.id.0);
         instances.remove(&handle.id);
         drop(instances);
@@ -1381,6 +1467,8 @@ impl ComponentState {
             grants: Arc::new(Mutex::new(crate::providers::bus2_ui::GrantBook::default())),
             frames: Arc::new(Mutex::new(HashMap::new())),
             reads: super::bus2_stream::ReadBudget::new(),
+            ui_events: Arc::new(Mutex::new(None)),
+            ui_now: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -1463,30 +1551,61 @@ impl ComponentState {
         }
         hold.shrink(bytes.len());
         hold.arm();
-        self.grants
-            .lock()
-            .expect("grant book")
-            .hold(&grant, &resource, "read");
+        {
+            let mut book = self.grants.lock().expect("grant book");
+            book.hold(&grant, &resource, "read");
+            book.note_bytes(&grant, &bytes);
+        }
         Ok(super::bus2_stream::PreparedRead { bytes, audit, hold })
     }
 
     /// Checker first, then a grant this guest already holds. One frame, replaced.
-    fn present_document(&mut self, media: &str, document: &[u8]) -> V2Result<()> {
+    /// The first stored frame tells the guest the surface opened.
+    fn present_document(&mut self, blocks: Vec<crate::providers::bus2_ui::Block>) -> V2Result<()> {
         if self.sealed {
             return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
         }
+        let now = crate::providers::bus2_ui::host_now(self.ui_now.load(Ordering::Acquire));
+        let due = {
+            let mut frames = self.frames.lock().expect("frames");
+            frames
+                .get_mut(&self.capsule_id)
+                .map(|stored| crate::providers::bus2_ui::blank_expired(&mut stored.frame, now))
+                .unwrap_or_default()
+        };
+        if !due.is_empty() {
+            {
+                let mut book = self.grants.lock().expect("grant book");
+                for grant in &due {
+                    book.revoke(grant);
+                }
+            }
+            for grant in &due {
+                send_ui_event(
+                    &self.ui_events,
+                    v2::elastos::bus::types::Event::GrantRevoked(grant.clone()),
+                );
+            }
+        }
         let frame = {
             let book = self.grants.lock().expect("grant book");
-            crate::providers::bus2_ui::present_frame(media, document, &book)
-                .map_err(present_error)?
+            crate::providers::bus2_ui::present_blocks(blocks, &book, now).map_err(present_error)?
         };
-        self.frames.lock().expect("frames").insert(
-            self.capsule_id.clone(),
-            StoredFrame {
-                principal: self.principal_id.clone(),
-                frame,
-            },
-        );
+        let first = {
+            let mut frames = self.frames.lock().expect("frames");
+            let first = !frames.contains_key(&self.capsule_id);
+            frames.insert(
+                self.capsule_id.clone(),
+                StoredFrame {
+                    principal: self.principal_id.clone(),
+                    frame,
+                },
+            );
+            first
+        };
+        if first {
+            send_ui_event(&self.ui_events, v2::elastos::bus::types::Event::Opened);
+        }
         Ok(())
     }
 
@@ -1760,10 +1879,101 @@ impl v2::elastos::bus::ui::Host for ComponentState {}
 impl v2::elastos::bus::ui::HostWithStore<ComponentState> for HasSelf<ComponentState> {
     async fn present(
         accessor: &wasmtime::component::Accessor<ComponentState, Self>,
-        media_type: String,
-        document: Vec<u8>,
+        document: Vec<v2::elastos::bus::ui::Block>,
     ) -> std::result::Result<(), v2::elastos::bus::types::BusError> {
-        accessor.with(|mut access| access.get().present_document(&media_type, &document))
+        accessor.with(|mut access| {
+            let blocks = document.into_iter().map(host_block).collect();
+            access.get().present_document(blocks)
+        })
+    }
+}
+
+fn host_block(block: v2::elastos::bus::ui::Block) -> crate::providers::bus2_ui::Block {
+    use crate::providers::bus2_ui::Block;
+    use v2::elastos::bus::ui::Block as Guest;
+    match block {
+        Guest::Heading((level, spans)) => Block::Heading {
+            level,
+            spans: spans.into_iter().map(host_span).collect(),
+        },
+        Guest::Paragraph(spans) => Block::Paragraph {
+            spans: spans.into_iter().map(host_span).collect(),
+        },
+        Guest::CodeBlock(text) => Block::Code { text },
+        Guest::Quote(paragraphs) => Block::Quote {
+            paragraphs: paragraphs
+                .into_iter()
+                .map(|spans| spans.into_iter().map(host_span).collect())
+                .collect(),
+        },
+        Guest::List((ordered, items)) => Block::List {
+            ordered,
+            items: items.into_iter().map(host_item).collect(),
+        },
+        Guest::Rule => Block::Rule,
+        Guest::Image(image) => Block::Image {
+            grant: image.grant,
+            alt: image.alt,
+            resource: String::new(),
+            empty: false,
+            expires_at_ms: None,
+        },
+    }
+}
+
+fn host_span(span: v2::elastos::bus::ui::Span) -> crate::providers::bus2_ui::Span {
+    use crate::providers::bus2_ui::Span as Host;
+    use v2::elastos::bus::ui::Span as Guest;
+    match span {
+        Guest::Plain(text) => Host::Plain(text),
+        Guest::Strong(text) => Host::Strong(text),
+        Guest::Emphasis(text) => Host::Emphasis(text),
+        Guest::Code(text) => Host::Code(text),
+    }
+}
+
+fn host_item(item: v2::elastos::bus::ui::Item) -> crate::providers::bus2_ui::Item {
+    use crate::providers::bus2_ui::Item as Host;
+    use v2::elastos::bus::ui::Item as Guest;
+    match item {
+        Guest::Spans(spans) => Host::Spans(spans.into_iter().map(host_span).collect()),
+        Guest::Blocks(blocks) => Host::Blocks(blocks.into_iter().map(host_nested).collect()),
+    }
+}
+
+fn host_nested(block: v2::elastos::bus::ui::Nested) -> crate::providers::bus2_ui::Block {
+    use crate::providers::bus2_ui::{Block, Item};
+    use v2::elastos::bus::ui::Nested as Guest;
+    match block {
+        Guest::Heading((level, spans)) => Block::Heading {
+            level,
+            spans: spans.into_iter().map(host_span).collect(),
+        },
+        Guest::Paragraph(spans) => Block::Paragraph {
+            spans: spans.into_iter().map(host_span).collect(),
+        },
+        Guest::CodeBlock(text) => Block::Code { text },
+        Guest::Quote(paragraphs) => Block::Quote {
+            paragraphs: paragraphs
+                .into_iter()
+                .map(|spans| spans.into_iter().map(host_span).collect())
+                .collect(),
+        },
+        Guest::List((ordered, items)) => Block::List {
+            ordered,
+            items: items
+                .into_iter()
+                .map(|spans| Item::Spans(spans.into_iter().map(host_span).collect()))
+                .collect(),
+        },
+        Guest::Rule => Block::Rule,
+        Guest::Image(image) => Block::Image {
+            grant: image.grant,
+            alt: image.alt,
+            resource: String::new(),
+            empty: false,
+            expires_at_ms: None,
+        },
     }
 }
 
@@ -1774,10 +1984,8 @@ fn present_error(err: crate::providers::bus2_ui::PresentError) -> V2BusError {
     }
 }
 
-/// A delivered `grant-revoked` marks that grant and drops the host's stored
-/// frame when that frame names the grant. The draft leaves a frame already
-/// drawn unstated (WIT note 11). This drops the host's own copy. It does not
-/// clear a screen.
+/// A delivered `grant-revoked` marks that grant. The picture in the stored
+/// frame becomes a named empty place. The other blocks stay.
 fn note_delivered_event(
     book: &Mutex<crate::providers::bus2_ui::GrantBook>,
     frames: &Mutex<HashMap<String, StoredFrame>>,
@@ -1788,21 +1996,18 @@ fn note_delivered_event(
         return;
     };
     book.lock().expect("grant book").revoke(id);
-    drop_frame_naming(frames, capsule_id, id);
+    let mut frames = frames.lock().expect("frames");
+    if let Some(stored) = frames.get_mut(capsule_id) {
+        crate::providers::bus2_ui::blank_grant(&mut stored.frame, id);
+    }
 }
 
-/// Drops the host frame for `capsule_id` when an image node names `grant`.
-fn drop_frame_naming(frames: &Mutex<HashMap<String, StoredFrame>>, capsule_id: &str, grant: &str) {
-    let mut frames = frames.lock().expect("frames");
-    let names = frames.get(capsule_id).is_some_and(|stored| {
-        stored.frame.nodes.iter().any(|node| match node {
-            crate::providers::bus2_ui::FrameNode::Image { grant: named, .. } => named == grant,
-            crate::providers::bus2_ui::FrameNode::Text(_) => false,
-        })
-    });
-    if names {
-        frames.remove(capsule_id);
-    }
+fn notify_grant_revoked(pipe: &UiPipe, grant: &str) {
+    pipe.grants.lock().expect("grant book").revoke(grant);
+    send_ui_event(
+        &pipe.events,
+        v2::elastos::bus::types::Event::GrantRevoked(grant.to_string()),
+    );
 }
 
 #[cfg(test)]
@@ -2493,7 +2698,7 @@ mod tests {
             StoredFrame {
                 principal: None,
                 frame: crate::providers::bus2_ui::Frame {
-                    nodes: vec![crate::providers::bus2_ui::FrameNode::Text("up".into())],
+                    nodes: vec![crate::providers::bus2_ui::Block::text("up")],
                 },
             },
         );
@@ -2526,7 +2731,7 @@ mod tests {
             StoredFrame {
                 principal: Some("person:local:a".into()),
                 frame: crate::providers::bus2_ui::Frame {
-                    nodes: vec![crate::providers::bus2_ui::FrameNode::Text("up".into())],
+                    nodes: vec![crate::providers::bus2_ui::Block::text("up")],
                 },
             },
         );
@@ -2543,7 +2748,7 @@ mod tests {
             StoredFrame {
                 principal: None,
                 frame: crate::providers::bus2_ui::Frame {
-                    nodes: vec![crate::providers::bus2_ui::FrameNode::Text("stay".into())],
+                    nodes: vec![crate::providers::bus2_ui::Block::text("stay")],
                 },
             },
         );
@@ -2557,16 +2762,19 @@ mod tests {
                 .read_v2_frame(None, &handle.id.0)
                 .expect("a text frame stays")
                 .nodes,
-            vec![crate::providers::bus2_ui::FrameNode::Text("stay".into())]
+            vec![crate::providers::bus2_ui::Block::text("stay")]
         );
         provider.frames.lock().expect("frames").insert(
             handle.id.0.clone(),
             StoredFrame {
                 principal: None,
                 frame: crate::providers::bus2_ui::Frame {
-                    nodes: vec![crate::providers::bus2_ui::FrameNode::Image {
+                    nodes: vec![crate::providers::bus2_ui::Block::Image {
                         grant: "g1".into(),
+                        alt: "a cat".into(),
                         resource: "localhost://Local/x".into(),
+                        empty: false,
+                        expires_at_ms: None,
                     }],
                 },
             },
@@ -2577,15 +2785,101 @@ mod tests {
             .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if provider.read_v2_frame(None, &handle.id.0).is_none() {
+                let empty = provider
+                    .read_v2_frame(None, &handle.id.0)
+                    .is_some_and(|frame| {
+                        matches!(
+                            frame.nodes.first(),
+                            Some(crate::providers::bus2_ui::Block::Image {
+                                empty: true,
+                                alt,
+                                ..
+                            }) if alt == "a cat"
+                        )
+                    });
+                if empty {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("the host frame stays after revoke");
+        .expect("the image becomes a named empty place");
         assert!(provider.instances.read().await.contains_key(&handle.id));
+        provider.stop(&handle).await.unwrap();
+    }
+
+    /// A due image becomes a named empty place on the next read, and the
+    /// guest is told `grant-revoked`. The clock is the test clock, not the wall.
+    #[tokio::test]
+    async fn v2_expiry_blanks_the_image_and_tells_the_guest() {
+        let provider = ComponentProvider::new();
+        provider.testing_set_now_ms(10);
+        let (_, mut manifest) = component_fixture();
+        manifest.bus_contract = Some(ELASTOS_BUS_V2_CONTRACT.into());
+        manifest.wit_world_sha256 = Some(elastos_common::elastos_bus_v2_wit_sha256());
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let handle = provider.load_admitted(bytes, manifest).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), provider.start(&handle))
+            .await
+            .expect("guest start completes")
+            .unwrap();
+        let id = handle.id.0.clone();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if provider.instances.read().await.contains_key(&handle.id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("guest stays resident");
+        provider
+            .ui_pipes
+            .lock()
+            .expect("pipes")
+            .get(&id)
+            .expect("pipe")
+            .grants
+            .lock()
+            .expect("grant book")
+            .hold_until("g1", "localhost://Local/x", "read", Some(10));
+        provider.testing_store_v2_frame(
+            &id,
+            None,
+            vec![crate::providers::bus2_ui::Block::Image {
+                grant: "g1".into(),
+                alt: "a cat".into(),
+                resource: "localhost://Local/x".into(),
+                empty: false,
+                expires_at_ms: Some(10),
+            }],
+        );
+        let frame = provider
+            .read_v2_frame(None, &id)
+            .expect("the due image is a named empty place");
+        assert!(matches!(
+            frame.nodes.first(),
+            Some(crate::providers::bus2_ui::Block::Image { empty: true, alt, .. })
+                if alt == "a cat"
+        ));
+        assert!(
+            provider
+                .ui_pipes
+                .lock()
+                .expect("pipes")
+                .get(&id)
+                .expect("pipe")
+                .grants
+                .lock()
+                .expect("grant book")
+                .is_empty(),
+            "telling the guest revokes the grant"
+        );
         provider.stop(&handle).await.unwrap();
     }
 
@@ -3024,16 +3318,37 @@ mod tests {
             "capsule-1",
             &v2::elastos::bus::types::Event::GrantRevoked(revoked.id.clone()),
         );
-        let media = crate::providers::bus2_ui::UI_MEDIA_TYPE;
-        let present = |state: &mut ComponentState, document: &str| {
-            state.present_document(media, document.as_bytes())
+        let present = |state: &mut ComponentState,
+                       blocks: Vec<crate::providers::bus2_ui::Block>| {
+            state.present_document(blocks)
         };
-        present(&mut state, r#"{"frame":[{"text":"one"}]}"#).unwrap();
-        let second = format!(
-            r#"{{"frame":[{{"image":{{"grant":"{}"}}}},{{"text":"two"}}]}}"#,
-            read.id
+        let unread = present(
+            &mut state,
+            vec![crate::providers::bus2_ui::Block::image(read.id.clone(), "")],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(unread, V2BusError::Denied(ref message) if message.contains("is not an image")),
+            "{unread:?}"
         );
-        present(&mut state, &second).unwrap();
+        state
+            .grants
+            .lock()
+            .expect("grant book")
+            .note_bytes(&read.id, b"\x89PNG\r\n\x1a\n");
+        present(
+            &mut state,
+            vec![crate::providers::bus2_ui::Block::text("one")],
+        )
+        .unwrap();
+        present(
+            &mut state,
+            vec![
+                crate::providers::bus2_ui::Block::image(read.id.clone(), ""),
+                crate::providers::bus2_ui::Block::text("two"),
+            ],
+        )
+        .unwrap();
         let stored = state
             .frames
             .lock()
@@ -3045,19 +3360,12 @@ mod tests {
         assert_eq!(
             stored.frame.nodes,
             vec![
-                crate::providers::bus2_ui::FrameNode::Image {
-                    grant: read.id.clone(),
-                    resource: photo.into(),
-                },
-                crate::providers::bus2_ui::FrameNode::Text("two".into()),
+                crate::providers::bus2_ui::Block::image(read.id.clone(), photo),
+                crate::providers::bus2_ui::Block::text("two"),
             ]
         );
         let denied = |state: &mut ComponentState, id: &str| {
-            present(
-                state,
-                &format!(r#"{{"frame":[{{"image":{{"grant":"{id}"}}}}]}}"#),
-            )
-            .unwrap_err()
+            present(state, vec![crate::providers::bus2_ui::Block::image(id, "")]).unwrap_err()
         };
         assert!(
             matches!(denied(&mut state, "g-missing"), V2BusError::Denied(message)
@@ -3071,23 +3379,32 @@ mod tests {
             matches!(denied(&mut state, &write.id), V2BusError::Denied(message)
             if message.contains("does not allow read"))
         );
-        let script = present(
+        present(
             &mut state,
-            r#"{"frame":[{"text":"x","script":"alert(1)"}]}"#,
+            vec![crate::providers::bus2_ui::Block::text(
+                "<script>alert(1)</script>",
+            )],
         )
-        .unwrap_err();
-        assert!(matches!(script, V2BusError::Invalid(message) if message.contains("scripts")));
+        .unwrap();
         assert_eq!(
             state
                 .frames
                 .lock()
                 .expect("frames")
                 .get("capsule-1")
-                .unwrap(),
-            &stored
+                .unwrap()
+                .frame
+                .nodes,
+            vec![crate::providers::bus2_ui::Block::text(
+                "<script>alert(1)</script>"
+            )]
         );
         state.sealed = true;
-        let sealed = present(&mut state, r#"{"frame":[{"text":"no"}]}"#).unwrap_err();
+        let sealed = present(
+            &mut state,
+            vec![crate::providers::bus2_ui::Block::text("no")],
+        )
+        .unwrap_err();
         assert!(matches!(sealed, V2BusError::Denied(message) if message == SEALED_BRIDGE));
         assert_eq!(
             calls.load(Ordering::Relaxed),

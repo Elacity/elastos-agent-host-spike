@@ -136,13 +136,13 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The stored nodes of one resident when `caller` presented that frame.
-/// An image node still carries its grant id. The Home answer leaves that out.
+/// The stored blocks of one resident when `caller` presented that frame.
+/// An image block still carries its grant id. The Home answer leaves that out.
 pub fn read_v2_frame_for_home(
     provider: &elastos_compute::providers::ComponentProvider,
     caller: Option<&str>,
     id: &str,
-) -> Option<Vec<elastos_compute::providers::bus2_ui::FrameNode>> {
+) -> Option<Vec<elastos_compute::providers::bus2_ui::Block>> {
     provider.read_v2_frame(caller, id).map(|frame| frame.nodes)
 }
 
@@ -156,19 +156,7 @@ pub fn v2_frame_answer(
     app: &str,
 ) -> std::result::Result<Vec<u8>, &'static str> {
     let nodes = read_v2_frame_for_home(provider, Some(principal), app).unwrap_or_default();
-    let nodes: Vec<serde_json::Value> = nodes
-        .into_iter()
-        .map(|node| match node {
-            elastos_compute::providers::bus2_ui::FrameNode::Text(text) => {
-                serde_json::json!({ "kind": "text", "text": text })
-            }
-            elastos_compute::providers::bus2_ui::FrameNode::Image { resource, .. } => {
-                serde_json::json!({ "kind": "image", "resource": resource })
-            }
-        })
-        .collect();
-    let bytes = serde_json::to_vec(&serde_json::json!({ "nodes": nodes }))
-        .map_err(|_| "frame answer is malformed")?;
+    let bytes = elastos_compute::providers::bus2_ui::encode_frame(&nodes);
     if bytes.len() > V2_FRAME_ANSWER_MAX {
         return Err("frame answer is over the bound");
     }
@@ -376,31 +364,17 @@ mod tests {
 
     #[test]
     fn v2_frame_read_returns_nodes_and_grant_ids() {
-        use elastos_compute::providers::bus2_ui::{
-            present_frame, FrameNode, GrantBook, UI_MEDIA_TYPE,
-        };
+        use elastos_compute::providers::bus2_ui::{present_blocks, Block, GrantBook};
         use elastos_compute::providers::ComponentProvider;
 
         let mut book = GrantBook::default();
         let photo = "localhost://Users/self/Pictures/a.png";
         book.hold("g1", photo, "read");
-        let replaced = present_frame(
-            UI_MEDIA_TYPE,
-            br#"{"frame":[{"text":"two"},{"image":{"grant":"g1"}}]}"#,
-            &book,
-        )
-        .unwrap();
+        book.note_bytes("g1", b"\x89PNG\r\n\x1a\n");
+        let replaced =
+            present_blocks(vec![Block::text("two"), Block::image("g1", "")], &book, 0).unwrap();
         let nodes = replaced.nodes;
-        assert_eq!(
-            nodes,
-            vec![
-                FrameNode::Text("two".into()),
-                FrameNode::Image {
-                    grant: "g1".into(),
-                    resource: photo.into(),
-                },
-            ]
-        );
+        assert_eq!(nodes, vec![Block::text("two"), Block::image("g1", photo)]);
         let provider = ComponentProvider::new();
         assert!(super::read_v2_frame_for_home(&provider, None, "other").is_none());
     }
@@ -409,15 +383,15 @@ mod tests {
     /// read returns that frame. A second guest's frame stays its own.
     #[tokio::test]
     async fn v2_guest_present_reaches_the_home_frame_read() {
-        use elastos_compute::providers::bus2_ui::FrameNode;
+        use elastos_compute::providers::bus2_ui::Block;
         use elastos_compute::providers::ComponentProvider;
         use elastos_compute::ComputeProvider;
         use std::collections::HashMap;
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
-        let object_a = br#"{"frame":[{"text":"A"}]}"#.to_vec();
-        let object_b = br#"{"frame":[{"text":"B"}]}"#.to_vec();
+        let object_a = b"A".to_vec();
+        let object_b = b"B".to_vec();
         let docs = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
         let lines = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
         let provider = ComponentProvider::new();
@@ -505,11 +479,11 @@ mod tests {
         };
         let nodes_a = frame_of(first.id.as_str(), Some("person:local:a")).await;
         let nodes_b = frame_of(second.id.as_str(), None).await;
-        assert_eq!(nodes_a, vec![FrameNode::Text("A".into())]);
-        assert_eq!(nodes_b, vec![FrameNode::Text("B".into())]);
+        assert_eq!(nodes_a, vec![Block::text("A")]);
+        assert_eq!(nodes_b, vec![Block::text("B")]);
         assert_eq!(
             read_v2_frame_for_home(&provider, Some("person:local:a"), first.id.as_str()),
-            Some(vec![FrameNode::Text("A".into())]),
+            Some(vec![Block::text("A")]),
             "the second guest does not replace the first frame"
         );
         assert!(read_v2_frame_for_home(&provider, None, first.id.as_str()).is_none());
@@ -830,7 +804,7 @@ mod tests {
     async fn v2_guest_presents_then_a_revoked_grant_denies_the_next_present() {
         use crate::resource_bridge::{handle_component_resource_request, BridgeContext};
         use elastos_common::AuthorityBound;
-        use elastos_compute::providers::bus2_ui::FrameNode;
+        use elastos_compute::providers::bus2_ui::Block;
         use elastos_compute::providers::{ActivationOutcome, ComponentProvider};
         use elastos_compute::ComputeProvider;
         use elastos_runtime::capability::pending::PendingRequestStore;
@@ -899,7 +873,7 @@ mod tests {
         registry
             .register(Arc::new(NoteProvider {
                 calls: calls.clone(),
-                note: b"note".to_vec(),
+                note: b"\x89PNG\r\n\x1a\n".to_vec(),
             }))
             .await;
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -998,12 +972,17 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
-        assert_eq!(
-            nodes,
-            vec![FrameNode::Image {
-                grant: encoded.clone(),
-                resource: RESOURCE.into(),
-            }]
+        assert!(
+            matches!(
+                nodes.as_slice(),
+                [Block::Image {
+                    grant,
+                    resource,
+                    empty: false,
+                    ..
+                }] if grant == &encoded && resource == RESOURCE
+            ),
+            "{nodes:?}"
         );
         assert_eq!(
             *calls.lock().expect("calls"),
@@ -1052,19 +1031,35 @@ mod tests {
             .await
             .expect("the revoke route answers");
         assert_eq!(revoked.status(), axum::http::StatusCode::OK);
+        // A successful second present would have ended the guest with an error.
+        // It is still up, so that present was denied, and the picture is a
+        // named empty place until stop.
         assert!(
-            read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str()).is_none(),
-            "the route drops the frame that names the grant"
+            resident.outcome().is_none(),
+            "the denied present leaves the guest up"
         );
+        let after = read_v2_frame_for_home(provider.as_ref(), None, handle.id.as_str())
+            .expect("the frame stays as a named empty place");
+        assert!(
+            matches!(
+                after.as_slice(),
+                [Block::Image {
+                    empty: true,
+                    resource,
+                    ..
+                }] if resource == RESOURCE
+            ),
+            "{after:?}"
+        );
+        provider.stop(&handle).await.unwrap();
         let outcome = tokio::time::timeout(Duration::from_secs(8), resident.ended())
             .await
             .expect("guest timed out");
         assert_eq!(
             outcome,
-            ActivationOutcome::Returned,
-            "the next present is denied and the guest returns"
+            ActivationOutcome::Stopped,
+            "stop ends the guest after the denied present"
         );
-        provider.stop(&handle).await.unwrap();
     }
 
     fn wat_imports(names: &[&str]) -> Vec<u8> {

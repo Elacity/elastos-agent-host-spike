@@ -99,13 +99,8 @@ async fn home_frame_comes_from_the_managed_runtime() {
         "app-frame",
         Some(owner.principal_id.as_str()),
         vec![
-            elastos_compute::providers::bus2_ui::FrameNode::Text(
-                "<script>alert(1)</script>".into(),
-            ),
-            elastos_compute::providers::bus2_ui::FrameNode::Image {
-                grant: "grant-frame".into(),
-                resource: "localhost://photo".into(),
-            },
+            elastos_compute::providers::bus2_ui::Block::text("<script>alert(1)</script>"),
+            elastos_compute::providers::bus2_ui::Block::image("grant-frame", "localhost://photo"),
         ],
     );
     let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
@@ -122,8 +117,12 @@ async fn home_frame_comes_from_the_managed_runtime() {
     let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let owner_frame: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(owner_frame["nodes"][0]["text"], "<script>alert(1)</script>");
+    assert_eq!(
+        owner_frame["nodes"][0]["spans"][0]["text"],
+        "<script>alert(1)</script>"
+    );
     assert_eq!(owner_frame["nodes"][1]["resource"], "localhost://photo");
+    assert_eq!(owner_frame["nodes"][1]["empty"], false);
     assert!(owner_frame.get("grant").is_none());
 
     let (other_status, other_body) = frame_body(&app, &other.home_token, "app=app-frame").await;
@@ -164,19 +163,19 @@ async fn home_frame_comes_from_the_managed_runtime() {
         .deliver_grant_revoked(&elastos_common::CapsuleId::new("app-frame"), "grant-frame")
         .await;
     let (_, revoked) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    let revoked_nodes = serde_json::from_str::<serde_json::Value>(&revoked).unwrap();
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&revoked).unwrap()["nodes"]
-            .as_array()
-            .map(Vec::len),
-        Some(0),
-        "revoke clears the panel, got {revoked}"
+        revoked_nodes["nodes"][0]["spans"][0]["text"], "<script>alert(1)</script>",
+        "the paragraph stays, got {revoked}"
     );
+    assert_eq!(revoked_nodes["nodes"][1]["empty"], true, "{revoked}");
+    assert_eq!(revoked_nodes["nodes"][1]["resource"], "localhost://photo");
 
     provider.testing_store_v2_frame(
         "app-frame",
         Some(owner.principal_id.as_str()),
-        vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
-            "still here".into(),
+        vec![elastos_compute::providers::bus2_ui::Block::text(
+            "still here",
         )],
     );
     let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
@@ -209,7 +208,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
     provider.testing_store_v2_frame(
         "app-frame",
         Some(owner.principal_id.as_str()),
-        vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
+        vec![elastos_compute::providers::bus2_ui::Block::text(
             "x".repeat(crate::component::V2_FRAME_ANSWER_MAX),
         )],
     );

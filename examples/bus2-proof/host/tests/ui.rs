@@ -1,14 +1,14 @@
-//! Proof 3: ui.present draws one frame from one declarative document,
-//! images by granted handle, no script.
+//! Proof 3: ui.present draws one typed document. An image is a grant.
 mod common;
 
 use std::time::Duration;
 
+use bus2_host::elastos::bus::ui::{Block, Image, Item, Nested, Span};
 use bus2_host::objects::request_grant;
 use bus2_host::ui::check_document;
 use bus2_host::{
-    run_resident, BusError, Event, Frame, HostState, Limits, Node, Outcome, StubObject, Ticker,
-    UI_MEDIA_TYPE,
+    run_resident, BusError, Event, Frame, HostState, Limits, Node, Outcome, Piece, StubObject,
+    Ticker,
 };
 use wasmtime::component::Component;
 
@@ -33,7 +33,6 @@ fn state() -> HostState {
     state
         .objects
         .insert(NOTES.to_string(), StubObject::new(b"just text".to_vec()));
-    // Both photos are the same bytes, so one licence covers both.
     state.credentials.push(common::licence(PNG));
     state
 }
@@ -60,6 +59,17 @@ fn show(state: HostState, uris: &'static [&'static str]) -> Outcome {
     })
 }
 
+fn plain(text: &str) -> Span {
+    Span::Plain(text.to_string())
+}
+
+fn image(id: &str) -> Vec<Block> {
+    vec![Block::Image(Image {
+        grant: id.to_string(),
+        alt: String::new(),
+    })]
+}
+
 #[test]
 fn a_good_document_draws_one_frame_that_names_the_image_by_grant() {
     let outcome = show(state(), &[PHOTO]);
@@ -70,9 +80,15 @@ fn a_good_document_draws_one_frame_that_names_the_image_by_grant() {
             nodes: vec![
                 Node::Image {
                     grant: "grant:1".into(),
-                    resource: PHOTO.into()
+                    resource: PHOTO.into(),
+                    alt: String::new(),
                 },
-                Node::Text(format!("{} bytes", PNG.len())),
+                Node::Paragraph {
+                    spans: vec![Piece {
+                        style: "plain".into(),
+                        text: format!("{} bytes", PNG.len()),
+                    }],
+                },
             ]
         }]
     );
@@ -86,134 +102,72 @@ fn a_new_present_replaces_the_frame() {
     assert!(matches!(&on_screen.nodes[0], Node::Image { resource, .. } if resource == OTHER));
 }
 
-fn refused(state: &HostState, media_type: &str, document: &str) -> BusError {
-    match check_document(state, media_type, document.as_bytes()) {
+fn refused(state: &HostState, document: &[Block]) -> BusError {
+    match check_document(state, document) {
         Ok(frame) => panic!("expected a refusal, drew {frame:?}"),
-        Err(error) => {
-            println!("refused: {error:?}");
-            error
-        }
-    }
-}
-
-fn invalid_with(error: BusError, part: &str) {
-    match error {
-        BusError::Invalid(why) => assert!(why.contains(part), "{why:?} should say {part:?}"),
-        other => panic!("expected invalid, got {other:?}"),
+        Err(error) => error,
     }
 }
 
 #[test]
-fn a_document_with_script_or_handlers_is_refused() {
+fn a_script_shaped_string_is_text() {
     let state = state();
-    let no_script = "scripts and event handlers are not allowed";
-    invalid_with(
-        refused(
-            &state,
-            UI_MEDIA_TYPE,
-            r#"{"frame":[{"script":"alert(1)"}]}"#,
-        ),
-        no_script,
+    let frame = check_document(
+        &state,
+        &[Block::Paragraph(vec![plain("<script>alert(1)</script>")])],
+    )
+    .unwrap();
+    assert_eq!(
+        frame.nodes,
+        vec![Node::Paragraph {
+            spans: vec![Piece {
+                style: "plain".into(),
+                text: "<script>alert(1)</script>".into(),
+            }],
+        }]
     );
-    invalid_with(
-        refused(
-            &state,
-            UI_MEDIA_TYPE,
-            r#"{"frame":[{"text":"hi","onclick":"x"}]}"#,
-        ),
-        no_script,
-    );
-    invalid_with(
-        refused(
-            &state,
-            UI_MEDIA_TYPE,
-            r#"{"frame":[{"image":{"grant":"grant:1","onload":"x"}}]}"#,
-        ),
-        no_script,
-    );
-    invalid_with(
-        refused(&state, UI_MEDIA_TYPE, r#"{"frame":[{"html":"<b>hi</b>"}]}"#),
-        "never by a URI or bytes",
-    );
-}
-
-#[test]
-fn an_image_by_uri_or_bytes_is_refused() {
-    let state = state();
-    for document in [
-        r#"{"frame":[{"image":{"uri":"localhost://Users/self/Pictures/a.png"}}]}"#,
-        r#"{"frame":[{"image":{"src":"https://example.com/a.png"}}]}"#,
-        r#"{"frame":[{"image":{"bytes":"iVBORw0KGgo="}}]}"#,
-    ] {
-        invalid_with(
-            refused(&state, UI_MEDIA_TYPE, document),
-            "never by a URI or bytes",
-        );
-    }
 }
 
 #[test]
 fn an_image_needs_a_held_unrevoked_read_grant_on_an_image() {
     let mut state = state();
     let photo = request_grant(&mut state, PHOTO.into(), vec!["read".into()]).unwrap();
+    let other = request_grant(&mut state, OTHER.into(), vec!["read".into()]).unwrap();
     let notes = request_grant(&mut state, NOTES.into(), vec!["read".into()]).unwrap();
-    let image = |id: &str| format!(r#"{{"frame":[{{"image":{{"grant":"{id}"}}}}]}}"#);
-
-    assert!(check_document(&state, UI_MEDIA_TYPE, image(&photo.id).as_bytes()).is_ok());
+    assert!(check_document(&state, &image(&photo.id)).is_ok());
+    assert!(check_document(&state, &image(&other.id)).is_ok());
     assert_eq!(
-        refused(&state, UI_MEDIA_TYPE, &image("grant:99")),
+        refused(&state, &image("grant:99")),
         BusError::Denied("grant:99 is not a grant this guest holds".into())
     );
-    invalid_with(
-        refused(&state, UI_MEDIA_TYPE, &image(&notes.id)),
-        "is not a PNG, JPEG or WebP image",
-    );
+    match refused(&state, &image(&notes.id)) {
+        BusError::Denied(why) => assert!(why.contains("is not a PNG, JPEG or WebP image"), "{why}"),
+        other => panic!("{other:?}"),
+    }
     state.revoked.push(photo.id.clone());
     assert_eq!(
-        refused(&state, UI_MEDIA_TYPE, &image(&photo.id)),
+        refused(&state, &image(&photo.id)),
         BusError::Denied(format!("{} was revoked", photo.id))
     );
 }
 
 #[test]
-fn a_document_that_is_not_the_one_format_is_refused() {
+fn bounds_refuse_an_empty_document_and_a_long_string() {
     let state = state();
-    let good = r#"{"frame":[{"text":"hi"}]}"#;
-    invalid_with(refused(&state, "text/html", good), "media type");
-    invalid_with(
-        refused(&state, "application/vnd.elastos.ui+json;v=1", good),
-        "media type",
-    );
-    invalid_with(
-        refused(
-            &state,
-            UI_MEDIA_TYPE,
-            r#"{"frame":[{"text":"hi"}],"style":"x"}"#,
-        ),
-        "unknown field",
-    );
-    invalid_with(
-        refused(
-            &state,
-            UI_MEDIA_TYPE,
-            r#"{"frame":[{"video":{"grant":"grant:1"}}]}"#,
-        ),
-        "unknown variant",
-    );
-    invalid_with(
-        refused(&state, UI_MEDIA_TYPE, r#"{"frame":[],"frame":[]}"#),
-        "duplicate field",
-    );
-    invalid_with(
-        refused(&state, UI_MEDIA_TYPE, r#"{"frame":[]}"#),
-        "1 to 32 nodes",
-    );
-    invalid_with(refused(&state, UI_MEDIA_TYPE, "not json"), "not JSON");
-    let long = format!(r#"{{"frame":[{{"text":"{}"}}]}}"#, "x".repeat(1001));
-    invalid_with(
-        refused(&state, UI_MEDIA_TYPE, &long),
-        "at most 1000 characters",
-    );
-    let big = format!(r#"{{"frame":[{{"text":"{}"}}]}}"#, " ".repeat(17 * 1024));
-    invalid_with(refused(&state, UI_MEDIA_TYPE, &big), "byte limit");
+    match refused(&state, &[]) {
+        BusError::Invalid(why) => assert!(why.contains("1 to 32"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    match refused(&state, &[Block::Paragraph(vec![plain(&"x".repeat(1001))])]) {
+        BusError::Invalid(why) => assert!(why.contains("1000"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    let nested = Block::List((
+        false,
+        vec![Item::Blocks(vec![Nested::List((
+            true,
+            vec![vec![plain("inside")]],
+        ))])],
+    ));
+    assert!(check_document(&state, &[nested]).is_ok());
 }
