@@ -314,6 +314,47 @@ mod tests {
         panic!("filter did not return");
     }
 
+    /// Localhost `write_file` opens, writes, and may `mkdirat`. It does not rename
+    /// (`capsules/localhost-provider/src/main.rs` write path). Object's atomic write
+    /// and chain's lifecycle file use `rename`, which is `renameat` on aarch64.
+    /// `faccessat2` and `ioctl` are not those calls. Both stay denied.
+    #[test]
+    fn helper_operations_pass_the_filter_for_the_calls_they_make() {
+        let arch = AuditArch::Aarch64;
+        let audit = 0xc000_00b7_u32;
+        let allow = ["openat", "write", "close", "mkdirat", "statx", "newfstatat", "readlinkat"];
+        for provider in [RuntimeProviderId::Localhost, RuntimeProviderId::Object, RuntimeProviderId::Chain] {
+            let admitted = super::super::rights::admit_runtime_grant(provider);
+            let names = super::linux_seccomp_list(provider, &admitted, arch);
+            assert!(!names.contains(&"ioctl"), "{provider:?}");
+            assert!(!names.contains(&"faccessat2"), "{provider:?}");
+            let prog = program(provider, &admitted, arch);
+            for name in allow {
+                let nr = number(name, arch).expect(name);
+                assert_eq!(interpret(&prog, nr, [0; 6], audit), super::ALLOW, "{provider:?} {name}");
+            }
+            let renameat = number("renameat", arch).expect("renameat");
+            let rename_allowed = matches!(provider, RuntimeProviderId::Object | RuntimeProviderId::Chain);
+            assert_eq!(
+                interpret(&prog, renameat, [0; 6], audit) == super::ALLOW,
+                rename_allowed,
+                "{provider:?} renameat"
+            );
+            // aarch64 ioctl is 29. faccessat2 is 439 on both arches. Neither name is listed.
+            assert_eq!(interpret(&prog, 29, [0; 6], audit), super::DENY, "{provider:?} ioctl");
+            assert_eq!(interpret(&prog, 439, [0; 6], audit), super::DENY, "{provider:?} faccessat2");
+        }
+        let x86 = AuditArch::X86_64;
+        let x86_audit = 0xc000_003e_u32;
+        for provider in [RuntimeProviderId::Localhost, RuntimeProviderId::Object, RuntimeProviderId::Chain] {
+            let admitted = super::super::rights::admit_runtime_grant(provider);
+            let prog = program(provider, &admitted, x86);
+            // x86_64 ioctl is 16.
+            assert_eq!(interpret(&prog, 16, [0; 6], x86_audit), super::DENY, "{provider:?} ioctl");
+            assert_eq!(interpret(&prog, 439, [0; 6], x86_audit), super::DENY, "{provider:?} faccessat2");
+        }
+    }
+
     /// The pin's model golden, minus the post-pin rename pair, is the unconditional
     /// baseline. Measured probe names are dropped the same way. The argument tail
     /// is the interpreter row above, not this pin.
