@@ -110,13 +110,16 @@ pub(super) async fn append_inbox_requests(
         notifications.entries.push(card);
     }
     append_wallet_approval_notifications(notifications, wallet_approvals);
-    // Runtime capability requests are the admin's to answer.
+    let (home_asks, agent_asks) = live_pending(&state.data_dir).await;
     if ensure_admin_context(&state.data_dir, context).is_ok() {
-        if let Ok(capability_requests) = runtime_capability_pending_requests(&state.data_dir).await
-        {
-            append_runtime_capability_notifications(notifications, capability_requests);
-        }
+        append_runtime_capability_notifications(notifications, home_asks);
     }
+    append_agent_asks(
+        notifications,
+        context.principal_id(),
+        &owned_agents(&state.data_dir),
+        &agent_asks,
+    );
     if let Ok(inspect_requests) =
         pending_inspect_action_requests(&state.data_dir, context.principal_id())
     {
@@ -254,25 +257,190 @@ pub(super) fn append_wallet_approval_notifications(
     }
 }
 
-pub(super) async fn runtime_capability_pending_requests(
-    data_dir: &std::path::Path,
+#[derive(Deserialize)]
+struct PendingBody {
+    #[serde(default)]
+    requests: Vec<RuntimeCapabilityPendingRequest>,
+}
+
+struct OwnedAgent {
+    id: String,
+    name: String,
+    root: String,
+    owner: String,
+}
+
+fn rows_from(
+    read: Option<anyhow::Result<Vec<RuntimeCapabilityPendingRequest>>>,
+) -> Vec<RuntimeCapabilityPendingRequest> {
+    match read {
+        Some(Ok(rows)) => rows,
+        Some(Err(_)) | None => Vec::new(),
+    }
+}
+
+async fn read_pending(
+    coords: &crate::runtime_control::RuntimeCoords,
 ) -> anyhow::Result<Vec<RuntimeCapabilityPendingRequest>> {
-    let coords = load_live_runtime_coords(data_dir)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
-    let shell_token = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
-    let response = client
+    let shell = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
+    Ok(client
         .get(format!("{}/api/capability/pending", coords.api_url))
-        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
         .send()
         .await?
         .error_for_status()?
-        .json::<RuntimeCapabilityPendingResponse>()
-        .await?;
-    Ok(response.requests)
+        .json::<PendingBody>()
+        .await?
+        .requests)
+}
+
+async fn live_pending(
+    data_dir: &std::path::Path,
+) -> (
+    Vec<RuntimeCapabilityPendingRequest>,
+    Vec<RuntimeCapabilityPendingRequest>,
+) {
+    let home = rows_from(match load_live_runtime_coords(data_dir).await {
+        Some(coords) => Some(read_pending(&coords).await),
+        None => None,
+    });
+    let agent = rows_from(match crate::api::agent_plane::live_coords(data_dir).await {
+        Some(coords) => Some(read_pending(&coords).await),
+        None => None,
+    });
+    (home, agent)
+}
+
+fn owned_agents(data_dir: &std::path::Path) -> Vec<OwnedAgent> {
+    let Ok(state) = crate::auth::load_auth_state(data_dir) else {
+        return Vec::new();
+    };
+    state
+        .principals
+        .into_iter()
+        .filter_map(|record| {
+            if record.retired_at.is_some() || record.localhost_root.is_empty() {
+                return None;
+            }
+            let owner = record.owner?;
+            let name = if record.display_name.is_empty() {
+                record.principal_id.clone()
+            } else {
+                record.display_name
+            };
+            Some(OwnedAgent {
+                id: record.principal_id,
+                name,
+                root: record.localhost_root,
+                owner,
+            })
+        })
+        .collect()
+}
+
+fn own_rest<'a>(resource: &'a str, root: &str) -> Option<&'a str> {
+    let root = root.trim_end_matches('/');
+    if resource == root {
+        return Some("");
+    }
+    let rest = resource.strip_prefix(root)?.strip_prefix('/')?;
+    if rest.is_empty()
+        || rest
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    Some(rest)
+}
+
+fn ask_sentence(agent: &OwnedAgent, ask: &RuntimeCapabilityPendingRequest) -> Option<String> {
+    let word = match ask.action.as_str() {
+        "read" | "write" => ask.action.as_str(),
+        _ => "use",
+    };
+    let place = if ask.resource.starts_with("localhost://") {
+        match own_rest(&ask.resource, &agent.root)?.rsplit_once('/') {
+            Some((dir, _)) if !dir.is_empty() => format!("{dir} in its own folder"),
+            _ => "its own folder".to_string(),
+        }
+    } else {
+        ask.resource.clone()
+    };
+    Some(format!(
+        "{} asks to {word} {place}. It requests {} access to {}.",
+        agent.name, ask.action, ask.resource
+    ))
+}
+
+fn push_capability_card(
+    notifications: &mut HomeNotificationsSummary,
+    id: String,
+    action: &str,
+    body: String,
+    action_id: String,
+    created_at: u64,
+) {
+    notifications.unread_count += 1;
+    notifications.attention_count += 1;
+    notifications.entries.push(HomeNotificationEntrySummary {
+        id,
+        source_app: SYSTEM_CAPSULE_ID.to_string(),
+        kind: "capability_request".to_string(),
+        title: capability_request_title(action),
+        body,
+        action_ref: Some(HomeNotificationActionSummary {
+            app: SYSTEM_CAPSULE_ID.to_string(),
+            action_id,
+        }),
+        severity: "attention".to_string(),
+        read: false,
+        created_at,
+        ..Default::default()
+    });
+}
+
+fn append_agent_asks(
+    notifications: &mut HomeNotificationsSummary,
+    caller: &str,
+    agents: &[OwnedAgent],
+    asks: &[RuntimeCapabilityPendingRequest],
+) {
+    for ask in asks {
+        let Some(agent) = agents
+            .iter()
+            .find(|agent| agent.id == ask.agent_id && agent.owner == caller)
+        else {
+            continue;
+        };
+        let Some(body) = ask_sentence(agent, ask) else {
+            continue;
+        };
+        push_capability_card(
+            notifications,
+            format!("capability-request:agent:{}", ask.request_id),
+            &ask.action,
+            body,
+            format!("capability-approve-request:agent:{}", ask.request_id),
+            ask.requested_at,
+        );
+    }
+}
+
+fn not_owner(caller: &str, name: &str) -> String {
+    format!("{caller} belongs to a different principal and does not own {name}")
+}
+
+fn capability_decision(action_id: &str) -> Option<(&str, bool)> {
+    if let Some(id) = action_id.strip_prefix("capability-approve-request:") {
+        return Some((id, true));
+    }
+    action_id
+        .strip_prefix("capability-deny-request:")
+        .map(|id| (id, false))
 }
 
 pub(super) fn append_runtime_capability_notifications(
@@ -280,26 +448,17 @@ pub(super) fn append_runtime_capability_notifications(
     capability_requests: Vec<RuntimeCapabilityPendingRequest>,
 ) {
     for request in capability_requests {
-        notifications.unread_count += 1;
-        notifications.attention_count += 1;
-        notifications.entries.push(HomeNotificationEntrySummary {
-            id: format!("capability-request:{}", request.request_id),
-            source_app: SYSTEM_CAPSULE_ID.to_string(),
-            kind: "capability_request".to_string(),
-            title: capability_request_title(&request.action),
-            body: format!(
+        push_capability_card(
+            notifications,
+            format!("capability-request:{}", request.request_id),
+            &request.action,
+            format!(
                 "A capsule requests {} access to {}.",
                 request.action, request.resource
             ),
-            action_ref: Some(HomeNotificationActionSummary {
-                app: SYSTEM_CAPSULE_ID.to_string(),
-                action_id: format!("capability-approve-request:{}", request.request_id),
-            }),
-            severity: "attention".to_string(),
-            read: false,
-            created_at: request.requested_at,
-            ..Default::default()
-        });
+            format!("capability-approve-request:{}", request.request_id),
+            request.requested_at,
+        );
     }
 }
 
@@ -361,9 +520,11 @@ pub(super) async fn inbox_action(
             return inbox_error_response(error);
         }
     }
-    if action.action_id.starts_with("capability-approve-request:")
-        || action.action_id.starts_with("capability-deny-request:")
-    {
+    if capability_decision(&action.action_id).is_some_and(|(id, _)| {
+        id.strip_prefix("agent:")
+            .filter(|rest| !rest.is_empty())
+            .is_none()
+    }) {
         if let Err(error) = ensure_admin_context(&state.data_dir, &context) {
             return inbox_error_response(error);
         }
@@ -559,11 +720,17 @@ async fn dispatch_inbox_action(
         )?;
         return Ok("Rejected wallet request.".to_string());
     }
-    if let Some(request_id) = action_id.strip_prefix("capability-approve-request:") {
-        return approve_runtime_capability_request(data_dir, request_id).await;
-    }
-    if let Some(request_id) = action_id.strip_prefix("capability-deny-request:") {
-        return deny_runtime_capability_request(data_dir, request_id).await;
+    if let Some((request_id, approve)) = capability_decision(action_id) {
+        if let Some(id) = request_id
+            .strip_prefix("agent:")
+            .filter(|id| !id.is_empty())
+        {
+            return answer_agent_ask(data_dir, context.principal_id(), id, approve).await;
+        }
+        return match approve {
+            true => approve_runtime_capability_request(data_dir, request_id).await,
+            false => deny_runtime_capability_request(data_dir, request_id).await,
+        };
     }
     if let Some(request_id) = action_id.strip_prefix("service-approve-request:") {
         let discovery_service = state.collaboration_discovery_service.clone();
@@ -775,6 +942,42 @@ async fn decide_contact_request(
     })
 }
 
+async fn decide_capability(
+    coords: &crate::runtime_control::RuntimeCoords,
+    request_id: &str,
+    approve: bool,
+) -> anyhow::Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()?;
+    let shell = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
+    let (path, body, done) = if approve {
+        (
+            "grant",
+            serde_json::json!({
+                "request_id": request_id,
+                "duration": "session",
+                "rationale": "Approved in Inbox",
+            }),
+            "Approved capsule request.",
+        )
+    } else {
+        (
+            "deny",
+            serde_json::json!({"request_id": request_id, "reason": "Denied in Inbox"}),
+            "Denied capsule request.",
+        )
+    };
+    client
+        .post(format!("{}/api/capability/{path}", coords.api_url))
+        .header(AUTHORIZATION, format!("Bearer {shell}"))
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(done.to_string())
+}
+
 pub(super) async fn approve_runtime_capability_request(
     data_dir: &std::path::Path,
     request_id: &str,
@@ -782,22 +985,7 @@ pub(super) async fn approve_runtime_capability_request(
     let coords = load_live_runtime_coords(data_dir)
         .await
         .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()?;
-    let shell_token = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
-    client
-        .post(format!("{}/api/capability/grant", coords.api_url))
-        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
-        .json(&serde_json::json!({
-            "request_id": request_id,
-            "duration": "session",
-            "rationale": "Approved in Inbox",
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok("Approved capsule request.".to_string())
+    decide_capability(&coords, request_id, true).await
 }
 
 pub(super) async fn deny_runtime_capability_request(
@@ -807,19 +995,177 @@ pub(super) async fn deny_runtime_capability_request(
     let coords = load_live_runtime_coords(data_dir)
         .await
         .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()?;
-    let shell_token = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await?;
-    client
-        .post(format!("{}/api/capability/deny", coords.api_url))
-        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
-        .json(&serde_json::json!({
-            "request_id": request_id,
-            "reason": "Denied in Inbox",
-        }))
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok("Denied capsule request.".to_string())
+    decide_capability(&coords, request_id, false).await
+}
+
+async fn answer_agent_ask(
+    data_dir: &std::path::Path,
+    caller: &str,
+    request_id: &str,
+    approve: bool,
+) -> anyhow::Result<String> {
+    let coords = crate::api::agent_plane::live_coords(data_dir)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("agent runtime is not running"))?;
+    let pending = read_pending(&coords).await?;
+    let ask = pending
+        .iter()
+        .find(|row| row.request_id == request_id)
+        .ok_or_else(|| anyhow::anyhow!("that request is no longer pending"))?;
+    let agents = owned_agents(data_dir);
+    let Some(agent) = agents.iter().find(|agent| agent.id == ask.agent_id) else {
+        anyhow::bail!("{}", not_owner(caller, "this agent"));
+    };
+    if agent.owner != caller {
+        anyhow::bail!("{}", not_owner(caller, &agent.name));
+    }
+    if ask.resource.starts_with("localhost://") && own_rest(&ask.resource, &agent.root).is_none() {
+        decide_capability(&coords, request_id, false).await?;
+        anyhow::bail!("a path outside the agent's own folder is not pending");
+    }
+    decide_capability(&coords, request_id, approve).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(owner: &str) -> OwnedAgent {
+        OwnedAgent {
+            id: "agent-1".into(),
+            name: "Notes".into(),
+            root: "localhost://UsersAI/notes".into(),
+            owner: owner.into(),
+        }
+    }
+
+    fn ask(resource: &str, action: &str) -> RuntimeCapabilityPendingRequest {
+        RuntimeCapabilityPendingRequest {
+            request_id: "req-1".into(),
+            agent_id: "agent-1".into(),
+            resource: resource.into(),
+            action: action.into(),
+            requested_at: 1,
+        }
+    }
+
+    #[test]
+    fn the_card_names_the_agent_its_folder_and_the_runtime() {
+        let body = ask_sentence(
+            &agent("owner-a"),
+            &ask("localhost://UsersAI/notes/.AppData/journal", "write"),
+        )
+        .unwrap();
+        assert!(body.starts_with("Notes asks to write "), "{body}");
+        assert!(body.contains(".AppData in its own folder"), "{body}");
+        assert!(
+            body.contains("access to localhost://UsersAI/notes/.AppData/journal."),
+            "{body}"
+        );
+        let mut notes = HomeNotificationsSummary::default();
+        append_agent_asks(
+            &mut notes,
+            "owner-a",
+            &[agent("owner-a")],
+            &[ask("localhost://UsersAI/notes/.AppData/journal", "read")],
+        );
+        let entry = &notes.entries[0];
+        assert!(entry.id.contains(":agent:"), "{}", entry.id);
+        assert_eq!(
+            entry.action_ref.as_ref().unwrap().action_id,
+            "capability-approve-request:agent:req-1"
+        );
+    }
+
+    #[test]
+    fn another_owner_sees_nothing_and_is_refused_by_name() {
+        let mut notes = HomeNotificationsSummary::default();
+        append_agent_asks(
+            &mut notes,
+            "owner-b",
+            &[agent("owner-a")],
+            &[ask("localhost://UsersAI/notes/.AppData/journal", "read")],
+        );
+        assert!(notes.entries.is_empty());
+        let text = not_owner("owner-b", "Notes");
+        assert!(text.contains("owner-b"), "{text}");
+        assert!(text.contains("Notes"), "{text}");
+        assert!(text.contains("belongs to a different principal"), "{text}");
+    }
+
+    #[test]
+    fn a_path_outside_the_agents_root_is_not_approvable() {
+        let outside = ask("localhost://UsersAI/other/secret", "read");
+        assert!(ask_sentence(&agent("owner-a"), &outside).is_none());
+        let mut notes = HomeNotificationsSummary::default();
+        append_agent_asks(&mut notes, "owner-a", &[agent("owner-a")], &[outside]);
+        assert!(notes.entries.is_empty());
+        assert!(ask_sentence(
+            &agent("owner-a"),
+            &ask("localhost://UsersAI/notes-evil/file", "read")
+        )
+        .is_none());
+        assert!(ask_sentence(
+            &agent("owner-a"),
+            &ask("localhost://UsersAI/notes/../other/file", "write")
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn an_elastos_ask_stays_approvable_for_its_owner() {
+        let body = ask_sentence(
+            &agent("owner-a"),
+            &ask("elastos://inspect/submit_agent_plan", "write"),
+        )
+        .unwrap();
+        assert!(body.contains("Notes asks to write "), "{body}");
+        assert!(
+            body.contains("access to elastos://inspect/submit_agent_plan."),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn one_runtime_down_keeps_the_other() {
+        let kept = rows_from(Some(Ok(vec![ask(
+            "elastos://inspect/submit_agent_plan",
+            "read",
+        )])));
+        assert_eq!(kept.len(), 1);
+        assert!(rows_from(Some(Err(anyhow::anyhow!("down")))).is_empty());
+        assert!(rows_from(None).is_empty());
+    }
+
+    #[test]
+    fn a_home_card_keeps_its_sentence_and_id() {
+        let mut notes = HomeNotificationsSummary::default();
+        append_runtime_capability_notifications(
+            &mut notes,
+            vec![RuntimeCapabilityPendingRequest {
+                request_id: "cap-1".into(),
+                agent_id: String::new(),
+                resource: "elastos://content".into(),
+                action: "read".into(),
+                requested_at: 1,
+            }],
+        );
+        let entry = &notes.entries[0];
+        assert_eq!(
+            entry.body,
+            "A capsule requests read access to elastos://content."
+        );
+        assert_eq!(
+            entry.action_ref.as_ref().unwrap().action_id,
+            "capability-approve-request:cap-1"
+        );
+        assert_eq!(
+            capability_decision("capability-approve-request:cap-1").map(|(id, _)| id),
+            Some("cap-1")
+        );
+        assert_eq!(
+            capability_decision("capability-approve-request:agent:req-1").map(|(id, _)| id),
+            Some("agent:req-1")
+        );
+    }
 }

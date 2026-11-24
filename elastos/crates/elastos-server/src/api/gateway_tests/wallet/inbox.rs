@@ -152,6 +152,7 @@ fn test_capsule_capability_requests_render_as_inbox_notifications() {
         &mut notifications,
         vec![RuntimeCapabilityPendingRequest {
             request_id: "cap-1".to_string(),
+            agent_id: String::new(),
             resource: "elastos://content/publish".to_string(),
             action: "execute".to_string(),
             requested_at: 42,

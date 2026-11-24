@@ -571,13 +571,62 @@ async fn agent_runtime_refuses_every_non_agent_start() {
         "/api/supervisor/ensure-capsule",
         "/api/supervisor/ensure-external",
         "/api/orchestrator/session",
-        "/api/capability/grant",
         "/api/capability/request",
+        "/api/capability/requests",
+        "/api/capability/revoke-all",
+        "/api/audit",
         "/api/test/create-session",
     ] {
         let (status, text) = post(path, json!({})).await;
         assert_eq!(status.as_u16(), 404, "{path} {status} {text}");
     }
+    let (status, text) = post(
+        "/api/capability/grant",
+        json!({"request_id": "missing-ask"}),
+    )
+    .await;
+    assert_eq!(status.as_u16(), 404, "{text}");
+    assert!(text.contains("Request not found"), "{text}");
+    let (status, text) = post("/api/capability/deny", json!({"request_id": "missing-ask"})).await;
+    assert_ne!(status.as_u16(), 404, "{text}");
+    assert!(text.contains("Request not found"), "{text}");
+    let pending = client
+        .get(format!("{}/api/capability/pending", plane.url))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pending.status().as_u16(), 200);
+    let pending_text = pending.text().await.unwrap();
+    assert!(pending_text.contains("\"requests\""), "{pending_text}");
+    let app_token: Value = client
+        .post(format!("{}/api/auth/attach", plane.url))
+        .json(&json!({"secret": plane.secret, "scope": "client"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let app_token = app_token["token"].as_str().unwrap();
+    let refused = client
+        .get(format!("{}/api/capability/pending", plane.url))
+        .header("authorization", format!("Bearer {app_token}"))
+        .send()
+        .await
+        .unwrap();
+    let refused_status = refused.status();
+    let refused_text = refused.text().await.unwrap();
+    assert_eq!(refused_status.as_u16(), 403, "{refused_text}");
+    assert!(refused_text.contains("Home app session"), "{refused_text}");
+    let anonymous = client
+        .get(format!("{}/api/capability/pending", plane.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status().as_u16(), 401);
     let listed = client
         .get(format!("{}/api/capsules", plane.url))
         .header("authorization", format!("Bearer {token}"))
@@ -591,6 +640,46 @@ async fn agent_runtime_refuses_every_non_agent_start() {
         listed.contains("\"capsules\":[]") || listed.contains("\"capsules\": []"),
         "{listed}"
     );
+    plane.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_restart_shows_no_orphan_ask() {
+    let home = Home::open();
+    let plane = home.plane().await;
+    let token = plane.token().await;
+    let client = reqwest::Client::new();
+    let pending = client
+        .get(format!("{}/api/capability/pending", plane.url))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        pending.contains("\"requests\":[]") || pending.contains("\"requests\": []"),
+        "{pending}"
+    );
+    plane.shutdown().await;
+    std::fs::write(
+        home.data.join("capability-pending.json"),
+        br#"{"requests":[{"request_id":"orphan","resource":"localhost://UsersAI/orphan/journal","action":"write"}]}"#,
+    )
+    .unwrap();
+    let plane = home.plane().await;
+    let token = plane.token().await;
+    let pending = client
+        .get(format!("{}/api/capability/pending", plane.url))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!pending.contains("orphan"), "{pending}");
     plane.shutdown().await;
 }
 

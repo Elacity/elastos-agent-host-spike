@@ -572,14 +572,10 @@ struct InboxSummaryResponse {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-struct RuntimeCapabilityPendingResponse {
-    #[serde(default)]
-    requests: Vec<RuntimeCapabilityPendingRequest>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
 struct RuntimeCapabilityPendingRequest {
     request_id: String,
+    #[serde(default)]
+    agent_id: String,
     resource: String,
     action: String,
     requested_at: u64,
