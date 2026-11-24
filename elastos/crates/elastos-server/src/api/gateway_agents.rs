@@ -137,6 +137,11 @@ pub(super) async fn agents_retire(
     let result = async {
         let owner = agents_owner(&state, &headers)?;
         let request: RetireRequest = agents_request(&body)?;
+        // The other record routes answer "not turned on" before they look up
+        // an id. Retire keeps that answer, and it does not stop a guest on
+        // the way to it. Ownership is the next check, so another admin's
+        // retire does not end this guest.
+        crate::agents::list(&state.data_dir, &owner.caller())?;
         crate::agents::stored_agent_for_stop(
             &state.data_dir,
             &owner.principal.principal_id,
