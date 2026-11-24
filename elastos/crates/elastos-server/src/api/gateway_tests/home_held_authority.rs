@@ -1377,7 +1377,7 @@ fn rows() -> Vec<HeldRow> {
         "localhost_provider_bridge_config",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "localhost provider", "On Unix the encryption field is the HKDF file key `elastos-localhost-file-v1`, not the raw device key. On Windows the field is still the device key, because this slice does not rewrite files there. The child is unconfined and `base_path` is the data directory, so it can open `identity/device.key`. The object process has that same file-read. The row stays open until slice C."),
+        mark("open", "device private key", "localhost provider", "On Unix the encryption field is the HKDF file key `elastos-localhost-file-v1`, not the raw device key. On Windows the field is still the device key, because this slice does not rewrite files there. The object config no longer carries the device key. The localhost child is unconfined and `base_path` is the data directory, so it can open `identity/device.key`. The object process has that same file-read. The row stays open until slice C."),
     ),
     row(
         "elastos-server/src/server_infra.rs",

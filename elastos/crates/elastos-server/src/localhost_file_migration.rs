@@ -5,6 +5,24 @@
 //! device key, and the marker `identity/localhost-file-key-v1` records the
 //! finished migration. The marker counts as finished only when it carries the
 //! fixed record written by the migration; any other content stops local apps.
+//!
+//! One lock on `identity/localhost-file-key.lock` covers the walk, so two
+//! Homes on one data folder take turns. Each new envelope is written to a
+//! temp file in the same directory, fsynced, and renamed. A crash at any of
+//! those writes leaves the previous bytes or the new bytes. The next start
+//! finishes the walk. A finished file opens with the file key only.
+//!
+//! A symlink or a hard link stops the walk. A file that changes while the
+//! walk is reading it stops the walk and keeps the new bytes. After the
+//! marker is the fixed record, the raw device key is not used to open or
+//! rewrite local-app files.
+//!
+//! An older build still passes that raw device key to the helper and does not
+//! read the marker. Rewritten files then fail to open. Files that older build
+//! writes afterwards stay under the device key. A later start of this build
+//! does not rewrite them, because the marker is already present. The helper
+//! has only the file key, so those later files fail to open too. Start itself
+//! still proceeds, because the walk is skipped.
 
 use std::path::Path;
 
@@ -18,6 +36,8 @@ const LOCALHOST_FILE_KEY_INFO: &[u8] = b"elastos-localhost-file-v1";
 #[cfg(unix)]
 const LOCALHOST_MIGRATION_MARKER: &str = "localhost-file-key-v1";
 #[cfg(unix)]
+const LOCALHOST_MIGRATION_LOCK: &str = "localhost-file-key.lock";
+#[cfg(unix)]
 const LOCALHOST_MIGRATION_RECORD: &[u8] = b"elastos-localhost-file-v1\n";
 #[cfg(unix)]
 const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
@@ -25,6 +45,59 @@ const LOCALHOST_REWRITE_SUFFIX: &str = ".elastos-localhost-file-key-v1.tmp";
 /// plaintext. `identity/` and `did/` are not in this list.
 #[cfg(unix)]
 const LOCALHOST_ENCRYPTED_ROOTS: &[&str] = &["AppCapsules", "ElastOS", "Local", "Users", "UsersAI"];
+
+#[cfg(all(unix, test))]
+thread_local! {
+    static WRITE_BUDGET: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+    static BEFORE_REPLACE: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Stops the walk after this many migration writes. `None` writes normally.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_write_budget(budget: Option<u32>) {
+    WRITE_BUDGET.with(|slot| slot.set(budget));
+}
+
+/// Runs once for each file, after the bytes are read and before they are
+/// replaced. The test uses this to change the file mid-walk.
+#[cfg(all(unix, test))]
+pub(crate) fn set_localhost_migration_before_replace(hook: Option<Box<dyn Fn(&Path)>>) {
+    BEFORE_REPLACE.with(|slot| *slot.borrow_mut() = hook);
+}
+
+#[cfg(all(unix, test))]
+fn charge_migration_write() -> anyhow::Result<()> {
+    WRITE_BUDGET.with(|budget| {
+        let Some(left) = budget.get() else {
+            return Ok(());
+        };
+        if left == 0 {
+            return Err(anyhow::anyhow!(
+                "localhost file migration stopped at a write; local apps were not started"
+            ));
+        }
+        budget.set(Some(left - 1));
+        Ok(())
+    })
+}
+
+#[cfg(all(unix, not(test)))]
+fn charge_migration_write() -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(unix, test))]
+fn run_before_replace(path: &Path) {
+    let hook = BEFORE_REPLACE.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(path);
+        BEFORE_REPLACE.with(|slot| *slot.borrow_mut() = Some(hook));
+    }
+}
+
+#[cfg(all(unix, not(test)))]
+fn run_before_replace(_path: &Path) {}
 
 #[cfg(unix)]
 fn localhost_refused(path: &Path, why: &str) -> anyhow::Error {
@@ -46,6 +119,19 @@ pub(crate) fn localhost_file_key(device_key: &[u8; 32]) -> anyhow::Result<[u8; 3
     hk.expand(LOCALHOST_FILE_KEY_INFO, &mut okm)
         .map_err(|_| anyhow::anyhow!("localhost file key expansion failed"))?;
     Ok(okm)
+}
+
+/// Holds the exclusive migration lock until dropped.
+#[cfg(unix)]
+pub(crate) struct LocalhostMigrationLock {
+    _file: std::fs::File,
+}
+
+#[cfg(all(unix, test))]
+pub(crate) fn hold_localhost_migration_lock(
+    data_dir: &Path,
+) -> anyhow::Result<LocalhostMigrationLock> {
+    acquire_migration_lock(data_dir)
 }
 
 /// Write `bytes` by creating a temp file in the same directory, calling
@@ -72,23 +158,37 @@ fn replace_file_fsync_rename(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     tmp_name.push(LOCALHOST_REWRITE_SUFFIX);
     let tmp = parent.join(tmp_name);
     let _ = std::fs::remove_file(&tmp);
+    charge_migration_write().map_err(io_error)?;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&tmp)?;
-    if let Err(err) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+    if let Err(err) = (|| {
+        charge_migration_write().map_err(io_error)?;
+        file.write_all(bytes)?;
+        charge_migration_write().map_err(io_error)?;
+        file.sync_all()?;
+        Ok(())
+    })() {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
     drop(file);
+    charge_migration_write().map_err(io_error)?;
     if let Err(err) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
+    charge_migration_write().map_err(io_error)?;
     let dir = std::fs::File::open(parent)?;
     dir.sync_all()?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn io_error(err: anyhow::Error) -> std::io::Error {
+    std::io::Error::other(err)
 }
 
 #[cfg(unix)]
@@ -105,26 +205,86 @@ fn read_nofollow(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(unix)]
+fn is_rewrite_temp(name: &std::ffi::OsStr) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = name.as_bytes();
+    bytes.starts_with(b".") && bytes.ends_with(LOCALHOST_REWRITE_SUFFIX.as_bytes())
+}
+
+#[cfg(unix)]
+fn opened_file_still_matches(
+    path: &Path,
+    file: &std::fs::File,
+    read_len: u64,
+) -> anyhow::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    let open_meta = file
+        .metadata()
+        .with_context(|| localhost_refused(path, "cannot be read"))?;
+    let path_meta = std::fs::symlink_metadata(path)
+        .with_context(|| localhost_refused(path, "cannot be read"))?;
+    if path_meta.file_type().is_symlink() {
+        return Err(localhost_refused(path, "is a link"));
+    }
+    if !path_meta.is_file()
+        || path_meta.nlink() != 1
+        || open_meta.nlink() != 1
+        || path_meta.dev() != open_meta.dev()
+        || path_meta.ino() != open_meta.ino()
+        || path_meta.len() != read_len
+        || open_meta.len() != read_len
+    {
+        return Err(localhost_refused(path, "changed while it was being read"));
+    }
+    Ok(())
+}
+
 /// Rewrite one envelope onto the file key.
 ///
 /// A file that is not the JSON envelope is left as it is. An envelope that
 /// opens with the raw device key is sealed again under the file key. An
 /// envelope that opens only with the file key was written by an earlier pass
 /// that crashed before the marker; it is left as it is. Any other envelope
-/// stops local apps and is not written.
+/// stops local apps and is not written. A file that changes after it is read
+/// is not written either.
 #[cfg(unix)]
 fn migrate_localhost_envelope(
     path: &Path,
     device_key: &[u8; 32],
     file_key: &[u8; 32],
 ) -> anyhow::Result<()> {
-    let bytes = read_nofollow(path).with_context(|| localhost_refused(path, "cannot be read"))?;
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| localhost_refused(path, "cannot be read"))?;
+    let meta = file
+        .metadata()
+        .with_context(|| localhost_refused(path, "cannot be read"))?;
+    if !meta.is_file() {
+        return Err(localhost_refused(path, "is not a regular file"));
+    }
+    if meta.nlink() > 1 {
+        return Err(localhost_refused(path, "is linked from another path"));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| localhost_refused(path, "cannot be read"))?;
+    run_before_replace(path);
+    opened_file_still_matches(path, &file, bytes.len() as u64)?;
     if !localhost_provider::is_encrypted_envelope(&bytes) {
         return Ok(());
     }
     if let Ok(plaintext) = localhost_provider::decrypt_bytes(device_key, &bytes) {
         let sealed = localhost_provider::encrypt_bytes(file_key, &plaintext)
             .with_context(|| localhost_refused(path, "cannot be sealed"))?;
+        opened_file_still_matches(path, &file, bytes.len() as u64)?;
         replace_file_fsync_rename(path, &sealed)
             .with_context(|| localhost_refused(path, "cannot be replaced"))?;
         return Ok(());
@@ -139,30 +299,42 @@ fn migrate_localhost_envelope(
 }
 
 #[cfg(unix)]
-fn migrate_localhost_tree(
-    dir: &Path,
-    device_key: &[u8; 32],
-    file_key: &[u8; 32],
-) -> anyhow::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
+fn without_rewrite_temps(names: &[std::ffi::OsString]) -> Vec<std::ffi::OsString> {
+    names
+        .iter()
+        .filter(|name| !is_rewrite_temp(name))
+        .cloned()
+        .collect()
+}
 
+#[cfg(unix)]
+fn directory_names(dir: &Path) -> anyhow::Result<Vec<std::ffi::OsString>> {
     let mut names = Vec::new();
     for entry in std::fs::read_dir(dir).with_context(|| localhost_refused(dir, "cannot be read"))? {
         let entry = entry.with_context(|| localhost_refused(dir, "cannot be read"))?;
         names.push(entry.file_name());
     }
     names.sort();
-    let suffix = LOCALHOST_REWRITE_SUFFIX.as_bytes();
-    for name in names {
-        let path = dir.join(&name);
+    Ok(names)
+}
+
+#[cfg(unix)]
+fn migrate_localhost_tree(
+    dir: &Path,
+    device_key: &[u8; 32],
+    file_key: &[u8; 32],
+) -> anyhow::Result<()> {
+    let names = directory_names(dir)?;
+    for name in &names {
+        let path = dir.join(name);
         let meta = std::fs::symlink_metadata(&path)
             .with_context(|| localhost_refused(&path, "cannot be read"))?;
         let file_type = meta.file_type();
         if file_type.is_symlink() {
             return Err(localhost_refused(&path, "is a link"));
         }
-        let name_bytes = name.as_bytes();
-        if file_type.is_file() && name_bytes.starts_with(b".") && name_bytes.ends_with(suffix) {
+        if file_type.is_file() && is_rewrite_temp(name) {
+            charge_migration_write()?;
             std::fs::remove_file(&path)
                 .with_context(|| localhost_refused(&path, "cannot be removed"))?;
             continue;
@@ -178,6 +350,10 @@ fn migrate_localhost_tree(
             return Err(localhost_refused(&path, "is linked from another path"));
         }
         migrate_localhost_envelope(&path, device_key, file_key)?;
+    }
+    let again = directory_names(dir)?;
+    if without_rewrite_temps(&names) != without_rewrite_temps(&again) {
+        return Err(localhost_refused(dir, "changed while it was being read"));
     }
     Ok(())
 }
@@ -209,28 +385,79 @@ fn localhost_marker_finished(marker: &Path) -> anyhow::Result<bool> {
 }
 
 #[cfg(unix)]
-fn write_localhost_marker(marker: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+fn ensure_identity_dir(identity: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
 
+    match std::fs::symlink_metadata(identity) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(localhost_refused(identity, "is a link")),
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(localhost_refused(identity, "is not a directory")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            charge_migration_write()?;
+            match std::fs::DirBuilder::new().mode(0o700).create(identity) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match std::fs::symlink_metadata(identity) {
+                        Ok(meta) if meta.file_type().is_symlink() => {
+                            Err(localhost_refused(identity, "is a link"))
+                        }
+                        Ok(meta) if meta.is_dir() => Ok(()),
+                        Ok(_) => Err(localhost_refused(identity, "is not a directory")),
+                        Err(err) => {
+                            Err(err).with_context(|| localhost_refused(identity, "cannot be read"))
+                        }
+                    }
+                }
+                Err(err) => {
+                    Err(err).with_context(|| localhost_refused(identity, "cannot be created"))
+                }
+            }
+        }
+        Err(err) => Err(err).with_context(|| localhost_refused(identity, "cannot be read")),
+    }
+}
+
+#[cfg(unix)]
+fn acquire_migration_lock(data_dir: &Path) -> anyhow::Result<LocalhostMigrationLock> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let identity = data_dir.join("identity");
+    ensure_identity_dir(&identity)?;
+    let lock_path = identity.join(LOCALHOST_MIGRATION_LOCK);
+    if let Ok(meta) = std::fs::symlink_metadata(&lock_path) {
+        if meta.file_type().is_symlink() {
+            return Err(localhost_refused(&lock_path, "is a link"));
+        }
+        if !meta.is_file() {
+            return Err(localhost_refused(&lock_path, "is not a file"));
+        }
+    }
+    charge_migration_write()?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .with_context(|| localhost_refused(&lock_path, "cannot be locked"))?;
+    let meta = file
+        .metadata()
+        .with_context(|| localhost_refused(&lock_path, "cannot be locked"))?;
+    if !meta.is_file() || meta.nlink() > 1 {
+        return Err(localhost_refused(&lock_path, "is linked from another path"));
+    }
+    file.lock()
+        .with_context(|| localhost_refused(&lock_path, "cannot be locked"))?;
+    Ok(LocalhostMigrationLock { _file: file })
+}
+
+#[cfg(unix)]
+fn write_localhost_marker(marker: &Path) -> anyhow::Result<()> {
     let identity = marker.parent().ok_or_else(|| {
         anyhow::anyhow!("localhost file key marker has no directory; local apps were not started")
     })?;
-    match std::fs::symlink_metadata(identity) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(localhost_refused(identity, "is a link"));
-        }
-        Ok(meta) if meta.is_dir() => {}
-        Ok(_) => return Err(localhost_refused(identity, "is not a directory")),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(identity)
-                .with_context(|| localhost_refused(identity, "cannot be created"))?;
-            std::fs::set_permissions(identity, std::fs::Permissions::from_mode(0o700))
-                .with_context(|| localhost_refused(identity, "cannot be created"))?;
-        }
-        Err(err) => {
-            return Err(err).with_context(|| localhost_refused(identity, "cannot be read"));
-        }
-    }
+    ensure_identity_dir(identity)?;
     replace_file_fsync_rename(marker, LOCALHOST_MIGRATION_RECORD)
         .with_context(|| localhost_refused(marker, "cannot be replaced"))?;
     Ok(())
@@ -248,6 +475,7 @@ fn migrate_localhost_files_to_file_key(
     data_dir: &Path,
     device_key: &[u8; 32],
 ) -> anyhow::Result<()> {
+    let _lock = acquire_migration_lock(data_dir)?;
     let marker = data_dir.join("identity").join(LOCALHOST_MIGRATION_MARKER);
     if localhost_marker_finished(&marker)? {
         return Ok(());

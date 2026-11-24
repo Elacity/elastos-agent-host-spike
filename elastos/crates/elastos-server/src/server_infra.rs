@@ -2513,7 +2513,10 @@ mod tests {
     }
 
     use super::*;
-    use crate::localhost_file_migration::{localhost_file_key, localhost_provider_bridge_config};
+    use crate::localhost_file_migration::{
+        hold_localhost_migration_lock, localhost_file_key, localhost_provider_bridge_config,
+        set_localhost_migration_before_replace, set_localhost_migration_write_budget,
+    };
     #[cfg(unix)]
     use std::ffi::CString;
     #[cfg(unix)]
@@ -4921,6 +4924,644 @@ mod tests {
         assert!(localhost_provider::decrypt_bytes(&device_key, &original).is_ok());
         assert_eq!(fs::read(&marker).unwrap(), b"elastos-localhost-file-v2\n");
         assert_no_localhost_rewrite_temps(root);
+    }
+
+    struct ClearLocalhostMigrationFaults;
+
+    impl Drop for ClearLocalhostMigrationFaults {
+        fn drop(&mut self) {
+            set_localhost_migration_write_budget(None);
+            set_localhost_migration_before_replace(None);
+        }
+    }
+
+    fn assert_envelope_opens_with_exactly_one_key(
+        path: &std::path::Path,
+        plaintext: &[u8],
+        device_key: &[u8; 32],
+        file_key: &[u8; 32],
+    ) {
+        let bytes = fs::read(path).unwrap();
+        let with_device = localhost_provider::decrypt_bytes(device_key, &bytes).ok();
+        let with_file = localhost_provider::decrypt_bytes(file_key, &bytes).ok();
+        match (with_device, with_file) {
+            (Some(plain), None) | (None, Some(plain)) => assert_eq!(plain.as_slice(), plaintext),
+            _ => panic!(
+                "{} is readable under both keys or under neither",
+                path.display()
+            ),
+        }
+    }
+
+    fn plant_device_envelope(
+        path: &std::path::Path,
+        device_key: &[u8; 32],
+        plaintext: &[u8],
+    ) -> Vec<u8> {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let sealed = localhost_provider::encrypt_bytes(device_key, plaintext).unwrap();
+        fs::write(path, &sealed).unwrap();
+        sealed
+    }
+
+    #[test]
+    fn crash_at_every_migration_write_restarts_and_leaves_one_key() {
+        let _clear = ClearLocalhostMigrationFaults;
+        let device_key = [0x55; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let alpha = b"alpha-secret";
+        let beta = b"beta-secret";
+        let mut saw_fault = false;
+        let mut finished_clean = false;
+        for budget in 0..32 {
+            let temp = TempDir::new().unwrap();
+            let root = temp.path();
+            let alpha_path = root.join("Users/alpha.bin");
+            let beta_path = root.join("Local/beta.bin");
+            plant_device_envelope(&alpha_path, &device_key, alpha);
+            plant_device_envelope(&beta_path, &device_key, beta);
+            fs::write(root.join("Users/readme.txt"), b"plain").unwrap();
+
+            set_localhost_migration_write_budget(Some(budget));
+            let first = localhost_provider_bridge_config(root, &device_key);
+            set_localhost_migration_write_budget(None);
+            if let Err(err) = first {
+                saw_fault = true;
+                assert!(
+                    err.to_string().contains("local apps were not started"),
+                    "{err}"
+                );
+                assert_envelope_opens_with_exactly_one_key(
+                    &alpha_path,
+                    alpha,
+                    &device_key,
+                    &file_key,
+                );
+                assert_envelope_opens_with_exactly_one_key(
+                    &beta_path,
+                    beta,
+                    &device_key,
+                    &file_key,
+                );
+                assert_eq!(fs::read(root.join("Users/readme.txt")).unwrap(), b"plain");
+                let marker = root.join("identity/localhost-file-key-v1");
+                if marker.exists() {
+                    assert_eq!(fs::read(&marker).unwrap(), b"elastos-localhost-file-v1\n");
+                    assert!(localhost_provider::decrypt_bytes(
+                        &device_key,
+                        &fs::read(&alpha_path).unwrap()
+                    )
+                    .is_err());
+                    assert!(localhost_provider::decrypt_bytes(
+                        &device_key,
+                        &fs::read(&beta_path).unwrap()
+                    )
+                    .is_err());
+                } else {
+                    fs::write(
+                        root.join("Users/.alpha.bin.elastos-localhost-file-key-v1.tmp"),
+                        b"partial",
+                    )
+                    .unwrap();
+                }
+
+                localhost_provider_bridge_config(root, &device_key).unwrap();
+                assert_envelope_opens_with_exactly_one_key(
+                    &alpha_path,
+                    alpha,
+                    &device_key,
+                    &file_key,
+                );
+                assert_envelope_opens_with_exactly_one_key(
+                    &beta_path,
+                    beta,
+                    &device_key,
+                    &file_key,
+                );
+                assert!(localhost_provider::decrypt_bytes(
+                    &device_key,
+                    &fs::read(&alpha_path).unwrap()
+                )
+                .is_err());
+                assert!(localhost_provider::decrypt_bytes(
+                    &device_key,
+                    &fs::read(&beta_path).unwrap()
+                )
+                .is_err());
+                assert_eq!(
+                    fs::read(root.join("identity/localhost-file-key-v1")).unwrap(),
+                    b"elastos-localhost-file-v1\n"
+                );
+                assert_eq!(fs::read(root.join("Users/readme.txt")).unwrap(), b"plain");
+                assert_no_localhost_rewrite_temps(root);
+            } else {
+                finished_clean = true;
+                assert_envelope_opens_with_exactly_one_key(
+                    &alpha_path,
+                    alpha,
+                    &device_key,
+                    &file_key,
+                );
+                assert_envelope_opens_with_exactly_one_key(
+                    &beta_path,
+                    beta,
+                    &device_key,
+                    &file_key,
+                );
+                assert!(localhost_provider::decrypt_bytes(
+                    &device_key,
+                    &fs::read(&alpha_path).unwrap()
+                )
+                .is_err());
+                assert!(localhost_provider::decrypt_bytes(
+                    &device_key,
+                    &fs::read(&beta_path).unwrap()
+                )
+                .is_err());
+                assert_eq!(
+                    fs::read(root.join("identity/localhost-file-key-v1")).unwrap(),
+                    b"elastos-localhost-file-v1\n"
+                );
+                assert_eq!(fs::read(root.join("Users/readme.txt")).unwrap(), b"plain");
+                assert_no_localhost_rewrite_temps(root);
+                break;
+            }
+        }
+        assert!(saw_fault, "no write failed");
+        assert!(finished_clean, "a full budget never finished the migration");
+    }
+
+    fn spawn_migration_child(
+        root: &std::path::Path,
+        device_key: &[u8; 32],
+        ready_name: &str,
+    ) -> std::process::Child {
+        use std::process::{Command, Stdio};
+
+        let test = format!(
+            "{}::localhost_migration_second_home_child",
+            module_path!().split_once("::").unwrap().1
+        );
+        Command::new(std::env::current_exe().unwrap())
+            .env("ELASTOS_LOCALHOST_MIGRATION_CHILD_ROOT", root)
+            .env(
+                "ELASTOS_LOCALHOST_MIGRATION_CHILD_KEY",
+                hex::encode(device_key),
+            )
+            .env("ELASTOS_LOCALHOST_MIGRATION_CHILD_READY", ready_name)
+            .args([
+                "--exact",
+                test.as_str(),
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    struct ReapChild(Option<std::process::Child>);
+
+    impl Drop for ReapChild {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                if matches!(child.try_wait(), Ok(None)) {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
+            }
+        }
+    }
+
+    impl ReapChild {
+        fn spawn(root: &std::path::Path, device_key: &[u8; 32], ready_name: &str) -> Self {
+            Self(Some(spawn_migration_child(root, device_key, ready_name)))
+        }
+
+        fn child(&mut self) -> &mut std::process::Child {
+            self.0.as_mut().unwrap()
+        }
+    }
+
+    fn child_output(child: &mut std::process::Child) -> (String, String) {
+        use std::io::Read;
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            pipe.read_to_string(&mut stdout).unwrap();
+        }
+        if let Some(mut pipe) = child.stderr.take() {
+            pipe.read_to_string(&mut stderr).unwrap();
+        }
+        (stdout, stderr)
+    }
+
+    #[test]
+    fn two_homes_on_one_data_folder_finish_on_one_key() {
+        use std::time::{Duration, Instant};
+
+        let device_key = [0x66; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let plaintext = b"shared-home-secret";
+
+        let blocked = TempDir::new().unwrap();
+        let blocked_root = blocked.path();
+        let blocked_note = blocked_root.join("Users/note.bin");
+        plant_device_envelope(&blocked_note, &device_key, plaintext);
+        let _lock = hold_localhost_migration_lock(blocked_root).unwrap();
+        let mut child = ReapChild::spawn(blocked_root, &device_key, "child-hold");
+        let ready = blocked_root.join("child-hold");
+        let done = ready.with_extension("done");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "second Home did not reach the migration lock"
+            );
+            if let Some(status) = child.child().try_wait().unwrap() {
+                let (stdout, stderr) = child_output(child.child());
+                panic!(
+                    "second Home exited before waiting: {status} stdout {stdout} stderr {stderr}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            child.child().try_wait().unwrap().is_none(),
+            "second Home ran while the first Home held the migration lock"
+        );
+        assert!(!done.exists());
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&blocked_note).unwrap())
+                .unwrap(),
+            plaintext
+        );
+        drop(_lock);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = child.child().try_wait().unwrap() {
+                let (stdout, stderr) = child_output(child.child());
+                assert!(
+                    status.success(),
+                    "second Home failed: {status} stdout {stdout} stderr {stderr}"
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "second Home did not finish");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_envelope_opens_with_exactly_one_key(
+            &blocked_note,
+            plaintext,
+            &device_key,
+            &file_key,
+        );
+        assert!(
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&blocked_note).unwrap())
+                .is_err()
+        );
+        assert_eq!(fs::read(&done).unwrap(), hex::encode(file_key).into_bytes());
+
+        let shared = TempDir::new().unwrap();
+        let shared_root = shared.path();
+        let first = shared_root.join("Users/one.bin");
+        let second = shared_root.join("Users/two.bin");
+        plant_device_envelope(&first, &device_key, b"one");
+        plant_device_envelope(&second, &device_key, b"two");
+        let mut home_a = ReapChild::spawn(shared_root, &device_key, "child-a");
+        let mut home_b = ReapChild::spawn(shared_root, &device_key, "child-b");
+        for (name, child) in [("Home A", home_a.child()), ("Home B", home_b.child())] {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    let (stdout, stderr) = child_output(child);
+                    assert!(
+                        status.success(),
+                        "{name} failed: {status} stdout {stdout} stderr {stderr}"
+                    );
+                    break;
+                }
+                assert!(Instant::now() < deadline, "{name} did not finish");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert_envelope_opens_with_exactly_one_key(&first, b"one", &device_key, &file_key);
+        assert_envelope_opens_with_exactly_one_key(&second, b"two", &device_key, &file_key);
+        assert!(
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&first).unwrap()).is_err()
+        );
+        assert_eq!(
+            fs::read(shared_root.join("identity/localhost-file-key-v1")).unwrap(),
+            b"elastos-localhost-file-v1\n"
+        );
+        assert_no_localhost_rewrite_temps(shared_root);
+    }
+
+    #[test]
+    #[ignore]
+    fn localhost_migration_second_home_child() {
+        let Ok(root) = std::env::var("ELASTOS_LOCALHOST_MIGRATION_CHILD_ROOT") else {
+            return;
+        };
+        let key_hex = std::env::var("ELASTOS_LOCALHOST_MIGRATION_CHILD_KEY").unwrap();
+        let ready_name = std::env::var("ELASTOS_LOCALHOST_MIGRATION_CHILD_READY").unwrap();
+        let bytes = hex::decode(key_hex).unwrap();
+        let mut device_key = [0u8; 32];
+        device_key.copy_from_slice(&bytes);
+        let root = std::path::PathBuf::from(root);
+        let ready = root.join(ready_name);
+        fs::write(&ready, b"ready").unwrap();
+        let config = localhost_provider_bridge_config(&root, &device_key).unwrap();
+        fs::write(
+            ready.with_extension("done"),
+            config.encryption_key.as_bytes(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn symlink_root_marker_identity_and_inside_hard_link_stop_start() {
+        use std::os::unix::fs::symlink;
+
+        let device_key = [0x73; 32];
+        let original = localhost_provider::encrypt_bytes(&device_key, b"linked-secret").unwrap();
+
+        let outside = TempDir::new().unwrap();
+        let linked_root = TempDir::new().unwrap();
+        fs::create_dir(outside.path().join("real-users")).unwrap();
+        fs::write(outside.path().join("real-users/note.bin"), &original).unwrap();
+        symlink(
+            outside.path().join("real-users"),
+            linked_root.path().join("Users"),
+        )
+        .unwrap();
+        let err = localhost_provider_bridge_config(linked_root.path(), &device_key).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&linked_root.path().join("Users").display().to_string()),
+            "{err}"
+        );
+        assert!(err.to_string().contains("is a link"), "{err}");
+        assert_eq!(
+            fs::read(outside.path().join("real-users/note.bin")).unwrap(),
+            original
+        );
+        assert!(!linked_root
+            .path()
+            .join("identity/localhost-file-key-v1")
+            .exists());
+
+        let marker_root = TempDir::new().unwrap();
+        plant_device_envelope(
+            &marker_root.path().join("Users/note.bin"),
+            &device_key,
+            b"linked-secret",
+        );
+        fs::create_dir(marker_root.path().join("identity")).unwrap();
+        let marker_target = outside.path().join("marker-target");
+        fs::write(&marker_target, b"not-the-record").unwrap();
+        let marker = marker_root.path().join("identity/localhost-file-key-v1");
+        symlink(&marker_target, &marker).unwrap();
+        let err = localhost_provider_bridge_config(marker_root.path(), &device_key).unwrap_err();
+        assert!(
+            err.to_string().contains(&marker.display().to_string()),
+            "{err}"
+        );
+        assert!(err.to_string().contains("is a link"), "{err}");
+        assert_eq!(fs::read(&marker_target).unwrap(), b"not-the-record");
+        assert_eq!(
+            localhost_provider::decrypt_bytes(
+                &device_key,
+                &fs::read(marker_root.path().join("Users/note.bin")).unwrap()
+            )
+            .unwrap(),
+            b"linked-secret"
+        );
+
+        let identity_root = TempDir::new().unwrap();
+        plant_device_envelope(
+            &identity_root.path().join("Local/note.bin"),
+            &device_key,
+            b"linked-secret",
+        );
+        let identity_target = outside.path().join("ident");
+        fs::create_dir(&identity_target).unwrap();
+        symlink(&identity_target, identity_root.path().join("identity")).unwrap();
+        let err = localhost_provider_bridge_config(identity_root.path(), &device_key).unwrap_err();
+        assert!(err.to_string().contains("is a link"), "{err}");
+        assert!(fs::read_dir(&identity_target).unwrap().next().is_none());
+        assert_eq!(
+            localhost_provider::decrypt_bytes(
+                &device_key,
+                &fs::read(identity_root.path().join("Local/note.bin")).unwrap()
+            )
+            .unwrap(),
+            b"linked-secret"
+        );
+
+        let hard = TempDir::new().unwrap();
+        let hard_a = hard.path().join("Users/a.bin");
+        let sealed = plant_device_envelope(&hard_a, &device_key, b"linked-secret");
+        let hard_b = hard.path().join("Users/b.bin");
+        fs::hard_link(&hard_a, &hard_b).unwrap();
+        let err = localhost_provider_bridge_config(hard.path(), &device_key).unwrap_err();
+        assert!(
+            err.to_string().contains("is linked from another path"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&hard_a).unwrap(), sealed);
+        assert_eq!(fs::read(&hard_b).unwrap(), sealed);
+        assert!(!hard.path().join("identity/localhost-file-key-v1").exists());
+
+        let lock_link = TempDir::new().unwrap();
+        plant_device_envelope(
+            &lock_link.path().join("Users/note.bin"),
+            &device_key,
+            b"linked-secret",
+        );
+        fs::create_dir(lock_link.path().join("identity")).unwrap();
+        let creds = lock_link.path().join("identity/credentials.json");
+        fs::write(&creds, &original).unwrap();
+        fs::hard_link(
+            &creds,
+            lock_link.path().join("identity/localhost-file-key.lock"),
+        )
+        .unwrap();
+        let err = localhost_provider_bridge_config(lock_link.path(), &device_key).unwrap_err();
+        assert!(err.to_string().contains("localhost-file-key.lock"), "{err}");
+        assert!(
+            err.to_string().contains("is linked from another path"),
+            "{err}"
+        );
+        assert_eq!(fs::read(&creds).unwrap(), original);
+        assert_eq!(
+            localhost_provider::decrypt_bytes(
+                &device_key,
+                &fs::read(lock_link.path().join("Users/note.bin")).unwrap()
+            )
+            .unwrap(),
+            b"linked-secret"
+        );
+    }
+
+    #[test]
+    fn large_localhost_tree_migrates_once_and_second_start_does_not_rewrite() {
+        let device_key = [0x77; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let count = 1000;
+        for index in 0..count {
+            let plaintext = format!("bulk-{index}");
+            plant_device_envelope(
+                &root.join(format!("Users/bulk/f{index:04}.bin")),
+                &device_key,
+                plaintext.as_bytes(),
+            );
+        }
+        fs::create_dir_all(root.join("Users/bulk/nested")).unwrap();
+        for index in 0..10 {
+            plant_device_envelope(
+                &root.join(format!("Users/bulk/nested/n{index}.bin")),
+                &device_key,
+                b"nested",
+            );
+        }
+        fs::write(root.join("Users/bulk/plain.txt"), b"leave-me").unwrap();
+
+        let config = localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(config.encryption_key, hex::encode(file_key));
+        for index in [0, 1, count - 1] {
+            let plaintext = format!("bulk-{index}");
+            let path = root.join(format!("Users/bulk/f{index:04}.bin"));
+            assert_envelope_opens_with_exactly_one_key(
+                &path,
+                plaintext.as_bytes(),
+                &device_key,
+                &file_key,
+            );
+        }
+        assert_envelope_opens_with_exactly_one_key(
+            &root.join("Users/bulk/nested/n0.bin"),
+            b"nested",
+            &device_key,
+            &file_key,
+        );
+        assert_eq!(
+            fs::read(root.join("Users/bulk/plain.txt")).unwrap(),
+            b"leave-me"
+        );
+        let sample = fs::read(root.join("Users/bulk/f0000.bin")).unwrap();
+        let tail =
+            fs::read(root.join(format!("Users/bulk/f{index:04}.bin", index = count - 1))).unwrap();
+        let again = localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(again.encryption_key, hex::encode(file_key));
+        assert_eq!(fs::read(root.join("Users/bulk/f0000.bin")).unwrap(), sample);
+        assert_eq!(
+            fs::read(root.join(format!("Users/bulk/f{index:04}.bin", index = count - 1))).unwrap(),
+            tail
+        );
+        assert_eq!(
+            fs::read(root.join("identity/localhost-file-key-v1")).unwrap(),
+            b"elastos-localhost-file-v1\n"
+        );
+        assert_no_localhost_rewrite_temps(root);
+    }
+
+    #[test]
+    fn file_changed_during_the_walk_keeps_the_new_bytes_and_stops_start() {
+        let _clear = ClearLocalhostMigrationFaults;
+        let device_key = [0x79; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let alpha = root.join("Users/a.bin");
+        let beta = root.join("Users/b.bin");
+        plant_device_envelope(&alpha, &device_key, b"alpha");
+        let original_beta = plant_device_envelope(&beta, &device_key, b"beta");
+        set_localhost_migration_before_replace(Some(Box::new(move |path: &std::path::Path| {
+            if path.file_name().and_then(|name| name.to_str()) != Some("b.bin") {
+                return;
+            }
+            let sealed =
+                localhost_provider::encrypt_bytes(&device_key, b"changed-during-walk").unwrap();
+            let swap = path.with_file_name(".b.bin.swap");
+            fs::write(&swap, &sealed).unwrap();
+            fs::rename(&swap, path).unwrap();
+        })));
+        let err = localhost_provider_bridge_config(root, &device_key).unwrap_err();
+        set_localhost_migration_before_replace(None);
+        assert!(
+            err.to_string().contains("changed while it was being read"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("b.bin"), "{err}");
+        assert_ne!(fs::read(&beta).unwrap(), original_beta);
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &fs::read(&beta).unwrap()).unwrap(),
+            b"changed-during-walk"
+        );
+        assert_envelope_opens_with_exactly_one_key(&alpha, b"alpha", &device_key, &file_key);
+        assert!(!root.join("identity/localhost-file-key-v1").exists());
+        let alpha_bytes = fs::read(&alpha).unwrap();
+
+        localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(fs::read(&alpha).unwrap(), alpha_bytes);
+        assert_envelope_opens_with_exactly_one_key(
+            &beta,
+            b"changed-during-walk",
+            &device_key,
+            &file_key,
+        );
+        assert!(localhost_provider::decrypt_bytes(&device_key, &fs::read(&beta).unwrap()).is_err());
+        assert_eq!(
+            fs::read(root.join("identity/localhost-file-key-v1")).unwrap(),
+            b"elastos-localhost-file-v1\n"
+        );
+        assert_no_localhost_rewrite_temps(root);
+    }
+
+    #[test]
+    fn raw_device_key_is_not_used_again_after_migration() {
+        let device_key = [0x7a; 32];
+        let file_key = expected_localhost_file_key(&device_key);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let note = root.join("Users/note.bin");
+        plant_device_envelope(&note, &device_key, b"already-moved");
+        let config = localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(config.encryption_key, hex::encode(file_key));
+        assert_ne!(config.encryption_key, hex::encode(device_key));
+        let migrated = fs::read(&note).unwrap();
+        assert!(localhost_provider::decrypt_bytes(&device_key, &migrated).is_err());
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&file_key, &migrated).unwrap(),
+            b"already-moved"
+        );
+
+        let later = localhost_provider::encrypt_bytes(&device_key, b"written-after").unwrap();
+        fs::create_dir_all(root.join("Local")).unwrap();
+        fs::write(root.join("Local/later.bin"), &later).unwrap();
+        let corrupt =
+            br#"{"version":1,"nonce":"00112233445566778899aabb","ciphertext":"deadbeef"}"#;
+        fs::write(root.join("Users/corrupt.bin"), corrupt).unwrap();
+        let again = localhost_provider_bridge_config(root, &device_key).unwrap();
+        assert_eq!(again.encryption_key, hex::encode(file_key));
+        assert_eq!(fs::read(root.join("Local/later.bin")).unwrap(), later);
+        assert_eq!(
+            localhost_provider::decrypt_bytes(&device_key, &later).unwrap(),
+            b"written-after"
+        );
+        assert_eq!(fs::read(root.join("Users/corrupt.bin")).unwrap(), corrupt);
+        assert_eq!(fs::read(&note).unwrap(), migrated);
+        assert_eq!(
+            fs::read(root.join("identity/localhost-file-key-v1")).unwrap(),
+            b"elastos-localhost-file-v1\n"
+        );
     }
 
     #[cfg(unix)]
