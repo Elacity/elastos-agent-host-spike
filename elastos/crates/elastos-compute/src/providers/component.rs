@@ -44,7 +44,10 @@ mod v2 {
 const COMPONENT_FUEL: u64 = 100_000_000;
 // The resident v2 run uses epoch ticks as its execution backstop. Keep fuel
 // above that window even for cheap instructions; v1 keeps its original fuel.
+// Each slice yields the executor. Wasmtime 48 refills the reserve, not the
+// count already running, so the next slice takes the new fuel.
 const V2_FUEL: u64 = 1_000_000_000_000;
+const V2_FUEL_SLICE: u64 = 10_000_000;
 const COMPONENT_MEMORY_SIZE: usize = 128 * 1024 * 1024;
 /// The largest component file the Runtime reads or compiles. The largest
 /// component in this repository is under 1 MiB.
@@ -169,6 +172,8 @@ struct V2RunControl {
     stop_requested: Arc<AtomicBool>,
     cancel_requested: Arc<AtomicBool>,
     max_ticks: u64,
+    fuel: u64,
+    fuel_slice: u64,
     #[cfg(test)]
     pending_read: Arc<AtomicBool>,
 }
@@ -320,20 +325,7 @@ impl ComponentProvider {
         static ENGINE: OnceLock<std::result::Result<Engine, String>> = OnceLock::new();
         ENGINE
             .get_or_init(|| {
-                let mut config = Config::new();
-                config
-                    .wasm_component_model(true)
-                    .wasm_component_model_async(true)
-                    .concurrency_support(true)
-                    .consume_fuel(true)
-                    .epoch_interruption(true)
-                    .wasm_features(
-                        WasmFeatures::THREADS
-                            | WasmFeatures::SHARED_EVERYTHING_THREADS
-                            | WasmFeatures::GC
-                            | WasmFeatures::STACK_SWITCHING,
-                        false,
-                    );
+                let mut config = Self::v2_config();
                 // The same signal-trap choice as v1: the two engines are in one
                 // process and wasmtime's global trap handler must agree.
                 config.macos_use_mach_ports(false);
@@ -352,6 +344,24 @@ impl ComponentProvider {
             .map_err(|err| {
                 ElastosError::Compute(format!("Failed to configure v2 component engine: {err}"))
             })
+    }
+
+    fn v2_config() -> Config {
+        let mut config = Config::new();
+        config
+            .wasm_component_model(true)
+            .wasm_component_model_async(true)
+            .concurrency_support(true)
+            .consume_fuel(true)
+            .epoch_interruption(true)
+            .wasm_features(
+                WasmFeatures::THREADS
+                    | WasmFeatures::SHARED_EVERYTHING_THREADS
+                    | WasmFeatures::GC
+                    | WasmFeatures::STACK_SWITCHING,
+                false,
+            );
+        config
     }
 
     /// Reads a component file once, and never more than one byte past the cap.
@@ -666,8 +676,13 @@ impl ComponentProvider {
     ) -> Result<&'static str> {
         let mut store = Store::new(&engine, state);
         store.limiter(|state| &mut state.limits);
+        // Yield each slice. The tick refills the reserve the next slice reads.
+        let fuel = control.fuel;
         store
-            .set_fuel(V2_FUEL)
+            .fuel_async_yield_interval(Some(control.fuel_slice))
+            .map_err(|err| run_error("v2 fuel slice", err))?;
+        store
+            .set_fuel(fuel)
             .map_err(|err| run_error("v2 fuel", err))?;
         // Count guest execution between delivered events. A stream wake can
         // reach the callback once even when the guest was idle for 10 ms.
@@ -676,10 +691,11 @@ impl ComponentProvider {
         let deadline_ticks = ticks.clone();
         let cancel_requested = control.cancel_requested.clone();
         let max_ticks = control.max_ticks;
-        store.epoch_deadline_callback(move |_| {
+        store.epoch_deadline_callback(move |mut context| {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
+            context.set_fuel(fuel)?;
             Ok(
                 if deadline_ticks.fetch_add(1, Ordering::AcqRel) + 1 >= max_ticks {
                     UpdateDeadline::Interrupt
@@ -858,6 +874,8 @@ impl ComputeProvider for ComponentProvider {
                 max_ticks: instance.test_max_ticks,
                 #[cfg(not(test))]
                 max_ticks: V2_EPOCH_TICKS,
+                fuel: V2_FUEL,
+                fuel_slice: V2_FUEL_SLICE,
                 #[cfg(test)]
                 pending_read: instance.pending_read.clone(),
             };
@@ -1620,6 +1638,114 @@ mod tests {
                 .contains(ENDING_EPOCH_DEADLINE)
         );
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    fn quiet_v2_engine() -> Engine {
+        let mut config = ComponentProvider::v2_config();
+        config.macos_use_mach_ports(false);
+        Engine::new(&config).expect("v2 engine without a ticker")
+    }
+
+    async fn drive_v2_guest(
+        engine: &Engine,
+        component: Component,
+        fuel: u64,
+        fuel_slice: u64,
+        max_ticks: u64,
+        close: bool,
+    ) -> String {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let _open = (!close).then_some(sender);
+        let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
+        let control = V2RunControl {
+            stop_requested: Arc::new(AtomicBool::new(close)),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+            max_ticks,
+            fuel,
+            fuel_slice,
+            pending_read: Arc::new(AtomicBool::new(false)),
+        };
+        match ComponentProvider::run_v2(
+            engine.clone(),
+            component,
+            ComponentState::new(None, "v2".into(), None),
+            receiver,
+            control,
+            ready_tx,
+        )
+        .await
+        {
+            Ok(ending) => ending.to_string(),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    /// One tick is four yields. The clock moves only when a guest gives the
+    /// thread back, so the row does not use a wall-clock budget.
+    #[tokio::test(flavor = "current_thread")]
+    async fn v2_busy_guest_does_not_finish_before_a_second_guest() {
+        const TURNS_PER_TICK: u64 = 4;
+        const SHORT_STARTS_AT: u64 = 2;
+        const BUSY_TICKS: u64 = 12;
+        const SLICE: u64 = 1_000;
+        let engine = quiet_v2_engine();
+        let busy = Component::new(
+            &engine,
+            v2_variant(&[(
+                "call $new global.set $set\n      call $next)",
+                "call $new global.set $set\n      (loop $spin br $spin) i32.const 0)",
+            )]),
+        )
+        .expect("busy guest");
+        let short = Component::new(&engine, v2_variant(&[])).expect("short guest");
+        let turns = Arc::new(AtomicU64::new(0));
+        let (clock_turns, busy_turns, short_turns) = (turns.clone(), turns.clone(), turns);
+        let (engine_busy, engine_short, clock_engine) = (engine.clone(), engine.clone(), engine);
+        let mut work = std::pin::pin!(async move {
+            let busy_run = async move {
+                let ending =
+                    drive_v2_guest(&engine_busy, busy, 32 * SLICE, SLICE, BUSY_TICKS, false).await;
+                (ending, busy_turns.load(Ordering::Relaxed) / TURNS_PER_TICK)
+            };
+            let short_run = async move {
+                while short_turns.load(Ordering::Relaxed) / TURNS_PER_TICK < SHORT_STARTS_AT {
+                    tokio::task::yield_now().await;
+                }
+                let ending = drive_v2_guest(
+                    &engine_short,
+                    short,
+                    V2_FUEL,
+                    V2_FUEL_SLICE,
+                    BUSY_TICKS * 4,
+                    true,
+                )
+                .await;
+                (ending, short_turns.load(Ordering::Relaxed) / TURNS_PER_TICK)
+            };
+            tokio::join!(busy_run, short_run)
+        });
+        let ((busy_ending, busy_at), (short_ending, short_at)) = std::future::poll_fn(|context| {
+            let poll = std::future::Future::poll(work.as_mut(), context);
+            if poll.is_pending() {
+                let turn = clock_turns.fetch_add(1, Ordering::Relaxed) + 1;
+                if turn % TURNS_PER_TICK == 0 {
+                    clock_engine.increment_epoch();
+                }
+                assert!(
+                    turn <= BUSY_TICKS * TURNS_PER_TICK * 8,
+                    "turns ran past the budget"
+                );
+            }
+            poll
+        })
+        .await;
+        assert!(
+            short_at >= SHORT_STARTS_AT
+                && short_at < busy_at
+                && short_ending == "stopped"
+                && busy_ending.contains(ENDING_EPOCH_DEADLINE),
+            "short guest {short_ending} at tick {short_at}, busy guest {busy_ending} at tick {busy_at}"
+        );
     }
 
     #[tokio::test]
