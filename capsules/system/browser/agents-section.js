@@ -125,6 +125,9 @@ export function bindAgents(doc, request, confirmStepUp) {
     if (!body || !Array.isArray(body.agents)) throw pageRefusal("The Home did not list agents.");
     agents = body.agents;
     gate = "ready";
+    // The list names the agent and whether it is turned on. It does not name a
+    // live session, so a reload cannot keep Stopping.
+    stopping.clear();
   }
 
   function post(id, label, path, body, accept) {
@@ -183,18 +186,30 @@ export function bindAgents(doc, request, confirmStepUp) {
   }
 
   function stopJob(agent) {
-    const id = agent.agent_id
+    const id = agent.agent_id;
     return async () => {
-      pendingId = id
-      pendingLabel = "Stopping"
-      paint()
-      const reply = await request("/api/apps/system/agents/stop", { method: "POST", body: JSON.stringify({ agent_id: id }) })
-      const stopped = reply && Array.isArray(reply.stopped) ? reply.stopped : []
-      const still = reply && Array.isArray(reply.stopping) ? reply.stopping : []
-      if (!reply || reply.agent_id !== id || (!stopped.length && !still.length)) throw pageRefusal("The Home did not confirm that change.")
-      still.length ? stopping.add(id) : stopping.delete(id)
-      await load()
-    }
+      pendingId = id;
+      pendingLabel = "Stopping";
+      paint();
+      let reply;
+      try {
+        reply = await request("/api/apps/system/agents/stop", { method: "POST", body: JSON.stringify({ agent_id: id }) });
+      } catch (error) {
+        const why = reason(error);
+        if (why === "this agent is already stopped" || why === "this agent has no running session") {
+          stopping.delete(id);
+        }
+        throw error;
+      }
+      const stopped = reply && Array.isArray(reply.stopped) ? reply.stopped : [];
+      const still = reply && Array.isArray(reply.stopping) ? reply.stopping : [];
+      if (!reply || reply.agent_id !== id || (!stopped.length && !still.length)) {
+        throw pageRefusal("The Home did not confirm that change.");
+      }
+      await load();
+      if (still.length) stopping.add(id);
+      else stopping.delete(id);
+    };
   }
 
   createButton.addEventListener("click", () => { if (gate === "ready") run(createJob()); });
