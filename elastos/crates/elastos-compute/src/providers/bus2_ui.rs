@@ -103,9 +103,14 @@ fn one_node(value: &Value) -> Result<Node, String> {
 
 /// serde_json keeps the last copy of a repeated key. This walk refuses that
 /// before the value is built. Keys are compared after string escapes.
+/// Guest JSON, bounded before any recursive walk. `read` params use this too.
+pub(crate) fn reject_guest_json(bytes: &[u8]) -> Result<(), String> {
+    reject_duplicate_keys(bytes)
+}
+
 fn reject_duplicate_keys(bytes: &[u8]) -> Result<(), String> {
     let mut i = 0;
-    scan_value(bytes, &mut i)?;
+    scan_value(bytes, &mut i, 1)?;
     skip_ws(bytes, &mut i);
     if i != bytes.len() {
         return Err("document is not JSON".to_string());
@@ -119,11 +124,15 @@ fn skip_ws(bytes: &[u8], i: &mut usize) {
     }
 }
 
-fn scan_value(bytes: &[u8], i: &mut usize) -> Result<(), String> {
+fn scan_value(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> {
+    // Checked before any further call. Eight is this checker's own cap.
+    if depth > MAX_DEPTH {
+        return Err(format!("depth cap {MAX_DEPTH}"));
+    }
     skip_ws(bytes, i);
     match bytes.get(*i).copied() {
-        Some(b'{') => scan_object(bytes, i),
-        Some(b'[') => scan_array(bytes, i),
+        Some(b'{') => scan_object(bytes, i, depth),
+        Some(b'[') => scan_array(bytes, i, depth),
         Some(b'"') => {
             scan_string(bytes, i)?;
             Ok(())
@@ -136,7 +145,7 @@ fn scan_value(bytes: &[u8], i: &mut usize) -> Result<(), String> {
     }
 }
 
-fn scan_object(bytes: &[u8], i: &mut usize) -> Result<(), String> {
+fn scan_object(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> {
     *i += 1;
     let mut keys = Vec::new();
     loop {
@@ -162,11 +171,11 @@ fn scan_object(bytes: &[u8], i: &mut usize) -> Result<(), String> {
             return Err("document is not JSON".to_string());
         }
         *i += 1;
-        scan_value(bytes, i)?;
+        scan_value(bytes, i, depth + 1)?;
     }
 }
 
-fn scan_array(bytes: &[u8], i: &mut usize) -> Result<(), String> {
+fn scan_array(bytes: &[u8], i: &mut usize, depth: usize) -> Result<(), String> {
     *i += 1;
     let mut seen = false;
     loop {
@@ -181,7 +190,7 @@ fn scan_array(bytes: &[u8], i: &mut usize) -> Result<(), String> {
             }
             *i += 1;
         }
-        scan_value(bytes, i)?;
+        scan_value(bytes, i, depth + 1)?;
         seen = true;
     }
 }
@@ -285,6 +294,9 @@ pub fn check_document(media_type: &str, document: &[u8]) -> Result<Vec<Node>, St
         ));
     }
     reject_duplicate_keys(document)?;
+    // serde_json::from_slice keeps its own depth limit (128). This crate does
+    // not turn that limit off. The scan above already refused anything past 8,
+    // so this parse never walks a deeper tree.
     let value: Value =
         serde_json::from_slice(document).map_err(|err| format!("document is not JSON: {err}"))?;
     walk(&value, 1)?;
@@ -532,6 +544,77 @@ mod tests {
             matches!(oldest, PresentError::Denied(ref message) if message.contains("is not a grant")),
             "{oldest:?}"
         );
+    }
+
+    /// 16,384 `[`, the same many `{"a":`, and a 16 KiB string. Each ends
+    /// Invalid. The check runs in a child: a stack overflow there fails this
+    /// row, and the suite process stays up.
+    #[test]
+    fn deep_documents_end_invalid_and_the_process_lives() {
+        const NAME: &str =
+            "providers::bus2_ui::tests::deep_documents_end_invalid_and_the_process_lives";
+        if std::env::var("RA2_DEPTH_CHILD").is_err() {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .arg(NAME)
+                .arg("--exact")
+                .arg("--test-threads=1")
+                .arg("--nocapture")
+                .env("RA2_DEPTH_CHILD", "1");
+            let output = child.output().expect("depth child starts");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "deep document must end Invalid in a live process, status {:?}\n{stdout}\n{stderr}",
+                output.status
+            );
+            assert!(
+                stdout.contains("deep document: Invalid")
+                    || stderr.contains("deep document: Invalid"),
+                "child did not report Invalid\n{stdout}\n{stderr}"
+            );
+            return;
+        }
+        for document in deep_documents() {
+            let err = check_document(UI_MEDIA_TYPE, &document).expect_err("deep document");
+            assert!(!err.is_empty(), "{err}");
+            let read =
+                super::super::bus2_stream::read_cap(&document).expect_err("deep read params");
+            assert!(
+                read.contains("depth cap")
+                    || read.contains("not JSON")
+                    || read.contains("expected"),
+                "{read}"
+            );
+            eprintln!("deep document: Invalid");
+        }
+        let mut nested = Vec::new();
+        for _ in 0..200 {
+            nested.extend_from_slice(br#"{"a":"#);
+        }
+        nested.extend_from_slice(br#"null"#);
+        nested.extend(std::iter::repeat(b'}').take(200));
+        let err = serde_json::from_slice::<serde_json::Value>(&nested).expect_err("serde depth");
+        assert!(
+            err.to_string().contains("recursion"),
+            "serde_json keeps its own depth limit, got {err}"
+        );
+        eprintln!("deep document: Invalid");
+    }
+
+    fn deep_documents() -> [Vec<u8>; 3] {
+        let brackets = vec![b'['; MAX_DOCUMENT_BYTES];
+        let mut objects = Vec::new();
+        while objects.len() + 5 <= MAX_DOCUMENT_BYTES {
+            objects.extend_from_slice(br#"{"a":"#);
+        }
+        let mut deep_string = vec![b'"'];
+        while deep_string.len() + 7 <= MAX_DOCUMENT_BYTES {
+            deep_string.extend_from_slice(br#"\u0041"#);
+        }
+        deep_string.push(b'"');
+        [brackets, objects, deep_string]
     }
 
     #[test]

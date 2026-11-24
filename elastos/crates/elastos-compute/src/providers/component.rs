@@ -427,6 +427,10 @@ impl ComponentProvider {
             .concurrency_support(true)
             .consume_fuel(true)
             .epoch_interruption(true)
+            // A guest's own calls stop at this stack and trap. The host
+            // scanner does not borrow that stack. 512 KiB is Wasmtime's own
+            // default, named here so a later config cannot leave it open.
+            .max_wasm_stack(512 * 1024)
             .wasm_features(
                 WasmFeatures::THREADS
                     | WasmFeatures::SHARED_EVERYTHING_THREADS
@@ -1751,6 +1755,36 @@ mod tests {
             v1.get_wasm_features() ^ v2.get_wasm_features(),
             WasmFeatures::CM_ASYNC,
             "v2 enables only its component-model async features beyond v1"
+        );
+        assert_eq!(
+            v2.get_max_wasm_stack(),
+            512 * 1024,
+            "a v2 guest's own recursion traps inside the named wasm stack"
+        );
+    }
+
+    /// WIT `ui.present` takes a flat `list<u8>`. This is the other recursion a
+    /// guest can drive: its own calls. The wasm stack traps them.
+    #[test]
+    fn v2_guest_recursion_traps_inside_the_wasm_stack() {
+        let engine = ComponentProvider::v2_engine().expect("v2 engine");
+        let bytes = wat::parse_str(
+            r#"(module (func $again call $again) (func (export "go") call $again))"#,
+        )
+        .expect("recursive wat");
+        let module = wasmtime::Module::new(&engine, &bytes).expect("recursive module");
+        let mut store = wasmtime::Store::new(&engine, ());
+        store.set_fuel(1_000_000_000).expect("fuel");
+        store.set_epoch_deadline(1_000_000);
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).expect("instance");
+        let go = instance
+            .get_typed_func::<(), ()>(&mut store, "go")
+            .expect("go");
+        let err = go.call(&mut store, ()).expect_err("recursion traps");
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("stack"),
+            "recursive guest traps inside the wasm stack, got {text}"
         );
     }
 
