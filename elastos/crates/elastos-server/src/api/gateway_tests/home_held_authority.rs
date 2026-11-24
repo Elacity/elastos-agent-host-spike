@@ -1389,7 +1389,7 @@ fn rows() -> Vec<HeldRow> {
             "open",
             "device private key",
             "chain provider",
-            "Linux proof pending the CTO's run. The real-binary test prints \"chain-provider binary is absent from the test build\" or the Landlock ABI refusal when it cannot run.",
+            "Linux proof pending the CTO's run. CI builds chain-provider and fails if that binary is absent or the Landlock ABI is refused. A developer machine without the binary prints \"chain-provider binary is absent from the test build\".",
         ),
     ),
     row(

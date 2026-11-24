@@ -33,9 +33,20 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
         if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
             candidates.push(PathBuf::from(dir).join("debug").join(name));
         }
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        candidates.push(manifest.join("../../target/debug").join(name));
+        // The test-elastos job builds object-provider into this directory.
+        // localhost-provider is a workspace member and is not built there.
         candidates.push(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/debug")
+            manifest
+                .join("../../../target/provider-fence-tests/debug")
+                .join(name),
+        );
+        candidates.push(
+            manifest
+                .join("../../../capsules")
+                .join(name)
+                .join("target/debug")
                 .join(name),
         );
         candidates

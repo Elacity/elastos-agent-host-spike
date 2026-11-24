@@ -1310,9 +1310,10 @@ mod tests {
 
     /// The real `chain-provider` binary, started by `start_path_allow`.
     ///
-    /// Runs when that binary is already in this test build. Linux also needs
-    /// Landlock ABI 5 or newer. When the binary is absent, or the kernel
-    /// refuses that ABI, the test prints the named reason and returns.
+    /// CI builds that binary and this test runs it. A missing binary, or a
+    /// Linux kernel that refuses Landlock ABI 5, fails the test when `CI` is
+    /// set. A developer machine without the binary, or without that ABI,
+    /// prints the named reason and returns.
     /// Linux-only companions, not this test: `a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer`
     /// and `a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key`.
     #[cfg(all(
@@ -1330,15 +1331,28 @@ mod tests {
         use sha2::{Digest, Sha256};
         use std::io::{Read, Write};
 
+        fn ci_must_run_the_helper() -> bool {
+            let ci = std::env::var("CI").ok().is_some_and(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+            });
+            ci || std::env::var_os("GITHUB_ACTIONS").is_some()
+        }
+        fn stop_without_proof(reason: &str) {
+            let text = format!("chain-provider real-binary proof did not run: {reason}");
+            if ci_must_run_the_helper() {
+                panic!("{text}");
+            }
+            eprintln!("{text}");
+        }
+
         #[cfg(target_os = "linux")]
         if let Err(reason) = super::super::landlock_plan::kernel_abi() {
-            eprintln!("chain-provider real-binary proof did not run: {reason}");
+            stop_without_proof(&reason);
             return;
         }
         let Some(bin) = chain_provider_binary() else {
-            eprintln!(
-                "chain-provider real-binary proof did not run: chain-provider binary is absent from the test build"
-            );
+            stop_without_proof("chain-provider binary is absent from the test build");
             return;
         };
         assert!(bin.is_file(), "chain binary {}", bin.display());
@@ -1608,9 +1622,13 @@ mod tests {
                 candidates.push(debug_dir.join("chain-provider"));
             }
         }
-        candidates.push(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/debug/chain-provider"),
-        );
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        candidates.push(manifest.join("../../../target/debug/chain-provider"));
+        // The test-elastos job builds this binary beside the other provider
+        // process binaries, in one shared debug directory.
+        candidates.push(manifest.join("../../../target/provider-fence-tests/debug/chain-provider"));
+        candidates
+            .push(manifest.join("../../../capsules/chain-provider/target/debug/chain-provider"));
         candidates.into_iter().find(|path| path.is_file())
     }
 

@@ -687,6 +687,15 @@ jobs:
           cargo build --release --manifest-path capsules/protected-content-protect-provider/Cargo.toml --target-dir capsules/protected-content-protect-provider/target
           cargo build --release --manifest-path capsules/protected-content-decrypt-provider/Cargo.toml --target-dir capsules/protected-content-decrypt-provider/target
           cargo build --release --manifest-path capsules/custody-provider/Cargo.toml --target-dir capsules/custody-provider/target
+          # Debug binaries for the fence tests. They share one target dir so
+          # chain-provider reuses crates object-provider already compiled.
+          # The workspace dev profile uses line-tables-only; match it here.
+          # A missing binary fails those tests in this job (CI is set).
+          # Added time on one Mac, empty directory: object-provider 1m 41s,
+          # then chain-provider 18s. About 2 minutes on this step.
+          export CARGO_PROFILE_DEV_DEBUG=line-tables-only
+          cargo build --locked --manifest-path capsules/object-provider/Cargo.toml --target-dir target/provider-fence-tests
+          cargo build --locked --manifest-path capsules/chain-provider/Cargo.toml --target-dir target/provider-fence-tests
       - name: cargo test
         working-directory: elastos
         env:

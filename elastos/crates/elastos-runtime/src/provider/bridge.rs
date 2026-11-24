@@ -1812,7 +1812,7 @@ impl ProviderBridge {
     /// `chain-provider/` must be a real directory before the path allow-list
     /// renders. Create it when Home has not yet. A symlink is refused.
     fn ensure_chain_provider_root(data_dir: &Path) -> Result<(), BridgeError> {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::DirBuilderExt;
         let root = data_dir.join("chain-provider");
         match std::fs::symlink_metadata(&root) {
             Ok(metadata) if metadata.file_type().is_symlink() => Err(BridgeError::Refused(
@@ -1823,9 +1823,11 @@ impl ProviderBridge {
             )),
             Ok(_) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&root).map_err(BridgeError::Io)?;
-                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-                    .map_err(BridgeError::Io)?;
+                // Mode at create. `create_dir` follows the umask, so 0755 would
+                // sit on the directory until a later chmod.
+                let mut builder = std::fs::DirBuilder::new();
+                builder.mode(0o700);
+                builder.create(&root).map_err(BridgeError::Io)?;
                 Ok(())
             }
             Err(err) => Err(BridgeError::Io(err)),

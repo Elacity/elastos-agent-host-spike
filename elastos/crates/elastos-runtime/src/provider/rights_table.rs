@@ -49,7 +49,10 @@ const HELPER_RIGHT_IDS: &[&str] = DID_RIGHT_IDS;
 
 /// The caller derives this id from the Runtime's `components.json` key,
 /// never from the package manifest's `name`.
-#[allow(dead_code)] // Windows does not construct the Unix spawn ids.
+// This module is `#[cfg(unix)]`, so Windows never compiles it. The allow
+// is for macOS: the Linux seccomp installer is not compiled there, and the
+// ids that installer constructs are otherwise unused on that cfg.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(super) enum RuntimeProviderId {
     Did,
