@@ -69,13 +69,26 @@ const HOSTED_RUN_BINDING_TTL: std::time::Duration = std::time::Duration::from_se
 // entries immediately; an unpolled completion remains until the two-hour TTL.
 const MAX_HOSTED_RUN_BINDINGS: usize = 4096;
 
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 fn seatbelt_path(path: &Path) -> Result<String, BridgeError> {
     let value = path
         .to_str()
         .filter(|value| !value.chars().any(char::is_control))
         .ok_or_else(|| BridgeError::InitFailed("invalid model sandbox path".into()))?;
     Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(target_os = "macos")]
+fn model_capsule_authority() -> Result<ProviderAuthority, BridgeError> {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../capsules/model-provider/capsule.json");
+    let bytes = std::fs::read(&path)
+        .map_err(|_| BridgeError::InitFailed("model authority unavailable".into()))?;
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| BridgeError::InitFailed("model authority unavailable".into()))?;
+    manifest
+        .authority
+        .ok_or_else(|| BridgeError::InitFailed("model authority unavailable".into()))
 }
 
 #[cfg(target_os = "macos")]
@@ -238,19 +251,10 @@ fn model_engine_receipt_file_matches(
 
 #[cfg(target_os = "macos")]
 fn model_file_policy(
-    binary_path: &Path,
     config: &ProviderConfig,
-    journal: &Path,
     pinned_engine_bundle: Option<&Path>,
-) -> Result<String, BridgeError> {
+) -> Result<(), BridgeError> {
     let base = Path::new(&config.base_path);
-    let mut files = std::collections::BTreeSet::new();
-    let mut metadata_paths = base
-        .ancestors()
-        .map(Path::to_path_buf)
-        .collect::<std::collections::BTreeSet<_>>();
-    files.insert(binary_path.to_path_buf());
-    metadata_paths.extend(binary_path.ancestors().map(Path::to_path_buf));
     for offer in config.extra["offers"]
         .as_array()
         .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?
@@ -281,8 +285,6 @@ fn model_file_policy(
             {
                 return Err(BridgeError::InitFailed("unsafe model artifact path".into()));
             }
-            files.insert(path.to_path_buf());
-            metadata_paths.extend(path.ancestors().skip(1).map(Path::to_path_buf));
         }
         let engine_dir = engine
             .parent()
@@ -351,36 +353,8 @@ fn model_file_policy(
                     return Err(BridgeError::InitFailed("changed model engine file".into()));
                 }
             }
-            files.insert(path);
-            files.insert(canonical);
         }
     }
-    let mut policy = String::from(
-        "(version 1)\n(allow default)\n(deny network-outbound)\n(deny file-read*)\n(deny file-write*)\n(allow file-read* (literal \"/\") (subpath \"/System\") (subpath \"/usr/lib\") (literal \"/dev/urandom\") (literal \"/dev/null\"))\n(allow file-write-data (literal \"/dev/null\"))\n",
-    );
-    // Runtime owns admission and descriptor verification. The child can read
-    // admitted payloads created after startup, while staging and inventory stay
-    // outside its file boundary. Seatbelt resolves aliases before this match.
-    let admitted_parent = base.join("model-preparation");
-    let mut admitted_pattern = String::from("^");
-    for character in admitted_parent
-        .to_str()
-        .ok_or_else(|| BridgeError::InitFailed("invalid model sandbox path".into()))?
-        .chars()
-    {
-        if "\\.^$|?*+()[]{}".contains(character) {
-            admitted_pattern.push('\\');
-        }
-        admitted_pattern.push(character);
-    }
-    admitted_pattern.push_str("/admitted-");
-    admitted_pattern.push_str(&"[a-f0-9]".repeat(64));
-    admitted_pattern.push_str("(/|$)");
-    policy.push_str(&format!(
-        "(allow file-read* (regex \"{}\"))\n",
-        seatbelt_path(Path::new(&admitted_pattern))?
-    ));
-    metadata_paths.insert(admitted_parent);
     if let Some(bundle) = pinned_engine_bundle {
         let prefix = base.join("libexec/llama.cpp");
         let relative = bundle
@@ -393,30 +367,8 @@ fn model_file_policy(
         {
             return Err(BridgeError::InitFailed("unsafe model engine bundle".into()));
         }
-        policy.push_str(&format!(
-            "(allow file-read* (subpath \"{}\"))\n",
-            seatbelt_path(bundle)?
-        ));
-        metadata_paths.extend(bundle.ancestors().map(Path::to_path_buf));
     }
-    metadata_paths.remove(Path::new("/"));
-    for ancestor in metadata_paths {
-        policy.push_str(&format!(
-            "(allow file-read-metadata (literal \"{}\"))\n",
-            seatbelt_path(&ancestor)?
-        ));
-    }
-    for path in files {
-        policy.push_str(&format!(
-            "(allow file-read* (literal \"{}\"))\n",
-            seatbelt_path(&path)?
-        ));
-    }
-    let journal = seatbelt_path(journal)?;
-    policy.push_str(&format!(
-        "(allow file-read* (subpath \"{journal}\"))\n(allow file-write* (subpath \"{journal}\"))\n"
-    ));
-    Ok(policy)
+    Ok(())
 }
 
 /// One local offer may name one weights file under `model-preparation/admitted-`
@@ -424,9 +376,7 @@ fn model_file_policy(
 /// or an engine the receipt does not list is refused before a child exists.
 #[cfg(target_os = "macos")]
 fn admit_model_rights_inputs(
-    binary: &Path,
     config: &ProviderConfig,
-    journal: &Path,
     engine: &Path,
     model: &Path,
     bundle: &Path,
@@ -510,7 +460,7 @@ fn admit_model_rights_inputs(
             return Err(BridgeError::InitFailed("unlisted model sidecar".into()));
         }
     }
-    model_file_policy(binary, config, journal, Some(bundle))?;
+    model_file_policy(config, Some(bundle))?;
     Ok(())
 }
 
@@ -1928,7 +1878,7 @@ impl ProviderBridge {
     #[cfg(target_os = "macos")]
     pub async fn spawn_confined_model_with_engine_bundle(
         binary_path: &CheckedExecutable,
-        mut config: ProviderConfig,
+        config: ProviderConfig,
         pinned_engine_bundle: Option<&Path>,
     ) -> Result<
         (
@@ -1940,33 +1890,14 @@ impl ProviderBridge {
         ),
         BridgeError,
     > {
+        let authority = model_capsule_authority()?;
+        let base = std::path::PathBuf::from(&config.base_path);
         let offers = config
             .extra
             .get("offers")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?;
-        let mut sockets = BTreeMap::new();
-        let mut vacant_sockets = Vec::new();
-        let mut brokers = BrokerTasks::default();
-        let provider_pid = Arc::new(AtomicU32::new(0));
-        let provider_birth = Arc::new(AtomicU64::new(0));
-        let ipc_dir = tempfile::Builder::new()
-            .prefix("em-")
-            .tempdir()
-            .map_err(BridgeError::Spawn)?;
-        // Seatbelt resolves /var to /private/var before comparing literal paths.
-        let ipc_path = std::fs::canonicalize(ipc_dir.path()).map_err(BridgeError::Spawn)?;
-        let journal = model_journal_for_sandbox(&config)?;
-        let prepared = binary_path
-            .verify_at_spawn()
-            .map_err(BridgeError::Refused)?;
-        let mut policy = model_file_policy(
-            prepared.exec_path(),
-            &config,
-            &journal,
-            pinned_engine_bundle,
-        )?;
-        let local_ids = offers
+        let local: Vec<_> = offers
             .iter()
             .filter(|offer| {
                 offer
@@ -1974,117 +1905,86 @@ impl ProviderBridge {
                     .and_then(serde_json::Value::as_str)
                     == Some("local_llama_cpp_text")
             })
-            .map(|offer| {
-                offer
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if local_ids.len() > 1 {
+            .collect();
+        if local.len() > 1 {
             return Err(BridgeError::InitFailed(
                 "too many local model offers".into(),
             ));
         }
-        for index in 0..MAX_LOCAL_MODEL_SLOTS {
-            let socket = ipc_path.join(format!("{index}.sock"));
-            let engine_socket = ipc_path.join(format!("{index}.engine.sock"));
-            let socket = socket
-                .to_str()
-                .ok_or_else(|| BridgeError::InitFailed("invalid local socket path".into()))?
-                .to_string();
-            if !socket.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
-            }) {
-                return Err(BridgeError::InitFailed("unsafe local socket path".into()));
-            }
-            if socket.len() >= 104 {
-                return Err(BridgeError::InitFailed("local socket path too long".into()));
-            }
-            if engine_socket.as_os_str().len() >= 104 {
-                return Err(BridgeError::InitFailed(
-                    "engine socket path too long".into(),
-                ));
-            }
-            if let Some(id) = local_ids.get(index) {
-                if sockets.insert((*id).to_string(), socket.clone()).is_some() {
-                    return Err(BridgeError::InitFailed("duplicate local offer id".into()));
-                }
-            } else {
-                vacant_sockets.push(socket.clone());
-            }
-            policy.push_str(&format!(
-                "(allow network-outbound (literal \"{socket}\"))\n"
-            ));
-            policy.push_str(&format!(
-                "(allow file-read-metadata (literal \"{0}\"))\n(allow file-write* (literal \"{0}\"))\n",
-                seatbelt_path(Path::new(&engine_socket))?
-            ));
-            brokers.0.push(
-                super::local_model_broker::start(
-                    &socket,
-                    engine_socket,
-                    provider_pid.clone(),
-                    provider_birth.clone(),
-                )
-                .map_err(BridgeError::Spawn)?,
+        let (engine, model, bundle) = if let Some(offer) = local.first() {
+            let engine = std::path::PathBuf::from(
+                offer
+                    .pointer("/adapter/engine/path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        BridgeError::InitFailed("model engine path unavailable".into())
+                    })?,
             );
-        }
-        let hosted_socket = ipc_path.join("hosted.sock");
-        let hosted_socket = hosted_socket
-            .to_str()
-            .ok_or_else(|| BridgeError::InitFailed("invalid hosted socket path".into()))?;
-        if hosted_socket.len() >= 104
-            || !hosted_socket.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-')
-            })
-        {
-            return Err(BridgeError::InitFailed(
-                "hosted socket path too long".into(),
-            ));
-        }
-        policy.push_str(&format!(
-            "(allow network-outbound (literal \"{hosted_socket}\"))\n"
-        ));
-        let hosted_listener =
-            tokio::net::UnixListener::bind(hosted_socket).map_err(BridgeError::Spawn)?;
-        config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
-        config.extra["runtime_hosted_socket"] = serde_json::json!(hosted_socket);
-        let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.arg("-p").arg(policy).arg(prepared.exec_path());
-        let mut bridge = Self::spawn_command(
-            prepared,
-            command,
-            config.clone(),
-            INIT_TIMEOUT,
-            SHUTDOWN_TIMEOUT,
-            std::process::Stdio::inherit(),
-            false,
+            let model = std::path::PathBuf::from(
+                offer
+                    .pointer("/adapter/model/path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        BridgeError::InitFailed("model weights path unavailable".into())
+                    })?,
+            );
+            let bundle = pinned_engine_bundle
+                .map(Path::to_path_buf)
+                .or_else(|| engine.parent().map(Path::to_path_buf))
+                .ok_or_else(|| {
+                    BridgeError::InitFailed("model engine directory unavailable".into())
+                })?;
+            model_file_policy(&config, Some(&bundle))?;
+            (engine, model, bundle)
+        } else if let Some(pinned) = pinned_engine_bundle {
+            model_file_policy(&config, Some(pinned))?;
+            let engine = std::fs::canonicalize(binary_path.path()).map_err(BridgeError::Spawn)?;
+            if !engine.starts_with(pinned) {
+                return Err(BridgeError::InitFailed("unsafe model artifact path".into()));
+            }
+            let model = base.join("providers/model-provider/hosted-binding/model");
+            if let Some(parent) = model.parent() {
+                std::fs::create_dir_all(parent).map_err(BridgeError::Spawn)?;
+            }
+            std::fs::write(&model, b"").map_err(BridgeError::Spawn)?;
+            let model = std::fs::canonicalize(&model).map_err(BridgeError::Spawn)?;
+            (engine, model, pinned.to_path_buf())
+        } else {
+            let root = base.join("providers/model-provider/hosted-binding");
+            let bundle = root.join("bundle");
+            std::fs::create_dir_all(&bundle).map_err(BridgeError::Spawn)?;
+            let engine = bundle.join("engine");
+            let model = root.join("model");
+            std::fs::write(&engine, b"").map_err(BridgeError::Spawn)?;
+            std::fs::write(&model, b"").map_err(BridgeError::Spawn)?;
+            (
+                std::fs::canonicalize(&engine).map_err(BridgeError::Spawn)?,
+                std::fs::canonicalize(&model).map_err(BridgeError::Spawn)?,
+                std::fs::canonicalize(&bundle).map_err(BridgeError::Spawn)?,
+            )
+        };
+        let (confined, sockets, vacant, returned) = Self::spawn_confined_model_from_rights(
+            &authority,
+            binary_path,
+            config,
+            &engine,
+            &model,
+            &bundle,
         )
         .await?;
-        let pid = bridge
-            .child
-            .lock()
-            .await
-            .as_ref()
-            .and_then(tokio::process::Child::id)
-            .ok_or_else(|| BridgeError::InitFailed("model provider pid unavailable".into()))?;
-        let birth = match super::local_model_broker::process_birth(pid) {
-            Some(birth) => birth,
-            None => {
-                let _ = bridge.shutdown().await;
-                return Err(BridgeError::InitFailed(
-                    "model provider identity unavailable".into(),
-                ));
-            }
-        };
-        provider_birth.store(birth, Ordering::Release);
-        provider_pid.store(pid, Ordering::Release);
-        *bridge._local_ipc_dir.lock().await = Some(ipc_dir);
-        *bridge._local_brokers.lock().await = brokers;
-        bridge._local_provider_pid = provider_pid;
-        bridge._local_provider_birth = provider_birth;
-        Ok((bridge, sockets, vacant_sockets, config, hosted_listener))
+        let hosted = returned
+            .extra
+            .get("runtime_hosted_socket")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| BridgeError::InitFailed("model hosted socket unavailable".into()))?
+            .to_string();
+        let hosted_listener =
+            tokio::net::UnixListener::bind(&hosted).map_err(BridgeError::Spawn)?;
+        let bridge_arc = Arc::clone(confined.bridge());
+        drop(confined);
+        let bridge = Arc::try_unwrap(bridge_arc)
+            .map_err(|_| BridgeError::InitFailed("model bridge is shared".into()))?;
+        Ok((bridge, sockets, vacant, returned, hosted_listener))
     }
 
     /// macOS model start from the admitted rights. The server binds the hosted socket.
@@ -2134,14 +2034,7 @@ impl ProviderBridge {
                 "too many local model offers".into(),
             ));
         }
-        admit_model_rights_inputs(
-            binary_path.path(),
-            &config,
-            &journal,
-            engine,
-            model_file,
-            bundle,
-        )?;
+        admit_model_rights_inputs(&config, engine, model_file, bundle)?;
         let ipc_dir = tempfile::Builder::new()
             .prefix("em-")
             .tempdir()
@@ -5075,7 +4968,7 @@ int main(void) {
         )
         .unwrap();
         let engine_dir = base.join("libexec/llama.cpp/fixture/darwin-arm64");
-        let model_dir = base.join("models");
+        let model_dir = base.join(format!("model-preparation/admitted-{}", "ab".repeat(32)));
         std::fs::create_dir_all(&engine_dir).unwrap();
         std::fs::create_dir_all(&model_dir).unwrap();
         let script = engine_dir.join("model-seatbelt-probe");
@@ -5100,7 +4993,7 @@ int main(void) {
         )
         .unwrap();
         std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o400)).unwrap();
-        let model = model_dir.join("model.gguf");
+        let model = model_dir.join("weights.gguf");
         std::fs::write(&model, b"synthetic model").unwrap();
         let canary = base.join("canary");
         std::fs::write(&canary, b"synthetic canary").unwrap();
@@ -5119,35 +5012,7 @@ int main(void) {
             ..Default::default()
         };
         let policy_config = config.clone();
-        let rust_source = base.join("model-canonicalize-probe.rs");
-        let rust_probe = base.join("model-canonicalize-probe");
-        std::fs::write(
-            &rust_source,
-            include_str!("../../tests/fixtures/model_canonicalize_probe.rs"),
-        )
-        .unwrap();
-        assert!(std::process::Command::new("rustc")
-            .arg(&rust_source)
-            .arg("-o")
-            .arg(&rust_probe)
-            .status()
-            .unwrap()
-            .success());
-        let mut profile = model_file_policy(&script, &config, &journal, None).unwrap();
-        profile.push_str(&format!(
-            "(allow file-read* (literal \"{}\"))\n",
-            seatbelt_path(&rust_probe).unwrap()
-        ));
-        let profile_path = base.join("model-canonicalize-probe.sb");
-        std::fs::write(&profile_path, profile).unwrap();
-        let canonicalized = std::process::Command::new("/usr/bin/sandbox-exec")
-            .arg("-f")
-            .arg(&profile_path)
-            .arg(&rust_probe)
-            .args([&base, &script, &model])
-            .status()
-            .unwrap();
-        assert!(canonicalized.success());
+        model_file_policy(&config, Some(&engine_dir)).unwrap();
         let (bridge, sockets, vacant, confined_config, _hosted_listener) =
             ProviderBridge::spawn_confined_model(&CheckedExecutable::for_test(&script), config)
                 .await
@@ -5211,7 +5076,7 @@ int main(void) {
         bridge.shutdown().await.unwrap();
         assert!(!Path::new(&sockets["fixture-local"]).exists());
         std::fs::write(&listed_library, b"changed fixture library").unwrap();
-        assert!(model_file_policy(&script, &policy_config, &journal, None).is_err());
+        assert!(model_file_policy(&policy_config, None).is_err());
 
         // Keep one confined child through a zero-offer startup and files that
         // arrive later. The declared read namespace excludes mutable staging,
@@ -5272,7 +5137,7 @@ int main(void) {
         let ProviderResponse::Ok { data: Some(data) } = response else {
             panic!("expected native namespace probe response");
         };
-        assert_eq!(data["model_read_errno"], 0);
+        assert_eq!(data["model_read_errno"], libc::EPERM);
         assert_eq!(data["late_engine_read_errno"], 0);
         for denied in [
             "stage_read_errno",
@@ -5298,7 +5163,7 @@ int main(void) {
             b"unlisted fixture library",
         )
         .unwrap();
-        assert!(model_file_policy(&script, &policy_config, &journal, None).is_err());
+        assert!(model_file_policy(&policy_config, None).is_err());
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -6968,6 +6833,26 @@ __attribute__((used)) void run(void) {
         (temp, base, engine, model, bundle)
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_path_escapes_a_quote_and_a_backslash() {
+        assert_eq!(seatbelt_path(Path::new(r#"a"b\c"#)).unwrap(), r#"a\"b\\c"#);
+    }
+
+    #[test]
+    fn the_hand_written_model_policy_is_gone() {
+        let source = include_str!("bridge.rs");
+        let start = source.find("fn model_file_policy(").unwrap();
+        let end = source[start..]
+            .find("fn admit_model_rights_inputs(")
+            .unwrap()
+            + start;
+        let body = &source[start..end];
+        assert!(!body.contains("(allow default)"));
+        assert!(body.contains("model_engine_receipt_file_matches"));
+        assert!(body.contains("unsafe model engine bundle"));
+    }
+
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
     #[test]
     fn a_second_local_offer_is_refused_before_start() {
@@ -6982,15 +6867,8 @@ __attribute__((used)) void run(void) {
             }),
             ..ProviderConfig::default()
         };
-        let error = admit_model_rights_inputs(
-            Path::new("/bin/true"),
-            &config,
-            &base.join("journal"),
-            &engine,
-            &model,
-            &bundle,
-        )
-        .expect_err("two local offers");
+        let error = admit_model_rights_inputs(&config, &engine, &model, &bundle)
+            .expect_err("two local offers");
         assert!(
             matches!(error, BridgeError::InitFailed(ref reason) if reason == "too many local model offers"),
             "{error:?}"
@@ -7008,15 +6886,8 @@ __attribute__((used)) void run(void) {
             }),
             ..ProviderConfig::default()
         };
-        let error = admit_model_rights_inputs(
-            Path::new("/bin/true"),
-            &config,
-            &base.join("journal"),
-            &engine,
-            &model,
-            &bundle,
-        )
-        .expect_err("weights outside model-preparation");
+        let error = admit_model_rights_inputs(&config, &engine, &model, &bundle)
+            .expect_err("weights outside model-preparation");
         assert!(
             matches!(error, BridgeError::InitFailed(ref reason) if reason == "model preparation path is not admitted"),
             "{error:?}"
@@ -7039,15 +6910,8 @@ __attribute__((used)) void run(void) {
             }),
             ..ProviderConfig::default()
         };
-        let error = admit_model_rights_inputs(
-            Path::new("/bin/true"),
-            &config,
-            &base.join("journal"),
-            &engine,
-            &model,
-            &bundle,
-        )
-        .expect_err("sidecar");
+        let error =
+            admit_model_rights_inputs(&config, &engine, &model, &bundle).expect_err("sidecar");
         assert!(
             matches!(error, BridgeError::InitFailed(ref reason) if reason == "unlisted model sidecar"),
             "{error:?}"
