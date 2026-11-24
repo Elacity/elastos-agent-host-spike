@@ -29,7 +29,7 @@ static PLANT_HOST_PANIC: AtomicBool = AtomicBool::new(false);
 
 /// Plant one panic in the next host call a guest makes. The flag is consumed
 /// by that call. Release builds do not carry this.
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) fn plant_host_panic() {
     PLANT_HOST_PANIC.store(true, Ordering::Release);
 }

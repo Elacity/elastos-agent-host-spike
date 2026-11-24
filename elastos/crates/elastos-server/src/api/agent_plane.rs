@@ -49,12 +49,12 @@ fn clear_fault(data_dir: &Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) fn plant_task_panic() {
     PLANT_TASK_PANIC.store(true, Ordering::Release);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "prototype-agents"))]
 pub(crate) fn dirs_lock_works() -> bool {
     dirs().lock().is_ok()
 }
@@ -126,6 +126,9 @@ pub(crate) async fn start(
     data_dir: &Path,
     providers: Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>,
 ) -> anyhow::Result<AgentPlane> {
+    if !crate::agents::build_allows() {
+        anyhow::bail!(crate::agents::FEATURE_OFF);
+    }
     #[cfg(unix)]
     {
         start_owned(data_dir.to_path_buf(), providers).await
