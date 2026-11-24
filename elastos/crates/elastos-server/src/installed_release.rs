@@ -10,6 +10,8 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use elastos_common::localhost::{
@@ -801,6 +803,166 @@ fn publish_stage(data: &Path, binary: &Path, stage: &Path, root: &Path) -> Resul
 
 fn sync(path: &Path) -> Result<()> {
     File::open(path)?.sync_all().map_err(Into::into)
+}
+
+/// The signed release a managed runtime child verifies for itself.
+/// Bytes are the pair this Home's admission reads, plus the trusted source
+/// record that names their generation and install path. A caller skips this
+/// when the Home has no release, and does not copy `dev_mode`.
+#[cfg(unix)]
+pub(crate) fn project_verified_release(
+    parent: &Path,
+    child: &Path,
+    source: &TrustedSource,
+) -> Result<()> {
+    let runtime = fs::canonicalize(Path::new(&source.install_path))?;
+    let (release, _) = read_signed_release(parent, &runtime, source, false, true)?;
+    let private = consumed_present(parent, InstallTransaction::has_pending_recovery(&runtime))?;
+    let (head_path, release_path) = release_pair_paths(parent, private);
+    let head = read_regular(&head_path, MAX_METADATA, private)?;
+    anyhow::ensure!(
+        read_regular(&release_path, MAX_METADATA, private)? == release,
+        "{REPAIR}"
+    );
+    let sources = fs::read(parent.join("sources.json"))?;
+    anyhow::ensure!(sources.len() as u64 <= MAX_METADATA, "{REPAIR}");
+    let (child_head, child_release) = release_pair_paths(child, private);
+    place_projected_file(child, &child_head, &head, private)?;
+    place_projected_file(child, &child_release, &release, private)?;
+    place_projected_file(child, &child.join("sources.json"), &sources, false)?;
+    if private {
+        remove_projected_file(&publisher_release_head_path(child))?;
+        remove_projected_file(&publisher_release_manifest_path(child))?;
+    } else {
+        remove_tree_nofollow(&child.join("installation"))?;
+    }
+    sync(child)
+}
+
+#[cfg(all(not(unix), test))]
+pub(crate) fn project_verified_release(
+    _parent: &Path,
+    _child: &Path,
+    _source: &TrustedSource,
+) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "managed runtime release projection is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
+fn release_pair_paths(data: &Path, private: bool) -> (PathBuf, PathBuf) {
+    if private {
+        (
+            installation_release_head_path(data),
+            installation_release_manifest_path(data),
+        )
+    } else {
+        (
+            publisher_release_head_path(data),
+            publisher_release_manifest_path(data),
+        )
+    }
+}
+
+#[cfg(unix)]
+fn place_projected_file(data: &Path, path: &Path, bytes: &[u8], private_file: bool) -> Result<()> {
+    let parent = path.parent().context(REPAIR)?;
+    ensure_projected_dirs(data, parent, private_file && parent != data)?;
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "{REPAIR}");
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context(REPAIR)?;
+    let temporary = parent.join(format!(".{name}.project"));
+    if let Ok(meta) = fs::symlink_metadata(&temporary) {
+        anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "{REPAIR}");
+        fs::remove_file(&temporary)?;
+    }
+    let mode = if private_file { 0o600 } else { 0o644 };
+    let write = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write
+}
+
+#[cfg(unix)]
+fn ensure_projected_dirs(data: &Path, parent: &Path, private_leaf: bool) -> Result<()> {
+    if parent == data {
+        return Ok(());
+    }
+    let relative = parent.strip_prefix(data).context(REPAIR)?;
+    let parts: Vec<_> = relative.components().collect();
+    let mut path = data.to_path_buf();
+    for (index, part) in parts.iter().enumerate() {
+        anyhow::ensure!(matches!(part, std::path::Component::Normal(_)), "{REPAIR}");
+        path.push(part);
+        let mode = if private_leaf && index + 1 == parts.len() {
+            0o700
+        } else {
+            0o755
+        };
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                anyhow::ensure!(meta.is_dir() && !meta.file_type().is_symlink(), "{REPAIR}")
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::DirBuilder::new().mode(mode).create(&path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_projected_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
+            fs::remove_file(path).map_err(Into::into)
+        }
+        Ok(_) => anyhow::bail!("{REPAIR}"),
+    }
+}
+
+#[cfg(unix)]
+fn remove_tree_nofollow(path: &Path) -> Result<()> {
+    fn walk(path: &Path, depth: u32) -> Result<()> {
+        let meta = match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+            Ok(meta) => meta,
+        };
+        if meta.file_type().is_symlink() || meta.is_file() {
+            return fs::remove_file(path).map_err(Into::into);
+        }
+        anyhow::ensure!(meta.is_dir() && depth < 6, "{REPAIR}");
+        for entry in fs::read_dir(path)? {
+            walk(&entry?.path(), depth + 1)?;
+        }
+        fs::remove_dir(path).map_err(Into::into)
+    }
+    walk(path, 0)
 }
 
 #[cfg(all(test, unix))]
