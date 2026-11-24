@@ -1580,3 +1580,290 @@ async fn agents_audit_retire_is_recorded_by_its_record_write_row() {
     assert_eq!(signed_audit_rows(&world, "agent.record.retire").len(), 1);
     assert!(signed_audit_rows(&world, "agent.retired").is_empty());
 }
+
+/// The answers a stand-in Runtime gives the gateway's hop: the launch route
+/// and the stop route each answer with a planted status and body, so a test
+/// can reach gateway behavior the real Runtime cannot produce here — a stop
+/// that fails, or a session the Runtime has not ended yet.
+#[derive(Clone)]
+struct StubRuntimeAnswers {
+    launch_status: StatusCode,
+    launch_body: Value,
+    stop_status: StatusCode,
+    stop_body: Value,
+    stops: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+struct StubRuntimeHost {
+    task: tokio::task::JoinHandle<()>,
+    stops: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl Drop for StubRuntimeHost {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn serve_stub_runtime(
+    data: &std::path::Path,
+    launch: (StatusCode, Value),
+    stop: (StatusCode, Value),
+) -> StubRuntimeHost {
+    let stops = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let answers = StubRuntimeAnswers {
+        launch_status: launch.0,
+        launch_body: launch.1,
+        stop_status: stop.0,
+        stop_body: stop.1,
+        stops: stops.clone(),
+    };
+    let app = Router::new()
+        .route("/api/health", get(|| async { StatusCode::OK }))
+        .route(
+            "/api/auth/attach",
+            post(|| async { (StatusCode::OK, axum::Json(json!({ "token": "stub-shell" }))) }),
+        )
+        .route("/api/capsules", post(stub_runtime_launch))
+        .route("/api/capsules/stop-agent", post(stub_runtime_stop))
+        .with_state(answers);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    // The gateway reads these coords per request, so a rewrite after the
+    // real Runtime served is enough to point the hop at the stub.
+    std::fs::write(
+        crate::runtime_control::home_runtime_coord_path(data),
+        serde_json::to_vec(&json!({
+            "api_url": format!("http://{addr}"),
+            "attach_secret": "agent-start-attach",
+            "pid": std::process::id(),
+            "runtime_kind": crate::runtime_control::RUNTIME_KIND_MANAGED_HOME,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    StubRuntimeHost { task, stops }
+}
+
+async fn stub_runtime_launch(
+    axum::extract::State(answers): axum::extract::State<StubRuntimeAnswers>,
+) -> impl axum::response::IntoResponse {
+    (answers.launch_status, axum::Json(answers.launch_body))
+}
+
+async fn stub_runtime_stop(
+    axum::extract::State(answers): axum::extract::State<StubRuntimeAnswers>,
+    body: String,
+) -> impl axum::response::IntoResponse {
+    if let Ok(value) = serde_json::from_str::<Value>(&body) {
+        answers
+            .stops
+            .lock()
+            .expect("recorded stub stops")
+            .push(value);
+    }
+    (answers.stop_status, axum::Json(answers.stop_body))
+}
+
+#[tokio::test]
+async fn agents_audit_settle_stop_ends_only_the_session_this_start_made() {
+    let world = world().await;
+    let first = started(&world, &world.agent_a).await;
+    let first_session = first["session_id"].as_str().unwrap().to_string();
+    // The second start's completion row is the fourth signed agent append
+    // of this Home, so the plant fails only that row.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 4);
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let rows = live(&world).await;
+    assert_eq!(
+        live_principal(&rows, &world.agent_a),
+        1,
+        "the settle stop ended the earlier session too: {body} rows={rows:?}"
+    );
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_ne!(
+        stopped[0].session_id.as_deref(),
+        Some(first_session.as_str()),
+        "the settle stop labelled the earlier session unrecorded_start"
+    );
+    let reason: Value = serde_json::from_str(&stopped[0].reason).unwrap();
+    assert_eq!(reason["cause"], "unrecorded_start");
+}
+
+#[tokio::test]
+async fn agents_audit_settle_stop_failure_still_refuses_by_name_and_records_it() {
+    let world = world().await;
+    let planted = "/var/lib/elastos/bundle-root";
+    let _stub = serve_stub_runtime(
+        &world.home.data,
+        (
+            StatusCode::OK,
+            json!({
+                "id": "stub-capsule",
+                "session_id": format!("stub-session-{}", uuid_like_token()),
+                "status": "running",
+            }),
+        ),
+        (StatusCode::INTERNAL_SERVER_ERROR, json!(planted)),
+    )
+    .await;
+    // The completion row is the second signed agent append of this Start.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 2);
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains(world.agent_a.as_str()) && body.contains("may still be running"),
+        "the refusal names the agent and the still-running guest: {body}"
+    );
+    assert!(
+        !body.contains(planted),
+        "the refusal carries the runtime's own body: {body}"
+    );
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(completed[0].result, "failed");
+    let reason: Value = serde_json::from_str(&completed[0].reason).unwrap();
+    assert!(!reason["error"].as_str().unwrap_or_default().is_empty());
+    assert!(
+        !reason["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(planted),
+        "the failed row carries the stop's own detail: {reason}"
+    );
+    let posted = _stub.stops.lock().expect("recorded stub stops").clone();
+    assert_eq!(posted.len(), 1, "{posted:?}");
+    assert!(
+        posted[0]["session_id"].is_string(),
+        "the settle stop did not name the session it made: {posted:?}"
+    );
+}
+
+#[tokio::test]
+async fn agents_audit_owner_stop_reports_which_rows_are_missing() {
+    let world = world().await;
+    let first = started(&world, &world.agent_a).await;
+    let second = started(&world, &world.agent_a).await;
+    let a = first["session_id"].as_str().unwrap();
+    let b = second["session_id"].as_str().unwrap();
+    let (earlier, later) = if a < b { (a, b) } else { (b, a) };
+    // Two starts spent four signed appends; the owner's stop writes the
+    // requested row fifth and the first signed stop row sixth, so the plant
+    // fails only that row.
+    fail_agent_lifecycle_audit_append_for_test(&world.home.data, 6);
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert!(
+        body.contains(earlier) && body.contains(later),
+        "the error does not name the stopped and unrecorded sessions: {body}"
+    );
+    // The row after the failed one was still attempted.
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0].session_id.as_deref(), Some(later));
+    assert_eq!(signed_audit_rows(&world, "agent.stop.requested").len(), 1);
+}
+
+#[tokio::test]
+async fn agents_audit_owner_stop_marks_a_session_that_has_not_ended_as_stopping() {
+    let world = world().await;
+    let _stub = serve_stub_runtime(
+        &world.home.data,
+        (StatusCode::OK, json!({ "id": "stub-capsule" })),
+        (
+            StatusCode::OK,
+            json!({
+                "stopped": [
+                    { "session_id": "stub-session-1", "status": "running" }
+                ]
+            }),
+        ),
+    )
+    .await;
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "owner stop: {body}");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0].session_id.as_deref(), Some("stub-session-1"));
+    assert_eq!(
+        stopped[0].result, "stopping",
+        "a session the Runtime has not ended is not ok: {stopped:?}"
+    );
+    let reason: Value = serde_json::from_str(&stopped[0].reason).unwrap();
+    assert_eq!(reason["cause"], "owner");
+}
+
+#[tokio::test]
+async fn agents_audit_owner_stop_writes_the_requested_row_before_the_runtime_stop() {
+    let world = world().await;
+    started(&world, &world.agent_a).await;
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::OK, "owner stop: {body}");
+    let requested = signed_audit_rows(&world, "agent.stop.requested");
+    let stopped = signed_audit_rows(&world, "agent.stopped");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    let events = signed_audit_events(&world);
+    let position = |row: &RuntimeAuditEventV1| {
+        events
+            .iter()
+            .position(|event| event.event_id == row.event_id)
+            .unwrap()
+    };
+    assert!(
+        position(&requested[0]) < position(&stopped[0]),
+        "the requested row must come before the signed stop row"
+    );
+    assert_eq!(requested[0].result, "ok");
+    assert_eq!(
+        requested[0].principal_id.as_deref(),
+        Some(world.admin.principal_id.as_str())
+    );
+    let reason: Value = serde_json::from_str(&requested[0].reason).unwrap();
+    assert_eq!(reason["agent_id"], world.agent_a);
+    assert_eq!(reason["cause"], "owner");
+    // The second stop finds no live session and is refused, and its
+    // requested row is still written before the Runtime is asked.
+    let (status, body) = stop(&world, &world.admin, &world.agent_a).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(signed_audit_rows(&world, "agent.stop.requested").len(), 2);
+    assert_eq!(signed_audit_rows(&world, "agent.stopped").len(), 1);
+}
+
+#[tokio::test]
+async fn agents_audit_failed_launch_stores_a_named_cause_without_host_paths() {
+    let world = world().await;
+    let planted = "/var/lib/elastos/bundle-root";
+    let _stub = serve_stub_runtime(
+        &world.home.data,
+        (StatusCode::INTERNAL_SERVER_ERROR, json!(planted)),
+        (StatusCode::OK, json!({ "stopped": [] })),
+    )
+    .await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    assert!(
+        !body.contains(planted),
+        "the answer carries the runtime's own body: {body}"
+    );
+    assert!(body.contains("runtime launch failed"), "{body}");
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(completed[0].result, "failed");
+    let reason: Value = serde_json::from_str(&completed[0].reason).unwrap();
+    let stored = reason["error"].as_str().unwrap_or_default();
+    assert!(!stored.is_empty(), "{reason}");
+    assert!(
+        !stored.contains(planted),
+        "the signed row carries the runtime's own body: {reason}"
+    );
+    assert!(stored.contains("runtime launch failed"), "{stored}");
+}

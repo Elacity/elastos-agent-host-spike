@@ -426,13 +426,17 @@ pub async fn stop_capsule(
     }
 }
 
-/// Body of `POST /api/capsules/stop-agent`. The only selector is the agent
-/// id, which is the principal on the Runtime row. A capsule name is not a
-/// field: an unknown field is refused and nothing is stopped.
+/// Body of `POST /api/capsules/stop-agent`. The agent id is the principal
+/// on the Runtime rows. A settle path that must end only the session its
+/// own Start made also names that `session_id`; without it every live row
+/// of the agent is stopped. A capsule name is not a field: an unknown field
+/// is refused and nothing is stopped.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StopAgentRequest {
     agent_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -477,7 +481,13 @@ pub async fn stop_agent_session(
         )
             .into_response();
     }
-    let ids = runtime.live_sessions_for_agent(&agent_id).await;
+    let mut ids = runtime.live_sessions_for_agent(&agent_id).await;
+    if let Some(session_id) = request.session_id.as_deref() {
+        // The settle path of a Start names the one session it made: keep
+        // only that row, so an earlier session of the same agent, which
+        // already has its own completion row, stays up.
+        ids.retain(|id| id == session_id);
+    }
     if ids.is_empty() {
         return (
             StatusCode::NOT_FOUND,

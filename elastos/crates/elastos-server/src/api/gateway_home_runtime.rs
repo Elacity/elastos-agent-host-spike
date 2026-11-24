@@ -655,6 +655,11 @@ struct RuntimeAgentLaunchResponse {
     status: String,
 }
 
+/// The short cause a failed launch carries in the signed row and the
+/// answer. The runtime's own detail can name host paths, so it stays in
+/// the log and never travels into the signed chain or the response.
+const RUNTIME_LAUNCH_FAILURE_CAUSE: &str = "the runtime did not start the agent host";
+
 /// Ask the live Home Runtime to start one agent. `capsule_dir` is the
 /// directory `verify_agent_host` already checked. The grant was minted by the
 /// caller after the passkey step-up was consumed.
@@ -685,8 +690,16 @@ pub(super) async fn launch_runtime_agent(
         .await?;
     let status = response.status();
     if !status.is_success() {
-        let text = response.text().await.unwrap_or_default();
-        anyhow::bail!("runtime launch failed ({}): {}", status, text.trim());
+        let detail = response.text().await.unwrap_or_default();
+        // The body can name host paths (a bundle refusal carries the bundle
+        // root), so it stays in this log; the error the signed row stores
+        // and the answer carry the short named cause only.
+        tracing::warn!("runtime launch failed ({}): {}", status, detail);
+        anyhow::bail!(
+            "runtime launch failed ({}): {}",
+            status,
+            RUNTIME_LAUNCH_FAILURE_CAUSE
+        );
     }
     let payload = response.json::<RuntimeAgentLaunchResponse>().await?;
     Ok(StartedRuntimeAgent {
@@ -723,11 +736,42 @@ struct RuntimeStoppedSession {
     status: String,
 }
 
+/// The body the gateway sends the Runtime's stop route. The owner's Stop
+/// names the agent only; the settle path of a Start also names the one
+/// session its own Start made.
+#[derive(Serialize)]
+struct RuntimeAgentStopRequest<'a> {
+    agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+}
+
 /// Ask the live Home Runtime to stop the live rows whose principal is
 /// `agent_id`. The body is that id. It does not name a capsule.
 pub(super) async fn stop_runtime_agent(
     data_dir: &FsPath,
     agent_id: &str,
+) -> anyhow::Result<RuntimeAgentStop> {
+    stop_runtime_agent_rows(data_dir, agent_id, None).await
+}
+
+/// Ask the live Home Runtime to stop one session of this agent, named by
+/// session id: the Runtime stops only the row whose session this is, so an
+/// earlier session of the same agent, which already has its own completion
+/// row, stays up. The settle path of a Start ends only the guest its own
+/// Start made.
+pub(super) async fn stop_runtime_agent_session(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: &str,
+) -> anyhow::Result<RuntimeAgentStop> {
+    stop_runtime_agent_rows(data_dir, agent_id, Some(session_id)).await
+}
+
+async fn stop_runtime_agent_rows(
+    data_dir: &FsPath,
+    agent_id: &str,
+    session_id: Option<&str>,
 ) -> anyhow::Result<RuntimeAgentStop> {
     let coords = load_live_runtime_coords(data_dir)
         .await
@@ -741,7 +785,10 @@ pub(super) async fn stop_runtime_agent(
     let response = client
         .post(format!("{}/api/capsules/stop-agent", coords.api_url))
         .header(AUTHORIZATION, format!("Bearer {shell}"))
-        .json(&serde_json::json!({ "agent_id": agent_id }))
+        .json(&RuntimeAgentStopRequest {
+            agent_id,
+            session_id,
+        })
         .send()
         .await?;
     let status = response.status();
