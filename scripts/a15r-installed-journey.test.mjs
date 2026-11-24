@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   OWNER_DOCUMENT,
   OWNER_NOTE,
@@ -38,6 +42,25 @@ import {
   mintHitsFromRepo,
   gatewayRestartLoadedChain,
 } from "./a15r-installed-journey.mjs";
+import {
+  agentsInGatewayChange,
+  bindsPort,
+  carrierConfigOk,
+  elastosSubcommand,
+  executableInsideHome,
+  FULL_MODE_NOTICE,
+  gitTreeHash,
+  homeProcessEnv,
+  judgeCreatingOwner,
+  listedAgentsMatch,
+  noGuestProof,
+  pageFolderProof,
+  playwrightPin,
+  redactDidAndAddress,
+  redactInstall,
+  removeStaleReceipt,
+  throwawayAllowed,
+} from "./a15r-installed-journey-proof.mjs";
 
 const agentA = "agent:v2:" + "a".repeat(32);
 const agentB = "agent:v2:" + "b".repeat(32);
@@ -219,8 +242,13 @@ test("user-area route row requires both reads refused", () => {
   assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, session: "session-b" } }), false);
   assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, root: rootA, resource: `${rootA}/Documents/other.txt` } }), false);
   assert.equal(userAreaRouteRefused({ grants: [`${rootA}/journal`, `${rootB}/journal`] }), false);
-  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("elastos/crates/elastos-server/src/api/routes.rs:4825")));
-  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("elastos/crates/elastos-server/src/api/routes.rs:4884")));
+  const routes = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/routes.rs", import.meta.url), "utf8");
+  for (const line of U4_ISOLATION_NOT_COVERED) {
+    assert.equal(line.includes("routes.rs:"), false);
+    const named = line.match(/an_agents_guest_[a-z0-9_]+/);
+    assert.ok(named, line);
+    assert.ok(routes.includes(`fn ${named[0]}`), named[0]);
+  }
 });
 
 test("created agent stores the creating owner", () => {
@@ -365,13 +393,215 @@ test("mint grep at head has no production hit", () => {
   assert.equal(classifyMintHit(hits[0], source), true);
   assert.equal(classifyMintHit(hits[1], source), false);
   assert.equal(mintHitKind({ path: "scripts/a15r-installed-journey.mjs", line: 1 }, source), "checker");
-  const live = mintHitsFromRepo(new URL("..", import.meta.url).pathname);
+  const live = mintHitsFromRepo(fileURLToPath(new URL("..", import.meta.url)));
   assert.equal(live.ok, true, JSON.stringify(live.production));
   assert.equal(live.production.length, 0);
   assert.equal(live.defined, false);
   assert.ok(live.testOnly.length >= 2);
-  assert.ok(live.testOnly.every((hit) => hit.path.endsWith(".rs") || hit.path.endsWith(".test.mjs")));
-  assert.ok(live.checker.some((hit) => hit.path === "scripts/a15r-installed-journey.mjs"));
+  assert.ok(live.testOnly.every((hit) => hit.path.startsWith("elastos/") || hit.path.startsWith("capsules/")));
+  assert.ok(live.testOnly.every((hit) => hit.path.endsWith(".rs") || hit.path.endsWith(".mjs")));
+  assert.equal(live.checker.length, 0);
+});
+
+test("restart list is both Helper rows, first on and second off", () => {
+  const first = "agent:v2:" + "a".repeat(32);
+  const second = "agent:v2:" + "b".repeat(32);
+  const expected = [
+    { id: first, name: "Helper", active: true },
+    { id: second, name: "Helper", active: false },
+  ];
+  const body = {
+    agents: [
+      { agent_id: second, display_name: "Helper", active: false },
+      { agent_id: first, display_name: "Helper", active: true },
+    ],
+  };
+  assert.equal(listedAgentsMatch(body, expected).ok, true);
+  assert.equal(listedAgentsMatch({ agents: [] }, expected).ok, false);
+  assert.equal(listedAgentsMatch({
+    agents: [{ agent_id: first, display_name: "Helper", active: false }],
+  }, expected).ok, false);
+  assert.equal(listedAgentsMatch({
+    agents: [
+      { agent_id: first, display_name: "Other", active: true },
+      { agent_id: second, display_name: "Helper", active: false },
+    ],
+  }, expected).ok, false);
+  assert.equal(listedAgentsMatch({
+    agents: [
+      { agent_id: first, display_name: "Helper", active: false },
+      { agent_id: second, display_name: "Helper", active: true },
+    ],
+  }, expected).ok, false);
+});
+
+test("no guest proof fails closed when serve cannot be listed", () => {
+  assert.equal(noGuestProof({ stray: [], serveKnown: true, serveRunning: false }).ok, true);
+  assert.equal(noGuestProof({
+    stray: [],
+    serveKnown: true,
+    serveRunning: true,
+    capsulesListed: true,
+    guestCapsules: 0,
+  }).ok, true);
+  const hidden = noGuestProof({
+    stray: [],
+    serveKnown: true,
+    serveRunning: true,
+    capsulesListed: false,
+    guestCapsules: 0,
+  });
+  assert.equal(hidden.ok, false);
+  assert.match(hidden.reason, /cannot be listed/);
+  assert.equal(noGuestProof({
+    stray: ["capsule"],
+    serveKnown: true,
+    serveRunning: false,
+  }).ok, false);
+  assert.equal(noGuestProof({ serveKnown: false, stray: [] }).ok, false);
+});
+
+test("a skipped owner check is not a pass", () => {
+  const owner = "person:local:abc";
+  assert.equal(judgeCreatingOwner({
+    checkRan: true,
+    storedOwner: owner,
+    productOwner: owner,
+    fileOwner: owner,
+  }).ok, true);
+  const skipped = judgeCreatingOwner({
+    checkRan: false,
+    storedOwner: owner,
+    productOwner: owner,
+    fileOwner: owner,
+  });
+  assert.equal(skipped.ok, false);
+  assert.equal(skipped.reason, "owner check skipped");
+  assert.equal(judgeCreatingOwner({
+    checkRan: true,
+    storedOwner: "person:spoof",
+    productOwner: owner,
+    fileOwner: owner,
+  }).ok, false);
+});
+
+test("full mode notice names the missing agents-in-gateway route", () => {
+  assert.match(FULL_MODE_NOTICE, /not proof of anything until/);
+  const gateway = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway.rs", import.meta.url), "utf8");
+  const launch = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway_agents.rs", import.meta.url), "utf8");
+  const detected = agentsInGatewayChange(gateway, launch);
+  assert.equal(detected.ok, false);
+  assert.equal(detected.route, "/api/apps/system/agents/launch");
+  const ready = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))',
+    "async fn start_agent() { start_in_gateway(); }",
+  );
+  assert.equal(ready.ok, true);
+});
+
+test("playwright pin is the version in test-behaviour.sh", () => {
+  const text = fs.readFileSync(new URL("./test-behaviour.sh", import.meta.url), "utf8");
+  const pin = playwrightPin(text);
+  assert.equal(pin.ok, true);
+  assert.equal(pin.version, "1.60.0");
+  assert.equal(playwrightPin("installed \"$browser\" playwright 1.0.0\nplaywright@1.2.0\n").ok, false);
+});
+
+test("home env drops inherited ELASTOS variables", () => {
+  const env = homeProcessEnv("/tmp/home", {
+    PATH: "/bin",
+    HOME: "/Users/someone",
+    ELASTOS_CARRIER_NETWORK: "public",
+    ELASTOS_QUIET_RUNTIME_NOTICES: "0",
+    SECRET: "no",
+  });
+  assert.equal(env.HOME, "/tmp/home");
+  assert.equal(env.PATH, "/bin");
+  assert.equal(env.ELASTOS_QUIET_RUNTIME_NOTICES, "1");
+  assert.equal(env.ELASTOS_CARRIER_NETWORK, undefined);
+  assert.equal(env.SECRET, undefined);
+});
+
+test("a serve command is read after the Home path, spaces included", () => {
+  const bin = "/tmp/Library/Application Support/elastos/bin/elastos";
+  const copy = "/var/folders/xx/T/executable";
+  assert.equal(elastosSubcommand(`${bin} serve --addr 127.0.0.1:9`, bin), "serve");
+  assert.equal(elastosSubcommand(`${bin} gateway --addr 127.0.0.1:9`, [bin]), "gateway");
+  assert.equal(elastosSubcommand(`${copy} serve --addr 127.0.0.1:9`, copy), "serve");
+  assert.equal(elastosSubcommand(`${bin} serve --addr 127.0.0.1:9`, copy), "");
+});
+
+test("carrier config is a free loopback port and 4433 is a bind", () => {
+  assert.equal(carrierConfigOk('carrier_bind_addr = "127.0.0.1:0"\n'), true);
+  assert.equal(carrierConfigOk('carrier_bind_addr = "0.0.0.0:4433"\n'), false);
+  assert.equal(bindsPort(["127.0.0.1:54000->9.9.9.9:4433"], 4433), false);
+  assert.equal(bindsPort(["*:4433"], 4433), true);
+  assert.equal(bindsPort(["127.0.0.1:44330"], 4433), false);
+});
+
+test("redaction removes the DID and the address", () => {
+  const did = "did:key:z6Mk" + "1".repeat(44);
+  const text = redactDidAndAddress(`carrier ${did} on 127.0.0.1:4433 and [::1]:9`);
+  assert.equal(text.includes(did), false);
+  assert.equal(text.includes("127.0.0.1"), false);
+  assert.equal(text.includes("[::1]"), false);
+  const install = redactInstall({ signer_did: did, runtime_sha256: "ab", note: `see ${did}` });
+  assert.equal(install.signer_did, "redacted");
+  assert.equal(JSON.stringify(install).includes("did:key:z6Mk"), false);
+  assert.equal(install.runtime_sha256, "ab");
+});
+
+test("a pid is killed only inside the throwaway home", () => {
+  assert.equal(executableInsideHome("/tmp/a15r/run/bin/elastos", "/tmp/a15r/run"), true);
+  assert.equal(executableInsideHome("/usr/bin/elastos", "/tmp/a15r/run"), false);
+  assert.equal(executableInsideHome("/tmp/a15r/run-extra/bin/elastos", "/tmp/a15r/run"), false);
+});
+
+test("throwaway removal stays inside its scratch directory", () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "a15r-scratch-"));
+  const home = path.join(scratch, "run-1");
+  fs.mkdirSync(home);
+  assert.equal(throwawayAllowed(home, scratch), false);
+  fs.writeFileSync(path.join(home, ".a15r-throwaway"), `${home}\n`);
+  assert.equal(throwawayAllowed(home, scratch), true);
+  assert.equal(throwawayAllowed(scratch, scratch), false);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "a15r-outside-"));
+  fs.writeFileSync(path.join(outside, ".a15r-throwaway"), `${outside}\n`);
+  assert.equal(throwawayAllowed(outside, scratch), false);
+  fs.rmSync(scratch, { recursive: true });
+  fs.rmSync(outside, { recursive: true });
+});
+
+test("an old receipt is removed before a new run writes one", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "a15r-receipt-"));
+  fs.writeFileSync(path.join(dir, "receipt.json"), "{}\n");
+  assert.equal(removeStaleReceipt(dir), true);
+  assert.equal(fs.existsSync(path.join(dir, "receipt.json")), false);
+  fs.rmSync(dir, { recursive: true });
+});
+
+test("installed page folders hash to the committed trees", () => {
+  const repo = fileURLToPath(new URL("..", import.meta.url));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "a15r-pages-"));
+  const data = path.join(dir, "data");
+  fs.mkdirSync(path.join(data, "capsules"), { recursive: true });
+  for (const folder of ["home", "system", "inbox", "home-gui"]) {
+    const dest = path.join(data, "capsules", folder);
+    fs.mkdirSync(dest);
+    const archived = spawnSync("git", ["archive", "--format=tar", `HEAD:capsules/${folder}`], {
+      cwd: repo,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    assert.equal(archived.status, 0, archived.stderr?.toString());
+    const extracted = spawnSync("tar", ["-x", "-C", dest], { input: archived.stdout });
+    assert.equal(extracted.status, 0);
+  }
+  const proof = pageFolderProof(repo, data);
+  assert.equal(proof.ok, true, JSON.stringify(proof.pages));
+  const mutated = path.join(data, "capsules", "home", "a15r-plant.txt");
+  fs.writeFileSync(mutated, "plant\n");
+  assert.notEqual(gitTreeHash(path.join(data, "capsules", "home")), proof.pages.home.committed);
+  fs.rmSync(dir, { recursive: true });
 });
 
 test("audit bytes match the signed fixture chain", () => {

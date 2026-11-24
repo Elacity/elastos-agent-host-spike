@@ -1,13 +1,42 @@
 #!/usr/bin/env node
-// POST /api/apps/system/agents/launch after enable, create, activate,
-// and passkey step-up operation agent.start.
+// Full mode needs the agents-in-gateway change. It is not proof of anything
+// until that change is in the gateway. Full mode refuses to run until it
+// detects that route.
+// `--only u3-create` is the create proof. It does not start a guest.
+// POST /api/apps/system/agents/launch is the full journey's route, after
+// enable, create, activate, and passkey step-up operation agent.start.
 
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  CARRIER_MODE,
+  FULL_MODE_NOTICE,
+  agentsInGatewayChange,
+  behaviourInputsDir,
+  bindsPort,
+  carrierConfigOk,
+  elastosSubcommand,
+  executableInsideHome,
+  gitPorcelain,
+  guestCapsuleCount,
+  headlessShellRevision,
+  homeProcessEnv,
+  judgeCreatingOwner,
+  listedAgentsMatch,
+  macPlaywrightBrowserCache,
+  noGuestProof,
+  packageVersion,
+  pageFolderProof,
+  playwrightPin,
+  redactDidAndAddress,
+  redactInstall,
+  removeStaleReceipt,
+  throwawayAllowed,
+} from "./a15r-installed-journey-proof.mjs";
 
 const out = process.env.A15R_OUT;
 const root = process.env.A15R_ROOT;
@@ -136,14 +165,42 @@ async function launchApp(homeToken, target) {
 
 function loadPlaywright() {
   const candidates = [
+    process.env.A15R_PLAYWRIGHT_DIR
+      ? path.join(process.env.A15R_PLAYWRIGHT_DIR, "index.js")
+      : "",
     path.join(out, "tool/node_modules/playwright/index.js"),
     path.join(root, "elastos/tools/browser-playwright-engine/node_modules/playwright/index.js"),
-  ];
+  ].filter(Boolean);
   for (const candidate of candidates) {
     if (!fs.existsSync(candidate)) continue;
     return createRequire(candidate)(candidate);
   }
   return null;
+}
+
+function rememberBrowser(playwright, browser) {
+  const version = typeof browser?.version === "function" ? browser.version() : "";
+  let build = "";
+  const child = typeof browser?.process === "function" ? browser.process() : null;
+  if (child?.pid) {
+    const listed = homeExecutables();
+    const row = listed.ok ? listed.rows.find((item) => item.pid === child.pid) : null;
+    const match = String(row?.exe || "").match(/(chromium[_-][\w-]*-\d+)/);
+    if (match) build = match[1];
+  }
+  if (!build && process.env.A15R_PLAYWRIGHT_DIR) {
+    const revision = headlessShellRevision(process.env.A15R_PLAYWRIGHT_DIR);
+    if (revision) build = `chromium_headless_shell-${revision}`;
+  }
+  browserProof = {
+    playwright: process.env.A15R_PLAYWRIGHT_VERSION || packageVersion(
+      path.join(process.env.A15R_PLAYWRIGHT_DIR || "", "package.json"),
+    ),
+    browser: version,
+    build,
+    source: process.env.A15R_PLAYWRIGHT_SOURCE || "",
+  };
+  return playwright;
 }
 
 async function addAuthenticator(context, page) {
@@ -293,9 +350,10 @@ export const OWNER_NOTE = "Documents/note.txt";
 
 // The installed guest has no request channel, and this route is not the Bus
 // read. These in-Runtime rows are the isolation words this journey does not cover.
+// The function name is the citation. A line number is not pinned.
 export const U4_ISOLATION_NOT_COVERED = [
-  "the guest reads its own root and gets the bytes it wrote: elastos/crates/elastos-server/src/api/routes.rs:4825 an_agents_guest_serves_its_own_root_on_the_component_bridge",
-  "another agent's root is refused and that agent's bytes stay out of the answer: elastos/crates/elastos-server/src/api/routes.rs:4884 an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "the guest reads its own root and gets the bytes it wrote: elastos/crates/elastos-server/src/api/routes.rs an_agents_guest_serves_its_own_root_on_the_component_bridge",
+  "another agent's root is refused and that agent's bytes stay out of the answer: elastos/crates/elastos-server/src/api/routes.rs an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
 ];
 
 export function canonicalJson(value) {
@@ -790,18 +848,32 @@ export function mintReport(hits) {
   };
 }
 
+const MINT_SOURCE = /\.(?:rs|js|mjs|cjs|py|ts|tsx|c|cc|h|hh|wit)$/;
+
+export function repoPath(input) {
+  if (input instanceof URL) return fileURLToPath(input);
+  if (typeof input === "string" && input.startsWith("file:")) return fileURLToPath(input);
+  return input;
+}
+
 export function mintHitsFromRepo(repoRoot) {
+  const cwd = repoPath(repoRoot);
+  // Sources under elastos/ and capsules/ only. The journey script is not one of them.
   const listed = spawnSync("git", [
     "grep", "-n", "-I", "-e", "mint_agent_principal", "-e", "agent:v1", "HEAD",
-  ], { cwd: repoRoot, encoding: "utf8" });
+    "--", "elastos", "capsules",
+  ], { cwd, encoding: "utf8" });
   if (listed.status !== 0 && listed.status !== 1) {
-    return { ok: false, reason: String(listed.stderr || "git grep failed").slice(0, 240), production: [], testOnly: [] };
+    return { ok: false, reason: String(listed.stderr || "git grep failed").slice(0, 240), production: [], testOnly: [], checker: [] };
   }
-  const parsed = parseGitGrep(listed.stdout || "");
+  const parsed = parseGitGrep(listed.stdout || "").filter((hit) => (
+    (hit.path.startsWith("elastos/") || hit.path.startsWith("capsules/"))
+    && MINT_SOURCE.test(hit.path)
+  ));
   const cache = new Map();
   const hits = parsed.map((hit) => {
     if (!cache.has(hit.path)) {
-      const shown = spawnSync("git", ["show", `HEAD:${hit.path}`], { cwd: repoRoot, encoding: "utf8" });
+      const shown = spawnSync("git", ["show", `HEAD:${hit.path}`], { cwd, encoding: "utf8" });
       cache.set(hit.path, shown.status === 0 ? shown.stdout : "");
     }
     return { ...hit, kind: mintHitKind(hit, cache.get(hit.path)) };
@@ -1063,23 +1135,76 @@ function alive(pid) {
   }
 }
 
-async function stopServe() {
-  const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
-  try { process.kill(-pid, "SIGTERM"); } catch { try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ } }
-  const deadline = Date.now() + 20000;
-  while (Date.now() < deadline && alive(pid)) await sleep(200);
-  if (alive(pid)) {
-    try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ }
+function homeExecutables() {
+  const listed = spawnSync("python3", ["-c", `
+import ctypes, ctypes.util, subprocess, sys
+libc = ctypes.CDLL(ctypes.util.find_library("c"))
+buf = ctypes.create_string_buffer(4096)
+ps = subprocess.check_output(["ps", "-ax", "-o", "pid="], text=True)
+for line in ps.splitlines():
+    pid = int(line.strip() or "0")
+    if pid <= 0:
+        continue
+    n = libc.proc_pidpath(pid, buf, len(buf))
+    if n > 0:
+        sys.stdout.write(f"{pid}\\t{buf.value.decode()}\\n")
+`], { encoding: "utf8" });
+  if (listed.status !== 0) return { ok: false, rows: [] };
+  const rows = [];
+  for (const line of String(listed.stdout || "").split("\n")) {
+    if (!line) continue;
+    const tab = line.indexOf("\t");
+    if (tab < 0) continue;
+    rows.push({ pid: Number(line.slice(0, tab)), exe: line.slice(tab + 1).trim() });
   }
+  return { ok: true, rows };
+}
+
+function homePids() {
+  const listed = homeExecutables();
+  if (!listed.ok) return { ok: false, pids: [] };
+  const pids = listed.rows
+    .filter((row) => executableInsideHome(row.exe, home))
+    .map((row) => row.pid);
+  return { ok: true, pids };
+}
+
+async function signalHomePids(pids) {
+  for (const pid of pids) {
+    try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+  }
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline && pids.some((pid) => alive(pid))) await sleep(200);
+  for (const pid of pids) {
+    if (alive(pid)) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+  const killed = Date.now() + 2000;
+  while (Date.now() < killed && pids.some((pid) => alive(pid))) await sleep(100);
+}
+
+function servePidsToStop(executables, commands) {
+  const pids = [];
+  if (!executables?.ok || !commands || !serveBin) return pids;
+  let binary = "";
+  try { binary = fs.realpathSync(serveBin); } catch { return pids; }
+  const verified = verifiedServePid(executables, commands, binary);
+  // An unverified coords pid is left alone. It is not this Home's binary.
+  if (verified.state === "serve") pids.push(verified.pid);
+  return pids;
+}
+
+async function stopServe() {
+  const listed = homePids();
+  if (!listed.ok) throw new Error("cannot list executables for this Home");
+  const extra = servePidsToStop(homeExecutables(), commandByPid());
+  await signalHomePids([...new Set([...listed.pids, ...extra])]);
 }
 
 async function startServe() {
   const log = fs.openSync(logPath, "a");
-  const env = { ...process.env, HOME: home, ELASTOS_QUIET_RUNTIME_NOTICES: "1" };
-  delete env.XDG_DATA_HOME;
-  delete env.XDG_CONFIG_HOME;
-  delete env.XDG_STATE_HOME;
-  delete env.XDG_CACHE_HOME;
+  const env = homeProcessEnv(home);
   const child = spawn(serveBin, ["gateway", "--addr", gatewayAddr], {
     cwd: home,
     env,
@@ -1108,18 +1233,37 @@ async function startServe() {
   throw new Error("restarted gateway did not ensure its Home runtime");
 }
 
+let pageProof = null;
+let carrierProof = null;
+let browserProof = null;
+let gitAfter = { ok: false, text: "not checked" };
+
+function gitFields() {
+  return {
+    git_porcelain_before: process.env.A15R_GIT_BEFORE || "",
+    git_porcelain_after: gitAfter.ok ? "" : String(gitAfter.text || "git status failed"),
+  };
+}
+
 function writeReceipt() {
   if (process.env.A15R_ONLY === "u3-create") return writeU3Receipt();
   const assertions = names.map((name) => marks.get(name) || { name, status: "not reached", detail: "" });
   const install = fs.existsSync(path.join(out, "install.json"))
-    ? readJson(path.join(out, "install.json"))
+    ? redactInstall(readJson(path.join(out, "install.json")))
     : {};
   const receipt = {
+    mode: "full",
+    proof: false,
+    notice: FULL_MODE_NOTICE,
     route: "POST /api/apps/system/agents/launch",
     step_up_operation: "agent.start",
     plan_step_up_operation: "agent_plan.approve",
     source_commit: process.env.A15R_SOURCE_COMMIT || "",
     source_tree: process.env.A15R_SOURCE_TREE || "",
+    ...gitFields(),
+    pages: pageProof?.pages || null,
+    carrier: carrierProof,
+    browser: browserProof,
     install,
     timings_ms: { ...timings, total: Date.now() - started },
     assertions,
@@ -1129,8 +1273,10 @@ function writeReceipt() {
     screenshots,
     stopped,
   };
-  fs.writeFileSync(path.join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
-  return assertions.some((item) => item.status !== "pass") ? 1 : 0;
+  const body = redactDidAndAddress(JSON.stringify(receipt, null, 2) + "\n");
+  fs.writeFileSync(path.join(out, "receipt.json"), body);
+  const gitDirty = !gitAfter.ok || String(process.env.A15R_GIT_BEFORE || "").length > 0;
+  return gitDirty || assertions.some((item) => item.status !== "pass") ? 1 : 0;
 }
 
 async function main() {
@@ -1167,6 +1313,7 @@ async function main() {
     halt("owner_passkey_created", "playwright is not installed");
   }
   browser = await playwright.chromium.launch({ headless: true });
+  rememberBrowser(playwright, browser);
   const adminContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   adminPage = await adminContext.newPage();
   await addAuthenticator(adminContext, adminPage);
@@ -1573,6 +1720,11 @@ function writeU3Receipt() {
     non_owner: "guest session",
     source_commit: process.env.A15R_SOURCE_COMMIT || "",
     source_tree: process.env.A15R_SOURCE_TREE || "",
+    ...gitFields(),
+    pages: pageProof?.pages || null,
+    carrier: carrierProof,
+    browser: browserProof,
+    plant: process.env.A15R_PLANT || "",
     binaries: binarySha256s(loadInstall()),
     timings_ms: { ...timings, total: Date.now() - started },
     assertions,
@@ -1585,7 +1737,8 @@ function writeU3Receipt() {
     stopped,
   };
   fs.writeFileSync(path.join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
-  return assertions.some((item) => item.status !== "pass") ? 1 : 0;
+  const gitDirty = !gitAfter.ok || String(process.env.A15R_GIT_BEFORE || "").length > 0;
+  return gitDirty || assertions.some((item) => item.status !== "pass") ? 1 : 0;
 }
 
 function agentRecordsPath() {
@@ -1631,11 +1784,7 @@ async function productCaller(token) {
 }
 
 function runtimeIdentityDid() {
-  const env = { ...process.env, HOME: home, ELASTOS_QUIET_RUNTIME_NOTICES: "1" };
-  delete env.XDG_DATA_HOME;
-  delete env.XDG_CONFIG_HOME;
-  delete env.XDG_STATE_HOME;
-  delete env.XDG_CACHE_HOME;
+  const env = homeProcessEnv(home);
   const result = spawnSync(serveBin, ["identity", "show"], { env, encoding: "utf8" });
   if (result.status !== 0) return "";
   const line = String(result.stdout || "").split("\n").find((item) => item.includes("did:key:"));
@@ -1644,40 +1793,91 @@ function runtimeIdentityDid() {
   return didKeyEd25519(did) ? did : "";
 }
 
-function guestProcesses() {
-  const coords = ["home-runtime-coords.json", "agent-runtime-coords.json"].filter((name) => (
-    fs.existsSync(path.join(data, name))
-  ));
-  let others = 0;
-  const stray = [];
-  const gatewayPid = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, "utf8").trim() : "";
+function commandByPid() {
+  const listed = spawnSync("ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8" });
+  if (listed.status !== 0) return null;
+  const commands = new Map();
+  for (const line of String(listed.stdout || "").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const pid = trimmed.split(/\s+/)[0];
+    commands.set(pid, trimmed.slice(pid.length).trim());
+  }
+  return commands;
+}
+
+function realExe(exe) {
+  const cleaned = String(exe || "").replace(/ \(deleted\)$/, "");
+  try { return fs.realpathSync(cleaned); } catch { return path.resolve(cleaned); }
+}
+
+function sha256File(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
+let installedBinarySha = "";
+function installedSha() {
+  if (!installedBinarySha) installedBinarySha = sha256File(serveBin);
+  return installedBinarySha;
+}
+
+function coordsPid() {
+  const file = data ? path.join(data, "home-runtime-coords.json") : "";
+  if (!file || !fs.existsSync(file)) return 0;
   try {
-    // Wide output keeps one process on one line. Only a process whose own
-    // argv starts with this Home's elastos binary counts; a command that
-    // merely mentions the path does not.
-    const listed = spawnSync("ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8" });
-    const prefix = String(serveBin);
-    for (const line of String(listed.stdout || "").split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const pid = trimmed.split(/\s+/)[0];
-      const command = trimmed.slice(pid.length).trim();
-      if (!(command === prefix || command.startsWith(prefix + " "))) continue;
-      if (!pid || pid === gatewayPid) continue;
-      others += 1;
-      stray.push(command.slice(prefix.length).trim().split(/\s+/)[0] || "elastos");
-    }
-  } catch { /* coords are the product's record of a running runtime */ }
-  return { coords, other_gateway_processes: others, stray, gateway_pid: gatewayPid };
+    const pid = Number(readJson(file).pid);
+    return Number.isInteger(pid) && pid > 0 ? pid : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// The gateway starts serve from a private copy outside the Home. That pid is
+// this Home's binary only when the coords file names it, the command is serve,
+// and the bytes match the installed elastos.
+function verifiedServePid(executables, commands, binary) {
+  const pid = coordsPid();
+  if (!pid) return { state: "absent" };
+  const row = executables.rows.find((item) => item.pid === pid);
+  if (!row) return { state: "dead" };
+  const exe = realExe(row.exe);
+  const sub = elastosSubcommand(commands.get(String(pid)) || "", [row.exe, exe, binary, serveBin]);
+  if (sub !== "serve") return { state: "unverified", reason: "coords pid is not an elastos serve" };
+  if (exe === binary) return { state: "serve", pid };
+  let same = false;
+  try { same = sha256File(exe) === installedSha(); } catch { same = false; }
+  if (!same) return { state: "unverified", reason: "coords pid executable is not this Home's binary" };
+  return { state: "serve", pid };
+}
+
+function elastosProcesses() {
+  const executables = homeExecutables();
+  const commands = commandByPid();
+  if (!executables.ok || !commands) return { ok: false, reason: "process list is missing", serve: [], stray: [] };
+  let binary = "";
+  try { binary = fs.realpathSync(serveBin); } catch { return { ok: false, reason: "installed elastos is missing", serve: [], stray: [] }; }
+  const gatewayPid = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, "utf8").trim() : "";
+  const serve = [];
+  const stray = [];
+  for (const row of executables.rows) {
+    const exe = realExe(row.exe);
+    if (exe !== binary) continue;
+    if (String(row.pid) === gatewayPid) continue;
+    const sub = elastosSubcommand(commands.get(String(row.pid)) || "", [row.exe, exe, binary, serveBin]);
+    if (sub === "serve") serve.push(row.pid);
+    else stray.push(sub || "unparsed");
+  }
+  const verified = verifiedServePid(executables, commands, binary);
+  if (verified.state === "unverified") {
+    return { ok: false, reason: verified.reason, serve, stray };
+  }
+  if (verified.state === "serve" && !serve.includes(verified.pid)) serve.push(verified.pid);
+  return { ok: true, reason: "", serve, stray };
 }
 
 async function startGatewayOnly() {
   const log = fs.openSync(logPath, "a");
-  const env = { ...process.env, HOME: home, ELASTOS_QUIET_RUNTIME_NOTICES: "1" };
-  delete env.XDG_DATA_HOME;
-  delete env.XDG_CONFIG_HOME;
-  delete env.XDG_STATE_HOME;
-  delete env.XDG_CACHE_HOME;
+  const env = homeProcessEnv(home);
   const child = spawn(serveBin, ["gateway", "--addr", gatewayAddr], {
     cwd: home,
     env,
@@ -1819,7 +2019,79 @@ async function waitAgentText(system, agentId, text) {
   halt("u3_home_asks", `the page did not show ${text}`);
 }
 
+function udpNames(pid) {
+  const listed = spawnSync("lsof", ["-nP", "-a", "-p", String(pid), "-iUDP", "-Fn"], { encoding: "utf8" });
+  if (listed.status !== 0 && listed.status !== 1) return { ok: false, names: [] };
+  const names = [];
+  for (const line of String(listed.stdout || "").split("\n")) {
+    if (line.startsWith("n")) names.push(line.slice(1));
+  }
+  return { ok: true, names };
+}
+
+function noteCarrier() {
+  const configPath = path.join(data, "config.toml");
+  const config = fs.existsSync(configPath) ? fs.readFileSync(configPath, "utf8") : "";
+  if (!carrierConfigOk(config)) {
+    return { ok: false, reason: "carrier config is not the free loopback port" };
+  }
+  const procs = homePids();
+  if (!procs.ok) return { ok: false, reason: "cannot list Home executables" };
+  const gatewayPid = pidFile && fs.existsSync(pidFile) ? Number(fs.readFileSync(pidFile, "utf8").trim()) : 0;
+  if (!procs.pids.includes(gatewayPid)) {
+    return { ok: false, reason: "gateway executable is not inside this Home" };
+  }
+  const executables = homeExecutables();
+  const commands = commandByPid();
+  let binary = "";
+  try { binary = fs.realpathSync(serveBin); } catch { binary = ""; }
+  const verified = executables.ok && commands && binary
+    ? verifiedServePid(executables, commands, binary)
+    : { state: "absent" };
+  if (verified.state === "unverified") return { ok: false, reason: verified.reason };
+  const names = [];
+  const pids = new Set(procs.pids);
+  if (verified.state === "serve") pids.add(verified.pid);
+  for (const pid of pids) {
+    const sockets = udpNames(pid);
+    if (!sockets.ok) return { ok: false, reason: "lsof failed" };
+    names.push(...sockets.names);
+  }
+  if (bindsPort(names, 4433)) return { ok: false, reason: "Carrier bound UDP 4433" };
+  carrierProof = {
+    mode: CARRIER_MODE,
+    config: "127.0.0.1:0",
+    binds_4433: false,
+    note: "Carrier is not disabled. It binds 127.0.0.1 and an ephemeral port.",
+  };
+  return { ok: true };
+}
+
+async function listRuntimeCapsules() {
+  if (!fs.existsSync(path.join(data, "home-runtime-coords.json"))) {
+    return { listed: false, reason: "home runtime coords are absent", capsules: [] };
+  }
+  try {
+    const attached = await runtimeToken("home-runtime-coords.json");
+    const response = await fetch(`${attached.api}/api/capsules`, {
+      headers: { authorization: `Bearer ${attached.token}` },
+    });
+    const text = await response.text();
+    const body = JSON.parse(text);
+    if (!response.ok || !Array.isArray(body.capsules)) {
+      return { listed: false, reason: "capsules route refused", capsules: [] };
+    }
+    return { listed: true, reason: "", capsules: body.capsules };
+  } catch (error) {
+    return { listed: false, reason: String(error.message || error).slice(0, 180), capsules: [] };
+  }
+}
+
 async function runU3Create() {
+  const earlyTree = gitPorcelain(root);
+  if (!earlyTree.ok || String(process.env.A15R_GIT_BEFORE || "").length > 0) {
+    halt("release_signed", earlyTree.text || "git status --porcelain is not empty");
+  }
   const install = readJson(path.join(out, "install.json"));
   const keyGone = !fs.existsSync(path.join(data, ".a15r-publisher.key"));
   if (install.signer_did && install.release_sha256 && install.key_deleted && keyGone) {
@@ -1827,11 +2099,14 @@ async function runU3Create() {
   } else halt("release_signed", "install.json is missing a signed release");
   if (install.key_deleted && keyGone) pass("signing_key_deleted");
   else halt("signing_key_deleted", "disposable key is still present");
+  pageProof = pageFolderProof(root, data);
+  if (!pageProof.ok) halt("installed_identity_recorded", pageProof.pages);
   if (install.runtime_sha256 && install.wasm_sha256 && install.components_sha256 && install.bundle_cid) {
     pass("installed_identity_recorded", {
       runtime_sha256: install.runtime_sha256,
       wasm_sha256: install.wasm_sha256,
       components_sha256: install.components_sha256,
+      pages: pageProof.pages,
     });
   } else halt("installed_identity_recorded", "install identity is incomplete");
 
@@ -1842,10 +2117,15 @@ async function runU3Create() {
   } catch (error) {
     halt("gateway_started", String(error.message || error));
   }
-  if (!gatewayHealthOk(gatewayProbe.status, gatewayProbe.body)) {
-    halt("gateway_started", { status: gatewayProbe.status, body: String(gatewayProbe.body).slice(0, 200) });
+  const carrier = noteCarrier();
+  if (!gatewayHealthOk(gatewayProbe.status, gatewayProbe.body) || !carrier.ok) {
+    halt("gateway_started", {
+      status: gatewayProbe.status,
+      body: String(gatewayProbe.body).slice(0, 200),
+      carrier: carrier.reason || "",
+    });
   }
-  pass("gateway_started", { status: gatewayProbe.status });
+  pass("gateway_started", { status: gatewayProbe.status, carrier: CARRIER_MODE });
 
   const playwright = loadPlaywright();
   if (!playwright) {
@@ -1853,6 +2133,7 @@ async function runU3Create() {
     halt("owner_passkey_created", "playwright is not installed");
   }
   browser = await playwright.chromium.launch({ headless: true });
+  rememberBrowser(playwright, browser);
   fs.mkdirSync(path.join(out, "video"), { recursive: true });
   adminContext = await browser.newContext({
     viewport: { width: 1280, height: 800 },
@@ -1903,9 +2184,17 @@ async function runU3Create() {
   const spoof = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
     display_name: "Spoof", agent_host: "agent-host", request_id: "u3-spoof", owner: "person:spoof",
   });
-  if (!refusalIncludes(spoof.status, spoof.text, 409, "agent request is invalid")
+  const spoofSeen = process.env.A15R_PLANT === "unknown-owner-field-let-through"
+    ? { status: 200, text: "created" }
+    : spoof;
+  if (!refusalIncludes(spoofSeen.status, spoofSeen.text, 409, "agent request is invalid")
     || JSON.stringify(storedAgentRecords()) !== JSON.stringify(beforeSpoof)) {
-    halt("u3_owner_field_refused", { status: spoof.status, body: spoof.text.slice(0, 300) });
+    halt(
+      "u3_owner_field_refused",
+      process.env.A15R_PLANT === "unknown-owner-field-let-through"
+        ? "unknown owner field let through"
+        : { status: spoofSeen.status, body: spoofSeen.text.slice(0, 300) },
+    );
   }
   pass("u3_owner_field_refused", spoof.text.slice(0, 180));
 
@@ -1974,8 +2263,15 @@ async function runU3Create() {
       state.systemToken = latestToken;
       frameTokens.push(latestToken);
     }
-    homeAsks = judgeHomeAsks(pagePosts, frameTokens, state.homeToken);
-    if (!homeAsks.ok) halt("u3_home_asks", homeAsks);
+    const posts = process.env.A15R_PLANT === "create-post-hidden"
+      ? pagePosts.filter((item) => item.path !== "/api/apps/system/agents/create")
+      : pagePosts;
+    homeAsks = judgeHomeAsks(posts, frameTokens, state.homeToken);
+    if (!homeAsks.ok) {
+      halt("u3_home_asks", process.env.A15R_PLANT === "create-post-hidden"
+        ? { plant: "Create post hidden", ...homeAsks }
+        : homeAsks);
+    }
   } catch (error) {
     if (error instanceof Error && U3_NAMES.includes(error.message)) throw error;
     halt("u3_home_asks", String(error.message || error).slice(0, 400));
@@ -1996,15 +2292,26 @@ async function runU3Create() {
   const stored = storedRows.find((row) => row.id === createdId);
   const storedSecond = storedRows.find((row) => row.id === secondId);
   const ownerFromFile = admins.length === 1 ? admins[0].id : "";
+  const ownerJudge = judgeCreatingOwner({
+    checkRan: process.env.A15R_PLANT !== "owner-check-skipped",
+    storedOwner: stored?.owner,
+    productOwner: caller.id,
+    fileOwner: ownerFromFile,
+  });
+  const secondOwner = judgeCreatingOwner({
+    checkRan: process.env.A15R_PLANT !== "owner-check-skipped",
+    storedOwner: storedSecond?.owner,
+    productOwner: caller.id,
+    fileOwner: ownerFromFile,
+  });
+  if (!ownerJudge.ok || !secondOwner.ok) {
+    halt("u3_agent_created", ownerJudge.reason || secondOwner.reason);
+  }
   if (
     created.json?.active !== false
     || created.json?.session_id !== undefined
     || createdAgain.json?.active !== false
     || storedRows.length !== 2
-    || !storedOwnerIsCreatingOwner(stored?.owner, caller.id)
-    || stored.owner !== ownerFromFile
-    || storedSecond?.owner !== ownerFromFile
-    || caller.id !== ownerFromFile
     || agentDisplayName(createdId) !== AGENT_NAME
     || agentDisplayName(secondId) !== AGENT_NAME
   ) {
@@ -2151,38 +2458,33 @@ async function runU3Create() {
   const minted = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
     display_name: "Chosen", agent_host: "agent-host", request_id: "u3-chosen-id", agent_id: chosenId,
   });
-  const processes = guestProcesses();
+  const processes = elastosProcesses();
   const replacement = createReplacesMint(
     fs.readFileSync(path.join(root, "elastos/crates/elastos-server/src/agents.rs"), "utf8"),
     fs.readFileSync(path.join(root, "elastos/crates/elastos-server/src/api/gateway.rs"), "utf8"),
   );
-  // Home's own page asks the gateway to start the managed Home runtime
-  // (`elastos serve`). That process is not an agent guest. An agent guest
-  // would be another elastos argv, an agent-runtime coord file, a session
-  // id, or a running capsule for this agent.
-  const managedOnly = processes.stray.every((arg) => arg === "serve");
-  const agentCoords = processes.coords.includes("agent-runtime-coords.json");
-  let runningAgentCapsules = 0;
-  let capsuleNote = "home runtime coords absent";
-  if (processes.coords.includes("home-runtime-coords.json")) {
-    try {
-      const attached = await runtimeToken("home-runtime-coords.json");
-      const response = await fetch(attached.api + "/api/capsules", {
-        headers: { authorization: "Bearer " + attached.token },
-      });
-      const text = await response.text();
-      const listed = JSON.parse(text);
-      const rows = listed.capsules || [];
-      runningAgentCapsules = rows.filter((row) => {
-        const blob = JSON.stringify(row);
-        const live = row.status === "starting" || row.status === "running";
-        return live && (blob.includes(createdId) || blob.includes("agent-host"));
-      }).length;
-      capsuleNote = "listed";
-    } catch (error) {
-      halt("u3_no_guest_no_mint", { capsules: String(error.message || error).slice(0, 180) });
+  let capsulesListed = false;
+  let guestCapsules = 0;
+  if (processes.ok && processes.serve.length > 0) {
+    let listed = await listRuntimeCapsules();
+    const deadline = Date.now() + 20000;
+    while (!listed.listed && Date.now() < deadline) {
+      await sleep(500);
+      listed = await listRuntimeCapsules();
+    }
+    capsulesListed = listed.listed;
+    guestCapsules = guestCapsuleCount(listed.capsules, [createdId, secondId]);
+    if (!listed.listed) {
+      halt("u3_no_guest_no_mint", { reason: "serve is running and its capsules cannot be listed", detail: listed.reason });
     }
   }
+  const guestProof = noGuestProof({
+    stray: processes.ok ? processes.stray : null,
+    serveKnown: processes.ok,
+    serveRunning: processes.ok && processes.serve.length > 0,
+    capsulesListed,
+    guestCapsules,
+  });
   const mint = mintHitsFromRepo(root);
   const sameNameDistinct = agentIdV2(createdId) && agentIdV2(secondId) && createdId !== secondId;
   const noMint = refusalIncludes(minted.status, minted.text, 409, "agent request is invalid")
@@ -2190,9 +2492,7 @@ async function runU3Create() {
     && !storedAgentRecords().some((row) => row.id === chosenId)
     && created.json?.session_id === undefined
     && activated.json?.session_id === undefined
-    && managedOnly
-    && !agentCoords
-    && runningAgentCapsules === 0
+    && guestProof.ok
     && replacement.ok
     && mint.ok
     && mint.defined === false
@@ -2201,9 +2501,9 @@ async function runU3Create() {
     halt("u3_no_guest_no_mint", {
       status: minted.status,
       body: minted.text.slice(0, 180),
-      coords: processes.coords,
       stray: processes.stray,
-      running_agent_capsules: runningAgentCapsules,
+      serve: processes.ok ? processes.serve.length : "unknown",
+      guest: guestProof.reason,
       route: replacement.route,
       fields: replacement.fields,
       id_source: replacement.id_source,
@@ -2220,11 +2520,9 @@ async function runU3Create() {
     mint_defined: mint.defined,
     production_mint_hits: mint.production.map((hit) => `${hit.path}:${hit.line}`),
     test_only_mint_hits: mint.testOnly.map((hit) => `${hit.path}:${hit.line}`),
-    checker_mint_hits: mint.checker.map((hit) => `${hit.path}:${hit.line}`),
-    sessions: 0,
-    agent_runtime_coords: false,
-    managed_runtime: processes.stray,
-    capsules: capsuleNote,
+    stray: processes.stray,
+    capsules_listed: capsulesListed,
+    guest_capsules: guestCapsules,
   });
 
   const beforeBytes = fs.readFileSync(agentRecordsPath());
@@ -2238,16 +2536,35 @@ async function runU3Create() {
   const afterBytes = fs.readFileSync(agentRecordsPath());
   const afterCaller = await productCaller(state.systemToken);
   const afterStored = storedAgentRecords().find((row) => row.id === createdId);
+  const listed = await call("GET", "/api/apps/system/agents", state.systemToken);
+  const listedBody = process.env.A15R_PLANT === "ignore-agent-file" ? { agents: [] } : listed.json;
+  const expectedAgents = [
+    { id: createdId, name: AGENT_NAME, active: true },
+    { id: secondId, name: AGENT_NAME, active: false },
+  ];
+  const listJudge = listedAgentsMatch(listedBody, expectedAgents);
+  const carrierAgain = noteCarrier();
   if (!beforeBytes.equals(afterBytes)
     || !storedOwnerIsCreatingOwner(afterStored?.owner, afterCaller.id)
-    || afterCaller.id !== beforeCaller.id) {
+    || afterCaller.id !== beforeCaller.id
+    || !listJudge.ok
+    || !carrierAgain.ok) {
     halt("u3_restart_same_record", {
       bytes_match: beforeBytes.equals(afterBytes),
       summary_status: afterCaller.status,
       owner_matches: afterStored?.owner === afterCaller.id,
+      list: process.env.A15R_PLANT === "ignore-agent-file"
+        ? "gateway ignores the agent file after restart"
+        : listJudge.reason,
+      list_status: listed.status,
+      carrier: carrierAgain.reason || "",
     });
   }
-  pass("u3_restart_same_record", { bytes_match: true, owner_matches_product: true });
+  pass("u3_restart_same_record", {
+    bytes_match: true,
+    owner_matches_product: true,
+    agents: expectedAgents.map((row) => ({ id: row.id, name: row.name, active: row.active })),
+  });
 
   const did = runtimeIdentityDid();
   const verified = verifyInstalledAudit(readJson(authStatePath()), did);
@@ -2292,6 +2609,7 @@ function shellFailReceipt() {
       non_owner: "guest session",
       source_commit: process.env.A15R_SOURCE_COMMIT || "",
       source_tree: process.env.A15R_SOURCE_TREE || "",
+      git_porcelain_before: process.env.A15R_GIT_BEFORE || "",
       binaries: binarySha256s(loadInstall()),
       timings_ms: {},
       assertions,
@@ -2311,12 +2629,16 @@ function shellFailReceipt() {
   }));
   const installPath = path.join(out, "install.json");
   const receipt = {
+    mode: "full",
+    proof: false,
+    notice: FULL_MODE_NOTICE,
     route: "POST /api/apps/system/agents/launch",
     step_up_operation: "agent.start",
     plan_step_up_operation: "agent_plan.approve",
     source_commit: process.env.A15R_SOURCE_COMMIT || "",
     source_tree: process.env.A15R_SOURCE_TREE || "",
-    install: fs.existsSync(installPath) ? readJson(installPath) : {},
+    git_porcelain_before: process.env.A15R_GIT_BEFORE || "",
+    install: redactInstall(fs.existsSync(installPath) ? readJson(installPath) : {}),
     timings_ms: {},
     assertions,
     card: null,
@@ -2325,7 +2647,7 @@ function shellFailReceipt() {
     screenshots: [],
     stopped: clip(reason),
   };
-  fs.writeFileSync(path.join(out, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n");
+  fs.writeFileSync(path.join(out, "receipt.json"), redactDidAndAddress(JSON.stringify(receipt, null, 2) + "\n"));
 }
 
 function invokedDirectly() {
@@ -2334,29 +2656,195 @@ function invokedDirectly() {
   return import.meta.url === pathToFileURL(path.resolve(entry)).href;
 }
 
+function scriptRoot() {
+  return process.env.A15R_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+function readAgentsInGateway() {
+  const repo = scriptRoot();
+  return agentsInGatewayChange(
+    fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway.rs"), "utf8"),
+    fs.readFileSync(path.join(repo, "elastos/crates/elastos-server/src/api/gateway_agents.rs"), "utf8"),
+  );
+}
+
+function preparePlaywright() {
+  const repo = scriptRoot();
+  const pin = playwrightPin(fs.readFileSync(path.join(repo, "scripts/test-behaviour.sh"), "utf8"));
+  if (!pin.ok) {
+    console.error("playwright pin in scripts/test-behaviour.sh is missing or inconsistent");
+    process.exit(2);
+  }
+  const inputs = behaviourInputsDir(process.env);
+  const bundled = inputs ? path.join(inputs, "browser", "node_modules", "playwright") : "";
+  const scratch = process.env.A15R_SCRATCH || path.join(repo, "target", "a15r-homes");
+  let moduleDir = "";
+  let source = "";
+  if (packageVersion(path.join(bundled, "package.json")) === pin.version) {
+    moduleDir = bundled;
+    source = "behaviour-inputs";
+  } else {
+    moduleDir = path.join(scratch, "tool", "node_modules", "playwright");
+    source = "scratch-install";
+    if (packageVersion(path.join(moduleDir, "package.json")) !== pin.version) {
+      fs.mkdirSync(path.join(scratch, "tool"), { recursive: true });
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) {
+        if (key.startsWith("ELASTOS_")) delete env[key];
+      }
+      const installed = spawnSync("npm", [
+        "install", "--prefix", path.join(scratch, "tool"),
+        "--no-save", "--package-lock=false", `playwright@${pin.version}`,
+      ], { env, encoding: "utf8" });
+      if (installed.status !== 0) {
+        console.error(String(installed.stderr || "npm install playwright failed").slice(0, 500));
+        process.exit(2);
+      }
+    }
+  }
+  const revision = headlessShellRevision(moduleDir);
+  const shellName = revision ? `chromium_headless_shell-${revision}` : "";
+  let browsers = process.env.PLAYWRIGHT_BROWSERS_PATH || "";
+  if (!(browsers && shellName && fs.existsSync(path.join(browsers, shellName)))) {
+    const cached = macPlaywrightBrowserCache(process.env);
+    if (cached && shellName && fs.existsSync(path.join(cached, shellName))) browsers = cached;
+  }
+  if (!(browsers && shellName && fs.existsSync(path.join(browsers, shellName)))) {
+    browsers = path.join(scratch, "browsers");
+    fs.mkdirSync(browsers, { recursive: true });
+    const env = { ...process.env };
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("ELASTOS_")) delete env[key];
+    }
+    env.PLAYWRIGHT_BROWSERS_PATH = browsers;
+    const bin = path.join(path.dirname(moduleDir), ".bin", "playwright");
+    const installed = spawnSync(bin, ["install", "chromium", "--only-shell"], { env, encoding: "utf8" });
+    if (installed.status !== 0) {
+      console.error(String(installed.stderr || "playwright install chromium failed").slice(0, 500));
+      process.exit(2);
+    }
+  }
+  process.stdout.write(`${moduleDir}\n${browsers}\n${source}\n${pin.version}\n`);
+}
+
+function scrubEvidenceFiles() {
+  if (logPath && fs.existsSync(logPath)) {
+    fs.writeFileSync(logPath, redactDidAndAddress(fs.readFileSync(logPath, "utf8")));
+  }
+  const installPath = out ? path.join(out, "install.json") : "";
+  if (installPath && fs.existsSync(installPath)) {
+    fs.writeFileSync(installPath, `${JSON.stringify(redactInstall(readJson(installPath)))}\n`);
+  }
+}
+
+async function removeHome() {
+  const scratch = process.env.A15R_SCRATCH || "";
+  if (!home || !scratch || !fs.existsSync(home)) return;
+  if (!throwawayAllowed(home, scratch)) {
+    throw new Error("refusing to remove a path that is not this run's throwaway home");
+  }
+  const target = fs.realpathSync(home);
+  const identity = data ? path.join(data, "identity") : "";
+  if (identity && fs.existsSync(identity)) {
+    for (const name of fs.readdirSync(identity)) {
+      if (name.endsWith(".key") || name.endsWith(".pem")) {
+        fs.rmSync(path.join(identity, name), { force: true });
+      }
+    }
+  }
+  const publisherKey = data ? path.join(data, ".a15r-publisher.key") : "";
+  if (publisherKey && fs.existsSync(publisherKey)) fs.rmSync(publisherKey, { force: true });
+  await new Promise((resolve, reject) => {
+    fs.rm(target, { recursive: true }, (error) => (error ? reject(error) : resolve()));
+  });
+}
+
 if (invokedDirectly()) {
-  if (process.argv[2] === "--shell-fail") {
+  const flag = process.argv[2] || "";
+  if (flag === "--shell-fail") {
     shellFailReceipt();
     process.exit(1);
   }
-  const job = process.env.A15R_ONLY === "u3-create" ? runU3Create : main;
-  job().catch((error) => {
-    stopped = clip(error && (error.detail || error.stack || error.message) || error);
-  }).finally(async () => {
-    const video = adminPage && typeof adminPage.video === "function" ? adminPage.video() : null;
-    if (video) {
-      await adminPage.close().catch(() => {});
-      try {
-        const file = path.join(out, "owner.webm");
-        await video.saveAs(file);
-        screenshots.push({ name: "owner-video", status: "taken", path: file });
-      } catch (error) {
-        screenshots.push({ name: "owner-video", status: "skipped", detail: clip(String(error)) });
+  if (flag === "--agents-in-gateway") {
+    const detected = readAgentsInGateway();
+    if (!detected.ok) {
+      console.error(detected.reason);
+      process.exit(2);
+    }
+    process.exit(0);
+  }
+  if (flag === "--prepare-playwright") {
+    preparePlaywright();
+    process.exit(0);
+  }
+  if (flag === "--scrub-evidence") {
+    scrubEvidenceFiles();
+    process.exit(0);
+  }
+  if (flag === "--stop-home") {
+    stopServe().then(() => process.exit(0)).catch((error) => {
+      console.error(String(error.message || error));
+      process.exit(1);
+    });
+  } else if (flag === "--remove-throwaway") {
+    stopServe()
+      .catch(() => {})
+      .then(() => removeHome())
+      .then(() => process.exit(0))
+      .catch((error) => {
+        console.error(String(error.message || error));
+        process.exit(1);
+      });
+  } else if (flag) {
+    console.error(`unknown argument: ${flag}`);
+    process.exit(2);
+  } else {
+    const full = process.env.A15R_ONLY !== "u3-create";
+    if (full) {
+      console.log(FULL_MODE_NOTICE);
+      const detected = readAgentsInGateway();
+      if (!detected.ok) {
+        console.error(detected.reason);
+        process.exit(2);
       }
     }
-    if (browser) await browser.close().catch(() => {});
-    browser = undefined;
-    const code = writeReceipt();
-    process.exit(code);
-  });
+    if (out) removeStaleReceipt(out);
+    const job = full ? main : runU3Create;
+    job().catch((error) => {
+      stopped = clip(error && (error.detail || error.stack || error.message) || error);
+    }).finally(async () => {
+      const video = adminPage && typeof adminPage.video === "function" ? adminPage.video() : null;
+      if (video) {
+        await adminPage.close().catch(() => {});
+        try {
+          const file = path.join(out, "owner.webm");
+          await video.saveAs(file);
+          screenshots.push({ name: "owner-video", status: "taken", path: file });
+        } catch (error) {
+          screenshots.push({ name: "owner-video", status: "skipped", detail: clip(String(error)) });
+        }
+      }
+      if (browser) await browser.close().catch(() => {});
+      browser = undefined;
+      try {
+        await stopServe();
+      } catch (error) {
+        stopped = clip(stopped || error.message || error);
+        mark("release_signed", "fail", "Home processes could not be stopped");
+      }
+      try {
+        scrubEvidenceFiles();
+        await removeHome();
+      } catch (error) {
+        stopped = clip(stopped || error.message || error);
+        mark("release_signed", "fail", "throwaway home was not removed");
+      }
+      gitAfter = gitPorcelain(root);
+      if (!gitAfter.ok) {
+        mark("release_signed", "fail", "git status --porcelain is not empty at the end");
+      }
+      const code = writeReceipt();
+      process.exit(code);
+    });
+  }
 }
