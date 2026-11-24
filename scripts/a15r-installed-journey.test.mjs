@@ -34,6 +34,7 @@ import {
   lineIsTestOnly,
   parseGitGrep,
   classifyMintHit,
+  mintHitKind,
   mintHitsFromRepo,
   gatewayRestartLoadedChain,
 } from "./a15r-installed-journey.mjs";
@@ -363,12 +364,14 @@ test("mint grep at head has no production hit", () => {
   assert.equal(hits.length, 2);
   assert.equal(classifyMintHit(hits[0], source), true);
   assert.equal(classifyMintHit(hits[1], source), false);
+  assert.equal(mintHitKind({ path: "scripts/a15r-installed-journey.mjs", line: 1 }, source), "checker");
   const live = mintHitsFromRepo(new URL("..", import.meta.url).pathname);
   assert.equal(live.ok, true, JSON.stringify(live.production));
   assert.equal(live.production.length, 0);
   assert.equal(live.defined, false);
   assert.ok(live.testOnly.length >= 2);
-  assert.ok(live.testOnly.every((hit) => hit.path.endsWith(".rs")));
+  assert.ok(live.testOnly.every((hit) => hit.path.endsWith(".rs") || hit.path.endsWith(".test.mjs")));
+  assert.ok(live.checker.some((hit) => hit.path === "scripts/a15r-installed-journey.mjs"));
 });
 
 test("audit bytes match the signed fixture chain", () => {

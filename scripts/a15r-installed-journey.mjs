@@ -761,21 +761,32 @@ export function classifyMintHit(hit, source) {
   return testFile || lineIsTestOnly(source, hit.line);
 }
 
+// The journey names the old mint so it can search for it. That mention is the
+// checker, not a call and not a definition.
+export function mintHitKind(hit, source) {
+  if (hit.path === "scripts/a15r-installed-journey.mjs" || hit.path === "scripts/a15r-installed-journey.sh") {
+    return "checker";
+  }
+  return classifyMintHit(hit, source) ? "test" : "production";
+}
+
 export function mintReport(hits) {
   const production = [];
   const testOnly = [];
+  const checker = [];
   for (const hit of hits) {
-    (hit.testOnly ? testOnly : production).push({
-      path: hit.path,
-      line: hit.line,
-      text: hit.text,
-    });
+    const row = { path: hit.path, line: hit.line, text: hit.text };
+    if (hit.kind === "checker") checker.push(row);
+    else if (hit.kind === "test") testOnly.push(row);
+    else production.push(row);
   }
+  const defines = hits.some((hit) => hit.kind === "production" && hit.text.includes("mint_agent_principal"));
   return {
-    ok: production.length === 0 && !hits.some((hit) => hit.path.includes("mint_agent_principal") && !hit.testOnly),
+    ok: production.length === 0 && !defines,
     production,
     testOnly,
-    defined: hits.some((hit) => hit.text.includes("mint_agent_principal")),
+    checker,
+    defined: defines,
   };
 }
 
@@ -793,7 +804,7 @@ export function mintHitsFromRepo(repoRoot) {
       const shown = spawnSync("git", ["show", `HEAD:${hit.path}`], { cwd: repoRoot, encoding: "utf8" });
       cache.set(hit.path, shown.status === 0 ? shown.stdout : "");
     }
-    return { ...hit, testOnly: classifyMintHit(hit, cache.get(hit.path)) };
+    return { ...hit, kind: mintHitKind(hit, cache.get(hit.path)) };
   });
   const report = mintReport(hits);
   return {
@@ -2182,6 +2193,7 @@ async function runU3Create() {
     && runningAgentCapsules === 0
     && replacement.ok
     && mint.ok
+    && mint.defined === false
     && sameNameDistinct;
   if (!noMint) {
     halt("u3_no_guest_no_mint", {
@@ -2203,9 +2215,10 @@ async function runU3Create() {
     id_source: replacement.id_source,
     id_form: "agent:v2 plus 32 hex",
     same_name_distinct: true,
-    mint_defined: false,
-    production_mint_hits: [],
+    mint_defined: mint.defined,
+    production_mint_hits: mint.production.map((hit) => `${hit.path}:${hit.line}`),
     test_only_mint_hits: mint.testOnly.map((hit) => `${hit.path}:${hit.line}`),
+    checker_mint_hits: mint.checker.map((hit) => `${hit.path}:${hit.line}`),
     sessions: 0,
     agent_runtime_coords: false,
     managed_runtime: processes.stray,
