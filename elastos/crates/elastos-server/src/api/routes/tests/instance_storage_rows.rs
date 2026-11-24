@@ -1,3 +1,4 @@
+#![cfg(feature = "prototype-agents")]
 //! Each running instance gets fresh, limited access to its agent's storage,
 //! which ends when the instance stops. A plan step whose dispatch had already
 //! begun when the end was recorded may finish after it. A plan step still
