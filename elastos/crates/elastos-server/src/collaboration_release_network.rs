@@ -743,6 +743,7 @@ pub(crate) mod tests {
     }
 
     /// The Home's installed `components.json`, pinning `pin`.
+    #[cfg(unix)]
     fn install_components_pin(data: &Path, pin: &CollaborationNetworkPin) {
         let manifest = serde_json::json!({
             "external": {},

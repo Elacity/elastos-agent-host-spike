@@ -29,9 +29,11 @@ use elastos_runtime::provider::ProviderRegistry;
 use crate::server_infra;
 
 /// Where a running provider host publishes its readiness receipt.
+#[cfg(unix)]
 const READY_RECEIPT_RELATIVE_PATH: &str = "run/provider-host.ready.json";
 
 /// The remedy for a custody host whose state root has not been provisioned.
+#[cfg(unix)]
 const CUSTODY_PROVISIONING_REMEDY: &str =
     "run `elastos protected-content-config provision-custody-node` on this home first";
 
@@ -39,6 +41,7 @@ const CUSTODY_PROVISIONING_REMEDY: &str =
 /// A custody committee member settles every release through its own chain
 /// rights evidence (`protected_content_rights_evidence`), so a host that
 /// serves `custody` without `chain` fails every release closed.
+#[cfg(unix)]
 const CHAIN_CONFIG_REMEDY: &str = "install the protected-content chain configuration at \
      <data_dir>/protected-content/chain-provider.json (the client's network, with evidence RPC \
      URLs reachable from this host) first";
@@ -98,6 +101,7 @@ impl ProviderPlane {
 
     /// Fail closed on prerequisites this plane needs on disk, naming the
     /// command that creates them. Runs before anything is spawned.
+    #[cfg(unix)]
     fn check_prerequisites(self, data_dir: &Path) -> anyhow::Result<()> {
         match self {
             ProviderPlane::Custody => {
@@ -175,6 +179,7 @@ impl ProviderPlane {
     }
 
     /// The registry target this plane answers on, for the readiness log line.
+    #[cfg(any(unix, test))]
     const fn registry_target(self) -> &'static str {
         match self {
             ProviderPlane::Custody => "custody",
@@ -252,6 +257,7 @@ impl ProviderHostPlan {
             .collect()
     }
 
+    #[cfg(unix)]
     fn ready_receipt_path(&self) -> PathBuf {
         self.data_dir.join(READY_RECEIPT_RELATIVE_PATH)
     }
@@ -313,6 +319,7 @@ pub(crate) struct ProviderHost {
 }
 
 impl ProviderHost {
+    #[cfg(unix)]
     #[cfg(test)]
     pub(crate) fn registry(&self) -> &Arc<ProviderRegistry> {
         &self._registry

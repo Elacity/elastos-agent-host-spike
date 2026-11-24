@@ -201,6 +201,7 @@ pub(crate) struct Admission {
 /// capsule metadata rows, and capsule registry entries.
 struct ManifestRows {
     external: BTreeMap<String, Vec<serde_json::Value>>,
+    #[cfg(any(unix, test))]
     registry: BTreeMap<String, serde_json::Value>,
 }
 
@@ -224,8 +225,14 @@ impl ManifestRows {
             .capsules
             .iter()
             .map(|(name, entry)| Ok((name.clone(), serde_json::to_value(entry)?)))
-            .collect::<Result<_>>()?;
-        Ok(Self { external, registry })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        #[cfg(windows)]
+        let _ = &registry;
+        Ok(Self {
+            external,
+            #[cfg(any(unix, test))]
+            registry,
+        })
     }
 }
 
@@ -318,6 +325,7 @@ impl Admission {
 
     /// Admit a capsule registry entry. Only a release without records (before
     /// 0.8.0) or a Home without a signed release can carry registry downloads.
+    #[cfg(any(unix, test))]
     pub(crate) fn registry_entry(
         &self,
         name: &str,

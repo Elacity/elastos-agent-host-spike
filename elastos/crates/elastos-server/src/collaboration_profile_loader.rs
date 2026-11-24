@@ -318,12 +318,14 @@ impl CollaborationProfileChainLoader {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     fn directory_sync_count(&self) -> u8 {
         self.directory_sync_count
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    #[cfg(unix)]
     #[cfg(test)]
     fn inject_write_fault(&self, fault: WriteFault) {
         self.write_fault
@@ -509,12 +511,14 @@ fn ensure_owner_only_directory(path: &Path) -> anyhow::Result<bool> {
             Ok(false)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
+            let builder = fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             let created = match builder.create(path) {
                 Ok(()) => true,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
@@ -596,7 +600,9 @@ fn lock_owner_only_file(path: &Path) -> anyhow::Result<FileLock> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     use std::sync::{mpsc, Arc};
+    #[cfg(unix)]
     use std::time::Duration;
 
     use elastos_runtime::signature::{generate_keypair, SigningKey};
@@ -612,14 +618,18 @@ mod tests {
     };
 
     const NETWORK: &str = "collaboration-loader-test";
+    #[cfg(unix)]
     const OTHER_NETWORK: &str = "collaboration-loader-other";
+    #[cfg(unix)]
     const CONVERSATION: &str = "default-conversation";
+    #[cfg(unix)]
     const SERVICE: &str = "chat";
 
     struct Fixture {
         _temp: tempfile::TempDir,
         data_root: PathBuf,
         signer_a: SigningKey,
+        #[cfg(unix)]
         signer_b: SigningKey,
         trusted: Vec<String>,
     }
@@ -636,6 +646,7 @@ mod tests {
                 _temp: temp,
                 data_root,
                 signer_a,
+                #[cfg(unix)]
                 signer_b,
                 trusted,
             }
@@ -650,6 +661,7 @@ mod tests {
         crate::crypto::encode_signing_key_did(key)
     }
 
+    #[cfg(unix)]
     fn grant_bytes(network_id: &str) -> Vec<u8> {
         canonical_default_conversation_grant_bytes(&DefaultConversationGrant {
             schema: DEFAULT_CONVERSATION_GRANT_SCHEMA_V1.to_string(),
@@ -661,6 +673,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn raw_sha256_cid(bytes: &[u8]) -> String {
         let digest = Sha256::digest(bytes);
         let multihash = cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice()).unwrap();
@@ -705,6 +718,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn configured(
         result: CollaborationNetworkConfiguration,
     ) -> (
@@ -717,6 +731,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn write_owner_only(path: &Path, bytes: &[u8]) {
         let mut options = OpenOptions::new();
         options.write(true).create(true).truncate(true);
@@ -735,6 +750,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn recursive_entries(root: &Path) -> Vec<String> {
         fn visit(root: &Path, path: &Path, entries: &mut Vec<String>) {
             let mut children = fs::read_dir(path)

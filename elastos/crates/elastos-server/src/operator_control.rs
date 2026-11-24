@@ -1869,6 +1869,20 @@ impl OperatorClient {
                 anyhow::bail!("operator peer '{}' has an invalid connect ticket", peer.did);
             }
 
+            // The ticket names the addresses the request is written to; every
+            // one of them must be the peer the record names, or the request
+            // could be handed to a different key.
+            let peer_key = public_key_from_did(&peer.did)?;
+            if ticket_endpoints
+                .iter()
+                .any(|endpoint| endpoint.id != peer_key)
+            {
+                anyhow::bail!(
+                    "operator connect ticket endpoint does not match the peer DID '{}'",
+                    peer.did
+                );
+            }
+
             let mut ticket_errors = Vec::new();
             for endpoint in ticket_endpoints {
                 match Self::connect_endpoint_addr(endpoint, timeout_secs).await {
@@ -1916,6 +1930,49 @@ fn public_key_from_did(did: &str) -> Result<iroh::PublicKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct OperatorCarrier {
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl elastos_runtime::provider::Provider for OperatorCarrier {
+        async fn handle(
+            &self,
+            _request: elastos_runtime::provider::ResourceRequest,
+        ) -> std::result::Result<
+            elastos_runtime::provider::ResourceResponse,
+            elastos_runtime::provider::ProviderError,
+        > {
+            Err(elastos_runtime::provider::ProviderError::Provider(
+                "operator test carrier accepts raw requests only".into(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["peer"]
+        }
+
+        fn name(&self) -> &'static str {
+            "operator-test-carrier"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, elastos_runtime::provider::ProviderError>
+        {
+            self.requests.lock().await.push(request.clone());
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "ticket": "operator-private-ticket",
+                    "node_id": "operator-private-node"
+                }
+            }))
+        }
+    }
+
     use crate::carrier::start_carrier_node;
     use axum::http::{HeaderMap, StatusCode};
     use axum::response::IntoResponse;
@@ -2342,6 +2399,67 @@ mod tests {
         task.abort();
     }
 
+    #[tokio::test]
+    async fn operator_fetch_reads_the_private_carrier_ticket() {
+        use crate::api::handlers::provider::{provider_proxy, ProviderProxyState};
+        use elastos_runtime::provider::ProviderRegistry;
+        use elastos_runtime::session::{Session, SessionType};
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let registry = Arc::new(ProviderRegistry::new());
+        registry
+            .register_sub_provider(
+                "peer",
+                Arc::new(OperatorCarrier {
+                    requests: requests.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/api/provider/:scheme/:op", post(provider_proxy))
+            .layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let shell = request
+                        .headers()
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer shell-test");
+                    let kind = if shell {
+                        SessionType::Shell
+                    } else {
+                        SessionType::Capsule
+                    };
+                    request.extensions_mut().insert(Session::new(kind, None));
+                    next.run(request).await
+                },
+            ))
+            .with_state(ProviderProxyState {
+                registry,
+                capability_manager: None,
+            });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = build_http_client(2).unwrap();
+        assert_eq!(
+            fetch_ticket_and_node_id(&client, &api_url, "shell-test")
+                .await
+                .unwrap(),
+            (
+                "operator-private-ticket".to_string(),
+                "operator-private-node".to_string()
+            )
+        );
+        let error = fetch_ticket_and_node_id(&client, &api_url, "client-test")
+            .await
+            .unwrap_err();
+        assert!(!format!("{error:#}").contains("operator-private-ticket"));
+        let seen = requests.lock().await.clone();
+        task.abort();
+        assert_eq!(seen, vec![serde_json::json!({"op": "get_ticket"})]);
+    }
+
     #[test]
     fn normalize_actions_rejects_unknown_entries() {
         let err = normalize_actions(&["remote.shell".to_string()]).unwrap_err();
@@ -2713,6 +2831,114 @@ mod tests {
                 ("req-check-1".to_string(), false),
             ]
         );
+    }
+    #[tokio::test]
+    async fn operator_matching_ticket_dial_connects() {
+        // The positive side of the dial check: a ticket whose endpoint is the
+        // key of the peer's DID connects, so a too-strict check cannot pass the
+        // suite while locking out every real operator dial.
+        let dir = tempfile::tempdir().unwrap();
+        let key = [25u8; 32];
+        let (sk, did) = elastos_identity::derive_did(&key);
+        let node = start_carrier_node(&sk, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let ticket = local_endpoint_ticket(&node.endpoint).unwrap();
+        let peer = OperatorPeer {
+            did,
+            label: "peer".to_string(),
+            connect_ticket: ticket,
+            allow: Vec::new(),
+        };
+        if let Err(err) = OperatorClient::connect(&peer, 10).await {
+            panic!("a ticket naming the peer's own key must connect: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_mismatched_ticket_dial_is_refused_before_any_write() {
+        // A ticket that names another node must be refused before any
+        // connection, so a request is never written to a key other than
+        // the configured peer's DID.
+        let dir = tempfile::tempdir().unwrap();
+        let other_key = [17u8; 32];
+        let (other_sk, other_did) = elastos_identity::derive_did(&other_key);
+        let other_node = start_carrier_node(&other_sk, &other_did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let other_ticket = local_endpoint_ticket(&other_node.endpoint).unwrap();
+
+        let (_, peer_did) = elastos_identity::derive_did(&[18u8; 32]);
+        let peer = OperatorPeer {
+            did: peer_did,
+            label: "peer".to_string(),
+            connect_ticket: other_ticket,
+            allow: Vec::new(),
+        };
+        let err = match OperatorClient::connect(&peer, 10).await {
+            Ok(_) => panic!("a ticket naming another node must be refused before any write"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "operator connect ticket endpoint does not match the peer DID '{}'",
+                peer.did
+            )
+        );
+    }
+
+    // Like operator_stream_audits_verified_requests_only: the accepted request
+    // writes the owner-only audit file, which Windows refuses until P2-11 W2.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn operator_request_over_a_short_lived_dial_is_decided_by_its_signature() {
+        // The product dial binds a short-lived random key, so the receiver
+        // decides on the signed envelope (a configured requester, this Home as
+        // target, no replay), never on the connection key. Requiring the
+        // connection key to be the signer would refuse every real operator
+        // request (CTO decision, P2-9 step 6, 24 Nov).
+        let dir = tempfile::tempdir().unwrap();
+        let key = [21u8; 32];
+        write_test_device_key(dir.path(), &key);
+        let (sk, did) = elastos_identity::derive_did(&key);
+        let node = start_carrier_node(&sk, &did, dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let ticket = local_endpoint_ticket(&node.endpoint).unwrap();
+        let addr = decode_ticket_endpoints(&ticket).remove(0);
+        // The product dial binds a short-lived ephemeral key, so the
+        // connection's key differs from the configured signer below.
+        let client = OperatorClient::connect_endpoint_addr(addr, 10)
+            .await
+            .unwrap();
+
+        let (signer_sk, signer_did) = elastos_identity::derive_did(&[22u8; 32]);
+        upsert_peer(
+            dir.path(),
+            OperatorPeer {
+                did: signer_did.clone(),
+                label: "signer".to_string(),
+                connect_ticket: String::new(),
+                allow: vec![OPERATOR_ACTION_STATUS_READ.to_string()],
+            },
+        )
+        .unwrap();
+
+        let request = OperatorRequestPayload {
+            version: 1,
+            request_id: "req-short-lived-dial-1".to_string(),
+            requester_did: signer_did,
+            target_did: did.clone(),
+            ts: now_ts(),
+            action: OPERATOR_ACTION_STATUS_READ.to_string(),
+            args: serde_json::Value::Null,
+        };
+        let signed = sign_envelope(&signer_sk, OPERATOR_REQUEST_DOMAIN, &request).unwrap();
+        let answer = client.send_request(&signed).await.unwrap();
+        let accepted = verify_response_envelope(&answer, &did).unwrap();
+        assert!(accepted.accepted, "{:?}", accepted.error);
+        assert!(dir.path().join(OPERATOR_AUDIT_FILE).exists());
     }
 
     #[tokio::test]

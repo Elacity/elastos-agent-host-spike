@@ -150,6 +150,7 @@ pub(crate) struct RestartRecord {
 /// The lock path stays in place after the guard releases the flock and closes its file.
 pub(crate) struct InstallationGuard {
     _lock: crate::host_lock::FileLock,
+    #[cfg(unix)]
     binary_parent: PathBuf,
 }
 
@@ -1455,6 +1456,7 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+#[cfg(unix)]
 /// Quote a path so a repair command pastes into a POSIX shell for any path.
 pub(crate) fn shell_quote_path(path: &Path) -> String {
     shell_quote(&path.display().to_string())
@@ -2021,6 +2023,7 @@ pub(crate) fn volume_space(_path: &Path) -> anyhow::Result<(u64, u128)> {
 /// Waits between attempts to start a binary that was just written. On Linux a
 /// concurrent fork can briefly inherit the closed writer descriptor, so exec
 /// reports ETXTBSY until that child execs. Only that error is retried (<2 s).
+#[cfg(unix)]
 const TEXT_FILE_BUSY_WAITS_MS: [u64; 9] = [20, 40, 80, 160, 200, 200, 200, 200, 200];
 
 #[cfg(unix)]
@@ -2058,6 +2061,7 @@ fn windows_refuses_installation_writer_before_file_creation() {
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
 }
 
+#[cfg(unix)]
 /// Blocking form for synchronous callers; see [`TEXT_FILE_BUSY_WAITS_MS`].
 pub(crate) fn retry_text_file_busy<T>(
     mut attempt: impl FnMut() -> std::io::Result<T>,
@@ -2073,6 +2077,7 @@ pub(crate) fn retry_text_file_busy<T>(
     attempt()
 }
 
+#[cfg(unix)]
 /// Non-blocking form for async callers; see [`TEXT_FILE_BUSY_WAITS_MS`].
 pub(crate) async fn retry_text_file_busy_async<T>(
     mut attempt: impl FnMut() -> std::io::Result<T>,

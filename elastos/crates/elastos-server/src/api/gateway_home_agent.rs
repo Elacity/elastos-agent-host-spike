@@ -220,9 +220,11 @@ pub(super) fn validate_legacy_workspace_bytes(bytes: &[u8]) -> anyhow::Result<se
 
 #[cfg(test)]
 mod r3_tests {
+    #[cfg(unix)]
     use super::super::r3_stored_root_tests::{
         fixture, seed, verified_parent_device_context, HUMAN_ROOT, NEEDS_PROTECTION,
     };
+    #[cfg(unix)]
     use super::*;
     #[cfg(unix)]
     #[test]
@@ -378,6 +380,7 @@ mod r3_tests {
 /// `home_agent_workspace_put` calls after the token is verified.
 #[cfg(test)]
 mod r8d_passkey_rows {
+    #[cfg(unix)]
     use super::super::gateway_tests::r8d_passkey_rows::{
         kept_elsewhere_refusal, passkey_person, PasskeyPerson, KEPT_ELSEWHERE,
     };

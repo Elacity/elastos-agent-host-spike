@@ -30,6 +30,7 @@ mod webspace_cmd;
 
 use clap::{Parser, Subcommand};
 use security_cmd::{EmergencyCommand, TlsCommand};
+#[cfg(unix)]
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2365,6 +2366,10 @@ fn find_free_local_addr() -> anyhow::Result<String> {
 
 /// Try to open a URL in the default browser.
 pub(crate) fn open_browser(url: &str) {
+    #[cfg(windows)]
+    {
+        let _ = url;
+    }
     #[cfg(target_os = "linux")]
     {
         // Try WSL browser opener first, then xdg-open
@@ -2401,9 +2406,11 @@ pub(crate) async fn create_runtime(
 
     // Components have a dedicated provider; host-specific VM providers remain
     // behind the same Runtime compute contract.
-    let mut compute_providers: Vec<Arc<dyn ComputeProvider>> = Vec::new();
+    let compute_providers: Vec<Arc<dyn ComputeProvider>> = Vec::new();
 
     // Add crosvm provider if KVM is available
+    #[cfg(unix)]
+    let mut compute_providers = compute_providers;
     #[cfg(unix)]
     if elastos_crosvm::is_supported() {
         match CrosvmProvider::new(CrosvmConfig::default()) {
