@@ -52,14 +52,28 @@ pub(crate) fn verify_service_message(message: &Value, peer_field: &str) -> Resul
     let did = payload["signer_did"]
         .as_str()
         .context("Services signer required")?;
-    let endpoint = super::did_to_public_key(did)
-        .context("Services signer is invalid")?
-        .to_string();
+    let signer = super::did_to_public_key(did).context("Services signer is invalid")?;
+    let endpoint = signer.to_string();
     anyhow::ensure!(
-        payload[peer_field].as_str() == Some(&endpoint)
-            && message["sender_id"].as_str() == Some(&endpoint),
+        payload[peer_field].as_str() == Some(endpoint.as_str()),
         "Services message sender does not match signer"
     );
+    // A shown sender is the transport-checked Home. On a direct frame it must
+    // be the signer, whether it is a DID or the hex form of that key. A
+    // forwarded frame has no shown sender: the signature decides. A sender_id
+    // inside the signed body is not read.
+    if let Some(shown) = message
+        .get("sender_id")
+        .and_then(Value::as_str)
+        .filter(|sender| !sender.is_empty())
+    {
+        let shown_key = super::home_public_key(shown)
+            .context("Services message sender does not match signer")?;
+        anyhow::ensure!(
+            shown_key == signer,
+            "Services message sender does not match signer"
+        );
+    }
     crate::crypto::verify_domain_separated_signature(
         did,
         SERVICE_MESSAGE_DOMAIN,
@@ -346,6 +360,19 @@ mod tests {
         );
         message["sender_id"] = json!("other");
         assert!(verify_service_message(&message, "provider_peer_id").is_err());
+        let (_, other_did) = elastos_identity::derive_did(&[0x5a; 32]);
+        message["sender_id"] = json!(other_did);
+        assert!(verify_service_message(&message, "provider_peer_id").is_err());
+        message["sender_id"] = json!(did);
+        assert_eq!(
+            verify_service_message(&message, "provider_peer_id").unwrap(),
+            payload
+        );
+        let forwarded = json!({"content": payload.to_string()});
+        assert_eq!(
+            verify_service_message(&forwarded, "provider_peer_id").unwrap(),
+            payload
+        );
         message["sender_id"] = json!(peer);
         payload["decision"] = json!("denied");
         message["content"] = json!(payload.to_string());

@@ -56,6 +56,87 @@ pub fn should_record_nick(verified: bool) -> bool {
     verified
 }
 
+/// The Home a direct `gossip_recv` frame names, when it names one.
+fn transport_sender(message: &serde_json::Value) -> Option<&str> {
+    message
+        .get("sender_id")
+        .and_then(|value| value.as_str())
+        .filter(|sender| !sender.is_empty())
+}
+
+/// The DID the sending Home put on its own frame. Not a transport sender.
+fn signed_author(message: &serde_json::Value) -> Option<&str> {
+    message
+        .get("signed_author")
+        .and_then(|value| value.as_str())
+        .filter(|author| !author.is_empty())
+}
+
+/// Author DID for one chat line.
+///
+/// A direct frame's transport sender and the signed author must be the same
+/// Home. A forwarded frame has no transport sender, so the signed author
+/// decides. A frame with neither name has no author to check.
+pub fn chat_line_author(message: &serde_json::Value) -> Option<&str> {
+    match (transport_sender(message), signed_author(message)) {
+        (Some(transport), Some(author)) if transport == author => Some(author),
+        (Some(transport), None) => Some(transport),
+        (None, Some(author)) => Some(author),
+        _ => None,
+    }
+}
+
+/// A verified chat line. `transport_sender` is set only for a direct delivery
+/// from `author`. A forwarded line has no claimed transport sender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChatDelivery<'a> {
+    pub author: &'a str,
+    pub transport_sender: Option<&'a str>,
+}
+
+/// Deliver a chat line only after its signature has been checked.
+/// An unverified line is not delivered.
+pub fn chat_delivery<'a>(
+    message: &'a serde_json::Value,
+    verified: bool,
+) -> Option<ChatDelivery<'a>> {
+    if !verified {
+        return None;
+    }
+    let author = chat_line_author(message)?;
+    let transport_sender = transport_sender(message).filter(|sender| *sender == author);
+    Some(ChatDelivery {
+        author,
+        transport_sender,
+    })
+}
+
+/// Author DID for a presence announcement.
+///
+/// `envelope_did` is the DID inside the signed presence body. A direct
+/// transport sender must name that DID. A signed-author claim, when the
+/// frame has one, must name it too. A forwarded frame can carry only the
+/// envelope DID; the signature still has to verify against it.
+pub fn presence_author<'a>(
+    message: &'a serde_json::Value,
+    envelope_did: &'a str,
+) -> Option<&'a str> {
+    if envelope_did.is_empty() {
+        return None;
+    }
+    if let Some(transport) = transport_sender(message) {
+        if transport != envelope_did {
+            return None;
+        }
+    }
+    if let Some(author) = signed_author(message) {
+        if author != envelope_did {
+            return None;
+        }
+    }
+    Some(envelope_did)
+}
+
 /// Check if a message is from the same chat instance (should be skipped as echo).
 ///
 /// Requires both DID and session_id to match. On a shared runtime, multiple
@@ -141,6 +222,64 @@ mod tests {
         ));
         assert!(!is_own_message("did:key:z1", "s1", "did:key:z1", None));
         assert!(!is_own_message("", "s1", "did:key:z1", Some("s1"))); // empty self
+    }
+
+    #[test]
+    fn forwarded_chat_line_names_signed_author_without_transport_sender() {
+        let forwarded = serde_json::json!({
+            "signed_author": "did:key:zAlice",
+            "content": "hello",
+            "ts": 1000,
+            "signature": "sig",
+        });
+        assert_eq!(chat_line_author(&forwarded), Some("did:key:zAlice"));
+        assert_eq!(
+            chat_delivery(&forwarded, true),
+            Some(ChatDelivery {
+                author: "did:key:zAlice",
+                transport_sender: None,
+            })
+        );
+        assert!(chat_delivery(&forwarded, false).is_none());
+        let unnamed = serde_json::json!({"content": "hello", "signature": "sig"});
+        assert!(chat_line_author(&unnamed).is_none());
+        assert!(chat_delivery(&unnamed, true).is_none());
+    }
+
+    #[test]
+    fn direct_chat_refuses_author_transport_mismatch() {
+        let mismatch = serde_json::json!({
+            "sender_id": "did:key:zBob",
+            "signed_author": "did:key:zAlice",
+        });
+        assert!(chat_line_author(&mismatch).is_none());
+        let direct = serde_json::json!({"sender_id": "did:key:zAlice"});
+        assert_eq!(
+            chat_delivery(&direct, true),
+            Some(ChatDelivery {
+                author: "did:key:zAlice",
+                transport_sender: Some("did:key:zAlice"),
+            })
+        );
+    }
+
+    #[test]
+    fn forwarded_presence_names_envelope_did() {
+        let forwarded = serde_json::json!({"content": "{}"});
+        assert_eq!(
+            presence_author(&forwarded, "did:key:zAlice"),
+            Some("did:key:zAlice")
+        );
+        let claimed = serde_json::json!({"signed_author": "did:key:zAlice"});
+        assert_eq!(
+            presence_author(&claimed, "did:key:zAlice"),
+            Some("did:key:zAlice")
+        );
+        let mismatch = serde_json::json!({"sender_id": "did:key:zBob"});
+        assert!(presence_author(&mismatch, "did:key:zAlice").is_none());
+        let forged_author = serde_json::json!({"signed_author": "did:key:zBob"});
+        assert!(presence_author(&forged_author, "did:key:zAlice").is_none());
+        assert!(presence_author(&forwarded, "").is_none());
     }
 
     #[test]

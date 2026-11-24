@@ -113,11 +113,11 @@ Unsubscribe from a topic.
 
 Broadcast a message to all peers on a topic.
 
-The `sender_id` and `ts` fields are optional overrides for relaying messages from other users (e.g., history sync). If omitted, the provider fills them with the local node ID and current time.
+The provider does not take a sender identity from the caller. `ts` is optional. If it is omitted, the provider uses the current time. When the caller names this Home's own DID, the provider stores that DID as `signed_author` for the signature check above Carrier. Any other caller `sender_id` is ignored.
 
 ```json
 // Request
-{"op": "gossip_send", "topic": "#general", "message": "hello world", "sender": "alice", "sender_id": "abc123", "ts": 1708000000}
+{"op": "gossip_send", "topic": "#general", "message": "hello world", "sender": "alice", "ts": 1708000000}
 
 // Response
 {"status": "ok"}
@@ -135,14 +135,15 @@ Poll buffered incoming messages for a topic. Returns up to `limit` messages (def
 
 // Response
 {"status": "ok", "data": {"messages": [
-  {"sender_id": "node123", "sender_nick": "bob", "content": "hello", "ts": 1708000000}
+  {"sender_id": "did:key:z6MkExample", "sender_nick": "bob", "content": "hello", "ts": 1708000000}
 ]}}
 ```
 
 Each message has:
 | Field | Type | Description |
 |-------|------|-------------|
-| `sender_id` | string | Sender's node/public key ID |
+| `sender_id` | string, optional | DID of the Home whose Carrier key delivered the frame directly. Absent when the frame was forwarded. A `sender_id` in the sent body is not returned. |
+| `signed_author` | string, optional | DID this sending Home named for its own signature. Not the transport sender. Absent when the sender did not name its own DID. |
 | `sender_nick` | string | Sender's display name |
 | `content` | string | Message text (may contain DM markers, see below) |
 | `ts` | u64 | Unix timestamp (seconds) |
