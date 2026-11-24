@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::task::{Context, Poll};
@@ -82,6 +82,15 @@ const V2_EPOCH_TICKS: u64 = 1_000;
 const V2_TEST_EPOCH_TICKS: u64 = 30;
 /// The named ending of a run that the deadline stopped.
 const ENDING_EPOCH_DEADLINE: &str = "epoch-deadline";
+/// The named ending of a run whose small slices added up to the tick budget.
+const ENDING_EXECUTION_BOUND: &str = "execution-bound";
+/// Fuel under this is an idle wake. It does not count as work.
+const V2_IDLE_FUEL: u64 = 1_000;
+/// How many v2 guests may run at once. The refusal names this cap.
+#[cfg(test)]
+const V2_RESIDENT_CAP: usize = 2;
+#[cfg(not(test))]
+const V2_RESIDENT_CAP: usize = 8;
 /// The named ending of a run that used up its fuel.
 const ENDING_FUEL_EXHAUSTED: &str = "fuel-exhausted";
 /// The named ending of a run that a stop request ended.
@@ -106,6 +115,7 @@ struct ComponentActivation {
     events: Option<mpsc::UnboundedSender<v2::elastos::bus::types::Event>>,
     cancel_requested: Arc<AtomicBool>,
     task: Option<tokio::task::AbortHandle>,
+    worker: Option<std::thread::JoinHandle<()>>,
     #[cfg(test)]
     test_max_ticks: u64,
     #[cfg(test)]
@@ -214,6 +224,8 @@ struct ComponentState {
     /// Set by the epoch callback when it interrupts *because* of a stop
     /// request, so a trap is named `stopped` only when the stop caused it.
     ended_by_stop: bool,
+    /// Set when small slices of fuel, each under one tick, add up to the budget.
+    execution_bound: bool,
     grants: Arc<Mutex<crate::providers::bus2_ui::GrantBook>>,
     /// The one presented frame, keyed by capsule id, with the principal who
     /// presented it. A second present replaces it.
@@ -247,6 +259,9 @@ pub struct ComponentProvider {
     worker_gate: std::sync::Mutex<Option<tests::WorkerGate>>,
     #[cfg(test)]
     panic_next_v2: AtomicBool,
+    /// v2 guest threads that have entered their run and not left it.
+    #[cfg(test)]
+    threads_live: Arc<AtomicUsize>,
 }
 
 impl ComponentProvider {
@@ -265,6 +280,8 @@ impl ComponentProvider {
             worker_gate: std::sync::Mutex::new(None),
             #[cfg(test)]
             panic_next_v2: AtomicBool::new(false),
+            #[cfg(test)]
+            threads_live: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -552,6 +569,7 @@ impl ComponentProvider {
                 events: None,
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 task: None,
+                worker: None,
                 #[cfg(test)]
                 test_max_ticks: V2_TEST_EPOCH_TICKS,
                 #[cfg(test)]
@@ -588,6 +606,18 @@ impl ComponentProvider {
         let endings = self.endings.clone();
         let frames = self.frames.clone();
         let mut entries = self.instances.write().await;
+        let running = entries
+            .values()
+            .filter(|item| {
+                item.status == CapsuleStatus::Running
+                    && item.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT)
+            })
+            .count();
+        if running >= V2_RESIDENT_CAP {
+            return Err(ElastosError::Compute(format!(
+                "v2 resident cap {V2_RESIDENT_CAP}"
+            )));
+        }
         let instance = entries
             .get_mut(&handle.id)
             .ok_or_else(|| ElastosError::CapsuleNotFound(handle.id.0.clone()))?;
@@ -625,9 +655,19 @@ impl ComponentProvider {
         drop(entries);
 
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-        let spawned = std::thread::Builder::new()
+        #[cfg(test)]
+        let threads_live = self.threads_live.clone();
+        let spawned_worker = std::thread::Builder::new()
             .name("component-v2".into())
             .spawn(move || {
+                #[cfg(test)]
+                struct LiveGuard(Arc<AtomicUsize>);
+                #[cfg(test)]
+                impl Drop for LiveGuard {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
                 let rt = match tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -640,6 +680,10 @@ impl ComponentProvider {
                         return;
                     }
                 };
+                #[cfg(test)]
+                threads_live.fetch_add(1, Ordering::AcqRel);
+                #[cfg(test)]
+                let _live = LiveGuard(threads_live);
                 let task = rt.spawn(async move {
                     #[cfg(test)]
                     if panic_now {
@@ -659,13 +703,16 @@ impl ComponentProvider {
                 };
                 let _ = done_tx.send(ending);
             });
-        if let Err(err) = spawned {
-            if let Some(instance) = self.instances.write().await.remove(&handle.id) {
-                instance.grants.lock().expect("grant book").clear();
+        let worker = match spawned_worker {
+            Ok(worker) => worker,
+            Err(err) => {
+                if let Some(instance) = self.instances.write().await.remove(&handle.id) {
+                    instance.grants.lock().expect("grant book").clear();
+                }
+                self.frames.lock().expect("frames").remove(&handle.id.0);
+                return Err(ElastosError::Compute(format!("v2 guest thread: {err}")));
             }
-            self.frames.lock().expect("frames").remove(&handle.id.0);
-            return Err(ElastosError::Compute(format!("v2 guest thread: {err}")));
-        }
+        };
 
         let id_for_end = handle.id.clone();
         let frames_for_end = self.frames.clone();
@@ -701,8 +748,10 @@ impl ComponentProvider {
             let mut entries = self.instances.write().await;
             if let Some(instance) = entries.get_mut(&handle.id) {
                 instance.task = Some(abort);
+                instance.worker = Some(worker);
             } else {
                 abort.abort();
+                let _ = worker.join();
             }
         }
         match ready_rx.await {
@@ -932,15 +981,33 @@ impl ComponentProvider {
         // delivered event, leaves the count as it is.
         store.set_epoch_deadline(1);
         let deadline_ticks = Arc::new(AtomicU64::new(0));
+        let nibbled = Arc::new(AtomicU64::new(0));
+        // `get_fuel` keeps falling across refills. The delta is this epoch's work.
+        let last_remaining = Arc::new(AtomicU64::new(fuel));
         let cancel_requested = control.cancel_requested.clone();
         let max_ticks = control.max_ticks;
+        let nibble_limit = max_ticks.saturating_mul(V2_TICK_FUEL);
         store.epoch_deadline_callback(move |mut context| {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
             let remaining = context.get_fuel()?;
+            let previous = last_remaining.swap(remaining, Ordering::AcqRel);
+            let spent = previous.saturating_sub(remaining);
             context.set_fuel(fuel)?;
-            if fuel.saturating_sub(remaining) < V2_TICK_FUEL {
+            // A slice under one tick still counts. Enough of them end the run.
+            if (V2_IDLE_FUEL..V2_TICK_FUEL).contains(&spent) {
+                let sum = nibbled.fetch_add(spent, Ordering::AcqRel) + spent;
+                if sum >= nibble_limit {
+                    context.data_mut().execution_bound = true;
+                    return Ok(UpdateDeadline::Interrupt);
+                }
+                return Ok(UpdateDeadline::Continue(1));
+            }
+            // A full slice counts. So does an epoch whose counter has stuck
+            // after that much work: the busy guest's fuel does not move again.
+            let stuck = spent == 0 && fuel.saturating_sub(remaining) >= V2_TICK_FUEL;
+            if spent < V2_TICK_FUEL && !stuck {
                 return Ok(UpdateDeadline::Continue(1));
             }
             Ok(
@@ -976,17 +1043,26 @@ impl ComponentProvider {
         )
         .map_err(|err| run_error("Failed to open v2 events", err))?;
         let _ = ready.send(Ok(()));
-        store
+        let ran = store
             .run_concurrent(async move |accessor| {
                 bindings
                     .elastos_bus_lifecycle()
                     .call_run(accessor, events)
                     .await
             })
-            .await
-            .map_err(|err| run_error("V2 lifecycle run failed", err))?
-            .map_err(|err| run_error("V2 lifecycle run failed", err))?
-            .map_err(|err| ElastosError::Compute(format!("V2 lifecycle denied: {err:?}")))?;
+            .await;
+        let execution_bound = store.data().execution_bound;
+        ran.map_err(|err| {
+            if execution_bound {
+                ElastosError::Compute(format!(
+                    "V2 lifecycle run failed: (ending: {ENDING_EXECUTION_BOUND})"
+                ))
+            } else {
+                run_error("V2 lifecycle run failed", err)
+            }
+        })?
+        .map_err(|err| run_error("V2 lifecycle run failed", err))?
+        .map_err(|err| ElastosError::Compute(format!("V2 lifecycle denied: {err:?}")))?;
         Ok(if control.stop_requested.load(Ordering::Acquire) {
             "stopped"
         } else {
@@ -1111,27 +1187,41 @@ impl ComputeProvider for ComponentProvider {
         // Dropping the sole sender closes the v2 events stream. The guest
         // receives no separate stop event.
         let mut task = None;
+        let mut cancel = None;
+        let mut worker = None;
         if let Some(instance) = instances.get_mut(&handle.id) {
             if instance.manifest.bus_contract.as_deref() == Some(ELASTOS_BUS_V2_CONTRACT) {
                 instance.stop_requested.store(true, Ordering::Release);
                 instance.grants.lock().expect("grant book").clear();
-                task = instance
-                    .task
-                    .take()
-                    .map(|task| (task, instance.cancel_requested.clone()));
+                task = instance.task.take();
+                cancel = Some(instance.cancel_requested.clone());
+                worker = instance.worker.take();
             }
         }
         self.frames.lock().expect("frames").remove(&handle.id.0);
         instances.remove(&handle.id);
         drop(instances);
-        if let Some((task, cancel_requested)) = task {
-            tokio::spawn(async move {
-                tokio::time::sleep(V2_STOP_GRACE).await;
-                if !task.is_finished() {
-                    cancel_requested.store(true, Ordering::Release);
-                    task.abort();
-                }
-            });
+        if task.is_some() || worker.is_some() {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let cancel_requested = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+            std::thread::Builder::new()
+                .name("component-v2-stop".into())
+                .spawn(move || {
+                    std::thread::sleep(V2_STOP_GRACE);
+                    if let Some(task) = task {
+                        if !task.is_finished() {
+                            cancel_requested.store(true, Ordering::Release);
+                            task.abort();
+                        }
+                    }
+                    if let Some(worker) = worker {
+                        let _ = worker.join();
+                    }
+                    let _ = done_tx.send(());
+                })
+                .map_err(|err| ElastosError::Compute(format!("v2 stop thread: {err}")))?;
+            let bound = V2_STOP_GRACE + Duration::from_millis(500);
+            let _ = tokio::task::spawn_blocking(move || done_rx.recv_timeout(bound)).await;
         }
         Ok(())
     }
@@ -1260,6 +1350,7 @@ impl ComponentState {
             in_bus: Duration::ZERO,
             stop_requested: Arc::new(AtomicBool::new(false)),
             ended_by_stop: false,
+            execution_bound: false,
             grants: Arc::new(Mutex::new(crate::providers::bus2_ui::GrantBook::default())),
             frames: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -1991,6 +2082,115 @@ mod tests {
             "stop cancellation must beat the 30-tick execution budget"
         );
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    /// Stop's grace used to be a task on the caller's runtime. Dropping that
+    /// runtime left a guest that ignores the closed stream running.
+    #[test]
+    fn v2_ignore_close_is_gone_when_the_caller_runtime_drops() {
+        let provider = Arc::new(ComponentProvider::new());
+        let bytes = v2_variant(&[(
+            "local.get $event i32.const 2 i32.eq\n      if",
+            "(loop $ignore i32.const 0 i32.const 0 i32.const 65536 memory.fill br $ignore)\n      local.get $event i32.const 2 i32.eq\n      if",
+        )]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = rt.block_on(async {
+            let handle = load_v2_fixture(&provider, bytes).await;
+            provider.start(&handle).await.unwrap();
+            v2_pending_read(&provider, &handle).await;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while provider.threads_live.load(Ordering::Acquire) == 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the guest thread starts");
+            handle
+        });
+        let started = Instant::now();
+        rt.block_on(provider.stop(&handle)).unwrap();
+        drop(rt);
+        // Shorter than the 30-tick execution budget, so a guest that merely
+        // runs out of ticks does not pass this row.
+        let bound = V2_STOP_GRACE + Duration::from_millis(80);
+        while provider.threads_live.load(Ordering::Acquire) != 0 {
+            assert!(
+                started.elapsed() < bound,
+                "a guest that ignores the closed stream is still running"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Two residents may run. The next start is refused, and the refusal names the cap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_resident_cap_is_refused_by_name() {
+        let provider = ComponentProvider::new();
+        let bytes = wat::parse_str(include_str!(
+            "../../../../tests/fixtures/components/v2-resident.wat"
+        ))
+        .unwrap();
+        let first = load_v2_fixture(&provider, bytes.clone()).await;
+        let second = load_v2_fixture(&provider, bytes.clone()).await;
+        let third = load_v2_fixture(&provider, bytes).await;
+        provider.start(&first).await.unwrap();
+        provider.start(&second).await.unwrap();
+        let err = provider.start(&third).await.unwrap_err().to_string();
+        assert!(
+            err.contains("v2 resident cap"),
+            "the refusal names the cap, got {err}"
+        );
+        provider.stop(&first).await.unwrap();
+        provider.start(&third).await.unwrap();
+        provider.stop(&second).await.unwrap();
+        provider.stop(&third).await.unwrap();
+    }
+
+    /// Each event does a little work, under one tick. The total still ends the guest.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_nibbles_end_at_the_execution_bound() {
+        let provider = ComponentProvider::new();
+        let bytes = v2_variant(&[
+            (
+                "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      local.get $event i32.const 2 i32.eq",
+                "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      (local $i i32)\n      (loop $burn local.get $i i32.const 1 i32.add local.tee $i i32.const 8000 i32.lt_u br_if $burn)\n      local.get $event i32.const 2 i32.eq",
+            ),
+            (
+                "i32.const 0 i32.const 0 i32.const 0 i32.const 0 call $done\n        i32.const 0 return",
+                "call $next return",
+            ),
+        ]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 2;
+        provider.start(&handle).await.unwrap();
+        v2_pending_read(&provider, &handle).await;
+        for _ in 0..16 {
+            provider
+                .deliver_grant_revoked(&handle.id, "nibble")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            if provider.endings.read().await.contains_key(&handle.id) {
+                break;
+            }
+        }
+        let ending = tokio::time::timeout(Duration::from_secs(2), v2_ending(&provider, &handle))
+            .await
+            .expect("nibbles must reach the execution bound");
+        assert!(
+            ending.contains(ENDING_EXECUTION_BOUND),
+            "work under one tick still ends the guest, got {ending}"
+        );
+        assert!(provider.threads_live.load(Ordering::Acquire) == 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
