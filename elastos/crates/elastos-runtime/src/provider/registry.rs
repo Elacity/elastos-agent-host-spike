@@ -3598,8 +3598,10 @@ mod tests {
         }
     }
 
+    // Windows dispatches the private IPFS ops since W6; staged hashing is still
+    // refused by the Windows provider itself.
     #[tokio::test]
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     async fn private_ipfs_unsupported_platform_has_no_dispatch() {
         let registry = ProviderRegistry::new();
         let provider = Arc::new(PrivateIpfsMock::default());
