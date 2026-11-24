@@ -1,5 +1,8 @@
 //! Running VM lifecycle management (crosvm)
 
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 
@@ -32,11 +35,19 @@ pub struct RunningVm {
 
     /// Path to crosvm binary (for `crosvm stop`)
     crosvm_bin: Option<PathBuf>,
+
+    verified_rootfs: Option<File>,
+    verified_kernel: Option<File>,
 }
 
 impl RunningVm {
     /// Create a new VM (not yet started)
-    pub fn new(config: VmConfig, manifest: CapsuleManifest, socket_path: PathBuf) -> Self {
+    pub fn new(
+        config: VmConfig,
+        manifest: CapsuleManifest,
+        socket_path: PathBuf,
+        verified_rootfs: Option<File>,
+    ) -> Self {
         Self {
             config,
             manifest,
@@ -45,7 +56,15 @@ impl RunningVm {
             process: None,
             pid: None,
             crosvm_bin: None,
+            verified_rootfs,
+            verified_kernel: None,
         }
+    }
+
+    /// Hold the private kernel copy whose bytes matched the signed image entry.
+    pub fn with_verified_kernel(mut self, kernel: File) -> Self {
+        self.verified_kernel = Some(kernel);
+        self
     }
 
     /// Start the VM using crosvm
@@ -53,11 +72,20 @@ impl RunningVm {
         if self.process.is_some() {
             return Err(ElastosError::Compute("VM already started".into()));
         }
+        let rootfs = self
+            .verified_rootfs
+            .as_ref()
+            .ok_or_else(|| ElastosError::Compute("Unverified VM rootfs refused".into()))?;
+        let rootfs_fd = rootfs.as_raw_fd();
+        let kernel = self
+            .verified_kernel
+            .as_ref()
+            .ok_or_else(|| ElastosError::Compute("Unverified VM kernel refused".into()))?;
+        let kernel_fd = kernel.as_raw_fd();
 
-        // Require KVM — no fallback
-        if !std::path::Path::new("/dev/kvm").exists() {
+        if !cfg!(target_os = "linux") || !std::path::Path::new("/dev/kvm").exists() {
             return Err(ElastosError::Compute(
-                "/dev/kvm not available — crosvm requires KVM".into(),
+                "/dev/kvm not available — verified crosvm disk requires Linux KVM".into(),
             ));
         }
 
@@ -98,15 +126,10 @@ impl RunningVm {
             })?;
         }
 
-        // Ensure socket directory exists and is writable.
-        // setcap binaries run with AT_SECURE which may restrict /tmp access.
-        if let Some(parent) = self.socket_path.parent() {
-            tokio::fs::create_dir_all(parent).await.ok();
-        }
         let _ = tokio::fs::remove_file(&self.socket_path).await;
 
         // Build crosvm run command
-        let crosvm_args = self.config.to_crosvm_args();
+        let crosvm_args = verified_crosvm_args(&self.config, rootfs_fd, kernel_fd);
 
         tracing::info!(
             "Starting crosvm VM '{}': {} run --socket {} {}",
@@ -124,6 +147,17 @@ impl RunningVm {
             .arg(&self.socket_path)
             .args(&crosvm_args)
             .kill_on_drop(true);
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                if libc::fcntl(rootfs_fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::fcntl(kernel_fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
 
         if self.config.interactive_stdio {
             command
@@ -143,6 +177,7 @@ impl RunningVm {
             }
             ElastosError::Compute(format!("Failed to start crosvm: {}", e))
         })?;
+        self.verified_rootfs.take();
 
         // Forward VM serial output through tracing.
         if !self.config.interactive_stdio {
@@ -243,6 +278,7 @@ impl RunningVm {
         self.process = None;
         self.pid = None;
         self.status = CapsuleStatus::Stopped;
+        self.verified_rootfs.take();
 
         // Clean up socket
         let _ = tokio::fs::remove_file(&self.socket_path).await;
@@ -269,6 +305,7 @@ impl RunningVm {
         self.process = None;
         self.pid = None;
         self.status = CapsuleStatus::Stopped;
+        self.verified_rootfs.take();
 
         // Clean up socket
         let _ = tokio::fs::remove_file(&self.socket_path).await;
@@ -311,6 +348,17 @@ impl RunningVm {
     }
 }
 
+fn verified_crosvm_args(
+    config: &VmConfig,
+    rootfs_fd: std::os::fd::RawFd,
+    kernel_fd: std::os::fd::RawFd,
+) -> Vec<String> {
+    let mut checked = config.clone();
+    checked.rootfs_path = format!("/proc/self/fd/{rootfs_fd}").into();
+    checked.kernel_path = format!("/proc/self/fd/{kernel_fd}").into();
+    checked.to_crosvm_args()
+}
+
 impl Drop for RunningVm {
     fn drop(&mut self) {
         // Try to clean up the VM if it's still running
@@ -321,5 +369,68 @@ impl Drop for RunningVm {
         if let Some(ref network) = self.config.network {
             let _ = network.teardown();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn start_without_checked_rootfs_refuses_before_kvm() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest: CapsuleManifest = serde_json::from_value(serde_json::json!({
+            "schema": "elastos.capsule/v1",
+            "version": "0.1.0",
+            "name": "test-vm",
+            "role": "app",
+            "type": "microvm",
+            "entrypoint": "rootfs.ext4"
+        }))
+        .unwrap();
+        let config = VmConfig::from_manifest(&manifest, temp.path(), &temp.path().join("vmlinux"));
+        let mut vm = RunningVm::new(config, manifest, temp.path().join("vm.sock"), None);
+        let error = vm.start(&temp.path().join("crosvm")).await.unwrap_err();
+        assert!(error.to_string().contains("Unverified VM rootfs refused"));
+        assert!(!temp.path().join("vm.sock").exists());
+    }
+
+    #[tokio::test]
+    async fn start_without_checked_kernel_refuses_before_kvm() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest: CapsuleManifest = serde_json::from_value(serde_json::json!({
+            "schema": "elastos.capsule/v1", "version": "0.1.0", "name": "test-vm",
+            "role": "app", "type": "microvm", "entrypoint": "rootfs.ext4"
+        }))
+        .unwrap();
+        let config = VmConfig::from_manifest(&manifest, temp.path(), &temp.path().join("vmlinux"));
+        let rootfs_path = temp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs_path, b"rootfs").unwrap();
+        let rootfs = File::open(rootfs_path).unwrap();
+        let mut vm = RunningVm::new(config, manifest, temp.path().join("vm.sock"), Some(rootfs));
+        let error = vm.start(&temp.path().join("crosvm")).await.unwrap_err();
+        assert!(error.to_string().contains("Unverified VM kernel refused"));
+    }
+
+    #[test]
+    fn crosvm_command_uses_the_held_rootfs_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest: CapsuleManifest = serde_json::from_value(serde_json::json!({
+            "schema": "elastos.capsule/v1", "version": "0.1.0", "name": "test-vm",
+            "role": "app", "type": "microvm", "entrypoint": "rootfs.ext4",
+            "microvm": {"kernel": "unsigned-vmlinux"}
+        }))
+        .unwrap();
+        let config = VmConfig::from_manifest(&manifest, temp.path(), &temp.path().join("vmlinux"));
+        let args = verified_crosvm_args(&config, 17, 19);
+        assert!(
+            args.iter().any(|arg| arg.contains("path=/proc/self/fd/17")),
+            "{args:?}"
+        );
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains(&temp.path().join("rootfs.ext4").display().to_string())));
+        assert_eq!(args.last().map(String::as_str), Some("/proc/self/fd/19"));
+        assert!(!args.iter().any(|arg| arg.contains("unsigned-vmlinux")));
     }
 }

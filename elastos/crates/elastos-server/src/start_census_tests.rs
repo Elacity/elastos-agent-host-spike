@@ -50,6 +50,7 @@ pub(super) struct Site {
 
 /// The needle fragments. They are joined only at run time.
 const LOAD: &[&str] = &["lo", "ad"];
+const LOAD_VERIFIED: &[&str] = &["load_", "verified"];
 const START: &[&str] = &["sta", "rt"];
 const START_RESIDENT: &[&str] = &["start_", "resident"];
 const LOAD_ADMITTED: &[&str] = &["load_", "admitted"];
@@ -114,7 +115,7 @@ fn places() -> Vec<Place> {
             "run_signer",
             label_of("provider", &load),
             1,
-            "folder start: trusted key, dev mode, or installed release",
+            "non-VM folder start; crosvm refuses this unsigned load",
         ),
         place(
             "elastos-server/src/runtime.rs",
@@ -316,9 +317,9 @@ fn places() -> Vec<Place> {
         place(
             "elastos-server/src/serve_cmd.rs",
             "load_microvm_capsule",
-            label_of("provider", &load),
+            label_of("provider", &joined(LOAD_VERIFIED)),
             1,
-            "entrypoint file checked before MicroVM load; P2-2 authority pending",
+            "signed VM image checked before load",
         ),
         place(
             "elastos-server/src/serve_cmd.rs",
@@ -346,7 +347,7 @@ fn places() -> Vec<Place> {
             "launch_capsule",
             label_of("vm", &start),
             1,
-            P2_2,
+            "signed capsule-metadata image checked before overlay; Linux KVM required",
         ),
         place(
             "elastos-server/src/server_infra.rs",
@@ -521,12 +522,20 @@ fn every_capsule_load_spawn_and_registration_is_listed_with_its_gate() {
 #[test]
 fn census_preload_checks_run_before_their_loads() {
     let sources = production_sources();
-    let required_orders = [(
-        "elastos-server/src/serve_cmd.rs",
-        "load_microvm_capsule",
-        "check_entrypoint_file(",
-        "provider.load",
-    )];
+    let required_orders = [
+        (
+            "elastos-server/src/serve_cmd.rs",
+            "load_microvm_capsule",
+            "check_entrypoint_file(",
+            "provider.load_verified",
+        ),
+        (
+            "elastos-server/src/serve_cmd.rs",
+            "load_microvm_capsule",
+            "elastos_server::setup::checked_vm_image(",
+            "provider.load_verified",
+        ),
+    ];
 
     for (file, function, check, load) in required_orders {
         let code = code_only(sources.get(file).expect("listed load source exists"));
@@ -536,11 +545,11 @@ fn census_preload_checks_run_before_their_loads() {
             .filter(|&at| enclosing_fn(&code, at) == function)
             .collect();
         let load_sites: Vec<_> = code
-            .match_indices(".load(")
+            .match_indices(".load_verified(")
             .map(|(at, _)| at)
             .filter(|&at| {
                 enclosing_fn(&code, at) == function
-                    && label_of(receiver_before(&code, at), "load") == load
+                    && label_of(receiver_before(&code, at), "load_verified") == load
             })
             .collect();
         assert_eq!(
@@ -566,7 +575,14 @@ fn census_preload_checks_run_before_their_loads() {
 pub(super) fn sites(file: &str, text: &str) -> Vec<Site> {
     let mut sites = Vec::new();
     let code = code_only(text);
-    for parts in [LOAD_SEALED, LOAD_ADMITTED, START_RESIDENT, LOAD, START] {
+    for parts in [
+        LOAD_SEALED,
+        LOAD_ADMITTED,
+        LOAD_VERIFIED,
+        START_RESIDENT,
+        LOAD,
+        START,
+    ] {
         let method = joined(parts);
         let needle = [".", method.as_str(), "("].concat();
         for (at, _) in code.match_indices(&needle) {
@@ -1103,4 +1119,21 @@ fn production() { component.start_resident(&handle); }
 fn census_source_cannot_supply_its_own_spawn_site() {
     let own = include_str!("start_census_tests.rs");
     assert!(sites("start_census_tests.rs", own).is_empty());
+}
+
+#[test]
+fn launch_capsule_keeps_signed_image_admission_before_vm_start() {
+    let sources = production_sources();
+    let source = &sources["elastos-server/src/supervisor.rs"];
+    let launch = source
+        .split("async fn launch_capsule(")
+        .nth(1)
+        .unwrap()
+        .split("async fn launch_carrier_service(")
+        .next()
+        .unwrap();
+    let check = launch.find("crate::setup::checked_vm_image(").unwrap();
+    let load = launch.find(".create_verified_overlay(").unwrap();
+    let start = launch.find("vm.start(").unwrap();
+    assert!(check < load && load < start);
 }

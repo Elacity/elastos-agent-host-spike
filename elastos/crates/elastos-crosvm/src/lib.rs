@@ -46,6 +46,8 @@ pub use provider::CrosvmProvider;
 #[cfg(not(windows))]
 pub use proxy::TcpProxy;
 #[cfg(not(windows))]
+pub use rootfs::{open_private_file, RootfsManager};
+#[cfg(not(windows))]
 pub use vm::RunningVm;
 
 /// Check process access to the supported KVM API before admitting a local VM.

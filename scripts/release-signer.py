@@ -1128,7 +1128,9 @@ def prepare_from_root(policy, root, manifest_name, fetch, snapshot_root, held_ro
                 continue
             def component_refs(value):
                 if isinstance(value, dict):
-                    if value.get("strategy") == "browser-vm-image":
+                    if value.get("strategy") == "browser-vm-image" or "vm_image" in value:
+                        require(value.get("strategy") in ("browser-vm-image", "prebuilt"),
+                                "VM image entry requires a packaged platform row")
                         image = value.get("vm_image")
                         require(type(image) is dict and set(image) == {"path", "size", "sha256", "cid", "kernel", "initrd"},
                                 "signed VM image entry required")

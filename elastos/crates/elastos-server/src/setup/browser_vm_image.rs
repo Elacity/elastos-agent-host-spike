@@ -57,21 +57,21 @@ impl std::error::Error for BrowserVmImageInvalid {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct VmImageEntry {
-    path: String,
-    size: u64,
-    sha256: String,
-    cid: String,
-    kernel: VmImageFile,
-    initrd: VmImageFile,
+pub(crate) struct VmImageEntry {
+    pub(crate) path: String,
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
+    pub(crate) cid: String,
+    pub(crate) kernel: VmImageFile,
+    pub(crate) initrd: VmImageFile,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct VmImageFile {
-    path: String,
-    size: u64,
-    sha256: String,
+pub(crate) struct VmImageFile {
+    pub(crate) path: String,
+    pub(crate) size: u64,
+    pub(crate) sha256: String,
 }
 
 fn valid_image_file(entry: &VmImageFile, path: &str) -> bool {
@@ -85,10 +85,10 @@ fn valid_image_file(entry: &VmImageFile, path: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-pub(super) fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
+pub(crate) fn signed_image(info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
     let entry = info.extra.get("vm_image");
     ensure!(
-        entry.is_some() || info.cid.is_none(),
+        entry.is_some() || info.strategy.as_deref() != Some(NAME) || info.cid.is_none(),
         "Browser image has no signed VM image entry"
     );
     let Some(entry) = entry else { return Ok(None) };
@@ -182,7 +182,7 @@ fn legacy_signed_image_receipt_matches(recorded: &Value, entry: &VmImageEntry) -
 
 // Like AuthState's verified-file cache, use inode plus nanosecond change time:
 // a same-size rewrite with restored mtime still requires verification.
-use elastos_common::browser_vm_seed::{BrowserVmSeedIdentity, FileIdentity};
+use elastos_common::browser_vm_seed::{BrowserVmBootArtifact, BrowserVmSeedIdentity, FileIdentity};
 
 #[derive(Clone, PartialEq, Eq)]
 struct VerifiedSetKey {
@@ -301,14 +301,39 @@ fn verified_seed_identity_in(
         .filter(|entry| entry.verification.result.get().is_some_and(Result::is_ok))
         .map(|entry| entry.key.clone())
         .collect::<Vec<_>>();
-    ensure!(
-        keys.iter().any(|key| {
+    let admitted = keys
+        .iter()
+        .find(|key| {
             key.platform == platform
                 && key.identities[1].1 == identity.target
                 && image_identities(&key.paths).is_ok_and(|current| current == key.identities)
-        }),
-        "Browser rootfs seed has no current Runtime admission; retry Browser open"
-    );
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Browser rootfs seed has no current Runtime admission; retry Browser open"
+            )
+        })?;
+    let verification = cache
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .iter()
+        .find(|entry| entry.key == *admitted)
+        .ok_or_else(|| anyhow::anyhow!("Browser image admission expired; retry Browser open"))?
+        .verification
+        .clone();
+    let digests = verification.wait(None)?;
+    let mut identity = identity;
+    identity.sha256 = Some(digests[0].clone());
+    identity.kernel = Some(BrowserVmBootArtifact {
+        link: admitted.identities[2].0.clone(),
+        target: admitted.identities[2].1.clone(),
+        sha256: digests[1].clone(),
+    });
+    identity.initrd = Some(BrowserVmBootArtifact {
+        link: admitted.identities[3].0.clone(),
+        target: admitted.identities[3].1.clone(),
+        sha256: digests[2].clone(),
+    });
     Ok(identity)
 }
 

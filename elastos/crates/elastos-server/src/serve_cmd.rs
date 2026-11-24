@@ -14,13 +14,30 @@ use sha2::Digest as _;
 
 #[cfg(unix)]
 async fn load_microvm_capsule(
-    provider: &dyn ComputeProvider,
+    provider: &CrosvmProvider,
+    data_dir: &Path,
     capsule_dir: &Path,
     manifest: elastos_common::CapsuleManifest,
 ) -> anyhow::Result<elastos_compute::CapsuleHandle> {
     check_entrypoint_file(capsule_dir, &manifest.entrypoint).await?;
+    let checked_image = elastos_server::setup::checked_vm_image(
+        data_dir,
+        capsule_dir,
+        &manifest.name,
+        &manifest.entrypoint,
+        manifest
+            .microvm
+            .as_ref()
+            .and_then(|vm| vm.kernel.as_deref()),
+    )?;
     provider
-        .load(capsule_dir, manifest)
+        .load_verified(
+            capsule_dir,
+            manifest,
+            &checked_image.rootfs,
+            &checked_image.rootfs_sha256,
+            checked_image.kernel,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("Failed to load capsule: {}", e))
 }
@@ -123,7 +140,8 @@ pub async fn run_serve(
                 let tls_config = infra.tls_config;
 
                 let handle =
-                    load_microvm_capsule(&vm_provider, &capsule_dir, manifest.clone()).await?;
+                    load_microvm_capsule(&vm_provider, &data_dir, &capsule_dir, manifest.clone())
+                        .await?;
 
                 if let Some(vm_id) = vm_provider.get_vm_id(&handle.id).await {
                     let vm_session = create_initial_vm_session(&session_registry, &vm_id).await;
@@ -589,53 +607,6 @@ mod tests {
     use tower::ServiceExt;
 
     #[cfg(unix)]
-    struct LoadMustNotRun;
-
-    #[cfg(unix)]
-    #[async_trait::async_trait]
-    impl ComputeProvider for LoadMustNotRun {
-        fn supports(&self, _capsule_type: &elastos_common::CapsuleType) -> bool {
-            true
-        }
-
-        async fn load(
-            &self,
-            _path: &Path,
-            _manifest: elastos_common::CapsuleManifest,
-        ) -> elastos_common::Result<elastos_compute::CapsuleHandle> {
-            panic!("compute load ran before entrypoint refusal")
-        }
-
-        async fn start(
-            &self,
-            _handle: &elastos_compute::CapsuleHandle,
-        ) -> elastos_common::Result<()> {
-            unreachable!()
-        }
-
-        async fn stop(
-            &self,
-            _handle: &elastos_compute::CapsuleHandle,
-        ) -> elastos_common::Result<()> {
-            unreachable!()
-        }
-
-        async fn status(
-            &self,
-            _handle: &elastos_compute::CapsuleHandle,
-        ) -> elastos_common::Result<elastos_common::CapsuleStatus> {
-            unreachable!()
-        }
-
-        async fn info(
-            &self,
-            _handle: &elastos_compute::CapsuleHandle,
-        ) -> elastos_common::Result<elastos_compute::CapsuleInfo> {
-            unreachable!()
-        }
-    }
-
-    #[cfg(unix)]
     #[tokio::test]
     async fn serve_microvm_refuses_outside_entrypoint_before_compute_load() {
         let dir = tempfile::tempdir().unwrap();
@@ -646,8 +617,20 @@ mod tests {
         std::os::unix::fs::symlink(&outside, capsule.join("rootfs.ext4")).unwrap();
         let manifest: elastos_common::CapsuleManifest =
             serde_json::from_str(include_str!("../../../capsules/shell/capsule.json")).unwrap();
+        let kernel = dir.path().join("vmlinux");
+        std::fs::write(&kernel, b"ext4 virtio_blk virtio_pci").unwrap();
+        let binary = dir.path().join("crosvm");
+        std::fs::write(&binary, b"test placeholder").unwrap();
+        let provider = CrosvmProvider::new(
+            CrosvmConfig::new()
+                .with_crosvm_bin(binary)
+                .with_kernel_path(kernel)
+                .with_socket_dir(dir.path().join("sockets"))
+                .with_rootfs_cache_dir(dir.path().join("cache")),
+        )
+        .unwrap();
 
-        let error = load_microvm_capsule(&LoadMustNotRun, &capsule, manifest)
+        let error = load_microvm_capsule(&provider, dir.path(), &capsule, manifest)
             .await
             .unwrap_err();
         assert!(
