@@ -619,6 +619,14 @@ impl Fixture {
         self.save_source();
     }
 
+    /// The signed runtime file is replaced, and `dev_mode = true` is set.
+    /// A signed Home must still refuse those bytes.
+    pub(crate) fn substitute_runtime(&self) {
+        fs::write(&self.binary, b"substituted runtime").unwrap();
+        fs::set_permissions(&self.binary, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(self.data.join("config.toml"), "dev_mode = true\n").unwrap();
+    }
+
     pub(crate) fn bind_components(&mut self) {
         let components = fs::read(self.data.join("components.json")).unwrap();
         let mut release: Value = serde_json::from_slice(&self.release).unwrap();

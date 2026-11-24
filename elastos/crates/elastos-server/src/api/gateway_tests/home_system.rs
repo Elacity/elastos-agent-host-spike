@@ -6192,6 +6192,8 @@ async fn test_system_updates_home_background_image() {
 #[tokio::test]
 async fn test_home_runtime_ensure_reuses_running_runtime() {
     let dir = tempfile::tempdir().unwrap();
+    // A source Home starts again only through the named dev_mode opt-in.
+    std::fs::write(dir.path().join("config.toml"), "dev_mode = true\n").unwrap();
     let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
     let _runtime = start_fake_runtime(dir.path(), bus, "home-peer").await;
 

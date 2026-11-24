@@ -229,9 +229,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "return_to_home_if_requested",
             call: "command",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command:", ":new(exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -249,9 +249,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_action",
             call: "command",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command:", ":new(exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -259,9 +259,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_capsule_action",
             call: "command",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command:", ":new(exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -611,9 +611,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "ensure_managed_runtime",
             call: "command",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(&self_exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -621,9 +621,9 @@ fn columns() -> Vec<TrustColumn> {
             function: "ensure_managed_runtime",
             call: "spawn()",
             class: "own-binary",
-            trust_root: "none",
-            verified_when: "never",
-            evidence: ["Command::ne", "w(&self_exe)"].concat(),
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
+            evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
         },
         TrustColumn {
@@ -1649,14 +1649,14 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&56));
+    assert_eq!(roots.get("none"), Some(&51));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&25));
+    assert_eq!(roots.get("release-signature"), Some(&30));
     assert_eq!(roots.get("staged-cid"), Some(&8));
-    assert_eq!(times.get("at-every-start"), Some(&32));
+    assert_eq!(times.get("at-every-start"), Some(&37));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&9));
-    assert_eq!(times.get("never"), Some(&56));
+    assert_eq!(times.get("never"), Some(&51));
     assert_eq!(to_gate, 31);
 }
 
@@ -1807,4 +1807,36 @@ fn dev_opt_in_start_is_one_honest_row_behind_the_installed_release() {
             "verify_installed_component_start".to_string()
         )]
     );
+}
+
+#[test]
+fn own_runtime_starts_admit_the_running_binary_before_exec() {
+    let sources = source::production_sources();
+    let door = "checked_running_runtime(";
+    let exec = ["Command::new(prepared", ".exec_path())"].concat();
+    for (file, function) in [
+        (
+            "elastos-server/src/chat_cmd.rs",
+            "return_to_home_if_requested",
+        ),
+        ("elastos-server/src/home_cmd.rs", "run_action"),
+        ("elastos-server/src/home_cmd.rs", "run_capsule_action"),
+        (
+            "elastos-server/src/runtime_control.rs",
+            "ensure_managed_runtime",
+        ),
+    ] {
+        let text = &sources[file];
+        let code = source::code_only(text);
+        let at = |needle: &str| {
+            text.match_indices(needle)
+                .find(|(at, _)| source::enclosing_fn(&code, *at) == function)
+                .map(|(at, _)| at)
+                .unwrap_or_else(|| panic!("{file}::{function} lost {needle}"))
+        };
+        assert!(
+            at(door) < at(&exec),
+            "{file}::{function} execs before the release door"
+        );
+    }
 }

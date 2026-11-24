@@ -6,6 +6,37 @@ use elastos_runtime::provider::CheckedExecutable;
 
 use crate::{setup, sources::default_data_dir};
 
+/// Admit the running Runtime binary before this process starts it again.
+/// An installed Home admits only its signed release binary and returns those
+/// held bytes. A source Home with no release continues only through
+/// `verify_installed_component_start`'s `dev_mode = true` opt-in.
+pub fn checked_running_runtime(
+    data_dir: &Path,
+    exe: &Path,
+) -> anyhow::Result<setup::verified_executable::VerifiedExecutable> {
+    let Some(source) = setup::installed_release_source(data_dir)? else {
+        return setup::verify_installed_component_start(data_dir, "elastos", exe);
+    };
+    let runtime = std::fs::canonicalize(&source.install_path)
+        .map_err(|error| anyhow::anyhow!("installed release binary: {error}"))?;
+    // The signed descriptor is checked before the path comparison, so a
+    // substituted file is refused even when this process is some other binary.
+    let (release_bytes, _) =
+        crate::installed_release::read_signed_release(data_dir, &runtime, &source, false, true)?;
+    let running =
+        std::fs::canonicalize(exe).map_err(|error| anyhow::anyhow!("running binary: {error}"))?;
+    anyhow::ensure!(
+        running == runtime,
+        "running binary is not the installed release"
+    );
+    let release: serde_json::Value = serde_json::from_slice(&release_bytes)?;
+    let platform = crate::update::detect_release_platform();
+    let sha = release["payload"]["platforms"][platform]["binary"]["sha256"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("signed runtime digest is missing"))?;
+    setup::verified_executable::VerifiedExecutable::prepare(&runtime, &format!("sha256:{sha}"))
+}
+
 /// Bind a native provider start to the current publisher-signed release.
 /// A failed admission stays a refused executable until the bridge reports it.
 pub fn checked_native_provider(path: &Path) -> CheckedExecutable {
@@ -864,5 +895,35 @@ mod tests {
             error.to_string().contains("No trusted source configured"),
             "{error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_home_running_runtime_keeps_the_named_dev_opt_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let refused = checked_running_runtime(temp.path(), &exe).unwrap_err();
+        assert!(
+            refused.to_string().contains("No trusted source configured"),
+            "{refused:#}"
+        );
+        std::fs::write(temp.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        let held = checked_running_runtime(temp.path(), &exe).unwrap();
+        assert!(
+            held.signed_checksum().is_err(),
+            "dev_mode start is unchecked"
+        );
+        assert!(held.exec_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_running_runtime_holds_the_release_bytes() {
+        let fixture = crate::installed_release::tests::Fixture::new();
+        let binary = fixture.data.join("runtime");
+        let held = checked_running_runtime(&fixture.data, &binary).unwrap();
+        let digest = hex::encode(sha2::Sha256::digest(b"installed signed runtime"));
+        assert_eq!(held.signed_checksum().unwrap(), format!("sha256:{digest}"));
+        assert!(held.exec_path().exists());
     }
 }

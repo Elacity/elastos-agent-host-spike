@@ -1205,6 +1205,19 @@ async fn ensure_managed_runtime(
     allow_resources: &[&str],
     surface_name: &str,
 ) -> anyhow::Result<RuntimeCoords> {
+    let self_exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to determine runtime binary: {}", e))?;
+    let prepared = crate::binaries::checked_running_runtime(data_dir, &self_exe)?;
+    // Linux holds the executable on a shared descriptor. Opening
+    // /proc/self/fd/N after the digest read would hash an empty offset.
+    // The child records the original file, whose digest is this value.
+    let binary_sha256 = match prepared.signed_checksum() {
+        Ok(checksum) => checksum
+            .strip_prefix("sha256:")
+            .unwrap_or(checksum)
+            .to_string(),
+        Err(_) => sha256_file(&self_exe)?,
+    };
     let coords_path = managed_runtime_coord_path(data_dir, runtime_kind);
     // Home boot can issue concurrent app/system/browser requests. Serialize the
     // check/start sequence across processes so only one managed runtime can be
@@ -1233,9 +1246,6 @@ async fn ensure_managed_runtime(
         }
     };
 
-    let self_exe = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("Failed to determine runtime binary: {}", e))?;
-    let binary_sha256 = sha256_file(&self_exe)?;
     let (_home_launch_signing_key, home_launch_signer_did) =
         elastos_identity::load_or_create_did(data_dir)?;
     let policy = serde_json::json!({
@@ -1401,8 +1411,8 @@ async fn ensure_managed_runtime(
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| anyhow::anyhow!("Failed to create runtime log: {}", e))?;
 
-    // 5. Spawn managed runtime as detached background process
-    let mut child = std::process::Command::new(&self_exe);
+    // 5. Spawn the held release bytes, not a later read of the install path.
+    let mut child = std::process::Command::new(prepared.exec_path());
     child
         .arg("serve")
         .arg("--addr")
@@ -1450,6 +1460,7 @@ async fn ensure_managed_runtime(
         .as_ref()
         .map(|owner| owner.lock_start())
         .transpose()?;
+    prepared.attach_std(&mut child, false)?;
     let child = child
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start runtime: {}", e))?;
@@ -1526,6 +1537,31 @@ async fn windows_refuses_managed_runtime_before_start() {
         Some(std::io::ErrorKind::Unsupported)
     );
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn ensure_managed_runtime_refuses_a_changed_runtime_before_exec() {
+    let fixture = crate::installed_release::tests::Fixture::new();
+    fixture.substitute_runtime();
+    let error = ensure_managed_runtime(
+        &fixture.data,
+        "managed-home",
+        "home-auto.json",
+        &["localhost://Users/*"],
+        "home",
+    )
+    .await
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("Installed artifact differs from its signed checksum"),
+        "{message}"
+    );
+    assert!(!fixture.data.join("managed-runtime-start.lock").exists());
+    assert!(!fixture.data.join("logs").exists());
+    assert!(!fixture.data.join("policy").exists());
+    assert!(!fixture.data.join("did").exists());
 }
 
 #[cfg(any(unix, test))]
