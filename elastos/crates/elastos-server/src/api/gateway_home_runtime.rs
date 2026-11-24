@@ -684,6 +684,18 @@ pub(super) async fn launch_runtime_agent(
         .send()
         .await?;
     let status = response.status();
+    if status == StatusCode::CONFLICT {
+        let text = response.text().await.unwrap_or_default();
+        let trimmed = text.trim();
+        if trimmed == crate::runtime::Runtime::AGENT_STOPPING {
+            return Err(crate::agents::CodedRefusal {
+                code: "agent_stopping",
+                reason: "this agent is stopping",
+            }
+            .into());
+        }
+        return Err(crate::agents::Refused(trimmed.to_string()).into());
+    }
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
         anyhow::bail!("runtime launch failed ({}): {}", status, text.trim());
@@ -707,12 +719,16 @@ pub(super) struct StoppedRuntimeAgent {
 /// found the sessions already ending and stopped nothing further.
 pub(super) struct RuntimeAgentStop {
     pub(super) stopped: Vec<StoppedRuntimeAgent>,
+    pub(super) stopping: Vec<StoppedRuntimeAgent>,
     pub(super) already: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RuntimeAgentStopResponse {
+    #[serde(default)]
     stopped: Vec<RuntimeStoppedSession>,
+    #[serde(default)]
+    stopping: Vec<RuntimeStoppedSession>,
     #[serde(default)]
     already: Option<String>,
 }
@@ -721,6 +737,13 @@ struct RuntimeAgentStopResponse {
 struct RuntimeStoppedSession {
     session_id: String,
     status: String,
+}
+
+fn stopped_agent(session: RuntimeStoppedSession) -> StoppedRuntimeAgent {
+    StoppedRuntimeAgent {
+        session_id: session.session_id,
+        status: session.status,
+    }
 }
 
 /// Ask the live Home Runtime to stop the live rows whose principal is
@@ -749,9 +772,11 @@ pub(super) async fn stop_runtime_agent(
         let text = response.text().await.unwrap_or_default();
         let detail = text.trim();
         if status == StatusCode::NOT_FOUND {
-            return Err(
-                crate::agents::Refused("this agent has no running session".to_string()).into(),
-            );
+            return Err(crate::agents::CodedRefusal {
+                code: "agent_no_session",
+                reason: "this agent has no running session",
+            }
+            .into());
         }
         if status == StatusCode::CONFLICT || status == StatusCode::BAD_REQUEST {
             let reason = if detail.is_empty() {
@@ -765,14 +790,8 @@ pub(super) async fn stop_runtime_agent(
     }
     let payload = response.json::<RuntimeAgentStopResponse>().await?;
     Ok(RuntimeAgentStop {
-        stopped: payload
-            .stopped
-            .into_iter()
-            .map(|session| StoppedRuntimeAgent {
-                session_id: session.session_id,
-                status: session.status,
-            })
-            .collect(),
+        stopped: payload.stopped.into_iter().map(stopped_agent).collect(),
+        stopping: payload.stopping.into_iter().map(stopped_agent).collect(),
         already: payload.already,
     })
 }

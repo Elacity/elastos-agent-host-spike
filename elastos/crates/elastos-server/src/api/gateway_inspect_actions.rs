@@ -434,6 +434,10 @@ pub(super) fn approve_agent_plan_request(
     Ok("Approved agent plan. The step is ready for Runtime dispatch.".to_string())
 }
 
+pub(super) fn settle_agent_plans_lost_before_start(data_dir: &FsPath) -> anyhow::Result<()> {
+    store::settle_agent_plans_lost_before_start(data_dir, now_ts())
+}
+
 /// Claim the stored step, audit the claim, then let its settlement outlive the
 /// Inbox request. A stopped process still leaves a one-way claim.
 pub(super) async fn dispatch_approved_agent_plan(

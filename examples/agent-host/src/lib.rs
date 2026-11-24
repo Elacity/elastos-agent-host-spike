@@ -4027,8 +4027,19 @@ fn preview_document_plan(
     }))
 }
 
+/// A document inside the root the Runtime gives this agent. `UsersAI/self`
+/// is that root. The guest does not derive an id.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn document_in_own_root(path: &str) -> bool {
+    match path.strip_prefix("localhost://UsersAI/self/") {
+        Some(rest) if !rest.is_empty() => path_refusal(path).is_none(),
+        _ => false,
+    }
+}
+
 /// Submit only a one-step plan through the granted Bus invoke. The Runtime
 /// owns the pending record, the owner, and the later approval decision.
+/// A document outside this agent's root is refused before any Bus call.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn submit_document_plan(
     bus: &mut impl ResourceBus,
@@ -4049,6 +4060,14 @@ fn submit_document_plan(
             .is_some_and(serde_json::Value::is_object)
     {
         return Err("document write step required");
+    }
+    let path = step
+        .get("request")
+        .and_then(|request| request.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !document_in_own_root(path) {
+        return Err("document is outside the agent root");
     }
     const RESOURCE: &str = "elastos://inspect/submit_agent_plan";
     let grant = bus
@@ -4545,6 +4564,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
         }
         let epoch = journal.epoch;
         let before_read = model_bytes(&journal.events);
+        // This read check stays on the owner-area path. It is not the submitted plan.
         let read_resource = "localhost://Users/self/Documents/note.txt";
         let read_id = propose_read(&mut journal, read_resource);
         if authorize(&mut journal, read_id, None).is_ok()
@@ -5004,7 +5024,8 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
                 "a model summary was not recorded once".to_string(),
             ));
         }
-        let resource = "localhost://Users/self/Documents/note.txt";
+        // The submitted document. UsersAI/self is the root the Runtime gives this agent.
+        let resource = "localhost://UsersAI/self/Documents/note.txt";
         let mut seen = empty_journal();
         if !observe(&mut seen, resource, 1, "one line")
             || observe(&mut seen, "", 1, "one line")
@@ -5129,6 +5150,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut writes = empty_journal();
+        // Write checks stay on the owner-area path. They are not the submitted plan.
         let file = "localhost://Users/self/Documents/note.txt";
         if !observe(&mut writes, file, 1, "alpha beta") {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -5349,6 +5371,7 @@ impl exports::elastos::bus::lifecycle::Guest for AgentHost {
             ));
         }
         let mut restored = empty_journal();
+        // Restore checks stay on the owner-area path. They are not the submitted plan.
         let file = "localhost://Users/self/Documents/note.txt";
         if propose_restore(&mut restored, file, 1).is_ok() || !restored.steps.is_empty() {
             return Err(elastos::bus::types::BusError::Invalid(
@@ -9809,6 +9832,52 @@ mod tests {
             Err("one step required")
         );
         assert!(bus.asks.is_empty() && bus.invokes.is_empty());
+    }
+
+    /// The owner-area path used to be the submitted document. It stays here as
+    /// the plan the guest must refuse. `UsersAI/self` is the root the Runtime
+    /// gives this agent, so one plan there is submitted and its edit dispatches
+    /// once.
+    #[test]
+    fn a_plan_outside_the_agent_root_is_refused_and_one_inside_dispatches_once() {
+        let mut outside_journal = empty_journal();
+        let outside = "localhost://Users/self/Documents/note.txt";
+        assert!(observe(&mut outside_journal, outside, 2, "two lines"));
+        let outside_edit =
+            propose_edit(&mut outside_journal, outside, "two", "three", Some(2)).unwrap();
+        let mut outside_bus = PlanBus::default();
+        let outside_plan =
+            preview_document_plan(&mut outside_bus, &outside_journal, outside_edit).unwrap();
+        assert_eq!(
+            submit_document_plan(&mut outside_bus, &outside_plan),
+            Err("document is outside the agent root")
+        );
+        assert!(outside_bus.asks.is_empty() && outside_bus.invokes.is_empty());
+
+        let other = "localhost://UsersAI/other/Documents/note.txt";
+        let mut other_journal = empty_journal();
+        assert!(observe(&mut other_journal, other, 2, "two lines"));
+        let other_edit = propose_edit(&mut other_journal, other, "two", "three", Some(2)).unwrap();
+        let mut other_bus = PlanBus::default();
+        let other_plan = preview_document_plan(&mut other_bus, &other_journal, other_edit).unwrap();
+        assert_eq!(
+            submit_document_plan(&mut other_bus, &other_plan),
+            Err("document is outside the agent root")
+        );
+        assert!(other_bus.asks.is_empty() && other_bus.invokes.is_empty());
+
+        let mut journal = empty_journal();
+        let inside = "localhost://UsersAI/self/Documents/note.txt";
+        assert!(observe(&mut journal, inside, 2, "two lines"));
+        let edit = propose_edit(&mut journal, inside, "two", "three", Some(2)).unwrap();
+        let mut bus = PlanBus::default();
+        let plan = preview_document_plan(&mut bus, &journal, edit).unwrap();
+        submit_document_plan(&mut bus, &plan).unwrap();
+        assert_eq!(bus.invokes.len(), 1);
+        assert!(authorize(&mut journal, edit, Some("grant")).is_ok());
+        assert!(dispatch(&mut journal, edit));
+        assert!(!dispatch(&mut journal, edit));
+        assert_eq!(step_state(&journal, edit), Some(StepState::Dispatched));
     }
 
     // Sweep gaps (reports/guard-sweep.md): the child and grant checks.
