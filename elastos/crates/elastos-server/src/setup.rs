@@ -14,6 +14,7 @@ use std::io::Read as _;
 #[cfg(unix)]
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Command;
 
 mod browser_config;
@@ -901,6 +902,7 @@ async fn admit_installed_setup_metadata(
     Ok(Some(metadata))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn load_manifest() -> anyhow::Result<ComponentsManifest> {
     Ok(load_manifest_with_path()?.1)
@@ -2352,6 +2354,8 @@ fn write_cache_metadata(
     name: &str,
     dest: &Path,
 ) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    let _ = platform;
     if !dest.is_dir() {
         return Ok(());
     }
@@ -2410,15 +2414,15 @@ fn write_cache_metadata(
 }
 
 // Linux AArch64 HWCAP: FP16 scalar, FP16 SIMD and dot product.
-#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "aarch64"), all(test, unix)))]
 const ARM64_MODEL_HWCAP: u64 = (1 << 9) | (1 << 10) | (1 << 20);
 
-#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "aarch64"), all(test, unix)))]
 fn arm64_model_cpu_features_available(hwcap: u64) -> bool {
     hwcap & ARM64_MODEL_HWCAP == ARM64_MODEL_HWCAP
 }
 
-#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "aarch64"), all(test, unix)))]
 fn arm64_model_elf_compatible(header: &[u8]) -> bool {
     header.len() >= 20
         && header.starts_with(b"\x7fELF\x02\x01\x01")
@@ -2438,6 +2442,7 @@ pub(crate) enum LocalModelExecutionUnavailable {
 }
 
 impl LocalModelExecutionUnavailable {
+    #[cfg(unix)]
     pub(crate) fn public_class(self) -> &'static str {
         match self {
             Self::UnsupportedHost => "unsupported_host",
@@ -2459,6 +2464,7 @@ impl std::fmt::Display for LocalModelExecutionUnavailable {
 
 impl std::error::Error for LocalModelExecutionUnavailable {}
 
+#[cfg(unix)]
 fn local_model_engine_acquisition_refusal(
     info: &PlatformInfo,
 ) -> Option<LocalModelExecutionUnavailable> {
@@ -2469,7 +2475,7 @@ fn local_model_engine_acquisition_refusal(
     .then_some(LocalModelExecutionUnavailable::SourceEngineRequired)
 }
 
-#[cfg(any(test, all(target_os = "linux", target_arch = "aarch64")))]
+#[cfg(any(all(target_os = "linux", target_arch = "aarch64"), all(test, unix)))]
 fn require_arm64_model_cpu_features(hwcap: u64) -> anyhow::Result<()> {
     if !arm64_model_cpu_features_available(hwcap) {
         return Err(anyhow::anyhow!(
@@ -2515,6 +2521,7 @@ pub(crate) fn verify_arm64_model_host(platform: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn probe_arm64_model_engine(path: &Path) -> anyhow::Result<()> {
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     {
@@ -2580,6 +2587,7 @@ fn probe_arm64_model_engine(path: &Path) -> anyhow::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn local_model_engine_receipt_args<'a>(
     component: &'a Component,
     platform_info: &'a PlatformInfo,
@@ -3006,14 +3014,14 @@ fn folder_name(dir: &Path) -> Option<std::ffi::OsString> {
 /// canonical path and the walk CID its install recorded. The Home reads this
 /// file, not a file beside the folder, so the folder's parent directory alone
 /// cannot name an install.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn install_cid_ledger(data_dir: &Path) -> PathBuf {
     data_dir.join("capsules").join("install-cids.json")
 }
 
 /// The canonical path of `dir`, whether or not it exists yet: a path whose
 /// last name does not exist is keyed under its canonical parent.
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn canonical_install_folder(dir: &Path) -> Option<PathBuf> {
     fs::canonicalize(dir).ok().or_else(|| {
         let parent = fs::canonicalize(dir.parent()?).ok()?;
@@ -3021,7 +3029,7 @@ fn canonical_install_folder(dir: &Path) -> Option<PathBuf> {
     })
 }
 
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 fn read_install_cid_ledger(data_dir: &Path) -> std::collections::BTreeMap<String, String> {
     fs::read_to_string(install_cid_ledger(data_dir))
         .ok()
@@ -3501,6 +3509,7 @@ pub(crate) fn catalog_head_cid(bytes: &[u8]) -> anyhow::Result<String> {
     Ok(cid::Cid::new_v1(0x55, hash).to_string())
 }
 
+#[cfg(unix)]
 fn verify_catalog_head(head_cid: &str, bytes: &[u8]) -> anyhow::Result<()> {
     let actual = catalog_head_cid(bytes)?;
     if actual != head_cid {
@@ -3511,6 +3520,7 @@ fn verify_catalog_head(head_cid: &str, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn resolve_model_catalog_source(manifest_path: &Path, dest: &Path) -> anyhow::Result<PathBuf> {
     let sibling = manifest_path
         .parent()
@@ -4217,6 +4227,7 @@ struct SupportUpdate<'a> {
     name: &'a str,
     component: &'a Component,
     info: &'a PlatformInfo,
+    #[cfg(unix)]
     old: Option<&'a Component>,
     /// Install or replace the component's own artifact.
     artifact: bool,
@@ -4285,6 +4296,7 @@ fn plan_update_support<'a>(
                 name,
                 component,
                 info,
+                #[cfg(unix)]
                 old: old_component,
                 artifact,
                 metadata,
@@ -4297,6 +4309,7 @@ fn plan_update_support<'a>(
 /// Install and refresh support after the updater installs the verified manifest
 /// bytes, from standalone setup. The publisher owns that manifest; setup's local
 /// stamping stays separate.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) async fn refresh_installed_components_for_update(
     data_dir: &Path,
@@ -4657,6 +4670,7 @@ pub(crate) async fn stage_update_support(
 
 /// The bytes of one admitted release row through an update's fetcher, checked
 /// against the row's signed checksum and size before they are used.
+#[cfg(unix)]
 async fn fetch_admitted_row(
     fetch: &crate::update::FetchFn,
     row: &crate::capsule_record::AdmittedRow,
@@ -5021,6 +5035,7 @@ fn verify_checksum(name: &str, data: &[u8], platform_info: &PlatformInfo) -> any
 
 /// Component installs keep the shared free-space reserve. A tarball is written
 /// and unpacked under the system temp directory, then copied to `dest`.
+#[cfg(unix)]
 fn require_component_space(dest: &Path, bytes: &[u8], is_tarball: bool) -> anyhow::Result<()> {
     let temp = is_tarball
         .then(|| crate::install_transaction::volume_space(&std::env::temp_dir()))
@@ -5029,6 +5044,7 @@ fn require_component_space(dest: &Path, bytes: &[u8], is_tarball: bool) -> anyho
 }
 
 /// `temp` and `dest` are (device, available bytes); `temp` is set for a tarball.
+#[cfg(unix)]
 fn component_space_fits(
     bytes: &[u8],
     temp: Option<(u64, u128)>,
@@ -5057,6 +5073,7 @@ fn component_space_fits(
 
 /// Extract the bytes of one admitted row; component archives are extracted only
 /// for admitted rows.
+#[cfg(unix)]
 fn extract_from_tarball(
     data: &[u8],
     dest: &Path,
@@ -5200,6 +5217,7 @@ fn sibling_scratch(dest: &Path) -> anyhow::Result<(PathBuf, PathBuf)> {
     Ok((parent.to_path_buf(), tmp))
 }
 
+#[cfg(unix)]
 fn sync_path(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()
 }

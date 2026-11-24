@@ -23,16 +23,22 @@ use crate::runtime::tests::{
 };
 use crate::runtime::Runtime;
 use crate::stage_cmd::{bundle_cid, run_staged_folder, stage_bundle};
+#[cfg(unix)]
 use axum::body::Body;
-use axum::http::{header::AUTHORIZATION, Request, StatusCode};
+#[cfg(unix)]
+use axum::http::header::AUTHORIZATION;
+#[cfg(unix)]
+use axum::http::{Request, StatusCode};
 use elastos_bundle_identity::Budget;
 use elastos_runtime::capability::pending::{GrantDuration, PendingRequestStore};
 use elastos_runtime::capability::{Action, CapabilityManager, CapabilityStore, TokenConstraints};
 use elastos_runtime::primitives::audit::AuditLog;
 use elastos_runtime::primitives::metrics::MetricsManager;
 use elastos_runtime::provider::ProviderRegistry;
+#[cfg(unix)]
 use elastos_runtime::session::{SessionRegistry, SessionType};
 use std::time::Duration;
+#[cfg(unix)]
 use tower::ServiceExt;
 
 /// One call a component made to the bridge: the capsule's id, the principal
@@ -213,6 +219,7 @@ struct RealBridge {
     dir: tempfile::TempDir,
     pending: Arc<PendingRequestStore>,
     capabilities: Arc<CapabilityManager>,
+    #[cfg(unix)]
     store: Arc<CapabilityStore>,
     provider: Arc<BusConformanceProvider>,
 }
@@ -259,17 +266,21 @@ impl RealBridge {
             .configure_capsule_admission(dir.path(), &keys, false)
             .await
             .unwrap();
+        #[cfg(not(unix))]
+        let _ = store;
         RealBridge {
             runtime,
             dir,
             pending,
             capabilities,
+            #[cfg(unix)]
             store,
             provider,
         }
     }
 
     /// Stage a bundle whose entrypoint is `bytes`, signed by `key`.
+    #[cfg(unix)]
     async fn staged_bytes(
         &self,
         name: &str,
@@ -512,6 +523,7 @@ fn calling_component() -> Vec<u8> {
 /// One read of [`PROBE`], then the invoke of that read, for whatever principal
 /// the launch bound. The bus fixture returns before it calls unless it runs
 /// as [`PERSON`], and a Home token names this Home's device.
+#[cfg(unix)]
 fn probe_component() -> Vec<u8> {
     // The model guest already asks and invokes once. Its resource is 22 bytes
     // and its invoke names `offers_list`; the probe is 24 bytes and the read
@@ -4369,6 +4381,7 @@ async fn the_launch_open_route_opens_a_signed_bundle_by_cid_and_refuses_a_tamper
 }
 
 /// One request to the router `elastos serve` builds.
+#[cfg(unix)]
 async fn http(
     app: &axum::Router,
     shell: &str,
@@ -4403,6 +4416,7 @@ async fn http(
 /// `events` from `GET /api/audit?type=capability_grant`, kept when they name
 /// `session`. An empty session keeps every one: a grant with no pending
 /// request still has to show up here.
+#[cfg(unix)]
 fn grants_for(events: &[serde_json::Value], session: &str) -> Vec<serde_json::Value> {
     events
         .iter()
@@ -4413,6 +4427,7 @@ fn grants_for(events: &[serde_json::Value], session: &str) -> Vec<serde_json::Va
 
 /// The real bridge, a shell session, and the router `elastos serve` builds
 /// from those same stores, with the person's Home token.
+#[cfg(unix)]
 struct ServerHome {
     bridge: RealBridge,
     app: axum::Router,
@@ -4421,6 +4436,7 @@ struct ServerHome {
     open_grant: String,
 }
 
+#[cfg(unix)]
 impl ServerHome {
     async fn trusting(key: &SigningKey) -> ServerHome {
         let bridge = RealBridge::trusting(&[key]).await;
@@ -4497,6 +4513,7 @@ impl ServerHome {
 }
 
 /// Content whose core is `component` under `manifest`, signed by `key`.
+#[cfg(unix)]
 async fn stage_content(
     bridge: &RealBridge,
     key: &SigningKey,
@@ -4517,6 +4534,7 @@ async fn stage_content(
         .await
 }
 
+#[cfg(unix)]
 async fn wait_for_request(
     home: &ServerHome,
     open: &tokio::task::JoinHandle<(StatusCode, String)>,

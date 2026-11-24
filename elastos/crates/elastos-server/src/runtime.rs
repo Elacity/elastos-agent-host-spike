@@ -2766,9 +2766,9 @@ pub(crate) mod tests {
     };
     use elastos_compute::{CapsuleInfo, ComputeProvider};
     use elastos_runtime::capability::pending::GrantDuration;
-    use elastos_runtime::capability::{
-        CapabilityManager, CapabilityStore, Settler, TokenConstraints,
-    };
+    #[cfg(unix)]
+    use elastos_runtime::capability::Settler;
+    use elastos_runtime::capability::{CapabilityManager, CapabilityStore, TokenConstraints};
     use elastos_runtime::primitives::audit::{AuditEvent, AuditLog};
     use elastos_runtime::primitives::metrics::MetricsManager;
     use elastos_runtime::provider::{

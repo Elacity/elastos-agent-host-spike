@@ -22,4 +22,17 @@
 # its +12.
 # +15 lines for the owner's Stop audit on CapsuleStop (A15-R slice 3): agent id, owner,
 # host bundle CID, launch id, and session. Measured 22 Nov 2026.
-12320
+# +131 measured on main 23 Nov 2026 (844c83549), recorded so the budget matches reality:
+# #1811 (P2-9 slice 1a/1b, every Carrier caller reaches a peer by DID through one checked
+# route) +21, unrecorded (#1831 then recorded its own +15 above, 12,305 -> 12,320, but the
+# count stood 21 over that line); #1827 (P2-11 Windows step 6: the Windows provider bridge
+# and Windows refusals in the Runtime) +110. Neither #1811 nor #1827 raised this file. The CI
+# core-size job is still advisory; the CTO's merge review now runs the check at the merge
+# head, so growth is raised in the same pull request again.
+# +666 for #1802 (P2-8 slice 3: native providers start only from a checked, held executable;
+# provider/checked_executable.rs with the macOS private verified copies, and its Windows refusal
+# twin), merged 23 Nov 2026 without a budget change; CTO decision under the delegated size
+# authority, noted in #1802's description. Measured on main after the merge.
+# +5 for #1804 (P2-8 slice 4a: a capsule start requires the component closure; the gate in
+# capsule/manager.rs component_closure_required). Measured 23 Nov 2026 after merging main.
+13122

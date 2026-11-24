@@ -1202,6 +1202,7 @@ mod gateway_browser_route_tests;
 mod gba;
 mod home_agent;
 mod home_authority_inventory;
+mod home_held_authority;
 mod home_system;
 mod inbox_audit_rows;
 mod inspect;

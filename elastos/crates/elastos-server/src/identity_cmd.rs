@@ -163,7 +163,9 @@ fn prompt_for_nickname(current: Option<&str>) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_identity_profile, prompt_for_nickname, set_local_nickname};
+    use super::prompt_for_nickname;
+    #[cfg(unix)]
+    use super::{load_identity_profile, set_local_nickname};
     use std::io::IsTerminal;
 
     #[cfg(unix)]

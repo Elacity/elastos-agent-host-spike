@@ -53,6 +53,7 @@ pub(super) async fn capsule_catalog(
     }
 }
 
+#[cfg(unix)]
 fn project_model_memory_fit(
     catalog: &mut CapsuleCatalogResponse,
     memory: Option<elastos_common::host_memory::HostMemory>,
