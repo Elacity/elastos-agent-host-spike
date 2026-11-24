@@ -580,15 +580,39 @@ async fn v2_resident_is_refused_from_folder_and_cid() {
     ))
     .unwrap();
     let folder = home.bundle("v2", &json.to_string(), &v2_component);
-    assert!(matches!(
-        home.runtime.run_local(&folder, Vec::new()).await,
-        Err(elastos_common::ElastosError::InvalidManifest(why))
-            if why == "Bus v2 contract not yet runnable"
-    ));
-    assert!(home.runtime.list_capsules().await.is_empty());
+    let handle = home
+        .runtime
+        .run_local(&folder, Vec::new())
+        .await
+        .expect("a folder start runs the v2 guest");
+    let running = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(entry) = home.runtime.get_capsule(handle.id.as_str()).await {
+                if entry.status == crate::runtime::CAPSULE_RUNNING {
+                    return entry;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the folder guest stays up");
+    assert_eq!(running.session_id, handle.id.as_str());
+    assert!(running.cause.is_none());
+    assert!(running.ended_at.is_none());
+    let ended = home
+        .runtime
+        .stop_capsule_by_id(handle.id.as_str())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ended.status, crate::runtime::CAPSULE_STOPPED);
+    assert_eq!(ended.cause.as_deref(), Some("stopped: user"));
+    assert!(ended.ended_at.is_some());
+    assert_eq!(ended.session_id, handle.id.as_str());
     assert!(
         !home.data().exists(),
-        "a refused folder start leaves no store"
+        "a folder start does not write the bundle store"
     );
 
     let cid = home.stage(&folder, &publisher).await;

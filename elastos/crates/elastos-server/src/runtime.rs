@@ -1448,14 +1448,6 @@ impl Runtime {
             }
         }
 
-        // The server has no owner or stop route for a resident v2 activation.
-        // Refuse it before loading a component or running any guest code.
-        if manifest.bus_contract.as_deref() == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT) {
-            return Err(ElastosError::InvalidManifest(
-                "Bus v2 contract not yet runnable".into(),
-            ));
-        }
-
         // Reject entrypoints that escape the capsule directory
         if manifest.entrypoint.contains("..")
             || std::path::Path::new(&manifest.entrypoint).is_absolute()
@@ -2237,14 +2229,19 @@ impl Runtime {
         model_admission: Option<AgentModelCeiling>,
         mode: LaunchMode,
     ) -> Result<()> {
-        let detached_component =
-            if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
-                Some(self.component_provider.clone().ok_or_else(|| {
-                    ElastosError::Compute("No component compute provider is configured".to_string())
-                })?)
-            } else {
-                None
-            };
+        // A v2 component stays up. A folder start uses this detached path,
+        // with the same admission, grants, and limits as a v1 start.
+        let v2_resident = handle.manifest.bus_contract.as_deref()
+            == Some(elastos_common::ELASTOS_BUS_V2_CONTRACT);
+        let detached_component = if (mode == LaunchMode::Detached || v2_resident)
+            && handle.manifest.is_component_capsule()
+        {
+            Some(self.component_provider.clone().ok_or_else(|| {
+                ElastosError::Compute("No component compute provider is configured".to_string())
+            })?)
+        } else {
+            None
+        };
         let held = detached_component
             .as_ref()
             .map(|component| ActivationContextHeld::new(self, handle, component.clone()));
