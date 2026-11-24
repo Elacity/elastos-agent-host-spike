@@ -7,6 +7,14 @@
 //! answer is the grant check. A cleared ceiling would refuse the call earlier,
 //! which the existing late-call rows already show. The stop flag is left unset
 //! on the replay for the same reason: the row is the grant.
+//!
+//! The refusal is a new `capability_validation_failed` warning for this caller
+//! and this token. After the instance has ended, that warning ends in
+//! `individually_revoked`. A replay from another run ends in `wrong_capsule`,
+//! the session check. A retained plan step is outside the pending store. The
+//! instance end drops that admission while the plan is still pending. The
+//! owner's later approval is then refused `admission_missing`, and the step's
+//! file is unchanged.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -247,17 +255,34 @@ async fn replay(
         .expect("the bridge answers the replay")
 }
 
+fn validation_failures(home: &ProbeLaunch) -> Vec<String> {
+    home.audit_log
+        .recent_events(8_000)
+        .into_iter()
+        .filter_map(|event| match event {
+            elastos_runtime::primitives::audit::AuditEvent::SecurityWarning {
+                warning_type,
+                details,
+                ..
+            } if warning_type == "capability_validation_failed" => Some(details),
+            _ => None,
+        })
+        .collect()
+}
+
 async fn assert_replay_refused(
     home: &ProbeLaunch,
     agent: &str,
     caller: &str,
     token: &CapabilityToken,
     manifest: Vec<elastos_common::AuthorityBound>,
+    reason: &str,
 ) {
     let uri = token.resource().as_str().to_string();
     let path = object_path(home, &uri);
     let before = std::fs::read(&path).expect("the journal file is on disk");
     let plain = read_plain(home, agent, &uri);
+    let before_warnings = validation_failures(home);
     let answer = replay(home, agent, caller, token, manifest).await;
     assert_eq!(
         answer["response"]["code"], "capability_denied",
@@ -276,6 +301,16 @@ async fn assert_replay_refused(
     assert!(
         !plain.windows(REPLAY.len()).any(|window| window == REPLAY),
         "the replay bytes are not the stored journal"
+    );
+    let token_id = token.id().to_string();
+    let expected =
+        format!("capsule {caller} presented token {token_id} failed validation: {reason}");
+    let count = |lines: &[String]| lines.iter().filter(|line| *line == &expected).count();
+    let after_warnings = validation_failures(home);
+    assert_eq!(
+        count(&after_warnings) - count(&before_warnings),
+        1,
+        "a new capability_validation_failed warning for this caller and token ends in {reason}: {expected}; warnings {after_warnings:?}"
     );
 }
 
@@ -332,13 +367,22 @@ async fn a_used_storage_grant_is_refused_after_stop() {
     let end = home.wait_ended(&used.session).await;
     assert_eq!(end.status, "stopped");
     assert_eq!(end.cause.as_deref(), Some("stopped: journal written"));
-    assert_replay_refused(&home, &agent, &used.session, &used.token, used.manifest).await;
+    assert_replay_refused(
+        &home,
+        &agent,
+        &used.session,
+        &used.token,
+        used.manifest,
+        "individually_revoked",
+    )
+    .await;
     grants.abort();
 }
 
-/// The same used grant is refused when the stop route cancels the instance
-/// while a later bridge call is still unanswered. That call is denied by the
-/// Runtime, and the journal file is unchanged.
+/// The stop row ends the instance and refuses the used grant. This row adds
+/// the unanswered notes write: that call is still open when the stop route
+/// runs, and the Runtime denies it. The used grant is refused after that
+/// denial, and the journal file is unchanged.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_used_storage_grant_is_refused_after_cancel() {
@@ -365,7 +409,15 @@ async fn a_used_storage_grant_is_refused_after_cancel() {
     assert_eq!(*settled_by, Settler::Runtime);
     let end = home.wait_ended(&used.session).await;
     assert_eq!(end.status, "stopped");
-    assert_replay_refused(&home, &agent, &used.session, &used.token, used.manifest).await;
+    assert_replay_refused(
+        &home,
+        &agent,
+        &used.session,
+        &used.token,
+        used.manifest,
+        "individually_revoked",
+    )
+    .await;
     grants.abort();
 }
 
@@ -406,13 +458,53 @@ async fn a_used_storage_grant_is_refused_after_failure() {
         ),
         "{cause}"
     );
-    assert_replay_refused(&home, &agent, &used.session, &used.token, used.manifest).await;
+    assert_replay_refused(
+        &home,
+        &agent,
+        &used.session,
+        &used.token,
+        used.manifest,
+        "individually_revoked",
+    )
+    .await;
+    grants.abort();
+}
+
+/// After the guest completes on its own, the storage grant that run used is
+/// refused. The file is unchanged.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_used_storage_grant_is_refused_after_the_guest_completes() {
+    if !require_agents() {
+        return;
+    }
+    let home = ProbeLaunch::new(&["a"]).await;
+    let agent = home.agents[0].clone();
+    let control = GrantControl::new(true);
+    let grants = spawn_grants(&home, Arc::clone(&control));
+    let used = launch_until_journal_is_used(&home, &agent, &control).await;
+    let _notes = wait_notes_write(&home, &used.session).await;
+    control.release_notes();
+    let end = home.wait_ended(&used.session).await;
+    assert_eq!(end.cause.as_deref(), Some("completed"), "{end:?}");
+    assert_replay_refused(
+        &home,
+        &agent,
+        &used.session,
+        &used.token,
+        used.manifest,
+        "individually_revoked",
+    )
+    .await;
     grants.abort();
 }
 
 /// After one run has stopped, a later run of the same agent cannot use that
-/// run's storage grant. The file is unchanged. The later run gets its own grant
-/// and its own journal write succeeds.
+/// run's storage grant. The same-session replay is revocation. The replay from
+/// the later run is the session check (`wrong_capsule`). That check is the
+/// proof that remains when a second live run is no longer admitted. The file
+/// is unchanged. The later run gets its own grant and its own journal write
+/// succeeds.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_later_run_cannot_use_the_earlier_runs_storage_grant() {
@@ -434,10 +526,12 @@ async fn a_later_run_cannot_use_the_earlier_runs_storage_grant() {
         &used.session,
         &used.token,
         used.manifest.clone(),
+        "individually_revoked",
     )
     .await;
 
-    let later = tokio::time::timeout(Duration::from_secs(15), home.launch(&agent))
+    // The launch loads the component, and that load includes its compile.
+    let later = tokio::time::timeout(Duration::from_secs(60), home.launch(&agent))
         .await
         .expect("the later run is admitted after the first has stopped")
         .expect("the later launch is admitted")
@@ -445,14 +539,28 @@ async fn a_later_run_cannot_use_the_earlier_runs_storage_grant() {
     assert_ne!(later.id, used.session, "the later run is a new instance");
     home.wait_pending(&later.id).await;
     let manifest = ceiling(&home, &later.id);
-    assert_replay_refused(&home, &agent, &later.id, &used.token, manifest).await;
+    assert_replay_refused(
+        &home,
+        &agent,
+        &later.id,
+        &used.token,
+        manifest,
+        "wrong_capsule",
+    )
+    .await;
     own_grant_finishes(&home, &agent, &later.id, &control, &used.token).await;
     grants.abort();
 }
 
 /// Where two runs of one agent are admitted together, the second cannot use
-/// the first's live storage grant. The file is unchanged. The second run gets
-/// its own grant.
+/// the first's live storage grant. The refusal is the session check
+/// (`wrong_capsule`). The file is unchanged. The second run gets its own
+/// grant.
+///
+/// Once U8 lands, a second live run of one agent is refused. This row then
+/// plants its second session, a resident row without a second launch, and
+/// keeps the session-check replay. The later-run row carries that proof for
+/// a run that starts after the first has ended.
 #[cfg(unix)]
 #[tokio::test]
 async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
@@ -466,7 +574,8 @@ async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
     let used = launch_until_journal_is_used(&home, &agent, &control).await;
     let _notes = wait_notes_write(&home, &used.session).await;
 
-    let second = tokio::time::timeout(Duration::from_secs(15), home.launch(&agent))
+    // The launch loads the component, and that load includes its compile.
+    let second = tokio::time::timeout(Duration::from_secs(60), home.launch(&agent))
         .await
         .expect("a second run is admitted while the first is live")
         .expect("the Runtime admits two runs of one agent at once")
@@ -474,11 +583,182 @@ async fn two_runs_of_one_agent_at_once_keep_separate_storage_grants() {
     assert_ne!(second.id, used.session);
     home.wait_pending(&second.id).await;
     let manifest = ceiling(&home, &second.id);
-    assert_replay_refused(&home, &agent, &second.id, &used.token, manifest).await;
+    assert_replay_refused(
+        &home,
+        &agent,
+        &second.id,
+        &used.token,
+        manifest,
+        "wrong_capsule",
+    )
+    .await;
     own_grant_finishes(&home, &agent, &second.id, &control, &used.token).await;
 
     control.release_notes();
     let first = home.wait_ended(&used.session).await;
     assert_eq!(first.cause.as_deref(), Some("completed"), "{first:?}");
     grants.abort();
+}
+
+#[derive(Clone, Copy)]
+enum InstanceEnd {
+    Stop,
+    Completed,
+}
+
+fn plan_record_path(dir: &std::path::Path, request_id: &str) -> std::path::PathBuf {
+    dir.join("inspect-actions")
+        .join(format!("{request_id}.json"))
+}
+
+/// The owner's approval is the stored move from `pending` to `approved`.
+/// The approve route writes that status. The dispatch below is what runs
+/// after it.
+fn owner_approves_pending_plan(dir: &std::path::Path, request_id: &str) {
+    let path = plan_record_path(dir, request_id);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("the plan record is on disk"))
+            .expect("the plan record is json");
+    assert_eq!(
+        record["status"], "pending",
+        "the plan is still pending when the instance has ended"
+    );
+    record["status"] = serde_json::json!("approved");
+    std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+}
+
+/// Today's rule. A plan step is retained for the live instance. The instance
+/// then ends, by the stop route or by the guest completing, while that plan
+/// is still pending. Ending the instance drops the retained admission. The
+/// owner then approves. The dispatch is refused `admission_missing`, and the
+/// step's file is unchanged.
+///
+/// The admission is dropped for a pending plan as well as any other. A change
+/// that keeps a pending plan's admission after the guest ends would let this
+/// dispatch proceed, and this assert would fail.
+async fn retained_plan_dispatch_after(end: InstanceEnd) {
+    let home = ProbeLaunch::new(&["plan"]).await;
+    let agent = home.agents[0].clone();
+    let root = home.root(&agent);
+    let target = format!("{root}/Documents/plan-step.md");
+    let path = object_path(&home, &target);
+    let plain = b"before-the-owner-approves";
+    crate::auth::write_principal_root_object(&home.data_dir, &agent, &root, &target, &path, plain)
+        .unwrap();
+    let plan = serde_json::json!({
+        "steps": [{
+            "scheme": "localhost",
+            "operation": "write",
+            "request": {
+                "path": target,
+                "content": [65, 70, 84, 69, 82],
+            },
+        }],
+    });
+
+    let run = home
+        .launch(&agent)
+        .await
+        .expect("the agent launch is admitted")
+        .0;
+    assert_eq!(run.id, run.session_id, "the instance id is its session");
+    home.wait_pending(&run.id).await;
+    let manifest = ceiling(&home, &run.id);
+    let created = crate::api::gateway::submit_pending_agent_plan(
+        &home.data_dir,
+        &home.owner,
+        &agent,
+        &run.id,
+        &run.session_id,
+        &plan,
+        91,
+    )
+    .expect("the plan step is retained as a pending record");
+    let request_id = created["request_id"].as_str().expect("the plan has an id");
+    assert_eq!(created["status"], "pending");
+    assert_eq!(created["id"], run.id);
+    let step = created["request"].clone();
+    let ctx = crate::resource_bridge::BridgeContext {
+        provider_registry: home.registry.clone(),
+        capability_manager: home.capability_manager.clone(),
+        pending_store: home.pending_store.clone(),
+        capsule_id: run.id.clone(),
+        session_id: run.session_id.clone(),
+        principal_id: Some(agent.clone()),
+        manifest_capabilities: manifest,
+        data_dir: Some(home.data_dir.clone()),
+        launch: None,
+        model_token_ceiling: None,
+        model_budget: None,
+        stop: None,
+    };
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        request_id,
+        &home.owner,
+        &ctx,
+        &step,
+    )
+    .expect("the plan step's dispatch admission is retained");
+
+    match end {
+        InstanceEnd::Stop => {
+            let (status, _) = stop_route(&home, &run.id, Some("plan still pending")).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            let ended = home.wait_ended(&run.id).await;
+            assert_eq!(ended.status, "stopped");
+        }
+        InstanceEnd::Completed => {
+            let grants = super::grant_probe_requests(
+                home.pending_store.clone(),
+                home.capability_manager.clone(),
+            );
+            let ended = home.wait_ended(&run.id).await;
+            grants.abort();
+            assert_eq!(ended.cause.as_deref(), Some("completed"), "{ended:?}");
+        }
+    }
+
+    let sealed_before = std::fs::read(&path).expect("the step's file is on disk");
+    let plain_before =
+        crate::auth::read_principal_root_object(&home.data_dir, &agent, &root, &target, &path)
+            .expect("the step's file still opens");
+    assert_eq!(plain_before, plain);
+    owner_approves_pending_plan(&home.data_dir, request_id);
+    let response = crate::resource_bridge::dispatch_agent_plan_step(
+        request_id,
+        &home.owner,
+        &agent,
+        &run.id,
+        &run.session_id,
+        &home.data_dir,
+        &step,
+    )
+    .await;
+    assert_eq!(
+        response["code"], "admission_missing",
+        "the dispatch is refused admission_missing: {response}"
+    );
+    assert_eq!(
+        std::fs::read(&path).expect("the step's file stays on disk"),
+        sealed_before,
+        "the file is unchanged"
+    );
+    assert_eq!(
+        crate::auth::read_principal_root_object(&home.data_dir, &agent, &root, &target, &path)
+            .expect("the step's file still opens"),
+        plain_before,
+        "the stored bytes are unchanged"
+    );
+}
+
+/// A retained plan step does not survive the instance. After stop, and after
+/// the guest completes, the owner's approval cannot dispatch it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_retained_plan_step_is_refused_after_the_instance_ends() {
+    if !require_agents() {
+        return;
+    }
+    retained_plan_dispatch_after(InstanceEnd::Stop).await;
+    retained_plan_dispatch_after(InstanceEnd::Completed).await;
 }
