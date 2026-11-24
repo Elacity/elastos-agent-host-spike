@@ -1088,12 +1088,19 @@ pub async fn home_launch_content(
 }
 
 /// The Runtime's open, asked as the shell with a grant for `home` minted from
-/// the person's own context: the person is never named by the request.
+/// the person's own context: the person is never named by the request. A
+/// context with no proof binding is refused before the Runtime is asked.
 async fn open_at_runtime(
     data_dir: &FsPath,
     context: &HomeLaunchTokenContext,
     cid: &str,
 ) -> Result<RuntimeOpened, (StatusCode, String)> {
+    if context.proof_binding_id().is_none() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "proofless home launch token is limited to home and home-cli".to_string(),
+        ));
+    }
     let unavailable = |what: &str| (StatusCode::SERVICE_UNAVAILABLE, what.to_string());
     let coords = load_live_runtime_coords(data_dir)
         .await
@@ -1449,6 +1456,70 @@ mod r4_root_tests {
                 "R4 viewer root check"
             );
         }
+    }
+
+    /// A device-minted `home` token can reach this hop with browser headers.
+    /// Content open refuses it before it asks the Runtime. A proof-bound
+    /// context still reaches the runtime lookup, and the shell grant it would
+    /// sign is one the Runtime accepts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn content_open_refuses_a_proofless_context_before_the_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let proofless =
+            crate::api::gateway::issue_local_runtime_home_launch_token(dir.path(), "home").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "localhost:61180".parse().unwrap());
+        headers.insert("origin", "http://localhost:61180".parse().unwrap());
+        headers.insert("referer", "http://localhost:61180/home/".parse().unwrap());
+        headers.insert("sec-fetch-site", "same-origin".parse().unwrap());
+        headers.insert("x-elastos-home-token", proofless.parse().unwrap());
+        let context = require_home_page_or_cli_launch_context(dir.path(), &headers).unwrap();
+        assert!(context.proof_binding_id().is_none());
+        let refused = open_at_runtime(dir.path(), &context, "bafy-good")
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, StatusCode::UNAUTHORIZED);
+        assert!(refused.1.contains("proofless"), "{}", refused.1);
+
+        let mut cli_headers = HeaderMap::new();
+        cli_headers.insert("x-elastos-home-token", proofless.parse().unwrap());
+        let page_only =
+            require_home_page_or_cli_launch_context(dir.path(), &cli_headers).unwrap_err();
+        assert_eq!(page_only.to_string(), "home_page_only");
+
+        let home_cli =
+            crate::api::gateway::issue_local_runtime_home_launch_token(dir.path(), "home-cli")
+                .unwrap();
+        let mut cli_token_headers = HeaderMap::new();
+        cli_token_headers.insert("x-elastos-home-token", home_cli.parse().unwrap());
+        let mismatch =
+            require_home_page_or_cli_launch_context(dir.path(), &cli_token_headers).unwrap_err();
+        assert_eq!(mismatch.to_string(), "home_cli_launch_grant_mismatch");
+
+        let bound = crate::api::gateway::bind_device_session_grant(dir.path(), &["home"]).unwrap();
+        let runtime = open_at_runtime(dir.path(), &bound, "bafy-good")
+            .await
+            .unwrap_err();
+        assert_eq!(runtime.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(runtime.1, "local runtime is not running");
+
+        let shell = issue_home_projection_launch_token_with_context(
+            dir.path(),
+            "home",
+            "home-shell",
+            &bound,
+        )
+        .unwrap();
+        let mut shell_headers = HeaderMap::new();
+        shell_headers.insert("x-elastos-home-token", shell.parse().unwrap());
+        crate::api::gateway::require_internal_shell_content_open_context(
+            dir.path(),
+            &shell_headers,
+        )
+        .unwrap();
     }
 }
 

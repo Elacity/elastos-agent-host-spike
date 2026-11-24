@@ -626,4 +626,27 @@ mod tests {
             0o700
         );
     }
+
+    #[test]
+    fn compose_does_not_contain_encryption_key() {
+        let source = include_str!("provider_host.rs");
+        let unix_body = source
+            .split_once("pub(crate) async fn compose(plan: &ProviderHostPlan)")
+            .unwrap()
+            .1
+            .split_once("\n#[cfg(windows)]")
+            .unwrap()
+            .0;
+        let windows_body = source
+            .split_once("pub(crate) async fn compose(_plan: &ProviderHostPlan)")
+            .unwrap()
+            .1
+            .split_once("\npub(crate) async fn run(")
+            .unwrap()
+            .0;
+        assert!(unix_body.contains("load_or_create_device_key"));
+        assert!(unix_body.contains("derive_did"));
+        assert!(!unix_body.contains("encryption_key"), "{unix_body}");
+        assert!(!windows_body.contains("encryption_key"), "{windows_body}");
+    }
 }

@@ -1448,7 +1448,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
         .unwrap()
         .unwrap();
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(token)
+        .decode(&token)
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
@@ -1464,7 +1464,192 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
         payload["payload"]["launch_context"]["authority_actor"],
         HOME_CAPSULE_ID
     );
+    require_carried_home_launch_token(dir.path(), &token, &["people"]).unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gateway_owned_home_cli_issuer_refuses_a_grant_that_does_not_name_home() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let now = now_ts();
+    let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    store_home_cli_principal(dir.path());
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
+    );
+    crate::auth::store_session_grant(
+        dir.path(),
+        AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: context.grant_id.clone(),
+            session_id: context.session_id.clone(),
+            principal_id: context.principal_id().to_string(),
+            proof_binding_id: context.proof_binding_id.clone().unwrap(),
+            issued_at: now,
+            expires_at: now + 300,
+            apps: vec!["library".to_string()],
+        },
+    )
+    .unwrap();
+
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        context.principal_id().to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        context.session_id.clone(),
+    );
+    let _proof = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
+        context.proof_binding_id.clone().unwrap(),
+    );
+    let _grant = EnvRestore::set(HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV, context.grant_id.clone());
+
+    let refused = issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("auth session grant is not authorized for app"),
+        "{refused}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gateway_owned_env_without_a_proof_binding_mints_no_device_token_for_people() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        "person:home-cli-test".to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        "auth:home-cli-test".to_string(),
+    );
+    let _proof = EnvRestore::set(HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV, String::new());
+    let _grant = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
+        "grant:home-cli-test".to_string(),
+    );
+
+    assert!(
+        issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        issue_local_runtime_home_launch_token(dir.path(), "people")
+            .unwrap_err()
+            .to_string(),
+        "device launch authority is limited to home and home-cli"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gateway_owned_env_refuses_a_revoked_or_expired_grant() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let now = now_ts();
+    let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    store_home_cli_principal(dir.path());
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        "person:home-cli-test".to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        "auth:home-cli-test".to_string(),
+    );
+    let _proof = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
+        "proof:passkey:home-cli-test".to_string(),
+    );
+    let _grant = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
+        "grant:home-cli-test".to_string(),
+    );
+    let grant = |expires_at| AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: "grant:home-cli-test".to_string(),
+        session_id: "auth:home-cli-test".to_string(),
+        principal_id: "person:home-cli-test".to_string(),
+        proof_binding_id: "proof:passkey:home-cli-test".to_string(),
+        issued_at: now.saturating_sub(10),
+        expires_at,
+        apps: vec![HOME_CAPSULE_ID.to_string()],
+    };
+    crate::auth::store_session_grant(dir.path(), grant(now)).unwrap();
+    let expired = issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+        .unwrap_err()
+        .to_string();
+    assert!(expired.contains("auth session is not active"), "{expired}");
+
+    crate::auth::store_session_grant(dir.path(), grant(now + 300)).unwrap();
+    crate::auth::revoke_session_grant(dir.path(), "auth:home-cli-test", now).unwrap();
+    let revoked = issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+        .unwrap_err()
+        .to_string();
+    // The next read drops a revoked session, so the mint finds nothing.
+    assert!(revoked.contains("auth session not found"), "{revoked}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gateway_owned_env_without_a_proof_binding_still_mints_home_and_home_cli() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        "person:home-cli-test".to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        "auth:home-cli-test".to_string(),
+    );
+    let _proof = EnvRestore::set(HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV, String::new());
+    let _grant = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
+        "grant:home-cli-test".to_string(),
+    );
+
+    for app in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID] {
+        assert!(
+            issue_gateway_owned_home_cli_launch_token(dir.path(), app)
+                .unwrap()
+                .is_none(),
+            "{app}"
+        );
+        let token = issue_local_runtime_home_launch_token(dir.path(), app)
+            .unwrap_or_else(|err| panic!("{app}: {err}"));
+        require_carried_home_launch_token(dir.path(), &token, &[app])
+            .unwrap_or_else(|err| panic!("{app}: {err}"));
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_reports_identity_and_launch_targets() {
@@ -3383,6 +3568,137 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
 
 #[cfg(unix)]
 #[tokio::test]
+async fn ticketless_exit_stream_dials_the_peer_and_refuses_a_wrong_key() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network.clone()).await;
+    accept_services_contact_pair(&alice, &bob);
+    let action = services_contact_pending_request(left.path(), right.path(), &alice, &bob).await;
+    let request_id = action.strip_prefix("service-approve-request:").unwrap();
+    let grant_id = format!(
+        "services-remote-exit-grant-{}",
+        hex::encode(&Sha256::digest(request_id.as_bytes())[..8])
+    );
+    let token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let relay_path = right.path().join("exit-ticketless.sock");
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+    registry
+        .register_sub_provider(
+            "exit",
+            Arc::new(ServicesCarrierRelayProvider {
+                path: relay_path,
+                calls: calls.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let (_, alice_did) = elastos_identity::load_or_create_did(left.path()).unwrap();
+    let (_, bob_did) = elastos_identity::load_or_create_did(right.path()).unwrap();
+    let local_node = crate::carrier::start_isolated_carrier_node_with_registry(
+        &alice.device_key,
+        &alice_did,
+        left.path().to_path_buf(),
+        None,
+    )
+    .await
+    .unwrap();
+    let remote_node = crate::carrier::start_isolated_carrier_node_with_registry(
+        &bob.device_key,
+        &bob_did,
+        right.path().to_path_buf(),
+        Some(Arc::downgrade(&registry)),
+    )
+    .await
+    .unwrap();
+    let provider_addr =
+        crate::carrier::tests::wait_for_direct_endpoint_addr(&remote_node.endpoint).await;
+    // Address book only. The request below carries no ticket. A dial that
+    // ignored the peer key would still reach Bob, because the wrong key is
+    // stored on Bob's socket.
+    local_node
+        .memory_lookup
+        .add_endpoint_info(provider_addr.clone());
+    let wrong = iroh::SecretKey::from_bytes(&[0xE2; 32]).public();
+    local_node
+        .memory_lookup
+        .add_endpoint_info(iroh::EndpointAddr::from(wrong).with_addrs(provider_addr.addrs.clone()));
+    let mut local = crate::carrier::CarrierRuntimeService::new(local_node);
+    let mut remote = crate::carrier::CarrierRuntimeService::new(remote_node);
+    remote.configure_browser_exit_network(network).await;
+    let endpoint = local.endpoint().unwrap();
+    let wire = crate::carrier::BrowserCarrierStreamRequest {
+        connect_ticket: String::new(),
+        peer_did: Some(bob.peer_id.clone()),
+        carrier_service: "elastos://exit/open_stream".into(),
+        grant_id,
+        stream_id: "consumer:stream:ticketless".into(),
+        target: "tls://example.com:443".into(),
+        principal_id: Some(alice.authority.principal_id.clone()),
+        reason: None,
+        timeout_ms: Some(5_000),
+    };
+    assert!(wire.connect_ticket.is_empty());
+    let opened = crate::carrier::open_browser_carrier_stream_on_endpoint(&endpoint, &wire)
+        .await
+        .expect("a ticketless Exit grant opens a stream to the peer key");
+    drop(opened);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["op"] == "open_stream")
+            .count(),
+        1,
+        "the ticketless dial did not reach Exit"
+    );
+    let mut wrong_wire = wire;
+    wrong_wire.peer_did = Some(wrong.to_string());
+    wrong_wire.stream_id = "consumer:stream:wrong-key".into();
+    let err = match crate::carrier::open_browser_carrier_stream_on_endpoint(&endpoint, &wrong_wire)
+        .await
+    {
+        Ok(_) => panic!("a wrong peer key is refused"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains(crate::carrier::SERVICE_PROVIDER_UNREACHABLE)
+            || err
+                .to_string()
+                .contains("does not match the requested peer"),
+        "{err:#}"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["op"] == "open_stream")
+            .count(),
+        1,
+        "a wrong key must not open Bob's Exit"
+    );
+    remote.shutdown().await.unwrap();
+    local.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_services_exit_decision_order_preserves_pending_and_committed_denial() {
     for pending in [true, false] {
         let left = tempfile::tempdir().unwrap();
@@ -3891,11 +4207,8 @@ async fn test_services_remote_exit_request_delivers_provider_inbox_notification(
         .as_array()
         .unwrap()
         .iter()
-        .find(|exit| {
-            exit["connect_ticket"] == format!("fake-ticket-{right_peer_id}")
-                && exit["peer_did"] == right_peer_id
-        })
-        .expect("approval should install a private remote Carrier Exit grant");
+        .find(|exit| exit.get("connect_ticket").is_none() && exit["peer_did"] == right_peer_id)
+        .expect("approval should install a remote Carrier Exit grant for the peer DID");
     assert_eq!(
         installed_exit["allowed_principals"][0],
         left_authority.principal_id
@@ -3903,6 +4216,241 @@ async fn test_services_remote_exit_request_delivers_provider_inbox_notification(
     assert_eq!(installed_exit["allowed_ports"], json!([80, 443]));
     assert_eq!(installed_exit["max_active_streams"], 64);
     assert_eq!(installed_exit["max_active_streams_per_principal"], 64);
+}
+
+#[cfg(unix)]
+fn text_has_socket_address(text: &str) -> bool {
+    text.split(|ch: char| {
+        ch.is_ascii_whitespace() || matches!(ch, '"' | ',' | '{' | '}' | '[' | ']' | '\\')
+    })
+    .any(token_is_socket_address)
+}
+
+#[cfg(unix)]
+fn token_is_socket_address(token: &str) -> bool {
+    if let Some(ip) = token.strip_prefix('[') {
+        let Some((addr, port)) = ip.rsplit_once("]:") else {
+            return false;
+        };
+        return !addr.is_empty()
+            && addr.contains(':')
+            && (1..=5).contains(&port.len())
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port
+                .parse::<u32>()
+                .ok()
+                .is_some_and(|port| port > 0 && port <= 65535);
+    }
+    let Some((addr, port)) = token.rsplit_once(':') else {
+        return false;
+    };
+    let octets = addr.split('.').collect::<Vec<_>>();
+    octets.len() == 4
+        && octets.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.len() <= 3
+                && octet.bytes().all(|byte| byte.is_ascii_digit())
+                && octet.parse::<u16>().ok().is_some_and(|n| n <= 255)
+        })
+        && (1..=5).contains(&port.len())
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|port| port > 0 && port <= 65535)
+}
+
+#[cfg(unix)]
+fn ticket_has_socket_address(text: &str) -> bool {
+    crate::carrier::decode_ticket_endpoints(text)
+        .into_iter()
+        .any(|endpoint| {
+            endpoint
+                .addrs
+                .iter()
+                .any(|addr| matches!(addr, iroh::TransportAddr::Ip(_)))
+        })
+}
+
+#[cfg(unix)]
+fn json_reveals_socket_address(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(key, child)| key == "connect_ticket" || json_reveals_socket_address(child)),
+        serde_json::Value::Array(items) => items.iter().any(json_reveals_socket_address),
+        serde_json::Value::String(text) => {
+            text_has_socket_address(text) || ticket_has_socket_address(text)
+        }
+        _ => false,
+    }
+}
+
+/// A service-decision body reveals a socket address when it names
+/// `connect_ticket`, contains an ip:port, or carries a Carrier ticket whose
+/// endpoints hold one.
+#[cfg(unix)]
+fn service_decision_body_reveals_socket_address(body: &str) -> bool {
+    if body.contains("connect_ticket") || text_has_socket_address(body) {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .is_some_and(|value| json_reveals_socket_address(&value))
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+#[tokio::test]
+async fn service_decision_gossip_recv_does_not_reveal_a_socket_address() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+    let ticket = services_direct_route_ticket(&bob.peer_id);
+    assert!(
+        ticket_has_socket_address(&ticket),
+        "the fixture ticket must decode to a socket address"
+    );
+    bus.lock()
+        .await
+        .ticket_by_peer
+        .insert(bob.peer_id.clone(), ticket.clone());
+
+    let action = services_contact_pending_request(left.path(), right.path(), &alice, &bob).await;
+    let inbox_token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &inbox_token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let engine_action =
+        services_contact_pending_engine_request(left.path(), right.path(), &alice, &bob).await;
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &inbox_token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": engine_action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let model_action =
+        services_contact_pending_model_request(left.path(), right.path(), &alice, &bob).await;
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &inbox_token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": model_action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let recv = alice
+        .peer_provider
+        .send_raw(&json!({
+            "op": "gossip_recv",
+            "topic": super::super::gateway_home_system::HOME_SERVICES_REQUESTS_TOPIC,
+            "consumer_id": "service-decision-socket-scan",
+            "limit": 64,
+        }))
+        .await
+        .unwrap();
+    let messages = recv["data"]["messages"].as_array().unwrap();
+    let mut decisions = Vec::new();
+    for message in messages {
+        let content = message["content"].as_str().unwrap_or("");
+        assert!(
+            !service_decision_body_reveals_socket_address(content),
+            "gossip body reveals a socket address: {content}"
+        );
+        let payload: serde_json::Value = serde_json::from_str(content).unwrap();
+        if payload["kind"] == "service_access_decision" && payload["decision"] == "approved" {
+            let verified = crate::carrier::verify_service_message(message, "provider_peer_id")
+                .expect("step 2 signature check still accepts the decision");
+            assert_eq!(verified["provider_peer_id"], bob.peer_id);
+            assert!(verified["signer_did"].as_str().is_some());
+            assert!(verified.get("connect_ticket").is_none());
+            decisions.push(verified);
+        }
+    }
+    let exit_decision = decisions
+        .iter()
+        .find(|payload| payload.get("remote_exit_grant").is_some())
+        .expect("exit decision");
+    let engine_decision = decisions
+        .iter()
+        .find(|payload| payload.get("remote_engine_grant").is_some())
+        .expect("engine decision");
+    assert_eq!(exit_decision["remote_exit_grant"]["peer_did"], bob.peer_id);
+    assert!(exit_decision["remote_exit_grant"]
+        .get("connect_ticket")
+        .is_none());
+    assert_eq!(
+        engine_decision["remote_engine_grant"]["peer_did"],
+        bob.peer_id
+    );
+    assert!(engine_decision["remote_engine_grant"]
+        .get("connect_ticket")
+        .is_none());
+    let model_decision = decisions
+        .iter()
+        .find(|payload| payload.get("remote_model_grant").is_some())
+        .expect("model decision");
+    assert_eq!(
+        model_decision["remote_model_grant"]["peer_did"],
+        bob.peer_id
+    );
+    assert!(model_decision["remote_model_grant"]
+        .get("connect_ticket")
+        .is_none());
+    for decision in [&exit_decision, &engine_decision, &model_decision] {
+        assert!(
+            !service_decision_body_reveals_socket_address(&decision.to_string()),
+            "decision reveals a socket address: {decision}"
+        );
+    }
+
+    let services_token =
+        app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &alice.authority);
+    let (_, summary) = home_test_get_json(
+        &alice.app,
+        "/api/apps/services/summary",
+        &services_token,
+        "null",
+    )
+    .await;
+    let summary_text = summary.to_string();
+    assert!(!summary_text.contains(&ticket));
+    assert!(!summary_text.contains("203.0.113.8"));
+    assert!(!summary_text.contains("connect_ticket"));
+    let exit_config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(left.path().join("config/exit-provider.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(!left.path().join("operator-control.json").exists());
+    assert!(exit_config["remote_carrier_exits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|exit| exit.get("connect_ticket").is_none() && exit["peer_did"] == bob.peer_id));
+    let saved = services_contact_saved_state(left.path(), &alice.authority, "services-state.json");
+    let engine_grant =
+        &saved["remote_offer_requests"][services_engine_offer(&bob)]["remote_engine_grant"];
+    assert_eq!(engine_grant["peer_did"], bob.peer_id);
+    assert!(engine_grant.get("connect_ticket").is_none());
+    let model_grant =
+        &saved["remote_offer_requests"][services_model_offer(&bob)]["remote_model_grant"];
+    assert_eq!(model_grant["peer_did"], bob.peer_id);
+    assert!(model_grant.get("connect_ticket").is_none());
 }
 
 #[cfg(unix)]
@@ -3985,7 +4533,12 @@ async fn test_services_remote_exit_request_local_only_does_not_save_requested_st
         "{}",
         String::from_utf8_lossy(&body)
     );
-    assert!(String::from_utf8_lossy(&body).contains("not delivered"));
+    let failure = String::from_utf8_lossy(&body);
+    assert!(failure.contains("not delivered"), "{failure}");
+    assert!(
+        failure.contains(crate::carrier::SERVICE_PROVIDER_UNREACHABLE),
+        "{failure}"
+    );
 
     let left_services_after = left_app
         .oneshot(
@@ -6353,7 +6906,10 @@ async fn test_system_summary_reports_trusted_source_update_policy() {
 async fn test_system_guest_registration_requires_admin_passkey() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
-    let local_system_token = system_app_token(dir.path());
+    let local_context = local_home_launch_token_context(dir.path()).unwrap();
+    let local_system_token =
+        issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &local_context)
+            .unwrap();
     let authority = passkey_authority(dir.path());
     let guest = passkey_authority_with_name_role(
         dir.path(),
@@ -6451,8 +7007,10 @@ async fn system_community_membership_is_home_wide_and_requires_current_owner_aut
     let marker = dir
         .path()
         .join("collaboration-community-membership-v1.json");
+    let local_context = local_home_launch_token_context(dir.path()).unwrap();
     let mut denied_tokens = vec![
-        system_app_token(dir.path()),
+        issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &local_context)
+            .unwrap(),
         projection_launch_token_for_authority_context(dir.path(), PEOPLE_CAPSULE_ID, &authority),
     ];
     for index in 0..3 {
@@ -7609,7 +8167,7 @@ async fn test_home_launch_validates_shell_targets() {
         .unwrap();
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 
-    let home_token = home_app_token(dir.path());
+    let home_token = granted_home_app_token(dir.path());
     let cookie_only = app
         .clone()
         .oneshot(
@@ -7666,6 +8224,7 @@ async fn test_home_launch_validates_shell_targets() {
     assert_eq!(payload["capsule_id"], "wasm-chat-room-instance");
     assert_isolated_launch_route(payload["route"].as_str().unwrap(), "chat-room");
 
+    let shell_home = granted_home_app_token(dir.path());
     let other_page = app
         .clone()
         .oneshot(
@@ -7676,7 +8235,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/apps/system/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"chat-room"}"#))
                 .unwrap(),
@@ -7717,7 +8276,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"library"}"#))
                 .unwrap(),
@@ -7746,7 +8305,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"projection-app"}"#))
                 .unwrap(),
@@ -7773,7 +8332,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"wallet-metamask"}"#))
                 .unwrap(),
@@ -7799,7 +8358,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{"target":"documents","query":{"doc":"did:key:z6ExampleDoc","view":"read"}}"#,
@@ -7828,7 +8387,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{"target":"documents","query":{"cid":"bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi","uri":"elastos://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi","view":"read"}}"#,
@@ -7866,7 +8425,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     r#"{"target":"chat-room","query":{"invite":"elastos://peer/invite?token=abc-123"}}"#,
@@ -7897,7 +8456,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"gba-ucity"}"#))
                 .unwrap(),
@@ -7930,7 +8489,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"missing-shell-target"}"#))
                 .unwrap(),
@@ -8011,6 +8570,7 @@ async fn test_window_policy_survives_discovery_catalog_and_home_launch() {
             .unwrap();
         assert!(absent.get("window_policy").is_none());
         let app = gateway_router(test_state(dir.path()));
+        let home_token = granted_home_app_token(dir.path());
         for target in [
             "window-app",
             "window-viewer",
@@ -8027,7 +8587,7 @@ async fn test_window_policy_survives_discovery_catalog_and_home_launch() {
                         .header("origin", "http://localhost:61180")
                         .header("sec-fetch-site", "same-origin")
                         .header("referer", "http://localhost:61180/home/")
-                        .header("x-elastos-home-token", home_app_token(dir.path()))
+                        .header("x-elastos-home-token", home_token.clone())
                         .header(CONTENT_TYPE, "application/json")
                         .body(Body::from(json!({"target": target}).to_string()))
                         .unwrap(),
@@ -9684,6 +10244,7 @@ async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
     let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
     let _runtime = start_fake_runtime(dir.path(), bus, "system-peer").await;
     let app = gateway_router(test_state(dir.path()));
+    let owner = passkey_authority(dir.path());
 
     let launch = app
         .clone()
@@ -9695,7 +10256,7 @@ async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", owner.home_token)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"system"}"#))
                 .unwrap(),
@@ -9898,7 +10459,7 @@ async fn test_home_launch_rejects_source_wasi_materialization() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", granted_home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"test-wasm-viewer"}"#))
                 .unwrap(),
@@ -9932,6 +10493,7 @@ async fn test_home_launch_rejects_source_wasi_materialization() {
 async fn test_home_launch_reports_system_launch_failure_when_runtime_cannot_start() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
+    let owner = passkey_authority(dir.path());
 
     let launch = app
         .clone()
@@ -9943,7 +10505,7 @@ async fn test_home_launch_reports_system_launch_failure_when_runtime_cannot_star
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", owner.home_token)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"system"}"#))
                 .unwrap(),
@@ -10578,6 +11140,13 @@ async fn test_home_appearance_preferences_fail_closed_and_signed_out_defaults_st
         non_regular_write.status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
+}
+
+fn services_model_offer(fixture: &ServicesContactFixture) -> String {
+    format!(
+        "offer:{}:model",
+        home_people_contact_id(&fixture.profile.document().profile_did)
+    )
 }
 
 fn services_engine_offer(fixture: &ServicesContactFixture) -> String {
@@ -11263,6 +11832,283 @@ async fn services_contact_pending_engine_request(
         .to_string()
 }
 
+async fn services_contact_pending_model_request(
+    left: &std::path::Path,
+    right: &std::path::Path,
+    alice: &ServicesContactFixture,
+    bob: &ServicesContactFixture,
+) -> String {
+    let model_id = "model:local-0123456789abcdef0123456789abcdef";
+    std::fs::create_dir_all(right.join("bin")).unwrap();
+    std::fs::write(right.join("bin/model-provider"), b"fixture").unwrap();
+    let token = app_token_for_authority(right, SERVICES_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({"offer_id": MODEL_LOCAL_OFFER, "section": "mine", "selected": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revision = Arc::new(std::sync::Mutex::new(format!("sha256:{}", "a".repeat(64))));
+    bob.registry
+        .register_sub_provider(
+            "model",
+            Arc::new(ServicesCatalogModelProvider {
+                offer: json!({"id": model_id, "title": "SmolLM2", "operation": "text.generate"}),
+                revision: revision.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let offer = services_model_offer(bob);
+    let token = app_token_for_authority(left, SERVICES_CAPSULE_ID, &alice.authority);
+    let (status, body) = services_contact_post(
+        &alice.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({"offer_id": offer, "section": "catalog", "selected": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bob.discovery_service
+        .sync_services_mailboxes_once(right, 0)
+        .await;
+    let (status, summary) =
+        home_test_get_json(&alice.app, "/api/apps/services/summary", &token, "null").await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let (status, body) = services_contact_post(
+        &alice.app,
+        &token,
+        "/api/apps/services/offers",
+        json!({
+            "offer_id": offer,
+            "section": "others",
+            "selected": true,
+            "model_offer_id": model_id,
+            "model_offer_revision": format!("sha256:{}", "a".repeat(64)),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    bob.discovery_service
+        .sync_services_mailboxes_once(right, 0)
+        .await;
+    let (status, _) = home_test_post_json(
+        &bob.app,
+        "/api/apps/home/launch",
+        &bob.authority.home_token,
+        "http://localhost:61180",
+        json!({"target": INBOX_CAPSULE_ID}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = app_token_for_authority(right, INBOX_CAPSULE_ID, &bob.authority);
+    let (_, inbox) = home_test_get_json(&bob.app, "/api/apps/inbox/summary", &token, "null").await;
+    inbox["notifications"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "service_access_request")
+        .unwrap()["action_ref"]["action_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+#[tokio::test]
+async fn service_grants_install_on_the_consumer_without_a_ticket() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+    approve_exit_engine_and_model(left.path(), right.path(), &alice, &bob).await;
+    assert!(!left.path().join("operator-control.json").exists());
+    assert!(!right.path().join("operator-control.json").exists());
+    assert_installed_service_grants_have_no_ticket(left.path(), &alice, &bob);
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+#[tokio::test]
+async fn second_principal_on_the_same_home_gets_none_of_the_service_grants() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network).await;
+    accept_services_contact_pair(&alice, &bob);
+    approve_exit_engine_and_model(left.path(), right.path(), &alice, &bob).await;
+    assert_installed_service_grants_have_no_ticket(left.path(), &alice, &bob);
+
+    let guest = passkey_authority_with_name_role(
+        left.path(),
+        Some("guest"),
+        crate::auth::RuntimePrincipalRole::Guest,
+    );
+    let guest_root = crate::auth::principal_localhost_root(&guest.principal_id);
+    let guest_state_uri = format!("{guest_root}/.AppData/ElastOS/Home/services-state.json");
+    let guest_state_path =
+        elastos_common::localhost::rooted_localhost_fs_path(left.path(), &guest_state_uri).unwrap();
+    assert!(
+        !guest_state_path.exists(),
+        "the second principal must not receive the first principal's services state"
+    );
+    let root = crate::auth::ResolvedPrincipalRoot::resolve(
+        left.path(),
+        &crate::api::gateway::gateway_home_token::home_launch_auth_data_dir(left.path()),
+        &guest.principal_id,
+    )
+    .unwrap();
+    let guest_context = HomeLaunchTokenContext::resolved(
+        root,
+        guest.session_id.clone(),
+        Some(guest.proof_binding_id.clone()),
+        guest.grant_id.clone(),
+    );
+    let model_grants = super::super::gateway_home_system::home_services_remote_model_grants(
+        left.path(),
+        &guest_context,
+        None,
+    )
+    .unwrap();
+    let engine_grants = super::super::gateway_home_system::home_services_remote_engine_grants(
+        left.path(),
+        &guest_context,
+        None,
+    )
+    .unwrap();
+    assert!(model_grants.is_empty(), "{model_grants:?}");
+    assert!(engine_grants.is_empty(), "{engine_grants:?}");
+    let exit_config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(left.path().join("config/exit-provider.json")).unwrap(),
+    )
+    .unwrap();
+    let allowed = &exit_config["remote_carrier_exits"][0]["allowed_principals"];
+    assert_eq!(allowed, &json!([alice.authority.principal_id]));
+    assert!(!allowed.to_string().contains(&guest.principal_id));
+
+    let guest_token = app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &guest);
+    let (status, summary) = home_test_get_json(
+        &alice.app,
+        "/api/apps/services/summary",
+        &guest_token,
+        "null",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let offers = summary["remote_offers"].as_array().unwrap();
+    assert!(
+        offers.iter().all(|offer| {
+            offer["offer_id"] != services_contact_offer(&bob)
+                && offer["offer_id"] != services_engine_offer(&bob)
+                && offer["offer_id"] != services_model_offer(&bob)
+                && offer["service_kind"] != "browser_engine"
+                && offer["service_kind"] != MODEL_SERVICE_KIND
+        }),
+        "{summary}"
+    );
+    let saved = services_contact_saved_state(left.path(), &alice.authority, "services-state.json");
+    let grant_ids = [
+        exit_config["remote_carrier_exits"][0]["grant_id"]
+            .as_str()
+            .unwrap(),
+        saved["remote_offer_requests"][services_engine_offer(&bob)]["remote_engine_grant"]
+            ["grant_id"]
+            .as_str()
+            .unwrap(),
+        saved["remote_offer_requests"][services_model_offer(&bob)]["remote_model_grant"]
+            ["grant_id"]
+            .as_str()
+            .unwrap(),
+    ];
+    let summary_text = summary.to_string();
+    for grant_id in grant_ids {
+        assert!(
+            !summary_text.contains(grant_id),
+            "second principal summary contains {grant_id}: {summary_text}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+async fn approve_inbox_action(app: &Router, token: &str, action: &str) {
+    let (status, body) = services_contact_post(
+        app,
+        token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+async fn approve_exit_engine_and_model(
+    left: &std::path::Path,
+    right: &std::path::Path,
+    alice: &ServicesContactFixture,
+    bob: &ServicesContactFixture,
+) {
+    let inbox_token = app_token_for_authority(right, INBOX_CAPSULE_ID, &bob.authority);
+    // Approve each request before the next one is created. The inbox returns
+    // the first open service request, so collecting every action first would
+    // approve the Exit three times and leave Engine and model pending.
+    let exit_action = services_contact_pending_request(left, right, alice, bob).await;
+    approve_inbox_action(&bob.app, &inbox_token, &exit_action).await;
+    let engine_action = services_contact_pending_engine_request(left, right, alice, bob).await;
+    approve_inbox_action(&bob.app, &inbox_token, &engine_action).await;
+    let model_action = services_contact_pending_model_request(left, right, alice, bob).await;
+    approve_inbox_action(&bob.app, &inbox_token, &model_action).await;
+    let services_token = app_token_for_authority(left, SERVICES_CAPSULE_ID, &alice.authority);
+    let (status, summary) = home_test_get_json(
+        &alice.app,
+        "/api/apps/services/summary",
+        &services_token,
+        "null",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+fn assert_installed_service_grants_have_no_ticket(
+    data_dir: &std::path::Path,
+    alice: &ServicesContactFixture,
+    bob: &ServicesContactFixture,
+) {
+    let exit_config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(data_dir.join("config/exit-provider.json")).unwrap())
+            .unwrap();
+    let exits = exit_config["remote_carrier_exits"].as_array().unwrap();
+    assert!(exits.iter().any(|exit| {
+        exit.get("connect_ticket").is_none()
+            && exit["peer_did"] == bob.peer_id
+            && exit["allowed_principals"] == json!([alice.authority.principal_id])
+    }));
+    let saved = services_contact_saved_state(data_dir, &alice.authority, "services-state.json");
+    for (offer, field) in [
+        (services_engine_offer(bob), "remote_engine_grant"),
+        (services_model_offer(bob), "remote_model_grant"),
+    ] {
+        let grant = &saved["remote_offer_requests"][&offer][field];
+        assert_eq!(grant["peer_did"], bob.peer_id, "{offer}: {grant}");
+        assert!(grant.get("connect_ticket").is_none(), "{grant}");
+        assert_eq!(grant["principal_id"], alice.authority.principal_id);
+    }
+}
+
 #[cfg(unix)]
 #[derive(Default)]
 struct ServicesEngineProbeProvider {
@@ -11348,13 +12194,9 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     )
     .await
     .unwrap();
+    let provider_addr = remote_node.endpoint.watch_addr().get();
     let ticket = data_encoding::BASE32_NOPAD
-        .encode(
-            &serde_json::to_vec(
-                &json!({"topic":null,"endpoints":[remote_node.endpoint.watch_addr().get()]}),
-            )
-            .unwrap(),
-        )
+        .encode(&serde_json::to_vec(&json!({"topic":null,"endpoints":[provider_addr]})).unwrap())
         .to_lowercase();
     let mut local = crate::carrier::CarrierRuntimeService::new(local_node);
     let mut remote = crate::carrier::CarrierRuntimeService::new(remote_node);
@@ -11366,19 +12208,15 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
             crate::carrier::CarrierProviderInvoker::with_carrier_endpoint(endpoint.clone()),
         ))
         .await;
-    // The fake gossip bus retains the actual serving endpoint in its signed decision.
-    // The consumer still validates that first decision through normal Services.
+    let address_book = iroh::address_lookup::memory::MemoryLookup::new();
+    address_book.add_endpoint_info(provider_addr);
+    endpoint.address_lookup().unwrap().add(address_book);
     {
-        let mut mailbox = bus.lock().await;
-        for message in mailbox.topic_messages.values_mut().flatten() {
-            let mut payload: Value =
-                serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
-            if payload["kind"] == "service_access_decision" && payload["decision"] == "approved" {
-                payload["remote_engine_grant"]["connect_ticket"] = json!(ticket);
-                crate::carrier::sign_service_message(right.path(), &mut payload).unwrap();
-                message["content"] = json!(payload.to_string());
-            }
-        }
+        let mailbox = bus.lock().await;
+        assert!(mailbox.topic_messages.values().flatten().all(|message| {
+            let content = message["content"].as_str().unwrap_or("");
+            !content.contains(&ticket) && !content.contains("connect_ticket")
+        }));
     }
     let token = app_token_for_authority(left.path(), SERVICES_CAPSULE_ID, &alice.authority);
     let (_, summary) =
@@ -11398,6 +12236,7 @@ async fn test_services_remote_engine_signed_approval_retains_scoped_execution_gr
     let grant = &saved["remote_offer_requests"][services_engine_offer(&bob)]["remote_engine_grant"];
     assert_eq!(grant["schema"], "elastos.service.remote-engine-grant/v1");
     assert_eq!(grant["peer_did"], bob.peer_id);
+    assert!(grant.get("connect_ticket").is_none());
     assert_eq!(grant["principal_id"], alice.authority.principal_id);
     assert_eq!(
         grant["operations"],
@@ -13773,7 +14612,7 @@ async fn home_external_link_raw(
 async fn home_external_link_names_the_launched_app_and_the_exact_address() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(library_test_state(dir.path()).await);
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap();
     let home_token =
         issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context).unwrap();
     let launched = |target: &str| {

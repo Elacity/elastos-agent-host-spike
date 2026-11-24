@@ -999,17 +999,24 @@ fn browser_carrier_exit_route(
     if carrier.get("transport").and_then(|value| value.as_str()) != Some("carrier_stream") {
         anyhow::bail!("remote Carrier exit descriptor must use carrier_stream transport");
     }
-    let connect_ticket = carrier
-        .get("connect_ticket")
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.trim().is_empty() && value.trim() == *value)
-        .ok_or_else(|| anyhow::anyhow!("remote Carrier exit descriptor missing connect_ticket"))?;
-    if connect_ticket
-        .bytes()
-        .any(|byte| byte.is_ascii_whitespace() || byte == b'\0')
-    {
-        anyhow::bail!("remote Carrier exit connect_ticket must not contain whitespace or NUL");
-    }
+    let connect_ticket = match carrier.get("connect_ticket") {
+        None => String::new(),
+        Some(value) => {
+            let ticket = value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("remote Carrier exit connect_ticket is invalid"))?;
+            if ticket
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == b'\0')
+            {
+                anyhow::bail!(
+                    "remote Carrier exit connect_ticket must not contain whitespace or NUL"
+                );
+            }
+            ticket.to_string()
+        }
+    };
     let carrier_service = carrier
         .get("carrier_service")
         .and_then(|value| value.as_str())
@@ -1050,7 +1057,7 @@ fn browser_carrier_exit_route(
         .and_then(|value| value.as_str())
         .map(|value| value.to_string());
     Ok(BrowserCarrierExitRoute {
-        connect_ticket: connect_ticket.to_string(),
+        connect_ticket,
         peer_did,
         carrier_service: carrier_service.to_string(),
         grant_id: grant_id.to_string(),
@@ -2075,6 +2082,31 @@ mod tests {
                 .get("runtime_stream_path")
                 .and_then(|value| value.as_str())
         );
+    }
+
+    #[test]
+    fn carrier_exit_route_dials_by_peer_when_the_ticket_is_absent() {
+        let receipt = json!({
+            "carrier": {
+                "schema": "elastos.exit.remote-carrier/v1",
+                "transport": "carrier_stream",
+                "peer_did": "did:key:z6Mkpeer",
+                "carrier_service": "elastos://exit/open_stream",
+                "grant_id": "grant-1",
+            },
+            "grant_id": "grant-1",
+            "stream_id": "stream-1",
+            "target": "tls://example.com:443",
+        });
+        let route = browser_carrier_exit_route(&receipt).unwrap();
+        assert!(route.connect_ticket.is_empty());
+        assert_eq!(route.peer_did.as_deref(), Some("did:key:z6Mkpeer"));
+        let mut blank = receipt.clone();
+        blank["carrier"]["connect_ticket"] = json!("");
+        assert!(browser_carrier_exit_route(&blank).is_err());
+        let mut spaced = receipt;
+        spaced["carrier"]["connect_ticket"] = json!(" ticket");
+        assert!(browser_carrier_exit_route(&spaced).is_err());
     }
 
     #[test]

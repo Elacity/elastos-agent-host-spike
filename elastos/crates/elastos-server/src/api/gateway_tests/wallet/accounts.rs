@@ -162,7 +162,7 @@ impl Provider for MalformedRecoveryWalletProvider {
 #[tokio::test]
 async fn test_system_token_can_review_and_reject_wallet_approvals() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[SYSTEM_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &context).unwrap();
     let provider = MockWalletProvider {
@@ -237,7 +237,7 @@ async fn test_system_token_can_review_and_reject_wallet_approvals() {
 #[tokio::test]
 async fn test_system_can_create_managed_wallet_account() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[SYSTEM_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &context).unwrap();
     let wallet_read_authority =
@@ -309,7 +309,7 @@ async fn test_system_can_create_managed_wallet_account() {
 #[tokio::test]
 async fn test_wallet_app_can_create_and_summarize_accounts() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[WALLET_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_CAPSULE_ID, &context).unwrap();
     let wallet_read_authority =
