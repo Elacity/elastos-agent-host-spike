@@ -2032,6 +2032,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn v2_exact_cap_object_arrives_in_more_than_one_chunk() {
+        let chunk = crate::providers::bus2_stream::READ_CHUNK;
+        let cap = chunk * 2;
+        let object = vec![7u8; cap];
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut state = state_for(object.clone(), calls.clone());
+        let prepared = state
+            .windowed_read(&read_request(cap as u64), false)
+            .expect("an object at the cap is readable");
+        assert_eq!(prepared.bytes, object);
+        let lengths = calls.lock().unwrap().clone();
+        assert!(
+            lengths.len() > 1,
+            "the sync bridge was asked more than once"
+        );
+        assert!(lengths.iter().all(|length| *length <= chunk as u64));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut stream = crate::providers::bus2_stream::WindowRead::new(prepared.bytes, tx);
+        let mut got = Vec::new();
+        let mut chunks = 0usize;
+        while let Some(part) = stream.pull(usize::MAX) {
+            assert!(!part.is_empty() && part.len() <= chunk);
+            got.extend(part);
+            chunks += 1;
+        }
+        assert!(chunks > 1, "exact-cap object arrived in {chunks} chunks");
+        assert_eq!(got, object);
+        assert!(rx.await.expect("trailer").is_ok());
+    }
+
     /// A file of `len` zero bytes named as the fixture manifest's entrypoint.
     fn capsule_dir_with_entrypoint_of(len: u64) -> (tempfile::TempDir, CapsuleManifest) {
         let (_, manifest) = component_fixture();

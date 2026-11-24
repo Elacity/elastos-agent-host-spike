@@ -127,7 +127,7 @@ impl WindowRead {
 
 /// How many buffered bytes the next guest-visible chunk may carry.
 fn chunk_len(left: usize, limit: usize) -> usize {
-    left.min(limit.max(1))
+    left.min(limit.max(1)).min(READ_CHUNK)
 }
 
 impl Drop for WindowRead {
