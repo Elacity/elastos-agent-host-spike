@@ -40,7 +40,7 @@ const names = [
 export const U3_NAMES = [
   "release_signed", "signing_key_deleted", "installed_identity_recorded",
   "gateway_started", "owner_passkey_created", "u3_agents_enabled",
-  "u3_owner_field_refused", "u3_agent_created", "u3_non_owner_refused",
+  "u3_owner_field_refused", "u3_home_asks", "u3_agent_created", "u3_non_owner_refused",
   "u3_unknown_id_refused", "u3_guest_refused", "u3_no_session_refused",
   "u3_agents_disabled_refused", "u3_agent_activated", "u3_no_guest_no_mint",
   "u3_restart_same_record", "u3_create_audit",
@@ -52,7 +52,12 @@ const started = Date.now();
 const timings = {};
 const screenshots = [];
 let browser;
+let adminContext;
 let adminPage;
+const pagePosts = [];
+const AGENT_NAME = "Helper";
+const AGENT_OFF = "Off until you turn it on";
+const AGENT_ON = "On";
 let stopped = "";
 const state = {
   homeToken: "",
@@ -671,6 +676,157 @@ export function createReplacesMint(agentsSource, routeSource) {
     fields,
     route: route ? "POST /api/apps/system/agents/create" : "",
     id_source: fresh ? "auth::fresh_agent_id" : "",
+  };
+}
+
+export function pageLaunchToken(frameUrl) {
+  const hash = String(frameUrl || "").split("#")[1] || "";
+  return new URLSearchParams(hash).get("home_token") || "";
+}
+
+export function agentIdV2(id) {
+  return /^agent:v2:[0-9a-f]{32}$/.test(String(id || ""));
+}
+
+// The page's own POSTs. A missing Create POST is the home-asks failure.
+export function judgeHomeAsks(posts, frameTokens, runnerToken) {
+  const allowed = new Set((Array.isArray(frameTokens) ? frameTokens : [frameTokens]).filter((token) => (
+    typeof token === "string" && token.length > 0
+  )));
+  const counts = { enable: 0, create: 0, activate: 0 };
+  if (allowed.size === 0) return { ok: false, reason: "page launch token missing", counts };
+  if ([...allowed].some((token) => token === runnerToken)) {
+    return { ok: false, reason: "page launch token is the runner enrollment token", counts };
+  }
+  const seen = new Set();
+  for (const post of Array.isArray(posts) ? posts : []) {
+    const name = post?.path === "/api/apps/system/agents/enable" ? "enable"
+      : post?.path === "/api/apps/system/agents/create" ? "create"
+        : post?.path === "/api/apps/system/agents/activate" ? "activate"
+          : "";
+    if (!name) continue;
+    if (post.fromPage !== true) return { ok: false, reason: "post was not from the page", counts };
+    if (!allowed.has(post.token) || post.token === runnerToken) {
+      return { ok: false, reason: "post token is not the page launch token", counts };
+    }
+    seen.add(post.token);
+    counts[name] += 1;
+  }
+  if (seen.size !== 1) return { ok: false, reason: "page posts used more than one launch token", counts };
+  const ok = counts.enable === 1 && counts.create === 2 && counts.activate === 1;
+  return { ok, reason: ok ? "" : "page did not send Allow, two Creates, and Turn on", counts };
+}
+
+export function lineIsTestOnly(source, lineNumber) {
+  const lines = String(source || "").split("\n");
+  const target = lineNumber - 1;
+  if (target < 0 || target >= lines.length) return false;
+  let depth = 0;
+  const floors = [];
+  let pending = false;
+  for (let index = 0; index <= target; index += 1) {
+    const line = lines[index];
+    if (/#\[\s*cfg\s*\(\s*test\s*\)\s*\]/.test(line)) pending = true;
+    const opens = (line.match(/\{/g) || []).length;
+    const closes = (line.match(/\}/g) || []).length;
+    if (pending && opens > 0) {
+      floors.push(depth);
+      pending = false;
+    } else if (pending && /;\s*$/.test(line) && !line.includes("{")) {
+      pending = false;
+    }
+    depth += opens - closes;
+    if (depth < 0) depth = 0;
+    while (floors.length > 0 && depth <= floors[floors.length - 1]) floors.pop();
+    if (index === target) return floors.length > 0;
+  }
+  return false;
+}
+
+export function parseGitGrep(output) {
+  const hits = [];
+  for (const line of String(output || "").split("\n")) {
+    if (!line) continue;
+    const match = line.match(/^HEAD:(.+?):(\d+):(.*)$/);
+    if (!match) continue;
+    hits.push({ path: match[1], line: Number(match[2]), text: match[3].trim() });
+  }
+  return hits;
+}
+
+export function classifyMintHit(hit, source) {
+  const testFile = /(?:^|\/)tests\//.test(hit.path)
+    || /_tests\.rs$/.test(hit.path)
+    || /\.test\./.test(hit.path);
+  return testFile || lineIsTestOnly(source, hit.line);
+}
+
+export function mintReport(hits) {
+  const production = [];
+  const testOnly = [];
+  for (const hit of hits) {
+    (hit.testOnly ? testOnly : production).push({
+      path: hit.path,
+      line: hit.line,
+      text: hit.text,
+    });
+  }
+  return {
+    ok: production.length === 0 && !hits.some((hit) => hit.path.includes("mint_agent_principal") && !hit.testOnly),
+    production,
+    testOnly,
+    defined: hits.some((hit) => hit.text.includes("mint_agent_principal")),
+  };
+}
+
+export function mintHitsFromRepo(repoRoot) {
+  const listed = spawnSync("git", [
+    "grep", "-n", "-I", "-e", "mint_agent_principal", "-e", "agent:v1", "HEAD",
+  ], { cwd: repoRoot, encoding: "utf8" });
+  if (listed.status !== 0 && listed.status !== 1) {
+    return { ok: false, reason: String(listed.stderr || "git grep failed").slice(0, 240), production: [], testOnly: [] };
+  }
+  const parsed = parseGitGrep(listed.stdout || "");
+  const cache = new Map();
+  const hits = parsed.map((hit) => {
+    if (!cache.has(hit.path)) {
+      const shown = spawnSync("git", ["show", `HEAD:${hit.path}`], { cwd: repoRoot, encoding: "utf8" });
+      cache.set(hit.path, shown.status === 0 ? shown.stdout : "");
+    }
+    return { ...hit, testOnly: classifyMintHit(hit, cache.get(hit.path)) };
+  });
+  const report = mintReport(hits);
+  return {
+    ...report,
+    ok: report.ok && report.production.length === 0,
+    reason: report.production.length === 0 ? "" : "production hit",
+  };
+}
+
+export function gatewayRestartLoadedChain(logText) {
+  const text = String(logText || "");
+  const shutdownAt = text.lastIndexOf("Shutting down gateway...");
+  const command = "elastos gateway --addr";
+  if (shutdownAt < 0) {
+    return { ok: false, reason: "no shutdown before the restart", log_line: "", command };
+  }
+  const after = text.slice(shutdownAt);
+  const banner = after.match(/ElastOS Gateway v\S+/);
+  const auditFault = /audit chain/i.test(after);
+  if (!banner || auditFault) {
+    return {
+      ok: false,
+      reason: auditFault ? "audit chain fault in the restart log" : "restart did not print the gateway banner",
+      log_line: banner ? banner[0] : "",
+      command,
+    };
+  }
+  return {
+    ok: true,
+    reason: "",
+    log_line: banner[0],
+    command,
+    verifier: "verify_auth_audit_chain_ready",
   };
 }
 
@@ -1428,6 +1584,12 @@ function authStatePath() {
   return path.join(data, "ElastOS/System/Auth/auth-state.json");
 }
 
+function agentDisplayName(agentId) {
+  if (!fs.existsSync(agentRecordsPath())) return "";
+  const row = (readJson(agentRecordsPath()).agents || []).find((agent) => agent.record?.principal_id === agentId);
+  return String(row?.record?.display_name || "");
+}
+
 function storedAgentRecords() {
   if (!fs.existsSync(agentRecordsPath())) return [];
   const body = readJson(agentRecordsPath());
@@ -1524,6 +1686,127 @@ async function startGatewayOnly() {
   throw new Error("restarted gateway did not accept healthz");
 }
 
+function productFault(control) {
+  return `product fault: ${control} cannot be reached in the installed Home`;
+}
+
+function shellFrame() {
+  return adminPage.frameLocator("#active-shell-frame");
+}
+
+function systemFrame() {
+  return shellFrame().frameLocator('[data-target="system"] iframe.window-frame');
+}
+
+function attachPagePostWatch(page) {
+  pagePosts.length = 0;
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    let pathname = "";
+    try { pathname = new URL(request.url()).pathname; } catch { return; }
+    if (!pathname.startsWith("/api/apps/system/agents/")) return;
+    pagePosts.push({
+      path: pathname,
+      token: request.headers()["x-elastos-home-token"] || "",
+      fromPage: true,
+    });
+  });
+}
+
+async function readBrowserResponse(response) {
+  const text = await response.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* refusal text */ }
+  return { status: response.status(), text, json };
+}
+
+async function readSystemFrameToken() {
+  const iframe = shellFrame().locator('[data-target="system"] iframe.window-frame');
+  const src = await iframe.getAttribute("src").catch(() => "");
+  const fromSrc = pageLaunchToken(src || "");
+  if (fromSrc) return fromSrc;
+  const frame = adminPage.frames().find((item) => pageLaunchToken(item.url()) && /system/i.test(item.url()));
+  return frame ? pageLaunchToken(frame.url()) : "";
+}
+
+async function shotAgents(name) {
+  await shot(adminPage, name);
+  const iframe = shellFrame().locator('[data-target="system"] iframe.window-frame');
+  const stillThere = await iframe.count().catch(() => 0);
+  if (!stillThere) {
+    halt("u3_home_asks", productFault("System window after the phone screenshot"));
+  }
+}
+
+async function openOwnerSystem() {
+  const shell = shellFrame();
+  const menu = shell.locator("#toolbar-home");
+  try {
+    await menu.waitFor({ state: "visible", timeout: 60000 });
+  } catch {
+    halt("u3_home_asks", productFault("ElastOS menu #toolbar-home"));
+  }
+  const later = shell.locator("#setup-sheet-later");
+  if (await later.isVisible().catch(() => false)) await later.click();
+  await menu.click();
+  const systemItem = shell.locator("#identity-menu-system");
+  try {
+    await systemItem.waitFor({ state: "visible", timeout: 15000 });
+  } catch {
+    halt("u3_home_asks", productFault("System Settings #identity-menu-system"));
+  }
+  await systemItem.click();
+  const iframe = shell.locator('[data-target="system"] iframe.window-frame');
+  try {
+    await iframe.waitFor({ state: "attached", timeout: 30000 });
+  } catch {
+    halt("u3_home_asks", productFault("System window"));
+  }
+  const deadline = Date.now() + 20000;
+  let token = "";
+  while (Date.now() < deadline && !token) {
+    token = await readSystemFrameToken();
+    if (!token) await sleep(200);
+  }
+  if (!token) halt("u3_home_asks", productFault("System launch token in the page frame"));
+  const system = systemFrame();
+  const locked = system.locator("#system-locked");
+  if (await locked.isVisible().catch(() => false)) {
+    halt("u3_home_asks", productFault("System page (it says Open from Home)"));
+  }
+  const agentsTab = system.locator('.settings-sidebar-item[data-settings="agents"]');
+  try {
+    await agentsTab.waitFor({ state: "visible", timeout: 30000 });
+  } catch {
+    halt("u3_home_asks", productFault("Agents section"));
+  }
+  await agentsTab.click();
+  return system;
+}
+
+async function pagePost(pathSuffix) {
+  const pending = adminPage.waitForResponse((response) => (
+    response.request().method() === "POST" && response.url().includes(pathSuffix)
+  ), { timeout: 30000 });
+  return pending;
+}
+
+async function waitAgentText(system, agentId, text) {
+  const node = system.locator(`[data-agent-state="${agentId}"]`);
+  try {
+    await node.waitFor({ state: "visible", timeout: 20000 });
+  } catch {
+    halt("u3_home_asks", productFault(`agent state for the created agent (${text})`));
+  }
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    const value = (await node.innerText().catch(() => "")).trim();
+    if (value === text) return;
+    await sleep(200);
+  }
+  halt("u3_home_asks", `the page did not show ${text}`);
+}
+
 async function runU3Create() {
   const install = readJson(path.join(out, "install.json"));
   const keyGone = !fs.existsSync(path.join(data, ".a15r-publisher.key"));
@@ -1558,7 +1841,11 @@ async function runU3Create() {
     halt("owner_passkey_created", "playwright is not installed");
   }
   browser = await playwright.chromium.launch({ headless: true });
-  const adminContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  fs.mkdirSync(path.join(out, "video"), { recursive: true });
+  adminContext = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    recordVideo: { dir: path.join(out, "video"), size: { width: 1280, height: 800 } },
+  });
   adminPage = await adminContext.newPage();
   await addAuthenticator(adminContext, adminPage);
   await adminPage.goto(pageOrigin + "/home/", { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -1576,10 +1863,25 @@ async function runU3Create() {
   await shot(adminPage, "owner-home");
   timings.owner_ms = Date.now() - started;
 
-  const system = await launchApp(state.homeToken, "system");
-  if (!system.token) halt("u3_agents_enabled", clip(system.reply.text));
-  state.systemToken = system.token;
-  const enabled = await call("POST", "/api/apps/system/agents/enable", state.systemToken, {});
+  attachPagePostWatch(adminPage);
+  const system = await openOwnerSystem();
+  state.systemToken = await readSystemFrameToken();
+  const frameTokens = [state.systemToken];
+  const allow = system.locator("#agent-allow");
+  try {
+    await allow.waitFor({ state: "visible", timeout: 30000 });
+  } catch {
+    halt("u3_home_asks", productFault("Allow agents #agent-allow"));
+  }
+  let enabled;
+  try {
+    const allowResponse = pagePost("/api/apps/system/agents/enable");
+    await allow.click();
+    enabled = await readBrowserResponse(await allowResponse);
+  } catch (error) {
+    if (error instanceof Error && U3_NAMES.includes(error.message)) throw error;
+    halt("u3_home_asks", `${productFault("Allow agents #agent-allow")} ${String(error.message || error).slice(0, 180)}`);
+  }
   if (enabled.status !== 200 || enabled.json?.enabled !== true) {
     halt("u3_agents_enabled", { status: enabled.status, body: enabled.text.slice(0, 300) });
   }
@@ -1595,37 +1897,120 @@ async function runU3Create() {
   }
   pass("u3_owner_field_refused", spoof.text.slice(0, 180));
 
-  const created = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
-    display_name: "Helper", agent_host: "agent-host", request_id: "u3-create",
+  const nameInput = system.locator("#agent-name");
+  const hostInput = system.locator("#agent-host");
+  const createButton = system.locator("#agent-create");
+  try {
+    await nameInput.waitFor({ state: "visible", timeout: 20000 });
+  } catch {
+    halt("u3_home_asks", productFault("agent name field #agent-name"));
+  }
+  let created;
+  let createdAgain;
+  let activated;
+  let createdId = "";
+  let secondId = "";
+  try {
+    await nameInput.fill(AGENT_NAME);
+    await hostInput.fill("agent-host");
+    await shotAgents("before-create");
+    await nameInput.fill(AGENT_NAME);
+    await hostInput.fill("agent-host");
+    const firstCreateWait = pagePost("/api/apps/system/agents/create");
+    await createButton.click();
+    created = await readBrowserResponse(await firstCreateWait);
+    createdId = String(created.json?.agent_id || "");
+    if (created.status !== 200 || !agentIdV2(createdId)) {
+      halt("u3_home_asks", { status: created.status, body: created.text.slice(0, 240) });
+    }
+    await waitAgentText(system, createdId, AGENT_OFF);
+    await shotAgents("after-create");
+    await nameInput.fill(AGENT_NAME);
+    await hostInput.fill("agent-host");
+    const secondCreateWait = pagePost("/api/apps/system/agents/create");
+    await createButton.click();
+    createdAgain = await readBrowserResponse(await secondCreateWait);
+    secondId = String(createdAgain.json?.agent_id || "");
+    if (createdAgain.status !== 200 || !agentIdV2(secondId) || secondId === createdId) {
+      halt("u3_home_asks", {
+        status: createdAgain.status,
+        same_name_same_id: secondId === createdId,
+        body: createdAgain.text.slice(0, 180),
+      });
+    }
+    await waitAgentText(system, secondId, AGENT_OFF);
+    const turnOn = system.locator(".pc2-card-row").filter({
+      has: system.locator(`[data-agent-state="${createdId}"]`),
+    }).locator("button", { hasText: "Turn on" });
+    try {
+      await turnOn.waitFor({ state: "visible", timeout: 15000 });
+    } catch {
+      halt("u3_home_asks", productFault("Turn on"));
+    }
+    const activateWait = pagePost("/api/apps/system/agents/activate");
+    await turnOn.click();
+    activated = await readBrowserResponse(await activateWait);
+    if (activated.status !== 200 || activated.json?.active !== true || activated.json?.agent_id !== createdId
+      || activated.json?.session_id !== undefined) {
+      halt("u3_home_asks", { status: activated.status, body: activated.text.slice(0, 240) });
+    }
+    await waitAgentText(system, createdId, AGENT_ON);
+    await shotAgents("after-turn-on");
+    const latestToken = await readSystemFrameToken();
+    if (latestToken) {
+      state.systemToken = latestToken;
+      frameTokens.push(latestToken);
+    }
+    const homeAsks = judgeHomeAsks(pagePosts, frameTokens, state.homeToken);
+    if (!homeAsks.ok) halt("u3_home_asks", homeAsks);
+  } catch (error) {
+    if (error instanceof Error && U3_NAMES.includes(error.message)) throw error;
+    halt("u3_home_asks", String(error.message || error).slice(0, 400));
+  }
+  pass("u3_home_asks", {
+    counts: homeAsks.counts,
+    token_is_page_frame: true,
+    token_is_runner_enrollment: false,
+    showed_off: true,
+    showed_on: true,
+    same_name: AGENT_NAME,
+    distinct_ids: true,
   });
-  const createdId = String(created.json?.agent_id || "");
+
   const caller = await productCaller(state.systemToken);
   const admins = storedHumans().filter((person) => person.role === "admin");
-  const stored = storedAgentRecords().find((row) => row.id === createdId);
+  const storedRows = storedAgentRecords();
+  const stored = storedRows.find((row) => row.id === createdId);
+  const storedSecond = storedRows.find((row) => row.id === secondId);
   const ownerFromFile = admins.length === 1 ? admins[0].id : "";
   if (
-    created.status !== 200
-    || created.json?.active !== false
+    created.json?.active !== false
     || created.json?.session_id !== undefined
-    || !/^agent:v2:[0-9a-f]{32}$/.test(createdId)
-    || storedAgentRecords().length !== 1
+    || createdAgain.json?.active !== false
+    || storedRows.length !== 2
     || !storedOwnerIsCreatingOwner(stored?.owner, caller.id)
     || stored.owner !== ownerFromFile
+    || storedSecond?.owner !== ownerFromFile
     || caller.id !== ownerFromFile
+    || agentDisplayName(createdId) !== AGENT_NAME
+    || agentDisplayName(secondId) !== AGENT_NAME
   ) {
     halt("u3_agent_created", {
       status: created.status,
       active: created.json?.active,
       stored_owner_matches_summary: stored?.owner === caller.id,
       stored_owner_matches_auth_file: stored?.owner === ownerFromFile,
+      rows: storedRows.length,
       admins: admins.length,
     });
   }
   pass("u3_agent_created", {
     agent: createdId,
+    second_agent: secondId,
     owner_matches_product: true,
     read_from: "agent-records.json and system summary authority.principal_id",
   });
+  pass("u3_agent_activated", { agent: createdId, active: true, session_id: false });
 
   const guestRegistration = await call(
     "POST", "/api/apps/system/access/guest-registration", state.systemToken, { enabled: true },
@@ -1678,14 +2063,26 @@ async function runU3Create() {
   const unknownActivate = await call("POST", "/api/apps/system/agents/activate", state.systemToken, {
     agent_id: unknownId, active: true,
   });
+  let unknownLaunch = { status: 0, text: "" };
+  try {
+    const stepToken = await stepUp(state.systemToken, "agent.start", { agent_id: unknownId });
+    unknownLaunch = await call("POST", "/api/apps/system/agents/launch", state.systemToken, {
+      agent_id: unknownId,
+      step_up_token: stepToken,
+    });
+  } catch (error) {
+    halt("u3_unknown_id_refused", "step-up before launch: " + String(error.message || error).slice(0, 240));
+  }
   if (!refusalIncludes(unknownActivate.status, unknownActivate.text, 409, noSuchAgent)
+    || !refusalIncludes(unknownLaunch.status, unknownLaunch.text, 409, noSuchAgent)
     || JSON.stringify(storedAgentRecords()) !== beforeUnknown) {
     halt("u3_unknown_id_refused", {
-      status: unknownActivate.status,
-      body: unknownActivate.text.slice(0, 240),
+      activate: unknownActivate.status,
+      launch: unknownLaunch.status,
+      body: unknownLaunch.text.slice(0, 240),
     });
   }
-  pass("u3_unknown_id_refused", noSuchAgent);
+  pass("u3_unknown_id_refused", { activate: noSuchAgent, launch: noSuchAgent });
 
   const beforeGuest = JSON.stringify(storedAgentRecords());
   const guestCreate = await call(
@@ -1734,15 +2131,8 @@ async function runU3Create() {
 
   const enabledAgain = await call("POST", "/api/apps/system/agents/enable", state.systemToken, {});
   if (enabledAgain.status !== 200 || enabledAgain.json?.enabled !== true) {
-    halt("u3_agent_activated", { status: enabledAgain.status, body: enabledAgain.text.slice(0, 240) });
+    halt("u3_no_guest_no_mint", { status: enabledAgain.status, body: enabledAgain.text.slice(0, 240) });
   }
-  const activated = await call("POST", "/api/apps/system/agents/activate", state.systemToken, {
-    agent_id: createdId, active: true,
-  });
-  if (activated.status !== 200 || activated.json?.active !== true || activated.json?.session_id !== undefined) {
-    halt("u3_agent_activated", { status: activated.status, body: activated.text.slice(0, 300) });
-  }
-  pass("u3_agent_activated", createdId);
 
   const beforeMint = JSON.stringify(storedAgentRecords());
   const minted = await call("POST", "/api/apps/system/agents/create", state.systemToken, {
@@ -1780,6 +2170,8 @@ async function runU3Create() {
       halt("u3_no_guest_no_mint", { capsules: String(error.message || error).slice(0, 180) });
     }
   }
+  const mint = mintHitsFromRepo(root);
+  const sameNameDistinct = agentIdV2(createdId) && agentIdV2(secondId) && createdId !== secondId;
   const noMint = refusalIncludes(minted.status, minted.text, 409, "agent request is invalid")
     && JSON.stringify(storedAgentRecords()) === beforeMint
     && !storedAgentRecords().some((row) => row.id === chosenId)
@@ -1788,7 +2180,9 @@ async function runU3Create() {
     && managedOnly
     && !agentCoords
     && runningAgentCapsules === 0
-    && replacement.ok;
+    && replacement.ok
+    && mint.ok
+    && sameNameDistinct;
   if (!noMint) {
     halt("u3_no_guest_no_mint", {
       status: minted.status,
@@ -1799,12 +2193,19 @@ async function runU3Create() {
       route: replacement.route,
       fields: replacement.fields,
       id_source: replacement.id_source,
+      production_mint_hits: mint.production,
+      same_name_distinct: sameNameDistinct,
     });
   }
   pass("u3_no_guest_no_mint", {
     route: replacement.route,
     fields: replacement.fields,
     id_source: replacement.id_source,
+    id_form: "agent:v2 plus 32 hex",
+    same_name_distinct: true,
+    mint_defined: false,
+    production_mint_hits: [],
+    test_only_mint_hits: mint.testOnly.map((hit) => `${hit.path}:${hit.line}`),
     sessions: 0,
     agent_runtime_coords: false,
     managed_runtime: processes.stray,
@@ -1835,15 +2236,29 @@ async function runU3Create() {
 
   const did = runtimeIdentityDid();
   const verified = verifyInstalledAudit(readJson(authStatePath()), did);
-  const oneCreate = verified.ok && verified.creates.length === 1 && verified.creates[0] === createdId;
-  if (!oneCreate) {
+  const binary = gatewayRestartLoadedChain(fs.readFileSync(logPath, "utf8"));
+  const creates = verified.creates;
+  const bothCreates = verified.ok
+    && creates.length === 2
+    && creates.includes(createdId)
+    && creates.includes(secondId);
+  if (!bothCreates || !binary.ok) {
     halt("u3_create_audit", {
-      reason: verified.reason,
+      reason: verified.reason || binary.reason,
       event_type: verified.event_type || "",
-      count: verified.creates.length,
+      count: creates.length,
+      binary_log_line: binary.log_line,
+      binary_reason: binary.reason,
     });
   }
-  pass("u3_create_audit", { count: 1, verified: true, subject_is_created_agent: true });
+  pass("u3_create_audit", {
+    count: 2,
+    verified: true,
+    subject_is_created_agent: true,
+    binary_command: binary.command,
+    binary_log_line: binary.log_line,
+    binary_verifier: binary.verifier,
+  });
 }
 
 function shellFailReceipt() {
@@ -1913,7 +2328,18 @@ if (invokedDirectly()) {
   job().catch((error) => {
     stopped = clip(error && (error.detail || error.stack || error.message) || error);
   }).finally(async () => {
+    const video = adminPage && typeof adminPage.video === "function" ? adminPage.video() : null;
     if (browser) await browser.close().catch(() => {});
+    browser = undefined;
+    if (video) {
+      try {
+        const file = path.join(out, "owner.webm");
+        await video.saveAs(file);
+        screenshots.push({ name: "owner-video", status: "taken", path: file });
+      } catch (error) {
+        screenshots.push({ name: "owner-video", status: "skipped", detail: clip(String(error)) });
+      }
+    }
     const code = writeReceipt();
     process.exit(code);
   });
