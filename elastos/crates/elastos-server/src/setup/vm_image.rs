@@ -155,10 +155,10 @@ fn directory_available_bytes(path: &Path) -> Result<u64> {
             .context("VM kernel private copy refused: free space unavailable");
     }
     let stats = unsafe { stats.assume_init() };
-    // f_bavail is u32 on macOS and u64 on Linux, so the cast is needed on one.
-    #[allow(clippy::unnecessary_cast)]
-    let available = stats.f_bavail as u64;
-    Ok(available.saturating_mul(stats.f_frsize))
+    // f_bavail is u32 on macOS and u64 on Linux; widening through u128 keeps
+    // the product exact and gives neither platform a cast to its own type.
+    let available = u128::from(stats.f_bavail) * u128::from(stats.f_frsize);
+    Ok(u64::try_from(available).unwrap_or(u64::MAX))
 }
 
 /// Copy the opened kernel into an unnamed file, hashing the bytes written.
