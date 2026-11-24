@@ -37,6 +37,13 @@ pub(in crate::api) static AGENT_AUDIT_APPEND_FAILURES: std::sync::LazyLock<
     >,
 > = std::sync::LazyLock::new(Default::default);
 
+/// Test seam: a Start returns after the Runtime has accepted the launch and
+/// before the completion row, so the chain keeps only `agent.start.requested`.
+#[cfg(test)]
+pub(in crate::api) static AGENT_AUDIT_CRASH_AFTER_LAUNCH: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(Default::default);
+
 /// Appends one signed audit row for an owner action on an agent, in the row
 /// shape the passkey step-up completion writes: the owner is the principal,
 /// and the agent's identity rides in the reason JSON because the signed
@@ -246,14 +253,15 @@ pub(super) async fn agents_retire(
         // would claim "ok" before the retire happened or error after the
         // record already changed, so this route adds none.
         //
-        // The window that stays open: the record write stores the tombstone
-        // before it appends the signed `agent.record.retire` row, so a
-        // crash between the two leaves the agent retired with no signed
-        // row, and a retry is refused ALREADY_RETIRED before the write runs
-        // again. Adding the row on a retry would mean writing that record
-        // row from this route, which duplicates the trusted row-writing in
-        // agents.rs behind the same audit scheme, so the retry lives there
-        // or nowhere.
+        // The record write stores the tombstone and then appends
+        // `agent.record.retire` (`agents.rs` `write`). A failed append leaves
+        // the agent retired and the chain without that row. The next call is
+        // refused "agent is already retired" before `write` runs again.
+        // The row id is that file's sequence and the sha256 of the bytes just
+        // stored, and `write` holds the agent lock across both steps. The
+        // lock is private to agents.rs. A retry here would append without it,
+        // so it can sign a file a later write already replaced, or sign the
+        // row twice. Adding the missing row on retry is an agents.rs change.
         crate::agents::retire(
             &state.data_dir,
             &owner.caller(),
@@ -429,6 +437,23 @@ async fn start_agent(
                 return Err(error);
             }
         };
+    // A crash here leaves `agent.start.requested` as the only row. That row
+    // is already on disk. No owner route serves the signed chain: the agent
+    // list returns records, and `GET /api/audit` is the Runtime log. A new
+    // process shows the gap by loading the auth file. The test seam returns
+    // at this line and does not stop the guest.
+    #[cfg(test)]
+    if AGENT_AUDIT_CRASH_AFTER_LAUNCH
+        .lock()
+        .unwrap()
+        .remove(state.data_dir.as_path())
+    {
+        return Err(Refused(format!(
+            "agent '{}' was started and its signed completion row was not recorded",
+            request.agent_id
+        ))
+        .into());
+    }
     if let Err(audit_error) = append_agent_lifecycle_audit(
         &state.data_dir,
         "agent.start.completed",
@@ -441,19 +466,9 @@ async fn start_agent(
         "ok",
         agent_start_reason(&request.agent_id, &launch, &host, &host_sha256, None),
     ) {
-        // The launch succeeded, so this session is running with no signed
-        // completion row. Two facts about that window are recorded here:
-        //
-        // A crash between the Runtime accepting the launch and the
-        // completion row becoming durable leaves the requested row as the
-        // only record of the start. The chain survives the crash on disk,
-        // so a Home restart shows an `agent.start.requested` row with no
-        // matching `agent.start.completed` row for that session. No route
-        // serves the Home's signed chain, so the owner reads that
-        // difference in the chain itself.
-        //
-        // The settle stop ends only the session this Start made, named by
-        // session id: an earlier session of the same agent, which already
+        // The launch succeeded and the completion row was not stored. The
+        // settle stop ends only the session this Start made, named by
+        // session id. An earlier session of the same agent, which already
         // has its own completion row, stays up and is never labelled
         // `unrecorded_start`.
         match stop_runtime_agent_session(&state.data_dir, &request.agent_id, &started.session_id)
@@ -461,7 +476,14 @@ async fn start_agent(
         {
             Ok(outcome) => {
                 for session in &outcome.stopped {
-                    append_agent_lifecycle_audit(
+                    let result = if session_ended(&session.status, session.ended) {
+                        "ok"
+                    } else {
+                        "stopping"
+                    };
+                    // An append error can name the auth-state path. The
+                    // refusal below stays the named outcome either way.
+                    if let Err(error) = append_agent_lifecycle_audit(
                         &state.data_dir,
                         "agent.stopped",
                         &owner,
@@ -470,12 +492,18 @@ async fn start_agent(
                             capsule_id: Some(host.package().name.as_str()),
                             session_id: Some(&session.session_id),
                         },
-                        "ok",
+                        result,
                         serde_json::json!({
                             "agent_id": request.agent_id,
                             "cause": "unrecorded_start"
                         }),
-                    )?;
+                    ) {
+                        tracing::warn!(
+                            "signed stop row for unrecorded start of agent '{}' session '{}' was not recorded: {error:#}",
+                            request.agent_id,
+                            session.session_id
+                        );
+                    }
                 }
                 // The completion row's own append error can name the
                 // auth-state path, so it stays in the log and the refusal
@@ -649,17 +677,17 @@ async fn stop_agent(
         };
         return Err(Refused(message.to_string()).into());
     }
+    let mut recorded: Vec<&str> = Vec::new();
     let mut unrecorded: Vec<&str> = Vec::new();
     for session in &outcome.stopped {
-        // The row says what is true: `ok` only when the Runtime's answer
-        // says the session ended; a session the Runtime is still ending is
-        // recorded as `stopping`.
-        let result = if session_ended(&session.status) {
+        // `ok` only when status is an ended status and `ended_at` was set.
+        // Anything else is still ending, so the row says `stopping`.
+        let result = if session_ended(&session.status, session.ended) {
             "ok"
         } else {
             "stopping"
         };
-        append_agent_lifecycle_audit(
+        match append_agent_lifecycle_audit(
             &state.data_dir,
             "agent.stopped",
             &owner,
@@ -670,19 +698,26 @@ async fn stop_agent(
             },
             result,
             serde_json::json!({ "agent_id": request.agent_id, "cause": "owner" }),
-        )?;
+        ) {
+            Ok(()) => recorded.push(session.session_id.as_str()),
+            Err(error) => {
+                // The append error can name the auth-state path. Try every
+                // later session, then name both lists without that text.
+                tracing::warn!(
+                    "signed stop row for agent '{}' session '{}' was not recorded: {error:#}",
+                    request.agent_id,
+                    session.session_id
+                );
+                unrecorded.push(session.session_id.as_str());
+            }
+        }
     }
     if !unrecorded.is_empty() {
-        let stopped = outcome
-            .stopped
-            .iter()
-            .map(|session| session.session_id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let unrecorded_list = unrecorded.join(", ");
         return Err(anyhow::anyhow!(
-            "agent '{}' stopped session(s) {stopped}; the signed stop row for session(s) {unrecorded_list} was not recorded",
-            request.agent_id
+            "agent '{}' stopped session(s) {}; the signed stop row for session(s) {} was not recorded",
+            request.agent_id,
+            recorded.join(", "),
+            unrecorded.join(", ")
         ));
     }
     Ok(AgentStopResponse {
@@ -698,9 +733,10 @@ async fn stop_agent(
     })
 }
 
-/// Whether the Runtime's answer says this session ended: `stopped` and
-/// `failed` are its ended statuses, and a session still starting or running
-/// has not ended yet.
-fn session_ended(status: &str) -> bool {
-    status == crate::runtime::CAPSULE_STOPPED || status == crate::runtime::CAPSULE_FAILED
+/// Whether this stop left the session ended. `ended` is `ended_at`.
+/// `stopped` and `failed` are the statuses set in the same write as
+/// `ended_at`. Both have to say the session ended before a signed row
+/// says `ok`.
+fn session_ended(status: &str, ended: bool) -> bool {
+    ended && (status == crate::runtime::CAPSULE_STOPPED || status == crate::runtime::CAPSULE_FAILED)
 }

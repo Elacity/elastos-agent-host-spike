@@ -660,6 +660,12 @@ struct RuntimeAgentLaunchResponse {
 /// the log and never travels into the signed chain or the response.
 const RUNTIME_LAUNCH_FAILURE_CAUSE: &str = "the runtime did not start the agent host";
 
+/// A launch body that names a filesystem path. A 409 sentence such as
+/// "this agent is already running" has neither separator.
+fn text_has_host_path(text: &str) -> bool {
+    text.contains('/') || text.contains('\\')
+}
+
 /// Ask the live Home Runtime to start one agent. `capsule_dir` is the
 /// directory `verify_agent_host` already checked. The grant was minted by the
 /// caller after the passkey step-up was consumed.
@@ -691,15 +697,17 @@ pub(super) async fn launch_runtime_agent(
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
-        // The body can name host paths (a bundle refusal carries the bundle
-        // root), so it stays in this log; the error the signed row stores
-        // and the answer carry the short named cause only.
-        tracing::warn!("runtime launch failed ({}): {}", status, detail);
-        anyhow::bail!(
-            "runtime launch failed ({}): {}",
-            status,
-            RUNTIME_LAUNCH_FAILURE_CAUSE
-        );
+        // The body can name a bundle root. It stays in this log.
+        tracing::warn!("runtime launch failed ({status}): {detail}");
+        let trimmed = detail.trim();
+        // A 409 with no host path is a named refusal ("this agent is
+        // stopping", "this agent is already running"). The sentence stays
+        // so that answer can keep its code. Any other body is stored and
+        // returned as the short cause below.
+        if status == StatusCode::CONFLICT && !trimmed.is_empty() && !text_has_host_path(trimmed) {
+            return Err(crate::agents::Refused(trimmed.to_string()).into());
+        }
+        anyhow::bail!("runtime launch failed ({status}): {RUNTIME_LAUNCH_FAILURE_CAUSE}");
     }
     let payload = response.json::<RuntimeAgentLaunchResponse>().await?;
     Ok(StartedRuntimeAgent {
@@ -710,10 +718,12 @@ pub(super) async fn launch_runtime_agent(
 }
 
 /// One session the Runtime stopped. The hop sends the agent id and nothing
-/// else: the Runtime chooses the row by that principal.
+/// else: the Runtime chooses the row by that principal. `ended` is that
+/// row's `ended_at`: the signed stop says `ok` only when this is set.
 pub(super) struct StoppedRuntimeAgent {
     pub(super) session_id: String,
     pub(super) status: String,
+    pub(super) ended: bool,
 }
 
 /// What the Runtime's stop route answered. `already` is set when the route
@@ -734,6 +744,9 @@ struct RuntimeAgentStopResponse {
 struct RuntimeStoppedSession {
     session_id: String,
     status: String,
+    /// `ended_at` was set. Absent means this answer did not say.
+    #[serde(default)]
+    ended: bool,
 }
 
 /// The body the gateway sends the Runtime's stop route. The owner's Stop
@@ -818,6 +831,7 @@ async fn stop_runtime_agent_rows(
             .map(|session| StoppedRuntimeAgent {
                 session_id: session.session_id,
                 status: session.status,
+                ended: session.ended,
             })
             .collect(),
         already: payload.already,

@@ -443,6 +443,9 @@ struct StopAgentRequest {
 struct StoppedAgentBody {
     session_id: String,
     status: String,
+    /// Whether this stop left `ended_at` set. The gateway's signed row says
+    /// `ok` only when this is true and `status` is an ended status.
+    ended: bool,
 }
 
 #[derive(Serialize)]
@@ -538,6 +541,7 @@ pub async fn stop_agent_session(
                 stopped.push(StoppedAgentBody {
                     session_id: info.session_id,
                     status: info.status,
+                    ended: info.ended_at.is_some(),
                 });
             }
             continue;
@@ -556,6 +560,7 @@ pub async fn stop_agent_session(
         stopped.push(StoppedAgentBody {
             session_id: info.session_id,
             status: info.status,
+            ended: info.ended_at.is_some(),
         });
     }
     let already = stopped.is_empty().then(|| "stopped".to_string());

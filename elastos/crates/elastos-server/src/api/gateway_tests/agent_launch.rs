@@ -1632,12 +1632,32 @@ async fn serve_stub_runtime(
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    // The gateway reads these coords per request, so a rewrite after the
-    // real Runtime served is enough to point the hop at the stub.
+    let url = format!("http://{addr}");
+    // `read_runtime_coords` deletes the file when health is not up yet, so
+    // the file is written only after this listener answers.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let mut healthy = false;
+    for _ in 0..50 {
+        if client
+            .get(format!("{url}/api/health"))
+            .send()
+            .await
+            .ok()
+            .is_some_and(|response| response.status().is_success())
+        {
+            healthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(healthy, "the stub runtime did not answer health");
     std::fs::write(
         crate::runtime_control::home_runtime_coord_path(data),
         serde_json::to_vec(&json!({
-            "api_url": format!("http://{addr}"),
+            "api_url": url,
             "attach_secret": "agent-start-attach",
             "pid": std::process::id(),
             "runtime_kind": crate::runtime_control::RUNTIME_KIND_MANAGED_HOME,
@@ -1651,7 +1671,12 @@ async fn serve_stub_runtime(
 async fn stub_runtime_launch(
     axum::extract::State(answers): axum::extract::State<StubRuntimeAnswers>,
 ) -> impl axum::response::IntoResponse {
-    (answers.launch_status, axum::Json(answers.launch_body))
+    // A string is the runtime's raw refusal. An object is a launch answer.
+    let body = match answers.launch_body.as_str() {
+        Some(text) => text.to_string(),
+        None => answers.launch_body.to_string(),
+    };
+    (answers.launch_status, body)
 }
 
 async fn stub_runtime_stop(
@@ -1781,7 +1806,7 @@ async fn agents_audit_owner_stop_marks_a_session_that_has_not_ended_as_stopping(
             StatusCode::OK,
             json!({
                 "stopped": [
-                    { "session_id": "stub-session-1", "status": "running" }
+                    { "session_id": "stub-session-1", "status": "stopped", "ended": false }
                 ]
             }),
         ),
@@ -1866,4 +1891,73 @@ async fn agents_audit_failed_launch_stores_a_named_cause_without_host_paths() {
         "the signed row carries the runtime's own body: {reason}"
     );
     assert!(stored.contains("runtime launch failed"), "{stored}");
+}
+
+#[tokio::test]
+async fn agents_audit_launch_conflict_keeps_the_named_sentence() {
+    let world = world().await;
+    let sentence = "this agent is already running";
+    let _stub = serve_stub_runtime(
+        &world.home.data,
+        (StatusCode::CONFLICT, json!(sentence)),
+        (StatusCode::OK, json!({ "stopped": [] })),
+    )
+    .await;
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body, sentence);
+    let completed = signed_audit_rows(&world, "agent.start.completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(completed[0].result, "failed");
+    let reason: Value = serde_json::from_str(&completed[0].reason).unwrap();
+    assert_eq!(reason["error"], sentence);
+}
+
+/// Removes a planted crash window if the start never reached it.
+struct CrashAfterLaunch(std::path::PathBuf);
+
+impl Drop for CrashAfterLaunch {
+    fn drop(&mut self) {
+        crate::api::gateway::gateway_agents::AGENT_AUDIT_CRASH_AFTER_LAUNCH
+            .lock()
+            .unwrap()
+            .remove(&self.0);
+    }
+}
+
+#[tokio::test]
+async fn agents_audit_restart_shows_requested_without_completed() {
+    let world = world().await;
+    crate::api::gateway::gateway_agents::AGENT_AUDIT_CRASH_AFTER_LAUNCH
+        .lock()
+        .unwrap()
+        .insert(world.home.data.clone());
+    let _guard = CrashAfterLaunch(world.home.data.clone());
+    let token = step_up(&world.app, &world.admin, &world.agent_a).await;
+    let (status, body) = start(&world, &world.admin, &world.agent_a, &token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body.contains(world.agent_a.as_str()) && body.contains("completion row was not recorded"),
+        "{body}"
+    );
+    let state_path = crate::auth::auth_state_path(&world.home.data).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&state_path)
+        .unwrap();
+    file.set_modified(std::time::SystemTime::now()).unwrap();
+    drop(file);
+    let requested = signed_audit_rows(&world, "agent.start.requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert!(
+        signed_audit_rows(&world, "agent.start.completed").is_empty(),
+        "a crash before the completion row left one"
+    );
+    assert!(signed_audit_rows(&world, "agent.stopped").is_empty());
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_a),
+        1,
+        "the crash stop is not this path: the guest is still the one this Start made"
+    );
 }
