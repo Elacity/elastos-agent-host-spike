@@ -1111,8 +1111,12 @@ async function main() {
     await sleep(300);
   }
   const recordResources = JSON.stringify(settled || {}).match(/localhost:\/\/[^"\\\s]+/g) || [];
+  // The guest submits localhost://UsersAI/self. The Runtime scopes that alias
+  // to this agent. The file check below is the proof the bytes landed in A's
+  // own folder. A concrete root in the record is also accepted.
   const ownDocument = recordResources.some((resource) => (
-    resource.startsWith(state.rootA) && resource.endsWith("/Documents/note.txt")
+    resource === "localhost://UsersAI/self/Documents/note.txt"
+    || (resource.startsWith(state.rootA) && resource.endsWith("/Documents/note.txt"))
   ));
   const filesAfter = interestingFiles();
   const written = filesAfter.filter((file) => (
@@ -1170,6 +1174,13 @@ async function main() {
     && JSON.stringify(auditEvents().map((event) => event.event_type)) === auditsBeforeReplay
     && JSON.stringify(interestingFiles()) === filesBeforeReplay;
   keep("replay_zero", replayClean, { status: replay.status, body: replay.text.slice(0, 240) });
+
+  // The runner wrote the owner's note as plain bytes so the write check can
+  // hash it. The gateway refuses to start while that file sits in a protected
+  // folder. The hash check above already recorded the bytes.
+  if (ownerDocPath) {
+    try { fs.unlinkSync(ownerDocPath); } catch { /* already gone */ }
+  }
 
   try {
     await stopServe();
