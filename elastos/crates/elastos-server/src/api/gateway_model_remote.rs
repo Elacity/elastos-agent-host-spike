@@ -46,9 +46,12 @@ pub(crate) struct RemoteRunRoute {
     pub principal_id: String,
     pub grant_id: String,
     pub peer_did: String,
-    /// The granting Runtime's Carrier ticket at creation time. Settlement of
-    /// this run (`runs_get`, `runs_events`, `runs_cancel`) keeps working after
-    /// the grant expires or is denied; the granting Runtime still decides.
+    /// A ticket copied from a legacy grant when this run was created. Empty
+    /// on a ticketless grant. Settlement (`runs_get`, `runs_events`,
+    /// `runs_cancel`) still dials the peer DID after the grant expires or is
+    /// denied; the granting Runtime still decides. When this string is not
+    /// empty, `call_grant` reads it and may seed a route whose endpoints must
+    /// match `peer_did`.
     #[serde(default)]
     pub connect_ticket: String,
     #[serde(default)]
@@ -372,6 +375,9 @@ async fn call_grant(
     request: Value,
 ) -> Result<Value, RemoteRouteError> {
     let expected_refusal = super::gateway_model_service::invocation_refusal_binding(&request);
+    // A legacy grant may still carry a ticket. It is read here and remembered
+    // only when every endpoint id is this peer's key. A new grant stores an
+    // empty ticket; the invoke below dials the peer DID either way.
     if !grant.connect_ticket.is_empty() {
         registry
             .remember_carrier_peer_ticket(&grant.peer_did, &grant.connect_ticket)

@@ -400,6 +400,9 @@ pub(crate) async fn call(
         .context("Engine peer required")?
         .parse::<iroh::PublicKey>()?;
     let peer_did = super::public_key_to_did(&endpoint)?;
+    // A legacy grant may still carry a ticket. It is read here and remembered
+    // only when every endpoint id is this peer's key. A new grant omits the
+    // field; the dial below is by peer DID either way.
     if let Some(value) = grant.get("connect_ticket") {
         let ticket = value.as_str().context("Engine ticket is invalid")?;
         if !ticket.is_empty() {

@@ -1859,7 +1859,6 @@ mod tests {
         headers
     }
 
-    #[cfg(unix)]
     fn decode_launch_token(token: &str) -> HomeLaunchTokenEnvelope {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(token)

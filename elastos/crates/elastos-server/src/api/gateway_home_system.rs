@@ -2638,9 +2638,9 @@ pub(super) async fn services_summary(
             discovery_service.as_ref(),
             provider_registry.as_deref(),
         ) {
-            if error_names_unreachable_provider(&err) {
-                return Err(err);
-            }
+            // Sync no longer dials. An unreachable-provider error cannot come
+            // from merging a decision, and returning it here would skip the
+            // summary after gossip has already moved on.
             tracing::warn!(
                 error = %err,
                 "could not sync Services access decisions"
@@ -3745,7 +3745,8 @@ fn home_services_sync_access_decisions(
         }
         match home_services_merge_access_decision(context, &mut state, &payload, &runtime.peer_id) {
             Ok(merged) => changed |= merged,
-            Err(err) if error_names_unreachable_provider(&err) => return Err(err),
+            // Keep going. Returning here would drop decisions already merged
+            // in this batch: gossip_recv has advanced, and the save is below.
             Err(err) => tracing::warn!("service access decision ignored: {err}"),
         }
     }
@@ -4496,10 +4497,6 @@ pub(crate) fn authorize_home_service_engine(
 fn home_services_remote_exit_grant_id(request_id: &str) -> String {
     let digest = Sha256::digest(request_id.as_bytes());
     format!("services-remote-exit-grant-{}", hex::encode(&digest[..8]))
-}
-
-fn error_names_unreachable_provider(err: &anyhow::Error) -> bool {
-    format!("{err:#}").contains(crate::carrier::SERVICE_PROVIDER_UNREACHABLE)
 }
 
 /// A service decision names the peer. It does not carry a Carrier ticket.
@@ -11089,7 +11086,7 @@ mod services_private_ticket_tests {
     }
 
     #[tokio::test]
-    async fn services_attach_reads_the_private_carrier_ticket() {
+    async fn services_attach_checks_a_bounded_local_ticket_and_keeps_the_peer_id() {
         let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let registry = std::sync::Arc::new(ProviderRegistry::new());
         registry
@@ -11178,8 +11175,152 @@ mod services_private_ticket_tests {
         .expect("services attach task");
         server.abort();
         assert_eq!(runtime.peer_id, "private-services-node");
-        // Step 4: the services runtime keeps only the peer id; no ticket is held.
+        // The local node must still return a bounded ticket and a node id.
+        // Services keeps the node id. The ticket is not stored on this runtime.
         let seen = requests.lock().await.clone();
         assert_eq!(seen, vec![serde_json::json!({"op": "get_ticket"})]);
+    }
+}
+
+#[cfg(test)]
+mod service_decision_ticket_tests {
+    use super::*;
+
+    fn record(peer: &str) -> HomeServicesRemoteOfferRequestRecord {
+        HomeServicesRemoteOfferRequestRecord {
+            request_id: "request-ticket-refusal".into(),
+            service_display_name: "Shared".into(),
+            target_peer_id: peer.into(),
+            ..HomeServicesRemoteOfferRequestRecord::default()
+        }
+    }
+
+    fn context() -> HomeLaunchTokenContext {
+        HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "session",
+            None,
+            "launch",
+            crate::auth::PrincipalKind::Human,
+        )
+    }
+
+    #[test]
+    fn a_legacy_service_decision_ticket_is_refused() {
+        let peer = iroh::SecretKey::from_bytes(&[0x44; 32])
+            .public()
+            .to_string();
+        let now = now_ts();
+        let context = context();
+        let record = record(&peer);
+        let expiry = now + 120;
+        let exit_id = home_services_remote_exit_grant_id(&record.request_id);
+        let engine_id = crate::carrier::engine_grant_id(&record.request_id);
+        let model_id = model_grant_id(&record.request_id);
+        let engine_ops = crate::carrier::browser_engine_binding::operations(None);
+        for ticket in [serde_json::json!("legacy-ticket"), serde_json::json!(null)] {
+            let mut exit = serde_json::json!({
+                "schema": "elastos.service.remote-exit-grant/v1",
+                "peer_did": peer,
+                "grant_id": exit_id,
+                "expires_at": expiry,
+                "max_active_streams": 4,
+                "max_active_streams_per_principal": 2,
+            });
+            exit["connect_ticket"] = ticket.clone();
+            let err = home_services_remote_exit_grant(
+                &context,
+                &record,
+                &serde_json::json!({"created_at": now, "remote_exit_grant": exit}),
+            )
+            .expect_err("a ticket on an Exit decision is refused");
+            assert!(
+                err.to_string().contains("must not carry a Carrier ticket"),
+                "{err}"
+            );
+
+            let mut engine = serde_json::json!({
+                "schema": "elastos.service.remote-engine-grant/v1",
+                "peer_did": peer,
+                "grant_id": engine_id,
+                "expires_at": expiry,
+                "operations": engine_ops.clone(),
+            });
+            engine["connect_ticket"] = ticket.clone();
+            let err = home_services_remote_engine_grant(
+                &context,
+                &record,
+                &serde_json::json!({"created_at": now, "remote_engine_grant": engine}),
+            )
+            .expect_err("a ticket on an Engine decision is refused");
+            assert!(
+                err.to_string().contains("must not carry a Carrier ticket"),
+                "{err}"
+            );
+
+            let mut model = serde_json::json!({
+                "schema": MODEL_GRANT_SCHEMA,
+                "peer_did": peer,
+                "grant_id": model_id,
+                "expires_at": expiry,
+                "operations": MODEL_OPERATIONS,
+                "offer_ids": ["qwen-local"],
+                "offer_revision": format!("sha256:{}", "ab".repeat(32)),
+            });
+            model["connect_ticket"] = ticket;
+            let err = home_services_remote_model_grant(
+                &context,
+                &record,
+                &serde_json::json!({"created_at": now, "remote_model_grant": model}),
+            )
+            .expect_err("a ticket on a model decision is refused");
+            assert!(
+                err.to_string().contains("must not carry a Carrier ticket"),
+                "{err}"
+            );
+        }
+
+        let exit = home_services_remote_exit_grant(
+            &context,
+            &record,
+            &serde_json::json!({"created_at": now, "remote_exit_grant": {
+                "schema": "elastos.service.remote-exit-grant/v1",
+                "peer_did": peer,
+                "grant_id": exit_id,
+                "expires_at": expiry,
+                "max_active_streams": 4,
+                "max_active_streams_per_principal": 2,
+            }}),
+        )
+        .expect("an Exit decision with no ticket is a grant");
+        assert!(exit.get("connect_ticket").is_none(), "{exit}");
+        let engine = home_services_remote_engine_grant(
+            &context,
+            &record,
+            &serde_json::json!({"created_at": now, "remote_engine_grant": {
+                "schema": "elastos.service.remote-engine-grant/v1",
+                "peer_did": peer,
+                "grant_id": engine_id,
+                "expires_at": expiry,
+                "operations": engine_ops.clone(),
+            }}),
+        )
+        .expect("an Engine decision with no ticket is a grant");
+        assert!(engine.get("connect_ticket").is_none(), "{engine}");
+        let model = home_services_remote_model_grant(
+            &context,
+            &record,
+            &serde_json::json!({"created_at": now, "remote_model_grant": {
+                "schema": MODEL_GRANT_SCHEMA,
+                "peer_did": peer,
+                "grant_id": model_id,
+                "expires_at": expiry,
+                "operations": MODEL_OPERATIONS,
+                "offer_ids": ["qwen-local"],
+                "offer_revision": format!("sha256:{}", "ab".repeat(32)),
+            }}),
+        )
+        .expect("a model decision with no ticket is a grant");
+        assert!(model.get("connect_ticket").is_none(), "{model}");
     }
 }

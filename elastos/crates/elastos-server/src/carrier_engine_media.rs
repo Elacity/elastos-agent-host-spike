@@ -178,6 +178,7 @@ enum WarmPayload {
 }
 
 const STREAM_WARM_DEADLINE: Duration = Duration::from_secs(5);
+const ENGINE_MEDIA_CONNECT_DEADLINE: Duration = Duration::from_secs(5);
 
 struct MediaWarm {
     generation: String,
@@ -250,13 +251,27 @@ async fn warm_media_client(
     endpoint: &iroh::Endpoint,
     grant: &Value,
 ) -> Result<super::CarrierClient> {
+    warm_media_client_until(
+        endpoint,
+        grant,
+        tokio::time::Instant::now() + ENGINE_MEDIA_CONNECT_DEADLINE,
+    )
+    .await
+}
+
+async fn warm_media_client_until(
+    endpoint: &iroh::Endpoint,
+    grant: &Value,
+    deadline: tokio::time::Instant,
+) -> Result<super::CarrierClient> {
     let peer = grant["peer_did"]
         .as_str()
         .context("Engine peer missing")?
         .parse::<iroh::PublicKey>()?;
-    // P2-9 step 4: service grants carry only the peer DID. A legacy ticket,
-    // when present, is tried first; otherwise the stream dials the peer's key
-    // and Carrier's own address lookup finds the route (as the Engine call does).
+    // A new service grant carries the peer DID. A legacy grant may still carry
+    // a ticket; that ticket is read and tried first, and only endpoints whose
+    // key is this peer are dialed. The dial budget ends before `deadline`, so
+    // a peer that never answers is the named unreachable error.
     let mut addresses: Vec<iroh::EndpointAddr> = match grant.get("connect_ticket") {
         Some(value) => {
             let ticket = value.as_str().context("Engine route is invalid")?;
@@ -273,7 +288,14 @@ async fn warm_media_client(
     };
     addresses.push(iroh::EndpointAddr::from(peer));
     for address in addresses {
-        if let Ok(client) = super::CarrierClient::connect_known_endpoint(endpoint, address, 5).await
+        let budget = super::connect_budget_inside(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+        );
+        if budget.is_zero() {
+            break;
+        }
+        if let Ok(client) =
+            super::CarrierClient::connect_known_endpoint_for(endpoint, address, budget).await
         {
             return Ok(client);
         }
@@ -282,6 +304,22 @@ async fn warm_media_client(
         "{}: Engine media route unavailable",
         super::SERVICE_PROVIDER_UNREACHABLE
     )
+}
+
+async fn open_engine_media_within(
+    endpoint: &iroh::Endpoint,
+    grant: &Value,
+    authority: &Value,
+    deadline: tokio::time::Instant,
+) -> Result<super::BrowserCarrierStream> {
+    let client = warm_media_client_until(endpoint, grant, deadline).await?;
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        anyhow::bail!("Engine media connection deadline");
+    }
+    tokio::time::timeout(remaining, open_media_stream(client, authority))
+        .await
+        .context("Engine media connection deadline")?
 }
 
 async fn admit_opened_stream(
@@ -669,19 +707,23 @@ async fn connect(
         } else {
             abort_warm_worker(worker);
             tracing::info!("browser_media_warm take_failed");
-            tokio::time::timeout(Duration::from_secs(5), async {
-                open_media_stream(warm_media_client(endpoint, grant).await?, authority).await
-            })
-            .await
-            .context("Engine media connection deadline")??
+            open_engine_media_within(
+                endpoint,
+                grant,
+                authority,
+                tokio::time::Instant::now() + ENGINE_MEDIA_CONNECT_DEADLINE,
+            )
+            .await?
         }
     } else {
         tracing::info!("browser_media_warm take_miss");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            open_media_stream(warm_media_client(endpoint, grant).await?, authority).await
-        })
-        .await
-        .context("Engine media connection deadline")??
+        open_engine_media_within(
+            endpoint,
+            grant,
+            authority,
+            tokio::time::Instant::now() + ENGINE_MEDIA_CONNECT_DEADLINE,
+        )
+        .await?
     };
     if let (Some(page), Some(generation)) = (
         authority["page_id"].as_str(),
@@ -1003,9 +1045,9 @@ mod tests {
 
     #[tokio::test]
     async fn ticketless_engine_grant_dials_the_peer_key() {
-        // P2-9 step 4: service grants carry only the peer DID. The media
-        // stream dials the peer's key; with a known live path it connects,
-        // and an unreachable peer gives the named error.
+        // P2-9 step 4: a ticketless grant dials the peer key. The address comes
+        // from the address book, with no connection already open, and an
+        // unreachable peer gives the named error.
         tokio::time::timeout(Duration::from_secs(15), async {
             let consumer_root = tempfile::tempdir().unwrap();
             let engine_root = tempfile::tempdir().unwrap();
@@ -1033,16 +1075,10 @@ mod tests {
             )
             .await
             .unwrap();
-            // One dial with the full address gives the consumer a live path,
-            // as Carrier's address lookup would in a real mesh.
-            let full = super::super::decode_ticket_endpoints(
-                &super::super::carrier_connect_ticket(&engine.endpoint),
-            )
-            .remove(0);
-            let _warm =
-                super::super::CarrierClient::connect_known_endpoint(&consumer.endpoint, full, 5)
-                    .await
-                    .unwrap();
+            // The engine's direct address is in the address book only. Nothing
+            // has dialed it, so a success is a lookup, not a reused connection.
+            let full = super::super::tests::wait_for_direct_endpoint_addr(&engine.endpoint).await;
+            consumer.memory_lookup.add_endpoint_info(full);
             let grant = json!({"peer_did": engine.endpoint.id().to_string()});
             warm_media_client(&consumer.endpoint, &grant)
                 .await
@@ -1065,6 +1101,56 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreachable_engine_media_peer_is_named_not_the_connection_deadline() {
+        // The production `connect` path wraps the dial. A peer that accepts
+        // UDP and never answers must be the named error, not the outer
+        // "Engine media connection deadline".
+        let root = tempfile::tempdir().unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[0xC3; 32]);
+        let did =
+            super::super::public_key_to_did(&iroh::SecretKey::from_bytes(&[0xC3; 32]).public())
+                .unwrap();
+        let node = super::super::start_isolated_carrier_node_with_registry(
+            &key,
+            &did,
+            root.path().to_path_buf(),
+            None,
+        )
+        .await
+        .unwrap();
+        let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let silent = iroh::SecretKey::from_bytes(&[0xC4; 32]).public();
+        node.memory_lookup.add_endpoint_info(
+            iroh::EndpointAddr::from(silent)
+                .with_addrs([iroh::TransportAddr::Ip(blackhole.local_addr().unwrap())]),
+        );
+        let endpoint = node.endpoint.clone();
+        let path = root.path().to_path_buf();
+        let grant = json!({"peer_did": silent.to_string()});
+        let authority = json!({"page_id":"page:silent","generation":"gen","binding_hash":"bind"});
+        let dial = tokio::spawn(async move { connect(&path, &endpoint, &grant, &authority).await });
+        let mut packet = [0u8; 64];
+        tokio::time::timeout(Duration::from_secs(3), blackhole.recv(&mut packet))
+            .await
+            .expect("silent Engine peer received no dial")
+            .unwrap();
+        let err = match dial.await.unwrap() {
+            Ok(_) => panic!("silent Engine peer opened a stream"),
+            Err(err) => err,
+        };
+        let shown = format!("{err:#}");
+        assert!(
+            shown.contains(super::super::SERVICE_PROVIDER_UNREACHABLE),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("Engine media connection deadline"),
+            "{shown}"
+        );
+        node.endpoint.close().await;
     }
 
     #[tokio::test]

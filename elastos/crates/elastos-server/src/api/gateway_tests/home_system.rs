@@ -3383,6 +3383,137 @@ async fn test_services_carrier_exit_admission_requires_current_issued_contact_gr
 
 #[cfg(unix)]
 #[tokio::test]
+async fn ticketless_exit_stream_dials_the_peer_and_refuses_a_wrong_key() {
+    let left = tempfile::tempdir().unwrap();
+    let right = tempfile::tempdir().unwrap();
+    let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
+    let (trusted_key, _) = generate_keypair();
+    let network = configured_discovery_network_profile_for_test(&trusted_key, "services-contacts");
+    let alice = services_contact_fixture(left.path(), "Alice", bus.clone(), network.clone()).await;
+    let bob = services_contact_fixture(right.path(), "Bob", bus.clone(), network.clone()).await;
+    accept_services_contact_pair(&alice, &bob);
+    let action = services_contact_pending_request(left.path(), right.path(), &alice, &bob).await;
+    let request_id = action.strip_prefix("service-approve-request:").unwrap();
+    let grant_id = format!(
+        "services-remote-exit-grant-{}",
+        hex::encode(&Sha256::digest(request_id.as_bytes())[..8])
+    );
+    let token = app_token_for_authority(right.path(), INBOX_CAPSULE_ID, &bob.authority);
+    let (status, body) = services_contact_post(
+        &bob.app,
+        &token,
+        "/api/apps/inbox/actions",
+        json!({"action_id": action}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let relay_path = right.path().join("exit-ticketless.sock");
+    let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+    registry
+        .register_sub_provider(
+            "exit",
+            Arc::new(ServicesCarrierRelayProvider {
+                path: relay_path,
+                calls: calls.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let (_, alice_did) = elastos_identity::load_or_create_did(left.path()).unwrap();
+    let (_, bob_did) = elastos_identity::load_or_create_did(right.path()).unwrap();
+    let local_node = crate::carrier::start_isolated_carrier_node_with_registry(
+        &alice.device_key,
+        &alice_did,
+        left.path().to_path_buf(),
+        None,
+    )
+    .await
+    .unwrap();
+    let remote_node = crate::carrier::start_isolated_carrier_node_with_registry(
+        &bob.device_key,
+        &bob_did,
+        right.path().to_path_buf(),
+        Some(Arc::downgrade(&registry)),
+    )
+    .await
+    .unwrap();
+    let provider_addr =
+        crate::carrier::tests::wait_for_direct_endpoint_addr(&remote_node.endpoint).await;
+    // Address book only. The request below carries no ticket. A dial that
+    // ignored the peer key would still reach Bob, because the wrong key is
+    // stored on Bob's socket.
+    local_node
+        .memory_lookup
+        .add_endpoint_info(provider_addr.clone());
+    let wrong = iroh::SecretKey::from_bytes(&[0xE2; 32]).public();
+    local_node
+        .memory_lookup
+        .add_endpoint_info(iroh::EndpointAddr::from(wrong).with_addrs(provider_addr.addrs.clone()));
+    let mut local = crate::carrier::CarrierRuntimeService::new(local_node);
+    let mut remote = crate::carrier::CarrierRuntimeService::new(remote_node);
+    remote.configure_browser_exit_network(network).await;
+    let endpoint = local.endpoint().unwrap();
+    let wire = crate::carrier::BrowserCarrierStreamRequest {
+        connect_ticket: String::new(),
+        peer_did: Some(bob.peer_id.clone()),
+        carrier_service: "elastos://exit/open_stream".into(),
+        grant_id,
+        stream_id: "consumer:stream:ticketless".into(),
+        target: "tls://example.com:443".into(),
+        principal_id: Some(alice.authority.principal_id.clone()),
+        reason: None,
+        timeout_ms: Some(5_000),
+    };
+    assert!(wire.connect_ticket.is_empty());
+    let opened = crate::carrier::open_browser_carrier_stream_on_endpoint(&endpoint, &wire)
+        .await
+        .expect("a ticketless Exit grant opens a stream to the peer key");
+    drop(opened);
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["op"] == "open_stream")
+            .count(),
+        1,
+        "the ticketless dial did not reach Exit"
+    );
+    let mut wrong_wire = wire;
+    wrong_wire.peer_did = Some(wrong.to_string());
+    wrong_wire.stream_id = "consumer:stream:wrong-key".into();
+    let err = match crate::carrier::open_browser_carrier_stream_on_endpoint(&endpoint, &wrong_wire)
+        .await
+    {
+        Ok(_) => panic!("a wrong peer key is refused"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains(crate::carrier::SERVICE_PROVIDER_UNREACHABLE)
+            || err
+                .to_string()
+                .contains("does not match the requested peer"),
+        "{err:#}"
+    );
+    assert_eq!(
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call["op"] == "open_stream")
+            .count(),
+        1,
+        "a wrong key must not open Bob's Exit"
+    );
+    remote.shutdown().await.unwrap();
+    local.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_services_exit_decision_order_preserves_pending_and_committed_denial() {
     for pending in [true, false] {
         let left = tempfile::tempdir().unwrap();
