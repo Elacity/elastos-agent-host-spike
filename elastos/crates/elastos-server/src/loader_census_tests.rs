@@ -89,7 +89,7 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-runtime/src/provider/bridge.rs",
-            "spawn_confined_model_linux",
+            "start_linux_model_from_rights",
             "command",
             "host process",
             "CID+DID",
@@ -1021,6 +1021,7 @@ fn found(sources: &BTreeMap<String, String>) -> BTreeMap<(String, String, String
         for (label, needle) in [
             ("command", "Command::new("),
             ("command", "Command::from("),
+            ("command", "Self::spawn_confined("),
             ("content import", "prepare_capsule_from_content_provider("),
             ("bundle start", bundle_start.as_str()),
             ("bundle start", bundle_run.as_str()),
@@ -1104,18 +1105,18 @@ fn native_provider_spawn_routes_keep_the_checked_executable() {
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
-            "spawn_confined_model_linux",
+            "start_linux_model_from_rights",
+            "model_linux_attachment(",
+        ),
+        (
+            "elastos-runtime/src/provider/failure_record.rs",
+            "launch",
             "verify_at_spawn()",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",
-            "spawn_confined_model_linux",
-            "Command::new(prepared.exec_path())",
-        ),
-        (
-            "elastos-runtime/src/provider/bridge.rs",
-            "spawn_confined_model_linux",
-            "Self::spawn_command(",
+            "start_linux_model_from_rights",
+            "Self::spawn_confined(",
         ),
         (
             "elastos-runtime/src/provider/bridge.rs",

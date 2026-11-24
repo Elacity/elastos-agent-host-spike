@@ -1,3 +1,8 @@
+#![cfg(all(
+    test,
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    not(target_os = "macos")
+))]
 //! Linux model-provider socket boundary. The provider and its descendants may
 //! create Unix sockets for the private local engine path, but cannot create
 //! Internet sockets. Runtime closes all other inherited descriptors on exec.
@@ -91,14 +96,6 @@ pub(super) fn install_on_command(command: &mut Command) -> io::Result<()> {
         });
     }
     Ok(())
-}
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-pub(super) fn install_on_command(_: &mut Command) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "Linux model socket confinement is unavailable on this architecture",
-    ))
 }
 
 #[cfg(all(

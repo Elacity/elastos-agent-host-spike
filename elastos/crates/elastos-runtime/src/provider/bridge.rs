@@ -2006,7 +2006,7 @@ impl ProviderBridge {
         ))
     }
 
-    /// Linux model start from the admitted rights. The server keeps the hand-written policy until M3.
+    /// Linux model start from the admitted rights. The Landlock plan attaches before the child runs.
     ///
     /// ABI 5 or newer continues into the preexec installer, which attaches the
     /// admitted Landlock plan and seccomp program. A missing, older, or failed
@@ -2077,116 +2077,6 @@ impl ProviderBridge {
             config,
         )
         .await
-    }
-
-    /// Start a Linux model provider with private local Unix routes and a
-    /// kernel socket filter inherited by its guard and llama.cpp descendants.
-    #[cfg(target_os = "linux")]
-    pub async fn spawn_confined_model_linux(
-        binary_path: &CheckedExecutable,
-        mut config: ProviderConfig,
-    ) -> Result<(Self, BTreeMap<String, String>, Vec<String>, ProviderConfig), BridgeError> {
-        let offers = config
-            .extra
-            .get("offers")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| BridgeError::InitFailed("model offers unavailable".into()))?;
-        let ipc_dir = tempfile::Builder::new()
-            .prefix("em-")
-            .tempdir()
-            .map_err(BridgeError::Spawn)?;
-        let ipc_path = std::fs::canonicalize(ipc_dir.path()).map_err(BridgeError::Spawn)?;
-        let mut sockets = BTreeMap::new();
-        let mut vacant_sockets = Vec::new();
-        let mut brokers = BrokerTasks::default();
-        let provider_pid = Arc::new(AtomicU32::new(0));
-        let provider_birth = Arc::new(AtomicU64::new(0));
-        let local_ids = offers
-            .iter()
-            .filter(|offer| {
-                offer
-                    .pointer("/adapter/kind")
-                    .and_then(serde_json::Value::as_str)
-                    == Some("local_llama_cpp_text")
-            })
-            .map(|offer| {
-                offer
-                    .get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| BridgeError::InitFailed("local offer id unavailable".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if local_ids.len() > 1 {
-            return Err(BridgeError::InitFailed(
-                "too many local model offers".into(),
-            ));
-        }
-        for index in 0..MAX_LOCAL_MODEL_SLOTS {
-            let socket = ipc_path.join(format!("{index}.sock"));
-            let engine_socket = ipc_path.join(format!("{index}.engine.sock"));
-            let socket = socket
-                .to_str()
-                .ok_or_else(|| BridgeError::InitFailed("invalid local socket path".into()))?
-                .to_string();
-            if socket.len() >= 104 || engine_socket.as_os_str().len() >= 104 {
-                return Err(BridgeError::InitFailed("local socket path too long".into()));
-            }
-            if let Some(id) = local_ids.get(index) {
-                if sockets.insert((*id).to_string(), socket.clone()).is_some() {
-                    return Err(BridgeError::InitFailed("duplicate local offer id".into()));
-                }
-            } else {
-                vacant_sockets.push(socket.clone());
-            }
-            brokers.0.push(
-                super::local_model_broker::start(
-                    &socket,
-                    engine_socket,
-                    provider_pid.clone(),
-                    provider_birth.clone(),
-                )
-                .map_err(BridgeError::Spawn)?,
-            );
-        }
-        config.extra["runtime_local_sockets"] = serde_json::json!(sockets);
-        let prepared = binary_path
-            .verify_at_spawn()
-            .map_err(BridgeError::Refused)?;
-        let mut command = Command::new(prepared.exec_path());
-        super::linux_model_seccomp::install_on_command(&mut command).map_err(BridgeError::Spawn)?;
-        let mut bridge = Self::spawn_command(
-            prepared,
-            command,
-            config.clone(),
-            INIT_TIMEOUT,
-            SHUTDOWN_TIMEOUT,
-            std::process::Stdio::null(),
-            false,
-        )
-        .await?;
-        let pid = bridge
-            .child
-            .lock()
-            .await
-            .as_ref()
-            .and_then(tokio::process::Child::id)
-            .ok_or_else(|| BridgeError::InitFailed("model provider pid unavailable".into()))?;
-        let birth = match super::local_model_broker::process_birth(pid) {
-            Some(birth) => birth,
-            None => {
-                let _ = bridge.shutdown().await;
-                return Err(BridgeError::InitFailed(
-                    "model provider identity unavailable".into(),
-                ));
-            }
-        };
-        provider_birth.store(birth, Ordering::Release);
-        provider_pid.store(pid, Ordering::Release);
-        *bridge._local_ipc_dir.lock().await = Some(ipc_dir);
-        *bridge._local_brokers.lock().await = brokers;
-        bridge._local_provider_pid = provider_pid;
-        bridge._local_provider_birth = provider_birth;
-        Ok((bridge, sockets, vacant_sockets, config))
     }
 
     #[cfg(target_os = "macos")]
@@ -4455,7 +4345,30 @@ int main(void) {
             extra: serde_json::json!({"offers":[]}),
             ..Default::default()
         };
-        let result = ProviderBridge::spawn_confined_model_linux(&checked, config).await;
+        let parent = temp.path().join("providers/model-provider");
+        std::fs::create_dir_all(&parent).unwrap();
+        for directory in [
+            temp.path(),
+            &temp.path().join("providers"),
+            parent.as_path(),
+        ] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let manifest: elastos_common::CapsuleManifest = serde_json::from_slice(
+            &std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../capsules/model-provider/capsule.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let result = ProviderBridge::spawn_confined_model_from_rights(
+            &manifest.authority.unwrap(),
+            &checked,
+            &parent.join("journal"),
+            config,
+        )
+        .await;
         assert!(matches!(result, Err(BridgeError::Refused(reason))
             if reason == "provider executable differs from verified release checksum"));
         assert!(!marker.exists(), "the changed model provider did not exec");
@@ -5078,6 +4991,7 @@ int main(void) {
             serde_json::from_value(fixture["provider_config"].clone()).unwrap();
         let offer_id = fixture["offer_id"].as_str().unwrap();
         #[cfg(target_os = "macos")]
+        #[cfg(target_os = "macos")]
         let local_offer = config.extra["offers"]
             .as_array()
             .unwrap()
@@ -5117,71 +5031,72 @@ int main(void) {
         )
         .await;
         #[cfg(target_os = "linux")]
-        let (bridge, sockets, _, _) = ProviderBridge::spawn_confined_model_linux(
-            &CheckedExecutable::for_test(binary),
-            config,
-        )
-        .await
-        .unwrap();
-        let socket = sockets[offer_id].clone();
-        let input = serde_json::json!({
-            "schema": "elastos.model.input.text/v1",
-            "prompt": "Reply with one word: local."
-        });
-        let input_hash = format!(
-            "sha256:{}",
-            hex::encode(Sha256::digest(serde_json::to_vec(&input).unwrap()))
-        );
-        let binding = serde_json::json!({
-            "schema": "elastos.model.runtime-binding/v1",
-            "principal_id": "person:local:test",
-            "session_id": "session:test",
-            "capsule_id": "assistant",
-            "grant_id": "grant:test",
-            "request_id": format!("request:broker-smol-{}", uuid::Uuid::new_v4()),
-            "offer_id": offer_id,
-            "operation": "text.generate",
-            "input_hash": input_hash,
-        });
-        let created = bridge
-            .send_raw(&serde_json::json!({
-                "op": "runs_create", "offer_id": offer_id,
-                "operation": "text.generate", "input": input,
-                "runtime_binding": binding,
-            }))
-            .await
-            .unwrap();
-        assert_eq!(created["status"], "ok", "{created}");
-        let run_id = created["data"]["run_id"].as_str().unwrap();
-        let access = serde_json::json!({
-            "schema": "elastos.model.runtime-access-binding/v1",
-            "principal_id": binding["principal_id"],
-            "session_id": binding["session_id"],
-            "capsule_id": binding["capsule_id"],
-            "grant_id": binding["grant_id"],
-            "request_id": binding["request_id"],
-            "run_id": run_id,
-        });
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-        loop {
-            assert!(tokio::time::Instant::now() < deadline, "Smol run timed out");
-            let result = bridge
+        {
+            let _ = (binary, config, offer_id);
+            panic!("Linux admits no path for a local model");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let socket = sockets[offer_id].clone();
+            let input = serde_json::json!({
+                "schema": "elastos.model.input.text/v1",
+                "prompt": "Reply with one word: local."
+            });
+            let input_hash = format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(serde_json::to_vec(&input).unwrap()))
+            );
+            let binding = serde_json::json!({
+                "schema": "elastos.model.runtime-binding/v1",
+                "principal_id": "person:local:test",
+                "session_id": "session:test",
+                "capsule_id": "assistant",
+                "grant_id": "grant:test",
+                "request_id": format!("request:broker-smol-{}", uuid::Uuid::new_v4()),
+                "offer_id": offer_id,
+                "operation": "text.generate",
+                "input_hash": input_hash,
+            });
+            let created = bridge
                 .send_raw(&serde_json::json!({
-                    "op": "runs_get", "run_id": run_id, "runtime_binding": access,
+                    "op": "runs_create", "offer_id": offer_id,
+                    "operation": "text.generate", "input": input,
+                    "runtime_binding": binding,
                 }))
                 .await
                 .unwrap();
-            if result["data"]["status"] == "completed" {
-                assert!(result["data"]["terminal"]["output"]["text"]
-                    .as_str()
-                    .is_some_and(|text| !text.is_empty()));
-                break;
+            assert_eq!(created["status"], "ok", "{created}");
+            let run_id = created["data"]["run_id"].as_str().unwrap();
+            let access = serde_json::json!({
+                "schema": "elastos.model.runtime-access-binding/v1",
+                "principal_id": binding["principal_id"],
+                "session_id": binding["session_id"],
+                "capsule_id": binding["capsule_id"],
+                "grant_id": binding["grant_id"],
+                "request_id": binding["request_id"],
+                "run_id": run_id,
+            });
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                assert!(tokio::time::Instant::now() < deadline, "Smol run timed out");
+                let result = bridge
+                    .send_raw(&serde_json::json!({
+                        "op": "runs_get", "run_id": run_id, "runtime_binding": access,
+                    }))
+                    .await
+                    .unwrap();
+                if result["data"]["status"] == "completed" {
+                    assert!(result["data"]["terminal"]["output"]["text"]
+                        .as_str()
+                        .is_some_and(|text| !text.is_empty()));
+                    break;
+                }
+                assert_ne!(result["data"]["status"], "failed", "{result}");
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
-            assert_ne!(result["data"]["status"], "failed", "{result}");
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            bridge.shutdown().await.unwrap();
+            assert!(!Path::new(&socket).exists());
         }
-        bridge.shutdown().await.unwrap();
-        assert!(!Path::new(&socket).exists());
     }
 
     #[test]
@@ -5304,30 +5219,26 @@ int main(void) {
         // The probe reports into `<its own executable path>.observed`, so no
         // process variable is set while other tests run in this thread pool.
         let observed = probe.with_extension("observed");
-        let config = ProviderConfig {
-            base_path: tempdir.path().to_string_lossy().into_owned(),
-            extra: serde_json::json!({
-                "offers": [{"id":"fixture-local", "adapter":{"kind":"local_llama_cpp_text"}}],
-            }),
-            ..Default::default()
-        };
-        let spawned = ProviderBridge::spawn_confined_model_linux(
-            &CheckedExecutable::for_test(&probe),
-            config,
-        )
-        .await;
-        let (bridge, sockets, vacant, _) = spawned.unwrap();
-        let pid = bridge
-            .child
-            .lock()
-            .await
-            .as_ref()
-            .unwrap()
-            .id()
-            .expect("egress-filtered provider pid");
-        // One `name=value` line per kernel observation, each asserted alone.
-        let report = std::fs::read_to_string(&observed)
-            .expect("probe did not inherit the egress filter from the route");
+        let mut command = tokio::process::Command::new(&probe);
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null());
+        super::super::linux_model_seccomp::install_on_command(&mut command).unwrap();
+        let mut child = command.spawn().unwrap();
+        let mut report = String::new();
+        for _ in 0..50 {
+            if let Ok(read) = std::fs::read_to_string(&observed) {
+                if !read.is_empty() {
+                    report = read;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !report.is_empty(),
+            "probe did not inherit the egress filter"
+        );
         let inherited = report
             .lines()
             .filter_map(|line| line.split_once('='))
@@ -5335,24 +5246,8 @@ int main(void) {
         assert_eq!(inherited.get("no_new_privs"), Some(&"1"), "{report:?}");
         assert_eq!(inherited.get("seccomp"), Some(&"2"), "{report:?}");
         assert_eq!(inherited.get("inet_socket"), Some(&"EPERM"), "{report:?}");
-        assert_eq!(sockets.len(), 1);
-        assert!(sockets["fixture-local"].ends_with("/0.sock"));
-        assert_eq!(vacant.len(), MAX_LOCAL_MODEL_SLOTS - 1);
-        assert!(
-            process_exists(&pid.to_string()),
-            "provider exited after Init"
-        );
-        bridge.shutdown().await.unwrap();
-        for _ in 0..250 {
-            if !process_exists(&pid.to_string()) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(
-            !process_exists(&pid.to_string()),
-            "provider survived shutdown"
-        );
+        let status = child.wait().await.unwrap();
+        assert!(status.success(), "filtered probe exited {status}");
     }
 
     // === Slice 10: spawn_confined and Confined ===
@@ -6763,6 +6658,13 @@ __attribute__((used)) void run(void) {
         std::fs::write(&engine, b"engine").unwrap();
         std::fs::write(&model, b"gguf").unwrap();
         (temp, base, engine, model, bundle)
+    }
+
+    #[test]
+    fn the_old_linux_model_entry_is_gone() {
+        let source = include_str!("bridge.rs");
+        let needle = ["fn spawn_confined_model_", "linux("].concat();
+        assert!(!source.contains(&needle));
     }
 
     #[test]

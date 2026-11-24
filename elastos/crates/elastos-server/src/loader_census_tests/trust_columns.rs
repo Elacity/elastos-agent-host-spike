@@ -73,12 +73,12 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-runtime/src/provider/bridge.rs",
-            function: "spawn_confined_model_linux",
+            function: "start_linux_model_from_rights",
             call: "command",
             class: "other",
             trust_root: "release-signature",
             verified_when: "at-every-start",
-            evidence: ["Command::new", "(prepared.exec_path())"].concat(),
+            evidence: ["Self::spawn_", "confined("].concat(),
             os_path: "",
         },
         TrustColumn {
