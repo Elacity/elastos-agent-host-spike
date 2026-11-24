@@ -1431,7 +1431,6 @@ impl Runtime {
             (principal_id, None),
             None,
             LaunchMode::Bounded,
-            None,
             (|_| {}, |_| {}),
         )
         .await
@@ -1456,7 +1455,6 @@ impl Runtime {
             (None, None),
             None,
             LaunchMode::Bounded,
-            None,
             (before_folder_walk, after_folder_walk),
         )
         .await
@@ -1479,7 +1477,6 @@ impl Runtime {
             (principal_id, grant_name),
             None,
             LaunchMode::Detached,
-            None,
             (|_| {}, |_| {}),
         )
         .await
@@ -2097,9 +2094,8 @@ impl Runtime {
             path,
             args,
             (Some(actor), None),
-            Some((manifest, entrypoint, model_admission)),
+            Some((manifest, entrypoint, model_admission, live_run)),
             mode,
-            live_run,
             (|_| {}, |_| {}),
         )
         .await
@@ -2114,9 +2110,13 @@ impl Runtime {
         path: &Path,
         args: Vec<String>,
         launch: (Option<BridgePrincipal>, Option<&str>),
-        admitted: Option<(CapsuleManifest, Vec<u8>, AgentModelCeiling)>,
+        admitted: Option<(
+            CapsuleManifest,
+            Vec<u8>,
+            AgentModelCeiling,
+            Option<AgentLiveRun>,
+        )>,
         mode: LaunchMode,
-        live_run: Option<AgentLiveRun>,
         walk_hooks: (
             impl FnOnce(&Path) + Send,
             impl FnOnce(&CheckedBundle) + Send,
@@ -2133,11 +2133,14 @@ impl Runtime {
             )
             .map_err(|err| ElastosError::InvalidManifest(err.to_string()))?;
         }
-        let (manifest, walked, admitted_model) = match admitted {
-            Some((manifest, entrypoint, model_admission)) => {
-                (Some(manifest), Some(entrypoint), Some(model_admission))
-            }
-            None => (None, None, None),
+        let (manifest, walked, admitted_model, live_run) = match admitted {
+            Some((manifest, entrypoint, model_admission, live_run)) => (
+                Some(manifest),
+                Some(entrypoint),
+                Some(model_admission),
+                live_run,
+            ),
+            None => (None, None, None, None),
         };
         let mut manifest: CapsuleManifest = match manifest {
             Some(manifest) => {
@@ -2340,9 +2343,8 @@ impl Runtime {
             &mut handle,
             args,
             principal_id.map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
-            admitted_model,
+            admitted_model.map(|ceiling| (ceiling, live_run)),
             mode,
-            live_run,
         )
         .await?;
 
@@ -2749,7 +2751,6 @@ impl Runtime {
             principal_id,
             None,
             LaunchMode::Bounded,
-            None,
         );
         let started = started.await;
         drop(held);
@@ -2979,7 +2980,7 @@ impl Runtime {
     }
 
     /// Test only: the planted session sits behind the live run's manifest ceiling.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "prototype-agents"))]
     pub(crate) fn copy_manifest_ceiling_for_test(&self, from: &str, to: &str) {
         let mut bounds = self
             .bridge_manifest_capabilities
@@ -3008,10 +3009,13 @@ impl Runtime {
         handle: &mut CapsuleHandle,
         args: Vec<String>,
         principal_id: Option<String>,
-        model_admission: Option<AgentModelCeiling>,
+        model_admission: Option<(AgentModelCeiling, Option<AgentLiveRun>)>,
         mode: LaunchMode,
-        mut live_run: Option<AgentLiveRun>,
     ) -> Result<()> {
+        let (model_admission, mut live_run) = match model_admission {
+            Some((ceiling, live_run)) => (Some(ceiling), live_run),
+            None => (None, None),
+        };
         let detached_component =
             if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
                 Some(self.component_provider.clone().ok_or_else(|| {

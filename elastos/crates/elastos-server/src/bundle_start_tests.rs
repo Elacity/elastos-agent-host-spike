@@ -1608,7 +1608,7 @@ fn the_start_by_cid_reads_each_slot_once_and_fetches_nothing() {
     let bounded =
         "self.start_loaded(\n            component,\n            &mut handle,\n            \
                    args,\n            principal_id,\n            None,\n            \
-                   LaunchMode::Bounded,\n            None,\n        )";
+                   LaunchMode::Bounded,\n        )";
     assert_eq!(start.matches(bounded).count(), 1);
     // One capsule is loaded, from the walked bytes and the judged manifest:
     // sealed when that manifest has no asks, unsealed when it has. The
