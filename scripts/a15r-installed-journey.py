@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Stage one disposable signed Home for the A15-R installed journey.
+"""Stage one disposable signed Home.
 
-The release envelope matches scripts/holder-canary-fixture.py sign_install:
-one 32-byte key, elastos sign-payload for elastos.release.v1 and
-elastos.release.head.v1, then the key is unlinked. This script also signs the
-Agent Host capsule with that same key. holder-canary-fixture.py is unchanged
-because its sign-install deletes the key before a caller could sign the capsule.
+One 32-byte key signs the Agent Host capsule and the release envelope, then
+the key is unlinked. holder-canary-fixture.py deletes its key before a caller
+could sign the capsule, so this script does not call it.
 """
 
 import argparse

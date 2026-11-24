@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-# A15-R installed journey.
-#
-# The owner route is POST /api/apps/system/agents/launch. The runner enables
-# agents, creates two, activates them, takes a fresh passkey step-up for
-# operation agent.start, and posts that route. The route mints a one-use
-# launch grant and asks the managed Home Runtime POST /api/capsules.
-#
-# That runtime exists only after the gateway owns the Home and the owner
-# calls POST /api/apps/home/runtime/ensure. The runner starts `elastos gateway`
-# and does not start an operator `elastos serve` on the same data directory.
+# Owner route: POST /api/apps/system/agents/launch.
+# The gateway owns the Home. POST /api/apps/home/runtime/ensure starts the
+# managed runtime. This runner does not start `elastos serve` beside it.
 set -u
 OUT="${1:-}"
 if [[ -z "$OUT" || "$OUT" == "-h" || "$OUT" == "--help" ]]; then
@@ -51,40 +44,11 @@ fail() {
   shift
   echo "a15r-installed-journey: $*" >&2
   if [[ ! -f "$OUT/receipt.json" ]]; then
-    FAILED="$name" REASON="$*" OUT_DIR="$OUT" python3 - <<'PY'
-import json, os
-from pathlib import Path
-names = [
-    "release_signed", "signing_key_deleted", "installed_identity_recorded",
-    "gateway_started", "owner_passkey_created", "home_runtime_ensured", "runtime_started",
-    "u3_agents_enabled", "u3_owner_field_refused", "u3_agent_created",
-    "u3_unknown_id_refused", "u3_guest_refused", "u3_agent_activated",
-    "u3_agent_started", "u4_second_agent_created", "u4_both_running",
-    "u4_distinct_roots", "u4_no_cross_read", "journal_in_agent_root",
-    "plan_card_captured", "one_pending_record", "approve_without_step_up_refused",
-    "step_up_approve", "one_authorised_write", "owner_document_unchanged",
-    "one_result_and_receipt", "signed_start_audit", "signed_completion_audit",
-    "card_removed", "replay_zero", "restart_zero",
-]
-failed = os.environ["FAILED"]
-reason = os.environ["REASON"]
-assertions = []
-seen = False
-for name in names:
-    if name == failed:
-        assertions.append({"name": name, "status": "fail", "detail": reason})
-        seen = True
-    elif not seen:
-        assertions.append({"name": name, "status": "not reached", "detail": ""})
-    else:
-        assertions.append({"name": name, "status": "not reached", "detail": ""})
-Path(os.environ["OUT_DIR"], "receipt.json").write_text(json.dumps({
-    "route": "POST /api/apps/system/agents/launch",
-    "step_up_operation": "agent.start",
-    "assertions": assertions,
-    "stopped": reason,
-}, indent=2) + "\n")
-PY
+    A15R_OUT="$OUT" \
+      A15R_SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)" \
+      A15R_SOURCE_TREE="$(git -C "$ROOT" rev-parse 'HEAD^{tree}')" \
+      FAILED="$name" REASON="$*" \
+      node "$ROOT/scripts/a15r-installed-journey.mjs" --shell-fail || true
   fi
   exit 1
 }
