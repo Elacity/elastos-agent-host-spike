@@ -133,6 +133,11 @@ fn measured_argument_rules(arch: AuditArch) -> Vec<Instruction> {
                        (42, "socket")] {
         rules[at][3] = number(name, arch).expect("measured rule needs an architecture number");
     }
+    // kill(2) for this group (0) or one group (pid_t < -1). -1 and a positive pid stay denied.
+    let kill = number("kill", arch).expect("measured kill");
+    let sink = rules.len() - 1;
+    rules[sink] = jump(0x15, kill, 0, 7);
+    rules.extend([stmt(0x20, 16), jump(0x15, 0, 0, 1), stmt(6, ALLOW), jump(0x15, u32::MAX, 0, 1), stmt(6, DENY), jump(0x35, 0x8000_0000, 0, 1), stmt(6, ALLOW), stmt(6, DENY)]);
     rules
 }
 
@@ -229,8 +234,8 @@ mod tests {
     fn model_whole_goldens_match_reviewed_pins() {
         use sha2::{Digest as _, Sha256};
         for (golden, expected) in [
-            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-x86_64.golden").as_slice(), "4fae5d0743d35c1650c6453d6f5bc9541ce67fb4237a99563dd9cafef8bcaf6a"),
-            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-aarch64.golden").as_slice(), "4debc431452131f50261d7fd2a9561503fcb6f9b934222770a35862c5271530c"),
+            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-x86_64.golden").as_slice(), "69cd9a31625501ef99fe4042178081907c3ac086ffc67e5df355c2c81290ef70"),
+            (include_bytes!("../../../../../capsules/wallet-provider/tests/model-seccomp-aarch64.golden").as_slice(), "ac158bfaa33c78cd60a79a88d0e13c6af5cf71a971a02449b6b616148d11d0e2"),
         ] {
             assert_eq!(format!("{:x}", Sha256::digest(golden)), expected);
         }
@@ -247,7 +252,7 @@ mod tests {
     #[test]
     fn measured_filter_decides_the_argument_cases() {
         // label, syscall, args, allow
-        let cases: [(&str, &str, [u64; 6], bool); 19] = [
+        let cases: [(&str, &str, [u64; 6], bool); 22] = [
             ("thread clone", "clone", [0x3d_0f00, 0, 0, 0, 0, 0], true),
             ("measured vfork", "clone", [0x4111, 0, 0, 0, 0, 0], true),
             ("plain fork", "clone", [0x11, 0, 0, 0, 0, 0], false),
@@ -266,6 +271,9 @@ mod tests {
             ("socket unix", "socket", [1, 1, 0, 0, 0, 0], true),
             ("socket inet", "socket", [2, 1, 0, 0, 0, 0], false),
             ("socket inet6", "socket", [10, 1, 0, 0, 0, 0], false),
+            ("kill own group", "kill", [0, 9, 0, 0, 0, 0], true),
+            ("kill one group", "kill", [0xffff_fffe, 9, 0, 0, 0, 0], true),
+            ("kill every process", "kill", [0xffff_ffff, 9, 0, 0, 0, 0], false),
             ("kill other pid", "kill", [1, 9, 0, 0, 0, 0], false),
         ];
         for arch in [AuditArch::X86_64, AuditArch::Aarch64] {
@@ -276,6 +284,20 @@ mod tests {
                 let got = interpret(&prog, nr, args, audit);
                 let want = if allow { super::ALLOW } else { super::DENY };
                 assert_eq!(got, want, "{arch:?} {label} returned {got:#x}");
+            }
+            // x86 numbers from the probe's nonfatal denials. They stay denied.
+            if matches!(arch, AuditArch::X86_64) {
+                for (label, nr) in [
+                    ("rt_sigreturn", 15u32),
+                    ("ioctl", 16),
+                    ("madvise", 28),
+                    ("setsockopt", 54),
+                    ("wait4", 61),
+                    ("sched_getaffinity", 204),
+                    ("tgkill", 234),
+                ] {
+                    assert_eq!(interpret(&prog, nr, [0; 6], audit), super::DENY, "{label}");
+                }
             }
         }
     }

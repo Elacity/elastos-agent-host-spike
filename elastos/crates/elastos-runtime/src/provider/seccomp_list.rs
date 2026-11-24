@@ -26,7 +26,24 @@ const BASELINE: &str = concat!(
 // Linux probe rows follow the original model names. `socket` is absent from
 // this model list: the model program admits it only for AF_UNIX, in the
 // argument rules. `connect`, `sendto` and `bind` stay, because the probe
-// measured them and they do not carry an address family.
+// measured them and they do not carry an address family. `kill` is absent
+// here too: the argument rule admits only a process group. The provider, the
+// guard, and the engine inherit this one filter, so the provider can make
+// every call listed for the engine.
+//
+// Left denied. The accepted probe run continued while each of these returned
+// EACCES, and the trace did not record an argument that a narrower rule could
+// admit:
+// `rt_sigreturn` (15) is the signal trampoline and was not fatal.
+// `madvise` (28) was not fatal.
+// `sched_getaffinity` (204) was not fatal. `sched_yield` and
+// `sched_setaffinity` were not in that denial set.
+// `ioctl` (16) was not fatal, and the request number was not recorded.
+// `setsockopt` (54) was not fatal, and the option was not recorded. Chain's
+// `IP_RECVERR` rule stays on chain.
+// `tgkill` (234) was not fatal. A positive tid cannot be proved to be this
+// process's own child with classic BPF.
+// `wait4` (61) was not fatal. `waitid` is the admitted reap.
 const MODEL: &str = "epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit flock geteuid munmap rename renameat rseq accept4 bind connect dup2 getpgrp getpid getsockopt listen pipe2 readlink recvfrom rt_sigprocmask sendto setpgid waitid";
 
 /// The lab sorts names after it joins declared rights and the baseline.

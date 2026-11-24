@@ -1236,9 +1236,10 @@ fn reap_engine_and_kill_guard_group(
     engine: &mut std::process::Child,
     process_group: libc::pid_t,
 ) -> ! {
-    // The monitor leaves the child unreaped, so its PID remains owned through
-    // kill and wait. Reap it before the guard kills itself with the group.
-    let _ = engine.kill();
+    // kill(2) is admitted only for a process group. Child::kill uses a positive
+    // pid, which the filter denies, and wait would then block. The group signal
+    // is the shutdown the probe measured, so it runs before the wait.
+    let _ = signal_process_group(process_group, libc::SIGKILL);
     let _ = engine.wait();
     kill_guard_process_group(process_group);
 }
