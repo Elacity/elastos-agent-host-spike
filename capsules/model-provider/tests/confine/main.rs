@@ -327,6 +327,7 @@ fn canonical_bindings(storage: &Storage, executable: &Path) -> Vec<(&'static str
                 .expect("executable parent")
                 .to_path_buf(),
         ),
+        ("HOSTED_SOCKET", storage.base.join("hosted.sock")),
     ];
     for (index, name) in ANCESTOR_NAMES.iter().enumerate() {
         let path = executable.ancestors().nth(index).unwrap_or(Path::new("/"));

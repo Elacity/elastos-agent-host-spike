@@ -52,6 +52,7 @@
           "(allow process-exec (literal (param \"ENGINE\")))",
           "(allow file-read* (subpath (param \"ENGINE_BUNDLE\")))",
           "(allow file-read* (subpath \"/usr/lib\"))",
+          "(allow network-outbound (literal (param \"HOSTED_SOCKET\")))",
           "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_0\")))",
           "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_1\")))",
           "(allow file-read-metadata (literal (param \"MODEL_ANCESTOR_2\")))",
