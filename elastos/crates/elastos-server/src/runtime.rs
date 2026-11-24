@@ -1,6 +1,6 @@
 //! Core runtime implementation
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -250,6 +250,10 @@ pub struct Runtime {
     /// end holds the same mutex: it puts the start tuple on the one stop
     /// audit, then drops the record.
     agent_launches: Arc<tokio::sync::Mutex<AgentLaunchState>>,
+    /// Live Stop tokens. A non-empty set is that agent's stopping mark.
+    /// Lock order: `agent_launches`, then this mutex. It is held for a few
+    /// instructions and never across an await. Drop takes only this mutex.
+    stop_marks: Arc<StdMutex<AgentStopMarks>>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
@@ -275,6 +279,10 @@ pub struct Runtime {
     /// Launches kept for their page after the program's start is over, by a
     /// launch id of their own (`page_launch.rs`). The bridge never reads them.
     pub(crate) page_launches: crate::page_launch::PageLaunches,
+    /// Test only: which stop-wait bound applies. The key is this token, not
+    /// the heap address of `activation_stops`. Zero is the 40s default.
+    #[cfg(test)]
+    stop_wait_token: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
@@ -284,6 +292,23 @@ struct AgentLaunchState {
     /// session's one end removes it, whether the owner stopped the guest or
     /// the guest ended on its own.
     sessions: HashMap<String, AgentSessionRecord>,
+    /// Set once Stop has asked a live row to end. Dropping Stop does not
+    /// clear it. Start stays refused while a live row remains, and clears
+    /// it once no live row remains.
+    stop_requested: HashSet<String>,
+}
+
+/// One Stop's tokens. The mark is a non-empty set for that agent.
+#[derive(Default)]
+struct AgentStopMarks {
+    tokens: HashMap<String, HashSet<u64>>,
+    next: u64,
+}
+
+impl AgentStopMarks {
+    fn holds(&self, agent_id: &str) -> bool {
+        self.tokens.get(agent_id).is_some_and(|set| !set.is_empty())
+    }
 }
 
 /// The facts a Start keeps so the owner's Stop can write the same tuple.
@@ -392,6 +417,75 @@ impl ActivationStop {
     /// stop: then the stop, not the call, is what ended the guest.
     fn cancelled(&self) -> bool {
         self.flag.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Stop-wait bounds for tests. The key is a token stored on the Runtime,
+/// not the heap address of `activation_stops`.
+#[cfg(test)]
+static TEST_STOP_WAITS: StdMutex<Vec<(u64, std::time::Duration)>> = StdMutex::new(Vec::new());
+
+#[cfg(test)]
+static NEXT_STOP_WAIT_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// First observation of whether Stop had marked this agent before its rows
+/// were read. Keyed by the launch gate so parallel tests stay apart.
+#[cfg(test)]
+static STOP_MARK_BEFORE_ROWS: StdMutex<Vec<(usize, String, Option<bool>)>> =
+    StdMutex::new(Vec::new());
+
+/// Pauses Stop after its token is set and before the registry is read.
+#[cfg(test)]
+struct StopRowsGate {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static STOP_ROWS_GATES: StdMutex<Vec<(usize, String, StopRowsGate)>> = StdMutex::new(Vec::new());
+
+#[cfg(test)]
+static STOP_PANIC_AFTER_MARK: StdMutex<Vec<(usize, String)>> = StdMutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) struct StopRowsPause {
+    pub(crate) entered: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+pub(crate) struct StopWaitLimit {
+    token: u64,
+}
+
+#[cfg(test)]
+impl Drop for StopWaitLimit {
+    fn drop(&mut self) {
+        let mut waits = TEST_STOP_WAITS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        waits.retain(|(token, _)| *token != self.token);
+    }
+}
+
+/// Clears this Stop's token when Stop returns or is dropped. It does not
+/// clear another Stop's token, and it does not clear `stop_requested`.
+pub(crate) struct AgentStopGuard {
+    marks: Arc<StdMutex<AgentStopMarks>>,
+    agent_id: String,
+    token: u64,
+}
+
+impl Drop for AgentStopGuard {
+    fn drop(&mut self) {
+        let mut marks = self.marks.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(set) = marks.tokens.get_mut(&self.agent_id) else {
+            return;
+        };
+        set.remove(&self.token);
+        if set.is_empty() {
+            marks.tokens.remove(&self.agent_id);
+        }
     }
 }
 
@@ -841,6 +935,7 @@ impl Runtime {
             provider_registry: RwLock::new(None),
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
             agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
+            stop_marks: Arc::new(StdMutex::new(AgentStopMarks::default())),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -850,6 +945,8 @@ impl Runtime {
             activation_stops: Arc::default(),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
+            #[cfg(test)]
+            stop_wait_token: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -866,6 +963,7 @@ impl Runtime {
             provider_registry: RwLock::new(None),
             running_capsules: Arc::new(RwLock::new(HashMap::new())),
             agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
+            stop_marks: Arc::new(StdMutex::new(AgentStopMarks::default())),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -875,6 +973,8 @@ impl Runtime {
             activation_stops: Arc::default(),
             launch_contents: Arc::default(),
             page_launches: Default::default(),
+            #[cfg(test)]
+            stop_wait_token: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -1270,7 +1370,11 @@ impl Runtime {
         admission: crate::agent_admission::AdmissionContext,
         facts: AgentStartFacts<'_>,
     ) -> Result<(CapsuleHandle, Signer)> {
+        let capsules = &self.running_capsules;
         let mut state = self.agent_launches.lock().await;
+        if Self::refuse_start_for_stop(&self.stop_marks, capsules, &mut state, facts.agent_id) {
+            return Err(ElastosError::InvalidManifest(Self::AGENT_STOPPING.into()));
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1308,6 +1412,8 @@ impl Runtime {
     /// not read: two rows that share a host name stay distinct, and a row
     /// with no principal is not this agent.
     pub(crate) async fn live_sessions_for_agent(&self, agent_id: &str) -> Vec<String> {
+        #[cfg(test)]
+        self.note_stop_mark_before_rows(agent_id);
         let capsules = self.running_capsules.read().await;
         let mut ids: Vec<String> = capsules
             .values()
@@ -1316,6 +1422,97 @@ impl Runtime {
             .collect();
         ids.sort();
         ids
+    }
+
+    pub(crate) const AGENT_STOPPING: &'static str = "this agent is stopping";
+
+    /// Marks the agent with this Stop's token. The guard clears that token
+    /// when Stop returns or the future is dropped, including a panic.
+    pub(crate) async fn begin_agent_stop(self: &Arc<Self>, agent_id: &str) -> AgentStopGuard {
+        let token = {
+            // A Start that already passed its check still holds this lock
+            // until its session is registered.
+            let _gate = self.agent_launches.lock().await;
+            let mut marks = self
+                .stop_marks
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let token = marks.next;
+            marks.next = marks.next.wrapping_add(1);
+            let _ = marks
+                .tokens
+                .entry(agent_id.to_string())
+                .or_default()
+                .insert(token);
+            token
+        };
+        AgentStopGuard {
+            marks: Arc::clone(&self.stop_marks),
+            agent_id: agent_id.to_string(),
+            token,
+        }
+    }
+
+    /// Records that Stop has asked this agent's live rows to end. The drop
+    /// guard does not clear this.
+    pub(crate) async fn note_agent_stop_requested(&self, agent_id: &str) {
+        self.agent_launches
+            .lock()
+            .await
+            .stop_requested
+            .insert(agent_id.to_string());
+    }
+
+    /// `Some` when the registry could be read: true when a row for this agent
+    /// has not ended. `None` when the registry is busy. This does not wait.
+    fn live_row_in(
+        capsules: &RwLock<HashMap<String, RunningCapsuleInfo>>,
+        agent_id: &str,
+    ) -> Option<bool> {
+        let capsules = capsules.try_read().ok()?;
+        Some(
+            capsules
+                .values()
+                .any(|info| info.ended_at.is_none() && info.principal.as_deref() == Some(agent_id)),
+        )
+    }
+
+    fn stop_mark_held(marks: &StdMutex<AgentStopMarks>, agent_id: &str) -> bool {
+        marks
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .holds(agent_id)
+    }
+
+    /// While any Stop token is set, Start is refused and the registry is not
+    /// read. The row test applies only to `stop_requested`. No signal does
+    /// not read the registry. No live row clears `stop_requested`. Each Stop
+    /// clears only its own token, in [`AgentStopGuard`].
+    fn refuse_start_for_stop(
+        marks: &StdMutex<AgentStopMarks>,
+        capsules: &RwLock<HashMap<String, RunningCapsuleInfo>>,
+        state: &mut AgentLaunchState,
+        agent_id: &str,
+    ) -> bool {
+        if Self::stop_mark_held(marks, agent_id) {
+            return true;
+        }
+        if !state.stop_requested.contains(agent_id) {
+            return false;
+        }
+        match Self::live_row_in(capsules, agent_id) {
+            Some(false) => {
+                state.stop_requested.remove(agent_id);
+                false
+            }
+            Some(true) | None => true,
+        }
+    }
+
+    pub(crate) async fn agent_is_stopping(&self, agent_id: &str) -> bool {
+        let capsules = &self.running_capsules;
+        let mut state = self.agent_launches.lock().await;
+        Self::refuse_start_for_stop(&self.stop_marks, capsules, &mut state, agent_id)
     }
 
     /// The start record for this session, if Start stored one and the
@@ -1343,6 +1540,188 @@ impl Runtime {
             .await
             .sessions
             .insert(session_id, record);
+    }
+
+    #[cfg(test)]
+    fn note_stop_mark_before_rows(&self, agent_id: &str) {
+        let key = Arc::as_ptr(&self.agent_launches) as usize;
+        let marked = Self::stop_mark_held(&self.stop_marks, agent_id);
+        let mut probes = STOP_MARK_BEFORE_ROWS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(slot) = probes
+            .iter_mut()
+            .rev()
+            .find(|(stored, id, seen)| *stored == key && id == agent_id && seen.is_none())
+        {
+            slot.2 = Some(marked);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn agent_stop_flag_is_set(&self, agent_id: &str) -> bool {
+        Self::stop_mark_held(&self.stop_marks, agent_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_stop_mark_probe(&self, agent_id: &str) {
+        STOP_MARK_BEFORE_ROWS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((
+                Arc::as_ptr(&self.agent_launches) as usize,
+                agent_id.to_string(),
+                None,
+            ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stop_mark_seen_before_rows(&self, agent_id: &str) -> Option<bool> {
+        let key = Arc::as_ptr(&self.agent_launches) as usize;
+        STOP_MARK_BEFORE_ROWS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .rev()
+            .find(|(stored, id, _)| *stored == key && id == agent_id)
+            .and_then(|(_, _, seen)| *seen)
+    }
+
+    #[cfg(test)]
+    fn stop_rows_key(&self) -> usize {
+        Arc::as_ptr(&self.agent_launches) as usize
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_stop_before_rows(&self, agent_id: &str) -> StopRowsPause {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        STOP_ROWS_GATES
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((
+                self.stop_rows_key(),
+                agent_id.to_string(),
+                StopRowsGate {
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
+                },
+            ));
+        StopRowsPause { entered, release }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pause_before_stop_rows(&self, agent_id: &str) {
+        let gate = {
+            let key = self.stop_rows_key();
+            let mut gates = STOP_ROWS_GATES
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            let pos = gates
+                .iter()
+                .rposition(|(stored, id, _)| *stored == key && id == agent_id);
+            pos.map(|pos| gates.swap_remove(pos).2)
+        };
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_stop_panic_after_mark(&self, agent_id: &str) {
+        STOP_PANIC_AFTER_MARK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((self.stop_rows_key(), agent_id.to_string()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_stop_panic_after_mark(&self, agent_id: &str) -> bool {
+        let key = self.stop_rows_key();
+        let mut armed = STOP_PANIC_AFTER_MARK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let Some(pos) = armed
+            .iter()
+            .rposition(|(stored, id)| *stored == key && id == agent_id)
+        else {
+            return false;
+        };
+        armed.swap_remove(pos);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn plant_open_agent_stop_for_test(&self, agent_id: &str, session_id: &str) {
+        self.register_capsule(RunningCapsuleInfo {
+            id: session_id.to_string(),
+            name: "planted".to_string(),
+            status: CAPSULE_RUNNING.to_string(),
+            capsule_type: CapsuleType::Wasm,
+            handle: None,
+            session_id: session_id.to_string(),
+            principal: Some(agent_id.to_string()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+        self.insert_agent_session_for_test(AgentSessionRecord {
+            agent_id: agent_id.to_string(),
+            owner: "person:owner".to_string(),
+            host_cid: "cid".to_string(),
+            launch_id: format!("launch:{session_id}"),
+            session_id: session_id.to_string(),
+        })
+        .await;
+        self.activation_stops
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(
+                session_id.to_string(),
+                Arc::new(ActivationStop {
+                    flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
+                    cause: StdMutex::new(None),
+                }),
+            );
+    }
+
+    /// Ends a planted row so it is no longer live. The stopping mark is left
+    /// as it is: a test can see whether Start still treats that mark as a refusal.
+    #[cfg(test)]
+    pub(crate) async fn end_planted_session_for_test(&self, session_id: &str) {
+        let mut capsules = self.running_capsules.write().await;
+        if let Some(info) = capsules.get_mut(session_id) {
+            info.ended_at = Some(std::time::Instant::now());
+            info.status = CAPSULE_STOPPED.to_string();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn limit_stop_wait_for_test(&self, bound: std::time::Duration) -> StopWaitLimit {
+        let token = NEXT_STOP_WAIT_TOKEN.fetch_add(1, Ordering::Relaxed);
+        TEST_STOP_WAITS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((token, bound));
+        self.stop_wait_token.store(token, Ordering::Release);
+        StopWaitLimit { token }
+    }
+
+    #[cfg(test)]
+    fn test_stop_wait_bound(&self) -> std::time::Duration {
+        let token = self.stop_wait_token.load(Ordering::Acquire);
+        if token == 0 {
+            return std::time::Duration::from_secs(40);
+        }
+        TEST_STOP_WAITS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .rev()
+            .find(|(stored, _)| *stored == token)
+            .map(|(_, bound)| *bound)
+            .unwrap_or(std::time::Duration::from_secs(40))
     }
 
     /// Both admitted entries derive the same actor and ceiling from the
@@ -2726,6 +3105,9 @@ impl Runtime {
     /// wait bound passes. The worker's own deadline is 10 s; the bridge's
     /// longest wait is 30 s.
     async fn wait_ended(&self, id: &str) {
+        #[cfg(test)]
+        let bound = self.test_stop_wait_bound();
+        #[cfg(not(test))]
         let bound = std::time::Duration::from_secs(40);
         let deadline = std::time::Instant::now() + bound;
         loop {
@@ -3582,6 +3964,26 @@ pub(crate) mod tests {
         );
         let compute = Arc::new(NoopComputeProvider);
         (Runtime::new(storage, compute), temp_dir)
+    }
+
+    #[tokio::test]
+    async fn a_stop_wait_limit_stays_on_the_runtime_that_set_it() {
+        let (first, _first_dir) = test_runtime().await;
+        let (second, _second_dir) = test_runtime().await;
+        let limit = first.limit_stop_wait_for_test(std::time::Duration::from_millis(20));
+        assert_eq!(
+            first.test_stop_wait_bound(),
+            std::time::Duration::from_millis(20)
+        );
+        assert_eq!(
+            second.test_stop_wait_bound(),
+            std::time::Duration::from_secs(40)
+        );
+        drop(limit);
+        assert_eq!(
+            first.test_stop_wait_bound(),
+            std::time::Duration::from_secs(40)
+        );
     }
 
     /// Row 5d at the folder entrance: an agent's own principal is refused by
