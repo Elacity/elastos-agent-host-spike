@@ -31,6 +31,9 @@ pub async fn run_serve(
     capsule: Option<PathBuf>,
     cid: Option<String>,
 ) -> anyhow::Result<()> {
+    // Hold the macOS private copy before readiness, so the spawning parent can
+    // return without unlinking the image this process is running.
+    let _private_exec = elastos_server::host_lock::hold_running_exec_copy()?;
     crate::runtime_control::watch_gateway_owner()?;
     let data_dir = crate::default_data_dir();
     let subordinate_host = std::env::var("ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST")
@@ -45,6 +48,9 @@ pub async fn run_serve(
         )?)
     };
     if !subordinate_host {
+        // On macOS this watch follows the signed install, not the private copy.
+        // A route on the serve router may admit this process: the copy stays
+        // for the process lifetime, and admission hashes those bytes.
         elastos_server::host_lock::spawn_installed_binary_supersession_watch(&data_dir, "serve");
     }
     let (_runtime_config, is_first_run) = bootstrap::RuntimeConfig::load(&data_dir);

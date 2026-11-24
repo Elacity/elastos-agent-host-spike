@@ -2017,7 +2017,7 @@ async fn dispatch_capsule_action(
     if !catalog_capsule_has_cli_projection(capsule) {
         anyhow::bail!("Capsule {} is not a Home CLI launch action.", capsule_name);
     }
-    run_capsule_action(capsule_name).await
+    run_capsule_action(Path::new(&snapshot.data_dir), capsule_name).await
 }
 
 fn action_spec(action_id: &str) -> Option<ActionSpec> {
@@ -2091,10 +2091,15 @@ async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Resu
         }
         ActionLaunch::External(args) => {
             let exe = std::env::current_exe().context("current exe unavailable")?;
-            let status = Command::new(exe)
-                .args(args)
-                .env("ELASTOS_PARENT_SURFACE", "home")
-                .status()?;
+            let admitted = elastos_server::binaries::checked_running_runtime(
+                Path::new(&snapshot.data_dir),
+                &exe,
+            )?;
+            let prepared = admitted.prepare()?;
+            let mut command = Command::new(prepared.exec_path());
+            command.args(args).env("ELASTOS_PARENT_SURFACE", "home");
+            prepared.attach_std(&mut command, false)?;
+            let status = command.status()?;
             let exit = status
                 .code()
                 .map(|code| code.to_string())
@@ -2112,9 +2117,12 @@ async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Resu
 }
 
 /// Launch a dynamically discovered capsule by name.
-async fn run_capsule_action(capsule_name: &str) -> anyhow::Result<String> {
+async fn run_capsule_action(data_dir: &Path, capsule_name: &str) -> anyhow::Result<String> {
     let exe = std::env::current_exe().context("current exe unavailable")?;
-    let status = Command::new(exe)
+    let admitted = elastos_server::binaries::checked_running_runtime(data_dir, &exe)?;
+    let prepared = admitted.prepare()?;
+    let mut command = Command::new(prepared.exec_path());
+    command
         .args([
             "capsule",
             capsule_name,
@@ -2122,8 +2130,9 @@ async fn run_capsule_action(capsule_name: &str) -> anyhow::Result<String> {
             "interactive",
             "--interactive",
         ])
-        .env("ELASTOS_PARENT_SURFACE", "home")
-        .status()?;
+        .env("ELASTOS_PARENT_SURFACE", "home");
+    prepared.attach_std(&mut command, false)?;
+    let status = command.status()?;
     if status.success() {
         Ok(format!("Returned home from {}.", capsule_name))
     } else {
@@ -5397,5 +5406,38 @@ pub(crate) mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("Ticket:"), "{rendered}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_action_refuses_a_changed_runtime_before_exec() {
+        let home = crate::own_runtime_fixture::substituted_runtime_home();
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.data_dir = home.data.display().to_string();
+        let action = ActionSpec {
+            id: "chat",
+            label: "Chat",
+            description: "Open chat",
+            args: &["chat"],
+            core: true,
+        };
+        let error = run_action(action, &snapshot).await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Installed artifact differs from its signed checksum"),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_capsule_action_refuses_a_changed_runtime_before_exec() {
+        let home = crate::own_runtime_fixture::substituted_runtime_home();
+        let error = run_capsule_action(&home.data, "demo").await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Installed artifact differs from its signed checksum"),
+            "{message}"
+        );
     }
 }
