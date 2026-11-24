@@ -543,7 +543,9 @@ async fn request_model_provider_status(
 }
 
 /// Start localhost, object, or chain on that provider's path allow-list.
-/// Windows stays on the plain spawn.
+///
+/// Unix-like systems other than Linux and macOS refuse in the OS entry before
+/// a process exists.
 #[cfg(unix)]
 async fn spawn_allow_listed_provider(
     component_key: &str,
@@ -581,6 +583,10 @@ async fn spawn_allow_listed_provider(
     Ok(Arc::clone(confined.bridge()))
 }
 
+/// Windows fences are P2-11, parked. This arm keeps `ProviderBridge::spawn`,
+/// the call Home used before the Unix fence and the call Windows still
+/// compiles. On Windows that spawn refuses before a process
+/// (`bridge_windows`), so the helper does not start.
 #[cfg(not(unix))]
 async fn spawn_allow_listed_provider(
     _component_key: &str,
@@ -1622,7 +1628,13 @@ async fn setup_server_infrastructure_impl(
                 Err(e) => tracing::warn!("Failed to spawn chain-provider: {}", e),
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            report_missing_home_provider(
+                &data_dir,
+                "chain-provider",
+                "Chain operations will fail closed",
+            );
+        }
         Err(e) => tracing::warn!("Skipping chain-provider due to verification failure: {}", e),
     }
 
@@ -2680,28 +2692,260 @@ mod tests {
     }
 
     #[test]
-    fn an_uninstalled_object_or_chain_helper_does_not_stop_home() {
+    fn windows_helper_spawn_is_the_parked_main_call() {
         let source = include_str!("server_infra.rs");
         let production = source.split("mod tests").next().unwrap();
-        for key in ["object-provider", "chain-provider"] {
-            let marker = format!("resolve_verified_native_provider_binary(\"{key}\")");
-            let at = production
-                .find(&marker)
-                .unwrap_or_else(|| panic!("{marker}"));
-            let window = &production[at..];
-            let none_at = window
-                .find("Ok(None) =>")
-                .unwrap_or_else(|| panic!("{key} Ok(None)"));
-            let arm = &window[none_at..];
-            let end = arm
-                .find("\n        Err(")
-                .unwrap_or_else(|| panic!("{key} Err arm"));
-            let arm = &arm[..end];
+        assert!(
+            production.contains("Unix-like systems other than Linux and macOS"),
+            "an unsupported OS is Unix-like systems other than Linux and macOS"
+        );
+        assert!(
+            production.contains("Windows fences are P2-11, parked"),
+            "Windows fences stay parked"
+        );
+        let first = production
+            .find("async fn spawn_allow_listed_provider(")
+            .expect("unix helper arm");
+        let second = production[first + 1..]
+            .find("async fn spawn_allow_listed_provider(")
+            .expect("windows helper arm")
+            + first
+            + 1;
+        let tail = &production[second..];
+        let open = tail.find('{').expect("windows body");
+        let mut depth = 0usize;
+        let mut end = open;
+        for (offset, byte) in tail[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + offset + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &tail[open..end];
+        assert!(
+            production[..second].contains("#[cfg(not(unix))]"),
+            "the second arm is the Windows call"
+        );
+        assert!(body.contains("ProviderBridge::spawn("), "{body}");
+        assert!(!body.contains("spawn_path_allow"), "{body}");
+        let windows = include_str!("../../elastos-runtime/src/provider/bridge_windows.rs");
+        let checked =
+            include_str!("../../elastos-runtime/src/provider/checked_executable_windows.rs");
+        assert!(windows.contains("fn refuse_checked"));
+        assert!(!windows.contains("Command::new"));
+        assert!(checked.contains("verified native providers are not supported on Windows yet"));
+        assert!(checked.contains("Windows does not open or start the file"));
+    }
+
+    /// Home comes up with object and chain absent. The log names each helper,
+    /// and each helper's route refuses by name. `/api/health` is bound only
+    /// after this start returns, so a successful start is the health step.
+    #[test]
+    fn a_missing_object_or_chain_helper_leaves_home_healthy() {
+        let scratch = TempDir::new().unwrap();
+        fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let home = scratch.path().join("home");
+        let xdg = scratch.path().join("xdg");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&xdg).unwrap();
+        for directory in [&home, &xdg] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let data = if cfg!(target_os = "macos") {
+            home.join("Library/Application Support/elastos")
+        } else {
+            xdg.join("elastos")
+        };
+        fs::create_dir_all(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+        if cfg!(target_os = "macos") {
+            for part in ["Library", "Library/Application Support"] {
+                fs::set_permissions(home.join(part), fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let bin = data.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o700)).unwrap();
+        let probe = bin.join("localhost-provider");
+        let source = scratch.path().join("localhost-probe.rs");
+        fs::write(
+            &source,
+            r#"use std::io::{BufRead, Write};
+fn main() {
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    for line in stdin.lock().lines() {
+        if line.is_err() { break; }
+        if writeln!(out, "{{\"status\":\"ok\"}}").is_err() { break; }
+        let _ = out.flush();
+    }
+}
+"#,
+        )
+        .unwrap();
+        let built = std::process::Command::new("rustc")
+            .args(["--edition", "2021", "-o"])
+            .arg(&probe)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "localhost probe failed to build: {}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+        use sha2::Digest as _;
+        let checksum = format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(fs::read(&probe).unwrap()))
+        );
+        let manifest = serde_json::json!({
+            "external": {"localhost-provider": {
+                "version": "test",
+                "install_path": "bin/localhost-provider",
+                "provider_runtime": {
+                    "role": "provider",
+                    "substrate": "native",
+                    "runtime_abi": "elastos.provider-stdio/v1",
+                    "execution": "native-provider",
+                    "provides": "localhost://*",
+                },
+                "platforms": {elastos_server::setup::detect_platform(): {
+                    "checksum": checksum,
+                    "source": probe.to_string_lossy(),
+                    "strategy": "local-copy",
+                }},
+            }},
+            "capsules": {},
+            "profiles": {"home": {"components": [
+                "localhost-provider", "object-provider", "chain-provider"
+            ]}},
+        });
+        fs::write(
+            data.join("components.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        sign_test_home(&data);
+        let _guard = ENV_LOCK.lock().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "server_infra::tests::missing_object_and_chain_helpers_leave_home_up_probe",
+            ])
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", &xdg)
+            .env("TMPDIR", scratch.path())
+            .env("RUST_LOG", "elastos=warn")
+            .env("ELASTOS_FENCE_HOME_ROOT", &data)
+            .env_remove("ELASTOS_CAPSULE_BIN_DIR")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // The child is a test process. Its captured log is on stdout.
+        let log = format!("{stderr}\n{stdout}");
+        assert!(
+            output.status.success() && !log.contains("FAILED") && !log.contains("panicked"),
+            "home probe failed ({}): {log}",
+            output.status
+        );
+        for name in ["object-provider", "chain-provider"] {
+            let named = format!("{name} binary is not installed");
+            let line = log
+                .lines()
+                .find(|line| line.contains(&named))
+                .unwrap_or_else(|| panic!("log does not name {name}\n{log}"));
+            eprintln!("{line}");
             assert!(
-                !arm.contains('?'),
-                "{key} absence is a start refusal:\n{arm}"
+                !log.contains(&format!("Failed to spawn {name}")),
+                "{name} was spawned: {log}"
+            );
+            assert!(
+                !log.contains(&format!("{name} capsule from")),
+                "{name} started: {log}"
             );
         }
+        let facts: serde_json::Value = serde_json::from_str(
+            stdout
+                .lines()
+                .find(|line| line.starts_with('{'))
+                .unwrap_or_else(|| panic!("no facts: {stdout}\n{stderr}")),
+        )
+        .unwrap();
+        assert_eq!(facts["health"], "ok", "{facts}");
+        for (key, scheme) in [("object", "object"), ("chain", "chain")] {
+            assert!(
+                facts[key]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains(&format!("no provider for scheme: {scheme}")),
+                "{facts}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "child half of a_missing_object_or_chain_helper_leaves_home_healthy; the parent runs it"]
+    async fn missing_object_and_chain_helpers_leave_home_up_probe() {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .unwrap();
+        // Every warn, on every thread. A target filter hides this binary's
+        // module and the parent then sees an empty log.
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .try_init()
+            .expect("tracing subscriber");
+        let expected = PathBuf::from(
+            std::env::var_os("ELASTOS_FENCE_HOME_ROOT").expect("ELASTOS_FENCE_HOME_ROOT"),
+        );
+        let data_dir = crate::sources::default_data_dir();
+        assert_eq!(
+            data_dir,
+            expected,
+            "Home data dir {} is not the prepared root {}",
+            data_dir.display(),
+            expected.display()
+        );
+        let mut infrastructure = setup_server_infrastructure()
+            .await
+            .unwrap_or_else(|error| panic!("Home did not start: {error:#}"));
+        let object = match infrastructure
+            .provider_registry
+            .send_raw("object", &serde_json::json!({"op": "status"}))
+            .await
+        {
+            Ok(value) => value.to_string(),
+            Err(error) => error.to_string(),
+        };
+        let chain = match infrastructure
+            .provider_registry
+            .send_raw("chain", &serde_json::json!({"op": "status"}))
+            .await
+        {
+            Ok(value) => value.to_string(),
+            Err(error) => error.to_string(),
+        };
+        if let Some(carrier) = infrastructure.carrier_service.as_mut() {
+            carrier.shutdown().await.unwrap();
+        }
+        drop(infrastructure);
+        println!(
+            "{}",
+            serde_json::json!({"health": "ok", "object": object, "chain": chain})
+        );
     }
 
     fn did_fixture() -> (TempDir, PathBuf, PathBuf) {
