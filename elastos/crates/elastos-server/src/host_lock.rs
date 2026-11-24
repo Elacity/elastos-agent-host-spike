@@ -199,9 +199,12 @@ impl From<HostProcessMeta> for HostProcessInfo {
 
 #[derive(Debug, Clone)]
 struct BinarySupersessionWatch {
-    current_exe_path: PathBuf,
-    current_exe_stamp: BinaryFileStamp,
-    current_binary_sha256: String,
+    watch_path: PathBuf,
+    watch_stamp: BinaryFileStamp,
+    watch_sha256: String,
+    /// The watched path is the canonical signed install, which is not the
+    /// macOS private copy this process may have been exec'd from.
+    follows_install: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,9 +232,41 @@ struct BinarySnapshot {
     sha256: String,
 }
 
+/// This process's private exec copy, when it was started from one.
+#[cfg(target_os = "macos")]
+pub type RunningExecCopy = Option<crate::setup::verified_executable::ExecCopyGuard>;
+/// Other platforms do not exec from a private copy.
+#[cfg(not(target_os = "macos"))]
+pub type RunningExecCopy = Option<()>;
+
+/// The running image keeps its private copy. On other platforms this is empty.
+pub fn hold_running_exec_copy() -> anyhow::Result<RunningExecCopy> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::setup::verified_executable::adopt_running_exec_copy()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(None)
+    }
+}
+
 pub fn spawn_installed_binary_supersession_watch(data_dir: &Path, role: &str) {
-    let Some(mut watch) = BinarySupersessionWatch::from_data_dir(data_dir) else {
-        return;
+    let mut watch = match BinarySupersessionWatch::from_data_dir(data_dir) {
+        Ok(watch) => watch,
+        Err(err) => {
+            // A private copy must not keep running when its install cannot be
+            // watched. Every other process keeps the previous behaviour.
+            #[cfg(target_os = "macos")]
+            if std::env::current_exe().is_ok_and(|exe| {
+                crate::setup::verified_executable::private_exec_dir(&exe).is_some()
+            }) {
+                eprintln!("[{role}] {err:#}. Exiting stale host.");
+                std::process::exit(75);
+            }
+            let _ = err;
+            return;
+        }
     };
     let role = role.to_string();
     tokio::spawn(async move {
@@ -241,6 +276,8 @@ pub fn spawn_installed_binary_supersession_watch(data_dir: &Path, role: &str) {
             interval.tick().await;
             if let Some(reason) = watch.superseded_reason() {
                 eprintln!("[{}] {}", role, reason);
+                #[cfg(target_os = "macos")]
+                crate::setup::verified_executable::release_running_exec_copy();
                 std::process::exit(75);
             }
         }
@@ -248,18 +285,45 @@ pub fn spawn_installed_binary_supersession_watch(data_dir: &Path, role: &str) {
 }
 
 impl BinarySupersessionWatch {
-    fn from_data_dir(data_dir: &Path) -> Option<Self> {
-        Self::from_reader(data_dir, &RealBinarySnapshotReader).ok()
+    fn from_data_dir(data_dir: &Path) -> anyhow::Result<Self> {
+        Self::from_reader(data_dir, &RealBinarySnapshotReader)
     }
 
     fn from_reader(data_dir: &Path, reader: &impl BinarySnapshotReader) -> anyhow::Result<Self> {
-        let current_exe = normalize_deleted_exe_path(&reader.current_exe_path_raw()?);
-        let snapshot = reader.digest_snapshot(&current_exe)?;
         let _ = data_dir;
+        let executing = normalize_deleted_exe_path(&reader.current_exe_path_raw()?);
+        // Only macOS execs a private copy. Linux fexecve and Windows keep the
+        // install path as current_exe, and that watch stays as it is.
+        #[cfg(target_os = "macos")]
+        if let Some((install, sha256)) = crate::binaries::signed_runtime_install(data_dir)? {
+            let running = std::fs::canonicalize(&executing)
+                .map_err(|error| anyhow!("running binary: {error}"))?;
+            if running != install {
+                let (actual, _) = crate::installed_release::file_digest(&running)?;
+                anyhow::ensure!(
+                    actual == sha256,
+                    "running binary is not the installed release"
+                );
+            }
+            let snapshot = reader.digest_snapshot(&install)?;
+            anyhow::ensure!(
+                snapshot.sha256 == sha256,
+                "installed binary does not match its signed digest"
+            );
+            return Ok(Self {
+                watch_path: install,
+                watch_stamp: snapshot.stamp,
+                watch_sha256: snapshot.sha256,
+                follows_install: true,
+            });
+        }
+        // A dev Home has no signed release. macOS execs that source path, so replacing it still exits 75.
+        let snapshot = reader.digest_snapshot(&executing)?;
         Ok(Self {
-            current_exe_path: current_exe,
-            current_exe_stamp: snapshot.stamp,
-            current_binary_sha256: snapshot.sha256,
+            watch_path: executing,
+            watch_stamp: snapshot.stamp,
+            watch_sha256: snapshot.sha256,
+            follows_install: false,
         })
     }
 
@@ -273,7 +337,7 @@ impl BinarySupersessionWatch {
             Err(err) => {
                 return Some(format!(
                     "host executable path could not be read for {}: {err:#}. Exiting stale host.",
-                    self.current_exe_path.display()
+                    self.watch_path.display()
                 ));
             }
         };
@@ -283,49 +347,51 @@ impl BinarySupersessionWatch {
         if raw_text.ends_with(" (deleted)") {
             return Some(format!(
                 "host executable {} was replaced on disk. Exiting stale host.",
-                self.current_exe_path.display()
+                self.watch_path.display()
             ));
         }
 
-        if current_exe != self.current_exe_path {
+        // A private copy's path is not the install. It may differ, or disappear
+        // after the parent returns, without the installed binary changing.
+        if !self.follows_install && current_exe != self.watch_path {
             return Some(format!(
                 "host executable moved from {} to {}. Exiting stale host.",
-                self.current_exe_path.display(),
+                self.watch_path.display(),
                 current_exe.display()
             ));
         }
 
-        let current_stamp = match reader.metadata_stamp(&self.current_exe_path) {
+        let current_stamp = match reader.metadata_stamp(&self.watch_path) {
             Ok(stamp) => stamp,
             Err(err) => {
                 return Some(format!(
                     "host executable {} could not be verified on disk: {err:#}. Exiting stale host.",
-                    self.current_exe_path.display()
+                    self.watch_path.display()
                 ));
             }
         };
 
-        if current_stamp == self.current_exe_stamp {
+        if current_stamp == self.watch_stamp {
             return None;
         }
 
-        let current_snapshot = match reader.digest_snapshot(&self.current_exe_path) {
+        let current_snapshot = match reader.digest_snapshot(&self.watch_path) {
             Ok(snapshot) => snapshot,
             Err(err) => {
                 return Some(format!(
                     "host executable {} changed on disk and could not be re-verified: {err:#}. Exiting stale host.",
-                    self.current_exe_path.display()
+                    self.watch_path.display()
                 ));
             }
         };
-        if current_snapshot.sha256 != self.current_binary_sha256 {
+        if current_snapshot.sha256 != self.watch_sha256 {
             return Some(format!(
                 "host binary {} changed on disk. Exiting stale host so the newer binary can take over.",
-                self.current_exe_path.display()
+                self.watch_path.display()
             ));
         }
 
-        self.current_exe_stamp = current_snapshot.stamp;
+        self.watch_stamp = current_snapshot.stamp;
         None
     }
 }
@@ -857,6 +923,46 @@ mod tests {
 
         let reason = watch.superseded_reason_with(&reader).expect("superseded");
         assert!(reason.contains("could not be verified on disk"), "{reason}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn supersession_watch_follows_the_signed_install_not_the_private_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = crate::installed_release::tests::Fixture::new();
+        let install = fixture.data.join("runtime");
+        let copy_dir = tempfile::tempdir().expect("copy dir");
+        let copy = copy_dir.path().join("executable");
+        fs::copy(&install, &copy).expect("copy install");
+        fs::set_permissions(&copy, fs::Permissions::from_mode(0o500)).expect("copy mode");
+        let reader = TestBinarySnapshotReader::new(copy.clone());
+        let mut watch = BinarySupersessionWatch::from_reader(&fixture.data, &reader)
+            .expect("watch the signed install");
+        fs::remove_file(&copy).expect("delete private copy");
+        assert!(
+            watch.superseded_reason_with(&reader).is_none(),
+            "a missing private copy is not a replaced install"
+        );
+        fs::write(&install, b"replaced signed runtime bytes").expect("replace install");
+        let reason = watch
+            .superseded_reason_with(&reader)
+            .expect("replaced install");
+        assert!(reason.contains("changed on disk"), "{reason}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn watch_setup_error_returns_when_this_process_is_not_a_private_copy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sources.json"), b"{").expect("sources");
+        let error = BinarySupersessionWatch::from_data_dir(temp.path())
+            .expect_err("malformed sources must not arm the watch");
+        assert!(
+            crate::setup::verified_executable::private_exec_dir(&std::env::current_exe().unwrap())
+                .is_none(),
+            "the test process is not a private exec copy"
+        );
+        assert!(!error.to_string().is_empty());
     }
 
     #[test]

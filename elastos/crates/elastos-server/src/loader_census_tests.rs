@@ -39,6 +39,28 @@ fn row(
 
 /// The authority input is local to the entry, not inherited from a caller's
 /// name. `none` and `checksum` document paths that later slices must gate.
+fn own_command_checks() -> &'static str {
+    #[cfg(windows)]
+    {
+        "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
+    }
+    #[cfg(not(windows))]
+    {
+        "checksum"
+    }
+}
+
+fn managed_runtime_checks() -> &'static str {
+    #[cfg(windows)]
+    {
+        "managed Runtime process ownership is unsupported on Windows"
+    }
+    #[cfg(not(windows))]
+    {
+        "checksum"
+    }
+}
+
 fn rows() -> Vec<Row> {
     let confined_spawn = ["ProviderBridge::spawn", "_confined"].concat();
     vec![
@@ -237,7 +259,7 @@ fn rows() -> Vec<Row> {
             "return_to_home_if_requested",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -255,7 +277,7 @@ fn rows() -> Vec<Row> {
             "run_action",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -264,7 +286,7 @@ fn rows() -> Vec<Row> {
             "run_capsule_action",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -579,7 +601,7 @@ fn rows() -> Vec<Row> {
             "ensure_managed_runtime",
             "command",
             "host process",
-            "none",
+            managed_runtime_checks(),
             "P2-8",
             1,
         ),
@@ -588,7 +610,7 @@ fn rows() -> Vec<Row> {
             "ensure_managed_runtime",
             "spawn()",
             "host process",
-            "none",
+            managed_runtime_checks(),
             "P2-8",
             1,
         ),
@@ -1084,6 +1106,8 @@ fn every_executable_loader_has_an_authority_row() {
                 | "CID"
                 | "DID"
                 | "checksum"
+                | "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
+                | "managed Runtime process ownership is unsupported on Windows"
                 | "admitted binary+OS gate+confined storage"
                 | "checked storage+Seatbelt profile"
                 | "none"

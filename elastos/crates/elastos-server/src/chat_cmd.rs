@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{io::IsTerminal, io::Read, io::Write};
@@ -266,13 +267,14 @@ pub async fn run_chat(nick: Option<String>, connect: Option<String>) -> anyhow::
     let _logging_guard = LoggingSuppressionGuard::enter();
 
     let coords = crate::runtime_control::ensure_runtime_for_chat(&data_dir).await?;
-    run_native_chat_with_runtime(nick, connect, coords).await
+    run_native_chat_with_runtime(nick, connect, coords, &data_dir).await
 }
 
 async fn run_native_chat_with_runtime(
     requested_nick: Option<String>,
     connect: Option<ChatBootstrap>,
     coords: crate::runtime_control::RuntimeCoords,
+    data_dir: &Path,
 ) -> anyhow::Result<()> {
     let tokens = crate::runtime_control::attach_to_runtime(&coords).await?;
     let client = reqwest::Client::new();
@@ -588,7 +590,7 @@ async fn run_native_chat_with_runtime(
         eprintln!("[chat] cleanup failed: {}", err);
     }
 
-    return_to_home_if_requested(home_requested)?;
+    return_to_home_if_requested(data_dir, home_requested)?;
     Ok(())
 }
 
@@ -1809,7 +1811,7 @@ async fn list_topic_peers(
         .unwrap_or_default())
 }
 
-fn return_to_home_if_requested(home_requested: bool) -> anyhow::Result<()> {
+fn return_to_home_if_requested(data_dir: &Path, home_requested: bool) -> anyhow::Result<()> {
     if !home_requested {
         return Ok(());
     }
@@ -1817,7 +1819,12 @@ fn return_to_home_if_requested(home_requested: bool) -> anyhow::Result<()> {
         return Ok(());
     }
     let exe = std::env::current_exe()?;
-    let status = std::process::Command::new(exe).arg("home").status()?;
+    let admitted = elastos_server::binaries::checked_running_runtime(data_dir, &exe)?;
+    let prepared = admitted.prepare()?;
+    let mut command = std::process::Command::new(prepared.exec_path());
+    command.arg("home");
+    prepared.attach_std(&mut command, false)?;
+    let status = command.status()?;
     if !status.success() {
         anyhow::bail!(
             "failed to return Home (exit {})",
@@ -2680,6 +2687,18 @@ mod tests {
                 serde_json::json!({"op": "get_ticket"}),
                 serde_json::json!({"op": "remember_peer", "ticket": "chat-bootstrap-ticket"}),
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn return_to_home_refuses_a_changed_runtime_before_exec() {
+        let home = crate::own_runtime_fixture::substituted_runtime_home();
+        let error = return_to_home_if_requested(&home.data, true).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Installed artifact differs from its signed checksum"),
+            "{message}"
         );
     }
 }
