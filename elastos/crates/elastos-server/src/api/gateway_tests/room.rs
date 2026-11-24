@@ -1914,7 +1914,7 @@ async fn test_chat_room_shell_can_approve_browser_access_request() {
             test_browser_request("localhost:61180", "http://localhost:61180")
                 .method("POST")
                 .uri("/api/apps/home/launch")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", granted_home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"chat-room"}"#))
                 .unwrap(),

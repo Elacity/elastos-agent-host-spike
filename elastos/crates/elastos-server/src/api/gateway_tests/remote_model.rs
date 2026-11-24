@@ -1920,17 +1920,14 @@ mod denial_authority {
         let (_parent_key, parent_did) =
             elastos_identity::load_or_create_did(parent.path()).unwrap();
         let parent_context = local_home_launch_token_context(parent.path()).unwrap();
-        let token = issue_home_launch_token_with_context(
-            parent.path(),
-            SERVICES_CAPSULE_ID,
-            &parent_context,
-        )
-        .unwrap();
+        let token =
+            issue_home_launch_token_with_context(parent.path(), HOME_CAPSULE_ID, &parent_context)
+                .unwrap();
         let verified =
             crate::api::gateway::gateway_home_token::require_home_launch_token_value_from_expected_did_for_test(
                 fx.owner.path(),
                 &token,
-                &[SERVICES_CAPSULE_ID],
+                &[HOME_CAPSULE_ID],
                 parent_did.clone(),
                 fx.owner.path(),
             )
@@ -1943,10 +1940,7 @@ mod denial_authority {
             "localhost://Users/{}",
             hex::encode(&Sha256::digest(principal.as_bytes())[..12])
         );
-        assert_eq!(
-            verified.launch_context.executable_actor,
-            SERVICES_CAPSULE_ID
-        );
+        assert_eq!(verified.launch_context.executable_actor, HOME_CAPSULE_ID);
         assert_eq!(context.principal_id(), principal);
         assert_eq!(context.proof_binding_id(), None);
         assert_eq!(context.root().localhost_root(), expected_root);

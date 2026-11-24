@@ -328,7 +328,7 @@ mod on {
     async fn enable_needs_the_admin_passkey_owner() {
         let dir = tempfile::tempdir().unwrap();
         let app = gateway_router(test_state(dir.path()));
-        // A session with no passkey proof behind it, and a guest's passkey.
+        // A stored guest, and a second guest's passkey.
         let unproved = system_app_token(dir.path());
         let owner = protected_owner(dir.path());
         let guest = passkey_authority_with_name_role(
