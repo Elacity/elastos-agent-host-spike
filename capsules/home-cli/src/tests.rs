@@ -2670,3 +2670,17 @@ fn system_tab_stays_short_and_actionable() {
     assert!(!lines.iter().any(|line| line.contains("launch-token")));
     assert!(!lines.iter().any(|line| line.starts_with("API")));
 }
+
+#[test]
+fn network_summary_is_ready_with_no_peers_and_no_ticket() {
+    let mut snapshot = sample_snapshot();
+    snapshot.runtime.running = true;
+    snapshot.runtime.peer_count = Some(0);
+    snapshot.runtime.ticket = None;
+    assert_eq!(
+        network_summary(&snapshot),
+        "Collaboration ready; waiting for another participant"
+    );
+    snapshot.runtime.peer_count = None;
+    assert_eq!(network_summary(&snapshot), "starting up");
+}
