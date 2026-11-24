@@ -4,6 +4,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 
 thread_local! {
     static AFTER_VERIFIED_READ: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
+    static AFTER_SOURCE_RECORD: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
     static SYNC_PATHS: RefCell<Option<Vec<std::path::PathBuf>>> = const { RefCell::new(None) };
 }
 
@@ -27,6 +28,30 @@ impl VerifiedReadInterrupt {
 impl Drop for VerifiedReadInterrupt {
     fn drop(&mut self) {
         AFTER_VERIFIED_READ.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+pub(crate) fn after_source_record_read() {
+    AFTER_SOURCE_RECORD.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+/// Fires after `sources.json` has been read and admitted, before that read returns.
+pub(crate) struct SourceRecordInterrupt;
+
+impl SourceRecordInterrupt {
+    pub(crate) fn arm(hook: impl Fn() + 'static) -> Self {
+        AFTER_SOURCE_RECORD.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Self
+    }
+}
+
+impl Drop for SourceRecordInterrupt {
+    fn drop(&mut self) {
+        AFTER_SOURCE_RECORD.with(|slot| *slot.borrow_mut() = None);
     }
 }
 

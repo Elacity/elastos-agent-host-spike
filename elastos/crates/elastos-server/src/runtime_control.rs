@@ -2073,6 +2073,7 @@ mod tests {
 
     #[cfg(unix)]
     fn sign_managed_provider_home() -> crate::installed_release::tests::Fixture {
+        use std::os::unix::fs::PermissionsExt;
         let mut fixture = crate::installed_release::tests::Fixture::new();
         let script = b"#!/bin/sh\nprintf started > \"$1\"\n";
         let platform = crate::setup::detect_platform();
@@ -2083,7 +2084,11 @@ mod tests {
             ("localhost-provider", "localhost://*"),
             ("did-provider", "elastos://did/*"),
         ] {
-            std::fs::write(bin_dir.join(name), script).unwrap();
+            let path = bin_dir.join(name);
+            std::fs::write(&path, script).unwrap();
+            // Same mode as installed_release::tests::start_fixture. Linux
+            // fexecve refuses a script with no execute bit.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             external.insert(
                 name.to_string(),
                 serde_json::json!({
@@ -2104,7 +2109,9 @@ mod tests {
                 }),
             );
         }
-        std::fs::write(bin_dir.join("shell"), script).unwrap();
+        let shell = bin_dir.join("shell");
+        std::fs::write(&shell, script).unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
         external.insert(
             "shell".to_string(),
             serde_json::json!({
@@ -2220,6 +2227,13 @@ mod tests {
             0o600
         );
         assert_eq!(projected_mode(head.parent().unwrap()), 0o700);
+        for name in ["localhost-provider", "did-provider", "shell"] {
+            assert_eq!(
+                projected_mode(&child.join("bin").join(name)),
+                0o755,
+                "{name} copied into the child keeps its execute bit"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -2422,6 +2436,22 @@ mod tests {
         .unwrap();
         assert_eq!(copied, original);
         start_signed_provider(&child, "localhost-provider");
+    }
+
+    /// The sources.json copied into the child is the record the parent admitted.
+    /// A write after that read must not reach the child.
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_keeps_the_sources_from_the_verified_read() {
+        let parent = sign_managed_provider_home();
+        let sources_path = parent.data.join("sources.json");
+        let original = std::fs::read(&sources_path).unwrap();
+        let hooked = sources_path.clone();
+        let _interrupt = crate::installed_release::tests::SourceRecordInterrupt::arm(move || {
+            std::fs::write(&hooked, br#"{"schema":"swapped-after-the-verified-read"}"#).unwrap();
+        });
+        let child = sync_managed_child(&parent.data);
+        assert_eq!(std::fs::read(child.join("sources.json")).unwrap(), original);
     }
 
     /// Door-removal plant: `fs::read` follows the symlink and the child receives
