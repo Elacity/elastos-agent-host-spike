@@ -8,6 +8,11 @@ Do not describe an unfixed issue in a public issue, pull request, commit message
 
 ## Current isolation and target boundary
 
+The agent host in this tree is a fork experiment. The upstream is unreviewed.
+It is a test capsule on a disposable Home, and it is not the installed
+architecture. Crash containment is not security isolation. The confined worker
+is the target.
+
 First-party apps run as web projections in the browser's opaque sandboxed
 frames. Runtime checks each app's signed launch token and actor before it performs an effect.
 Home can currently obtain every app's capability, so a compromised Home can

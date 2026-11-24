@@ -352,22 +352,46 @@ applications may depend on them.
 
 ### Prototype inside Home
 
+This is a fork experiment. The upstream is unreviewed. The agent host here is a
+test capsule on a disposable Home, and it is not the installed architecture.
+Crash containment is not security isolation. The confined worker is the target.
+
 For this prototype, an agent runs inside Home's main program. The guest runs in
 the Wasm sandbox the Runtime already uses for a component capsule. A default
 build leaves this off: Home does not open the agent listener, does not create
 an attach secret, and does not write the agent coordinates file. A build with
-the prototype feature starts that listener on loopback, on the Home data
-folder, and only for a stored agent.
+the prototype feature still leaves the listener down until the owner allows
+agents on this Home. Allow starts that listener on loopback, on the Home data
+folder, without a second Home start. Off stops it. It serves only a stored agent.
+
+When a run ends, its asks are settled, its grants are revoked on the agent
+Runtime's own store, its plan admission is dropped, and each pending plan is
+closed as `instance ended`. That plan cannot be approved. The owner's pending
+approval does not survive the run.
+
+The guest stays up after it submits a plan. It reads the decision through the
+existing status read. The host parks that read for at most 30 seconds, on a
+condition variable, until the row changes, Stop, retire, agents off, or the
+plan expires. The park is inside a Bus call. Time inside a Bus call is not
+guest fuel and is not the 10 second compute deadline. The guest repeats the
+read at most 10 times. The plan itself expires 300 seconds after it was
+created. Two guests on one Home may wait at once. A third Start on that Home
+is refused while those two waits are held. Another Home counts its own waits.
+
+No product provider can say whether a step that already started did finish.
+When the confirmation is lost, the step is `unresolved` and is not run again.
+A test provider may name the step. Stop and revocation prevent a new effect.
+An effect already under way is tracked to its outcome.
 
 The named next step is a confined worker that runs the agent without Home's
 keys.
 
 Two standing conditions are named here so later work can close them:
 
-- Condition 4 is a later slice. Start and Stop join the signed audit chain and
-  fail closed, and the runner's start-audit row stops counting
-  `agent_plan.dispatch.started` (`gateway_inspect_actions.rs`,
-  `append_agent_plan_dispatch_audit`).
+- Home's signed history holds start requested and completed, every grant and
+  plan approval and denial, every dispatch outcome (`completed`, `refused`,
+  `unresolved`), and stop requested and stopped. The rows are written by the
+  existing audit writer.
 - Condition 7 is this section: the interim above, and the confined worker as
   the named next step. A later slice does not owe this statement again.
 
