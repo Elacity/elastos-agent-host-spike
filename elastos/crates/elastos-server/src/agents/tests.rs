@@ -73,6 +73,55 @@ pub(crate) fn plant_for_dispatch(data_dir: &Path, owner_id: &str, admin_id: &str
     id
 }
 
+/// A second active agent for `owner_id` in a Home `plant_for_dispatch` already set up.
+pub(crate) fn plant_another_dispatch(data_dir: &Path, owner_id: &str, request_id: &str) -> String {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    let id = create_in_any_build(data_dir, &caller, &request(request_id), admit, 12)
+        .unwrap()
+        .agent_id;
+    let opened = open(data_dir, true).unwrap();
+    let mut after = opened.file.clone();
+    let agent = after
+        .agents
+        .iter_mut()
+        .find(|agent| agent.record.principal_id == id)
+        .unwrap();
+    agent.active = true;
+    agent.record.updated_at = 13;
+    after.sequence += 1;
+    write(
+        data_dir,
+        &opened,
+        Operation::SetActive,
+        &after,
+        &caller,
+        &id,
+        13,
+    )
+    .unwrap();
+    id
+}
+
+/// Retires a planted agent. The spent total stays on the record.
+pub(crate) fn retire_for_dispatch(data_dir: &Path, owner_id: &str, agent_id: &str) {
+    let owner = crate::auth::stored_principal_record(data_dir, owner_id)
+        .unwrap()
+        .unwrap();
+    let caller = Caller {
+        principal_id: owner_id,
+        proof_binding_id: &owner.proof_binding_id,
+        session_id: SESSION_ID,
+    };
+    retire_in_any_build(data_dir, &caller, agent_id, 20).unwrap();
+}
+
 pub(crate) fn stop_dispatch_agent(data_dir: &Path, owner_id: &str, agent_id: &str, disable: bool) {
     let owner = crate::auth::stored_principal_record(data_dir, owner_id)
         .unwrap()
@@ -269,6 +318,7 @@ fn stored_agent(owner: &str, id: &str) -> StoredAgent {
             updated_at: 5,
         },
         active: true,
+        model_tokens_spent: 0,
     }
 }
 
@@ -1000,10 +1050,11 @@ fn a_new_agent_protection_opens_under_its_own_derived_key_only() {
 /// The reason of a named refusal.
 fn refusal_of<T: std::fmt::Debug>(result: anyhow::Result<T>) -> String {
     let error = result.expect_err("the operation was not refused");
-    match error.downcast_ref::<Refused>() {
-        Some(refused) => refused.0.clone(),
-        None => panic!("not a named refusal: {error:#}"),
+    if let Some(refused) = error.downcast_ref::<Refused>() {
+        return refused.0.clone();
     }
+    // A file the loader refuses names itself. Its display is that sentence.
+    error.to_string()
 }
 
 fn turn_on(home: &Home) {

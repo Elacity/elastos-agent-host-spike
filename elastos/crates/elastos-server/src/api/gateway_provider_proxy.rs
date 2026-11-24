@@ -4024,7 +4024,7 @@ fn hosted_run_allowed(
 }
 
 /// Asks the HTTP gate with a context built for this principal.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn http_hosted_run_with_principal_for_test(
     data_dir: &std::path::Path,
     principal_id: &str,

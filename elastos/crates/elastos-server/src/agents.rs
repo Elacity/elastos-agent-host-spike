@@ -70,8 +70,10 @@ const OWNER_ROOT_ENVELOPE_SALT: &str = "unsalted";
 const NOT_REGULAR: &str = "agent file path is not a regular file";
 #[cfg(unix)]
 const MODE_TOO_WIDE: &str = "agent file mode is wider than 0600";
-const CANNOT_READ: &str = "agent file cannot be read";
-const DOES_NOT_PARSE: &str = "agent file does not parse";
+pub(crate) const CANNOT_READ: &str = "agent file cannot be read";
+pub(crate) const DOES_NOT_PARSE: &str = "agent file does not parse";
+pub(crate) const CANNOT_WRITE: &str = "agent file cannot be written";
+pub(crate) const NO_OWNER: &str = "agent record names no owner";
 const NOT_OUR_FORM: &str = "agent file holds a field or value this Runtime does not write";
 const UNKNOWN_SCHEMA: &str = "agent file schema is unknown";
 const BAD_SEQUENCE: &str = "agent file sequence is invalid";
@@ -120,6 +122,27 @@ fn refused<T>(reason: impl Into<String>) -> anyhow::Result<T> {
     Err(anyhow::Error::new(Refused(reason.into())))
 }
 
+#[derive(Debug)]
+struct Named(&'static str);
+
+impl std::fmt::Display for Named {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "agents are unavailable: {}", self.0)
+    }
+}
+
+impl std::error::Error for Named {}
+
+/// Text of a named refusal, for the 409 answer. A file the loader refuses is
+/// included, so that answer stays 409.
+pub(crate) fn refusal_text(error: &anyhow::Error) -> Option<String> {
+    if error.downcast_ref::<Refused>().is_some() || error.downcast_ref::<Named>().is_some() {
+        Some(error.to_string())
+    } else {
+        None
+    }
+}
+
 /// The agent file. Field order here is the order written.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct AgentRecordsFile {
@@ -145,6 +168,9 @@ pub(crate) struct StoredAgent {
     // Absent means on: a record stored before this field still launches.
     #[serde(default = "active_when_absent", skip_serializing_if = "is_active")]
     pub(crate) active: bool,
+    /// Model tokens already spent. Absent means zero, and zero is not written.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) model_tokens_spent: u64,
 }
 
 fn active_when_absent() -> bool {
@@ -152,6 +178,9 @@ fn active_when_absent() -> bool {
 }
 fn is_active(active: &bool) -> bool {
     *active
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 impl AgentRecordsFile {
@@ -390,6 +419,7 @@ enum Operation {
     Rename,
     Retire,
     SetActive,
+    Charge,
 }
 
 impl Operation {
@@ -401,6 +431,7 @@ impl Operation {
             Self::Rename => "agent.record.rename",
             Self::Retire => "agent.record.retire",
             Self::SetActive => "agent.record.active",
+            Self::Charge => "agent.record.spend",
         }
     }
 }
@@ -413,7 +444,8 @@ impl Operation {
 /// - create: one agent added at the end, not retired;
 /// - rename: one agent's `display_name`, and its `updated_at`;
 /// - retire: one agent's `retired_at`, set once, and its `updated_at`;
-/// - set active: one agent's `active`, and its `updated_at`.
+/// - set active: one agent's `active`, and its `updated_at`;
+/// - charge: one active agent's `model_tokens_spent`, raised.
 fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecordsFile) -> bool {
     if after.schema != before.schema || before.sequence.checked_add(1) != Some(after.sequence) {
         return false;
@@ -429,40 +461,28 @@ fn permits(operation: Operation, before: &AgentRecordsFile, after: &AgentRecords
                     kept == before.agents.as_slice() && added.record.retired_at.is_none()
                 })
         }
-        Operation::Rename => {
-            let changed: Vec<_> = before
-                .agents
-                .iter()
-                .zip(&after.agents)
-                .filter(|(old, new)| old != new)
-                .collect();
-            same_enabled
-                && after.agents.len() == before.agents.len()
-                && matches!(changed.as_slice(), [(old, new)] if renames(old, new))
-        }
-        Operation::Retire => {
-            let changed: Vec<_> = before
-                .agents
-                .iter()
-                .zip(&after.agents)
-                .filter(|(old, new)| old != new)
-                .collect();
-            same_enabled
-                && after.agents.len() == before.agents.len()
-                && matches!(changed.as_slice(), [(old, new)] if retires(old, new))
-        }
-        Operation::SetActive => {
-            let changed: Vec<_> = before
-                .agents
-                .iter()
-                .zip(&after.agents)
-                .filter(|(old, new)| old != new)
-                .collect();
-            same_enabled
-                && after.agents.len() == before.agents.len()
-                && matches!(changed.as_slice(), [(old, new)] if sets_active(old, new))
-        }
+        Operation::Rename => one_agent(before, after, same_enabled, renames),
+        Operation::Retire => one_agent(before, after, same_enabled, retires),
+        Operation::SetActive => one_agent(before, after, same_enabled, sets_active),
+        Operation::Charge => one_agent(before, after, same_enabled, spends),
     }
+}
+
+fn one_agent(
+    before: &AgentRecordsFile,
+    after: &AgentRecordsFile,
+    same_enabled: bool,
+    allows: fn(&StoredAgent, &StoredAgent) -> bool,
+) -> bool {
+    let changed: Vec<_> = before
+        .agents
+        .iter()
+        .zip(&after.agents)
+        .filter(|(old, new)| old != new)
+        .collect();
+    same_enabled
+        && after.agents.len() == before.agents.len()
+        && matches!(changed.as_slice(), [(old, new)] if allows(old, new))
 }
 
 /// `new` is `old` with a different `display_name` and `updated_at` moved,
@@ -483,6 +503,15 @@ fn retires(old: &StoredAgent, new: &StoredAgent) -> bool {
     expected.record.retired_at = new.record.retired_at;
     expected.record.updated_at = new.record.updated_at;
     old.record.retired_at.is_none() && new.record.retired_at.is_some() && expected == *new
+}
+
+fn spends(old: &StoredAgent, new: &StoredAgent) -> bool {
+    let mut expected = old.clone();
+    expected.model_tokens_spent = new.model_tokens_spent;
+    old.active
+        && old.record.retired_at.is_none()
+        && new.model_tokens_spent > old.model_tokens_spent
+        && expected == *new
 }
 
 fn sets_active(old: &StoredAgent, new: &StoredAgent) -> bool {
@@ -529,15 +558,70 @@ fn open(data_dir: &Path, for_write: bool) -> anyhow::Result<Opened> {
     let file = match load(data_dir, &owner_file)? {
         AgentFile::Missing => AgentRecordsFile::unwritten(),
         AgentFile::Loaded(file) => file,
-        AgentFile::Unavailable(reason) => {
-            return refused(format!("agents are unavailable: {reason}"))
-        }
+        AgentFile::Unavailable(reason) => return Err(Named(reason).into()),
     };
     Ok(Opened {
         lock,
         owner_file,
         file,
     })
+}
+
+#[derive(Debug)]
+pub(crate) enum SpendRefusal {
+    Over { asked: u64, held: u64, ceiling: u64 },
+    Name(&'static str),
+}
+
+fn reason_of(err: &anyhow::Error) -> &'static str {
+    err.downcast_ref::<Named>()
+        .map(|named| named.0)
+        .unwrap_or(CANNOT_READ)
+}
+
+#[rustfmt::skip]
+fn agent_of<'a>(file: &'a AgentRecordsFile, id: &str, owner: Option<&str>) -> Result<&'a StoredAgent, &'static str> {
+    if file.enabled.is_none() { return Err(NOT_ENABLED); }
+    let agent = file.agents.iter().find(|a| a.record.principal_id == id).ok_or(NO_SUCH_AGENT)?;
+    if owner.is_some_and(|o| agent.record.owner.as_deref() != Some(o)) { return Err(NO_SUCH_AGENT); }
+    if agent.record.retired_at.is_some() { return Err(ALREADY_RETIRED); }
+    if !agent.active { return Err(NOT_ACTIVE); }
+    if agent.record.owner.as_deref().unwrap_or("").is_empty() { return Err(NO_OWNER); }
+    Ok(agent)
+}
+
+#[rustfmt::skip]
+pub(crate) fn model_spend(data_dir: &Path, agent_id: &str) -> Result<(String, u64), &'static str> {
+    let opened = open(data_dir, true).map_err(|err| reason_of(&err))?;
+    let agent = agent_of(&opened.file, agent_id, None)?;
+    Ok((agent.record.owner.clone().ok_or(NO_OWNER)?, agent.model_tokens_spent))
+}
+
+#[rustfmt::skip]
+pub(crate) fn charge_model_spend(
+    data_dir: &Path, owner: &str, agent_id: &str, add: u64, ceiling: u64,
+) -> Result<u64, SpendRefusal> {
+    let opened = open(data_dir, true).map_err(|err| SpendRefusal::Name(reason_of(&err)))?;
+    let agent = agent_of(&opened.file, agent_id, Some(owner)).map_err(SpendRefusal::Name)?;
+    let held = agent.model_tokens_spent;
+    let Some(total) = held.checked_add(add).filter(|n| *n <= ceiling) else {
+        return Err(SpendRefusal::Over { asked: add, held, ceiling });
+    };
+    if total == held { return Ok(held); }
+    let mut after = opened.file.clone();
+    after.sequence = after.sequence.checked_add(1).ok_or(SpendRefusal::Name(BAD_SEQUENCE))?;
+    after.agents.iter_mut().find(|a| a.record.principal_id == agent_id)
+        .ok_or(SpendRefusal::Name(NO_SUCH_AGENT))?.model_tokens_spent = total;
+    let person = opened.owner_file.iter().find(|r| r.principal_id == owner)
+        .ok_or(SpendRefusal::Name(NOT_A_PERSON))?;
+    let caller = Caller {
+        principal_id: owner,
+        proof_binding_id: &person.proof_binding_id,
+        session_id: "model-budget",
+    };
+    write(data_dir, &opened, Operation::Charge, &after, &caller, agent_id, crate::auth::now_ts())
+        .map_err(|_| SpendRefusal::Name(CANNOT_WRITE))?;
+    Ok(total)
 }
 
 /// Writes `after` over the opened file. `subject` is the agent the event is
@@ -878,6 +962,7 @@ fn create_in_any_build(
             version: PRINCIPAL_RECORD_VERSION,
         },
         active: false,
+        model_tokens_spent: 0,
     };
     if id_or_root_held(&opened, &agent.record) {
         return refused(ID_HELD);
@@ -919,7 +1004,7 @@ fn list_in_any_build(data_dir: &Path, caller: &Caller<'_>) -> anyhow::Result<Vec
 }
 
 const NO_SUCH_AGENT: &str = "the caller owns no agent with that id";
-const ALREADY_RETIRED: &str = "agent is already retired";
+pub(crate) const ALREADY_RETIRED: &str = "agent is already retired";
 pub(crate) const NOT_ACTIVE: &str = "agent is off until its owner turns it on";
 
 /// Renames one of the caller's agents. The display name and `updated_at`

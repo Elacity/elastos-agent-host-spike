@@ -1779,6 +1779,9 @@ fn reserve_model_create(
                     "model_budget_exceeded: run needs {asked} tokens; {held} of {ceiling} held"
                 ),
             ),
+            BudgetRefusal::Record(name) => {
+                resource_error_response("denied", &format!("model_budget_exceeded: {name}"))
+            }
             _ => resource_error_response(
                 "denied",
                 "model_budget_exceeded: agent account unavailable",
@@ -4182,6 +4185,23 @@ pub(crate) mod tests {
         text.len()
     }
 
+    /// The first test-only attribute this counter drops. `#[cfg(test)]` is the
+    /// plain mark. The macOS hosted helper uses the compound mark, which does
+    /// not contain that text.
+    fn next_cfg_test_attr(rest: &str) -> Option<usize> {
+        ["#[cfg(test)]", "#[cfg(all(test, target_os = \"macos\"))]"]
+            .into_iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+    }
+
+    fn cfg_test_attr_end(rest: &str, start: usize) -> usize {
+        rest[start..]
+            .find(']')
+            .map(|at| start + at + 1)
+            .unwrap_or(rest.len())
+    }
+
     /// The byte index just past the `}` that closes the block opening at
     /// `open` (`open` indexes the `{`). Line and block comments, string
     /// literals, raw strings, byte/char literals and lifetimes are skipped, so
@@ -4317,9 +4337,10 @@ pub(crate) mod tests {
 
     /// The production text of a source file with each `tests` module dropped by
     /// brace match, then `#[cfg(test)]` items and statement-level
-    /// `#[cfg(test)]` lines dropped, then comment lines dropped. This is
-    /// stricter than `production_text`, whose first-marker cut keeps a
-    /// `#[cfg(test)]` item written before the test module and drops all
+    /// `#[cfg(test)]` lines dropped, then comment lines dropped. A macOS test
+    /// item marked `#[cfg(all(test, target_os = "macos"))]` is dropped the same
+    /// way. This is stricter than `production_text`, whose first-marker cut
+    /// keeps a `#[cfg(test)]` item written before the test module and drops all
     /// production code written after one.
     fn production_text_ignoring_cfg_test(source: &str) -> String {
         let mut kept_source = String::new();
@@ -4332,9 +4353,9 @@ pub(crate) mod tests {
         let source: &str = &kept_source;
         let mut kept = String::new();
         let mut rest = source;
-        while let Some(start) = rest.find("#[cfg(test)]") {
+        while let Some(start) = next_cfg_test_attr(rest) {
             kept.push_str(&rest[..start]);
-            let after = &rest[start + "#[cfg(test)]".len()..];
+            let after = &rest[cfg_test_attr_end(rest, start)..];
             let trimmed = after.trim_start();
             let skipped = after.len() - trimmed.len();
             let item_end = cfg_test_item_end(trimmed);
@@ -9441,6 +9462,7 @@ pub(crate) mod tests {
         });
         let creates = Arc::new(AtomicUsize::new(0));
         let account = Arc::new(ModelBudget::new());
+        account.bind_home(temp.path().to_path_buf());
         let agent_key = AgentKey::for_test(&agent_id);
         account.open(&agent_key, ceiling).unwrap();
         let mut ctx = bridge_context();
@@ -9547,6 +9569,10 @@ pub(crate) mod tests {
             home.account.held_for_test(&home.agent_key),
             hosted_offer_tokens()
         );
+        let (_owner, spent) =
+            crate::agents::model_spend(home.ctx.data_dir.as_deref().unwrap(), &home.agent_id)
+                .unwrap();
+        assert_eq!(spent, hosted_offer_tokens());
         let caller = hosted_owner_caller(&home.owner_id, &home.owner_proof);
         crate::agents::set_active(
             home.ctx.data_dir.as_deref().unwrap(),
@@ -9652,6 +9678,127 @@ pub(crate) mod tests {
         assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(home.account.held_for_test(&home.agent_key), 0);
+        let (_owner, spent) =
+            crate::agents::model_spend(home.ctx.data_dir.as_deref().unwrap(), &home.agent_id)
+                .unwrap();
+        assert_eq!(spent, 0);
+        home.sink.abort();
+    }
+
+    /// Spend, then open the same folder in a new account. The next create does
+    /// not fit and is refused before dispatch.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn spent_total_survives_a_new_runtime_and_blocks_the_next_create() {
+        let Some(mut home) = hosted_agent_home(hosted_offer_tokens()).await else {
+            return;
+        };
+        let listed = model_invoke(
+            &home.ctx,
+            "offers_list",
+            Action::Read,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(listed["response"]["result"]["status"], "ok", "{listed}");
+        let created = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8").await;
+        assert_eq!(created["response"]["result"]["status"], "ok", "{created}");
+        let offers = home.ctx.model_budget.as_ref().unwrap().offers.clone();
+        let data_dir = home.ctx.data_dir.clone().unwrap();
+        let restarted = std::sync::Arc::new(ModelBudget::new());
+        restarted.bind_home(data_dir);
+        restarted
+            .open(&home.agent_key, hosted_offer_tokens())
+            .unwrap();
+        assert_eq!(
+            restarted.held_for_test(&home.agent_key),
+            hosted_offer_tokens()
+        );
+        home.ctx.model_budget = Some(ModelDispatchBudget {
+            agent: home.agent_key.clone(),
+            account: restarted,
+            offers,
+        });
+        let refused = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8b").await;
+        let message = refused["response"]["message"].as_str().unwrap_or("");
+        assert!(message.contains("model_budget_exceeded"), "{refused}");
+        assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        home.sink.abort();
+    }
+
+    /// A record that does not parse is refused by that name before dispatch.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn unreadable_agent_record_refuses_the_create_by_name() {
+        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
+            return;
+        };
+        let listed = model_invoke(
+            &home.ctx,
+            "offers_list",
+            Action::Read,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(listed["response"]["result"]["status"], "ok", "{listed}");
+        let path = crate::agents::agent_file_path(home.ctx.data_dir.as_deref().unwrap()).unwrap();
+        std::fs::write(&path, b"{").unwrap();
+        let refused = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8").await;
+        let message = refused["response"]["message"].as_str().unwrap_or("");
+        // merge_into drops a file that does not load, so the principal root
+        // check refuses before the charge. The charge's own name is the unit row.
+        assert!(message.contains("has no stored record"), "{refused}");
+        assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        home.sink.abort();
+    }
+
+    /// Another Runtime fills the store. This Runtime's memory is still zero,
+    /// and the create is refused from the stored total before dispatch.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn two_runtimes_refuse_from_the_stored_total_before_dispatch() {
+        let Some(home) = hosted_agent_home(hosted_offer_tokens()).await else {
+            return;
+        };
+        let listed = model_invoke(
+            &home.ctx,
+            "offers_list",
+            Action::Read,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(listed["response"]["result"]["status"], "ok", "{listed}");
+        let other = ModelBudget::new();
+        other.bind_home(home.ctx.data_dir.clone().unwrap());
+        other.open(&home.agent_key, hosted_offer_tokens()).unwrap();
+        other
+            .reserve(
+                &home.agent_key,
+                &RunKey::of(
+                    &RuntimeCreateBinding {
+                        schema: RUNTIME_CREATE_BINDING_SCHEMA.to_string(),
+                        principal_id: home.agent_id.clone(),
+                        session_id: HOSTED_CAPSULE.to_string(),
+                        capsule_id: HOSTED_CAPSULE.to_string(),
+                        grant_id: "capability:other".to_string(),
+                        request_id: "model-v1:1700000000000:other".to_string(),
+                        offer_id: HOSTED_OFFER.to_string(),
+                        operation: "text.generate".to_string(),
+                        input_hash: model_input_hash(&serde_json::json!({"prompt": "hi"})).unwrap(),
+                    },
+                    "other-revision",
+                ),
+                hosted_offer_tokens(),
+            )
+            .unwrap();
+        assert_eq!(home.account.held_for_test(&home.agent_key), 0);
+        let refused = hosted_runs_create(&home.ctx, "model-v1:1700000000000:s8").await;
+        let message = refused["response"]["message"].as_str().unwrap_or("");
+        assert!(message.contains("model_budget_exceeded"), "{refused}");
+        assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         home.sink.abort();
     }
 

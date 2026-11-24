@@ -884,6 +884,7 @@ impl Runtime {
         pending_store: Arc<elastos_runtime::capability::pending::PendingRequestStore>,
         data_dir: std::path::PathBuf,
     ) {
+        self.model_budget.bind_home(data_dir.clone());
         // A detached activation's end settles through this pair, so it is held
         // from here rather than read again at the end.
         *self

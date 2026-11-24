@@ -10,15 +10,18 @@
 //!
 //! **Hold-only.** A reservation is charged once and never returns: no refund and
 //! no settle (design §5 "No refund"), so an agent that keeps running drains its
-//! ceiling and a cancel or unknown outcome keeps its hold. **Restart retention
-//! is out of scope:** the account is in memory, so a restart begins at zero.
+//! ceiling and a cancel or unknown outcome keeps its hold. A bound Home stores
+//! that total on the agent record: open reads it, and charge writes it under
+//! the agent lock before reserve. `held` can lag other Runtimes; the store refuses.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 
 use elastos_model_contract::{model_run_id, RuntimeCreateBinding};
 
 use crate::agent_admission::AdmissionContext;
+use crate::agents::{charge_model_spend, model_spend, SpendRefusal, NO_OWNER};
 
 /// The one identity that may hold model tokens: the principal admission minted.
 ///
@@ -102,6 +105,7 @@ struct Account {
     ceiling: u64,
     /// Tokens held by reservations, refunded by nothing.
     held: u64,
+    owner: Option<String>,
     /// Held tokens and request fingerprints by `model_run_id()`; only an
     /// identical retry reuses a hold without a second charge.
     holds: HashMap<String, HoldFingerprint>,
@@ -119,14 +123,17 @@ pub(crate) struct Hold {
 pub(crate) enum Refusal {
     /// No ceiling was opened for this agent; admission sets it first (N9).
     UnknownAgent,
-    /// The ceiling is already set and this call asked for a different one.
-    CeilingAlreadySet { ceiling: u64, asked: u64 },
     /// The run key was minted for a different agent than the account asked for.
     RunForOtherAgent,
     /// The same run id names a different request or reservation.
     ConflictingRetry,
     /// Holding `asked` more would pass `ceiling`. `held` excludes `asked`.
-    OverCap { asked: u64, held: u64, ceiling: u64 },
+    OverCap {
+        asked: u64,
+        held: u64,
+        ceiling: u64,
+    },
+    Record(&'static str),
 }
 
 /// Every agent's account in this process, behind one mutex.
@@ -137,6 +144,7 @@ pub(crate) enum Refusal {
 #[derive(Debug, Default)]
 pub(crate) struct ModelBudget {
     agents: Mutex<HashMap<String, Account>>,
+    home: Mutex<Option<PathBuf>>,
     /// Test-only: a planted check-then-add calls `after_read_gate` between its
     /// read and its write; the concurrency row installs a barrier here so every
     /// racer finishes reading before any racer adds.
@@ -149,30 +157,31 @@ impl ModelBudget {
         Self::default()
     }
 
-    /// Sets `agent`'s ceiling once. Re-opening with the same ceiling is
-    /// idempotent; any other ceiling is refused, so a caller cannot raise it.
-    ///
-    /// A panic in an earlier caller does not lock the account out: the account
-    /// is inserted whole, so ignoring poisoning cannot expose a torn total.
+    pub(crate) fn bind_home(&self, data_dir: PathBuf) {
+        *self.home.lock().unwrap_or_else(PoisonError::into_inner) = Some(data_dir);
+    }
+
+    fn home_dir(&self) -> Option<PathBuf> {
+        self.home
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Sets the ceiling and keeps what is already spent. A failed read opens nothing.
     pub(crate) fn open(&self, agent: &AgentKey, ceiling: u64) -> Result<(), Refusal> {
+        let loaded = self
+            .home_dir()
+            .map(|dir| model_spend(&dir, agent.principal()).map_err(Refusal::Record))
+            .transpose()?;
         let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
-        match agents.get(&agent.0) {
-            Some(account) if account.ceiling != ceiling => Err(Refusal::CeilingAlreadySet {
-                ceiling: account.ceiling,
-                asked: ceiling,
-            }),
-            Some(_) => Ok(()),
-            None => {
-                agents.insert(
-                    agent.0.clone(),
-                    Account {
-                        ceiling,
-                        ..Account::default()
-                    },
-                );
-                Ok(())
-            }
+        let account = agents.entry(agent.0.clone()).or_default();
+        if let Some((owner, spent)) = loaded {
+            account.owner = Some(owner);
+            account.held = spent;
         }
+        account.ceiling = ceiling;
+        Ok(())
     }
 
     /// Holds `tokens` for `run` — minted from the production binding through
@@ -191,6 +200,7 @@ impl ModelBudget {
         run: &RunKey,
         tokens: u64,
     ) -> Result<Hold, Refusal> {
+        let home = self.home_dir();
         let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
         let account = agents.get_mut(&agent.0).ok_or(Refusal::UnknownAgent)?;
         if run.principal != agent.0 {
@@ -206,21 +216,41 @@ impl ModelBudget {
                 Err(Refusal::ConflictingRetry)
             };
         }
-        let total = account
-            .held
-            .checked_add(tokens)
-            .filter(|total| *total <= account.ceiling)
-            .ok_or(Refusal::OverCap {
-                asked: tokens,
-                held: account.held,
-                ceiling: account.ceiling,
-            })?;
+        let total = if let Some(dir) = home {
+            let owner = account.owner.clone().ok_or(Refusal::Record(NO_OWNER))?;
+            match charge_model_spend(&dir, &owner, agent.principal(), tokens, account.ceiling) {
+                Ok(total) => total,
+                Err(SpendRefusal::Over {
+                    asked,
+                    held,
+                    ceiling,
+                }) => {
+                    account.held = held;
+                    return Err(Refusal::OverCap {
+                        asked,
+                        held,
+                        ceiling,
+                    });
+                }
+                Err(SpendRefusal::Name(name)) => return Err(Refusal::Record(name)),
+            }
+        } else {
+            account
+                .held
+                .checked_add(tokens)
+                .filter(|total| *total <= account.ceiling)
+                .ok_or(Refusal::OverCap {
+                    asked: tokens,
+                    held: account.held,
+                    ceiling: account.ceiling,
+                })?
+        };
         account.holds.insert(run.id.clone(), fingerprint);
         account.held = total;
         Ok(Hold { tokens })
     }
 
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, unix))]
     pub(crate) fn held_for_test(&self, agent: &AgentKey) -> u64 {
         self.agents
             .lock()
@@ -414,19 +444,18 @@ mod tests {
     }
 
     #[test]
-    fn ceiling_cannot_be_raised() {
+    fn changed_ceiling_keeps_what_is_spent() {
         let budget = opened();
-        let already = |asked| {
-            Err(Refusal::CeilingAlreadySet {
-                ceiling: 100,
-                asked,
-            })
-        };
-        assert_eq!(budget.open(&key(A), 200), already(200));
-        assert_eq!(budget.open(&key(A), 50), already(50));
+        budget.reserve(&key(A), &run_key(A, "r1"), 60).unwrap();
+        budget.open(&key(A), 200).unwrap();
         assert_eq!(
-            budget.reserve(&key(A), &run_key(A, "big"), 150),
-            Err(over_cap(150, 0, 100))
+            budget.reserve(&key(A), &run_key(A, "r2"), 140),
+            Ok(Hold { tokens: 140 })
+        );
+        budget.open(&key(A), 100).unwrap();
+        assert_eq!(
+            budget.reserve(&key(A), &run_key(A, "r3"), 1),
+            Err(over_cap(1, 200, 100))
         );
     }
 
@@ -435,5 +464,153 @@ mod tests {
         let ghost =
             ModelBudget::new().reserve(&key("agent:v2:ghost"), &run_key("agent:v2:ghost", "g"), 1);
         assert_eq!(ghost, Err(Refusal::UnknownAgent));
+    }
+
+    #[cfg(unix)]
+    fn planted_agent() -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = "person:local:spend-owner";
+        crate::auth::store_test_human_principal(dir.path(), owner);
+        let agent = crate::agents::tests::plant_for_dispatch(dir.path(), owner, owner);
+        (dir, owner.to_string(), agent)
+    }
+
+    #[cfg(unix)]
+    fn opened_on(dir: &std::path::Path, agent: &str, ceiling: u64) -> (ModelBudget, AgentKey) {
+        let budget = ModelBudget::new();
+        budget.bind_home(dir.to_path_buf());
+        let key = AgentKey::for_test(agent);
+        budget.open(&key, ceiling).unwrap();
+        (budget, key)
+    }
+
+    /// Spend, drop the account, open a new one on the same folder.
+    #[cfg(unix)]
+    #[test]
+    fn spent_total_survives_a_new_runtime() {
+        let (dir, _owner, agent) = planted_agent();
+        {
+            let (first, key) = opened_on(dir.path(), &agent, 100);
+            first.reserve(&key, &run_key(&agent, "r1"), 40).unwrap();
+        }
+        let (second, key) = opened_on(dir.path(), &agent, 100);
+        assert_eq!(second.held_for_test(&key), 40);
+        assert_eq!(
+            second.reserve(&key, &run_key(&agent, "r2"), 61),
+            Err(over_cap(61, 40, 100))
+        );
+        second.open(&key, 30).unwrap();
+        assert_eq!(second.held_for_test(&key), 40);
+        assert_eq!(
+            second.reserve(&key, &run_key(&agent, "r3"), 1),
+            Err(over_cap(1, 40, 30))
+        );
+        let file =
+            std::fs::read_to_string(crate::agents::agent_file_path(dir.path()).unwrap()).unwrap();
+        assert!(file.contains("\"model_tokens_spent\": 40"), "{file}");
+    }
+
+    /// A record that does not parse refuses by that name, before any hold.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_agent_record_refuses_by_name() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        let path = crate::agents::agent_file_path(dir.path()).unwrap();
+        std::fs::write(&path, b"{").unwrap();
+        assert_eq!(
+            budget.reserve(&key, &run_key(&agent, "r1"), 10),
+            Err(Refusal::Record(crate::agents::DOES_NOT_PARSE))
+        );
+        assert_eq!(budget.held_for_test(&key), 0);
+        let again = ModelBudget::new();
+        again.bind_home(dir.path().to_path_buf());
+        assert_eq!(
+            again.open(&key, 100),
+            Err(Refusal::Record(crate::agents::DOES_NOT_PARSE))
+        );
+    }
+
+    /// A failed write leaves the stored total and the in-memory hold unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn failed_write_refuses_by_name_before_the_hold_moves() {
+        let (dir, _owner, agent) = planted_agent();
+        let (budget, key) = opened_on(dir.path(), &agent, 100);
+        budget.reserve(&key, &run_key(&agent, "r1"), 40).unwrap();
+        let path = crate::agents::agent_file_path(dir.path()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let parent = path.parent().unwrap();
+        let restore = parent.to_path_buf();
+        struct Restore(std::path::PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let _restore = Restore(restore);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(
+            budget.reserve(&key, &run_key(&agent, "r2"), 10),
+            Err(Refusal::Record(crate::agents::CANNOT_WRITE))
+        );
+        drop(_restore);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(budget.held_for_test(&key), 40);
+    }
+
+    /// Two agents keep separate totals. Retiring one leaves its total in place.
+    #[cfg(unix)]
+    #[test]
+    fn two_agents_keep_separate_spent_totals() {
+        let (dir, owner, first) = planted_agent();
+        let second = crate::agents::tests::plant_another_dispatch(dir.path(), &owner, "request-b");
+        let budget = ModelBudget::new();
+        budget.bind_home(dir.path().to_path_buf());
+        let a = AgentKey::for_test(&first);
+        let b = AgentKey::for_test(&second);
+        budget.open(&a, 100).unwrap();
+        budget.open(&b, 80).unwrap();
+        budget.reserve(&a, &run_key(&first, "a1"), 70).unwrap();
+        assert_eq!(
+            budget.reserve(&b, &run_key(&second, "b1"), 80),
+            Ok(Hold { tokens: 80 })
+        );
+        assert_eq!(
+            budget.reserve(&a, &run_key(&first, "a2"), 40),
+            Err(over_cap(40, 70, 100))
+        );
+        crate::agents::tests::retire_for_dispatch(dir.path(), &owner, &first);
+        let file =
+            std::fs::read_to_string(crate::agents::agent_file_path(dir.path()).unwrap()).unwrap();
+        assert!(file.contains("\"model_tokens_spent\": 70"), "{file}");
+        assert_eq!(
+            budget.reserve(&a, &run_key(&first, "a3"), 1),
+            Err(Refusal::Record(crate::agents::ALREADY_RETIRED))
+        );
+        assert_eq!(budget.held_for_test(&b), 80);
+    }
+
+    /// Two opens in two Runtimes share the lock. The stale memory does not admit.
+    #[cfg(unix)]
+    #[test]
+    fn two_opens_in_two_runtimes_use_the_stored_total() {
+        let (dir, _owner, agent) = planted_agent();
+        let (first, key) = opened_on(dir.path(), &agent, 100);
+        let (second, key_b) = opened_on(dir.path(), &agent, 100);
+        first.reserve(&key, &run_key(&agent, "r1"), 60).unwrap();
+        assert_eq!(
+            second.held_for_test(&key_b),
+            0,
+            "stale by the other runtime's 60"
+        );
+        assert_eq!(
+            second.reserve(&key_b, &run_key(&agent, "r2"), 50),
+            Err(over_cap(50, 60, 100))
+        );
+        assert_eq!(second.held_for_test(&key_b), 60);
+        assert_eq!(first.held_for_test(&key), 60);
     }
 }

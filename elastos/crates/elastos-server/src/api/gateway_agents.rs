@@ -69,8 +69,8 @@ fn agents_owner(state: &GatewayState, headers: &HeaderMap) -> anyhow::Result<Age
 fn agents_response<T: Serialize>(result: anyhow::Result<T>) -> Response {
     match result {
         Ok(value) => Json(value).into_response(),
-        Err(error) => match error.downcast_ref::<Refused>() {
-            Some(refused) => (StatusCode::CONFLICT, refused.to_string()).into_response(),
+        Err(error) => match crate::agents::refusal_text(&error) {
+            Some(text) => (StatusCode::CONFLICT, text).into_response(),
             None => system_error_response(error),
         },
     }
