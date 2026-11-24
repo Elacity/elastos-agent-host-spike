@@ -136,7 +136,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::api::gateway::gateway_home_token::{
-        issue_home_launch_token_with_context, local_home_launch_token_context,
+        bind_device_session_grant, issue_home_launch_token_with_context,
         require_runtime_wallet_authority,
     };
 
@@ -295,7 +295,8 @@ mod tests {
     #[test]
     fn wallet_v2_authority_projection_preserves_verified_actor_and_launch_id() {
         let data_dir = tempfile::tempdir().unwrap();
-        let launch_context = local_home_launch_token_context(data_dir.path()).unwrap();
+        let launch_context =
+            bind_device_session_grant(data_dir.path(), &["wallet-metamask"]).unwrap();
         let token = issue_home_launch_token_with_context(
             data_dir.path(),
             "wallet-metamask",

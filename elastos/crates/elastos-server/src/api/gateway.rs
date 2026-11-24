@@ -166,6 +166,8 @@ use gateway_home_terminal::*;
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(super) use gateway_home_token::agent_launch_grants_minted_for_test;
+#[cfg(test)]
+pub(super) use gateway_home_token::bind_device_session_grant;
 pub(crate) use gateway_home_token::home_launch_auth_data_dir;
 #[cfg(test)]
 pub(super) use gateway_home_token::home_session_cookie_name;
@@ -386,12 +388,20 @@ fn gateway_owned_home_cli_launch_context_from_env(
             .filter(|value| !value.is_empty())
             .ok_or_else(|| anyhow::anyhow!("{key} is missing"))
     };
-    let proof_binding_id = std::env::var(HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV).ok();
+    // No proof binding is not a checked grant. Return nothing so the caller
+    // uses the device mint, which accepts only home and home-cli.
+    let Some(proof_binding_id) = std::env::var(HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
     Ok(Some(home_launch_token_context_from_parts(
         data_dir,
         &required_env(HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV)?,
         &required_env(HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV)?,
-        proof_binding_id.as_deref(),
+        Some(proof_binding_id.as_str()),
         &required_env(HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV)?,
     )?))
 }
@@ -413,6 +423,26 @@ pub fn issue_gateway_owned_home_cli_launch_token(
     let app = app.trim();
     if app.is_empty() {
         anyhow::bail!("home launch token context is incomplete");
+    }
+    // The projection's authority is home. The verifier checks the live grant
+    // against that authority, so the mint does the same check before it signs.
+    let Some(proof_binding_id) = context.proof_binding_id().filter(|value| !value.is_empty())
+    else {
+        anyhow::bail!("home launch token is missing authority context");
+    };
+    let grant = crate::auth::load_active_session_grant(
+        &gateway_home_token::home_launch_auth_data_dir(data_dir),
+        context.session_id(),
+        now_ts(),
+    )?;
+    if grant.principal_id != context.principal_id()
+        || grant.proof_binding_id != proof_binding_id
+        || grant.grant_id != context.grant_id()
+    {
+        anyhow::bail!("home launch token authority context mismatch");
+    }
+    if !grant.apps.iter().any(|allowed| allowed == HOME_CAPSULE_ID) {
+        anyhow::bail!("auth session grant is not authorized for app");
     }
     Ok(Some(
         gateway_home_token::issue_home_projection_launch_token_with_context(
