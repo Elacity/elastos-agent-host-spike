@@ -27,7 +27,7 @@ async fn test_wallet_connector_route_requires_connector_launch_token() {
 #[tokio::test]
 async fn test_wallet_connector_route_rejects_unknown_connector_capsule() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &["wallet-unknown"]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), "wallet-unknown", &context).unwrap();
     let provider = MockWalletProvider::default();
@@ -384,7 +384,8 @@ async fn test_injected_connector_direct_effect_routes_reach_neither_wallet_provi
 #[tokio::test]
 async fn test_walletconnect_connector_requires_pinned_config() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context =
+        bind_device_session_grant(dir.path(), &[WALLET_WALLETCONNECT_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_WALLETCONNECT_CAPSULE_ID, &context)
             .unwrap();
@@ -452,7 +453,8 @@ fn test_marketplace_lists_walletconnect_only_once_its_config_is_pinned() {
 async fn test_walletconnect_connector_accepts_pinned_config() {
     let dir = tempfile::tempdir().unwrap();
     seed_walletconnect_connector_config(dir.path());
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context =
+        bind_device_session_grant(dir.path(), &[WALLET_WALLETCONNECT_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_WALLETCONNECT_CAPSULE_ID, &context)
             .unwrap();
@@ -483,7 +485,8 @@ async fn test_walletconnect_connector_accepts_pinned_config() {
 async fn test_walletconnect_connector_config_returns_pinned_sdk_contract() {
     let dir = tempfile::tempdir().unwrap();
     seed_walletconnect_connector_config(dir.path());
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context =
+        bind_device_session_grant(dir.path(), &[WALLET_WALLETCONNECT_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_WALLETCONNECT_CAPSULE_ID, &context)
             .unwrap();
@@ -528,7 +531,7 @@ async fn test_walletconnect_connector_config_returns_pinned_sdk_contract() {
 #[tokio::test]
 async fn test_wallet_summary_reports_walletconnect_available_only_when_pinned() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[WALLET_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_CAPSULE_ID, &context).unwrap();
     let provider = MockWalletProvider::default();
@@ -587,7 +590,7 @@ async fn test_wallet_summary_reports_walletconnect_available_only_when_pinned() 
 #[tokio::test]
 async fn test_metamask_connector_config_returns_runtime_evm_chain_metadata() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[WALLET_METAMASK_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_METAMASK_CAPSULE_ID, &context)
             .unwrap();
@@ -719,7 +722,7 @@ async fn test_metamask_connector_lists_external_wallet_accounts() {
 #[tokio::test]
 async fn test_wallet_connector_approvals_are_scoped_to_connector() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[WALLET_METAMASK_CAPSULE_ID]).unwrap();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_METAMASK_CAPSULE_ID, &context)
             .unwrap();
@@ -866,7 +869,7 @@ async fn test_unisat_connector_lists_only_unisat_bitcoin_accounts() {
 #[tokio::test]
 async fn test_wallet_app_can_approve_wallet_scoped_external_request() {
     let dir = tempfile::tempdir().unwrap();
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[WALLET_CAPSULE_ID]).unwrap();
     let principal_id = context.principal_id().to_string();
     let token =
         issue_home_launch_token_with_context(dir.path(), WALLET_CAPSULE_ID, &context).unwrap();
