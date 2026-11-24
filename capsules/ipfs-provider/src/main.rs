@@ -4207,6 +4207,7 @@ mod tests {
 
     /// Holds an fcntl write lock on `path` from a forked child, as a running
     /// Kubo holds `repo.lock`; returns once it is held. Kill the pid when done.
+    #[cfg(unix)]
     fn hold_repo_lock_in_another_process(path: &Path) -> libc::pid_t {
         use std::os::unix::io::AsRawFd;
         let file = fs::OpenOptions::new()

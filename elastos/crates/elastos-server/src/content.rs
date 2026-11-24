@@ -15941,14 +15941,9 @@ mod tests {
         assert!(!output.contains("stage=\"runtime_stream_validation\""));
         assert!(!output.contains(TEST_CID));
         assert!(!output.contains("private-fixture-marker"));
-        // The not-ready read is one call. Linux and macOS then ask the local
-        // backend to prepare. Other platforms refuse that preparation first.
-        let local_backend_calls = if cfg!(any(target_os = "linux", target_os = "macos")) {
-            2
-        } else {
-            1
-        };
-        assert_eq!(ipfs.requests.lock().await.len(), local_backend_calls);
+        // The not-ready read is one call, then the local backend is asked to
+        // prepare (Linux, macOS, and Windows since W6).
+        assert_eq!(ipfs.requests.lock().await.len(), 2);
         assert_eq!(availability.requests.lock().await.len(), 1);
     }
 
