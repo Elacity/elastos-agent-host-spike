@@ -1095,8 +1095,17 @@ async fn owner_stop_reaches_a_guest_when_the_agent_or_the_home_is_off() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "retire: {body}");
+    assert_eq!(
+        live_principal(&live(&world).await, &world.agent_b),
+        0,
+        "retire ended that guest"
+    );
     let (status, body) = stop(&world, &world.admin, &world.agent_b).await;
-    assert_eq!(status, StatusCode::OK, "stop while retired: {body}");
+    assert_eq!(status, StatusCode::CONFLICT, "stop while retired: {body}");
+    assert!(
+        body.contains("no running session") || body.contains("already stopped"),
+        "{body}"
+    );
     assert_eq!(live_principal(&live(&world).await, &world.agent_b), 0);
 
     let (status, body) = call(

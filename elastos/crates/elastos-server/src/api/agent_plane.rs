@@ -16,7 +16,9 @@ use crate::api::middleware::{auth_middleware, shell_only_middleware, ApiState};
 use crate::api::server::ServerConfig;
 
 const COORDS_FILE: &str = "agent-runtime-coords.json";
+#[cfg(unix)]
 const KIND: &str = "agent";
+#[cfg(unix)]
 const RESERVED: &[&str] = &[
     "runtime-coords.json",
     "gateway-runtime-coords.json",
@@ -38,6 +40,7 @@ pub(crate) fn coords_path(data_dir: &Path) -> PathBuf {
     data_dir.join(COORDS_FILE)
 }
 
+#[derive(Debug)]
 pub(crate) struct AgentPlane {
     task: tokio::task::JoinHandle<()>,
     coords_path: PathBuf,
