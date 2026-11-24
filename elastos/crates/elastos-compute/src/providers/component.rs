@@ -1310,7 +1310,7 @@ impl ComponentState {
         if self.sealed {
             return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
         }
-        if request.operation != "read" || request.params.is_empty() {
+        if request.operation != "read" {
             return Err(V2BusError::Unavailable(
                 "providers are not available in this slice".into(),
             ));
@@ -2337,7 +2337,10 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 if let Some(ending) = provider.endings.read().await.get(&handle.id).cloned() {
-                    assert_eq!(ending, "returned", "invoke is unavailable and writer ends");
+                    assert_eq!(
+                        ending, "returned",
+                        "empty read params are invalid and the writer ends"
+                    );
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2412,20 +2415,35 @@ mod tests {
 
         let calls = Arc::new(Mutex::new(Vec::new()));
         let mut state = state_for(vec![9; 5], calls.clone());
-        let streamed = match state.windowed_read(&read_request(4), false) {
-            Ok(prepared) => opened_chunks(prepared),
-            Err(V2BusError::Invalid(message)) => {
-                assert_eq!(message, "object is 5 bytes, over the cap of 4");
-                0
-            }
-            Err(err) => panic!("over-cap read must be invalid, got {err:?}"),
-        };
-        assert_eq!(streamed, 0, "an over-cap read opens no chunk");
+        let err = state
+            .windowed_read(&read_request(4), false)
+            .expect_err("an over-cap read is invalid");
+        assert!(
+            matches!(err, V2BusError::Invalid(ref message)
+                if message == "object is 5 bytes, over the cap of 4"),
+            "{err:?}"
+        );
         let lengths = calls.lock().unwrap().clone();
         assert!(!lengths.is_empty(), "the size is learned from a window");
         assert!(lengths
             .iter()
             .all(|length| *length <= crate::providers::bus2_stream::READ_CHUNK as u64));
+    }
+
+    #[test]
+    fn empty_read_params_are_invalid_and_other_operations_stay_unavailable() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut state = state_for(vec![1], calls);
+        let mut request = read_request(4);
+        request.params.clear();
+        let err = state.windowed_read(&request, false).unwrap_err();
+        assert!(
+            matches!(err, V2BusError::Invalid(ref message) if message.contains("are not JSON")),
+            "{err:?}"
+        );
+        request.operation = "write".into();
+        let err = state.windowed_read(&request, false).unwrap_err();
+        assert!(matches!(err, V2BusError::Unavailable(_)), "{err:?}");
     }
 
     #[tokio::test]

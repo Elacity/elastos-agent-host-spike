@@ -69,8 +69,8 @@ fn one_node(value: &Value) -> Result<Node, String> {
     let object = value.as_object().ok_or("a node is an object")?;
     let text = object.contains_key("text");
     let image = object.contains_key("image");
-    if text == image {
-        return Err("a node is text or an image".to_string());
+    if text == image || object.len() != 1 {
+        return Err("a node is text or an image, with no other keys".to_string());
     }
     if text {
         let text = object
@@ -84,16 +84,191 @@ fn one_node(value: &Value) -> Result<Node, String> {
         }
         return Ok(Node::Text(text.to_string()));
     }
-    let grant = object
+    let image = object
         .get("image")
         .and_then(Value::as_object)
-        .and_then(|image| image.get("grant"))
+        .ok_or("an image names a grant")?;
+    if image.len() != 1 {
+        return Err("an image names a grant, with no other keys".to_string());
+    }
+    let grant = image
+        .get("grant")
         .and_then(Value::as_str)
         .filter(|grant| !grant.is_empty())
         .ok_or("an image names a grant")?;
     Ok(Node::Image {
         grant: grant.to_string(),
     })
+}
+
+/// serde_json keeps the last copy of a repeated key. This walk refuses that
+/// before the value is built. Keys are compared after string escapes.
+fn reject_duplicate_keys(bytes: &[u8]) -> Result<(), String> {
+    let mut i = 0;
+    scan_value(bytes, &mut i)?;
+    skip_ws(bytes, &mut i);
+    if i != bytes.len() {
+        return Err("document is not JSON".to_string());
+    }
+    Ok(())
+}
+
+fn skip_ws(bytes: &[u8], i: &mut usize) {
+    while bytes.get(*i).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        *i += 1;
+    }
+}
+
+fn scan_value(bytes: &[u8], i: &mut usize) -> Result<(), String> {
+    skip_ws(bytes, i);
+    match bytes.get(*i).copied() {
+        Some(b'{') => scan_object(bytes, i),
+        Some(b'[') => scan_array(bytes, i),
+        Some(b'"') => {
+            scan_string(bytes, i)?;
+            Ok(())
+        }
+        Some(b't') => scan_lit(bytes, i, b"true"),
+        Some(b'f') => scan_lit(bytes, i, b"false"),
+        Some(b'n') => scan_lit(bytes, i, b"null"),
+        Some(b'-') | Some(b'0'..=b'9') => scan_number(bytes, i),
+        _ => Err("document is not JSON".to_string()),
+    }
+}
+
+fn scan_object(bytes: &[u8], i: &mut usize) -> Result<(), String> {
+    *i += 1;
+    let mut keys = Vec::new();
+    loop {
+        skip_ws(bytes, i);
+        if bytes.get(*i) == Some(&b'}') {
+            *i += 1;
+            return Ok(());
+        }
+        if !keys.is_empty() {
+            if bytes.get(*i) != Some(&b',') {
+                return Err("document is not JSON".to_string());
+            }
+            *i += 1;
+            skip_ws(bytes, i);
+        }
+        let key = scan_string(bytes, i)?;
+        if keys.iter().any(|seen| seen == &key) {
+            return Err(format!("duplicate key {key:?}"));
+        }
+        keys.push(key);
+        skip_ws(bytes, i);
+        if bytes.get(*i) != Some(&b':') {
+            return Err("document is not JSON".to_string());
+        }
+        *i += 1;
+        scan_value(bytes, i)?;
+    }
+}
+
+fn scan_array(bytes: &[u8], i: &mut usize) -> Result<(), String> {
+    *i += 1;
+    let mut seen = false;
+    loop {
+        skip_ws(bytes, i);
+        if bytes.get(*i) == Some(&b']') {
+            *i += 1;
+            return Ok(());
+        }
+        if seen {
+            if bytes.get(*i) != Some(&b',') {
+                return Err("document is not JSON".to_string());
+            }
+            *i += 1;
+        }
+        scan_value(bytes, i)?;
+        seen = true;
+    }
+}
+
+fn scan_string(bytes: &[u8], i: &mut usize) -> Result<String, String> {
+    if bytes.get(*i) != Some(&b'"') {
+        return Err("document is not JSON".to_string());
+    }
+    *i += 1;
+    let mut raw = Vec::new();
+    while let Some(byte) = bytes.get(*i).copied() {
+        *i += 1;
+        match byte {
+            b'"' => {
+                return String::from_utf8(raw).map_err(|_| "document is not JSON".to_string());
+            }
+            b'\\' => {
+                let esc = bytes.get(*i).copied().ok_or("document is not JSON")?;
+                *i += 1;
+                let ch = match esc {
+                    b'"' => '"',
+                    b'\\' => '\\',
+                    b'/' => '/',
+                    b'b' => '\u{0008}',
+                    b'f' => '\u{000c}',
+                    b'n' => '\n',
+                    b'r' => '\r',
+                    b't' => '\t',
+                    b'u' => {
+                        let hex = bytes.get(*i..*i + 4).ok_or("document is not JSON")?;
+                        *i += 4;
+                        let text = std::str::from_utf8(hex).map_err(|_| "document is not JSON")?;
+                        let code = u32::from_str_radix(text, 16)
+                            .map_err(|_| "document is not JSON".to_string())?;
+                        char::from_u32(code).ok_or("document is not JSON")?
+                    }
+                    _ => return Err("document is not JSON".to_string()),
+                };
+                raw.extend(ch.encode_utf8(&mut [0; 4]).as_bytes());
+            }
+            byte if byte < 0x20 => return Err("document is not JSON".to_string()),
+            byte => raw.push(byte),
+        }
+    }
+    Err("document is not JSON".to_string())
+}
+
+fn scan_lit(bytes: &[u8], i: &mut usize, lit: &[u8]) -> Result<(), String> {
+    if bytes.get(*i..).is_some_and(|rest| rest.starts_with(lit)) {
+        *i += lit.len();
+        Ok(())
+    } else {
+        Err("document is not JSON".to_string())
+    }
+}
+
+fn scan_number(bytes: &[u8], i: &mut usize) -> Result<(), String> {
+    if bytes.get(*i) == Some(&b'-') {
+        *i += 1;
+    }
+    if !take_digits(bytes, i) {
+        return Err("document is not JSON".to_string());
+    }
+    if bytes.get(*i) == Some(&b'.') {
+        *i += 1;
+        if !take_digits(bytes, i) {
+            return Err("document is not JSON".to_string());
+        }
+    }
+    if matches!(bytes.get(*i), Some(b'e' | b'E')) {
+        *i += 1;
+        if matches!(bytes.get(*i), Some(b'+' | b'-')) {
+            *i += 1;
+        }
+        if !take_digits(bytes, i) {
+            return Err("document is not JSON".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn take_digits(bytes: &[u8], i: &mut usize) -> bool {
+    let start = *i;
+    while bytes.get(*i).is_some_and(|byte| byte.is_ascii_digit()) {
+        *i += 1;
+    }
+    *i > start
 }
 
 /// Checks one document. The frame it returns names text and grant ids.
@@ -109,9 +284,14 @@ pub fn check_document(media_type: &str, document: &[u8]) -> Result<Vec<Node>, St
             document.len()
         ));
     }
+    reject_duplicate_keys(document)?;
     let value: Value =
         serde_json::from_slice(document).map_err(|err| format!("document is not JSON: {err}"))?;
     walk(&value, 1)?;
+    let root = value.as_object().ok_or("a document is one frame")?;
+    if root.len() != 1 || !root.contains_key("frame") {
+        return Err("a document has other keys besides frame".to_string());
+    }
     let frame = value
         .get("frame")
         .and_then(Value::as_array)
@@ -124,9 +304,13 @@ pub fn check_document(media_type: &str, document: &[u8]) -> Result<Vec<Node>, St
 
 /// A grant the guest already holds. Present reads this record. It does not
 /// ask for a new grant.
+/// Revoked ids kept so a later present can still say the grant was revoked.
+const MAX_REVOKED_GRANTS: usize = 32;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GrantBook {
     grants: Vec<HeldGrant>,
+    revoked: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,11 +318,11 @@ struct HeldGrant {
     id: String,
     resource: String,
     actions: Vec<String>,
-    revoked: bool,
 }
 
 impl GrantBook {
     pub fn hold(&mut self, id: &str, resource: &str, action: &str) {
+        self.revoked.retain(|kept| kept != id);
         if self.grants.iter().any(|grant| grant.id == id) {
             return;
         }
@@ -146,24 +330,37 @@ impl GrantBook {
             id: id.to_string(),
             resource: resource.to_string(),
             actions: vec![action.to_string()],
-            revoked: false,
         });
     }
 
     pub fn revoke(&mut self, id: &str) {
-        if let Some(grant) = self.grants.iter_mut().find(|grant| grant.id == id) {
-            grant.revoked = true;
+        let Some(pos) = self.grants.iter().position(|grant| grant.id == id) else {
+            return;
+        };
+        self.grants.remove(pos);
+        if self.revoked.iter().any(|kept| kept == id) {
+            return;
         }
+        if self.revoked.len() == MAX_REVOKED_GRANTS {
+            self.revoked.remove(0);
+        }
+        self.revoked.push(id.to_string());
     }
 
-    /// Drops every grant this guest holds. A stop does this. A revoke of one
-    /// grant does not.
+    /// Drops every grant this guest holds, including the revoked ids. A stop
+    /// does this. A revoke of one grant does not.
     pub fn clear(&mut self) {
         self.grants.clear();
+        self.revoked.clear();
     }
 
     pub fn is_empty(&self) -> bool {
         self.grants.is_empty()
+    }
+
+    #[cfg(test)]
+    fn grant_slots(&self) -> usize {
+        self.grants.len() + self.revoked.len()
     }
 }
 
@@ -198,14 +395,14 @@ pub fn present_frame(
         out.push(match node {
             Node::Text(text) => FrameNode::Text(text),
             Node::Image { grant } => {
+                if book.revoked.iter().any(|id| id == &grant) {
+                    return Err(PresentError::Denied(format!("{grant} was revoked")));
+                }
                 let Some(held) = book.grants.iter().find(|item| item.id == grant) else {
                     return Err(PresentError::Denied(format!(
                         "{grant} is not a grant this guest holds"
                     )));
                 };
-                if held.revoked {
-                    return Err(PresentError::Denied(format!("{grant} was revoked")));
-                }
                 if !held.actions.iter().any(|action| action == "read") {
                     return Err(PresentError::Denied(format!("{grant} does not allow read")));
                 }
@@ -294,6 +491,47 @@ mod tests {
             let err = check_document(UI_MEDIA_TYPE, document.as_bytes()).unwrap_err();
             assert!(err.contains("never by a URI or bytes"), "{key}: {err}");
         }
+    }
+
+    #[test]
+    fn duplicate_keys_and_stray_keys_are_refused() {
+        let err =
+            check_document(UI_MEDIA_TYPE, br#"{"frame":[{"text":"a","text":"b"}]}"#).unwrap_err();
+        assert!(err.contains("duplicate key"), "{err}");
+        let err =
+            check_document(UI_MEDIA_TYPE, br#"{"frame":[{"text":"x","grant":"y"}]}"#).unwrap_err();
+        assert!(err.contains("other keys"), "{err}");
+        let err =
+            check_document(UI_MEDIA_TYPE, br#"{"grant":"y","frame":[{"text":"x"}]}"#).unwrap_err();
+        assert!(err.contains("other keys"), "{err}");
+    }
+
+    #[test]
+    fn revoked_ids_stay_bounded_and_still_say_revoked() {
+        let mut book = GrantBook::default();
+        for n in 0..40 {
+            let id = format!("g{n}");
+            book.hold(&id, "localhost://Users/self/Pictures/a.png", "read");
+            book.revoke(&id);
+        }
+        assert!(
+            book.grant_slots() <= 32,
+            "revoked ids stay in a bounded list, have {}",
+            book.grant_slots()
+        );
+        let media = UI_MEDIA_TYPE;
+        let latest =
+            present_frame(media, br#"{"frame":[{"image":{"grant":"g39"}}]}"#, &book).unwrap_err();
+        assert!(
+            matches!(latest, PresentError::Denied(ref message) if message.contains("was revoked")),
+            "{latest:?}"
+        );
+        let oldest =
+            present_frame(media, br#"{"frame":[{"image":{"grant":"g0"}}]}"#, &book).unwrap_err();
+        assert!(
+            matches!(oldest, PresentError::Denied(ref message) if message.contains("is not a grant")),
+            "{oldest:?}"
+        );
     }
 
     #[test]
