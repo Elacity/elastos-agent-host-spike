@@ -664,9 +664,9 @@ pub(super) async fn launch_runtime_agent(
     agent_id: &str,
     launch_grant: &str,
 ) -> anyhow::Result<StartedRuntimeAgent> {
-    let coords = load_live_runtime_coords(data_dir)
+    let coords = crate::api::agent_plane::live_coords(data_dir)
         .await
-        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+        .ok_or_else(|| anyhow::anyhow!("agent runtime is not running"))?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;
@@ -729,9 +729,9 @@ pub(super) async fn stop_runtime_agent(
     data_dir: &FsPath,
     agent_id: &str,
 ) -> anyhow::Result<RuntimeAgentStop> {
-    let coords = load_live_runtime_coords(data_dir)
+    let coords = crate::api::agent_plane::live_coords(data_dir)
         .await
-        .ok_or_else(|| anyhow::anyhow!("local runtime is not running"))?;
+        .ok_or_else(|| anyhow::anyhow!("agent runtime is not running"))?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .build()?;

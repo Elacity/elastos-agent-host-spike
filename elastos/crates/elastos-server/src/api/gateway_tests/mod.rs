@@ -1187,6 +1187,8 @@ include!("support_runtime.rs");
 #[cfg(feature = "prototype-agents")]
 mod agent_launch;
 mod agent_plan;
+#[cfg(all(unix, feature = "prototype-agents"))]
+mod agent_plane;
 mod agent_routes;
 mod assistant_workspace_v2;
 mod browser_profile;

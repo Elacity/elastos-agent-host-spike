@@ -491,6 +491,7 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         ready_tx: None,
         attach_secret: Some(secret.clone()),
         host_helpers: Vec::new(),
+        agents_only: false,
     })
     .unwrap()
     .layer(axum::middleware::from_fn_with_state(
@@ -525,15 +526,19 @@ async fn serve_runtime(data: &std::path::Path) -> RuntimeHost {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(healthy, "the runtime launch route did not answer health");
-    std::fs::write(
-        crate::runtime_control::home_runtime_coord_path(data),
-        serde_json::to_vec(&json!({
-            "api_url": url,
-            "attach_secret": secret,
-            "pid": std::process::id(),
-            "runtime_kind": crate::runtime_control::RUNTIME_KIND_MANAGED_HOME,
-        }))
-        .unwrap(),
+    crate::runtime_control::write_runtime_coords(
+        &crate::api::agent_plane::coords_path(data),
+        &crate::runtime_control::RuntimeCoords {
+            api_url: url,
+            attach_secret: secret,
+            pid: std::process::id(),
+            runtime_kind: "agent".to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: String::new(),
+            home_url: String::new(),
+        },
     )
     .unwrap();
     RuntimeHost {

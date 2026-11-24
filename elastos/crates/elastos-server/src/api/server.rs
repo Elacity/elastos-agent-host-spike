@@ -95,6 +95,8 @@ pub struct ServerConfig {
     pub attach_secret: Option<String>,
     /// Operator-approved host helpers that must live as long as this API server.
     pub host_helpers: Vec<HostHelperProcess>,
+    /// Serve the stored-agent routes on this Runtime.
+    pub agents_only: bool,
 }
 
 pub struct HostHelperProcess {
@@ -169,6 +171,9 @@ pub(crate) fn shell_capability_routes(
 /// `start_server_with_sessions` serves this router, and the test server
 /// builds it too, so tests reach the routes `elastos serve` serves.
 pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
+    if config.agents_only {
+        return crate::api::agent_plane::router(config);
+    }
     let ServerConfig {
         runtime,
         session_registry,
@@ -188,6 +193,7 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
         ready_tx: _,
         attach_secret,
         host_helpers: _,
+        agents_only: _,
     } = config;
     // Runtime keeps this control API on its own configured origin.
     // Browser capsules use the gateway launch boundary.
@@ -636,6 +642,7 @@ pub(crate) mod tests {
             ready_tx: None,
             attach_secret: None,
             host_helpers: Vec::new(),
+            agents_only: false,
         })
         .expect("the test server's router builds")
     }

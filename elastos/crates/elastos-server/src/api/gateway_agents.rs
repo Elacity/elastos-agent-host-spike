@@ -134,15 +134,39 @@ pub(super) async fn agents_retire(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    agents_response(agents_owner(&state, &headers).and_then(|owner| {
+    let result = async {
+        let owner = agents_owner(&state, &headers)?;
         let request: RetireRequest = agents_request(&body)?;
+        end_live_agent(&state.data_dir, &request.agent_id).await?;
         crate::agents::retire(
             &state.data_dir,
             &owner.caller(),
             &request.agent_id,
             now_ts(),
         )
-    }))
+    }
+    .await;
+    agents_response(result)
+}
+
+/// Stop one live agent before its record is retired. A Home with no agent
+/// Runtime retires the record as before. A stop the Runtime refuses because
+/// the agent is already stopped still retires the record.
+pub(super) async fn end_live_agent(
+    data_dir: &std::path::Path,
+    agent_id: &str,
+) -> anyhow::Result<()> {
+    let path = crate::api::agent_plane::coords_path(data_dir);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    match super::gateway_home_runtime::stop_runtime_agent(data_dir, agent_id).await {
+        Ok(_) => Ok(()),
+        Err(error) if error.downcast_ref::<Refused>().is_some() => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) async fn agents_rename(
