@@ -3642,7 +3642,7 @@ pub(crate) mod tests {
     /// that temp dir, or `temp.path()` directly. Every caller that derives it
     /// from `default_data_dir()` asserts it is under the temp dir before its
     /// first write, so this writes nothing outside the temp tree.
-    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) {
+    fn store_home_cmd_test_principal(data_dir: &Path, principal_id: &str) -> String {
         fs::create_dir_all(data_dir).unwrap();
         let now = elastos_server::auth::now_ts();
         let binding = elastos_runtime::auth::ProofBinding::passkey_webauthn(
@@ -3668,6 +3668,31 @@ pub(crate) mod tests {
         )
         .expect("fixture principal must be stored through the production store");
         assert_eq!(stored.principal_id, principal_id);
+        stored.proof_binding_id
+    }
+
+    fn store_home_cmd_live_grant(
+        data_dir: &Path,
+        principal_id: &str,
+        session_id: &str,
+        grant_id: &str,
+        proof_binding_id: &str,
+    ) {
+        let now = elastos_server::auth::now_ts();
+        elastos_server::auth::store_session_grant(
+            data_dir,
+            elastos_runtime::auth::AuthSessionGrantV1 {
+                schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+                grant_id: grant_id.to_string(),
+                session_id: session_id.to_string(),
+                principal_id: principal_id.to_string(),
+                proof_binding_id: proof_binding_id.to_string(),
+                issued_at: now,
+                expires_at: now + 300,
+                apps: vec!["home".to_string()],
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3682,7 +3707,7 @@ pub(crate) mod tests {
             "fixture data_dir {} escapes the test temp dir",
             data_dir.display()
         );
-        store_home_cmd_test_principal(&data_dir, "principal-a");
+        let proof_binding_id = store_home_cmd_test_principal(&data_dir, "principal-a");
         let _owned =
             ScopedEnvVar::set(crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV, "1");
         let _principal = ScopedEnvVar::set(
@@ -3707,6 +3732,31 @@ pub(crate) mod tests {
         );
 
         assert!(
+            !elastos_server::api::gateway::gateway_owned_home_cli_authority_available(&data_dir)
+        );
+        let missing = gather_home_cli_session_status();
+        assert_eq!(missing.mode, "browser_pty");
+        assert_eq!(
+            missing.passkey_state,
+            "browser Home terminal missing launch authority"
+        );
+        assert_eq!(
+            gateway_home_cli_api_url().as_deref(),
+            Some("http://localhost:61180")
+        );
+
+        store_home_cmd_live_grant(
+            &data_dir,
+            "principal-a",
+            "session-a",
+            "grant-a",
+            &proof_binding_id,
+        );
+        let _proof_live = ScopedEnvVar::set(
+            elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
+            proof_binding_id,
+        );
+        assert!(
             elastos_server::api::gateway::gateway_owned_home_cli_authority_available(&data_dir)
         );
         let status = gather_home_cli_session_status();
@@ -3714,10 +3764,6 @@ pub(crate) mod tests {
         assert_eq!(
             status.passkey_state,
             "launch-token authorized browser Home session"
-        );
-        assert_eq!(
-            gateway_home_cli_api_url().as_deref(),
-            Some("http://localhost:61180")
         );
     }
 
@@ -3888,7 +3934,14 @@ pub(crate) mod tests {
             "fixture data_dir {} escapes the test temp dir",
             data_dir.display()
         );
-        store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        let proof_binding_id = store_home_cmd_test_principal(&data_dir, "person:v07-admin");
+        store_home_cmd_live_grant(
+            &data_dir,
+            "person:v07-admin",
+            "session-v07-admin",
+            "grant-v07-admin",
+            &proof_binding_id,
+        );
         let _principal = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
             "person:v07-admin",
@@ -3899,7 +3952,7 @@ pub(crate) mod tests {
         );
         let _proof = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
-            "",
+            proof_binding_id,
         );
         let _grant = ScopedEnvVar::set(
             elastos_server::api::gateway::HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,

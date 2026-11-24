@@ -1448,7 +1448,7 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
         .unwrap()
         .unwrap();
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(token)
+        .decode(&token)
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
 
@@ -1464,7 +1464,192 @@ async fn gateway_owned_home_cli_issuer_projects_non_cli_capsules_under_home_auth
         payload["payload"]["launch_context"]["authority_actor"],
         HOME_CAPSULE_ID
     );
+    require_carried_home_launch_token(dir.path(), &token, &["people"]).unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gateway_owned_home_cli_issuer_refuses_a_grant_that_does_not_name_home() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let now = now_ts();
+    let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    store_home_cli_principal(dir.path());
+    let context = HomeLaunchTokenContext::for_test(
+        "person:home-cli-test",
+        "auth:home-cli-test",
+        Some("proof:passkey:home-cli-test".to_string()),
+        "grant:home-cli-test",
+        crate::auth::PrincipalKind::Human,
+    );
+    crate::auth::store_session_grant(
+        dir.path(),
+        AuthSessionGrantV1 {
+            schema: AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: context.grant_id.clone(),
+            session_id: context.session_id.clone(),
+            principal_id: context.principal_id().to_string(),
+            proof_binding_id: context.proof_binding_id.clone().unwrap(),
+            issued_at: now,
+            expires_at: now + 300,
+            apps: vec!["library".to_string()],
+        },
+    )
+    .unwrap();
+
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        context.principal_id().to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        context.session_id.clone(),
+    );
+    let _proof = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
+        context.proof_binding_id.clone().unwrap(),
+    );
+    let _grant = EnvRestore::set(HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV, context.grant_id.clone());
+
+    let refused = issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("auth session grant is not authorized for app"),
+        "{refused}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gateway_owned_env_without_a_proof_binding_mints_no_device_token_for_people() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        "person:home-cli-test".to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        "auth:home-cli-test".to_string(),
+    );
+    let _proof = EnvRestore::set(HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV, String::new());
+    let _grant = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
+        "grant:home-cli-test".to_string(),
+    );
+
+    assert!(
+        issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        issue_local_runtime_home_launch_token(dir.path(), "people")
+            .unwrap_err()
+            .to_string(),
+        "device launch authority is limited to home and home-cli"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gateway_owned_env_refuses_a_revoked_or_expired_grant() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let now = now_ts();
+    let _auth = set_test_home_launch_auth_data_dir(dir.path());
+    store_home_cli_principal(dir.path());
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        "person:home-cli-test".to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        "auth:home-cli-test".to_string(),
+    );
+    let _proof = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV,
+        "proof:passkey:home-cli-test".to_string(),
+    );
+    let _grant = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
+        "grant:home-cli-test".to_string(),
+    );
+    let grant = |expires_at| AuthSessionGrantV1 {
+        schema: AuthSessionGrantV1::SCHEMA.to_string(),
+        grant_id: "grant:home-cli-test".to_string(),
+        session_id: "auth:home-cli-test".to_string(),
+        principal_id: "person:home-cli-test".to_string(),
+        proof_binding_id: "proof:passkey:home-cli-test".to_string(),
+        issued_at: now.saturating_sub(10),
+        expires_at,
+        apps: vec![HOME_CAPSULE_ID.to_string()],
+    };
+    crate::auth::store_session_grant(dir.path(), grant(now)).unwrap();
+    let expired = issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+        .unwrap_err()
+        .to_string();
+    assert!(expired.contains("auth session is not active"), "{expired}");
+
+    crate::auth::store_session_grant(dir.path(), grant(now + 300)).unwrap();
+    crate::auth::revoke_session_grant(dir.path(), "auth:home-cli-test", now).unwrap();
+    let revoked = issue_gateway_owned_home_cli_launch_token(dir.path(), "people")
+        .unwrap_err()
+        .to_string();
+    // The next read drops a revoked session, so the mint finds nothing.
+    assert!(revoked.contains("auth session not found"), "{revoked}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn gateway_owned_env_without_a_proof_binding_still_mints_home_and_home_cli() {
+    let _guard = HOME_GATEWAY_TEST_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _owned = EnvRestore::set(
+        crate::runtime_control::GATEWAY_OWNED_HOME_TERMINAL_ENV,
+        "1".to_string(),
+    );
+    let _principal = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_PRINCIPAL_ID_ENV,
+        "person:home-cli-test".to_string(),
+    );
+    let _session = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_SESSION_ID_ENV,
+        "auth:home-cli-test".to_string(),
+    );
+    let _proof = EnvRestore::set(HOME_CLI_AUTH_CONTEXT_PROOF_BINDING_ID_ENV, String::new());
+    let _grant = EnvRestore::set(
+        HOME_CLI_AUTH_CONTEXT_GRANT_ID_ENV,
+        "grant:home-cli-test".to_string(),
+    );
+
+    for app in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID] {
+        assert!(
+            issue_gateway_owned_home_cli_launch_token(dir.path(), app)
+                .unwrap()
+                .is_none(),
+            "{app}"
+        );
+        let token = issue_local_runtime_home_launch_token(dir.path(), app)
+            .unwrap_or_else(|err| panic!("{app}: {err}"));
+        require_carried_home_launch_token(dir.path(), &token, &[app])
+            .unwrap_or_else(|err| panic!("{app}: {err}"));
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn test_home_summary_reports_identity_and_launch_targets() {
@@ -6353,7 +6538,10 @@ async fn test_system_summary_reports_trusted_source_update_policy() {
 async fn test_system_guest_registration_requires_admin_passkey() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
-    let local_system_token = system_app_token(dir.path());
+    let local_context = local_home_launch_token_context(dir.path()).unwrap();
+    let local_system_token =
+        issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &local_context)
+            .unwrap();
     let authority = passkey_authority(dir.path());
     let guest = passkey_authority_with_name_role(
         dir.path(),
@@ -6451,8 +6639,10 @@ async fn system_community_membership_is_home_wide_and_requires_current_owner_aut
     let marker = dir
         .path()
         .join("collaboration-community-membership-v1.json");
+    let local_context = local_home_launch_token_context(dir.path()).unwrap();
     let mut denied_tokens = vec![
-        system_app_token(dir.path()),
+        issue_home_launch_token_with_context(dir.path(), SYSTEM_CAPSULE_ID, &local_context)
+            .unwrap(),
         projection_launch_token_for_authority_context(dir.path(), PEOPLE_CAPSULE_ID, &authority),
     ];
     for index in 0..3 {
@@ -7609,7 +7799,7 @@ async fn test_home_launch_validates_shell_targets() {
         .unwrap();
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 
-    let home_token = home_app_token(dir.path());
+    let home_token = granted_home_app_token(dir.path());
     let cookie_only = app
         .clone()
         .oneshot(
@@ -7666,6 +7856,7 @@ async fn test_home_launch_validates_shell_targets() {
     assert_eq!(payload["capsule_id"], "wasm-chat-room-instance");
     assert_isolated_launch_route(payload["route"].as_str().unwrap(), "chat-room");
 
+    let shell_home = granted_home_app_token(dir.path());
     let other_page = app
         .clone()
         .oneshot(
@@ -7676,7 +7867,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/apps/system/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"chat-room"}"#))
                 .unwrap(),
@@ -7717,7 +7908,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"library"}"#))
                 .unwrap(),
@@ -7746,7 +7937,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"projection-app"}"#))
                 .unwrap(),
@@ -7773,7 +7964,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"wallet-metamask"}"#))
                 .unwrap(),
@@ -7799,7 +7990,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{"target":"documents","query":{"doc":"did:key:z6ExampleDoc","view":"read"}}"#,
@@ -7828,7 +8019,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                     .header(CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         r#"{"target":"documents","query":{"cid":"bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi","uri":"elastos://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi","view":"read"}}"#,
@@ -7866,7 +8057,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     r#"{"target":"chat-room","query":{"invite":"elastos://peer/invite?token=abc-123"}}"#,
@@ -7897,7 +8088,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home.clone())
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"gba-ucity"}"#))
                 .unwrap(),
@@ -7930,7 +8121,7 @@ async fn test_home_launch_validates_shell_targets() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", shell_home)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"missing-shell-target"}"#))
                 .unwrap(),
@@ -8011,6 +8202,7 @@ async fn test_window_policy_survives_discovery_catalog_and_home_launch() {
             .unwrap();
         assert!(absent.get("window_policy").is_none());
         let app = gateway_router(test_state(dir.path()));
+        let home_token = granted_home_app_token(dir.path());
         for target in [
             "window-app",
             "window-viewer",
@@ -8027,7 +8219,7 @@ async fn test_window_policy_survives_discovery_catalog_and_home_launch() {
                         .header("origin", "http://localhost:61180")
                         .header("sec-fetch-site", "same-origin")
                         .header("referer", "http://localhost:61180/home/")
-                        .header("x-elastos-home-token", home_app_token(dir.path()))
+                        .header("x-elastos-home-token", home_token.clone())
                         .header(CONTENT_TYPE, "application/json")
                         .body(Body::from(json!({"target": target}).to_string()))
                         .unwrap(),
@@ -9684,6 +9876,7 @@ async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
     let bus = Arc::new(TokioMutex::new(FakePeerBus::default()));
     let _runtime = start_fake_runtime(dir.path(), bus, "system-peer").await;
     let app = gateway_router(test_state(dir.path()));
+    let owner = passkey_authority(dir.path());
 
     let launch = app
         .clone()
@@ -9695,7 +9888,7 @@ async fn test_home_launch_starts_system_capsule_and_reports_runtime() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", owner.home_token)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"system"}"#))
                 .unwrap(),
@@ -9898,7 +10091,7 @@ async fn test_home_launch_rejects_source_wasi_materialization() {
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", granted_home_app_token(dir.path()))
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"test-wasm-viewer"}"#))
                 .unwrap(),
@@ -9932,6 +10125,7 @@ async fn test_home_launch_rejects_source_wasi_materialization() {
 async fn test_home_launch_reports_system_launch_failure_when_runtime_cannot_start() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(test_state(dir.path()));
+    let owner = passkey_authority(dir.path());
 
     let launch = app
         .clone()
@@ -9943,7 +10137,7 @@ async fn test_home_launch_reports_system_launch_failure_when_runtime_cannot_star
                 .header("origin", "http://localhost:61180")
                 .header("sec-fetch-site", "same-origin")
                 .header("referer", "http://localhost:61180/home/")
-                .header("x-elastos-home-token", home_app_token(dir.path()))
+                .header("x-elastos-home-token", owner.home_token)
                 .header(CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"target":"system"}"#))
                 .unwrap(),
@@ -13773,7 +13967,7 @@ async fn home_external_link_raw(
 async fn home_external_link_names_the_launched_app_and_the_exact_address() {
     let dir = tempfile::tempdir().unwrap();
     let app = gateway_router(library_test_state(dir.path()).await);
-    let context = local_home_launch_token_context(dir.path()).unwrap();
+    let context = bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap();
     let home_token =
         issue_home_launch_token_with_context(dir.path(), HOME_CAPSULE_ID, &context).unwrap();
     let launched = |target: &str| {

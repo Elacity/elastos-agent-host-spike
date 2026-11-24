@@ -720,6 +720,46 @@ impl Fixture {
         self.publish();
     }
 
+    pub(crate) fn publish_consumed(&self) {
+        self.publish_consumed_pair();
+    }
+
+    /// A publisher-signed pair at `version` over this install's current runtime
+    /// and components. The Home's source record is left unchanged.
+    pub(crate) fn release_pair_at_version(&self, version: &str) -> (Vec<u8>, Vec<u8>) {
+        let runtime = fs::read(&self.binary).unwrap();
+        let components = fs::read(self.data.join("components.json")).unwrap();
+        let release = signed(
+            json!({
+                "schema":"elastos.release/v1", "version": version, "channel":"stable",
+                "platforms": {(crate::update::detect_release_platform()): {
+                    "binary": descriptor(&runtime), "components": descriptor(&components)
+                }}
+            }),
+            "elastos.release.v1",
+            71,
+        );
+        let head = signed(
+            json!({
+                "schema":"elastos.release.head/v1", "version": version, "channel":"stable",
+                "latest_release_cid": raw_cid(&release),
+                "release_sha256": hex::encode(Sha256::digest(&release))
+            }),
+            "elastos.release.head.v1",
+            71,
+        );
+        (head, release)
+    }
+
+    /// Point this Home's source record at an already signed pair and publish it.
+    pub(crate) fn publish_exact(&mut self, version: &str, head: Vec<u8>, release: Vec<u8>) {
+        self.head = head;
+        self.release = release;
+        self.source.installed_version = version.to_string();
+        self.source.head_cid = raw_cid(&self.head);
+        self.publish();
+    }
+
     fn save_source(&self) {
         fs::write(
             self.data.join("sources.json"),

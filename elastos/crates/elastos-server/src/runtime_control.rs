@@ -673,6 +673,13 @@ fn sync_managed_runtime_child_components_manifest(
     for (name, parent_binary) in verified_binaries {
         std::fs::copy(parent_binary, child_bin_dir.join(name))?;
     }
+    if let Some(source) = crate::setup::installed_release_source(parent_data_dir)? {
+        crate::installed_release::project_verified_release(
+            parent_data_dir,
+            &child_data_dir,
+            &source,
+        )?;
+    }
     Ok(())
 }
 
@@ -2055,6 +2062,310 @@ mod tests {
                 .join("components.json")
                 .exists());
         }
+    }
+
+    #[cfg(unix)]
+    fn sign_managed_provider_home() -> crate::installed_release::tests::Fixture {
+        let mut fixture = crate::installed_release::tests::Fixture::new();
+        let script = b"#!/bin/sh\nprintf started > \"$1\"\n";
+        let platform = crate::setup::detect_platform();
+        let bin_dir = fixture.data.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let mut external = serde_json::Map::new();
+        for (name, provides) in [
+            ("localhost-provider", "localhost://*"),
+            ("did-provider", "elastos://did/*"),
+        ] {
+            std::fs::write(bin_dir.join(name), script).unwrap();
+            external.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "install_path": format!("bin/{name}"),
+                    "provider_runtime": {
+                        "role": "provider",
+                        "substrate": "native",
+                        "runtime_abi": "elastos.provider-stdio/v1",
+                        "execution": "native-provider",
+                        "provides": provides
+                    },
+                    "platforms": {
+                        platform.as_str(): {
+                            "checksum": format!("sha256:{}", sha256_bytes(script)),
+                            "install_path": format!("bin/{name}")
+                        }
+                    }
+                }),
+            );
+        }
+        std::fs::write(bin_dir.join("shell"), script).unwrap();
+        external.insert(
+            "shell".to_string(),
+            serde_json::json!({
+                "install_path": "bin/shell",
+                "platforms": {
+                    platform.as_str(): {
+                        "checksum": format!("sha256:{}", sha256_bytes(script)),
+                        "install_path": "bin/shell"
+                    }
+                }
+            }),
+        );
+        std::fs::write(
+            fixture.data.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.components/v1",
+                "external": external,
+                "capsules": {},
+                "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fixture.bind_components();
+        // A signed Home can also carry the parent opt-in. The child must not
+        // inherit it: admission stays on the publisher signature.
+        std::fs::write(fixture.data.join("config.toml"), "dev_mode = true\n").unwrap();
+        fixture
+    }
+
+    #[cfg(unix)]
+    fn sync_managed_child(parent: &Path) -> PathBuf {
+        let home = managed_runtime_child_home_dir(parent, RUNTIME_KIND_MANAGED_HOME);
+        sync_managed_runtime_child_components_manifest(parent, &home).unwrap();
+        managed_runtime_child_data_dir(&home)
+    }
+
+    #[cfg(unix)]
+    fn start_signed_provider(data: &Path, name: &str) -> String {
+        let path = data.join("bin").join(name);
+        let prepared = crate::setup::verify_installed_component_start(data, name, &path)
+            .expect("signed release admission");
+        let checksum = prepared.signed_checksum().unwrap().to_string();
+        let marker = data.join(format!(".{name}.started"));
+        let mut command = std::process::Command::new(prepared.exec_path());
+        command.arg(&marker);
+        prepared.attach_std(&mut command, false).unwrap();
+        assert!(command.status().unwrap().success(), "{name} did not start");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"started");
+        crate::binaries::checked_native_provider_with_data_dir(data, &path)
+            .verify_at_spawn()
+            .unwrap();
+        checksum
+    }
+
+    /// The plant is a publisher-signed older pair over the same artifacts.
+    /// `installation/` is the pair admission reads when it is present.
+    #[cfg(unix)]
+    fn plant_older_release(data: &Path, head: &[u8], release: &[u8]) {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        let head_path = elastos_common::localhost::publisher_release_head_path(data);
+        let release_path = elastos_common::localhost::publisher_release_manifest_path(data);
+        std::fs::write(&head_path, head).unwrap();
+        std::fs::write(&release_path, release).unwrap();
+        let install = data.join("installation");
+        let _ = std::fs::remove_dir_all(&install);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&install)
+            .unwrap();
+        std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (name, bytes) in [("release-head.json", head), ("release.json", release)] {
+            let path = install.join(name);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            file.write_all(bytes).unwrap();
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_starts_localhost_provider_and_did_provider() {
+        let parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        for name in ["localhost-provider", "did-provider"] {
+            let child_sum = start_signed_provider(&child, name);
+            let parent_sum = start_signed_provider(&parent.data, name);
+            assert_eq!(child_sum, parent_sum, "{name}");
+        }
+        assert!(
+            !child.join("config.toml").exists(),
+            "dev_mode stays on the signed parent"
+        );
+        assert_eq!(
+            std::fs::read(child.join("sources.json")).unwrap(),
+            std::fs::read(parent.data.join("sources.json")).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_follows_the_consumed_release_not_a_stale_publisher_copy() {
+        let parent = sign_managed_provider_home();
+        parent.publish_consumed();
+        let (head, release) = parent.release_pair_at_version("0.6.0");
+        std::fs::write(
+            elastos_common::localhost::publisher_release_head_path(&parent.data),
+            &head,
+        )
+        .unwrap();
+        std::fs::write(
+            elastos_common::localhost::publisher_release_manifest_path(&parent.data),
+            &release,
+        )
+        .unwrap();
+        start_signed_provider(&parent.data, "localhost-provider");
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "localhost-provider");
+        start_signed_provider(&child, "did-provider");
+        assert_eq!(
+            std::fs::read(elastos_common::localhost::installation_release_manifest_path(&child))
+                .unwrap(),
+            std::fs::read(
+                elastos_common::localhost::installation_release_manifest_path(&parent.data)
+            )
+            .unwrap()
+        );
+        assert!(!elastos_common::localhost::publisher_release_manifest_path(&child).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_refuses_a_changed_helper() {
+        let parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        let path = child.join("bin/localhost-provider");
+        // Door-removal plant: a different executable at the child path, plus
+        // dev_mode. The parent's copy of the helper still admits. Removing the
+        // digest check, or honouring dev_mode ahead of the signed release,
+        // starts this file.
+        std::fs::write(&path, b"#!/bin/sh\nprintf tampered\n").unwrap();
+        std::fs::write(child.join("config.toml"), "dev_mode = true\n").unwrap();
+        start_signed_provider(&parent.data, "localhost-provider");
+        let error =
+            crate::setup::verify_installed_component_start(&child, "localhost-provider", &path)
+                .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("installed executable differs from signed release digest"),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_refuses_an_older_release() {
+        let parent = sign_managed_provider_home();
+        let (head, release) = parent.release_pair_at_version("0.6.0");
+        // Door-removal plant: the same older pair admits when the source
+        // record names it. Copied over the child alone, the parent's head CID
+        // still has to refuse it.
+        let mut twin = sign_managed_provider_home();
+        twin.publish_exact("0.6.0", head.clone(), release.clone());
+        start_signed_provider(&twin.data, "localhost-provider");
+        let child = sync_managed_child(&parent.data);
+        plant_older_release(&child, &head, &release);
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Release metadata bytes do not match requested CID"),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_replaces_a_leftover_older_release() {
+        let parent = sign_managed_provider_home();
+        let (head, release) = parent.release_pair_at_version("0.6.0");
+        let child = sync_managed_child(&parent.data);
+        plant_older_release(&child, &head, &release);
+        let child = sync_managed_child(&parent.data);
+        assert!(
+            !child.join("installation").exists(),
+            "a leftover consumed pair must not shadow the parent's release"
+        );
+        start_signed_provider(&child, "did-provider");
+        assert_eq!(
+            std::fs::read(elastos_common::localhost::publisher_release_manifest_path(
+                &child
+            ))
+            .unwrap(),
+            std::fs::read(elastos_common::localhost::publisher_release_manifest_path(
+                &parent.data
+            ))
+            .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_home_without_dev_mode_stays_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_managed_runtime_parent_support_artifacts(tmp.path());
+        let child = sync_managed_child(tmp.path());
+        let path = child.join("bin/localhost-provider");
+        // Door-removal plant: the helper matches the manifest. A start that
+        // trusts the checksum alone admits it. A source Home has no release
+        // and no dev_mode, so admission stays refused.
+        crate::binaries::verify_component_binary_with_data_dir(&child, "localhost-provider", &path)
+            .unwrap();
+        let error =
+            crate::setup::verify_installed_component_start(&child, "localhost-provider", &path)
+                .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("No trusted source configured"),
+            "{message}"
+        );
+        assert!(!child.join("config.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_home_child_stays_refused_when_dev_mode_is_only_on_the_parent() {
+        // Today's source Home: dev_mode is read from the data dir of the
+        // process that admits the helper. The managed child has its own data
+        // dir, and the parent opt-in is not copied, so the child stays refused.
+        let tmp = tempfile::tempdir().unwrap();
+        write_managed_runtime_parent_support_artifacts(tmp.path());
+        std::fs::write(tmp.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        let parent_bin = tmp.path().join("bin/localhost-provider");
+        let parent_start = crate::setup::verify_installed_component_start(
+            tmp.path(),
+            "localhost-provider",
+            &parent_bin,
+        )
+        .unwrap();
+        assert!(
+            parent_start.signed_checksum().is_err(),
+            "the parent source Home starts unchecked"
+        );
+        let child = sync_managed_child(tmp.path());
+        assert!(!child.join("config.toml").exists());
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("No trusted source configured"),
+            "{message}"
+        );
     }
 
     #[test]

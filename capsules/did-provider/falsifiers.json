@@ -42,8 +42,8 @@
       "edits": [
         {
           "file": "../../capsules/did-provider/src/main.rs",
-          "old": "        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)\n            .map_err(|e| format!(\"did-provider: failed to read nickname: {e}\"))?;",
-          "new": "        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)\n            .ok()\n            .flatten();"
+          "old": "        self.nickname = elastos_identity::load_nickname_with_storage_key(&base_dir, &storage_key)\n            .map_err(|e| format!(\"did-provider: failed to read nickname: {e}\"))?;",
+          "new": "        self.nickname = elastos_identity::load_nickname_with_storage_key(&base_dir, &storage_key)\n            .ok()\n            .flatten();"
         }
       ],
       "tests": [
