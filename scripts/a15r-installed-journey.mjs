@@ -278,8 +278,11 @@ export const OWNER_NOTE = "Documents/note.txt";
 // The installed guest has no request channel, and this route is not the Bus
 // read. These in-Runtime rows are the isolation words this journey does not cover.
 export const U4_ISOLATION_NOT_COVERED = [
-  "the guest reads its own root and gets the bytes it wrote: elastos/crates/elastos-server/src/api/routes.rs:4825 an_agents_guest_serves_its_own_root_on_the_component_bridge",
-  "another agent's root is refused and that agent's bytes stay out of the answer: elastos/crates/elastos-server/src/api/routes.rs:4884 an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "the guest reads its own root and gets the bytes it wrote: elastos/crates/elastos-server/src/api/routes.rs:4846 an_agents_guest_serves_its_own_root_on_the_component_bridge",
+  "another agent's root is refused over 56 spellings: elastos/crates/elastos-server/src/api/routes.rs:5051 an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "Y's canary stays out of the answer: elastos/crates/elastos-server/src/api/routes.rs:5123 an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "no capability request names Y's root: elastos/crates/elastos-server/src/api/routes.rs:5163 an_agents_guest_is_refused_every_other_spelling_of_another_agents_root",
+  "the protected path refuses the other agent's root: elastos/crates/elastos-server/src/api/routes.rs:5202 an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path",
 ];
 
 export function canonicalJson(value) {
@@ -440,8 +443,9 @@ function routeReadRefused(attempt) {
   if (typeof attempt.root !== "string" || !attempt.root.startsWith("localhost://UsersAI/")) return false;
   if (typeof attempt.resource !== "string" || !attempt.resource.startsWith(`${attempt.root}/`)) return false;
   if (typeof attempt.marker !== "string" || attempt.marker.length === 0) return false;
+  if (attempt.runtime !== LIVE_SESSION_COORDS) return false;
   if (String(attempt.body ?? "").includes(attempt.marker)) return false;
-  return attempt.status === 403;
+  return attempt.status === 403 || attempt.status === 404;
 }
 
 // Both calls use the capsule provider route. A refusal here is the route
@@ -561,20 +565,25 @@ async function runtimeToken(coordFile) {
   return { token: body.token, api: String(coords.api_url).replace(/\/$/, "") };
 }
 
-async function shellToken() {
-  return runtimeToken("home-runtime-coords.json");
-}
-
 async function readThroughCapsuleRoute(session, root, fileName) {
   const marker = `a15r-marker-${crypto.randomBytes(8).toString("hex")}`;
   const resource = `${root}/Documents/${fileName}`;
-  const attempt = { called: false, session, resource, root, status: 0, body: "", marker };
+  const attempt = {
+    called: false,
+    runtime: LIVE_SESSION_COORDS,
+    session,
+    resource,
+    root,
+    status: 0,
+    body: "",
+    marker,
+  };
   if (!root || !session) return attempt;
   const full = path.join(data, rootSuffix(root), "Documents", fileName);
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, marker);
   try {
-    const attached = await shellToken();
+    const attached = await runtimeToken(LIVE_SESSION_COORDS);
     const response = await fetch(`${attached.api}/api/provider/localhost/read`, {
       method: "POST",
       headers: {
@@ -604,6 +613,7 @@ function routeAttemptDetail(attempt) {
   const marker = typeof attempt?.marker === "string" ? attempt.marker : "";
   return {
     called: attempt?.called === true,
+    runtime: attempt?.runtime || "",
     status: attempt?.status || 0,
     session: attempt?.session || "",
     resource: attempt?.resource || "",

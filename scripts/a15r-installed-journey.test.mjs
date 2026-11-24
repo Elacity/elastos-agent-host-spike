@@ -185,6 +185,7 @@ test("user-area route row requires both reads refused", () => {
   const marker = "secret-marker";
   const refused = (root, file) => ({
     called: true,
+    runtime: LIVE_SESSION_COORDS,
     session: "session-a",
     root,
     resource: `${root}/Documents/${file}`,
@@ -202,8 +203,19 @@ test("user-area route row requires both reads refused", () => {
   assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, session: "session-b" } }), false);
   assert.equal(userAreaRouteRefused({ own: pair.own, other: { ...pair.other, root: rootA, resource: `${rootA}/Documents/other.txt` } }), false);
   assert.equal(userAreaRouteRefused({ grants: [`${rootA}/journal`, `${rootB}/journal`] }), false);
-  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("elastos/crates/elastos-server/src/api/routes.rs:4825")));
-  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("elastos/crates/elastos-server/src/api/routes.rs:4884")));
+  assert.equal(userAreaRouteRefused({
+    own: { ...pair.own, status: 404, body: "" },
+    other: { ...pair.other, status: 404, body: "" },
+  }), true);
+  assert.equal(userAreaRouteRefused({
+    own: { ...pair.own, runtime: "home-runtime-coords.json" },
+    other: pair.other,
+  }), false);
+  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("routes.rs:4846") && line.includes("an_agents_guest_serves_its_own_root_on_the_component_bridge")));
+  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("routes.rs:5051") && line.includes("an_agents_guest_is_refused_every_other_spelling_of_another_agents_root")));
+  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("routes.rs:5123")));
+  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("routes.rs:5163")));
+  assert.ok(U4_ISOLATION_NOT_COVERED.some((line) => line.includes("routes.rs:5202") && line.includes("an_agents_guest_cannot_reach_another_agents_root_on_the_protected_path")));
 });
 
 test("created agent stores the creating owner", () => {
