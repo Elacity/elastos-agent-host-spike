@@ -33,6 +33,10 @@ pub struct RuntimeCoords {
     pub dependency_sha256: String,
     #[serde(default)]
     pub generation: String,
+    /// Kernel birth of `pid` (`process_start`). With `generation`, this is the
+    /// process identity. Empty when the file only names a pid.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub process_start: String,
     /// Gateway Home URL published after its listener and router are ready.
     #[serde(default)]
     pub home_url: String,
@@ -2280,6 +2284,7 @@ mod tests {
             policy_sha256: String::new(),
             dependency_sha256: String::new(),
             generation: "generation".to_string(),
+            process_start: String::new(),
             home_url: String::new(),
         }
     }

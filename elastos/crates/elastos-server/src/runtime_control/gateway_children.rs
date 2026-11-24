@@ -63,8 +63,22 @@ impl Owner {
         ) && pid_is_alive(self.pid)
     }
 
+    /// Another process, named by update generation and kernel start together.
+    /// A live pid with either missing is a recycled name, not this owner.
     pub(crate) fn names_another_live_process(&self) -> bool {
-        self.pid != std::process::id() && self.active()
+        if self.pid == std::process::id() {
+            return false;
+        }
+        let Some(coords) = read_private_runtime_coords(&gateway_runtime_coord_path(&self.data_dir))
+        else {
+            return false;
+        };
+        coords.pid == self.pid
+            && !coords.generation.is_empty()
+            && !coords.process_start.is_empty()
+            && process_start(coords.pid).as_deref() == Some(coords.process_start.as_str())
+            && sha256_bytes(&serde_json::to_vec(&coords).expect("runtime coordinates serialize"))
+                == self.generation
     }
 
     pub(crate) fn configure(&self, command: &mut Command) -> anyhow::Result<()> {
@@ -590,6 +604,7 @@ mod tests {
             policy_sha256: String::new(),
             dependency_sha256: String::new(),
             generation: generation.into(),
+            process_start: String::new(),
             home_url: String::new(),
         };
         let published = publish_gateway_runtime_coords(data, coords).unwrap();
@@ -1047,6 +1062,7 @@ mod tests {
             policy_sha256: String::new(),
             dependency_sha256: String::new(),
             generation: String::new(),
+            process_start: String::new(),
             home_url: String::new(),
         };
         let _published = publish_gateway_runtime_coords(temp.path(), coords).unwrap();
