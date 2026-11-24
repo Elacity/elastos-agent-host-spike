@@ -1749,6 +1749,7 @@ async fn reuse_makes_no_private_copy() {
         policy_sha256,
         dependency_sha256: managed_runtime_dependency_sha256(),
         generation: String::new(),
+        process_start: String::new(),
         home_url: String::new(),
     };
     std::fs::write(
