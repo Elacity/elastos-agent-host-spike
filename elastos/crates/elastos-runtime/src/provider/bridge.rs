@@ -69,15 +69,6 @@ const HOSTED_RUN_BINDING_TTL: std::time::Duration = std::time::Duration::from_se
 // entries immediately; an unpolled completion remains until the two-hour TTL.
 const MAX_HOSTED_RUN_BINDINGS: usize = 4096;
 
-#[cfg(all(test, target_os = "macos"))]
-fn seatbelt_path(path: &Path) -> Result<String, BridgeError> {
-    let value = path
-        .to_str()
-        .filter(|value| !value.chars().any(char::is_control))
-        .ok_or_else(|| BridgeError::InitFailed("invalid model sandbox path".into()))?;
-    Ok(value.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
 #[cfg(target_os = "macos")]
 fn model_capsule_authority() -> Result<ProviderAuthority, BridgeError> {
     let path =
@@ -6833,10 +6824,11 @@ __attribute__((used)) void run(void) {
         (temp, base, engine, model, bundle)
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn seatbelt_path_escapes_a_quote_and_a_backslash() {
-        assert_eq!(seatbelt_path(Path::new(r#"a"b\c"#)).unwrap(), r#"a\"b\\c"#);
+    fn the_seatbelt_path_helper_is_gone() {
+        let source = include_str!("bridge.rs");
+        let needle = ["fn seat", "belt_path("].concat();
+        assert!(!source.contains(&needle));
     }
 
     #[test]
