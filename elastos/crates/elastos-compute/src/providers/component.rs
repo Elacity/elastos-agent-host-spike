@@ -1299,7 +1299,7 @@ impl ComponentState {
     }
 
     /// A v2 read through the sync bridge. The seal is the first decision.
-    /// Windows use `offset` and `length` on the bridge the v1 invoke already
+    /// One call asks for `cap + 1` bytes on the bridge the v1 invoke already
     /// uses. Over the cap, this returns before any guest chunk exists.
     fn windowed_read(
         &mut self,
@@ -1325,26 +1325,22 @@ impl ComponentState {
             .ok_or_else(|| {
                 V2BusError::Denied("resource invoke requires a capability grant".into())
             })?;
+        let mut hold = super::bus2_stream::ReadHold::try_reserve(cap)
+            .ok_or_else(|| V2BusError::Unavailable("the host read cap is already in use".into()))?;
         let resource = request.resource.clone();
-        let mut audit = None;
-        let bytes = super::bus2_stream::collect_under_cap(cap, |offset, length| {
-            let (bytes, seen) = self.bridge_window(&resource, &grant, offset, length)?;
-            if audit.is_none() {
-                audit = seen;
-            }
-            Ok(bytes)
-        })
-        .map_err(|fail| match fail {
-            super::bus2_stream::CapFail::Over { len, cap } => {
-                V2BusError::Invalid(format!("object is {len} bytes, over the cap of {cap}"))
-            }
-            super::bus2_stream::CapFail::Window(err) => err,
-        })?;
+        let (bytes, audit) = self.bridge_window(&resource, &grant, 0, cap as u64 + 1)?;
+        if bytes.len() > cap {
+            return Err(V2BusError::Invalid(format!(
+                "object is {} bytes, over the cap of {cap}",
+                bytes.len()
+            )));
+        }
+        hold.shrink(bytes.len());
         self.grants
             .lock()
             .expect("grant book")
             .hold(&grant, &resource, "read");
-        Ok(super::bus2_stream::PreparedRead { bytes, audit })
+        Ok(super::bus2_stream::PreparedRead { bytes, audit, hold })
     }
 
     /// Checker first, then a grant this guest already holds. One frame, replaced.
@@ -1382,6 +1378,7 @@ impl ComponentState {
                     "path": resource,
                     "offset": offset,
                     "length": length,
+                    "check_revision": true,
                 }),
                 grant: Some(grant.to_string()),
             }))
@@ -1604,13 +1601,15 @@ impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<Comp
         if let Some(mut body) = body {
             let _ = accessor.with(|mut access| body.close(&mut access));
         }
-        let super::bus2_stream::PreparedRead { bytes, audit } =
+        let super::bus2_stream::PreparedRead { bytes, audit, hold } =
             accessor.with(|mut access| access.get().windowed_read(&request, had_body))?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         accessor
             .with(|mut access| {
-                let stream =
-                    StreamReader::new(&mut access, super::bus2_stream::WindowRead::new(bytes, tx))?;
+                let stream = StreamReader::new(
+                    &mut access,
+                    super::bus2_stream::WindowRead::new(bytes, tx, hold),
+                )?;
                 let trailer = wasmtime::component::FutureReader::new(&mut access, async move {
                     let ended = rx
                         .await
@@ -2347,7 +2346,8 @@ mod tests {
 
     fn opened_chunks(prepared: crate::providers::bus2_stream::PreparedRead) -> usize {
         let (tx, _rx) = tokio::sync::oneshot::channel();
-        let mut stream = crate::providers::bus2_stream::WindowRead::new(prepared.bytes, tx);
+        let mut stream =
+            crate::providers::bus2_stream::WindowRead::new(prepared.bytes, tx, prepared.hold);
         let mut chunks = 0;
         while stream.pull(usize::MAX).is_some() {
             chunks += 1;
@@ -2388,7 +2388,11 @@ mod tests {
     #[tokio::test]
     async fn v2_short_ok_is_refused() {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut stream = crate::providers::bus2_stream::WindowRead::new(vec![1, 2, 3, 4, 5], tx);
+        let mut stream = crate::providers::bus2_stream::WindowRead::new(
+            vec![1, 2, 3, 4, 5],
+            tx,
+            crate::providers::bus2_stream::ReadHold::empty(),
+        );
         assert_eq!(stream.pull(2).unwrap().len(), 2);
         drop(stream);
         let trailer = rx.await.expect("trailer");
@@ -2410,13 +2414,14 @@ mod tests {
             .expect("an object at the cap is readable");
         assert_eq!(prepared.bytes, object);
         let lengths = calls.lock().unwrap().clone();
-        assert!(
-            lengths.len() > 1,
-            "the sync bridge was asked more than once"
+        assert_eq!(
+            lengths,
+            vec![cap as u64 + 1],
+            "the sync bridge was asked once for the capped object"
         );
-        assert!(lengths.iter().all(|length| *length <= chunk as u64));
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let mut stream = crate::providers::bus2_stream::WindowRead::new(prepared.bytes, tx);
+        let mut stream =
+            crate::providers::bus2_stream::WindowRead::new(prepared.bytes, tx, prepared.hold);
         let mut got = Vec::new();
         let mut chunks = 0usize;
         while let Some(part) = stream.pull(usize::MAX) {
@@ -2447,11 +2452,108 @@ mod tests {
                 if *message == format!("object is {} bytes, over the cap of {host}", host + 1)),
             "{err:?}"
         );
-        let lengths = calls.lock().unwrap().clone();
-        assert!(!lengths.is_empty(), "the size is learned from a window");
-        assert!(lengths
-            .iter()
-            .all(|length| *length <= crate::providers::bus2_stream::READ_CHUNK as u64));
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![host as u64 + 1],
+            "one bounded read learns the size"
+        );
+    }
+
+    /// One bridge call carries the whole capped read. A second guest that
+    /// asks for the same cap is refused before its call.
+    #[test]
+    fn v2_one_bounded_read_and_a_second_guest_at_the_cap_is_refused() {
+        let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
+        let object = vec![3u8; host];
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut first = state_for(object.clone(), calls.clone());
+        let prepared = first
+            .windowed_read(&read_request(host as u64), false)
+            .expect("the first guest reads an object at the cap");
+        assert_eq!(prepared.bytes, object);
+        assert_eq!(
+            calls.lock().unwrap().clone(),
+            vec![host as u64 + 1],
+            "one bounded read of the object"
+        );
+        let mut second = state_for(object, calls.clone());
+        let before = calls.lock().unwrap().len();
+        let err = match second.windowed_read(&read_request(host as u64), false) {
+            Err(err) => err,
+            Ok(prepared) => panic!(
+                "a second guest at the cap is refused, got {} bytes",
+                prepared.bytes.len()
+            ),
+        };
+        assert!(
+            matches!(err, V2BusError::Unavailable(ref message) if message.contains("cap")),
+            "{err:?}"
+        );
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            before,
+            "the refusal happens before the bridge"
+        );
+        drop(prepared);
+        let mut third = state_for(vec![4u8; 4], calls.clone());
+        let again = third
+            .windowed_read(&read_request(8), false)
+            .expect("the cap is free once the first read ends");
+        assert_eq!(again.bytes, vec![4, 4, 4, 4]);
+    }
+
+    /// The bridge reports that the object changed. The read must end as an
+    /// error, from the one call that asked for that check.
+    #[test]
+    fn v2_a_revision_conflict_does_not_end_ok() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let seen = calls.clone();
+        let mut state = ComponentState::new(
+            Some(Arc::new(move |line, _, _| {
+                seen.fetch_add(1, Ordering::Relaxed);
+                let value: serde_json::Value = serde_json::from_str(line).expect("bridge line");
+                let body = &value["request"]["body"];
+                if body.get("check_revision").and_then(|value| value.as_bool()) == Some(true) {
+                    return Ok(serde_json::json!({
+                        "id": 1,
+                        "response": {
+                            "type": "resource_result",
+                            "result": {
+                                "status": "error",
+                                "code": "revision_conflict",
+                                "message": "the object changed during the read"
+                            }
+                        }
+                    })
+                    .to_string());
+                }
+                let length = body["length"].as_u64().expect("length") as usize;
+                let window = vec![1u8; length.min(4)];
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "resource_result",
+                        "result": {
+                            "status": "ok",
+                            "data": { "content": window, "size": window.len() }
+                        },
+                        "audit": "read-1"
+                    }
+                })
+                .to_string())
+            })),
+            "capsule-1".into(),
+            Some("person:local:test".into()),
+        );
+        let err = state
+            .windowed_read(&read_request(8), false)
+            .expect_err("a change during the read must not end ok");
+        assert!(
+            matches!(err, V2BusError::Invalid(ref message)
+                if message == "the object changed during the read"),
+            "{err:?}"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "one bridge read");
     }
 
     #[test]

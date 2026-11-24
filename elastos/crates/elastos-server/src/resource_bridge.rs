@@ -1414,6 +1414,36 @@ fn protected_principal_root_resource_response(
             };
             let revision =
                 crate::auth::principal_root_object_revision(principal_id, &rooted, &bytes);
+            // A v2 read sets this. The object is read again. A change between
+            // the two reads is a conflict, so the call ends as an error.
+            if request
+                .get("check_revision")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                #[cfg(test)]
+                run_read_revision_gap();
+                let again = match crate::auth::read_principal_root_object(
+                    data_dir,
+                    principal_id,
+                    &localhost_root,
+                    &rooted,
+                    &path,
+                ) {
+                    Ok(again) => again,
+                    Err(err) => {
+                        return Some(provider_error_result("read_failed", &err.to_string()))
+                    }
+                };
+                let again_revision =
+                    crate::auth::principal_root_object_revision(principal_id, &rooted, &again);
+                if again != bytes || again_revision != revision {
+                    return Some(provider_error_result(
+                        "revision_conflict",
+                        "the object changed during the read",
+                    ));
+                }
+            }
             let bytes = apply_read_window(
                 bytes,
                 request.get("offset").and_then(|value| value.as_u64()),
@@ -1618,6 +1648,22 @@ fn request_content_bytes(request: &serde_json::Value) -> Result<Vec<u8>, String>
     }
     serde_json::from_value::<Vec<u8>>(value.clone())
         .map_err(|err| format!("write content must be bytes or string: {err}"))
+}
+
+#[cfg(test)]
+static READ_REVISION_GAP: std::sync::Mutex<Option<Box<dyn FnMut() + Send>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn run_read_revision_gap() {
+    if let Some(hook) = READ_REVISION_GAP.lock().expect("revision gap").as_mut() {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn set_read_revision_gap(hook: Option<Box<dyn FnMut() + Send>>) {
+    *READ_REVISION_GAP.lock().expect("revision gap") = hook;
 }
 
 fn apply_read_window(bytes: Vec<u8>, offset: Option<u64>, length: Option<u64>) -> Vec<u8> {
@@ -6588,6 +6634,21 @@ pub(crate) mod tests {
     }
 
     #[cfg(unix)]
+    fn journal_checked_read_line(id: u64, uri: &str, token: String) -> String {
+        serde_json::json!({
+            "id": id,
+            "request": {
+                "type": "resource_invoke",
+                "uri": uri,
+                "operation": "read",
+                "token": token,
+                "body": { "check_revision": true, "offset": 0, "length": 64 },
+            }
+        })
+        .to_string()
+    }
+
+    #[cfg(unix)]
     async fn journal_write(
         ctx: &BridgeContext,
         object_uri: &str,
@@ -7800,6 +7861,90 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(next["response"]["result"]["status"], "ok");
+    }
+
+    /// A read that asks for the check reads the object twice. A change
+    /// between those reads ends as `revision_conflict`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_change_during_a_checked_read_does_not_end_ok() {
+        struct ClearGap;
+        impl Drop for ClearGap {
+            fn drop(&mut self) {
+                super::set_read_revision_gap(None);
+            }
+        }
+        let _clear = ClearGap;
+        let (temp, ctx, object_uri) = journal_context("person:local:journal-owner");
+        let written = journal_write(
+            &ctx,
+            &object_uri,
+            JOURNAL_SELF_URI,
+            b"journal v1",
+            serde_json::json!({ "create_only": true }),
+        )
+        .await;
+        assert_eq!(written["response"]["result"]["status"], "ok");
+        let path = journal_path(&temp, &object_uri);
+        let journal_reads = |path: &std::path::Path| {
+            crate::auth::principal_object_io::reads(temp.path())
+                .iter()
+                .filter(|read| read.as_path() == path)
+                .count()
+        };
+        let before = journal_reads(&path);
+        let token = bridge_token(&ctx, &object_uri, Action::Read);
+        let plain = handle_request(
+            &journal_read_line(70, JOURNAL_SELF_URI, token.clone()),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain["response"]["result"]["status"], "ok");
+        assert_eq!(
+            journal_reads(&path) - before,
+            1,
+            "a read without the check reads the object once"
+        );
+        let before = journal_reads(&path);
+        let checked = handle_request(
+            &journal_checked_read_line(71, JOURNAL_SELF_URI, token.clone()),
+            &Some(ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(checked["response"]["result"]["status"], "ok");
+        assert_eq!(
+            journal_reads(&path) - before,
+            2,
+            "the check reads the object and reads it again"
+        );
+        let data_dir = temp.path().to_path_buf();
+        let gap_uri = object_uri.clone();
+        let gap_path = path.clone();
+        super::set_read_revision_gap(Some(Box::new(move || {
+            crate::auth::write_principal_root_object(
+                &data_dir,
+                "person:local:journal-owner",
+                &crate::auth::principal_localhost_root("person:local:journal-owner"),
+                &gap_uri,
+                &gap_path,
+                b"journal v2",
+            )
+            .expect("the object changes between the two reads");
+        })));
+        let changed = handle_request(
+            &journal_checked_read_line(72, JOURNAL_SELF_URI, token),
+            &Some(ctx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(changed["response"]["result"]["status"], "error");
+        assert_eq!(changed["response"]["result"]["code"], "revision_conflict");
+        assert_eq!(
+            changed["response"]["result"]["message"],
+            "the object changed during the read"
+        );
     }
 
     /// Bytes cross the bridge as a JSON number array: up to four characters per

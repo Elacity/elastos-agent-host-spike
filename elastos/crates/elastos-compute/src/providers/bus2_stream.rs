@@ -1,30 +1,82 @@
-//! Guest-visible streaming of a windowed read.
+//! Guest-visible streaming of one bounded read.
 //!
-//! The sync bridge returns bytes it has already buffered. This module reads
-//! those bytes in windows and can show them to a guest as a stream. It does
-//! not stream a provider that has not buffered the object. The trailer is the
-//! only success. An object over the cap never opens a chunk.
+//! The sync bridge returns bytes it has already buffered. This module asks
+//! for that object once, up to the host cap, and can show the bytes to a
+//! guest as a stream. The trailer is the only success. An object over the
+//! cap never opens a chunk.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use wasmtime::component::{Destination, StreamProducer, StreamResult, VecBuffer};
 use wasmtime::StoreContextMut;
 
-/// Bytes one bridge window, and later one guest chunk, may hold.
+/// Bytes one guest chunk may hold. The bridge call itself asks once.
 pub(crate) const READ_CHUNK: usize = 64 * 1024;
-/// The host cap on one read, whatever the guest asks for.
+/// The host cap on one read, and on every read in this process together.
 pub(crate) const HOST_MAX_READ_BYTES: usize = 16 * 1024 * 1024;
+
+static HOST_READ_HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// Bytes this process is keeping for reads that are still open.
+#[derive(Debug)]
+pub(crate) struct ReadHold {
+    bytes: usize,
+}
+
+impl ReadHold {
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self { bytes: 0 }
+    }
+
+    /// Reserves `bytes` against the host cap. `None` means the cap is already
+    /// in use, so the caller makes no bridge call.
+    pub(crate) fn try_reserve(bytes: usize) -> Option<Self> {
+        let mut held = HOST_READ_HELD.load(Ordering::Acquire);
+        loop {
+            let next = held.checked_add(bytes)?;
+            if next > HOST_MAX_READ_BYTES {
+                return None;
+            }
+            match HOST_READ_HELD.compare_exchange_weak(
+                held,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(Self { bytes }),
+                Err(current) => held = current,
+            }
+        }
+    }
+
+    /// Keeps `bytes` and releases the rest, so a short object leaves room.
+    pub(crate) fn shrink(&mut self, bytes: usize) {
+        if bytes >= self.bytes {
+            return;
+        }
+        let release = self.bytes - bytes;
+        HOST_READ_HELD.fetch_sub(release, Ordering::AcqRel);
+        self.bytes = bytes;
+    }
+}
+
+impl Drop for ReadHold {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            HOST_READ_HELD.fetch_sub(self.bytes, Ordering::AcqRel);
+            self.bytes = 0;
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct PreparedRead {
     pub bytes: Vec<u8>,
     pub audit: Option<String>,
-}
-
-pub(crate) enum CapFail<E> {
-    Over { len: usize, cap: usize },
-    Window(E),
+    pub hold: ReadHold,
 }
 
 /// The guest's `params`: `{"max_bytes": N}` and nothing else, then the host cap.
@@ -48,51 +100,24 @@ pub(crate) fn read_cap(params: &[u8]) -> Result<usize, String> {
         .min(HOST_MAX_READ_BYTES))
 }
 
-/// Read windows until the object ends. One size check: over the cap, no bytes
-/// are returned, so the caller opens no chunk.
-pub(crate) fn collect_under_cap<E>(
-    cap: usize,
-    mut read_window: impl FnMut(u64, u64) -> Result<Vec<u8>, E>,
-) -> Result<Vec<u8>, CapFail<E>> {
-    let mut got = Vec::new();
-    loop {
-        let room = cap.saturating_add(1).saturating_sub(got.len());
-        if room == 0 {
-            break;
-        }
-        let ask = READ_CHUNK.min(room);
-        let window = read_window(got.len() as u64, ask as u64).map_err(CapFail::Window)?;
-        if window.is_empty() || window.len() < ask {
-            got.extend_from_slice(&window);
-            break;
-        }
-        got.extend_from_slice(&window);
-    }
-    if got.len() > cap {
-        Err(CapFail::Over {
-            len: got.len(),
-            cap,
-        })
-    } else {
-        Ok(got)
-    }
-}
-
 pub(crate) struct WindowRead {
     bytes: Vec<u8>,
     sent: usize,
     done: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
+    _hold: ReadHold,
 }
 
 impl WindowRead {
     pub(crate) fn new(
         bytes: Vec<u8>,
         done: tokio::sync::oneshot::Sender<Result<(), String>>,
+        hold: ReadHold,
     ) -> Self {
         Self {
             bytes,
             sent: 0,
             done: Some(done),
+            _hold: hold,
         }
     }
 
