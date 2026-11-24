@@ -42,7 +42,7 @@ fn row(
 fn own_command_checks() -> &'static str {
     #[cfg(windows)]
     {
-        "Verified executable start is unsupported on Windows"
+        "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
     }
     #[cfg(not(windows))]
     {
@@ -1083,7 +1083,7 @@ fn every_executable_loader_has_an_authority_row() {
                 | "CID"
                 | "DID"
                 | "checksum"
-                | "Verified executable start is unsupported on Windows"
+                | "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
                 | "managed Runtime process ownership is unsupported on Windows"
                 | "admitted binary+OS gate+confined storage"
                 | "checked storage+Seatbelt profile"

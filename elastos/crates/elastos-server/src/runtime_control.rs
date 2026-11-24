@@ -1412,7 +1412,7 @@ async fn ensure_managed_runtime(
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| anyhow::anyhow!("Failed to create runtime log: {}", e))?;
 
-    let prepared = admitted.prepare()?;
+    let mut prepared = admitted.prepare()?;
     let binary_sha256 = match signed_sha {
         Some(sha) => sha,
         None => prepared.held_content_sha256().to_string(),
@@ -1499,6 +1499,9 @@ async fn ensure_managed_runtime(
             terminate_sibling_managed_runtime_children(runtime_kind, coords.pid)?;
             child.ready();
             drop(start_guard);
+            // The child adopted the private copy before it became ready.
+            // Drop must not delete that directory out from under it.
+            prepared.persist_private_copy();
             Ok(coords)
         }
         StartWait::Exited(status) => anyhow::bail!(
@@ -1547,8 +1550,47 @@ async fn windows_refuses_managed_runtime_before_start() {
 #[cfg(all(test, unix))]
 #[tokio::test]
 async fn ensure_managed_runtime_refuses_a_changed_runtime_before_exec() {
+    if !crate::binaries::run_isolated(
+        "runtime_control::ensure_managed_runtime_refuses_a_changed_runtime_before_exec",
+    ) {
+        return;
+    }
+    let source = include_str!("runtime_control.rs");
+    let start = source
+        .find("async fn ensure_managed_runtime(")
+        .expect("unix ensure_managed_runtime");
+    let body = &source[start..];
+    let pos = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("ensure_managed_runtime lost {needle}"))
+    };
+    let door = pos("checked_running_runtime(data_dir, &self_exe)");
+    let lock = pos("acquire_managed_runtime_start_lock(data_dir)?");
+    let identity = pos("load_or_create_did(data_dir)?");
+    let prerequisite = pos("prerequisites not installed");
+    let ready = pos("StartWait::Ready");
+    let persist = pos("persist_private_copy()");
+    let exited = pos("StartWait::Exited");
+    assert!(
+        door < lock && lock < identity && identity < prerequisite,
+        "admission must precede the lock, the identity write, and the prerequisite check"
+    );
+    assert!(
+        ready < persist && persist < exited,
+        "the private copy is kept only after the child is ready"
+    );
     let fixture = crate::installed_release::tests::Fixture::new();
     fixture.substitute_runtime();
+    let bins = tempfile::tempdir().unwrap();
+    for name in ["localhost-provider", "did-provider", "shell"] {
+        let path = bins.path().join(name);
+        std::fs::write(&path, b"provider").unwrap();
+        let key = format!(
+            "ELASTOS_{}_BIN",
+            name.to_ascii_uppercase().replace('-', "_")
+        );
+        std::env::set_var(&key, &path);
+    }
     let error = ensure_managed_runtime(
         &fixture.data,
         "managed-home",
@@ -1563,6 +1605,11 @@ async fn ensure_managed_runtime_refuses_a_changed_runtime_before_exec() {
         message.contains("Installed artifact differs from its signed checksum"),
         "{message}"
     );
+    assert!(
+        !message.contains("prerequisites not installed"),
+        "{message}"
+    );
+    assert!(!fixture.data.join("identity").join("device.key").exists());
     assert!(!fixture.data.join("managed-runtime-start.lock").exists());
     assert!(!fixture.data.join("logs").exists());
     assert!(!fixture.data.join("policy").exists());
@@ -1582,6 +1629,9 @@ impl Drop for KillChild {
 #[cfg(all(unix, test))]
 #[tokio::test]
 async fn reuse_makes_no_private_copy() {
+    if !crate::binaries::run_isolated("runtime_control::reuse_makes_no_private_copy") {
+        return;
+    }
     let exe = std::env::current_exe().unwrap();
     let install = crate::binaries::InstallableRuntime::of(&exe);
     let fixture = crate::installed_release::tests::Fixture::bound_to(&install.path);

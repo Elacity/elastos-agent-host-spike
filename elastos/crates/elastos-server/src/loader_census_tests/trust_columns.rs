@@ -20,11 +20,22 @@ struct TrustColumn {
 fn own_command_verified_when() -> &'static str {
     #[cfg(windows)]
     {
-        "Verified executable start is unsupported on Windows"
+        "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
     }
     #[cfg(not(windows))]
     {
         "at-every-start"
+    }
+}
+
+fn own_command_trust_root() -> &'static str {
+    #[cfg(windows)]
+    {
+        "none"
+    }
+    #[cfg(not(windows))]
+    {
+        "release-signature"
     }
 }
 
@@ -251,7 +262,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "return_to_home_if_requested",
             call: "command",
             class: "own-binary",
-            trust_root: "release-signature",
+            trust_root: own_command_trust_root(),
             verified_when: own_command_verified_when(),
             evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
@@ -271,7 +282,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_action",
             call: "command",
             class: "own-binary",
-            trust_root: "release-signature",
+            trust_root: own_command_trust_root(),
             verified_when: own_command_verified_when(),
             evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
@@ -281,7 +292,7 @@ fn columns() -> Vec<TrustColumn> {
             function: "run_capsule_action",
             call: "command",
             class: "own-binary",
-            trust_root: "release-signature",
+            trust_root: own_command_trust_root(),
             verified_when: own_command_verified_when(),
             evidence: ["Command::ne", "w(prepared.exec_path())"].concat(),
             os_path: "",
@@ -1671,9 +1682,17 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(classes.get("release-component"), Some(&5));
     assert_eq!(roots.get("components-json-in-data-dir"), Some(&11));
     assert_eq!(roots.get("content-cid"), Some(&3));
-    assert_eq!(roots.get("none"), Some(&51));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&30));
+    #[cfg(not(windows))]
+    {
+        assert_eq!(roots.get("none"), Some(&51));
+        assert_eq!(roots.get("release-signature"), Some(&30));
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(roots.get("none"), Some(&54));
+        assert_eq!(roots.get("release-signature"), Some(&27));
+    }
     assert_eq!(roots.get("staged-cid"), Some(&8));
     #[cfg(not(windows))]
     assert_eq!(times.get("at-every-start"), Some(&37));
