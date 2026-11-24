@@ -257,6 +257,23 @@ fn read_signed_release_after_gate(
     Ok((installed.release, components))
 }
 
+#[cfg(test)]
+pub(crate) fn release_cid(data: &Path, binary: &Path, source: &TrustedSource) -> Result<String> {
+    let (release, _) = read_signed_release(data, binary, source, false, false)?;
+    let head = if consumed_present(data, false)? {
+        installation_release_head_path(data)
+    } else {
+        publisher_release_head_path(data)
+    };
+    let head: serde_json::Value =
+        serde_json::from_slice(&read_regular(&head, MAX_METADATA, false)?)?;
+    let cid = head["payload"]["latest_release_cid"]
+        .as_str()
+        .context("Release CID missing")?;
+    crate::update::verify_release_metadata_cid(cid, &release)?;
+    Ok(cid.to_owned())
+}
+
 /// Setup holds this guard while it obtains signed support for an installed binary.
 /// Its authority starts with Runtime's private pair, before support is present.
 pub(crate) fn read_for_setup(

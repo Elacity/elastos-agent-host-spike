@@ -347,12 +347,49 @@ pub(crate) fn issue_local_runtime_home_launch_token(
     issue_home_launch_token_with_context(data_dir, app, &context)
 }
 
+/// A device session whose live grant names `apps`. Tests use this when a
+/// non-shell app must verify. Production minting does not.
+#[cfg(test)]
+pub(crate) fn bind_device_session_grant(
+    data_dir: &std::path::Path,
+    apps: &[&str],
+) -> anyhow::Result<HomeLaunchTokenContext> {
+    let context = local_home_launch_token_context(data_dir)?;
+    let now = crate::auth::now_ts();
+    let proof_binding_id = format!("proof:device-test:{}", uuid_like_token());
+    let session_id = format!("local:{}", uuid_like_token());
+    let grant_id = format!("grant:local:{}", uuid_like_token());
+    crate::auth::store_session_grant(
+        &home_launch_auth_data_dir(data_dir),
+        elastos_runtime::auth::AuthSessionGrantV1 {
+            schema: elastos_runtime::auth::AuthSessionGrantV1::SCHEMA.to_string(),
+            grant_id: grant_id.clone(),
+            session_id: session_id.clone(),
+            principal_id: context.principal_id().to_string(),
+            proof_binding_id: proof_binding_id.clone(),
+            issued_at: now,
+            expires_at: now.saturating_add(HOME_LAUNCH_TOKEN_TTL_SECS),
+            apps: apps.iter().copied().map(str::to_string).collect(),
+        },
+    )?;
+    Ok(HomeLaunchTokenContext::resolved(
+        context.root().clone(),
+        session_id,
+        Some(proof_binding_id),
+        grant_id,
+    ))
+}
+
 #[cfg(test)]
 pub(crate) fn issue_home_launch_token(
     data_dir: &std::path::Path,
     app: &str,
 ) -> anyhow::Result<String> {
-    let context = local_home_launch_token_context(data_dir)?;
+    let context = if app == HOME_CAPSULE_ID || app == HOME_CLI_SHELL_ID {
+        local_home_launch_token_context(data_dir)?
+    } else {
+        bind_device_session_grant(data_dir, &[app])?
+    };
     issue_home_launch_token_with_context(data_dir, app, &context)
 }
 
@@ -1538,6 +1575,12 @@ fn verify_home_launch_token_value(
                     "proofless home launch token is not exact Runtime-local device authority"
                 );
             }
+            // A launch-bound page token is not an app token. App routes already
+            // refuse one. Every other proofless device token is Home's own shell.
+            let actor = envelope.payload.launch_context.executable_actor.as_str();
+            if !bound && actor != HOME_CAPSULE_ID && actor != HOME_CLI_SHELL_ID {
+                anyhow::bail!("proofless home launch token is limited to home and home-cli");
+            }
             if crate::auth::stored_principal_record(auth_data_dir, expected_principal.as_str())?
                 .is_some()
             {
@@ -1971,11 +2014,12 @@ mod tests {
         assert_eq!(context.principal_id(), principal);
         assert_eq!(context.root().localhost_root(), expected_root);
         let token =
-            issue_home_launch_token_with_context(data_dir.path(), "marketplace", &context).unwrap();
+            issue_home_launch_token_with_context(data_dir.path(), HOME_CAPSULE_ID, &context)
+                .unwrap();
         let checked = require_home_launch_token_value_from_expected_did(
             data_dir.path(),
             &token,
-            &["marketplace"],
+            &[HOME_CAPSULE_ID],
             did,
             data_dir.path(),
         )
@@ -2045,11 +2089,11 @@ mod tests {
         let context = local_home_launch_token_context(parent.path()).unwrap();
         let (_, did) = elastos_identity::load_or_create_did(parent.path()).unwrap();
         let token =
-            issue_home_launch_token_with_context(parent.path(), "marketplace", &context).unwrap();
+            issue_home_launch_token_with_context(parent.path(), HOME_CAPSULE_ID, &context).unwrap();
         let verified = require_home_launch_token_value_from_expected_did(
             child.path(),
             &token,
-            &["marketplace"],
+            &[HOME_CAPSULE_ID],
             did.clone(),
             parent.path(),
         )
@@ -2192,7 +2236,7 @@ mod tests {
     #[test]
     fn projection_token_binds_resource_actor_and_unique_launch() {
         let data_dir = tempfile::tempdir().unwrap();
-        let context = local_home_launch_token_context(data_dir.path()).unwrap();
+        let context = bind_device_session_grant(data_dir.path(), &[HOME_CAPSULE_ID]).unwrap();
         // One clock reading for both issues: two wall-clock reads can straddle
         // a second boundary and give the tokens different `iat` values.
         let issued_at = now_ts();
@@ -2822,14 +2866,14 @@ mod tests {
 
         let context = local_home_launch_token_context(parent.path()).unwrap();
         let token =
-            issue_home_launch_token_with_context(parent.path(), "marketplace", &context).unwrap();
+            issue_home_launch_token_with_context(parent.path(), HOME_CAPSULE_ID, &context).unwrap();
         let mut headers = HeaderMap::new();
         headers.insert("x-elastos-home-token", token.parse().unwrap());
 
         let child_result = require_home_launch_token_for_any_from_expected_did(
             child.path(),
             &headers,
-            &["marketplace"],
+            &[HOME_CAPSULE_ID],
             None,
             child_did,
             child.path(),
@@ -2843,7 +2887,7 @@ mod tests {
         let parent_result = require_home_launch_token_for_any_from_expected_did(
             child.path(),
             &headers,
-            &["marketplace"],
+            &[HOME_CAPSULE_ID],
             None,
             parent_did.clone(),
             child.path(),
@@ -2857,7 +2901,7 @@ mod tests {
         assert!(require_home_launch_token_for_any_from_expected_did(
             child.path(),
             &browser_headers,
-            &["marketplace"],
+            &[HOME_CAPSULE_ID],
             None,
             parent_did,
             child.path(),
@@ -3483,7 +3527,7 @@ mod tests {
     #[test]
     fn shell_content_open_grant_is_bound_to_its_operation() {
         let dir = tempfile::tempdir().unwrap();
-        let context = local_home_launch_token_context(dir.path()).unwrap();
+        let context = bind_device_session_grant(dir.path(), &[HOME_CAPSULE_ID]).unwrap();
         let shell = issue_home_projection_launch_token_with_context(
             dir.path(),
             "home",
@@ -3517,6 +3561,9 @@ mod tests {
         );
     }
 
+    // Home launch tokens need the private identity store, which Windows
+    // refuses until the owner-only file rule (P2-11 W2) lands.
+    #[cfg(unix)]
     #[test]
     fn device_launch_authority_is_limited_to_home_and_home_cli() {
         let dir = tempfile::tempdir().unwrap();
@@ -3538,6 +3585,42 @@ mod tests {
                 err.to_string(),
                 "device launch authority is limited to home and home-cli"
             );
+        }
+    }
+
+    // Home launch tokens need the private identity store, which Windows
+    // refuses until the owner-only file rule (P2-11 W2) lands.
+    #[cfg(unix)]
+    #[test]
+    fn verifier_refuses_a_proofless_device_token_for_people() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = local_home_launch_token_context(dir.path()).unwrap();
+        let direct = issue_home_launch_token_with_context(dir.path(), "people", &context).unwrap();
+        let direct_err = require_carried_home_launch_token(dir.path(), &direct, &["people"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            direct_err.contains("proofless home launch token is limited to home and home-cli"),
+            "{direct_err}"
+        );
+        let projected = issue_home_projection_launch_token_with_context(
+            dir.path(),
+            "people",
+            "people",
+            &context,
+        )
+        .unwrap();
+        let projected_err = require_carried_home_launch_token(dir.path(), &projected, &["people"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            projected_err.contains("proofless home launch token is limited to home and home-cli"),
+            "{projected_err}"
+        );
+        for app in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID] {
+            let token = issue_home_launch_token_with_context(dir.path(), app, &context).unwrap();
+            require_carried_home_launch_token(dir.path(), &token, &[app])
+                .unwrap_or_else(|err| panic!("{app} stays accepted: {err}"));
         }
     }
 }

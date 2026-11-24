@@ -85,11 +85,6 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "load_or_create_did",
     ),
     (
-        "elastos-server/src/provider_host.rs",
-        "compose",
-        "load_or_create_device_key",
-    ),
-    (
         "elastos-server/src/server_infra.rs",
         "register_chain_provider_plane",
         "load_or_create_device_key",
@@ -98,31 +93,6 @@ const OPEN_ROWS: &[(&str, &str, &str)] = &[
         "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
-        "start_did_provider",
-        "encryption_key: device_key_hex",
-    ),
-    (
-        "elastos-server/src/server_infra.rs",
-        "start_wallet_provider",
-        "encryption_key: device_key_hex",
-    ),
-    (
-        "elastos-server/src/api/gateway.rs",
-        "home_launch_token_context_from_parts",
-        "HomeLaunchTokenContext::resolved",
-    ),
-    (
-        "elastos-server/src/api/gateway.rs",
-        "issue_gateway_owned_home_cli_launch_token",
-        "issue_home_projection_launch_token_with_context",
-    ),
-    (
-        "elastos-server/src/home_cmd.rs",
-        "issue_capsule_launch_token",
-        "issue_gateway_owned_home_cli_launch_token",
     ),
 ];
 
@@ -273,14 +243,14 @@ fn rows() -> Vec<HeldRow> {
         "home_launch_token_context_from_parts",
         "HomeLaunchTokenContext::resolved",
         1,
-        mark("open", "env launch context", "CLI", "With no proof binding the context is built from env parts and the live grant is not checked"),
+        mark("delegated", "checked session grant", "the grant's person", "The gateway-owned environment route reaches this call only when a proof binding is set and the live grant matches"),
     ),
     row(
         "elastos-server/src/api/gateway.rs",
         "issue_gateway_owned_home_cli_launch_token",
         "issue_home_projection_launch_token_with_context",
         1,
-        mark("open", "device-signed app token", "any app", "This mints for any app from the env context, including when no proof binding is set"),
+        mark("delegated", "projection under the checked grant", "the grant's person", "This mints the named app only after the env context's live grant has been checked, and that grant names home"),
     ),
     row(
         "elastos-server/src/api/gateway.rs",
@@ -672,7 +642,14 @@ fn rows() -> Vec<HeldRow> {
         "local_home_launch_token_context",
         "load_or_create_did",
         1,
-        mark("open", "device DID root", "Home device", "The device DID becomes the principal root for any app"),
+        mark("open", "device DID root", "Home device", "The device DID is the principal root of the device context; its only production caller uses that context for home and home-cli"),
+    ),
+    row(
+        "elastos-server/src/api/gateway_home_token.rs",
+        "resolved",
+        "HomeLaunchTokenContext {",
+        1,
+        mark("delegated", "resolved launch context", "caller", "The constructor stores the root its caller already resolved"),
     ),
     row(
         "elastos-server/src/api/gateway_home_token.rs",
@@ -952,7 +929,7 @@ fn rows() -> Vec<HeldRow> {
         "open_at_runtime",
         "issue_home_projection_launch_token_with_context",
         1,
-        mark("delegated", "home and home-shell grant", "Home page", "Content open asks the Runtime with a home-shell projection"),
+        mark("delegated", "home and home-shell grant", "Home page", "Content open asks the Runtime with a home-shell projection of a proof-bound context"),
     ),
     row(
         "elastos-server/src/auth.rs",
@@ -1162,7 +1139,7 @@ fn rows() -> Vec<HeldRow> {
         "issue_capsule_launch_token",
         "issue_gateway_owned_home_cli_launch_token",
         1,
-        mark("open", "gateway-owned env token", "any app", "The CLI tries the gateway-owned env path first, which can mint for any app with no proof binding"),
+        mark("delegated", "gateway-owned env token", "the grant's person", "The CLI tries the gateway-owned env path first, and that path mints only after a live grant is checked"),
     ),
     row(
         "elastos-server/src/home_cmd.rs",
@@ -1330,7 +1307,7 @@ fn rows() -> Vec<HeldRow> {
         "compose",
         "load_or_create_device_key",
         1,
-        mark("open", "provider-host DID", "provider host", "The provider host derives its DID from the device private key"),
+        mark("home-own", "provider-host DID", "provider host", "this is the host's Carrier identity, the same `derive_did` the Home server already owns. The raw key is not copied into a child config."),
     ),
     row(
         "elastos-server/src/resource_bridge.rs",
@@ -1400,7 +1377,7 @@ fn rows() -> Vec<HeldRow> {
         "register_chain_provider_plane",
         "load_or_create_device_key",
         1,
-        mark("open", "runtime issuer", "chain provider", "The chain plane receives an issuer derived from the device key"),
+        mark("open", "device private key", "chain provider", "The child config now carries only the Ed25519 verifying key of `derive_did(device_key)`, which `RuntimeOperationIssuerKeyV1` accepts only as a public key. The row stays open: the child is an unconfined same-user process and the data directory is a fixed default, so it can still open `identity/device.key`, as the object provider can. It closes when slice C confines it."),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1413,8 +1390,8 @@ fn rows() -> Vec<HeldRow> {
         "elastos-server/src/server_infra.rs",
         "setup_server_infrastructure_impl",
         "encryption_key: device_key_hex",
-        2,
-        mark("open", "device private key", "localhost and object providers", "Home hands the device private key to the localhost and object providers"),
+        1,
+        mark("open", "device private key", "localhost provider", "Home hands the device private key to the localhost provider. The object config no longer carries the device key; the process is an unconfined child and `base_path` is the data directory, so it can open `identity/device.key`."),
     ),
     row(
         "elastos-server/src/server_infra.rs",
@@ -1425,17 +1402,17 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/server_infra.rs",
-        "start_did_provider",
+        "did_provider_bridge_config",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "DID provider", "Home hands the device private key to the DID provider"),
+        mark("narrowed", "device private key", "DID provider", "DID provider receives the existing device signing seed and the existing `elastos-did-storage` key. It does not receive the raw device key. It can still sign chat as the device."),
     ),
     row(
         "elastos-server/src/server_infra.rs",
-        "start_wallet_provider",
+        "wallet_provider_bridge_config",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "wallet provider", "Home hands the device private key to the wallet provider"),
+        mark("narrowed", "device private key", "wallet provider", "wallet storage key is the random `wallet-key.hex`; the confined process is not given the device key."),
     ),
     row(
         "elastos-server/src/sources.rs",
@@ -1693,9 +1670,9 @@ fn preceded_by_arrow(code: &str, at: usize) -> bool {
     end >= 2 && &code[end - 2..end] == "->"
 }
 
-/// A capability grant is any `.grant(` with arguments. The receiver name and
-/// a line break before the dot do not matter. A zero-argument `.grant()` is
-/// a getter, not this grant.
+/// A capability grant is any `.grant(` with arguments. The receiver may be an
+/// identifier or a method call. A line break before the dot does not matter.
+/// A zero-argument `.grant()` is a getter, not this grant.
 fn record_capability_grants(
     found: &mut BTreeMap<(String, String, String), usize>,
     file: &str,
@@ -1709,7 +1686,7 @@ fn record_capability_grants(
         let dot = from + rel;
         let after = dot + needle.len();
         from = after;
-        if source::receiver_before(code, dot).is_empty() {
+        if source::receiver_before(code, dot).is_empty() && !method_call_receiver(code, dot) {
             continue;
         }
         if code[after..].trim_start().starts_with(')') {
@@ -1717,6 +1694,16 @@ fn record_capability_grants(
         }
         add_site(found, file, bodies, dot, label);
     }
+}
+
+/// The character before `dot`, after whitespace, closes a call.
+fn method_call_receiver(code: &str, dot: usize) -> bool {
+    let bytes = code.as_bytes();
+    let mut end = dot;
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    end > 0 && bytes[end - 1] == b')'
 }
 
 /// Every call whose name ends in `_with_device_key`. The mechanism is that
@@ -1742,8 +1729,9 @@ fn record_device_key_family(
     }
 }
 
-/// A `HomeLaunchTokenContext { ... }` value. A struct or impl declaration,
-/// and a function whose return type is that name, are not constructions.
+/// A `HomeLaunchTokenContext { ... }` value, including `Self { ... }` inside
+/// `impl HomeLaunchTokenContext`. A struct or impl declaration, and a function
+/// whose return type is that name, are not constructions.
 fn record_context_literals(
     found: &mut BTreeMap<(String, String, String), usize>,
     file: &str,
@@ -1776,6 +1764,91 @@ fn record_context_literals(
         }
         add_site(found, file, bodies, at, label);
     }
+    record_context_self_literals(found, file, code, bodies, label);
+}
+
+/// `Self { ... }` inside `impl HomeLaunchTokenContext` is that same construction.
+fn record_context_self_literals(
+    found: &mut BTreeMap<(String, String, String), usize>,
+    file: &str,
+    code: &str,
+    bodies: &[FnBody],
+    label: &str,
+) {
+    let header = ["impl ", "HomeLaunchTokenContext"].concat();
+    let mut from = 0;
+    while let Some(rel) = code[from..].find(&header) {
+        let at = from + rel;
+        let after_name = at + header.len();
+        from = after_name;
+        if !counts_as_site(code, at + 5) {
+            continue;
+        }
+        if code
+            .as_bytes()
+            .get(after_name)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            continue;
+        }
+        let Some(open_rel) = code[after_name..].find(|ch: char| !ch.is_ascii_whitespace()) else {
+            break;
+        };
+        let open = after_name + open_rel;
+        if code.as_bytes()[open] != b'{' {
+            continue;
+        }
+        let Some(end) = matching_brace_end(code, open) else {
+            break;
+        };
+        from = end;
+        let mut inner = open + 1;
+        while inner < end {
+            let Some(rel) = code[inner..end].find("Self") else {
+                break;
+            };
+            let self_at = inner + rel;
+            inner = self_at + 4;
+            if !counts_as_site(code, self_at) {
+                continue;
+            }
+            if code
+                .as_bytes()
+                .get(self_at + 4)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                continue;
+            }
+            if !code[self_at + 4..end].trim_start().starts_with('{') {
+                continue;
+            }
+            if preceded_by_arrow(code, self_at) {
+                continue;
+            }
+            add_site(found, file, bodies, self_at, label);
+        }
+    }
+}
+
+fn matching_brace_end(code: &str, open: usize) -> Option<usize> {
+    let bytes = code.as_bytes();
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (offset, byte) in bytes[open..].iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + offset + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn sites_in(
@@ -2209,4 +2282,36 @@ fn scanner_counts_device_key_calls_and_a_context_literal() {
     );
     assert!(found.keys().all(|key| !key.1.is_empty()), "{found:?}");
     assert_eq!(found.len(), 5, "{found:?}");
+}
+
+#[test]
+fn scanner_counts_a_grant_on_a_method_call_receiver() {
+    let source = "fn issue() {\n    x.capability_manager().grant(a, b, c, d, e);\n}\nfn read() {\n    let _ = holder().grant();\n}\n";
+    let found = sites_in("elastos-server/src/fixture.rs", source, &needles());
+    let key = (
+        "elastos-server/src/fixture.rs".to_string(),
+        "issue".to_string(),
+        capability_grant_label(),
+    );
+    assert_eq!(found.get(&key).copied(), Some(1), "{found:?}");
+    assert!(found.keys().all(|key| key.1 != "read"), "{found:?}");
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn scanner_counts_self_construction_inside_home_launch_context_impl() {
+    let context = ["HomeLaunch", "TokenContext"].concat();
+    let literal = context_literal_label();
+    let source = format!(
+        "impl {context} {{\n    fn resolved() -> Self {{\n        Self {{ session_id: id }}\n    }}\n}}\nimpl Other {{\n    fn make() -> Self {{\n        Self {{}}\n    }}\n}}\n"
+    );
+    let found = sites_in("elastos-server/src/fixture.rs", &source, &needles());
+    let key = (
+        "elastos-server/src/fixture.rs".to_string(),
+        "resolved".to_string(),
+        literal,
+    );
+    assert_eq!(found.get(&key).copied(), Some(1), "{found:?}");
+    assert!(found.keys().all(|key| key.1 != "make"), "{found:?}");
+    assert_eq!(found.len(), 1, "{found:?}");
 }

@@ -232,56 +232,40 @@ struct BinarySnapshot {
     sha256: String,
 }
 
-/// Holds this process's macOS private exec copy until dropped.
-pub struct RunningExecCopy {
-    #[cfg(target_os = "macos")]
-    inner: Option<crate::setup::verified_executable::ExecCopyGuard>,
-    #[cfg(not(target_os = "macos"))]
-    inner: (),
-}
-
-impl RunningExecCopy {
-    pub fn holds_private_copy(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            self.inner.is_some()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = self.inner;
-            false
-        }
-    }
-}
+/// This process's private exec copy, when it was started from one.
+#[cfg(target_os = "macos")]
+pub type RunningExecCopy = Option<crate::setup::verified_executable::ExecCopyGuard>;
+/// Other platforms do not exec from a private copy.
+#[cfg(not(target_os = "macos"))]
+pub type RunningExecCopy = Option<()>;
 
 /// The running image keeps its private copy. On other platforms this is empty.
 pub fn hold_running_exec_copy() -> anyhow::Result<RunningExecCopy> {
     #[cfg(target_os = "macos")]
     {
-        Ok(RunningExecCopy {
-            inner: crate::setup::verified_executable::adopt_running_exec_copy()?,
-        })
+        crate::setup::verified_executable::adopt_running_exec_copy()
     }
     #[cfg(not(target_os = "macos"))]
-    Ok(RunningExecCopy { inner: () })
+    {
+        Ok(None)
+    }
 }
 
 pub fn spawn_installed_binary_supersession_watch(data_dir: &Path, role: &str) {
     let mut watch = match BinarySupersessionWatch::from_data_dir(data_dir) {
         Ok(watch) => watch,
         Err(err) => {
-            // A macOS serve may be the private copy. If its signed install cannot
-            // be read, skipping the watch would leave that process running.
+            // A private copy must not keep running when its install cannot be
+            // watched. Every other process keeps the previous behaviour.
             #[cfg(target_os = "macos")]
-            {
+            if std::env::current_exe().is_ok_and(|exe| {
+                crate::setup::verified_executable::private_exec_dir(&exe).is_some()
+            }) {
                 eprintln!("[{role}] {err:#}. Exiting stale host.");
                 std::process::exit(75);
             }
-            #[cfg(not(target_os = "macos"))]
-            {
-                let _ = err;
-                return;
-            }
+            let _ = err;
+            return;
         }
     };
     let role = role.to_string();
@@ -306,34 +290,34 @@ impl BinarySupersessionWatch {
     }
 
     fn from_reader(data_dir: &Path, reader: &impl BinarySnapshotReader) -> anyhow::Result<Self> {
+        let _ = data_dir;
         let executing = normalize_deleted_exe_path(&reader.current_exe_path_raw()?);
         // Only macOS execs a private copy. Linux fexecve and Windows keep the
         // install path as current_exe, and that watch stays as it is.
         #[cfg(target_os = "macos")]
-        if let Some(signed) = signed_install(data_dir)? {
+        if let Some((install, sha256)) = crate::binaries::signed_runtime_install(data_dir)? {
             let running = std::fs::canonicalize(&executing)
                 .map_err(|error| anyhow!("running binary: {error}"))?;
-            if running != signed.path {
+            if running != install {
                 let (actual, _) = crate::installed_release::file_digest(&running)?;
                 anyhow::ensure!(
-                    actual == signed.sha,
+                    actual == sha256,
                     "running binary is not the installed release"
                 );
             }
-            let snapshot = reader.digest_snapshot(&signed.path)?;
+            let snapshot = reader.digest_snapshot(&install)?;
             anyhow::ensure!(
-                snapshot.sha256 == signed.sha,
+                snapshot.sha256 == sha256,
                 "installed binary does not match its signed digest"
             );
             return Ok(Self {
-                watch_path: signed.path,
+                watch_path: install,
                 watch_stamp: snapshot.stamp,
                 watch_sha256: snapshot.sha256,
                 follows_install: true,
             });
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = data_dir;
+        // A dev Home has no signed release. macOS execs that source path, so replacing it still exits 75.
         let snapshot = reader.digest_snapshot(&executing)?;
         Ok(Self {
             watch_path: executing,
@@ -410,33 +394,6 @@ impl BinarySupersessionWatch {
         self.watch_stamp = current_snapshot.stamp;
         None
     }
-}
-
-#[cfg(target_os = "macos")]
-struct SignedInstall {
-    path: PathBuf,
-    sha: String,
-}
-
-/// The canonical install path from this Home's signed release. No environment
-/// variable or argument is consulted: a caller cannot name a different binary.
-#[cfg(target_os = "macos")]
-fn signed_install(data_dir: &Path) -> anyhow::Result<Option<SignedInstall>> {
-    let Some(source) = crate::setup::installed_release_source(data_dir)? else {
-        return Ok(None);
-    };
-    let path = std::fs::canonicalize(&source.install_path)
-        .map_err(|error| anyhow!("installed release binary: {error}"))?;
-    let (release_bytes, _) =
-        crate::installed_release::read_signed_release(data_dir, &path, &source, false, true)?;
-    let release: serde_json::Value = serde_json::from_slice(&release_bytes)?;
-    let platform = crate::update::detect_release_platform();
-    let sha = release["payload"]["platforms"][platform]["binary"]["sha256"]
-        .as_str()
-        .ok_or_else(|| anyhow!("signed runtime digest is missing"))?
-        .to_ascii_lowercase();
-    anyhow::ensure!(sha.len() == 64, "signed runtime digest is malformed");
-    Ok(Some(SignedInstall { path, sha }))
 }
 
 fn current_exe_path_raw() -> anyhow::Result<PathBuf> {
@@ -991,6 +948,21 @@ mod tests {
             .superseded_reason_with(&reader)
             .expect("replaced install");
         assert!(reason.contains("changed on disk"), "{reason}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn watch_setup_error_returns_when_this_process_is_not_a_private_copy() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(temp.path().join("sources.json"), b"{").expect("sources");
+        let error = BinarySupersessionWatch::from_data_dir(temp.path())
+            .expect_err("malformed sources must not arm the watch");
+        assert!(
+            crate::setup::verified_executable::private_exec_dir(&std::env::current_exe().unwrap())
+                .is_none(),
+            "the test process is not a private exec copy"
+        );
+        assert!(!error.to_string().is_empty());
     }
 
     #[test]

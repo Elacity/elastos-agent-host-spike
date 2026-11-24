@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import sys
@@ -13,7 +14,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "scripts/setup-source-home.sh"
-PLATFORM = "linux-arm64"
+PLATFORM = {
+    ("Darwin", "arm64"): "linux-arm64",
+    ("Linux", "aarch64"): "linux-arm64",
+    ("Linux", "arm64"): "linux-arm64",
+    ("Linux", "x86_64"): "linux-amd64",
+}[(platform.system(), platform.machine())]
 APPS = ("home-cli home-gui home system services people browser documents library "
         "elacity-player marketplace archive-manager inbox assistant wallet wallet-metamask "
         "wallet-unisat wallet-walletconnect gba-emulator gba-ucity gba-nonogram chat-room").split()
@@ -55,8 +61,12 @@ elif args == ['setup', '--profile', 'source-home', '--without', 'media-provider'
     assert p.with_name('model-catalog.json').stat().st_mode & 0o777 == 0o600
     manifest = json.loads(p.read_text())
     native = data / 'bin/browser-vz-engine-supervisor'
-    expected = 'sha256:' + hashlib.sha256(native.read_bytes()).hexdigest()
-    assert manifest['external']['browser-vz-engine-supervisor']['platforms']['linux-arm64']['checksum'] == expected
+    if os.environ['FIXTURE_PLATFORM'] == 'linux-arm64':
+        expected = 'sha256:' + hashlib.sha256(native.read_bytes()).hexdigest()
+        assert manifest['external']['browser-vz-engine-supervisor']['platforms']['linux-arm64']['checksum'] == expected
+    else:
+        expected = None
+        assert not native.exists()
     assert manifest['capsules']['browser']['entrypoint_sha256'].startswith('sha256:')
     assert (data / 'receipts/source-home-capsules.json').is_file()
     event.update(stage=str(p.parent), native_sha=expected,
@@ -150,7 +160,9 @@ class NativeSourceHomeTest(unittest.TestCase):
                         SETUP_SOURCE_HOME_RUNTIME_BIN=str(self.runtime), SETUP_SOURCE_HOME_INSTALL_KUBO='0',
                         SETUP_SOURCE_HOME_MEDIA_TOOLS_DIR=str(media), SETUP_SOURCE_HOME_INSTALL_LLAMA_SERVER='0',
                         FIXTURE_EVENTS=str(self.events), FIXTURE_CATALOG=str(self.repo / 'model-catalog.json'),
-                        FIXTURE_OUTSIDE=str(self.root / 'outside'), PYTHONDONTWRITEBYTECODE='1')
+                        FIXTURE_OUTSIDE=str(self.root / 'outside'), FIXTURE_PLATFORM=PLATFORM,
+                        FIXTURE_ARCH='x86_64' if PLATFORM == 'linux-amd64' else 'aarch64',
+                        PYTHONDONTWRITEBYTECODE='1')
 
     def save_manifest(self):
         write(self.repo / 'components.json', json.dumps(self.manifest))
@@ -191,7 +203,10 @@ class NativeSourceHomeTest(unittest.TestCase):
     def test_full_setup_installs_native_owner_and_publishes_exact_receipt(self):
         self.assert_ok(self.run_setup())
         installed = self.data / 'bin/browser-vz-engine-supervisor'
-        self.assertEqual(installed.read_bytes(), (self.root / 'built/release/browser-vz-engine-supervisor').read_bytes())
+        if PLATFORM == 'linux-arm64':
+            self.assertEqual(installed.read_bytes(), (self.root / 'built/release/browser-vz-engine-supervisor').read_bytes())
+        else:
+            self.assertFalse(installed.exists())
         self.assertEqual((self.data / 'bin/elastos').read_bytes(), self.runtime.read_bytes())
         receipt = json.loads((self.data / 'receipts/source-home-installation.json').read_text())
         self.assertEqual(receipt['runtime']['installed_sha256'], 'sha256:' + hashlib.sha256(self.runtime.read_bytes()).hexdigest())
@@ -202,8 +217,9 @@ class NativeSourceHomeTest(unittest.TestCase):
             if info is not None and name in stamped['profiles']['source-home']['components']:
                 self.assertEqual(info.get('strategy'), 'prebuilt', name)
         events = self.recorded_events()
+        expected_builds = (['browser-vz-engine-supervisor'] if PLATFORM == 'linux-arm64' else [])
         self.assertEqual([event['name'] for event in events if event['phase'] == 'build'],
-                         ['browser-vz-engine-supervisor', 'shell', 'browser-local-exit', 'home-cli'])
+                         expected_builds + ['shell', 'browser-local-exit', 'home-cli'])
         self.assertEqual([event['args'][:3] for event in events if event['phase'] == 'runtime'],
                          [['setup', '--with', 'media-provider'], ['setup', '--profile', 'source-home']])
         self.assertEqual(receipt['components_sha256'], events[-1]['components_sha'])
@@ -376,5 +392,38 @@ class NativeSourceHomeTest(unittest.TestCase):
                     child.terminate()
                 child.wait(timeout=5)
 
+def emit_retained_browser_pin(data):
+    """Run the real source Home producer on an image installed by a Rust test."""
+    case = NativeSourceHomeTest(methodName='test_full_setup_installs_native_owner_and_publishes_exact_receipt')
+    case.setUp()
+    try:
+        case.data = data
+        case.env['XDG_DATA_HOME'] = str(data.parent)
+        previous = json.loads((data / 'components.json').read_text())
+        entry = previous['external']['browser-vm-image']
+        info = dict(entry['platforms'][PLATFORM])
+        source_info = {key: value for key, value in info.items() if key not in ('checksum', 'size', 'cid')}
+        case.manifest['external']['browser-vm-image'] = {
+            'version': 'pin', 'install_path': 'browser-vm/image-set',
+            'platforms': {PLATFORM: source_info},
+        }
+        previous['external']['browser-vm-image']['version'] = 'pin'
+        write(data / 'components.json', json.dumps(previous))
+        case.save_manifest()
+        case.assert_ok(case.run_setup())
+        produced = json.loads((data / 'components.json').read_text())
+        retained = produced['external']['browser-vm-image']['platforms'][PLATFORM]
+        for key in ('checksum', 'size', 'cid'):
+            assert retained[key] == info[key], key
+        assert 'vm_image' not in retained
+        assert 'browser-vm-image' in produced['profiles']['source-home']['components']
+        assert 'dev_mode = true' in (data / 'config.toml').read_text()
+    finally:
+        case.doCleanups()
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 3 and sys.argv[1] == '--emit-retained-browser-pin':
+        emit_retained_browser_pin(Path(sys.argv[2]).resolve())
+    else:
+        unittest.main()

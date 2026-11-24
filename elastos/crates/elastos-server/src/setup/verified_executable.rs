@@ -13,12 +13,11 @@ use std::path::{Path, PathBuf};
 pub struct VerifiedExecutable {
     #[cfg(target_os = "linux")]
     file: File,
-    /// Shared lock on the private copy. Drop releases it. A detached child
-    /// takes its own shared lock before the parent drops this value.
+    /// Shared lock on the private copy. Drop releases it. None on a dev Home.
     #[cfg(target_os = "macos")]
-    _copy_lock: File,
+    _copy_lock: Option<File>,
     #[cfg(target_os = "macos")]
-    _private_dir: tempfile::TempDir,
+    _private_dir: Option<tempfile::TempDir>,
     exec_path: PathBuf,
     content_sha256: String,
     /// The signed release digest these held bytes matched (none for a source
@@ -76,6 +75,16 @@ impl VerifiedExecutable {
         #[cfg(target_os = "macos")]
         {
             use std::os::unix::fs::PermissionsExt;
+            // No signed digest: exec the source path so the watch follows that file.
+            if checksum.is_none() {
+                return Ok(Self {
+                    _copy_lock: None,
+                    _private_dir: None,
+                    exec_path: path.to_path_buf(),
+                    content_sha256,
+                    checksum: None,
+                });
+            }
             let private_dir = tempfile::Builder::new()
                 .prefix(EXEC_COPY_PREFIX)
                 .tempdir()?;
@@ -104,9 +113,11 @@ impl VerifiedExecutable {
                 sha256_hex(&mut copy)? == content_sha256,
                 "private executable copy differs from the held executable"
             );
+            // Age starts when the copy is ready, so a slow copy is not reaped.
+            copy_lock.set_modified(std::time::SystemTime::now())?;
             Ok(Self {
-                _copy_lock: copy_lock,
-                _private_dir: private_dir,
+                _copy_lock: Some(copy_lock),
+                _private_dir: Some(private_dir),
                 exec_path,
                 content_sha256,
                 checksum: checksum.map(str::to_owned),
@@ -124,7 +135,9 @@ impl VerifiedExecutable {
     /// Short-lived commands leave cleanup on and delete the copy with this value.
     pub(crate) fn persist_private_copy(&mut self) {
         #[cfg(target_os = "macos")]
-        self._private_dir.disable_cleanup(true);
+        if let Some(dir) = &mut self._private_dir {
+            dir.disable_cleanup(true);
+        }
     }
 
     /// Digest of the bytes read into this hold, not a later read of the caller path.
@@ -244,8 +257,15 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    fn a_dropped_exec_copy_is_reaped_and_a_held_lock_is_kept() {
+    fn age(path: &Path) {
+        let file = File::open(path).unwrap();
+        file.set_modified(
+            std::time::SystemTime::now() - COPY_REAP_AFTER - std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+    }
+
+    fn private_dir() -> PathBuf {
         let dir = tempfile::Builder::new()
             .prefix(EXEC_COPY_PREFIX)
             .tempdir()
@@ -253,20 +273,101 @@ mod tests {
         let mut mode = fs::metadata(dir.path()).unwrap().permissions();
         mode.set_mode(0o700);
         fs::set_permissions(dir.path(), mode).unwrap();
-        let lock = create_exec_copy_lock(dir.path()).unwrap();
-        fs::write(dir.path().join("executable"), b"copy").unwrap();
-        let path = dir.keep();
+        dir.keep()
+    }
+
+    #[test]
+    fn a_dropped_exec_copy_is_reaped_and_a_held_lock_is_kept() {
+        let path = private_dir();
+        let lock = create_exec_copy_lock(&path).unwrap();
+        fs::write(path.join("executable"), b"copy").unwrap();
         let suffix = path
             .file_name()
             .and_then(|name| name.to_str())
             .and_then(|name| name.strip_prefix(EXEC_COPY_PREFIX))
             .unwrap();
         assert_eq!(suffix.len(), 6);
+        age(&path);
+        age(&path.join(EXEC_COPY_LOCK));
         reap_dead_exec_copies();
         assert!(path.exists(), "a held private copy was reaped");
         drop(lock);
         reap_dead_exec_copies();
-        assert!(!path.exists(), "a dead private copy was left behind");
+        assert!(!path.exists(), "an old unlocked copy was left behind");
+    }
+
+    #[test]
+    fn a_young_unlocked_copy_is_kept_and_an_old_one_is_reaped() {
+        let path = private_dir();
+        let lock = create_exec_copy_lock(&path).unwrap();
+        drop(lock);
+        reap_dead_exec_copies();
+        assert!(
+            path.exists(),
+            "a copy whose lock just became free was reaped"
+        );
+        age(&path.join(EXEC_COPY_LOCK));
+        reap_dead_exec_copies();
+        assert!(!path.exists(), "an old unlocked copy was left behind");
+    }
+
+    #[test]
+    fn a_lockless_copy_is_reaped_only_once_it_is_old() {
+        let young = private_dir();
+        reap_dead_exec_copies();
+        assert!(young.exists(), "a new lockless copy was reaped");
+        let old = private_dir();
+        age(&old);
+        let wrong_mode = private_dir();
+        let mut mode = fs::metadata(&wrong_mode).unwrap().permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(&wrong_mode, mode).unwrap();
+        age(&wrong_mode);
+        let wrong_name =
+            std::env::temp_dir().join(format!("elastos-exec-not-{}", std::process::id()));
+        fs::create_dir(&wrong_name).unwrap();
+        let mut mode = fs::metadata(&wrong_name).unwrap().permissions();
+        mode.set_mode(0o700);
+        fs::set_permissions(&wrong_name, mode).unwrap();
+        age(&wrong_name);
+        reap_dead_exec_copies();
+        assert!(!old.exists(), "an old lockless copy was left behind");
+        assert!(young.exists(), "a new lockless copy was reaped");
+        assert!(
+            wrong_mode.exists(),
+            "a directory with the wrong mode was reaped"
+        );
+        assert!(
+            wrong_name.exists(),
+            "a directory with the wrong name was reaped"
+        );
+        let _ = fs::remove_dir_all(&young);
+        let _ = fs::remove_dir_all(&wrong_mode);
+        let _ = fs::remove_dir_all(&wrong_name);
+    }
+
+    #[test]
+    fn dev_unchecked_start_execs_the_source_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("elastos");
+        fs::write(&path, b"dev-runtime").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let held = VerifiedExecutable::unchecked(&path).unwrap();
+        assert_eq!(held.exec_path(), path.as_path());
+    }
+
+    #[test]
+    fn private_copy_recognition_is_name_and_owner_only() {
+        let path = private_dir();
+        let exe = path.join("executable");
+        fs::write(&exe, b"x").unwrap();
+        assert!(private_exec_dir(&exe).is_some());
+        let mut mode = fs::metadata(&path).unwrap().permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(&path, mode).unwrap();
+        assert!(private_exec_dir(&exe).is_none());
+        assert!(private_exec_dir(&std::env::current_exe().unwrap()).is_none());
+        let _ = fs::remove_dir_all(&path);
     }
 }
 
@@ -274,11 +375,13 @@ mod tests {
 const EXEC_COPY_PREFIX: &str = "elastos-exec-";
 #[cfg(target_os = "macos")]
 const EXEC_COPY_LOCK: &str = ".exec-copy.lock";
+#[cfg(target_os = "macos")]
+const COPY_REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The private directory of the running image, when this process was exec'd
 /// from one. The path is the kernel's executable path, not an environment value.
 #[cfg(target_os = "macos")]
-fn private_exec_dir(exe: &Path) -> Option<PathBuf> {
+pub(crate) fn private_exec_dir(exe: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     if exe.file_name().and_then(|name| name.to_str()) != Some("executable") {
         return None;
@@ -346,7 +449,7 @@ fn open_exec_copy_lock(dir: &Path) -> Result<File> {
 
 /// Holds the caller's private exec copy until drop, then removes it.
 #[cfg(target_os = "macos")]
-pub(crate) struct ExecCopyGuard {
+pub struct ExecCopyGuard {
     dir: PathBuf,
     _lock: File,
 }
@@ -384,8 +487,12 @@ pub(crate) fn release_running_exec_copy() {
     let _ = fs::remove_dir_all(dir);
 }
 
-/// Deletes private exec copies whose lock is free. A live parent or child holds
-/// the shared lock, so a crash cannot leave a copy behind after the next hold.
+#[cfg(target_os = "macos")]
+fn copy_is_old(meta: &fs::Metadata) -> bool {
+    matches!(meta.modified().ok().and_then(|m| m.elapsed().ok()), Some(age) if age >= COPY_REAP_AFTER)
+}
+
+/// Deletes old unused copies. No lock: name and owner only. A young or held lock stays.
 #[cfg(target_os = "macos")]
 pub(crate) fn reap_dead_exec_copies() {
     use std::os::unix::fs::MetadataExt;
@@ -414,10 +521,25 @@ pub(crate) fn reap_dead_exec_copies() {
             continue;
         }
         let lock_path = dir.join(EXEC_COPY_LOCK);
-        let Ok(lock_meta) = fs::symlink_metadata(&lock_path) else {
-            continue;
+        let lock_meta = match fs::symlink_metadata(&lock_path) {
+            Ok(meta) => meta,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound && copy_is_old(&dir_meta) =>
+            {
+                if fs::symlink_metadata(&dir).is_ok_and(|again| {
+                    (again.dev(), again.ino(), again.uid(), again.mode() & 0o777)
+                        == (dir_meta.dev(), dir_meta.ino(), dir_meta.uid(), 0o700)
+                }) && fs::symlink_metadata(&lock_path)
+                    .is_err_and(|err| err.kind() == std::io::ErrorKind::NotFound)
+                {
+                    let _ = fs::remove_dir_all(&dir);
+                }
+                continue;
+            }
+            Err(_) => continue,
         };
-        if !lock_meta.is_file()
+        if !copy_is_old(&lock_meta)
+            || !lock_meta.is_file()
             || lock_meta.nlink() != 1
             || lock_meta.uid() != unsafe { libc::geteuid() }
             || lock_meta.mode() & 0o777 != 0o600

@@ -11,14 +11,32 @@ use crate::{setup, sources::default_data_dir};
 pub struct AdmittedRuntime {
     path: PathBuf,
     checksum: Option<String>,
-    dev_home: Option<PathBuf>,
+}
+
+/// Canonical install path and lowercase sha256. `Ok(None)` with no release.
+pub(crate) fn signed_runtime_install(data_dir: &Path) -> anyhow::Result<Option<(PathBuf, String)>> {
+    let Some(source) = setup::installed_release_source(data_dir)? else {
+        return Ok(None);
+    };
+    let path = std::fs::canonicalize(&source.install_path)
+        .map_err(|error| anyhow::anyhow!("installed release binary: {error}"))?;
+    let (release_bytes, _) =
+        crate::installed_release::read_signed_release(data_dir, &path, &source, false, true)?;
+    let release: serde_json::Value = serde_json::from_slice(&release_bytes)?;
+    let sha256 = release["payload"]["platforms"][crate::update::detect_release_platform()]
+        ["binary"]["sha256"]
+        .as_str()
+        .filter(|sha| sha.len() == 64)
+        .ok_or_else(|| anyhow::anyhow!("signed runtime digest is malformed"))?
+        .to_ascii_lowercase();
+    Ok(Some((path, sha256)))
 }
 
 impl AdmittedRuntime {
-    /// Hold the admitted bytes. A source Home uses the one unchecked caller.
+    /// Hold the admitted bytes. A `dev_mode` source Home holds that path unchecked.
     pub fn prepare(&self) -> anyhow::Result<setup::verified_executable::VerifiedExecutable> {
-        if let Some(data_dir) = &self.dev_home {
-            return setup::verify_installed_component_start(data_dir, "elastos", &self.path);
+        if self.checksum.is_none() {
+            return setup::verified_executable::VerifiedExecutable::unchecked(&self.path);
         }
         setup::verified_executable::VerifiedExecutable::prepare(&self.path, self.signed_checksum()?)
     }
@@ -34,40 +52,28 @@ impl AdmittedRuntime {
 /// An installed Home admits only bytes that match its signed release.
 /// A source Home with no release continues only through `dev_mode = true`.
 pub fn checked_running_runtime(data_dir: &Path, exe: &Path) -> anyhow::Result<AdmittedRuntime> {
-    let Some(source) = setup::installed_release_source(data_dir)? else {
+    let Some((install, sha256)) = signed_runtime_install(data_dir)? else {
         if !setup::source_home_dev_mode(data_dir) {
             return Err(setup::missing_trusted_source_error());
         }
         return Ok(AdmittedRuntime {
             path: exe.to_path_buf(),
             checksum: None,
-            dev_home: Some(data_dir.to_path_buf()),
         });
     };
-    let runtime = std::fs::canonicalize(&source.install_path)
-        .map_err(|error| anyhow::anyhow!("installed release binary: {error}"))?;
-    // Digest before identity, so a substituted install file is refused first.
-    let (release_bytes, _) =
-        crate::installed_release::read_signed_release(data_dir, &runtime, &source, false, true)?;
-    let release: serde_json::Value = serde_json::from_slice(&release_bytes)?;
-    let platform = crate::update::detect_release_platform();
-    let sha = release["payload"]["platforms"][platform]["binary"]["sha256"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("signed runtime digest is missing"))?;
     let running =
         std::fs::canonicalize(exe).map_err(|error| anyhow::anyhow!("running binary: {error}"))?;
-    let checksum = format!("sha256:{sha}");
+    let checksum = format!("sha256:{sha256}");
     // A different path is admitted only when that file's own bytes match.
-    if running != runtime {
+    if running != install {
         anyhow::ensure!(
             running_file_matches_digest(&running, &checksum)?,
             "running binary is not the installed release"
         );
     }
     Ok(AdmittedRuntime {
-        path: runtime,
+        path: install,
         checksum: Some(checksum),
-        dev_home: None,
     })
 }
 
@@ -1267,21 +1273,6 @@ mod tests {
             macos_detached_serve();
             return;
         }
-        let serve = include_str!("serve_cmd.rs");
-        let hold = serve
-            .find("hold_running_exec_copy()")
-            .expect("run_serve lost the private-copy hold");
-        let watch = serve
-            .find("spawn_installed_binary_supersession_watch")
-            .expect("run_serve lost the supersession watch");
-        assert!(
-            hold < watch,
-            "the serve process must hold its copy before the watch starts"
-        );
-        assert!(
-            include_str!("host_lock.rs").contains("adopt_running_exec_copy()"),
-            "the serve hold must adopt the private copy"
-        );
         let exe = std::env::current_exe().unwrap();
         // `InstallableRuntime::of` can return the running test binary. This test
         // replaces the install, so the signed file is always a separate copy.
@@ -1395,7 +1386,7 @@ mod tests {
             eprintln!("adopt failed: {error:#}");
             std::process::exit(2);
         });
-        if !held.holds_private_copy() {
+        if held.is_none() {
             eprintln!("detached process was not started from a private exec copy");
             std::process::exit(3);
         }

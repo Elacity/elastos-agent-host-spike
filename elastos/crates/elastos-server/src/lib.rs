@@ -8,6 +8,7 @@ pub(crate) mod agent_admission;
 pub(crate) mod agents;
 pub mod api;
 pub mod auth;
+pub(crate) mod auth_state_files;
 pub mod binaries;
 pub mod browser_app_hosts;
 pub mod bundle_admission;

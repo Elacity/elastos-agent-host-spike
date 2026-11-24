@@ -30,6 +30,17 @@ const PROVIDER_BINARY: &str = env!("CARGO_BIN_EXE_did-provider");
 const PROFILE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/confine.sb");
 // Isolated fixture input, unrelated to any installed Home or production key.
 const DEVICE_KEY: [u8; 32] = [0x42; 32];
+
+/// Init config for `DEVICE_KEY`: the signing seed and the storage key, not the raw key.
+fn did_init_config(base: &Path) -> Value {
+    let signing_seed = elastos_identity::derive_did_seed(&DEVICE_KEY);
+    let storage_key = elastos_identity::derive_storage_key(&DEVICE_KEY);
+    json!({
+        "base_path": base,
+        "encryption_key": hex::encode(storage_key),
+        "extra": { "signing_seed": hex::encode(signing_seed) }
+    })
+}
 /// How long a failure path waits for the child to exit before it reports.
 const CHILD_EXIT_DEADLINE: Duration = Duration::from_secs(10);
 /// How often the bounded wait checks whether the child has exited.
@@ -340,7 +351,7 @@ impl ConfinedProvider {
     fn init(&mut self, base: &Path) {
         self.ok(json!({
             "op": "init",
-            "config": { "base_path": base, "encryption_key": hex::encode(DEVICE_KEY) }
+            "config": did_init_config(base)
         }));
     }
 
@@ -416,6 +427,11 @@ fn confined_provider_serves_did_operations_under_its_root() {
 
     let did_data = provider.ok(json!({ "op": "get_did" }));
     let did = did_data["did"].as_str().expect("device DID").to_string();
+    assert_eq!(
+        did,
+        elastos_identity::derive_did(&DEVICE_KEY).1,
+        "get_did must be the DID of the fixture device key"
+    );
     let document = provider.ok(json!({ "op": "resolve", "did": did }));
     assert_eq!(document["document"]["id"], did);
 
@@ -852,7 +868,7 @@ fn outside_read_denied() {
 
     let denied = provider.send(json!({
         "op": "init",
-        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+        "config": did_init_config(&root)
     }));
     assert_eq!(
         denied["status"], "error",
@@ -925,7 +941,7 @@ fn planted_file_beneath_storage_parent_is_neither_read_nor_written() {
     std::os::unix::fs::symlink(&planted_path, &granted).expect("planted symlink");
     let denied = provider.send(json!({
         "op": "init",
-        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+        "config": did_init_config(&root)
     }));
     assert_eq!(
         denied["status"], "error",
@@ -1124,7 +1140,7 @@ fn startup_denial_reports_its_reason() {
     fs::write(&profile, "(version 1)\n(deny default)\n").expect("fixture profile must be writable");
     let request = json!({
         "op": "init",
-        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+        "config": did_init_config(&root)
     });
 
     // The denied provider exits before it reads the request, so the harness
@@ -1284,7 +1300,7 @@ fn startup_is_refused_when_the_profile_cannot_be_applied() {
 
     let request = json!({
         "op": "init",
-        "config": { "base_path": root, "encryption_key": hex::encode(DEVICE_KEY) }
+        "config": did_init_config(&root)
     });
     let canonical = canonical_bindings(&root);
     let unbound_root: Vec<(&str, String)> = canonical
@@ -1379,7 +1395,7 @@ fn unbound_copy_is_refused_under_profile() {
     let before = fs::read(&stored.copy).expect("the copy must be readable");
     let request = json!({
         "op": "init",
-        "config": { "base_path": stored.base, "encryption_key": hex::encode(DEVICE_KEY) }
+        "config": did_init_config(&stored.base)
     });
     let mut refused = ConfinedProvider::spawn(confinement_command(
         Path::new(PROFILE_PATH),
@@ -1465,7 +1481,7 @@ fn bound_copy_serves_under_profile() {
     ));
     provider.ok(json!({
         "op": "init",
-        "config": { "base_path": stored.base, "encryption_key": hex::encode(DEVICE_KEY) }
+        "config": did_init_config(&stored.base)
     }));
     provider.ok(json!({ "op": "get_did" }));
     provider.shutdown();

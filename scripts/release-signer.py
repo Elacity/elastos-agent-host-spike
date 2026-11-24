@@ -1128,6 +1128,25 @@ def prepare_from_root(policy, root, manifest_name, fetch, snapshot_root, held_ro
                 continue
             def component_refs(value):
                 if isinstance(value, dict):
+                    if value.get("strategy") == "browser-vm-image":
+                        image = value.get("vm_image")
+                        require(type(image) is dict and set(image) == {"path", "size", "sha256", "cid", "kernel", "initrd"},
+                                "signed VM image entry required")
+                        require(image["path"] == "rootfs.ext4" and type(image["size"]) is int
+                                and 0 < image["size"] <= 64 * 1024**3,
+                                "signed VM image path or size refused")
+                        require(type(image["sha256"]) is str and HASH.fullmatch(image["sha256"])
+                                and image["cid"] == cid_from_hash(image["sha256"]),
+                                "signed VM image raw CID differs from SHA-256")
+                        for role, path in (("kernel", "vmlinux"), ("initrd", "initrd")):
+                            file = image[role]
+                            require(type(file) is dict and set(file) == {"path", "size", "sha256"}
+                                    and file["path"] == path and type(file["size"]) is int
+                                    and 0 < file["size"] <= 64 * 1024**3
+                                    and type(file["sha256"]) is str and HASH.fullmatch(file["sha256"]),
+                                    f"signed VM image {role} entry refused")
+                    else:
+                        require("vm_image" not in value, "VM image entry outside VM package")
                     if "cid" in value:
                         digest = value.get("sha256")
                         if "checksum" in value:
@@ -1139,7 +1158,9 @@ def prepare_from_root(policy, root, manifest_name, fetch, snapshot_root, held_ro
                         require("size" in value, "component descriptor size required")
                         require(type(value["size"]) is int and ("release_path" not in value or type(value["release_path"]) is str), "component descriptor type refused")
                         admit_ref(value["cid"], digest, value["size"], value.get("release_path"))
-                    for child in value.values():
+                    for key, child in value.items():
+                        if key == "vm_image":
+                            continue
                         component_refs(child)
                 elif isinstance(value, list):
                     for child in value:

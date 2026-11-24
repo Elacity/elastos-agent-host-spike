@@ -11,6 +11,39 @@ fn unsupported() -> anyhow::Error {
     super::windows_unsupported("Browser local Engine image admission")
 }
 
+/// The signed image is not admitted on Windows. Callers still match this error.
+#[derive(Debug)]
+pub(crate) struct BrowserVmImageInvalid(anyhow::Error);
+
+impl BrowserVmImageInvalid {
+    pub(crate) fn new(error: anyhow::Error) -> Self {
+        Self(error)
+    }
+}
+
+impl std::fmt::Display for BrowserVmImageInvalid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for BrowserVmImageInvalid {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+pub(super) struct VmImageEntry;
+
+pub(super) fn signed_image(_info: &PlatformInfo) -> anyhow::Result<Option<VmImageEntry>> {
+    Err(unsupported())
+}
+
+#[cfg(test)]
+pub(crate) fn install_signed_browser_vm_image_fixture(_data: &Path) {
+    panic!("Browser VM image fixture is refused: {}", unsupported());
+}
+
 pub(crate) struct BackgroundVerification;
 
 impl BackgroundVerification {

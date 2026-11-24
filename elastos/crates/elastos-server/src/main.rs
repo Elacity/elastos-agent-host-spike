@@ -3001,3 +3001,50 @@ mod tests {
         );
     }
 }
+
+/// The DID helper's init JSON carries the signing seed and the storage key.
+///
+/// The function name is the test name, so `--exact` selects this test and no other.
+#[cfg(test)]
+#[test]
+fn did_provider_config_omits_raw_device_key() {
+    let device_key = [0x5a; 32];
+    let temp = tempfile::TempDir::new().unwrap();
+    let identity = temp.path().join("identity");
+    std::fs::create_dir_all(&identity).unwrap();
+    std::fs::write(identity.join("device.key"), device_key).unwrap();
+    assert_eq!(
+        std::fs::read(temp.path().join("identity/device.key")).unwrap(),
+        device_key
+    );
+    let signing_seed = elastos_identity::derive_did_seed(&device_key);
+    let storage_key = elastos_identity::derive_storage_key(&device_key);
+    let (derived_key, _) = elastos_identity::derive_did(&device_key);
+    assert_eq!(derived_key.to_bytes().as_slice(), signing_seed.as_slice());
+    assert_ne!(signing_seed, device_key);
+    assert_ne!(storage_key, device_key);
+    assert_ne!(signing_seed, storage_key);
+    let config = server_infra::did_provider_bridge_config(temp.path(), &device_key);
+    assert_eq!(config.encryption_key, hex::encode(storage_key));
+    assert_eq!(config.extra["signing_seed"], hex::encode(signing_seed));
+    let init = serde_json::to_value(provider::bridge::ProviderRequest::Init { config }).unwrap();
+    assert_eq!(init["op"], "init");
+    let serialized = serde_json::to_string(&init).unwrap();
+    assert!(serialized.contains(&hex::encode(signing_seed)));
+    assert!(serialized.contains(&hex::encode(storage_key)));
+    assert!(
+        !serialized.contains(&hex::encode(device_key)),
+        "init JSON contains the device private key: {serialized}"
+    );
+    let source = include_str!("server_infra.rs");
+    let body = source
+        .split_once("\nasync fn start_did_provider(")
+        .unwrap()
+        .1
+        .split_once("\nasync fn start_did_provider_for_server(")
+        .unwrap()
+        .0;
+    assert!(body.contains("did_provider_bridge_config("));
+    assert!(!body.contains("device_key_hex"));
+    assert!(!body.contains("encryption_key"));
+}

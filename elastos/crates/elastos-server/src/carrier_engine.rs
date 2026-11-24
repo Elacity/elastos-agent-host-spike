@@ -399,13 +399,24 @@ pub(crate) async fn call(
         .as_str()
         .context("Engine peer required")?
         .parse::<iroh::PublicKey>()?;
-    let ticket = grant["connect_ticket"]
-        .as_str()
-        .context("Engine ticket required")?;
     let peer_did = super::public_key_to_did(&endpoint)?;
-    registry
-        .remember_carrier_peer_ticket(&peer_did, ticket)
-        .await?;
+    // A legacy grant may still carry a ticket. It is read here and remembered
+    // only when every endpoint id is this peer's key. A new grant omits the
+    // field; the dial below is by peer DID either way.
+    if let Some(value) = grant.get("connect_ticket") {
+        let ticket = value.as_str().context("Engine ticket is invalid")?;
+        if !ticket.is_empty() {
+            anyhow::ensure!(
+                !ticket
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || byte == 0),
+                "Engine ticket is invalid"
+            );
+            registry
+                .remember_carrier_peer_ticket(&peer_did, ticket)
+                .await?;
+        }
+    }
     request["op"] = json!(operation);
     request["grant_id"] = grant["grant_id"].clone();
     request["principal_id"] = grant["principal_id"].clone();
@@ -428,8 +439,23 @@ pub(crate) async fn call(
                 reply_wait_ms: None,
             }),
         })
-        .await
-        .map_err(|_| {
+        .await;
+    let result = match result {
+        Ok(value) => value,
+        Err(err)
+            if err.to_string().contains("no verified Carrier route")
+                || err
+                    .to_string()
+                    .contains(super::SERVICE_PROVIDER_UNREACHABLE) =>
+        {
+            tracing::warn!(
+                operation,
+                stage = "carrier_provider_invocation",
+                "Remote Engine provider is unreachable"
+            );
+            anyhow::bail!(super::SERVICE_PROVIDER_UNREACHABLE)
+        }
+        Err(_) => {
             // Provider errors can contain private tickets or backend details.
             // Preserve the fixed operation and stage at this public boundary.
             tracing::warn!(
@@ -437,8 +463,9 @@ pub(crate) async fn call(
                 stage = "carrier_provider_invocation",
                 "Remote Engine call failed"
             );
-            anyhow::anyhow!("Remote Engine {operation} failed at carrier_provider_invocation")
-        })?;
+            anyhow::bail!("Remote Engine {operation} failed at carrier_provider_invocation")
+        }
+    };
     Ok(result)
 }
 
@@ -463,6 +490,7 @@ mod tests {
 
     struct EngineCallInvoker {
         fail: bool,
+        unreachable: bool,
         calls: std::sync::Mutex<Vec<ProviderInvocation>>,
         tickets: std::sync::Mutex<Vec<(String, String)>>,
     }
@@ -488,14 +516,21 @@ mod tests {
             _: Value,
         ) -> std::result::Result<Value, elastos_runtime::provider::ProviderError> {
             if let ProviderCarrierRoute::PeerDid { peer_did, .. } = route {
-                assert!(self
-                    .tickets
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|(remembered, _)| remembered == peer_did));
+                if !self.unreachable {
+                    assert!(self
+                        .tickets
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(remembered, _)| remembered == peer_did));
+                }
             }
             self.calls.lock().unwrap().push(invocation.clone());
+            if self.unreachable {
+                return Err(elastos_runtime::provider::ProviderError::Unavailable(
+                    "no verified Carrier route to the requested peer".into(),
+                ));
+            }
             if self.fail {
                 Err(elastos_runtime::provider::ProviderError::Provider(
                     "Carrier provider invocation failed: ticket[0] connect failed; ticket:private-secret turn:private-credential".into(),
@@ -511,6 +546,7 @@ mod tests {
         let registry = ProviderRegistry::new();
         let invoker = Arc::new(EngineCallInvoker {
             fail: true,
+            unreachable: false,
             calls: Default::default(),
             tickets: Default::default(),
         });
@@ -556,10 +592,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_call_without_a_ticket_names_an_unreachable_provider() {
+        let registry = ProviderRegistry::new();
+        let invoker = Arc::new(EngineCallInvoker {
+            fail: false,
+            unreachable: true,
+            calls: Default::default(),
+            tickets: Default::default(),
+        });
+        registry.set_carrier_invoker(invoker.clone()).await;
+        let peer = iroh::SecretKey::from_bytes(&[21; 32]).public();
+        let grant = json!({
+            "peer_did": peer.to_string(),
+            "grant_id": "grant:approved",
+            "principal_id": "consumer",
+            "operations": super::super::browser_engine_binding::EXECUTION_OPERATIONS,
+        });
+        let error = call(&registry, &grant, "status", json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            super::super::SERVICE_PROVIDER_UNREACHABLE
+        );
+        assert!(invoker.tickets.lock().unwrap().is_empty());
+        let calls = invoker.calls.lock().unwrap();
+        let ProviderInvocationTransport::Carrier(ProviderCarrierRoute::PeerDid {
+            peer_did, ..
+        }) = &calls[0].transport
+        else {
+            panic!("Engine invoke dials by DID");
+        };
+        assert_eq!(peer_did, &super::super::public_key_to_did(&peer).unwrap());
+    }
+
+    #[tokio::test]
     async fn engine_call_keeps_success_and_rejects_unapproved_or_unknown_operations() {
         let registry = ProviderRegistry::new();
         let invoker = Arc::new(EngineCallInvoker {
             fail: false,
+            unreachable: false,
             calls: Default::default(),
             tickets: Default::default(),
         });
