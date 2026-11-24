@@ -998,7 +998,7 @@ fn missing_manifest_message() -> String {
 
 /// The owner's explicit opt-in: `dev_mode = true` (a TOML bool) in a regular,
 /// non-symlink `{data_dir}/config.toml`. Read-only; anything else is no opt-in.
-fn source_home_dev_mode(data_dir: &Path) -> bool {
+pub(crate) fn source_home_dev_mode(data_dir: &Path) -> bool {
     const MAX_CONFIG: u64 = 64 * 1024;
     #[cfg(windows)]
     {
@@ -1024,12 +1024,12 @@ fn source_home_dev_mode(data_dir: &Path) -> bool {
     read().unwrap_or(false)
 }
 
-fn missing_trusted_source_error() -> anyhow::Error {
+pub(crate) fn missing_trusted_source_error() -> anyhow::Error {
     anyhow::anyhow!(
         "No trusted source configured.\n\
          `elastos setup` installs first-party artifacts from a trusted source over Carrier.\n\
          For a published install, run the stamped installer first.\n\
-         For a source checkout, create your own trusted source or add one with `elastos source add ...`."
+         For a source checkout, set `dev_mode = true` in config.toml, or create your own trusted source or add one with `elastos source add ...`."
     )
 }
 
@@ -6819,6 +6819,7 @@ pub(crate) mod tests {
         let err = missing_trusted_source_error();
         let message = err.to_string();
         assert!(message.contains("elastos setup"));
+        assert!(message.contains("dev_mode = true"));
         assert!(message.contains("elastos source add"));
     }
 

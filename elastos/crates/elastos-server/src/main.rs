@@ -12,6 +12,8 @@ mod home_cmd;
 mod identity_cmd;
 mod init_cmd;
 mod node_cmd;
+#[cfg(all(test, unix))]
+mod own_runtime_fixture;
 mod provider_host;
 mod publish;
 mod release_cmd;

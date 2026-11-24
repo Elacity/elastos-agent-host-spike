@@ -201,6 +201,9 @@ pub(crate) fn build_router(config: ServerConfig) -> anyhow::Result<Router> {
     } = config;
     // Runtime keeps this control API on its own configured origin.
     // Browser capsules use the gateway launch boundary.
+    // A route here may admit the running runtime. On macOS the process holds
+    // its private exec copy until it exits, and the supersession watch follows
+    // the signed install path rather than that copy.
     let control_origin = url::Url::parse(&format!(
         "{}://{addr}",
         if tls_config.is_some() {
