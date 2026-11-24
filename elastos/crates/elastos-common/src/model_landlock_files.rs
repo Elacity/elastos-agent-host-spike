@@ -15,7 +15,7 @@
 //! so a confined process cannot connect to it. One shared ruleset still lists
 //! every admitted offer's directory.
 //!
-//! A library gets `READ_FILE` only. `EXECUTE` stays on the admitted engine.
+//! A receipted library gets `EXECUTE|READ_FILE`, the same mask as the engine.
 //! The engine listen socket is created in its own directory. That directory
 //! gets `MAKE_SOCK|REMOVE_FILE` and nothing else, so the broker socket beside
 //! it cannot be replaced. `/dev/null`, `/dev/urandom`, and `/proc` are absent.
@@ -154,7 +154,7 @@ pub fn grants_for(form: &str) -> Option<Vec<(&'static str, PathBuf, u64)>> {
             LIBRARY_RULE => files
                 .libraries
                 .iter()
-                .map(|path| ("ENGINE_LIBRARY", path.clone(), READ_FILE))
+                .map(|path| ("ENGINE_LIBRARY", path.clone(), BINARY))
                 .collect(),
             SOCKET_RULE => {
                 let mut grants: Vec<_> = files

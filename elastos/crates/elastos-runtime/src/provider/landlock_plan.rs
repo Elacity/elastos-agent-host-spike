@@ -692,11 +692,11 @@ mod tests {
         };
         assert_eq!(mask(&model), Some(READ_FILE));
         assert_eq!(mask(&engine), Some(BINARY));
-        assert_eq!(mask(&library), Some(READ_FILE));
+        assert_eq!(mask(&library), Some(BINARY));
         assert_eq!(
             mask(&library).unwrap() & 1,
-            0,
-            "a library is not executable"
+            1,
+            "a receipted library is executable"
         );
         assert_eq!(mask(&socket), Some(WRITE_FILE));
         assert_eq!(mask(&listen), Some(LISTEN_DIR));
@@ -717,7 +717,7 @@ mod tests {
             .iter()
             .any(|path| path.ends_with("ld-linux-x86-64.so.2")));
         assert!(!executable.contains(&not_engine));
-        assert!(!executable.contains(&library));
+        assert!(executable.contains(&library));
         let path = format!(
             "{}/../../../capsules/model-provider/capsule.json",
             env!("CARGO_MANIFEST_DIR")
