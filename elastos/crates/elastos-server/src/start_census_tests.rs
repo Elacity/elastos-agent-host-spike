@@ -97,10 +97,17 @@ fn places() -> Vec<Place> {
     vec![
         place(
             "elastos-server/src/runtime.rs",
+            "load_dev_unsigned_component",
+            label_of("component", &admitted),
+            1,
+            "dev mode only: owner set dev_mode = true; nothing checked",
+        ),
+        place(
+            "elastos-server/src/runtime.rs",
             "run_signer",
             label_of("component", &admitted),
             1,
-            "folder start: trusted key, dev mode, or installed release",
+            "folder start: admitted walk CID, signer; requires refused",
         ),
         place(
             "elastos-server/src/runtime.rs",
@@ -254,7 +261,7 @@ fn places() -> Vec<Place> {
             "ensure_managed_runtime",
             "spawn()".to_string(),
             1,
-            "managed Runtime process: gateway owner start lock",
+            "signed release binary held at start; source Home dev_mode = true",
         ),
         place(
             "elastos-server/src/server_infra.rs",

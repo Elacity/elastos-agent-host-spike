@@ -8,9 +8,25 @@ function text(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function reason(error) {
+function refusal(error) {
   const found = text(error && error.message).match(/^request failed: \d{3}\s+([\s\S]+)$/);
-  return (found && found[1].trim()) || "The Home did not answer.";
+  const body = (found && found[1].trim()) || "";
+  if (body.charAt(0) === "{") {
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed && typeof parsed.code === "string") {
+        const sentence = text(parsed.reason);
+        return { code: parsed.code, text: sentence || body };
+      }
+    } catch (ignored) {
+      text(ignored);
+    }
+  }
+  return { code: "", text: body || "The Home did not answer." };
+}
+
+function reason(error) {
+  return refusal(error).text;
 }
 
 // A bad reply is this page's refusal. 422 keeps Retry off. A lost answer has no
@@ -43,7 +59,7 @@ export function bindAgents(doc, request, confirmStepUp) {
     "#agents-list", "#agents-status", "#agent-form", "#agent-name", "#agent-host", "#agent-create", "#agent-allow", "#agent-retry",
   ].map((id) => doc.querySelector(id));
   if (!listNode || !statusNode || !formNode || !nameInput || !hostInput || !createButton || !allowButton || !retryButton) return { load() {} };
-  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait";
+  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait", stopping = new Set();
 
   function paint() {
     const banner = failure || (pendingId === "create" || pendingId === "allow" ? pendingLabel : "");
@@ -55,7 +71,8 @@ export function bindAgents(doc, request, confirmStepUp) {
     createButton.disabled = busy || gate !== "ready";
     const rows = agents.map((agent) => {
       const pending = pendingId === agent.agent_id ? pendingLabel : "";
-      const state = el(doc, "div", "pc2-card-sublabel", stateText(agent, pending));
+      const label = pending || (stopping.has(agent.agent_id) ? "Stopping" : stateText(agent, ""));
+      const state = el(doc, "div", "pc2-card-sublabel", label);
       state.dataset.agentState = agent.agent_id;
       const agentId = el(doc, "div", "pc2-card-sublabel", text(agent.agent_id));
       agentId.dataset.agentId = agent.agent_id;
@@ -68,7 +85,7 @@ export function bindAgents(doc, request, confirmStepUp) {
       if (agent.active === true) {
         const start = el(doc, "button", "pc2-btn pc2-btn-secondary", "Start");
         start.type = "button";
-        start.disabled = busy;
+        start.disabled = busy || stopping.has(agent.agent_id);
         start.addEventListener("click", () => run(startJob(agent)));
         actions.append(start);
       }
@@ -124,6 +141,9 @@ export function bindAgents(doc, request, confirmStepUp) {
     if (!body || !Array.isArray(body.agents)) throw pageRefusal("The Home did not list agents.");
     agents = body.agents;
     gate = "ready";
+    // The list is this Home's agent file. It does not read the Runtime's
+    // stopping mark, so a reload shows the stored on/off state.
+    stopping.clear();
   }
 
   function post(id, label, path, body, accept) {
@@ -170,10 +190,16 @@ export function bindAgents(doc, request, confirmStepUp) {
         throw pageRefusal("Open System from Home to verify your passkey.");
       }
       const stepUpToken = await confirmStepUp(agent);
-      const reply = await request("/api/apps/system/agents/launch", {
-        method: "POST",
-        body: JSON.stringify({ agent_id: id, step_up_token: stepUpToken }),
-      });
+      let reply;
+      try {
+        reply = await request("/api/apps/system/agents/launch", {
+          method: "POST",
+          body: JSON.stringify({ agent_id: id, step_up_token: stepUpToken }),
+        });
+      } catch (error) {
+        if (refusal(error).code === "agent_stopping") stopping.add(id);
+        throw error;
+      }
       if (!reply || reply.agent_id !== id || typeof reply.session_id !== "string") {
         throw pageRefusal("The Home did not confirm that change.");
       }
@@ -182,9 +208,30 @@ export function bindAgents(doc, request, confirmStepUp) {
   }
 
   function stopJob(agent) {
-    return post(agent.agent_id, "Stopping", "/api/apps/system/agents/stop", {
-      agent_id: agent.agent_id,
-    }, (reply) => reply && reply.agent_id === agent.agent_id && Array.isArray(reply.stopped) && reply.stopped.length > 0);
+    const id = agent.agent_id;
+    return async () => {
+      pendingId = id;
+      pendingLabel = "Stopping";
+      paint();
+      let reply;
+      try {
+        reply = await request("/api/apps/system/agents/stop", { method: "POST", body: JSON.stringify({ agent_id: id }) });
+      } catch (error) {
+        const found = refusal(error);
+        if (found.code === "agent_already_stopped" || found.code === "agent_no_session") {
+          stopping.delete(id);
+        }
+        throw error;
+      }
+      const stopped = reply && Array.isArray(reply.stopped) ? reply.stopped : [];
+      const still = reply && Array.isArray(reply.stopping) ? reply.stopping : [];
+      if (!reply || reply.agent_id !== id || (!stopped.length && !still.length)) {
+        throw pageRefusal("The Home did not confirm that change.");
+      }
+      await load();
+      if (still.length) stopping.add(id);
+      else stopping.delete(id);
+    };
   }
 
   createButton.addEventListener("click", () => { if (gate === "ready") run(createJob()); });

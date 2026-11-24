@@ -42,6 +42,11 @@ mod browser_vm_image;
 #[cfg(windows)]
 #[path = "setup/browser_vm_image_windows.rs"]
 mod browser_vm_image;
+#[cfg(all(test, windows))]
+pub(crate) use browser_vm_image::install_signed_browser_vm_image_fixture;
+#[cfg(all(test, unix))]
+pub(crate) use browser_vm_image::tests::install_signed_browser_vm_image_fixture;
+pub(crate) use browser_vm_image::BrowserVmImageInvalid;
 #[cfg(unix)]
 pub mod verified_executable;
 #[cfg(windows)]
@@ -993,7 +998,7 @@ fn missing_manifest_message() -> String {
 
 /// The owner's explicit opt-in: `dev_mode = true` (a TOML bool) in a regular,
 /// non-symlink `{data_dir}/config.toml`. Read-only; anything else is no opt-in.
-fn source_home_dev_mode(data_dir: &Path) -> bool {
+pub(crate) fn source_home_dev_mode(data_dir: &Path) -> bool {
     const MAX_CONFIG: u64 = 64 * 1024;
     #[cfg(windows)]
     {
@@ -1019,12 +1024,12 @@ fn source_home_dev_mode(data_dir: &Path) -> bool {
     read().unwrap_or(false)
 }
 
-fn missing_trusted_source_error() -> anyhow::Error {
+pub(crate) fn missing_trusted_source_error() -> anyhow::Error {
     anyhow::anyhow!(
         "No trusted source configured.\n\
          `elastos setup` installs first-party artifacts from a trusted source over Carrier.\n\
          For a published install, run the stamped installer first.\n\
-         For a source checkout, create your own trusted source or add one with `elastos source add ...`."
+         For a source checkout, set `dev_mode = true` in config.toml, or create your own trusted source or add one with `elastos source add ...`."
     )
 }
 
@@ -1505,10 +1510,49 @@ async fn ensure_browser_vm_image_in_context(
     data_dir: &Path,
     context: FirstPartyCarrierContext,
 ) -> anyhow::Result<()> {
+    ensure_browser_vm_image_in_context_for_platform(data_dir, context, detect_platform()).await
+}
+
+async fn ensure_browser_vm_image_in_context_for_platform(
+    data_dir: &Path,
+    context: FirstPartyCarrierContext,
+    platform: String,
+) -> anyhow::Result<()> {
+    if !source_home_dev_mode(data_dir) || installed_release_source(data_dir)?.is_some() {
+        // Read and admit the installed signed release before accepting even a
+        // cached image. Its components bytes are checked on every local launch.
+        let admitted = admit_installed_components(data_dir, context)?
+            .context("Browser local Engine requires an installed signed release")?;
+        let info = browser_vm_image::component_info(&admitted.manifest, &platform)
+            .map_err(BrowserVmImageInvalid::new)?;
+        match browser_vm_image::signed_image(info) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(BrowserVmImageInvalid::new(anyhow::anyhow!(
+                    "Browser local Engine requires a signed VM image entry"
+                ))
+                .into())
+            }
+            Err(error) => return Err(BrowserVmImageInvalid::new(error).into()),
+        }
+        let dest = data_dir.join(browser_vm_image::INSTALL_PATH);
+        if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
+            return Ok(());
+        }
+        let row = admitted_row(
+            data_dir,
+            Some(&admitted),
+            &admitted.manifest,
+            browser_vm_image::NAME,
+            info,
+        )?;
+        return download_component(data_dir, &row, &dest, context).await;
+    }
     let check_dir = data_dir.to_path_buf();
+    let check_platform = platform.clone();
     let pending =
         tokio::task::spawn_blocking(move || -> anyhow::Result<Option<ComponentsManifest>> {
-            let platform = detect_platform();
+            let platform = check_platform;
             let manifest_path = check_dir.join("components.json");
             if !manifest_path.exists() {
                 browser_vm_image::verify_legacy_or_missing_release(&check_dir, &platform)?;
@@ -1519,7 +1563,8 @@ async fn ensure_browser_vm_image_in_context(
                 browser_vm_image::verify_legacy_or_missing_release(&check_dir, &platform)?;
                 return Ok(None);
             }
-            let info = browser_vm_image::component_info(&manifest, &platform)?;
+            let info = browser_vm_image::component_info(&manifest, &platform)
+                .map_err(BrowserVmImageInvalid::new)?;
             let missing = browser_vm_image::verify_installed(&check_dir, info, &platform).is_err();
             Ok(missing.then_some(manifest))
         })
@@ -1529,12 +1574,12 @@ async fn ensure_browser_vm_image_in_context(
     };
     // The image row comes from the admitted release, not the earlier read; a
     // Runtime caller holds the writer until the image is written.
-    let platform = detect_platform();
     let admitted = admit_installed_components(data_dir, context)?;
     let manifest = admitted
         .as_ref()
         .map_or(&local, |admitted| &admitted.manifest);
-    let info = browser_vm_image::component_info(manifest, &platform)?;
+    let info = browser_vm_image::component_info(manifest, &platform)
+        .map_err(BrowserVmImageInvalid::new)?;
     if browser_vm_image::verify_installed(data_dir, info, &platform).is_ok() {
         return Ok(());
     }
@@ -4899,6 +4944,12 @@ async fn download_component(
     install_first_party_component_via_carrier(data_dir, row, dest, carrier_context)
         .await
         .map_err(|err| {
+            // An invalid-image refusal keeps its typed error so the gateway's
+            // Engine gate reports ArtifactInvalid; only a fetch-phase failure
+            // is reported as a Carrier fetch failure.
+            if err.downcast_ref::<BrowserVmImageInvalid>().is_some() {
+                return err;
+            }
             anyhow::anyhow!(
                 "Trusted source Carrier fetch failed for {} ({}): {}",
                 name,
@@ -6768,6 +6819,7 @@ pub(crate) mod tests {
         let err = missing_trusted_source_error();
         let message = err.to_string();
         assert!(message.contains("elastos setup"));
+        assert!(message.contains("dev_mode = true"));
         assert!(message.contains("elastos source add"));
     }
 
@@ -10058,9 +10110,14 @@ pub(crate) mod tests {
         let error = ensure_browser_vm_image_in_context(&data, FirstPartyCarrierContext::Runtime)
             .await
             .unwrap_err();
+        // The stale manifest is refused at the signed components descriptor,
+        // under the operator repair guidance.
+        let error = format!("{error:#}");
         assert!(
-            format!("{error:#}").contains("Installed release inputs require repair"),
-            "{error:#}"
+            error.contains("Installed release inputs require repair")
+                && error.contains("Installed component manifest verification failed")
+                && error.contains("Installed artifact differs from its signed checksum"),
+            "{error}"
         );
         assert!(!data.join(browser_vm_image::INSTALL_PATH).exists());
         server.close().await;

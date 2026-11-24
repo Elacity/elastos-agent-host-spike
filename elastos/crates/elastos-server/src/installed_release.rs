@@ -10,6 +10,7 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use elastos_common::localhost::{
@@ -193,6 +194,7 @@ pub(crate) fn read_signed_release(
         require_no_pending(binary)?;
     }
     read_signed_release_after_gate(data, binary, source, repair_version, for_host_start)
+        .map(|(installed, components, _)| (installed.release, components))
 }
 
 /// Tests drive the host-start gate with an explicit update generation and
@@ -209,7 +211,9 @@ pub(crate) fn read_signed_release_for_host_start_with_generation(
     crate::install_transaction::authorize_host_start_with_generation(
         data, binary, generation, process_id,
     )?;
-    read_signed_release_after_gate(data, binary, source, repair_version, true)
+    let (installed, components, _) =
+        read_signed_release_after_gate(data, binary, source, repair_version, true)?;
+    Ok((installed.release, components))
 }
 
 fn read_signed_release_after_gate(
@@ -218,23 +222,13 @@ fn read_signed_release_after_gate(
     source: &TrustedSource,
     repair_version: bool,
     for_host_start: bool,
-) -> Result<(Vec<u8>, Vec<u8>)> {
+) -> Result<(InstalledRelease, Vec<u8>, bool)> {
     require_current_source(data, source)?;
     let private = consumed_present(
         data,
         for_host_start && InstallTransaction::has_pending_recovery(binary),
     )?;
-    let (head, release) = if private {
-        (
-            installation_release_head_path(data),
-            installation_release_manifest_path(data),
-        )
-    } else {
-        (
-            publisher_release_head_path(data),
-            publisher_release_manifest_path(data),
-        )
-    };
+    let (head, release) = release_pair_paths(data, private);
     let (installed, release) = read_pair_and_binary(
         data,
         binary,
@@ -254,7 +248,24 @@ fn read_signed_release_after_gate(
     )
     .context(REPAIR)
     .context("Installed component manifest verification failed")?;
-    Ok((installed.release, components))
+    Ok((installed, components, private))
+}
+
+#[cfg(test)]
+pub(crate) fn release_cid(data: &Path, binary: &Path, source: &TrustedSource) -> Result<String> {
+    let (release, _) = read_signed_release(data, binary, source, false, false)?;
+    let head = if consumed_present(data, false)? {
+        installation_release_head_path(data)
+    } else {
+        publisher_release_head_path(data)
+    };
+    let head: serde_json::Value =
+        serde_json::from_slice(&read_regular(&head, MAX_METADATA, false)?)?;
+    let cid = head["payload"]["latest_release_cid"]
+        .as_str()
+        .context("Release CID missing")?;
+    crate::update::verify_release_metadata_cid(cid, &release)?;
+    Ok(cid.to_owned())
 }
 
 /// Setup holds this guard while it obtains signed support for an installed binary.
@@ -666,21 +677,22 @@ fn open_regular(_path: &Path, _private: bool) -> Result<File> {
 }
 
 fn read_regular(path: &Path, limit: u64, private: bool) -> Result<Vec<u8>> {
-    let file = open_regular(path, private)?;
-    anyhow::ensure!(
-        file.metadata()?.len() <= limit,
-        "Installed input exceeds its byte bound"
-    );
+    read_capped(
+        open_regular(path, private)?,
+        limit,
+        "Installed input exceeds its byte bound",
+    )
+}
+
+fn read_capped(file: File, limit: u64, bound: &str) -> Result<Vec<u8>> {
+    anyhow::ensure!(file.metadata()?.len() <= limit, "{bound}");
     let mut bytes = Vec::new();
     file.take(limit + 1).read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= limit,
-        "Installed input exceeds its byte bound"
-    );
+    anyhow::ensure!(bytes.len() as u64 <= limit, "{bound}");
     Ok(bytes)
 }
 
-fn file_digest(path: &Path) -> Result<(String, u64)> {
+pub(crate) fn file_digest(path: &Path) -> Result<(String, u64)> {
     let mut file = open_regular(path, false)?;
     let before = file.metadata()?;
     let mut digest = Sha256::new();
@@ -783,7 +795,190 @@ fn publish_stage(data: &Path, binary: &Path, stage: &Path, root: &Path) -> Resul
 }
 
 fn sync(path: &Path) -> Result<()> {
+    #[cfg(all(test, unix))]
+    tests::note_sync(path);
     File::open(path)?.sync_all().map_err(Into::into)
+}
+
+/// The signed release a managed runtime child verifies for itself.
+/// The head and the release are the bytes of one verified read. The copy does
+/// not open that head again. `sources.json` is a bounded no-follow read.
+/// A Home with no release clears any projection instead, and does not copy
+/// `dev_mode`.
+#[cfg(unix)]
+pub(crate) fn project_verified_release(
+    parent: &Path,
+    child: &Path,
+    source: &TrustedSource,
+) -> Result<()> {
+    let runtime = fs::canonicalize(Path::new(&source.install_path))?;
+    crate::install_transaction::authorize_host_start(parent, &runtime)?;
+    let (installed, _, private) =
+        read_signed_release_after_gate(parent, &runtime, source, false, true)?;
+    let sources = read_bounded(&parent.join("sources.json"), MAX_METADATA)?;
+    #[cfg(all(test, unix))]
+    tests::after_verified_release_read();
+    let (head, release) = release_pair_paths(child, private);
+    place_projected_file(child, &head, &installed.head)?;
+    place_projected_file(child, &release, &installed.release)?;
+    place_projected_file(child, &child.join("sources.json"), &sources)?;
+    if private {
+        remove_projected_file(&publisher_release_head_path(child))?;
+        remove_projected_file(&publisher_release_manifest_path(child))?;
+    } else {
+        remove_tree_nofollow(&child.join("installation"))?;
+    }
+    // The rename lands in the pair's directory. fsync that directory, then the data root.
+    sync(head.parent().context(REPAIR)?)?;
+    sync(child)
+}
+
+#[cfg(all(not(unix), test))]
+pub(crate) fn project_verified_release(
+    _parent: &Path,
+    _child: &Path,
+    _source: &TrustedSource,
+) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "managed runtime release projection is unsupported on Windows",
+    )
+    .into())
+}
+
+/// Remove a managed child's projected release. The parent no longer admits one,
+/// so the child must not keep the previous pair. Symlinks are removed, not followed.
+#[cfg(unix)]
+pub(crate) fn clear_projected_release(child: &Path) -> Result<()> {
+    remove_projected_file(&child.join("sources.json"))?;
+    remove_projected_file(&publisher_release_head_path(child))?;
+    remove_projected_file(&publisher_release_manifest_path(child))?;
+    remove_tree_nofollow(&child.join("installation"))?;
+    sync(child)
+}
+
+#[cfg(all(not(unix), test))]
+pub(crate) fn clear_projected_release(_child: &Path) -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "managed runtime release projection is unsupported on Windows",
+    )
+    .into())
+}
+
+#[cfg(unix)]
+fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    anyhow::ensure!(file.metadata()?.is_file(), "{REPAIR}");
+    read_capped(file, limit, REPAIR)
+}
+
+fn release_pair_paths(data: &Path, private: bool) -> (PathBuf, PathBuf) {
+    if private {
+        (
+            installation_release_head_path(data),
+            installation_release_manifest_path(data),
+        )
+    } else {
+        (
+            publisher_release_head_path(data),
+            publisher_release_manifest_path(data),
+        )
+    }
+}
+
+#[cfg(unix)]
+fn place_projected_file(data: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().context(REPAIR)?;
+    ensure_projected_dirs(data, parent)?;
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "{REPAIR}");
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context(REPAIR)?;
+    let temporary = parent.join(format!(".{name}.project"));
+    if let Ok(meta) = fs::symlink_metadata(&temporary) {
+        anyhow::ensure!(meta.is_file() && !meta.file_type().is_symlink(), "{REPAIR}");
+        fs::remove_file(&temporary)?;
+    }
+    let write = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write
+}
+
+#[cfg(unix)]
+fn ensure_projected_dirs(data: &Path, parent: &Path) -> Result<()> {
+    if parent == data {
+        return Ok(());
+    }
+    let relative = parent.strip_prefix(data).context(REPAIR)?;
+    let mut path = data.to_path_buf();
+    for part in relative.components() {
+        anyhow::ensure!(matches!(part, std::path::Component::Normal(_)), "{REPAIR}");
+        path.push(part);
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                anyhow::ensure!(meta.is_dir() && !meta.file_type().is_symlink(), "{REPAIR}")
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::DirBuilder::new().mode(0o700).create(&path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_projected_file(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
+            fs::remove_file(path).map_err(Into::into)
+        }
+        Ok(_) => anyhow::bail!("{REPAIR}"),
+    }
+}
+
+#[cfg(unix)]
+fn remove_tree_nofollow(path: &Path) -> Result<()> {
+    fn walk(path: &Path, depth: u32) -> Result<()> {
+        let meta = match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+            Ok(meta) => meta,
+        };
+        if meta.file_type().is_symlink() || meta.is_file() {
+            return fs::remove_file(path).map_err(Into::into);
+        }
+        anyhow::ensure!(meta.is_dir() && depth < 6, "{REPAIR}");
+        for entry in fs::read_dir(path)? {
+            walk(&entry?.path(), depth + 1)?;
+        }
+        fs::remove_dir(path).map_err(Into::into)
+    }
+    walk(path, 0)
 }
 
 #[cfg(all(test, unix))]

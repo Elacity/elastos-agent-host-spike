@@ -995,6 +995,7 @@ mod tests {
                 policy_sha256: String::new(),
                 dependency_sha256: String::new(),
                 generation: String::new(),
+                process_start: String::new(),
                 home_url: String::new(),
             },
         )

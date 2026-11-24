@@ -691,16 +691,8 @@ class FiniteRuntime:
             current[pid] = self.known[pid]
         for pid, fd in self.fds.items():
             if pid not in current and not pidfd_exited(fd):
-                try:
-                    stat = bounded_text(Path("/proc") / str(pid) / "stat", 4096)
-                    fields = stat[stat.rfind(")") + 2:].split()
-                    # Exited children leave cgroup.procs before their parent
-                    # reaps them. Bind state and birth to this one stat sample;
-                    # keep the pidfd for the whole-unit exit check in finish().
-                    if fields[0] == "Z" and int(fields[19]) == self.known.get(pid, {}).get("start_ticks"):
-                        continue
-                except (OSError, RuntimeError, ValueError, IndexError):
-                    pass
+                if self.exiting_outside_census(pid, fd):
+                    continue
                 self.record_census_gap(pid, fd)
                 raise RuntimeError("finite journey live child left its unit census")
         if require_runtime and self.pid not in current:
@@ -711,6 +703,27 @@ class FiniteRuntime:
         if any(self.events().get(key, 0) != self.baseline_events.get(key, 0) for key in ("oom", "oom_kill")):
             raise RuntimeError("finite journey observed an OOM event")
         return current
+
+    def exiting_outside_census(self, pid, fd):
+        # Exited children leave cgroup.procs before their parent reaps them,
+        # and the kernel drops a dying task from cgroup.procs before /proc
+        # shows state Z (CI 24 Nov: llama-server in state R with an empty
+        # cmdline). Bind state and birth to one stat sample; if it is not yet
+        # a zombie, wait at most 250 ms on the pidfd for the exit and sample
+        # once more. A live child that really left its unit does not exit in
+        # that window and is still a census gap. Keep the pidfd for the
+        # whole-unit exit check in finish().
+        for wait_ms in (0, 250):
+            if wait_ms and pidfd_exited(fd, wait_ms):
+                return True
+            try:
+                stat = bounded_text(Path("/proc") / str(pid) / "stat", 4096)
+                fields = stat[stat.rfind(")") + 2:].split()
+                if fields[0] == "Z" and int(fields[19]) == self.known.get(pid, {}).get("start_ticks"):
+                    return True
+            except (OSError, RuntimeError, ValueError, IndexError):
+                pass
+        return False
 
     def engines(self, current):
         _, _, info, bundle = engine_paths(self.data)

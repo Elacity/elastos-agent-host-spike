@@ -3,11 +3,13 @@
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
 
+#[cfg(unix)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -30,7 +32,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::auth_state_files::{
+    ensure_regular_auth_parent, observe_optional_regular_file_identity, open_regular_lock_file,
+    regular_file_identity_from_metadata, sync_parent_directory, write_secret_bytes_atomic,
+    write_secret_json_atomic, RegularFileIdentity,
+};
 use crate::host_lock::FileLock;
+
+#[cfg(any(unix, test))]
+use crate::auth_state_files::set_secret_file_permissions;
 
 mod verified_launch_token_signer;
 pub(crate) use verified_launch_token_signer::{
@@ -287,17 +297,6 @@ static VERIFIED_AUTH_STATE_CACHE_HIT_HOOKS: OnceLock<
 struct VerifiedAuthStateCacheBoundaryHook {
     reached: std::sync::mpsc::Sender<()>,
     resume: std::sync::mpsc::Receiver<()>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RegularFileIdentity {
-    dev: u64,
-    ino: u64,
-    mtime_secs: i64,
-    mtime_nanos: i64,
-    ctime_secs: i64,
-    ctime_nanos: i64,
-    len: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -557,51 +556,6 @@ fn unsupported_on_this_platform() -> anyhow::Error {
     .into()
 }
 
-#[cfg(unix)]
-fn regular_file_identity_from_metadata(
-    metadata: &std::fs::Metadata,
-    label: &str,
-) -> anyhow::Result<RegularFileIdentity> {
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("{label} must be a regular non-symlink file");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(RegularFileIdentity {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            mtime_secs: metadata.mtime(),
-            mtime_nanos: metadata.mtime_nsec(),
-            ctime_secs: metadata.ctime(),
-            ctime_nanos: metadata.ctime_nsec(),
-            len: metadata.len(),
-        })
-    }
-}
-
-#[cfg(not(unix))]
-fn regular_file_identity_from_metadata(
-    _metadata: &std::fs::Metadata,
-    _label: &str,
-) -> anyhow::Result<RegularFileIdentity> {
-    Err(unsupported_on_this_platform())
-}
-
-fn observe_optional_regular_file_identity(
-    path: &Path,
-    label: &str,
-) -> anyhow::Result<Option<RegularFileIdentity>> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => {
-            return Err(err).with_context(|| format!("failed to inspect {label} {path:?}"));
-        }
-    };
-    Ok(Some(regular_file_identity_from_metadata(&metadata, label)?))
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AuthStateFileIdentity {
     file: RegularFileIdentity,
@@ -732,25 +686,6 @@ fn take_verified_auth_state_cache_hit(
     } else {
         None
     }
-}
-
-#[cfg(test)]
-type AuthStateWriteHook = Box<dyn FnOnce(&Path) -> anyhow::Result<()> + Send>;
-#[cfg(test)]
-static AUTH_STATE_WRITE_HOOKS: OnceLock<Mutex<HashMap<PathBuf, AuthStateWriteHook>>> =
-    OnceLock::new();
-
-#[cfg(test)]
-fn run_auth_state_write_hook(path: &Path) -> anyhow::Result<()> {
-    let hook = AUTH_STATE_WRITE_HOOKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap()
-        .remove(path);
-    if let Some(hook) = hook {
-        hook(path)?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -4731,77 +4666,6 @@ fn audit_chain_activation_lock_path(data_dir: &Path) -> anyhow::Result<PathBuf> 
         .map(|path| path.with_file_name(format!("{AUDIT_CHAIN_REQUIRED_FILE}.lock")))
 }
 
-#[cfg(unix)]
-fn open_new_secret_file(path: &Path) -> anyhow::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    options
-        .open(path)
-        .with_context(|| format!("failed to create secret state file {path:?}"))
-}
-
-#[cfg(not(unix))]
-fn open_new_secret_file(_path: &Path) -> anyhow::Result<File> {
-    Err(unsupported_on_this_platform())
-}
-
-#[cfg(unix)]
-pub(crate) fn ensure_regular_auth_parent(data_dir: &Path, parent: &Path) -> anyhow::Result<()> {
-    let relative = parent
-        .strip_prefix(data_dir)
-        .map_err(|_| anyhow!("auth state path escaped its data root"))?;
-    let mut current = data_dir.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        let metadata = match std::fs::symlink_metadata(&current) {
-            Ok(metadata) => metadata,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                std::fs::create_dir(&current)
-                    .with_context(|| format!("failed to create auth state path {current:?}"))?;
-                std::fs::symlink_metadata(&current).with_context(|| {
-                    format!("failed to inspect created auth state path {current:?}")
-                })?
-            }
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("failed to inspect auth state path {current:?}"));
-            }
-        };
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            anyhow::bail!("auth state path must use regular non-symlink directories");
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(crate) fn ensure_regular_auth_parent(_data_dir: &Path, _parent: &Path) -> anyhow::Result<()> {
-    Err(unsupported_on_this_platform())
-}
-
-#[cfg(unix)]
-pub(crate) fn open_regular_lock_file(path: &Path, label: &str) -> anyhow::Result<File> {
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(false).read(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    let file = options
-        .open(path)
-        .with_context(|| format!("failed to open {label} lock {path:?}"))?;
-    if !file.metadata()?.is_file() {
-        anyhow::bail!("{label} lock must be a regular non-symlink file");
-    }
-    set_secret_file_permissions(path)?;
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn open_regular_lock_file(_path: &Path, _label: &str) -> anyhow::Result<File> {
-    Err(unsupported_on_this_platform())
-}
-
 fn open_auth_state_lock(data_dir: &Path) -> anyhow::Result<File> {
     let path = auth_state_lock_path(data_dir)?;
     if let Some(parent) = path.parent() {
@@ -4973,23 +4837,6 @@ pub fn load_or_create_recovery_archive_key(_data_dir: &Path) -> anyhow::Result<[
     Err(unsupported_on_this_platform())
 }
 
-#[cfg(unix)]
-fn set_secret_file_permissions(path: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, permissions)
-            .with_context(|| format!("failed to restrict secret file permissions for {path:?}"))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_secret_file_permissions(_path: &Path) -> anyhow::Result<()> {
-    Err(unsupported_on_this_platform())
-}
-
 fn audit_chain_checkpoint(state: &AuthState) -> anyhow::Result<Option<AuditChainCheckpointV1>> {
     let Some(chain_state) = state.audit_chain_state.as_ref() else {
         return Ok(None);
@@ -5131,61 +4978,6 @@ fn validate_checkpoint_progress(
         _ => {}
     }
     Ok(true)
-}
-
-#[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn sync_parent_directory(_path: &Path) -> anyhow::Result<()> {
-    Err(unsupported_on_this_platform())
-}
-
-fn write_secret_json_atomic(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
-    write_secret_bytes_atomic(path, &serde_json::to_vec_pretty(value)?).map(|_| ())
-}
-
-fn write_secret_bytes_atomic(
-    path: &Path,
-    bytes: &[u8],
-) -> anyhow::Result<Option<RegularFileIdentity>> {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let file_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| anyhow!("secret state path has no file name"))?;
-    let temp = path.with_file_name(format!(
-        ".{file_name}.{}.{}.tmp",
-        std::process::id(),
-        unique
-    ));
-    let result = (|| -> anyhow::Result<Option<RegularFileIdentity>> {
-        let mut file = open_new_secret_file(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, path)?;
-        set_secret_file_permissions(path)?;
-        sync_parent_directory(path)?;
-        #[cfg(test)]
-        run_auth_state_write_hook(path)?;
-        let held = regular_file_identity_from_metadata(&file.metadata()?, "secret state")?;
-        Ok(
-            (observe_optional_regular_file_identity(path, "secret state")? == Some(held))
-                .then_some(held),
-        )
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
 }
 
 pub fn load_auth_state(data_dir: &Path) -> anyhow::Result<AuthState> {
@@ -13317,7 +13109,7 @@ pub(crate) mod r4_fixture {
             .unwrap()
             .retain(|item| item["principal_id"] != principal_id);
         std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-        super::set_secret_file_permissions(&path).unwrap();
+        crate::auth_state_files::set_secret_file_permissions(&path).unwrap();
         super::invalidate_verified_auth_state_cache(data_dir);
     }
 
@@ -13489,6 +13281,12 @@ mod scan_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    use crate::auth_state_files::AUTH_STATE_WRITE_HOOKS;
+
+    #[cfg(unix)]
+    use crate::auth_state_files::ensure_regular_auth_parent;
 
     #[cfg(unix)]
     #[test]
@@ -21781,9 +21579,9 @@ pub(crate) mod tests {
 #[cfg(all(test, not(unix)))]
 mod windows_unprotected_secret_refusal {
     use super::{
-        atomic_write, create_owner_only_dir, durable_atomic_replace, open_new_secret_file,
-        open_regular_lock_file, write_owner_only_new_file,
+        atomic_write, create_owner_only_dir, durable_atomic_replace, write_owner_only_new_file,
     };
+    use crate::auth_state_files::{open_new_secret_file, open_regular_lock_file};
     use std::io::ErrorKind;
 
     fn assert_unsupported(err: anyhow::Error) {

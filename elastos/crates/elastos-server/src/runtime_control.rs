@@ -33,6 +33,10 @@ pub struct RuntimeCoords {
     pub dependency_sha256: String,
     #[serde(default)]
     pub generation: String,
+    /// Kernel birth of `pid` (`process_start`). With `generation`, this is the
+    /// process identity. Empty when the file only names a pid.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub process_start: String,
     /// Gateway Home URL published after its listener and router are ready.
     #[serde(default)]
     pub home_url: String,
@@ -538,7 +542,15 @@ impl AttachableRuntimeKind {
 /// and the caller can signal it, sets `ESRCH` when no such process exists, and
 /// sets `EPERM` when the process exists but the caller may not signal it (still
 /// alive from our perspective). Anything other than `ESRCH` means alive.
+///
+/// Pid 0 does not name one process. `kill(0, 0)` signals the caller's process
+/// group and returns success, so a coordinates file that names pid 0 would
+/// stay forever. A value that does not fit in a positive pid does not name
+/// one process either. Both are dead, and the file is removed.
 fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
     #[cfg(unix)]
     {
         let pid_i32: libc::pid_t = match pid.try_into() {
@@ -673,6 +685,14 @@ fn sync_managed_runtime_child_components_manifest(
     for (name, parent_binary) in verified_binaries {
         std::fs::copy(parent_binary, child_bin_dir.join(name))?;
     }
+    match crate::setup::installed_release_source(parent_data_dir)? {
+        Some(source) => crate::installed_release::project_verified_release(
+            parent_data_dir,
+            &child_data_dir,
+            &source,
+        )?,
+        None => crate::installed_release::clear_projected_release(&child_data_dir)?,
+    }
     Ok(())
 }
 
@@ -792,7 +812,7 @@ fn write_private_runtime_coords_atomically(
 }
 
 #[cfg(unix)]
-fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
+fn read_private_runtime_coord_bytes(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read as _;
 
     let metadata = std::fs::symlink_metadata(path).ok()?;
@@ -820,7 +840,7 @@ fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
         if data.len() > 64 * 1024 {
             return None;
         }
-        serde_json::from_slice(&data).ok()
+        Some(data)
     }
     #[cfg(not(unix))]
     {
@@ -833,14 +853,19 @@ fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
         if data.len() > 64 * 1024 {
             return None;
         }
-        serde_json::from_slice(&data).ok()
+        Some(data)
     }
 }
 
 #[cfg(windows)]
-fn read_private_runtime_coords(_path: &Path) -> Option<RuntimeCoords> {
+fn read_private_runtime_coord_bytes(_path: &Path) -> Option<Vec<u8>> {
     // Unknown file custody cannot establish a Runtime attach authority.
     None
+}
+
+fn read_private_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
+    let data = read_private_runtime_coord_bytes(path)?;
+    serde_json::from_slice(&data).ok()
 }
 
 impl Drop for GatewayRuntimeCoordsGuard {
@@ -851,47 +876,82 @@ impl Drop for GatewayRuntimeCoordsGuard {
     }
 }
 
+#[cfg(test)]
+struct CoordsRemovePause {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static COORDS_BEFORE_REMOVE: std::sync::Mutex<Vec<(std::path::PathBuf, CoordsRemovePause)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+async fn pause_before_coords_remove(path: &Path) {
+    let gate = {
+        let mut gates = COORDS_BEFORE_REMOVE
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let pos = gates.iter().position(|(stored, _)| stored == path);
+        pos.map(|pos| gates.swap_remove(pos).1)
+    };
+    if let Some(gate) = gate {
+        gate.entered.notify_one();
+        gate.release.notified().await;
+    }
+}
+
+#[cfg(test)]
+fn arm_coords_before_remove(path: &Path) -> CoordsRemovePause {
+    let pause = CoordsRemovePause {
+        entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    };
+    let handed = CoordsRemovePause {
+        entered: std::sync::Arc::clone(&pause.entered),
+        release: std::sync::Arc::clone(&pause.release),
+    };
+    COORDS_BEFORE_REMOVE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push((path.to_path_buf(), pause));
+    handed
+}
+
 pub async fn read_runtime_coords(path: &Path) -> Option<RuntimeCoords> {
     let data = std::fs::read(path).ok()?;
     let coords: RuntimeCoords = serde_json::from_slice(&data).ok()?;
-    validate_runtime_coords(path, coords).await
+    validate_runtime_coords(path, &data, coords).await
 }
 
-async fn validate_runtime_coords(path: &Path, coords: RuntimeCoords) -> Option<RuntimeCoords> {
-    let api_base = match LoopbackHttpBaseUrl::parse(&coords.api_url) {
-        Ok(api_base) => api_base,
-        Err(_) => {
-            let _ = std::fs::remove_file(path);
-            return None;
-        }
-    };
-
+/// Removes the file only when it still holds the bytes this call judged.
+async fn validate_runtime_coords(
+    path: &Path,
+    judged: &[u8],
+    coords: RuntimeCoords,
+) -> Option<RuntimeCoords> {
     if !pid_is_alive(coords.pid) {
-        let _ = std::fs::remove_file(path);
+        #[cfg(test)]
+        pause_before_coords_remove(path).await;
+        if std::fs::read(path).ok().as_deref() == Some(judged) {
+            let _ = std::fs::remove_file(path);
+        }
         return None;
     }
-
+    let api_base = LoopbackHttpBaseUrl::parse(&coords.api_url).ok()?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .ok()?;
-
     let healthy = client
         .get(api_base.join("/api/health").ok()?)
         .send()
         .await
         .ok()
-        .is_some_and(|r| r.status().is_success());
-    if !healthy {
-        let _ = std::fs::remove_file(path);
+        .is_some_and(|response| response.status().is_success());
+    if !healthy || !attach_secret_matches(&client, &api_base, &coords.attach_secret).await {
         return None;
     }
-
-    if !attach_secret_matches(&client, &api_base, &coords.attach_secret).await {
-        let _ = std::fs::remove_file(path);
-        return None;
-    }
-
     Some(coords)
 }
 
@@ -989,7 +1049,9 @@ pub async fn read_attachable_runtime_coords(
     let coords = match runtime_kind {
         AttachableRuntimeKind::Operator => read_runtime_coords(&path).await?,
         AttachableRuntimeKind::Gateway => {
-            validate_runtime_coords(&path, read_private_runtime_coords(&path)?).await?
+            let data = read_private_runtime_coord_bytes(&path)?;
+            let coords = serde_json::from_slice(&data).ok()?;
+            validate_runtime_coords(&path, &data, coords).await?
         }
     };
     runtime_kind.matches(&coords).then_some(coords)
@@ -1205,6 +1267,16 @@ async fn ensure_managed_runtime(
     allow_resources: &[&str],
     surface_name: &str,
 ) -> anyhow::Result<RuntimeCoords> {
+    let self_exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to determine runtime binary: {}", e))?;
+    let admitted = crate::binaries::checked_running_runtime(data_dir, &self_exe)?;
+    // Reuse keeps this digest. Holding waits until a spawn.
+    let signed_sha = admitted.signed_checksum().ok().map(|checksum| {
+        checksum
+            .strip_prefix("sha256:")
+            .unwrap_or(checksum)
+            .to_string()
+    });
     let coords_path = managed_runtime_coord_path(data_dir, runtime_kind);
     // Home boot can issue concurrent app/system/browser requests. Serialize the
     // check/start sequence across processes so only one managed runtime can be
@@ -1233,9 +1305,6 @@ async fn ensure_managed_runtime(
         }
     };
 
-    let self_exe = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("Failed to determine runtime binary: {}", e))?;
-    let binary_sha256 = sha256_file(&self_exe)?;
     let (_home_launch_signing_key, home_launch_signer_did) =
         elastos_identity::load_or_create_did(data_dir)?;
     let policy = serde_json::json!({
@@ -1266,6 +1335,10 @@ async fn ensure_managed_runtime(
                 {
                     match runtime_version_from_health(&coords.api_url).await {
                         Some(actual) if actual == expected => {
+                            let binary_sha256 = match &signed_sha {
+                                Some(sha) => sha.clone(),
+                                None => sha256_file(&self_exe)?,
+                            };
                             if coords.binary_sha256 == binary_sha256
                                 && coords.policy_sha256 == policy_sha256
                                 && coords.dependency_sha256 == dependency_sha256
@@ -1401,8 +1474,12 @@ async fn ensure_managed_runtime(
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| anyhow::anyhow!("Failed to create runtime log: {}", e))?;
 
-    // 5. Spawn managed runtime as detached background process
-    let mut child = std::process::Command::new(&self_exe);
+    let mut prepared = admitted.prepare()?;
+    let binary_sha256 = match signed_sha {
+        Some(sha) => sha,
+        None => prepared.held_content_sha256().to_string(),
+    };
+    let mut child = std::process::Command::new(prepared.exec_path());
     child
         .arg("serve")
         .arg("--addr")
@@ -1450,6 +1527,7 @@ async fn ensure_managed_runtime(
         .as_ref()
         .map(|owner| owner.lock_start())
         .transpose()?;
+    prepared.attach_std(&mut child, false)?;
     let child = child
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start runtime: {}", e))?;
@@ -1483,6 +1561,9 @@ async fn ensure_managed_runtime(
             terminate_sibling_managed_runtime_children(runtime_kind, coords.pid)?;
             child.ready();
             drop(start_guard);
+            // The child adopted the private copy before it became ready.
+            // Drop must not delete that directory out from under it.
+            prepared.persist_private_copy();
             Ok(coords)
         }
         StartWait::Exited(status) => anyhow::bail!(
@@ -1526,6 +1607,169 @@ async fn windows_refuses_managed_runtime_before_start() {
         Some(std::io::ErrorKind::Unsupported)
     );
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn ensure_managed_runtime_refuses_a_changed_runtime_before_exec() {
+    if !crate::binaries::run_isolated(
+        "runtime_control::ensure_managed_runtime_refuses_a_changed_runtime_before_exec",
+    ) {
+        return;
+    }
+    let source = include_str!("runtime_control.rs");
+    let start = source
+        .find("async fn ensure_managed_runtime(")
+        .expect("unix ensure_managed_runtime");
+    let body = &source[start..];
+    let pos = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("ensure_managed_runtime lost {needle}"))
+    };
+    let door = pos("checked_running_runtime(data_dir, &self_exe)");
+    let lock = pos("acquire_managed_runtime_start_lock(data_dir)?");
+    let identity = pos("load_or_create_did(data_dir)?");
+    let prerequisite = pos("prerequisites not installed");
+    let ready = pos("StartWait::Ready");
+    let persist = pos("persist_private_copy()");
+    let exited = pos("StartWait::Exited");
+    assert!(
+        door < lock && lock < identity && identity < prerequisite,
+        "admission must precede the lock, the identity write, and the prerequisite check"
+    );
+    assert!(
+        ready < persist && persist < exited,
+        "the private copy is kept only after the child is ready"
+    );
+    let fixture = crate::installed_release::tests::Fixture::new();
+    fixture.substitute_runtime();
+    let bins = tempfile::tempdir().unwrap();
+    for name in ["localhost-provider", "did-provider", "shell"] {
+        let path = bins.path().join(name);
+        std::fs::write(&path, b"provider").unwrap();
+        let key = format!(
+            "ELASTOS_{}_BIN",
+            name.to_ascii_uppercase().replace('-', "_")
+        );
+        std::env::set_var(&key, &path);
+    }
+    let error = ensure_managed_runtime(
+        &fixture.data,
+        "managed-home",
+        "home-auto.json",
+        &["localhost://Users/*"],
+        "home",
+    )
+    .await
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("Installed artifact differs from its signed checksum"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("prerequisites not installed"),
+        "{message}"
+    );
+    assert!(!fixture.data.join("identity").join("device.key").exists());
+    assert!(!fixture.data.join("managed-runtime-start.lock").exists());
+    assert!(!fixture.data.join("logs").exists());
+    assert!(!fixture.data.join("policy").exists());
+    assert!(!fixture.data.join("did").exists());
+}
+
+#[cfg(all(unix, test))]
+struct KillChild(std::process::Child);
+
+#[cfg(all(unix, test))]
+impl Drop for KillChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+    }
+}
+
+#[cfg(all(unix, test))]
+#[tokio::test]
+async fn reuse_makes_no_private_copy() {
+    if !crate::binaries::run_isolated("runtime_control::reuse_makes_no_private_copy") {
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let install = crate::binaries::InstallableRuntime::of(&exe);
+    let fixture = crate::installed_release::tests::Fixture::bound_to(&install.path);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/api/health",
+        axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "status": "ok",
+                "version": env!("ELASTOS_VERSION"),
+            }))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let health = format!("http://{addr}/api/health");
+    let client = reqwest::Client::new();
+    let mut ready = false;
+    for _ in 0..50 {
+        if client
+            .get(&health)
+            .send()
+            .await
+            .ok()
+            .is_some_and(|response| response.status().is_success())
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(ready, "health server did not accept a connection");
+    let (_key, did) = elastos_identity::load_or_create_did(&fixture.data).unwrap();
+    let allow = managed_home_allow_resources();
+    let policy = serde_json::json!({
+        "allow": allow,
+        "home_launch_signer_did": did,
+        "home_launch_auth_data_dir": fixture.data.display().to_string(),
+    });
+    let policy_sha256 = sha256_bytes(serde_json::to_vec(&policy).unwrap().as_slice());
+    let sleeper = KillChild(
+        std::process::Command::new("/bin/sleep")
+            .arg("300")
+            .spawn()
+            .unwrap(),
+    );
+    let coords = RuntimeCoords {
+        api_url: format!("http://{addr}"),
+        attach_secret: String::new(),
+        pid: sleeper.0.id(),
+        runtime_kind: RUNTIME_KIND_MANAGED_HOME.to_string(),
+        binary_sha256: fixture.binary_sha256(),
+        policy_sha256,
+        dependency_sha256: managed_runtime_dependency_sha256(),
+        generation: String::new(),
+        process_start: String::new(),
+        home_url: String::new(),
+    };
+    std::fs::write(
+        managed_runtime_coord_path(&fixture.data, RUNTIME_KIND_MANAGED_HOME),
+        serde_json::to_vec(&coords).unwrap(),
+    )
+    .unwrap();
+    let readonly = crate::binaries::ReadonlyTemp::enter();
+    let result = ensure_managed_runtime(
+        &fixture.data,
+        RUNTIME_KIND_MANAGED_HOME,
+        "home-auto.json",
+        allow,
+        "home",
+    )
+    .await;
+    drop(readonly);
+    drop(sleeper);
+    server.abort();
+    result.expect("reuse must admit without a private copy");
 }
 
 #[cfg(any(unix, test))]
@@ -1643,6 +1887,12 @@ fn summarize_runtime_start_failure_contents(contents: &str) -> Option<String> {
         return Some(format!(
             "Installed core components are out of sync with the stamped manifest.\nRun `elastos setup` to reconcile installed support assets, then retry.\nLast runtime error: {}",
             last_line
+        ));
+    }
+
+    if contents.contains("Installed artifact differs from its signed checksum") {
+        return Some(format!(
+            "The managed runtime is still on the release it started with. Open Home again to restart it.\nLast runtime error: {last_line}"
         ));
     }
 
@@ -1812,6 +2062,65 @@ mod tests {
         let ready = managed_runtime_ready(&coords_path, env!("ELASTOS_VERSION")).await;
         assert!(ready.is_none());
     }
+
+    /// Pid 0 names this process group, not one process. A coordinates file
+    /// that names it is removed, for a non-loopback URL and for a loopback URL.
+    #[tokio::test]
+    async fn a_pid_that_names_no_process_is_not_a_live_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad-url.json");
+        std::fs::write(
+            &bad,
+            br#"{"api_url":"http://192.0.2.1:9","attach_secret":"dummy-fixture","pid":0}"#,
+        )
+        .unwrap();
+        let good = dir.path().join("good-url.json");
+        std::fs::write(
+            &good,
+            br#"{"api_url":"http://127.0.0.1:9","attach_secret":"dummy-fixture","pid":0}"#,
+        )
+        .unwrap();
+        assert!(read_runtime_coords(&bad).await.is_none());
+        assert!(read_runtime_coords(&good).await.is_none());
+        assert!(
+            !bad.try_exists().unwrap(),
+            "pid 0 with a bad URL was left in place"
+        );
+        assert!(
+            !good.try_exists().unwrap(),
+            "pid 0 with a loopback URL was left in place"
+        );
+    }
+
+    /// The dead owner's bytes were judged, then the file was replaced. The
+    /// replacement is kept.
+    #[tokio::test]
+    async fn a_coords_file_replaced_after_the_read_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("coords.json");
+        let judged = br#"{"api_url":"http://127.0.0.1:9","attach_secret":"judged","pid":0}"#;
+        let replacement =
+            br#"{"api_url":"http://127.0.0.1:9","attach_secret":"live-owner","pid":1}"#;
+        std::fs::write(&path, judged).unwrap();
+        let pause = super::arm_coords_before_remove(&path);
+        let path_for_read = path.clone();
+        let task = tokio::spawn(async move { read_runtime_coords(&path_for_read).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), pause.entered.notified())
+            .await
+            .expect("coords validation did not pause before remove");
+        std::fs::write(&path, replacement).unwrap();
+        pause.release.notify_one();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("coords read did not finish")
+            .expect("coords read task panicked");
+        assert!(read.is_none());
+        assert!(
+            std::fs::read(&path).ok().as_deref() == Some(replacement.as_slice()),
+            "a coordinates file replaced after the read was removed"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn managed_runtime_ready_accepts_matching_health() {
@@ -2057,6 +2366,581 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn sign_managed_provider_home() -> crate::installed_release::tests::Fixture {
+        use std::os::unix::fs::PermissionsExt;
+        let mut fixture = crate::installed_release::tests::Fixture::new();
+        let script = b"#!/bin/sh\nprintf started > \"$1\"\n";
+        let platform = crate::setup::detect_platform();
+        let bin_dir = fixture.data.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let mut external = serde_json::Map::new();
+        for (name, provides) in [
+            ("localhost-provider", "localhost://*"),
+            ("did-provider", "elastos://did/*"),
+        ] {
+            let path = bin_dir.join(name);
+            std::fs::write(&path, script).unwrap();
+            // Same mode as installed_release::tests::start_fixture. Linux
+            // fexecve refuses a script with no execute bit.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            external.insert(
+                name.to_string(),
+                serde_json::json!({
+                    "install_path": format!("bin/{name}"),
+                    "provider_runtime": {
+                        "role": "provider",
+                        "substrate": "native",
+                        "runtime_abi": "elastos.provider-stdio/v1",
+                        "execution": "native-provider",
+                        "provides": provides
+                    },
+                    "platforms": {
+                        platform.as_str(): {
+                            "checksum": format!("sha256:{}", sha256_bytes(script)),
+                            "install_path": format!("bin/{name}")
+                        }
+                    }
+                }),
+            );
+        }
+        let shell = bin_dir.join("shell");
+        std::fs::write(&shell, script).unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        external.insert(
+            "shell".to_string(),
+            serde_json::json!({
+                "install_path": "bin/shell",
+                "platforms": {
+                    platform.as_str(): {
+                        "checksum": format!("sha256:{}", sha256_bytes(script)),
+                        "install_path": "bin/shell"
+                    }
+                }
+            }),
+        );
+        std::fs::write(
+            fixture.data.join("components.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.components/v1",
+                "external": external,
+                "capsules": {},
+                "profiles": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fixture.bind_components();
+        // A signed Home can also carry the parent opt-in. The child must not
+        // inherit it: admission stays on the publisher signature.
+        std::fs::write(fixture.data.join("config.toml"), "dev_mode = true\n").unwrap();
+        fixture
+    }
+
+    #[cfg(unix)]
+    fn sync_managed_child(parent: &Path) -> PathBuf {
+        let home = managed_runtime_child_home_dir(parent, RUNTIME_KIND_MANAGED_HOME);
+        sync_managed_runtime_child_components_manifest(parent, &home).unwrap();
+        managed_runtime_child_data_dir(&home)
+    }
+
+    #[cfg(unix)]
+    fn start_signed_provider(data: &Path, name: &str) -> String {
+        let path = data.join("bin").join(name);
+        let prepared = crate::setup::verify_installed_component_start(data, name, &path)
+            .expect("signed release admission");
+        let checksum = prepared.signed_checksum().unwrap().to_string();
+        let marker = data.join(format!(".{name}.started"));
+        let mut command = std::process::Command::new(prepared.exec_path());
+        command.arg(&marker);
+        prepared.attach_std(&mut command, false).unwrap();
+        assert!(command.status().unwrap().success(), "{name} did not start");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"started");
+        crate::binaries::checked_native_provider_with_data_dir(data, &path)
+            .verify_at_spawn()
+            .unwrap();
+        checksum
+    }
+
+    /// The plant is a publisher-signed older pair over the same artifacts.
+    /// `installation/` is the pair admission reads when it is present.
+    #[cfg(unix)]
+    fn plant_older_release(data: &Path, head: &[u8], release: &[u8]) {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+        let head_path = elastos_common::localhost::publisher_release_head_path(data);
+        let release_path = elastos_common::localhost::publisher_release_manifest_path(data);
+        std::fs::write(&head_path, head).unwrap();
+        std::fs::write(&release_path, release).unwrap();
+        let install = data.join("installation");
+        let _ = std::fs::remove_dir_all(&install);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&install)
+            .unwrap();
+        std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (name, bytes) in [("release-head.json", head), ("release.json", release)] {
+            let path = install.join(name);
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .unwrap();
+            file.write_all(bytes).unwrap();
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_starts_localhost_provider_and_did_provider() {
+        let parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        for name in ["localhost-provider", "did-provider"] {
+            let child_sum = start_signed_provider(&child, name);
+            let parent_sum = start_signed_provider(&parent.data, name);
+            assert_eq!(child_sum, parent_sum, "{name}");
+        }
+        assert!(
+            !child.join("config.toml").exists(),
+            "dev_mode stays on the signed parent"
+        );
+        assert_eq!(
+            std::fs::read(child.join("sources.json")).unwrap(),
+            std::fs::read(parent.data.join("sources.json")).unwrap()
+        );
+        assert_eq!(projected_mode(&child.join("sources.json")), 0o600);
+        let head = elastos_common::localhost::publisher_release_head_path(&child);
+        assert_eq!(projected_mode(&head), 0o600);
+        assert_eq!(
+            projected_mode(&elastos_common::localhost::publisher_release_manifest_path(
+                &child
+            )),
+            0o600
+        );
+        assert_eq!(projected_mode(head.parent().unwrap()), 0o700);
+        for name in ["localhost-provider", "did-provider", "shell"] {
+            assert_eq!(
+                projected_mode(&child.join("bin").join(name)),
+                0o755,
+                "{name} copied into the child keeps its execute bit"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_follows_the_consumed_release_not_a_stale_publisher_copy() {
+        let parent = sign_managed_provider_home();
+        parent.publish_consumed();
+        let (head, release) = parent.release_pair_at_version("0.6.0");
+        std::fs::write(
+            elastos_common::localhost::publisher_release_head_path(&parent.data),
+            &head,
+        )
+        .unwrap();
+        std::fs::write(
+            elastos_common::localhost::publisher_release_manifest_path(&parent.data),
+            &release,
+        )
+        .unwrap();
+        start_signed_provider(&parent.data, "localhost-provider");
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "localhost-provider");
+        start_signed_provider(&child, "did-provider");
+        assert_eq!(
+            std::fs::read(elastos_common::localhost::installation_release_manifest_path(&child))
+                .unwrap(),
+            std::fs::read(
+                elastos_common::localhost::installation_release_manifest_path(&parent.data)
+            )
+            .unwrap()
+        );
+        assert!(!elastos_common::localhost::publisher_release_manifest_path(&child).exists());
+        assert_eq!(projected_mode(&child.join("installation")), 0o700);
+        assert_eq!(
+            projected_mode(&elastos_common::localhost::installation_release_head_path(
+                &child
+            )),
+            0o600
+        );
+        assert_eq!(projected_mode(&child.join("sources.json")), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_refuses_a_changed_helper() {
+        let parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        let path = child.join("bin/localhost-provider");
+        // Door-removal plant: a different executable at the child path, plus
+        // dev_mode. The parent's copy of the helper still admits. Removing the
+        // digest check, or honouring dev_mode ahead of the signed release,
+        // starts this file.
+        std::fs::write(&path, b"#!/bin/sh\nprintf tampered\n").unwrap();
+        std::fs::write(child.join("config.toml"), "dev_mode = true\n").unwrap();
+        start_signed_provider(&parent.data, "localhost-provider");
+        let error =
+            crate::setup::verify_installed_component_start(&child, "localhost-provider", &path)
+                .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("installed executable differs from signed release digest"),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_refuses_an_older_release() {
+        let parent = sign_managed_provider_home();
+        let (head, release) = parent.release_pair_at_version("0.6.0");
+        // Door-removal plant: the same older pair admits when the source
+        // record names it. Copied over the child alone, the parent's head CID
+        // still has to refuse it.
+        let mut twin = sign_managed_provider_home();
+        twin.publish_exact("0.6.0", head.clone(), release.clone());
+        start_signed_provider(&twin.data, "localhost-provider");
+        let child = sync_managed_child(&parent.data);
+        plant_older_release(&child, &head, &release);
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Release metadata bytes do not match requested CID"),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_replaces_a_leftover_older_release() {
+        let parent = sign_managed_provider_home();
+        let (head, release) = parent.release_pair_at_version("0.6.0");
+        let child = sync_managed_child(&parent.data);
+        plant_older_release(&child, &head, &release);
+        let child = sync_managed_child(&parent.data);
+        assert!(
+            !child.join("installation").exists(),
+            "a leftover consumed pair must not shadow the parent's release"
+        );
+        start_signed_provider(&child, "did-provider");
+        assert_eq!(
+            std::fs::read(elastos_common::localhost::publisher_release_manifest_path(
+                &child
+            ))
+            .unwrap(),
+            std::fs::read(elastos_common::localhost::publisher_release_manifest_path(
+                &parent.data
+            ))
+            .unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_home_without_dev_mode_stays_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_managed_runtime_parent_support_artifacts(tmp.path());
+        let child = sync_managed_child(tmp.path());
+        let path = child.join("bin/localhost-provider");
+        // Door-removal plant: the helper matches the manifest. A start that
+        // trusts the checksum alone admits it. A source Home has no release
+        // and no dev_mode, so admission stays refused.
+        crate::binaries::verify_component_binary_with_data_dir(&child, "localhost-provider", &path)
+            .unwrap();
+        let error =
+            crate::setup::verify_installed_component_start(&child, "localhost-provider", &path)
+                .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("No trusted source configured"),
+            "{message}"
+        );
+        assert!(!child.join("config.toml").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_home_child_stays_refused_when_dev_mode_is_only_on_the_parent() {
+        // Today's source Home: dev_mode is read from the data dir of the
+        // process that admits the helper. The managed child has its own data
+        // dir, and the parent opt-in is not copied, so the child stays refused.
+        let tmp = tempfile::tempdir().unwrap();
+        write_managed_runtime_parent_support_artifacts(tmp.path());
+        std::fs::write(tmp.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        let parent_bin = tmp.path().join("bin/localhost-provider");
+        let parent_start = crate::setup::verify_installed_component_start(
+            tmp.path(),
+            "localhost-provider",
+            &parent_bin,
+        )
+        .unwrap();
+        assert!(
+            parent_start.signed_checksum().is_err(),
+            "the parent source Home starts unchecked"
+        );
+        let child = sync_managed_child(tmp.path());
+        assert!(!child.join("config.toml").exists());
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("No trusted source configured"),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn projected_mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777
+    }
+
+    /// The head copied into the child is the head the parent verified. A write
+    /// to the head file after that read must not reach the child.
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_keeps_the_head_from_the_verified_read() {
+        let parent = sign_managed_provider_home();
+        let head_path = elastos_common::localhost::publisher_release_head_path(&parent.data);
+        let original = std::fs::read(&head_path).unwrap();
+        let hooked = head_path.clone();
+        let _interrupt = crate::installed_release::tests::VerifiedReadInterrupt::arm(move || {
+            std::fs::write(&hooked, b"changed-after-the-verified-read").unwrap();
+        });
+        let child = sync_managed_child(&parent.data);
+        let copied = std::fs::read(elastos_common::localhost::publisher_release_head_path(
+            &child,
+        ))
+        .unwrap();
+        assert_eq!(copied, original);
+        start_signed_provider(&child, "localhost-provider");
+    }
+
+    /// Door-removal plant: `fs::read` follows the symlink and the child receives
+    /// the target. A bounded no-follow read refuses, and the child has no copy.
+    #[cfg(unix)]
+    #[test]
+    fn signed_home_child_does_not_follow_or_overread_sources() {
+        let parent = sign_managed_provider_home();
+        let real = parent.data.join("sources-real.json");
+        std::fs::rename(parent.data.join("sources.json"), &real).unwrap();
+        std::os::unix::fs::symlink(&real, parent.data.join("sources.json")).unwrap();
+        let home = managed_runtime_child_home_dir(&parent.data, RUNTIME_KIND_MANAGED_HOME);
+        let error =
+            sync_managed_runtime_child_components_manifest(&parent.data, &home).unwrap_err();
+        let child = managed_runtime_child_data_dir(&home);
+        assert!(
+            !child.join("sources.json").exists(),
+            "symlink sources reached the child: {error}"
+        );
+
+        let parent = sign_managed_provider_home();
+        let mut bytes = std::fs::read(parent.data.join("sources.json")).unwrap();
+        bytes.pop();
+        bytes.extend(br#","pad":""#);
+        bytes.extend(std::iter::repeat_n(b'x', (256 * 1024) + 1));
+        bytes.extend(br#""}"#);
+        std::fs::write(parent.data.join("sources.json"), &bytes).unwrap();
+        let home = managed_runtime_child_home_dir(&parent.data, RUNTIME_KIND_MANAGED_HOME);
+        let error =
+            sync_managed_runtime_child_components_manifest(&parent.data, &home).unwrap_err();
+        let child = managed_runtime_child_data_dir(&home);
+        assert!(
+            !child.join("sources.json").exists(),
+            "oversized sources reached the child: {error:#}"
+        );
+    }
+
+    /// A crash leftover inside `installation/` refuses admission. The next sync
+    /// removes it, and that sync fsyncs the installation directory.
+    #[cfg(unix)]
+    #[test]
+    fn crash_leftover_refuses_until_sync_and_the_installation_dir_is_fsynced() {
+        let parent = sign_managed_provider_home();
+        parent.publish_consumed();
+        let capture = crate::installed_release::tests::SyncCapture::start();
+        let child = sync_managed_child(&parent.data);
+        assert!(
+            capture.includes(&child.join("installation")),
+            "projection must fsync the installation directory"
+        );
+        drop(capture);
+        let leftover = child.join("installation/.release-head.json.project");
+        std::fs::write(&leftover, b"torn").unwrap();
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("require repair"), "{error:#}");
+        let child = sync_managed_child(&parent.data);
+        assert!(!leftover.exists());
+        start_signed_provider(&child, "localhost-provider");
+    }
+
+    /// While the child is still on the release it started with, an updated
+    /// parent runtime refuses the next helper start. The owner sees that
+    /// refusal through the runtime-start summary. The runtime hash no longer
+    /// matches, so the next ensure leaves the reuse branch and syncs the child.
+    #[cfg(unix)]
+    #[test]
+    fn running_child_refuses_the_next_helper_after_an_update_until_ensure_restarts_it() {
+        let mut parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "localhost-provider");
+        let runtime = std::path::PathBuf::from(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(parent.data.join("sources.json")).unwrap(),
+            )
+            .unwrap()["sources"][0]["install_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let running_hash = sha256_file(&runtime).unwrap();
+        std::fs::write(&runtime, b"updated signed runtime").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (head, release) = parent.release_pair_at_version("0.8.0");
+        parent.publish_exact("0.8.0", head, release);
+        let updated_hash = sha256_file(&runtime).unwrap();
+        assert_ne!(running_hash, updated_hash);
+        start_signed_provider(&parent.data, "localhost-provider");
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        let refusal = format!("{error:#}");
+        assert!(
+            refusal.contains("Installed artifact differs from its signed checksum"),
+            "{refusal}"
+        );
+        let log = child.join("runtime.log");
+        std::fs::write(&log, &refusal).unwrap();
+        let summary = summarize_runtime_start_failure(&log).unwrap();
+        assert!(
+            summary.contains("Open Home again to restart it"),
+            "{summary}"
+        );
+        let owner = format_runtime_start_exit_message(
+            "home",
+            &log,
+            std::process::Command::new("false").status().unwrap(),
+        );
+        assert!(owner.contains(&summary), "{owner}");
+        // ensure reuses the running child only when the stored binary, policy
+        // and dependency hashes all match. This binary hash changed, so ensure
+        // does not reuse it and syncs the replacement before that child starts.
+        assert_ne!(running_hash, updated_hash);
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "did-provider");
+    }
+
+    /// A pending journal beside the parent's install path names the parent Home.
+    /// The child's host-start gate refuses it as another Home.
+    #[cfg(unix)]
+    #[test]
+    fn pending_journal_beside_the_parent_install_refuses_the_child() {
+        let parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "did-provider");
+        let runtime = std::path::PathBuf::from(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(child.join("sources.json")).unwrap(),
+            )
+            .unwrap()["sources"][0]["install_path"]
+                .as_str()
+                .unwrap(),
+        );
+        let journal = runtime
+            .parent()
+            .unwrap()
+            .join(".elastos.update-journal.json");
+        std::fs::write(
+            &journal,
+            serde_json::to_vec(&serde_json::json!({
+                "schema": "elastos.install-transaction/v1",
+                "transaction_id": "0123456789abcdef0123456789abcdef",
+                "data_dir": parent.data.display().to_string(),
+                "binary_basename": runtime.file_name().unwrap().to_str().unwrap(),
+                "phase": "committing",
+                "entries": []
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Installation recovery belongs to a different Home"),
+            "{message}"
+        );
+    }
+
+    /// A parent that no longer has a release clears the child's projection,
+    /// including a symlink, and the child is refused again.
+    #[cfg(unix)]
+    #[test]
+    fn parent_without_a_source_clears_the_child_projection() {
+        let parent = sign_managed_provider_home();
+        let child = sync_managed_child(&parent.data);
+        start_signed_provider(&child, "localhost-provider");
+        let secret = child.join("secret-sources");
+        std::fs::write(&secret, b"keep").unwrap();
+        std::fs::remove_file(child.join("sources.json")).unwrap();
+        std::os::unix::fs::symlink(&secret, child.join("sources.json")).unwrap();
+        std::fs::create_dir_all(child.join("installation")).unwrap();
+        std::fs::write(child.join("installation/release-head.json"), b"stale").unwrap();
+        std::fs::remove_file(parent.data.join("sources.json")).unwrap();
+        let child = sync_managed_child(&parent.data);
+        assert!(!child.join("sources.json").exists());
+        assert_eq!(std::fs::read(&secret).unwrap(), b"keep");
+        assert!(!elastos_common::localhost::publisher_release_head_path(&child).exists());
+        assert!(!elastos_common::localhost::publisher_release_manifest_path(&child).exists());
+        assert!(!child.join("installation").exists());
+        assert!(child.join("components.json").exists());
+        let error = crate::setup::verify_installed_component_start(
+            &child,
+            "localhost-provider",
+            &child.join("bin/localhost-provider"),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("No trusted source configured"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn subordinate_managed_runtime_requires_parent_components_manifest() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2283,5 +3167,148 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    #[cfg(unix)]
+    fn live_gateway_coords(url: &str, secret: &str) -> RuntimeCoords {
+        RuntimeCoords {
+            api_url: url.to_string(),
+            attach_secret: secret.to_string(),
+            pid: std::process::id(),
+            runtime_kind: RUNTIME_KIND_GATEWAY.to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: "generation".to_string(),
+            process_start: String::new(),
+            home_url: String::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn status_server(
+        health: axum::http::StatusCode,
+        attach: axum::http::StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/api/health", get(move || async move { health }))
+            .route(
+                "/api/auth/attach",
+                axum::routing::post(move || async move { attach }),
+            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (url, server)
+    }
+
+    /// A validating read must not delete a live owner's file when health,
+    /// attach, or the URL fails. A dead pid is still removed, and that removal
+    /// plus a leftover live file both allow a later start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_health_read_keeps_a_live_owner_and_a_stale_file_does_not_block_start() {
+        let dead = tempfile::tempdir().unwrap();
+        let dead_path = gateway_runtime_coord_path(dead.path());
+        let mut dead_coords = live_gateway_coords("http://127.0.0.1:9", "secret");
+        dead_coords.pid = u32::MAX;
+        write_runtime_coords(&dead_path, &dead_coords).unwrap();
+        assert!(
+            read_attachable_runtime_coords(dead.path(), AttachableRuntimeKind::Gateway)
+                .await
+                .is_none()
+        );
+        assert!(!dead_path.exists(), "a dead pid left its coordinates file");
+        let restarted = crate::api::gateway_local_control::start_gateway_local_control(
+            dead.path(),
+            std::sync::Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+        )
+        .await
+        .expect("a later start after a dead pid was cleaned");
+        let restarted_coords =
+            read_attachable_runtime_coords(dead.path(), AttachableRuntimeKind::Gateway).await;
+        assert_eq!(
+            restarted_coords.as_ref().map(|coords| coords.pid),
+            Some(std::process::id()),
+            "a stale dead-pid file blocked a later start: {restarted_coords:?}"
+        );
+        restarted.shutdown().await.unwrap();
+
+        let (bad_health_url, bad_health) = status_server(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::http::StatusCode::OK,
+        )
+        .await;
+        let (bad_attach_url, bad_attach) = status_server(
+            axum::http::StatusCode::OK,
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+        .await;
+        let cases = [
+            ("bad url", "not a url", "secret"),
+            ("health", bad_health_url.as_str(), "secret"),
+            ("attach", bad_attach_url.as_str(), "secret"),
+        ];
+        let mut deleted = Vec::new();
+        let mut health_dir = None;
+        for (name, url, secret) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = gateway_runtime_coord_path(dir.path());
+            write_runtime_coords(&path, &live_gateway_coords(url, secret)).unwrap();
+            assert!(
+                read_attachable_runtime_coords(dir.path(), AttachableRuntimeKind::Gateway)
+                    .await
+                    .is_none(),
+                "{name} read accepted bad coordinates"
+            );
+            if !path.exists() {
+                deleted.push(name);
+            }
+            if name == "health" {
+                health_dir = Some(dir);
+            }
+        }
+        let health_dir = health_dir.unwrap();
+        let health_path = gateway_runtime_coord_path(health_dir.path());
+        let owner_held = health_path.exists()
+            && super::gateway_children::Owner::read(health_dir.path())
+                .and_then(|owner| owner.lock_start())
+                .is_ok();
+        let mut later = String::from("file was deleted before a later start");
+        if health_path.exists() {
+            match crate::api::gateway_local_control::start_gateway_local_control(
+                health_dir.path(),
+                std::sync::Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+            )
+            .await
+            {
+                Ok(control) => {
+                    let coords = read_attachable_runtime_coords(
+                        health_dir.path(),
+                        AttachableRuntimeKind::Gateway,
+                    )
+                    .await;
+                    later = match coords {
+                        Some(coords)
+                            if coords.pid == std::process::id()
+                                && coords.api_url != bad_health_url =>
+                        {
+                            "started".to_string()
+                        }
+                        other => format!("later start left {other:?}"),
+                    };
+                    control.shutdown().await.unwrap();
+                }
+                Err(error) => later = format!("later start failed: {error:#}"),
+            }
+        }
+        bad_health.abort();
+        bad_attach.abort();
+        assert!(
+            deleted.is_empty() && owner_held && later == "started",
+            "a live owner's coordinates were deleted on read ({deleted:?}); owner lock held={owner_held}; later start over the leftover file: {later}"
+        );
     }
 }

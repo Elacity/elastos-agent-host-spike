@@ -8461,6 +8461,7 @@ async fn test_browser_open_runtime_stream_relays_to_exit_ipc_without_host_networ
         browser_engine_attached_test_state_with_relay(
             dir.path(),
             Some(relay_path.to_string_lossy().to_string()),
+            true,
         )
         .await,
     );
@@ -9231,6 +9232,7 @@ async fn test_browser_readiness_denial_precedes_profile_and_launch_effects() {
         let authority = passkey_authority(dir.path());
         let token = app_token_for_authority(dir.path(), BROWSER_CAPSULE_ID, &authority);
         let state = net_exit_test_state(dir.path()).await;
+        crate::setup::install_signed_browser_vm_image_fixture(dir.path());
         let inventory = MockBrowserEngineProvider
             .send_raw(&json!({"op":"status","principal_id":"person:readiness"}))
             .await
@@ -9379,7 +9381,6 @@ async fn display_attach_test_app(
         gate: TokioMutex::new(gate),
         entered: tokio::sync::Notify::new(),
     });
-    seed_test_browser_capsules(dir);
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register_sub_provider("net", Arc::new(MockNetProvider))
@@ -9400,6 +9401,7 @@ async fn display_attach_test_app(
         .await
         .unwrap();
     let mut state = test_state(dir);
+    crate::setup::install_signed_browser_vm_image_fixture(dir);
     state.provider_registry = Some(registry);
     state.browser_internet = granted_browser_internet(dir);
     (gateway_router(state), provider)
@@ -10904,18 +10906,31 @@ async fn browser_open_repairs_helpers_after_viewer_load(
         serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
-    let source = serde_json::from_value(json!({"name":"fixture",
-        "publisher_dids":[elastos_identity::derive_did(&[217;32]).1],
-        "connect_ticket":"", "publisher_node_id":""}))
-    .unwrap();
-    let (_, server, serving) =
-        crate::setup::tests::carrier_cid_source(&data, &source, artifacts).await;
     let owner = passkey_authority_with_name(&data, Some("helper-repair"));
     // The viewer already holds its launch token. Open must repair independently
     // of the capsule's earlier Home launch preparation.
     let token = app_token_for_authority(&data, BROWSER_CAPSULE_ID, &owner);
     let authority = runtime_wallet_authority_for_app_token(&data, BROWSER_CAPSULE_ID, &token);
-    let state = browser_engine_attached_test_state(&data).await;
+    let state = browser_engine_attached_test_state_with_relay(&data, None, false).await;
+    if enabled {
+        // Admit helper repair through a signed release without installing an
+        // image: host refusal must follow repair before image preparation.
+        crate::installed_release::tests::sign_test_install(&data);
+    }
+    let source = if enabled {
+        crate::sources::load_trusted_sources(&data)
+            .unwrap()
+            .default_source()
+            .unwrap()
+            .clone()
+    } else {
+        serde_json::from_value(json!({"name":"fixture",
+            "publisher_dids":[elastos_identity::derive_did(&[217;32]).1],
+            "connect_ticket":"", "publisher_node_id":""}))
+        .unwrap()
+    };
+    let (_, server, serving) =
+        crate::setup::tests::carrier_cid_source(&data, &source, artifacts).await;
     for (_, relative, bytes) in helpers {
         if stale {
             std::fs::write(data.join(relative), vec![b'x'; bytes.len()]).unwrap();
@@ -11356,6 +11371,7 @@ async fn internet_stop_barrier(before: bool) {
     let inbox_revoke = app_token_for_authority(dir.path(), INBOX_CAPSULE_ID, &authority);
     let mut state = internet_test_state(dir.path());
     seed_test_browser_capsules(dir.path());
+    crate::setup::install_signed_browser_vm_image_fixture(dir.path());
     let registry = Arc::new(ProviderRegistry::new());
     registry
         .register_sub_provider("net", Arc::new(MockNetProvider))

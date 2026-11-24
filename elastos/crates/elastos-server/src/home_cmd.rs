@@ -2017,7 +2017,7 @@ async fn dispatch_capsule_action(
     if !catalog_capsule_has_cli_projection(capsule) {
         anyhow::bail!("Capsule {} is not a Home CLI launch action.", capsule_name);
     }
-    run_capsule_action(capsule_name).await
+    run_capsule_action(Path::new(&snapshot.data_dir), capsule_name).await
 }
 
 fn action_spec(action_id: &str) -> Option<ActionSpec> {
@@ -2091,10 +2091,15 @@ async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Resu
         }
         ActionLaunch::External(args) => {
             let exe = std::env::current_exe().context("current exe unavailable")?;
-            let status = Command::new(exe)
-                .args(args)
-                .env("ELASTOS_PARENT_SURFACE", "home")
-                .status()?;
+            let admitted = elastos_server::binaries::checked_running_runtime(
+                Path::new(&snapshot.data_dir),
+                &exe,
+            )?;
+            let prepared = admitted.prepare()?;
+            let mut command = Command::new(prepared.exec_path());
+            command.args(args).env("ELASTOS_PARENT_SURFACE", "home");
+            prepared.attach_std(&mut command, false)?;
+            let status = command.status()?;
             let exit = status
                 .code()
                 .map(|code| code.to_string())
@@ -2112,9 +2117,12 @@ async fn run_action(action: ActionSpec, snapshot: &HomeSnapshot) -> anyhow::Resu
 }
 
 /// Launch a dynamically discovered capsule by name.
-async fn run_capsule_action(capsule_name: &str) -> anyhow::Result<String> {
+async fn run_capsule_action(data_dir: &Path, capsule_name: &str) -> anyhow::Result<String> {
     let exe = std::env::current_exe().context("current exe unavailable")?;
-    let status = Command::new(exe)
+    let admitted = elastos_server::binaries::checked_running_runtime(data_dir, &exe)?;
+    let prepared = admitted.prepare()?;
+    let mut command = Command::new(prepared.exec_path());
+    command
         .args([
             "capsule",
             capsule_name,
@@ -2122,8 +2130,9 @@ async fn run_capsule_action(capsule_name: &str) -> anyhow::Result<String> {
             "interactive",
             "--interactive",
         ])
-        .env("ELASTOS_PARENT_SURFACE", "home")
-        .status()?;
+        .env("ELASTOS_PARENT_SURFACE", "home");
+    prepared.attach_std(&mut command, false)?;
+    let status = command.status()?;
     if status.success() {
         Ok(format!("Returned home from {}.", capsule_name))
     } else {
@@ -2547,9 +2556,6 @@ async fn gather_runtime_status(data_dir: &Path) -> RuntimeStatus {
         status.peer_count = fetch_peer_count(&client, &coords.api_url, &client_token, &peer_cap)
             .await
             .ok();
-        status.ticket = fetch_ticket(&client, &coords.api_url, &client_token, &peer_cap)
-            .await
-            .ok();
     }
 
     status
@@ -2792,29 +2798,6 @@ async fn fetch_peer_count(
     Ok(count)
 }
 
-async fn fetch_ticket(
-    client: &reqwest::Client,
-    api_url: &str,
-    client_token: &str,
-    peer_cap: &str,
-) -> anyhow::Result<String> {
-    let body = provider_call(
-        client,
-        api_url,
-        client_token,
-        peer_cap,
-        "peer",
-        "get_ticket",
-        &serde_json::json!({}),
-    )
-    .await?;
-    body.get("data")
-        .and_then(|d| d.get("ticket"))
-        .and_then(|v| v.as_str())
-        .map(|v| v.to_string())
-        .ok_or_else(|| anyhow::anyhow!("ticket response missing ticket"))
-}
-
 async fn provider_call(
     client: &reqwest::Client,
     api_url: &str,
@@ -2963,7 +2946,7 @@ fn write_home_state_probe(
         match snapshot.runtime.peer_count {
             Some(0) if snapshot.runtime.ticket.is_some() =>
                 "Carrier bootstrap ready; waiting for another Home".to_string(),
-            Some(0) => "starting up".to_string(),
+            Some(0) => "Carrier ready".to_string(),
             Some(1) => "1 Carrier peer reachable".to_string(),
             Some(peers) => format!("{} Carrier peers reachable", peers),
             None => "runtime not connected yet".to_string(),
@@ -3023,9 +3006,6 @@ fn write_home_state_probe(
     writeln!(out, "  Delivery:  {}", delivery)?;
     writeln!(out, "  Roots:     localhost://Users, localhost://UsersAI")?;
     writeln!(out, "  Profile:   elastos identity nickname set")?;
-    if let Some(ticket) = &snapshot.runtime.ticket {
-        writeln!(out, "  Ticket:    {}", ticket)?;
-    }
     writeln!(out)?;
 
     writeln!(out, "Spaces")?;
@@ -3571,6 +3551,46 @@ pub(crate) mod tests {
         assert!(none.contains("  Carrier:   0 reachable\n"), "{none}");
         assert!(none.contains("  Delivery:  local only until another Home joins Chat\n"));
         assert!(render(Some(2)).contains("  Carrier:   2 reachable\n"));
+    }
+
+    /// Printing `Ticket:` again fails this assertion. The snapshot may still
+    /// hold a ticket for the network line; the status text does not show it.
+    #[test]
+    fn home_status_text_omits_the_carrier_ticket() {
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.runtime.peer_count = Some(0);
+        snapshot.runtime.ticket = Some("addr-ticket-should-stay-off-the-page".to_string());
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("Carrier bootstrap ready; waiting for another Home"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("Ticket:"),
+            "status text prints a Carrier ticket:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("addr-ticket-should-stay-off-the-page"),
+            "status text prints the ticket value:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn home_status_shows_carrier_ready_without_a_ticket() {
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.runtime.peer_count = Some(0);
+        snapshot.runtime.ticket = None;
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("  Network:   Carrier ready\n"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Carrier bootstrap ready"), "{rendered}");
+        assert!(!rendered.contains("Ticket:"), "{rendered}");
     }
 
     #[cfg(unix)]
@@ -4676,6 +4696,7 @@ pub(crate) mod tests {
             policy_sha256: String::new(),
             dependency_sha256: String::new(),
             generation: String::new(),
+            process_start: String::new(),
             home_url: String::new(),
         };
 
@@ -5279,5 +5300,144 @@ pub(crate) mod tests {
         assert!(managed.running);
         assert_eq!(managed.kind.as_deref(), Some("managed-home"));
         server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn gather_runtime_status_shows_carrier_ready_without_fetching_a_ticket() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Mutex;
+
+        let _guard = HOME_CMD_ENV_LOCK.lock().await;
+        let temp = tempfile::tempdir().unwrap();
+        let _coords = ScopedEnvVar::set(
+            "ELASTOS_RUNTIME_COORDS_FILE",
+            temp.path().join("missing-runtime-coords.json"),
+        );
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let record = seen.clone();
+        let app = axum::Router::new()
+            .route(
+                "/api/health",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({"status": "ok", "version": "2.0.1-test"}))
+                }),
+            )
+            .route(
+                "/api/auth/attach",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({"token": "client"}))
+                }),
+            )
+            .route(
+                "/api/capsules",
+                axum::routing::get(|| async { axum::Json(serde_json::json!({"capsules": []})) }),
+            )
+            .route(
+                "/api/capability/request",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({"token": "peer-cap"}))
+                }),
+            )
+            .route(
+                "/api/provider/:scheme/:op",
+                axum::routing::post(
+                    move |axum::extract::Path((_, op)): axum::extract::Path<(String, String)>| {
+                        let record = record.clone();
+                        async move {
+                            record.lock().expect("op list").push(op.clone());
+                            if op == "get_ticket" {
+                                return (
+                                    axum::http::StatusCode::BAD_REQUEST,
+                                    axum::Json(serde_json::json!({"status": "error"})),
+                                );
+                            }
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({
+                                    "status": "ok",
+                                    "data": { "peers": [] }
+                                })),
+                            )
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let path = temp.path().join("home-runtime-coords.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "api_url": format!("http://{addr}"),
+                "attach_secret": "secret",
+                "pid": std::process::id(),
+                "runtime_kind": "managed-home",
+                "home_url": "http://127.0.0.1:1/home/"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let status = gather_runtime_status(temp.path()).await;
+        server.abort();
+        assert_eq!(status.peer_count, Some(0), "{status:?}");
+        assert!(status.ticket.is_none(), "{status:?}");
+        let ops = seen.lock().expect("op list");
+        assert!(
+            ops.iter().any(|op| op == "list_peers"),
+            "status did not read peers: {ops:?}"
+        );
+        assert!(
+            !ops.iter().any(|op| op == "get_ticket"),
+            "status fetched a Carrier ticket: {ops:?}"
+        );
+        drop(ops);
+
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.runtime = status;
+        let mut out = Vec::new();
+        write_home_state_probe(&mut out, &snapshot).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            rendered.contains("  Network:   Carrier ready\n"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Ticket:"), "{rendered}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_action_refuses_a_changed_runtime_before_exec() {
+        let home = crate::own_runtime_fixture::substituted_runtime_home();
+        let mut snapshot = sample_snapshot_with_components(&[]);
+        snapshot.data_dir = home.data.display().to_string();
+        let action = ActionSpec {
+            id: "chat",
+            label: "Chat",
+            description: "Open chat",
+            args: &["chat"],
+            core: true,
+        };
+        let error = run_action(action, &snapshot).await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Installed artifact differs from its signed checksum"),
+            "{message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_capsule_action_refuses_a_changed_runtime_before_exec() {
+        let home = crate::own_runtime_fixture::substituted_runtime_home();
+        let error = run_capsule_action(&home.data, "demo").await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("Installed artifact differs from its signed checksum"),
+            "{message}"
+        );
     }
 }

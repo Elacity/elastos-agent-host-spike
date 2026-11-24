@@ -1,7 +1,137 @@
 use super::*;
+use std::cell::RefCell;
 use std::os::unix::fs::{symlink, PermissionsExt};
 
+thread_local! {
+    static AFTER_VERIFIED_READ: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
+    static SYNC_PATHS: RefCell<Option<Vec<std::path::PathBuf>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn after_verified_release_read() {
+    AFTER_VERIFIED_READ.with(|slot| {
+        if let Some(hook) = slot.borrow().as_ref() {
+            hook();
+        }
+    });
+}
+
+pub(crate) struct VerifiedReadInterrupt;
+
+impl VerifiedReadInterrupt {
+    pub(crate) fn arm(hook: impl Fn() + 'static) -> Self {
+        AFTER_VERIFIED_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+        Self
+    }
+}
+
+impl Drop for VerifiedReadInterrupt {
+    fn drop(&mut self) {
+        AFTER_VERIFIED_READ.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+pub(crate) fn note_sync(path: &Path) {
+    SYNC_PATHS.with(|slot| {
+        if let Some(paths) = slot.borrow_mut().as_mut() {
+            paths.push(path.to_path_buf());
+        }
+    });
+}
+
+pub(crate) struct SyncCapture;
+
+impl SyncCapture {
+    pub(crate) fn start() -> Self {
+        SYNC_PATHS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+        Self
+    }
+
+    pub(crate) fn includes(&self, path: &Path) -> bool {
+        SYNC_PATHS.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|paths| paths.iter().any(|saved| saved == path))
+        })
+    }
+}
+
+impl Drop for SyncCapture {
+    fn drop(&mut self) {
+        SYNC_PATHS.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
 use serde_json::{json, Value};
+
+/// Signs a test install: a publisher release head and manifest over this
+/// Home's components.json. Generic (no product names), shared by tests that
+/// need a Home with a signed installed release. The runtime file is
+/// `fixture-runtime-bin` so it does not collide with a `runtime` directory.
+#[cfg(unix)]
+pub(crate) fn sign_test_install(data_dir: &Path) {
+    use ed25519_dalek::SigningKey;
+    use elastos_common::localhost::{publisher_release_head_path, publisher_release_manifest_path};
+    let cid = |bytes: &[u8]| {
+        cid::Cid::new_v1(
+            0x55,
+            cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap(),
+        )
+        .to_string()
+    };
+    let descriptor = |bytes: &[u8]| {
+        serde_json::json!({
+            "cid":cid(bytes), "sha256":hex::encode(Sha256::digest(bytes)), "size":bytes.len()
+        })
+    };
+    let key = SigningKey::from_bytes(&[0x71; 32]);
+    let publisher = crate::crypto::encode_signing_key_did(&key);
+    let signed = |payload: serde_json::Value, domain: &str| {
+        let (signature, signer_did) = crate::crypto::domain_separated_sign(
+            &key,
+            domain,
+            &serde_json::to_vec(&payload).unwrap(),
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "payload":payload, "signature":signature, "signer_did":signer_did
+        }))
+        .unwrap()
+    };
+    let runtime = data_dir.join("fixture-runtime-bin");
+    let runtime_bytes = b"fixture runtime";
+    std::fs::write(&runtime, runtime_bytes).unwrap();
+    let components = std::fs::read(data_dir.join("components.json")).unwrap();
+    let release = signed(
+        serde_json::json!({
+            "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
+            "platforms":{(crate::update::detect_release_platform()):{
+                "binary":descriptor(runtime_bytes), "components":descriptor(&components)
+            }}
+        }),
+        "elastos.release.v1",
+    );
+    let head = signed(
+        serde_json::json!({
+            "schema":"elastos.release.head/v1", "version":"0.7.0", "channel":"stable",
+            "latest_release_cid":cid(&release), "release_sha256":hex::encode(Sha256::digest(&release))
+        }),
+        "elastos.release.head.v1",
+    );
+    let head_path = publisher_release_head_path(data_dir);
+    std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
+    std::fs::write(head_path, &head).unwrap();
+    std::fs::write(publisher_release_manifest_path(data_dir), &release).unwrap();
+    std::fs::write(
+        data_dir.join("sources.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema":"elastos.trusted-sources/v1", "default_source":"fixture", "sources":[{
+                "name":"fixture", "publisher_dids":[publisher], "channel":"stable",
+                "installed_version":"0.7.0", "install_path":runtime, "head_cid":cid(&head)
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
 
 fn start_fixture() -> (Fixture, std::path::PathBuf, std::path::PathBuf) {
     let mut fixture = Fixture::new();
@@ -40,6 +170,23 @@ fn installed_component_start_accepts_signed_release() {
     let (fixture, path, marker) = start_fixture();
     start_shell(&fixture, &path, &marker).unwrap();
     assert_eq!(fs::read(marker).unwrap(), b"ran");
+}
+
+#[test]
+fn installed_release_cid_comes_from_verified_signed_head() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        release_cid(&fixture.data, &fixture.binary, &fixture.source).unwrap(),
+        raw_cid(&fixture.release)
+    );
+    let mut head: Value = serde_json::from_slice(&fixture.head).unwrap();
+    head["signature"] = json!("changed");
+    fs::write(
+        publisher_release_head_path(&fixture.data),
+        serde_json::to_vec(&head).unwrap(),
+    )
+    .unwrap();
+    assert!(release_cid(&fixture.data, &fixture.binary, &fixture.source).is_err());
 }
 
 #[tokio::test]
@@ -576,6 +723,25 @@ fn descriptor(bytes: &[u8]) -> Value {
     json!({"cid": raw_cid(bytes), "sha256": hex::encode(Sha256::digest(bytes)), "size": bytes.len()})
 }
 
+fn file_descriptor(path: &std::path::Path) -> Value {
+    let mut file = fs::File::open(path).unwrap();
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    json!({
+        "cid": cid::Cid::new_v1(0x55, cid::multihash::Multihash::<64>::wrap(0x12, digest.as_slice()).unwrap()).to_string(),
+        "sha256": hex::encode(digest),
+        "size": fs::metadata(path).unwrap().len(),
+    })
+}
+
 impl Fixture {
     pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
@@ -583,12 +749,30 @@ impl Fixture {
         let binary = data.join("runtime");
         fs::write(&binary, b"installed signed runtime").unwrap();
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        Self::release(root, data, binary, descriptor(b"installed signed runtime"))
+    }
+
+    /// Sign an existing file as this Home's runtime. The file is not copied or deleted.
+    pub(crate) fn bound_to(binary: &std::path::Path) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let data = fs::canonicalize(root.path()).unwrap();
+        let binary = fs::canonicalize(binary).unwrap();
+        let described = file_descriptor(&binary);
+        Self::release(root, data, binary, described)
+    }
+
+    fn release(
+        root: tempfile::TempDir,
+        data: std::path::PathBuf,
+        binary: std::path::PathBuf,
+        binary_descriptor: Value,
+    ) -> Self {
         let components =
             br#"{"schema":"elastos.components/v1","external":{},"capsules":{},"profiles":{}}"#;
         fs::write(data.join("components.json"), components).unwrap();
         let release = signed(
             json!({"schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
-            "platforms": {(crate::update::detect_release_platform()): {"binary":descriptor(b"installed signed runtime"), "components":descriptor(components)}}}),
+            "platforms": {(crate::update::detect_release_platform()): {"binary": binary_descriptor, "components": descriptor(components)}}}),
             "elastos.release.v1",
             71,
         );
@@ -612,11 +796,28 @@ impl Fixture {
         fixture
     }
 
+    pub(crate) fn binary_sha256(&self) -> String {
+        let release: Value = serde_json::from_slice(&self.release).unwrap();
+        release["payload"]["platforms"][crate::update::detect_release_platform()]["binary"]
+            ["sha256"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
     fn publish(&self) {
         fs::create_dir_all(publisher_release_head_path(&self.data).parent().unwrap()).unwrap();
         fs::write(publisher_release_head_path(&self.data), &self.head).unwrap();
         fs::write(publisher_release_manifest_path(&self.data), &self.release).unwrap();
         self.save_source();
+    }
+
+    /// The signed runtime file is replaced, and `dev_mode = true` is set.
+    /// A signed Home must still refuse those bytes.
+    pub(crate) fn substitute_runtime(&self) {
+        fs::write(&self.binary, b"substituted runtime").unwrap();
+        fs::set_permissions(&self.binary, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(self.data.join("config.toml"), "dev_mode = true\n").unwrap();
     }
 
     pub(crate) fn bind_components(&mut self) {
@@ -629,6 +830,46 @@ impl Fixture {
         head["payload"]["latest_release_cid"] = json!(raw_cid(&self.release));
         head["payload"]["release_sha256"] = json!(hex::encode(Sha256::digest(&self.release)));
         self.head = signed(head["payload"].take(), "elastos.release.head.v1", 71);
+        self.source.head_cid = raw_cid(&self.head);
+        self.publish();
+    }
+
+    pub(crate) fn publish_consumed(&self) {
+        self.publish_consumed_pair();
+    }
+
+    /// A publisher-signed pair at `version` over this install's current runtime
+    /// and components. The Home's source record is left unchanged.
+    pub(crate) fn release_pair_at_version(&self, version: &str) -> (Vec<u8>, Vec<u8>) {
+        let runtime = fs::read(&self.binary).unwrap();
+        let components = fs::read(self.data.join("components.json")).unwrap();
+        let release = signed(
+            json!({
+                "schema":"elastos.release/v1", "version": version, "channel":"stable",
+                "platforms": {(crate::update::detect_release_platform()): {
+                    "binary": descriptor(&runtime), "components": descriptor(&components)
+                }}
+            }),
+            "elastos.release.v1",
+            71,
+        );
+        let head = signed(
+            json!({
+                "schema":"elastos.release.head/v1", "version": version, "channel":"stable",
+                "latest_release_cid": raw_cid(&release),
+                "release_sha256": hex::encode(Sha256::digest(&release))
+            }),
+            "elastos.release.head.v1",
+            71,
+        );
+        (head, release)
+    }
+
+    /// Point this Home's source record at an already signed pair and publish it.
+    pub(crate) fn publish_exact(&mut self, version: &str, head: Vec<u8>, release: Vec<u8>) {
+        self.head = head;
+        self.release = release;
+        self.source.installed_version = version.to_string();
         self.source.head_cid = raw_cid(&self.head);
         self.publish();
     }
@@ -1399,71 +1640,4 @@ fn source_home_dev_mode_does_not_admit_a_native_provider() {
     let checked = crate::binaries::checked_native_provider_with_data_dir(&data, &path);
     let error = checked.verify_at_spawn().unwrap_err();
     assert!(error.contains("no signed release digest"), "{error}");
-}
-
-/// Signs a test install: a publisher release head and manifest over this
-/// Home's components.json. Generic (no product names), shared by tests that
-/// need a Home with a signed installed release.
-pub(crate) fn sign_test_install(data_dir: &Path) {
-    use elastos_common::localhost::{publisher_release_head_path, publisher_release_manifest_path};
-    let cid = |bytes: &[u8]| {
-        cid::Cid::new_v1(
-            0x55,
-            cid::multihash::Multihash::<64>::wrap(0x12, &Sha256::digest(bytes)).unwrap(),
-        )
-        .to_string()
-    };
-    let descriptor = |bytes: &[u8]| {
-        serde_json::json!({
-            "cid":cid(bytes), "sha256":hex::encode(Sha256::digest(bytes)), "size":bytes.len()
-        })
-    };
-    let key = ed25519_dalek::SigningKey::from_bytes(&[0x71; 32]);
-    let publisher = crate::crypto::encode_signing_key_did(&key);
-    let signed = |payload: serde_json::Value, domain: &str| {
-        let (signature, signer_did) = crate::crypto::domain_separated_sign(
-            &key,
-            domain,
-            &serde_json::to_vec(&payload).unwrap(),
-        );
-        serde_json::to_vec(&serde_json::json!({
-            "payload":payload, "signature":signature, "signer_did":signer_did
-        }))
-        .unwrap()
-    };
-    let runtime = data_dir.join("runtime");
-    let runtime_bytes = b"fixture runtime";
-    std::fs::write(&runtime, runtime_bytes).unwrap();
-    let components = std::fs::read(data_dir.join("components.json")).unwrap();
-    let release = signed(
-        serde_json::json!({
-            "schema":"elastos.release/v1", "version":"0.7.0", "channel":"stable",
-            "platforms":{(crate::update::detect_release_platform()):{
-                "binary":descriptor(runtime_bytes), "components":descriptor(&components)
-            }}
-        }),
-        "elastos.release.v1",
-    );
-    let head = signed(
-        serde_json::json!({
-            "schema":"elastos.release.head/v1", "version":"0.7.0", "channel":"stable",
-            "latest_release_cid":cid(&release), "release_sha256":hex::encode(Sha256::digest(&release))
-        }),
-        "elastos.release.head.v1",
-    );
-    let head_path = publisher_release_head_path(data_dir);
-    std::fs::create_dir_all(head_path.parent().unwrap()).unwrap();
-    std::fs::write(head_path, &head).unwrap();
-    std::fs::write(publisher_release_manifest_path(data_dir), &release).unwrap();
-    std::fs::write(
-        data_dir.join("sources.json"),
-        serde_json::to_vec(&serde_json::json!({
-            "schema":"elastos.trusted-sources/v1", "default_source":"fixture", "sources":[{
-                "name":"fixture", "publisher_dids":[publisher], "channel":"stable",
-                "installed_version":"0.7.0", "install_path":runtime, "head_cid":cid(&head)
-            }]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
 }

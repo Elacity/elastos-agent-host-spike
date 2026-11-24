@@ -1,8 +1,8 @@
 //! ElastOS DID Provider Capsule
 //!
 //! Manages the device-backed Ed25519 identity as a did:key.
-//! The main DID is derived from the shared device key so every runtime surface
-//! sees the same stable node/device identity. Human accounts link to it through
+//! The main DID is the device signing seed given at init, so every runtime
+//! surface sees the same stable node/device identity. Human accounts link to it through
 //! runtime principals and proof bindings; they do not inherit this key.
 //! Wire protocol: line-delimited JSON over stdin/stdout.
 
@@ -11,7 +11,6 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use elastos_guest::prelude::*;
 use elastos_identity::{decode_did_key, encode_did_key, encode_signing_key_did};
-use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -126,8 +125,9 @@ struct DidProvider {
     verifying_key: Option<VerifyingKey>,
     nickname: Option<String>,
     storage_path: String,
-    /// Device key — used only for encrypting DID key and nickname at rest
-    device_key: Option<[u8; 32]>,
+    /// AES key for nickname and persona files. This is the expanded
+    /// `elastos-did-storage` key.
+    storage_key: Option<[u8; 32]>,
 }
 
 impl DidProvider {
@@ -137,7 +137,7 @@ impl DidProvider {
             verifying_key: None,
             nickname: None,
             storage_path: String::new(),
-            device_key: None,
+            storage_key: None,
         }
     }
 
@@ -200,20 +200,28 @@ impl DidProvider {
             return Response::error(STORAGE_ERROR_CODE, &reason);
         }
 
-        if let Some(key_hex) = config.get("encryption_key").and_then(|v| v.as_str()) {
-            if let Ok(key_bytes) = hex::decode(key_hex) {
-                if key_bytes.len() == 32 {
-                    let mut dk = [0u8; 32];
-                    dk.copy_from_slice(&key_bytes);
-                    self.device_key = Some(dk);
-                }
+        // The seed is already the Ed25519 seed. Hashing it again changes the DID.
+        // The storage key is already the AES key. Expanding it again does not
+        // open nickname or persona files.
+        let signing_seed = decode_config_key(
+            config
+                .get("extra")
+                .and_then(|extra| extra.get("signing_seed")),
+        );
+        let storage_key = decode_config_key(config.get("encryption_key"));
+        match (signing_seed, storage_key) {
+            (Some(seed), Some(storage)) => {
+                let signing_key = SigningKey::from_bytes(&seed);
+                self.verifying_key = Some(signing_key.verifying_key());
+                self.signing_key = Some(signing_key);
+                self.storage_key = Some(storage);
             }
-        }
-
-        // Load or generate DID keypair
-        if self.device_key.is_some() {
-            if let Err(e) = self.load_or_generate_key() {
-                return Response::error("key_error", &e);
+            (None, None) => {}
+            _ => {
+                return Response::error(
+                    "key_error",
+                    "DID init requires the signing seed and the storage key",
+                );
             }
         }
 
@@ -225,15 +233,6 @@ impl DidProvider {
             "protocol_version": "1.0",
             "provider": "did",
         }))
-    }
-
-    fn load_or_generate_key(&mut self) -> Result<(), String> {
-        let dk = self.device_key.as_ref().ok_or("No device key")?;
-        let (signing_key, _did) = elastos_identity::derive_did(dk);
-        self.verifying_key = Some(signing_key.verifying_key());
-        self.signing_key = Some(signing_key);
-
-        Ok(())
     }
 
     fn get_did(&self) -> Response {
@@ -390,7 +389,7 @@ impl DidProvider {
     }
 
     fn set_nickname(&mut self, nickname: &str) -> Response {
-        if self.device_key.is_none() {
+        if self.storage_key.is_none() {
             return Response::error("not_init", "No device key provided");
         }
         if let Err(reason) = self.save_nickname(nickname) {
@@ -401,11 +400,11 @@ impl DidProvider {
     }
 
     /// Get or create a named persona DID (e.g. for an agent).
-    /// Persona keys are stored in `did/personas/{name}.enc`, encrypted with the device key.
+    /// Persona keys are stored in `did/personas/{name}.enc`, encrypted with the storage key.
     /// Returns the persona DID and the owner (main) DID.
     fn get_persona_did(&mut self, name: &str) -> Response {
-        let dk = match self.device_key.as_ref() {
-            Some(k) => k,
+        let storage_key = match self.storage_key {
+            Some(key) => key,
             None => return Response::error("not_init", "No device key provided"),
         };
 
@@ -429,7 +428,6 @@ impl DidProvider {
             Err(reason) => return Response::error(STORAGE_ERROR_CODE, &reason),
         };
         let key_path = dir.join(format!("{}.enc", normalized));
-        let storage_key = derive_storage_key(dk);
 
         let persona_vk = if key_path.exists() {
             // Load existing persona key
@@ -511,38 +509,36 @@ impl DidProvider {
     }
 
     fn try_load_nickname(&mut self) -> Result<(), String> {
-        let Some(dk) = self.device_key else {
+        let Some(storage_key) = self.storage_key else {
             return Ok(());
         };
         let base_dir = self.base_dir()?;
         // The shared loader is the single nickname decoder. A denied or corrupt
         // read is a refusal and reaches `Init` as `storage_error`; it is never
-        // reported as "no nickname set".
-        self.nickname = elastos_identity::load_nickname_with_device_key(&base_dir, &dk)
+        // reported as "no nickname set". The storage key is the AES key.
+        self.nickname = elastos_identity::load_nickname_with_storage_key(&base_dir, &storage_key)
             .map_err(|e| format!("did-provider: failed to read nickname: {e}"))?;
         Ok(())
     }
 
     fn save_nickname(&self, nickname: &str) -> Result<(), String> {
-        let Some(dk) = self.device_key else {
+        let Some(storage_key) = self.storage_key else {
             return Ok(());
         };
         let base_dir = self.base_dir()?;
-        elastos_identity::save_nickname_with_device_key(&base_dir, &dk, nickname)
+        elastos_identity::save_nickname_with_storage_key(&base_dir, &storage_key, nickname)
             .map_err(|e| format!("did-provider: failed to save nickname: {e}"))
     }
 }
 
-// === Crypto helpers ===
-
-/// Derive a separate AES key for DID storage from the device key
-fn derive_storage_key(device_key: &[u8; 32]) -> [u8; 32] {
-    let hk = Hkdf::<Sha256>::new(None, device_key);
-    let mut okm = [0u8; 32];
-    hk.expand(b"elastos-did-storage", &mut okm)
-        .expect("HKDF expand");
-    okm
+fn decode_config_key(value: Option<&serde_json::Value>) -> Option<[u8; 32]> {
+    let text = value.and_then(|item| item.as_str())?;
+    let bytes = hex::decode(text).ok()?;
+    let key: [u8; 32] = bytes.try_into().ok()?;
+    Some(key)
 }
+
+// === Crypto helpers ===
 
 fn encrypt_data(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let cipher =
@@ -1224,15 +1220,24 @@ mod tests {
         [42u8; 32]
     }
 
-    fn init_provider_with_device_key(base_path: Option<&str>, dk: [u8; 32]) -> DidProvider {
+    fn init_config(base_path: Option<&str>, device_key: &[u8; 32]) -> serde_json::Value {
+        let signing_seed = elastos_identity::derive_did_seed(device_key);
+        let storage_key = elastos_identity::derive_storage_key(device_key);
         let mut config = serde_json::json!({
-            "encryption_key": hex::encode(dk),
+            "encryption_key": hex::encode(storage_key),
+            "extra": { "signing_seed": hex::encode(signing_seed) },
         });
         if let Some(bp) = base_path {
             config["base_path"] = serde_json::json!(bp);
         }
+        config
+    }
+
+    fn init_provider_with_device_key(base_path: Option<&str>, dk: [u8; 32]) -> DidProvider {
         let mut provider = DidProvider::new();
-        provider.handle(Request::Init { config });
+        provider.handle(Request::Init {
+            config: init_config(base_path, &dk),
+        });
         provider
     }
 
@@ -1298,7 +1303,7 @@ mod tests {
 
     /// A storage root is required even when Init carries no encryption key.
     ///
-    /// Falsifier: move the root validation inside `if self.device_key.is_some()`
+    /// Falsifier: move the root validation inside `if self.storage_key.is_some()`
     /// in `init`; this Init then succeeds and the test fails.
     #[test]
     fn init_requires_storage_without_key() {
@@ -1407,9 +1412,9 @@ mod tests {
     #[test]
     fn storage_refusals_reach_callers() {
         let mut provider = DidProvider::new();
-        // Test seam: a device key without any storage root, which a refused
+        // Test seam: a storage key without any storage root, which a refused
         // Init also produces.
-        provider.device_key = Some(make_device_key());
+        provider.storage_key = Some(make_device_key());
 
         let before = current_dir_entries();
         assert_storage_error(
@@ -2032,13 +2037,10 @@ mod tests {
             _ => panic!("Expected DID"),
         };
 
-        // Try to load with a different device key
-        let config = serde_json::json!({
-            "encryption_key": hex::encode([99u8; 32]),
-            "base_path": bp,
-        });
         let mut provider2 = DidProvider::new();
-        let _ = provider2.handle(Request::Init { config });
+        let _ = provider2.handle(Request::Init {
+            config: init_config(Some(bp), &[99u8; 32]),
+        });
         let did2 = match provider2.get_did() {
             Response::Ok { data: Some(d) } => d["did"].as_str().unwrap().to_string(),
             other => panic!("Expected DID, got {:?}", other),
@@ -2064,10 +2066,7 @@ mod tests {
         // file makes the read fail without a sandbox.
         std::fs::create_dir_all(dir.path().join("did").join("nickname.enc")).unwrap();
         let response = provider.handle(Request::Init {
-            config: serde_json::json!({
-                "base_path": bp,
-                "encryption_key": hex::encode(make_device_key()),
-            }),
+            config: init_config(Some(&bp), &make_device_key()),
         });
         match response {
             Response::Error { code, message } => {
@@ -2278,7 +2277,7 @@ mod tests {
     /// Pins `No device key provided`, the one string `set_nickname` (:394) and
     /// `get_persona_did` (:409) raise before any storage work.
     ///
-    /// Falsifier: remove either `device_key.is_none()`/`None` guard; that call
+    /// Falsifier: remove either `storage_key.is_none()`/`None` guard; that call
     /// then writes or answers ok instead of refusing.
     #[test]
     fn handler_refuses_a_missing_device_key() {
@@ -2367,7 +2366,7 @@ mod tests {
     fn handler_refuses_a_stored_persona_key_of_wrong_length() {
         let dir = tempfile::tempdir().unwrap();
         let mut provider = init_provider(Some(dir.path().to_str().unwrap()));
-        let storage_key = derive_storage_key(&provider.device_key.expect("init sets a key"));
+        let storage_key = provider.storage_key.expect("init sets the storage key");
         let personas = dir.path().join("did").join("personas");
         fs::create_dir_all(&personas).unwrap();
         fs::write(

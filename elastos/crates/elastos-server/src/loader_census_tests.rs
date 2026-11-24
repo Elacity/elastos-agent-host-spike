@@ -39,6 +39,28 @@ fn row(
 
 /// The authority input is local to the entry, not inherited from a caller's
 /// name. `none` and `checksum` document paths that later slices must gate.
+fn own_command_checks() -> &'static str {
+    #[cfg(windows)]
+    {
+        "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
+    }
+    #[cfg(not(windows))]
+    {
+        "checksum"
+    }
+}
+
+fn managed_runtime_checks() -> &'static str {
+    #[cfg(windows)]
+    {
+        "managed Runtime process ownership is unsupported on Windows"
+    }
+    #[cfg(not(windows))]
+    {
+        "checksum"
+    }
+}
+
 fn rows() -> Vec<Row> {
     let confined_spawn = ["ProviderBridge::spawn", "_confined"].concat();
     vec![
@@ -46,7 +68,7 @@ fn rows() -> Vec<Row> {
             "elastos-runtime/src/capsule/manager.rs",
             "launch_internal",
             "compute.load",
-            "capsule compute",
+            "legacy module; component refused",
             "none",
             "P2-8",
             1,
@@ -55,7 +77,7 @@ fn rows() -> Vec<Row> {
             "elastos-runtime/src/capsule/manager.rs",
             "launch_internal",
             "compute.start",
-            "capsule compute",
+            "legacy module; component refused",
             "none",
             "P2-8",
             1,
@@ -227,7 +249,7 @@ fn rows() -> Vec<Row> {
             "return_to_home_if_requested",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -245,7 +267,7 @@ fn rows() -> Vec<Row> {
             "run_action",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -254,7 +276,7 @@ fn rows() -> Vec<Row> {
             "run_capsule_action",
             "command",
             "host process",
-            "none",
+            own_command_checks(),
             "P2-8",
             1,
         ),
@@ -476,10 +498,19 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/runtime.rs",
+            "load_dev_unsigned_component",
+            "component.load_admitted",
+            "WASM component; dev-only explicit opt-in (dev_mode = true)",
+            "none",
+            "P2-8",
+            1,
+        ),
+        row(
+            "elastos-server/src/runtime.rs",
             "run_signer",
             "component.load_admitted",
-            "WASM component",
-            "none",
+            "WASM component; folder closure is the root, requires refused",
+            "CID+DID+closure",
             "P2-8",
             1,
         ),
@@ -560,7 +591,7 @@ fn rows() -> Vec<Row> {
             "ensure_managed_runtime",
             "command",
             "host process",
-            "none",
+            managed_runtime_checks(),
             "P2-8",
             1,
         ),
@@ -569,7 +600,7 @@ fn rows() -> Vec<Row> {
             "ensure_managed_runtime",
             "spawn()",
             "host process",
-            "none",
+            managed_runtime_checks(),
             "P2-8",
             1,
         ),
@@ -604,7 +635,7 @@ fn rows() -> Vec<Row> {
             "elastos-server/src/serve_cmd.rs",
             "load_microvm_capsule",
             "provider.load",
-            "VM capsule",
+            "VM capsule; image check pending 4b-2",
             "none",
             "P2-8",
             1,
@@ -613,7 +644,7 @@ fn rows() -> Vec<Row> {
             "elastos-server/src/serve_cmd.rs",
             "run_serve",
             "vm_provider.start",
-            "VM capsule",
+            "VM capsule; image check pending 4b-2",
             "none",
             "P2-8",
             1,
@@ -701,12 +732,12 @@ fn rows() -> Vec<Row> {
         ),
         row(
             "elastos-server/src/setup.rs",
-            "ensure_browser_vm_image_in_context",
+            "ensure_browser_vm_image_in_context_for_platform",
             "component install",
-            "release component",
+            "signed release image or source Home dev-pinned image",
             "CID+DID",
             "P2-2",
-            1,
+            2,
         ),
         row(
             "elastos-server/src/setup.rs",
@@ -901,7 +932,7 @@ fn rows() -> Vec<Row> {
             "elastos-server/src/supervisor.rs",
             "handle_request",
             "launch_capsule",
-            "VM capsule",
+            "VM capsule; image check pending 4b-2",
             "none",
             "P2-8",
             1,
@@ -910,7 +941,7 @@ fn rows() -> Vec<Row> {
             "elastos-server/src/supervisor.rs",
             "launch_capsule",
             "vm.start",
-            "VM capsule",
+            "VM capsule; image check pending 4b-2",
             "none",
             "P2-8",
             1,
@@ -1052,6 +1083,8 @@ fn every_executable_loader_has_an_authority_row() {
                 | "CID"
                 | "DID"
                 | "checksum"
+                | "installed release no-follow file admission is unsupported on Windows; No trusted source configured on a source Home"
+                | "managed Runtime process ownership is unsupported on Windows"
                 | "admitted binary+OS gate+confined storage"
                 | "checked storage+Seatbelt profile"
                 | "none"

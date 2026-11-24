@@ -116,6 +116,21 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// A refusal the Home page can match by `code`. The sentence stays in `reason`.
+#[derive(Debug)]
+pub(crate) struct CodedRefusal {
+    pub(crate) code: &'static str,
+    pub(crate) reason: &'static str,
+}
+
+impl std::fmt::Display for CodedRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+
+impl std::error::Error for CodedRefusal {}
+
 fn refused<T>(reason: impl Into<String>) -> anyhow::Result<T> {
     Err(anyhow::Error::new(Refused(reason.into())))
 }
@@ -208,9 +223,9 @@ fn read_agent_file(data_dir: &Path, path: &Path) -> Result<Option<Vec<u8>>, &'st
         Err(_) => return Err(CANNOT_READ),
     }
     // The file exists, so each parent exists: this only checks them.
-    let parents_regular = path
-        .parent()
-        .is_some_and(|parent| crate::auth::ensure_regular_auth_parent(data_dir, parent).is_ok());
+    let parents_regular = path.parent().is_some_and(|parent| {
+        crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent).is_ok()
+    });
     if !parents_regular {
         return Err(NOT_REGULAR);
     }
@@ -372,9 +387,9 @@ fn lock_for_write(data_dir: &Path) -> anyhow::Result<WriteLock> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = agent_file_path(data_dir)?.with_file_name(format!("{AGENT_RECORDS_FILE}.lock"));
     if let Some(parent) = path.parent() {
-        crate::auth::ensure_regular_auth_parent(data_dir, parent)?;
+        crate::auth_state_files::ensure_regular_auth_parent(data_dir, parent)?;
     }
-    let file = crate::auth::open_regular_lock_file(&path, "agent records")?;
+    let file = crate::auth_state_files::open_regular_lock_file(&path, "agent records")?;
     Ok(WriteLock {
         _file: FileLock::exclusive(file).context("failed to lock agent records")?,
         _process: process,

@@ -132,6 +132,25 @@ async fn start_gateway_server_with_shutdown(
     let browser_lifecycle_reconciler =
         super::gateway_browser::start_browser_lifecycle_reconciler(state.clone())
             .map_err(anyhow::Error::msg)?;
+    // The reconciler registration proves this process is the in-process Home
+    // for the data directory: a second start on any port is refused there, and
+    // a failed bind already returned. Settle before a request can claim a plan.
+    // Production callers hold this data directory's host lock before they
+    // reach here. This function does not take that lock. While this process
+    // holds it, leftover coordinates are not an owner. With no host lock, only
+    // coordinates whose update generation and kernel start name a live process
+    // keep that process's plans.
+    if another_live_gateway_owner(&data_dir) {
+        eprintln!(
+            "[gateway] another live gateway owns this data directory; left its plans unchanged"
+        );
+    } else if let Err(error) =
+        super::gateway_inspect_actions::settle_agent_plans_lost_before_start(&data_dir)
+    {
+        browser_lifecycle_reconciler.cancel();
+        let _ = browser_lifecycle_reconciler.join().await;
+        return Err(error);
+    }
     let home_url = format!("{gateway_api_url}/home/");
     let app = gateway_router_with_api_url(state, gateway_api_url);
     // Publish one complete coordinate identity after Home setup, before children
@@ -327,6 +346,31 @@ fn dedupe_urls(urls: Vec<String>) -> Vec<String> {
     deduped
 }
 
+/// Another process owns this data directory.
+///
+/// This process's host lock is the proof: leftover coordinates do not keep
+/// plans while it holds the lock. A second flock in this process does not
+/// take that lock. With no host lock, coordinates count only when their
+/// update generation and kernel start name the live process. A bare pid does
+/// not. When the lock cannot be read, plans are left unchanged.
+fn another_live_gateway_owner(data_dir: &std::path::Path) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = data_dir;
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        match crate::host_lock::active_host_process(data_dir) {
+            Ok(Some(info)) if info.pid == std::process::id() => false,
+            Ok(Some(_)) => true,
+            Ok(None) => crate::runtime_control::gateway_children::Owner::read(data_dir)
+                .is_ok_and(|owner| owner.names_another_live_process()),
+            Err(_) => true,
+        }
+    }
+}
+
 fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()> + Send + 'static> {
     #[cfg(unix)]
     {
@@ -360,6 +404,8 @@ mod trusted_gateway_tests {
     use tokio::sync::oneshot;
 
     static READY_URL: Mutex<Option<oneshot::Sender<String>>> = Mutex::new(None);
+    #[cfg(unix)]
+    static LIVE_OWNER_READY: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
 
     fn record_ready(url: &str) {
         let parsed = url::Url::parse(url).unwrap();
@@ -376,6 +422,17 @@ mod trusted_gateway_tests {
 
     fn unexpected_ready(_: &str) {
         panic!("failed gateway startup must not open Home");
+    }
+
+    #[cfg(unix)]
+    fn record_live_owner_ready(_: &str) {
+        LIVE_OWNER_READY
+            .lock()
+            .unwrap()
+            .take()
+            .expect("live owner ready sender")
+            .send(())
+            .unwrap();
     }
 
     fn unused_localhost_address() -> String {
@@ -812,6 +869,501 @@ mod trusted_gateway_tests {
         assert_eq!(
             trusted_gateway_api_url("0.0.0.0:8090").unwrap(),
             "http://localhost:8090"
+        );
+    }
+
+    /// Gateway A is the live Home. A plan written after it is up stays
+    /// `dispatching` when a second start on this data dir is refused.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_second_gateway_keeps_a_dispatching_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().to_path_buf();
+        let addr = unused_localhost_address();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task_addr = addr.clone();
+        let task_data = data.clone();
+        let server = tokio::spawn(async move {
+            start_gateway_server_with_shutdown(
+                &task_addr,
+                Some(Arc::new(ProviderRegistry::new())),
+                GatewayCollaborationContext::default(),
+                task_data.join("cache"),
+                task_data,
+                None,
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
+        });
+        let coords = crate::runtime_control::gateway_runtime_coord_path(&data);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while !coords.is_file() {
+            if server.is_finished() || tokio::time::Instant::now() >= deadline {
+                let _ = stop_tx.send(());
+                let joined = tokio::time::timeout(Duration::from_secs(5), server).await;
+                panic!("gateway A did not become the live Home: {joined:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let owner = "person:owner";
+        let requester = "agent:v2:0123456789abcdef0123456789abcdef";
+        let capsule = "capsule:agent-host";
+        let session = "session:agent-1";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let created = super::super::submit_pending_agent_plan(
+            &data, owner, requester, capsule, session, &plan, 1,
+        )
+        .unwrap();
+        let id = created["request_id"].as_str().unwrap().to_string();
+        let path = data.join("inspect-actions").join(format!("{id}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["status"] = serde_json::json!("dispatching");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let duplicate = start_gateway_server_with_ready(
+            &unused_localhost_address(),
+            Some(Arc::new(ProviderRegistry::new())),
+            GatewayCollaborationContext::default(),
+            data.join("cache"),
+            data.clone(),
+            Some(unexpected_ready),
+        )
+        .await
+        .unwrap_err();
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let status = stored["status"].as_str().unwrap().to_string();
+        let _ = stop_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(20), server).await;
+        assert!(
+            duplicate
+                .to_string()
+                .contains("already running for this data root"),
+            "{duplicate}"
+        );
+        assert_eq!(
+            status, "dispatching",
+            "a refused second start rewrote the live gateway's plan to {status}"
+        );
+    }
+
+    /// Coordinates that name another process by its update generation and
+    /// kernel start are a live owner. This start does not hold the host lock,
+    /// so it must not rewrite that owner's plan.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_owner_with_another_pid_keeps_a_dispatching_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().to_path_buf();
+        let mut held = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = held.id();
+        let start = crate::update_controller::child::process_start(pid)
+            .expect("the owner process has a kernel start");
+        let coords = crate::runtime_control::RuntimeCoords {
+            api_url: "http://127.0.0.1:9".to_string(),
+            attach_secret: "secret".to_string(),
+            pid,
+            runtime_kind: crate::runtime_control::RUNTIME_KIND_GATEWAY.to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: "owner-generation".to_string(),
+            process_start: start,
+            home_url: String::new(),
+        };
+        crate::runtime_control::write_runtime_coords(
+            &crate::runtime_control::gateway_runtime_coord_path(&data),
+            &coords,
+        )
+        .unwrap();
+        let owner = "person:owner";
+        let requester = "agent:v2:0123456789abcdef0123456789abcdef";
+        let capsule = "capsule:agent-host";
+        let session = "session:agent-1";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let created = super::super::submit_pending_agent_plan(
+            &data, owner, requester, capsule, session, &plan, 1,
+        )
+        .unwrap();
+        let id = created["request_id"].as_str().unwrap().to_string();
+        let path = data.join("inspect-actions").join(format!("{id}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["status"] = serde_json::json!("dispatching");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let (ready_tx, ready_rx) = oneshot::channel();
+        *LIVE_OWNER_READY.lock().unwrap() = Some(ready_tx);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let addr = unused_localhost_address();
+        let task_addr = addr.clone();
+        let task_data = data.clone();
+        let server = tokio::spawn(async move {
+            start_gateway_server_with_shutdown(
+                &task_addr,
+                None,
+                GatewayCollaborationContext::default(),
+                task_data.join("cache"),
+                task_data,
+                Some(record_live_owner_ready),
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
+        });
+        let ready = tokio::time::timeout(Duration::from_secs(20), ready_rx).await;
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let status = stored["status"].as_str().unwrap().to_string();
+        let _ = stop_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(20), server).await;
+        let _ = held.kill();
+        let _ = held.wait();
+        assert!(ready.is_ok(), "gateway did not become ready: {ready:?}");
+        assert_eq!(
+            status, "dispatching",
+            "a start beside a live owner rewrote the plan to {status}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn plant_dispatching_plan(data: &std::path::Path) -> std::path::PathBuf {
+        let owner = "person:owner";
+        let requester = "agent:v2:0123456789abcdef0123456789abcdef";
+        let capsule = "capsule:agent-host";
+        let session = "session:agent-1";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let created = super::super::submit_pending_agent_plan(
+            data, owner, requester, capsule, session, &plan, 1,
+        )
+        .unwrap();
+        let id = created["request_id"].as_str().unwrap().to_string();
+        let path = data.join("inspect-actions").join(format!("{id}.json"));
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        value["status"] = serde_json::json!("dispatching");
+        std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn write_gateway_coords(
+        data: &std::path::Path,
+        pid: u32,
+        generation: &str,
+        process_start: &str,
+    ) {
+        let coords = crate::runtime_control::RuntimeCoords {
+            api_url: "http://127.0.0.1:9".to_string(),
+            attach_secret: "secret".to_string(),
+            pid,
+            runtime_kind: crate::runtime_control::RUNTIME_KIND_GATEWAY.to_string(),
+            binary_sha256: String::new(),
+            policy_sha256: String::new(),
+            dependency_sha256: String::new(),
+            generation: generation.to_string(),
+            process_start: process_start.to_string(),
+            home_url: String::new(),
+        };
+        crate::runtime_control::write_runtime_coords(
+            &crate::runtime_control::gateway_runtime_coord_path(data),
+            &coords,
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn status_after_gateway_listens(
+        data: std::path::PathBuf,
+        plan: &std::path::Path,
+    ) -> (bool, String) {
+        let addr = unused_localhost_address();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task_addr = addr.clone();
+        let task_data = data.clone();
+        let server = tokio::spawn(async move {
+            start_gateway_server_with_shutdown(
+                &task_addr,
+                None,
+                GatewayCollaborationContext::default(),
+                task_data.join("cache"),
+                task_data,
+                None,
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
+        });
+        let mut listened = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                listened = true;
+                break;
+            }
+            if server.is_finished() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let stored: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(plan).unwrap()).unwrap();
+        let status = stored["status"].as_str().unwrap().to_string();
+        let _ = stop_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(20), server).await;
+        (listened, status)
+    }
+
+    /// Leftover coordinates name a live foreign pid, and this process holds
+    /// the data directory host lock. The stranded plan is settled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_locked_restart_settles_a_plan_named_by_a_live_foreign_pid() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().to_path_buf();
+        let _host = crate::host_lock::acquire_host_process_lock(&data, "gateway", "127.0.0.1:9")
+            .expect("this process holds the host lock");
+        let mut held = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let start = crate::update_controller::child::process_start(held.id()).unwrap_or_default();
+        write_gateway_coords(&data, held.id(), "owner-generation", &start);
+        let plan = plant_dispatching_plan(&data);
+        let (listened, status) = status_after_gateway_listens(data, &plan).await;
+        let _ = held.kill();
+        let _ = held.wait();
+        assert!(listened, "gateway did not listen");
+        assert_eq!(
+            status, "unknown",
+            "a locked restart left the stranded plan {status}"
+        );
+    }
+
+    /// A live pid with neither an update generation nor a kernel start is not
+    /// an owner. The stranded plan is settled.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_live_foreign_pid_without_generation_and_start_is_settled() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().to_path_buf();
+        let mut held = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        write_gateway_coords(&data, held.id(), "", "");
+        let plan = plant_dispatching_plan(&data);
+        let (listened, status) = status_after_gateway_listens(data, &plan).await;
+        let _ = held.kill();
+        let _ = held.wait();
+        assert!(listened, "gateway did not listen");
+        assert_eq!(status, "unknown", "a bare pid kept the plan {status}");
+    }
+
+    /// Another process holds the data directory host lock. Its plan stays
+    /// dispatching.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_host_lock_held_by_another_process_keeps_a_dispatching_plan() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().to_path_buf();
+        let lock_path = data.join("host-process.lock");
+        let ready = data.join("lock-ready");
+        let mut holder = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import fcntl,json,os,sys,time\n\
+                 path,ready=sys.argv[1],sys.argv[2]\n\
+                 os.makedirs(os.path.dirname(path), exist_ok=True)\n\
+                 handle=open(path,'a+')\n\
+                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)\n\
+                 handle.seek(0); handle.truncate()\n\
+                 handle.write(json.dumps({'pid':os.getpid(),'role':'gateway','addr':'127.0.0.1:9','generation':'owner'}))\n\
+                 handle.flush(); os.fsync(handle.fileno())\n\
+                 flag=open(ready,'w')\n\
+                 flag.write('1'); flag.flush(); os.fsync(flag.fileno())\n\
+                 time.sleep(60)\n",
+            )
+            .arg(&lock_path)
+            .arg(&ready)
+            .spawn()
+            .expect("python3 holds the host lock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ready.is_file() {
+            if holder.try_wait().unwrap().is_some() || std::time::Instant::now() >= deadline {
+                let _ = holder.kill();
+                let _ = holder.wait();
+                panic!("the other process did not take the host lock");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let plan = plant_dispatching_plan(&data);
+        let (listened, status) = status_after_gateway_listens(data, &plan).await;
+        let _ = holder.kill();
+        let _ = holder.wait();
+        assert!(listened, "gateway did not listen");
+        assert_eq!(
+            status, "dispatching",
+            "a start beside the lock holder rewrote the plan to {status}"
+        );
+    }
+
+    /// Approved and dispatching agent plans survive a crash. A gateway start
+    /// must settle them to unknown. Today they stay as written, so the
+    /// requester's result call has nothing to answer.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stranded_agent_plan_is_unknown_after_gateway_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = "person:owner";
+        let requester = "agent:v2:0123456789abcdef0123456789abcdef";
+        let capsule = "capsule:agent-host";
+        let session = "session:agent-1";
+        let plan = serde_json::json!({
+            "steps": [{ "scheme": "availability", "operation": "status", "request": {} }]
+        });
+        let mut ids = Vec::new();
+        for now in [1_u64, 2, 3] {
+            let created = super::super::submit_pending_agent_plan(
+                temp.path(),
+                owner,
+                requester,
+                capsule,
+                session,
+                &plan,
+                now,
+            )
+            .unwrap();
+            ids.push(created["request_id"].as_str().unwrap().to_string());
+        }
+        for (id, status) in [(&ids[0], "approved"), (&ids[1], "dispatching")] {
+            let path = temp
+                .path()
+                .join("inspect-actions")
+                .join(format!("{id}.json"));
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            value["status"] = serde_json::json!(status);
+            std::fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        }
+        let addr = unused_localhost_address();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let task_addr = addr.clone();
+        let data = temp.path().to_path_buf();
+        let task_data = data.clone();
+        let server = tokio::spawn(async move {
+            start_gateway_server_with_shutdown(
+                &task_addr,
+                None,
+                GatewayCollaborationContext::default(),
+                task_data.join("cache"),
+                task_data,
+                None,
+                async {
+                    let _ = stop_rx.await;
+                },
+            )
+            .await
+        });
+        let mut listened = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                listened = true;
+                break;
+            }
+            if server.is_finished() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let read_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let statuses = loop {
+            let statuses: Vec<String> = ids
+                .iter()
+                .map(|id| {
+                    let path = data.join("inspect-actions").join(format!("{id}.json"));
+                    let value: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    value["status"].as_str().unwrap().to_string()
+                })
+                .collect();
+            if statuses == ["unknown", "unknown", "pending"]
+                || server.is_finished()
+                || tokio::time::Instant::now() >= read_deadline
+            {
+                break statuses;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        let result = super::super::agent_plan_result_for_requester(
+            &data, &ids[0], owner, requester, capsule, session,
+        );
+        let state = super::super::GatewayState {
+            provider_registry: None,
+            collaboration_chat_product_port: None,
+            collaboration_presence_product_port: None,
+            carrier_endpoint: None,
+            collaboration_discovery_service: None,
+            browser_internet: Default::default(),
+            identity_manager: Arc::new(std::sync::OnceLock::new()),
+            cache_dir: data.join("cache"),
+            data_dir: data.clone(),
+        };
+        let context = super::super::HomeLaunchTokenContext::for_test(
+            owner,
+            "session:owner",
+            None,
+            "grant:owner",
+            crate::auth::PrincipalKind::Human,
+        );
+        let dispatch = super::super::gateway_inspect_actions::dispatch_approved_agent_plan(
+            &state, &context, &ids[0],
+        )
+        .await;
+        let after = {
+            let path = data
+                .join("inspect-actions")
+                .join(format!("{}.json", ids[0]));
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            value["status"].as_str().unwrap().to_string()
+        };
+        let _ = stop_tx.send(());
+        let joined = tokio::time::timeout(Duration::from_secs(20), server).await;
+        let result_text = match &result {
+            Ok(value) => value.to_string(),
+            Err(error) => error.to_string(),
+        };
+        let dispatch_text = match &dispatch {
+            Ok(value) => format!("dispatched: {value}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            listened
+                && statuses == ["unknown", "unknown", "pending"]
+                && result.as_ref().is_ok_and(|value| {
+                    value["status"] == "unknown"
+                        && value["dispatch_result"]["reason"]
+                            == "a dispatch cannot survive a restart"
+                })
+                && dispatch_text.contains("not approved")
+                && after == "unknown",
+            "stranded plans stayed {statuses:?}; result {result_text}; dispatch {dispatch_text}; after {after}; listened {listened}; server {joined:?}"
         );
     }
 }
