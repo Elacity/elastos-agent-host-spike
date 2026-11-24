@@ -3,7 +3,9 @@
 //! creates and reads the device key through the owner-only helper: the current
 //! user owns it, the DACL does not inherit, a reparse point is refused, and the
 //! open is handle-relative. The key bytes go to a temporary file in the identity
-//! directory and are renamed onto `device.key`. Credential writes stay refused
+//! directory and are renamed onto `device.key`. An existing data root may be
+//! owned by the current user, SYSTEM, or Administrators. A file or directory
+//! this code creates is owned by the current user. Credential writes stay refused
 //! on Windows. The stable identity lock orders key creation and credential
 //! mutations. Callers must release it before taking an auth-state lock, or
 //! acquire auth before identity.
@@ -943,6 +945,7 @@ mod device_key {
         /// Plan check: `load_or_create_device_key` on an empty data directory that
         /// already exists. The directory is not a missing child this code creates.
         /// Its DACL is the accepted profile shape (user, SYSTEM, Administrators).
+        /// Its owner may be the current user, SYSTEM, or Administrators.
         /// A raw temp directory can also grant Users, and that grant stays refused.
         #[test]
         fn preexisting_empty_data_root_with_system_and_administrators_is_accepted() {

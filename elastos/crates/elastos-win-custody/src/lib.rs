@@ -1,8 +1,9 @@
 //! Windows owner-only files. The current user owns each new file and directory,
 //! the DACL does not inherit, and a reparse point is refused. A folder the
-//! helper writes into may also grant SYSTEM and Administrators write. Users
-//! and Everyone stay refused. The file itself stays owner-only. Opens and
-//! renames are handle-relative, one component at a time.
+//! helper writes into may also grant SYSTEM and Administrators write, and an
+//! existing accepted folder may be owned by the current user, SYSTEM, or
+//! Administrators. Users and Everyone stay refused. The file itself stays
+//! owner-only. Opens and renames are handle-relative, one component at a time.
 
 mod error;
 mod name;

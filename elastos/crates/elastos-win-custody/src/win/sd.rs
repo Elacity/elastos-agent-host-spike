@@ -54,6 +54,10 @@ pub(super) struct BuiltSd {
 
 /// The handle's owner is the current user, the DACL is protected, and every ACE
 /// is an allow for that owner with no inheritance flags.
+///
+/// Files and directories ElastOS creates use this check. SYSTEM and
+/// Administrators are not accepted as the owner here. An existing data
+/// directory is checked with `verify_not_writable_by_others`.
 pub fn verify_owner_only(file: &File, path: &Path) -> Result<(), CustodyError> {
     let user = current_user_sid().map_err(|error| io_at(path, error))?;
     let mut owner: PSID = std::ptr::null_mut();
@@ -80,11 +84,13 @@ pub fn verify_owner_only(file: &File, path: &Path) -> Result<(), CustodyError> {
     unsafe { owner_only(path, user.as_ptr() as PSID, owner, dacl, descriptor) }
 }
 
-/// The current user owns `file`, and no other user is granted write.
+/// The owner is the current user, SYSTEM, or Administrators, and no ACE grants
+/// write to anyone outside that set.
 ///
-/// SYSTEM and Administrators may hold write. A user profile and its temp
-/// directory grant those two principals write; refusing them would reject every
-/// empty temp directory. A new Home file still has to pass [`verify_owner_only`].
+/// Those three principals may already write an accepted directory, so accepting
+/// one of them as owner adds no writer. A user profile, an elevated token, and
+/// its temp directory use SYSTEM and Administrators. A new Home file or
+/// directory still has to pass [`verify_owner_only`].
 pub(super) fn verify_not_writable_by_others(file: &File, path: &Path) -> Result<(), CustodyError> {
     let user = current_user_sid().map_err(|error| io_at(path, error))?;
     let mut owner: PSID = std::ptr::null_mut();
@@ -128,6 +134,9 @@ pub(super) fn build_sd(sid_buf: &[u64]) -> io::Result<BuiltSd> {
     // SAFETY: `sd` and `acl_buf` are writable and live. `sid` stays valid for the
     // returned descriptor because the caller keeps `sid_buf` until the create returns.
     // Moving `acl_buf` into `BuiltSd` keeps its heap address.
+    // `SetSecurityDescriptorOwner` names the current user, and the third argument
+    // is 0, so that owner is explicit. An elevated token's default owner is
+    // Administrators. A new file or directory must not record that SID.
     let ok = unsafe {
         InitializeSecurityDescriptor(raw, 1) != 0
             && InitializeAcl(acl, acl_len as u32, ACL_REVISION) != 0
@@ -215,6 +224,21 @@ impl Drop for FreeLocal {
                 LocalFree(self.0);
             }
         }
+    }
+}
+
+/// `user` is the current user's SID. `sid` is null, or a SID from the same
+/// security descriptor. Trusted writers are that user, SYSTEM, and Administrators.
+unsafe fn trusted_writer(sid: PSID, user: PSID) -> bool {
+    if sid.is_null() || user.is_null() {
+        return false;
+    }
+    // SAFETY: both pointers are non-null. The caller passes the token SID copy
+    // and either the owner from GetSecurityInfo or an ACE SID whose length was checked.
+    unsafe {
+        EqualSid(sid, user) != 0
+            || IsWellKnownSid(sid, WinLocalSystemSid) != 0
+            || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
     }
 }
 
@@ -321,9 +345,10 @@ unsafe fn no_other_writers(
     if control & SE_DACL_PRESENT == 0 || dacl.is_null() {
         return Err(foreign(path));
     }
-    // SAFETY: `owner` and `user` are non-null SIDs for this check, or `owner` is null and we stop.
-    let owner_matches = unsafe { !owner.is_null() && EqualSid(owner, user) != 0 };
-    if !owner_matches {
+    // SAFETY: `user` is the copied current-user SID. `owner` is null or a SID
+    // inside `descriptor`, which the caller keeps alive.
+    let owner_trusted = unsafe { trusted_writer(owner, user) };
+    if !owner_trusted {
         return Err(CustodyError::NotOwner {
             path: path.display().to_string(),
         });
@@ -370,13 +395,9 @@ unsafe fn no_other_writers(
         if mask & OTHER_WRITE == 0 {
             continue;
         }
-        // SAFETY: `sid` and `user` are non-null and sized above. IsWellKnownSid only reads `sid`.
-        let allowed = unsafe {
-            EqualSid(sid, user) != 0
-                || IsWellKnownSid(sid, WinLocalSystemSid) != 0
-                || IsWellKnownSid(sid, WinBuiltinAdministratorsSid) != 0
-        };
-        if !allowed {
+        // SAFETY: `sid` is non-null and sized above. `user` is the copied current-user SID.
+        // IsWellKnownSid only reads `sid`.
+        if unsafe { !trusted_writer(sid, user) } {
             return Err(foreign(path));
         }
     }
