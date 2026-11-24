@@ -14,14 +14,14 @@
 ))]
 use std::path::{Path, PathBuf};
 
-/// The binary Cargo would hand an integration test of this package, or a
-/// binary this test builds with `--locked --offline` into its own target dir.
+/// The binary Cargo would hand an integration test of this package, or the
+/// binary `just prepare-providers` built. This function does not run Cargo.
 ///
 /// `localhost-provider` is a workspace member. `CARGO_BIN_EXE_localhost_provider`
 /// is set for that package's own integration tests, not for `elastos-server`.
-/// When it is unset, this builds `-p localhost-provider --bin localhost-provider`
-/// into `target/fence-localhost-provider`. Object is its own package and builds
-/// into `target/provider-fence-tests`, the directory CI fills first.
+/// When it is unset, localhost is `target/fence-localhost-provider/debug/localhost-provider`.
+/// Object is `target/provider-fence-tests/debug/object-provider`. A missing
+/// file panics with the prepare instruction.
 #[cfg(any(
     target_os = "macos",
     all(
@@ -46,42 +46,38 @@ fn provider_binary(name: &str) -> PathBuf {
         repo.join("target/provider-fence-tests")
     };
     let binary = target_dir.join("debug").join(name);
-    let manifest = if name == "localhost-provider" {
-        repo.join("elastos/Cargo.toml")
-    } else {
-        repo.join("capsules").join(name).join("Cargo.toml")
-    };
-    let mut command = std::process::Command::new(env!("CARGO"));
-    command
-        .arg("build")
-        .arg("--locked")
-        .arg("--offline")
-        .arg("--manifest-path")
-        .arg(&manifest);
-    if name == "localhost-provider" {
-        command.arg("-p").arg("localhost-provider");
-    }
-    let output = command
-        .arg("--bin")
-        .arg(name)
-        .arg("--target-dir")
-        .arg(&target_dir)
-        .current_dir(&repo)
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .env("CARGO_BUILD_BUILD_DIR", target_dir.join("build"))
-        .env("CARGO_PROFILE_DEV_DEBUG", "line-tables-only")
-        .env("CARGO_TERM_COLOR", "never")
-        .output()
-        .unwrap_or_else(|err| panic!("cargo build {name} did not start: {err}"));
-    if !output.status.success() || !binary.is_file() {
+    if !binary.is_file() {
         panic!(
-            "cargo build --locked --offline --bin {name} failed ({}); binary {}\n{}",
-            output.status,
-            binary.display(),
-            String::from_utf8_lossy(&output.stderr)
+            "{name} is not at {}. Run `just prepare-providers` before these tests. That command builds the helper binaries; the tests do not download crates.",
+            binary.display()
         );
     }
     binary
+}
+
+/// A name `just prepare-providers` does not build has no binary. The panic
+/// names that command. The tests do not run Cargo to fill the gap.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[test]
+fn a_missing_helper_binary_names_prepare_providers() {
+    let caught = std::panic::catch_unwind(|| provider_binary("not-a-helper"));
+    let message = caught.expect_err("a missing helper binary panics");
+    let text = message
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| message.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(
+        text.contains("Run `just prepare-providers` before these tests.")
+            && text.contains("the tests do not download crates."),
+        "{text}"
+    );
 }
 
 /// Localhost and object do their file job and cannot open the device key.

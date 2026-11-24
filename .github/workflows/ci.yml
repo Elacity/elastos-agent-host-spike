@@ -683,22 +683,7 @@ jobs:
           cache-directories: ${{ env.SCCACHE_DIR }}
           save-if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/spike/agent-host' || github.ref == 'refs/heads/develop')) || (github.event_name == 'schedule' && github.ref == 'refs/heads/spike/agent-host') }}
       - name: build provider process binaries for tests
-        run: |
-          cargo build --release --manifest-path capsules/protected-content-protect-provider/Cargo.toml --target-dir capsules/protected-content-protect-provider/target
-          cargo build --release --manifest-path capsules/protected-content-decrypt-provider/Cargo.toml --target-dir capsules/protected-content-decrypt-provider/target
-          cargo build --release --manifest-path capsules/custody-provider/Cargo.toml --target-dir capsules/custody-provider/target
-          # Debug binaries for the fence tests. They share one target dir so
-          # chain-provider reuses crates object-provider already compiled.
-          # The workspace dev profile uses line-tables-only; match it here.
-          # The tests also build with --locked --offline into this directory
-          # when it is empty, so a plain cargo test --locked --workspace runs
-          # them. localhost-provider is built into target/fence-localhost-provider.
-          # A failed build panics the test.
-          # Added time on one Mac, empty directory: object-provider 1m 41s,
-          # then chain-provider 18s. About 2 minutes on this step.
-          export CARGO_PROFILE_DEV_DEBUG=line-tables-only
-          cargo build --locked --manifest-path capsules/object-provider/Cargo.toml --target-dir target/provider-fence-tests
-          cargo build --locked --manifest-path capsules/chain-provider/Cargo.toml --target-dir target/provider-fence-tests
+        run: bash scripts/prepare-providers.sh
       - name: cargo test
         working-directory: elastos
         env:

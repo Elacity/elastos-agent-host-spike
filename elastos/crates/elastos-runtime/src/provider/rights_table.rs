@@ -104,10 +104,19 @@ impl RuntimeProviderId {
     /// row: reqwest 0.12.28, tokio 1.52.1, mio 1.2.0. `fcntl`, `clone`,
     /// `socket`, `setsockopt`, and `getsockopt` are argument-checked, so they
     /// stay off this list.
+    ///
+    /// `readlink` is x86_64 glibc `realpath`: `__readlink` is syscall
+    /// `readlink` (89). Landlock does not mediate it. This filter's deny is
+    /// EACCES, and `realpath` treats that errno as failure. aarch64 glibc
+    /// uses `readlinkat`, which the baseline already allows; the number table
+    /// has no `readlink` on that arch. Localhost calls `canonicalize` on its
+    /// base path and on later paths, inside the fence. Object calls it for
+    /// the auth-state cache key, also inside the fence. Chain does not, and
+    /// its Linux run already passed, so `readlink` stays off the chain row.
     pub(super) fn measured_syscalls(self) -> &'static str {
         match self {
-            Self::Localhost => "rmdir",
-            Self::Object => "flock rename renameat rmdir",
+            Self::Localhost => "readlink rmdir",
+            Self::Object => "flock readlink rename renameat rmdir",
             Self::Chain => "connect recvfrom sendmmsg epoll_create1 epoll_ctl epoll_pwait epoll_wait eventfd2 exit rseq rt_sigprocmask rename renameat",
             Self::Did | Self::Wallet | Self::Model => "",
         }
