@@ -379,7 +379,8 @@ fn granted_home_app_token(data_dir: &std::path::Path) -> String {
     issue_home_launch_token_with_context(data_dir, HOME_CAPSULE_ID, &context).unwrap()
 }
 
-#[allow(dead_code)] // used when prototype-agents is off
+#[cfg(unix)]
+#[cfg(feature = "prototype-agents")]
 fn system_app_token(data_dir: &std::path::Path) -> String {
     passkey_authority_with_name_role_credential(
         data_dir,
