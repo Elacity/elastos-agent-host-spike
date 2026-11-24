@@ -433,6 +433,72 @@ fn managed_child_still_refuses_agents() {
     assert!(body.contains("NOT_THE_HOME"));
 }
 
+struct EnteredModel {
+    entered: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl elastos_runtime::provider::Provider for EnteredModel {
+    async fn handle(
+        &self,
+        _request: elastos_runtime::provider::ResourceRequest,
+    ) -> Result<elastos_runtime::provider::ResourceResponse, elastos_runtime::provider::ProviderError>
+    {
+        Err(elastos_runtime::provider::ProviderError::Provider(
+            "the stub answers raw calls".into(),
+        ))
+    }
+
+    fn schemes(&self) -> Vec<&'static str> {
+        vec!["model"]
+    }
+
+    fn name(&self) -> &'static str {
+        "stub-model"
+    }
+
+    async fn send_raw(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, elastos_runtime::provider::ProviderError> {
+        self.entered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(json!({ "seen": request["op"].clone() }))
+    }
+}
+
+/// The plane installs the registry Home handed it. A raw model call on that
+/// same registry enters the stub. A guest still needs a grant this plane does
+/// not mint.
+#[tokio::test]
+async fn the_agent_runtime_calls_the_shared_model_provider() {
+    let home = Home::open();
+    let registry = Arc::new(elastos_runtime::provider::ProviderRegistry::new());
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    registry
+        .register_sub_provider(
+            "model",
+            Arc::new(EnteredModel {
+                entered: entered.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+    let plane = crate::api::agent_plane::start(&home.data, Some(registry.clone()))
+        .await
+        .unwrap();
+    let installed = crate::api::agent_plane::installed_provider_registry(&home.data)
+        .expect("the plane kept the registry");
+    assert!(Arc::ptr_eq(&registry, &installed));
+    let response = installed
+        .send_raw("model", &json!({ "op": "ping" }))
+        .await
+        .unwrap();
+    assert_eq!(response["seen"], "ping");
+    assert!(entered.load(std::sync::atomic::Ordering::SeqCst));
+    plane.shutdown().await;
+}
+
 #[test]
 fn agent_coordinates_are_created_owner_only_and_not_followed() {
     let source = include_str!("../agent_plane.rs");

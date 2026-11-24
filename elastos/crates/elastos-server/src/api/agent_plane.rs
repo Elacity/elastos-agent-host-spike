@@ -58,6 +58,42 @@ pub(crate) fn plant_task_panic() {
 pub(crate) fn dirs_lock_works() -> bool {
     dirs().lock().is_ok()
 }
+
+#[cfg(test)]
+static REGISTRIES: OnceLock<
+    Mutex<HashMap<PathBuf, std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>>,
+> = OnceLock::new();
+
+#[cfg(test)]
+fn registries(
+) -> &'static Mutex<HashMap<PathBuf, std::sync::Arc<elastos_runtime::provider::ProviderRegistry>>> {
+    REGISTRIES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn note_registry(
+    data_dir: &Path,
+    registry: std::sync::Arc<elastos_runtime::provider::ProviderRegistry>,
+) {
+    if let Ok(mut map) = registries().lock() {
+        map.insert(data_dir.to_path_buf(), registry);
+    }
+}
+
+#[cfg(test)]
+fn clear_registry(data_dir: &Path) {
+    if let Ok(mut map) = registries().lock() {
+        map.remove(data_dir);
+    }
+}
+
+/// The provider registry this process installed for the agent Runtime.
+#[cfg(test)]
+pub(crate) fn installed_provider_registry(
+    data_dir: &Path,
+) -> Option<std::sync::Arc<elastos_runtime::provider::ProviderRegistry>> {
+    registries().lock().ok()?.get(data_dir).cloned()
+}
 #[cfg(unix)]
 const KIND: &str = "agent";
 #[cfg(unix)]
@@ -103,6 +139,8 @@ impl Drop for AgentPlane {
         self.watcher.abort();
         let _ = std::fs::remove_file(&self.coords_path);
         clear_fault(&self.data_dir);
+        #[cfg(test)]
+        clear_registry(&self.data_dir);
         if let Ok(mut set) = dirs().lock() {
             set.remove(&self.data_dir);
         }
@@ -266,6 +304,8 @@ async fn listen(
     ));
     let registry = providers
         .unwrap_or_else(|| std::sync::Arc::new(elastos_runtime::provider::ProviderRegistry::new()));
+    #[cfg(test)]
+    let installed = registry.clone();
     runtime
         .set_provider_registry(registry, manager.clone(), pending.clone(), data_dir.clone())
         .await;
@@ -319,6 +359,8 @@ async fn listen(
                 return Err(error);
             }
             clear_fault(&data_dir);
+            #[cfg(test)]
+            note_registry(&data_dir, installed.clone());
             return Ok(AgentPlane {
                 server: running.server,
                 watcher: running.watcher,
