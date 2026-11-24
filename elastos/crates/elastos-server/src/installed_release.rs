@@ -194,7 +194,7 @@ pub(crate) fn read_signed_release(
         require_no_pending(binary)?;
     }
     read_signed_release_after_gate(data, binary, source, repair_version, for_host_start)
-        .map(|(installed, components, _, _)| (installed.release, components))
+        .map(|(installed, components, _)| (installed.release, components))
 }
 
 /// Tests drive the host-start gate with an explicit update generation and
@@ -211,7 +211,7 @@ pub(crate) fn read_signed_release_for_host_start_with_generation(
     crate::install_transaction::authorize_host_start_with_generation(
         data, binary, generation, process_id,
     )?;
-    let (installed, components, _, _) =
+    let (installed, components, _) =
         read_signed_release_after_gate(data, binary, source, repair_version, true)?;
     Ok((installed.release, components))
 }
@@ -222,8 +222,8 @@ fn read_signed_release_after_gate(
     source: &TrustedSource,
     repair_version: bool,
     for_host_start: bool,
-) -> Result<(InstalledRelease, Vec<u8>, bool, Vec<u8>)> {
-    let sources = require_current_source(data, source)?;
+) -> Result<(InstalledRelease, Vec<u8>, bool)> {
+    require_current_source(data, source)?;
     let private = consumed_present(
         data,
         for_host_start && InstallTransaction::has_pending_recovery(binary),
@@ -248,7 +248,7 @@ fn read_signed_release_after_gate(
     )
     .context(REPAIR)
     .context("Installed component manifest verification failed")?;
-    Ok((installed, components, private, sources))
+    Ok((installed, components, private))
 }
 
 #[cfg(test)]
@@ -311,14 +311,8 @@ pub(crate) fn read_for_transaction(
     )
 }
 
-/// The bytes of the `sources.json` this check admitted. Callers that copy the
-/// trust root write these bytes and do not open the file again.
-fn require_current_source(data: &Path, source: &TrustedSource) -> Result<Vec<u8>> {
-    #[cfg(unix)]
-    let bytes = read_bounded(&crate::sources::trusted_sources_path(data), MAX_METADATA)?;
-    #[cfg(not(unix))]
-    let bytes = fs::read(crate::sources::trusted_sources_path(data))?;
-    let current: crate::sources::TrustedSourcesConfig = serde_json::from_slice(&bytes)?;
+fn require_current_source(data: &Path, source: &TrustedSource) -> Result<()> {
+    let current = crate::sources::load_trusted_sources(data)?;
     anyhow::ensure!(
         current
             .source_named(Some(&source.name))
@@ -327,9 +321,7 @@ fn require_current_source(data: &Path, source: &TrustedSource) -> Result<Vec<u8>
             ),
         "Installed trusted source changed. Check the update again."
     );
-    #[cfg(all(test, unix))]
-    tests::after_source_record_read();
-    Ok(bytes)
+    Ok(())
 }
 
 fn require_no_pending(binary: &Path) -> Result<()> {
@@ -809,9 +801,10 @@ fn sync(path: &Path) -> Result<()> {
 }
 
 /// The signed release a managed runtime child verifies for itself.
-/// The head, the release, and `sources.json` are the bytes of one verified read.
-/// The copy does not open them again. A Home with no release clears any
-/// projection instead, and does not copy `dev_mode`.
+/// The head and the release are the bytes of one verified read. The copy does
+/// not open that head again. `sources.json` is a bounded no-follow read.
+/// A Home with no release clears any projection instead, and does not copy
+/// `dev_mode`.
 #[cfg(unix)]
 pub(crate) fn project_verified_release(
     parent: &Path,
@@ -820,8 +813,9 @@ pub(crate) fn project_verified_release(
 ) -> Result<()> {
     let runtime = fs::canonicalize(Path::new(&source.install_path))?;
     crate::install_transaction::authorize_host_start(parent, &runtime)?;
-    let (installed, _, private, sources) =
+    let (installed, _, private) =
         read_signed_release_after_gate(parent, &runtime, source, false, true)?;
+    let sources = read_bounded(&parent.join("sources.json"), MAX_METADATA)?;
     #[cfg(all(test, unix))]
     tests::after_verified_release_read();
     let (head, release) = release_pair_paths(child, private);
