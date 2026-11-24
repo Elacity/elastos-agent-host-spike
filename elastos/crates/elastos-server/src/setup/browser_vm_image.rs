@@ -2393,7 +2393,15 @@ JSON
         let (bytes, info) = archive(&arm64_fixture(b"image"));
         mark_dev_home(&data);
         assert!(install_archive(&data, &bytes, &info, "darwin-amd64").is_err());
-        assert!(!data.join(INSTALL_PATH).exists());
+        let installed: Vec<String> = fs::read_dir(&data)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            installed,
+            ["config.toml".to_owned()],
+            "a refused install must create nothing but the dev-mode config"
+        );
         let error = install_archive(&data, &bytes, &info, "linux-amd64").unwrap_err();
         assert!(error.to_string().contains("architecture does not match"));
         assert!(!data.join(INSTALL_PATH).exists());
@@ -2409,11 +2417,24 @@ JSON
     #[test]
     fn browser_image_archive_rejects_duplicates_and_unexpected_members() {
         let temp = tempfile::tempdir().unwrap();
+        // The dev opt-in lets the entry-less fixture reach the archive member
+        // check instead of refusing earlier for a missing signed image entry.
+        mark_dev_home(temp.path());
         for name in ["vmlinux", "extra-file"] {
             let mut files = arm64_fixture(b"image");
             files.push((name.into(), b"unexpected".to_vec()));
             let (bytes, info) = archive(&files);
-            assert!(install_archive(temp.path(), &bytes, &info, "darwin-arm64").is_err());
+            let error = install_archive(temp.path(), &bytes, &info, "darwin-arm64").unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("unexpected, duplicate or linked file"),
+                "{name}: {error:#}"
+            );
+            assert!(
+                error.to_string().contains(name),
+                "the refusal must name the offending member {name}: {error:#}"
+            );
             assert!(!temp.path().join(INSTALL_PATH).exists());
         }
     }
