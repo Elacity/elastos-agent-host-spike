@@ -41,6 +41,9 @@ mod v2 {
     wasmtime::component::bindgen!({ path: "../../wit-bus-v2", world: "product-capsule-v2" });
 }
 
+type V2BusError = v2::elastos::bus::types::BusError;
+type V2Result<T> = std::result::Result<T, V2BusError>;
+
 const COMPONENT_FUEL: u64 = 100_000_000;
 // The resident v2 run uses epoch ticks as its execution backstop. Keep fuel
 // above that window even for cheap instructions; v1 keeps its original fuel.
@@ -990,6 +993,38 @@ impl ComputeProvider for ComponentProvider {
     }
 }
 
+fn v2_error(err: elastos::bus::types::BusError) -> V2BusError {
+    use elastos::bus::types::BusError as V1;
+    match err {
+        V1::Denied(message) => V2BusError::Denied(message),
+        V1::NotFound(message) => V2BusError::NotFound(message),
+        V1::Invalid(message) => V2BusError::Invalid(message),
+        V1::Unavailable(message) => V2BusError::Unavailable(message),
+        V1::Timeout(message) => V2BusError::Timeout(message),
+        V1::Internal(message) => V2BusError::Internal(message),
+    }
+}
+
+fn window_bytes(data: &serde_json::Value) -> V2Result<Vec<u8>> {
+    let Some(content) = data.get("content") else {
+        return Err(V2BusError::Invalid("read result has no content".into()));
+    };
+    if let Some(text) = content.as_str() {
+        return Ok(text.as_bytes().to_vec());
+    }
+    let Some(items) = content.as_array() else {
+        return Err(V2BusError::Invalid("read content is not bytes".into()));
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_u64()
+                .and_then(|byte| u8::try_from(byte).ok())
+                .ok_or_else(|| V2BusError::Invalid("read content is not bytes".into()))
+        })
+        .collect()
+}
+
 fn bus_error(code: &str, message: impl Into<String>) -> elastos::bus::types::BusError {
     let message = message.into();
     match code {
@@ -1095,6 +1130,89 @@ impl ComponentState {
             return Err(response_error(&envelope.response));
         }
         Ok(envelope.response)
+    }
+
+    /// A v2 read through the sync bridge. The seal is the first decision.
+    /// Windows use `offset` and `length` on the bridge the v1 invoke already
+    /// uses. Over the cap, this returns before any guest chunk exists.
+    fn windowed_read(
+        &mut self,
+        request: &v2::elastos::bus::types::InvokeRequest,
+        had_body: bool,
+    ) -> V2Result<super::bus2_stream::PreparedRead> {
+        if self.sealed {
+            return Err(V2BusError::Denied(SEALED_BRIDGE.into()));
+        }
+        if request.operation != "read" || request.params.is_empty() {
+            return Err(V2BusError::Unavailable(
+                "providers are not available in this slice".into(),
+            ));
+        }
+        if had_body {
+            return Err(V2BusError::Invalid("a read takes no body".into()));
+        }
+        let cap = super::bus2_stream::read_cap(&request.params).map_err(V2BusError::Invalid)?;
+        let grant = request
+            .grant
+            .clone()
+            .filter(|grant| !grant.is_empty())
+            .ok_or_else(|| {
+                V2BusError::Denied("resource invoke requires a capability grant".into())
+            })?;
+        let resource = request.resource.clone();
+        let mut audit = None;
+        let bytes = super::bus2_stream::collect_under_cap(cap, |offset, length| {
+            let (bytes, seen) = self.bridge_window(&resource, &grant, offset, length)?;
+            if audit.is_none() {
+                audit = seen;
+            }
+            Ok(bytes)
+        })
+        .map_err(|fail| match fail {
+            super::bus2_stream::CapFail::Over { len, cap } => {
+                V2BusError::Invalid(format!("object is {len} bytes, over the cap of {cap}"))
+            }
+            super::bus2_stream::CapFail::Window(err) => err,
+        })?;
+        Ok(super::bus2_stream::PreparedRead { bytes, audit })
+    }
+
+    fn bridge_window(
+        &mut self,
+        resource: &str,
+        grant: &str,
+        offset: u64,
+        length: u64,
+    ) -> V2Result<(Vec<u8>, Option<String>)> {
+        let response = self
+            .call_bridge(guest_bus::invoke_request(guest_bus::InvokeRequest {
+                resource: resource.to_string(),
+                operation: "read".into(),
+                body: serde_json::json!({
+                    "path": resource,
+                    "offset": offset,
+                    "length": length,
+                }),
+                grant: Some(grant.to_string()),
+            }))
+            .map_err(v2_error)?;
+        let (result, audit) = match response {
+            RuntimeResponse::ResourceResult { result, audit } => (result, audit),
+            other => return Err(v2_error(response_error(&other))),
+        };
+        if result.get("status").and_then(|value| value.as_str()) != Some("ok") {
+            let code = result
+                .get("code")
+                .and_then(|value| value.as_str())
+                .unwrap_or("invalid");
+            let message = result
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("read failed");
+            return Err(v2_error(bus_error(code, message)));
+        }
+        let data = result.get("data").unwrap_or(&result);
+        Ok((window_bytes(data)?, audit))
     }
 }
 
@@ -1259,24 +1377,43 @@ impl v2::elastos::bus::providers::Host for ComponentState {}
 impl v2::elastos::bus::providers::HostWithStore<ComponentState> for HasSelf<ComponentState> {
     async fn invoke(
         accessor: &wasmtime::component::Accessor<ComponentState, Self>,
-        _: v2::elastos::bus::types::InvokeRequest,
+        request: v2::elastos::bus::types::InvokeRequest,
         body: Option<StreamReader<u8>>,
     ) -> std::result::Result<
         (
             v2::elastos::bus::types::InvokeStatus,
             StreamReader<u8>,
-            wasmtime::component::FutureReader<
-                std::result::Result<(), v2::elastos::bus::types::BusError>,
-            >,
+            wasmtime::component::FutureReader<std::result::Result<(), V2BusError>>,
         ),
-        v2::elastos::bus::types::BusError,
+        V2BusError,
     > {
+        let had_body = body.is_some();
         if let Some(mut body) = body {
             let _ = accessor.with(|mut access| body.close(&mut access));
         }
-        Err(v2::elastos::bus::types::BusError::Unavailable(
-            "providers are not available in this slice".into(),
-        ))
+        let super::bus2_stream::PreparedRead { bytes, audit } =
+            accessor.with(|mut access| access.get().windowed_read(&request, had_body))?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        accessor
+            .with(|mut access| {
+                let stream =
+                    StreamReader::new(&mut access, super::bus2_stream::WindowRead::new(bytes, tx))?;
+                let trailer = wasmtime::component::FutureReader::new(&mut access, async move {
+                    let ended = rx
+                        .await
+                        .unwrap_or_else(|_| Err("the provider ended without a result".into()));
+                    Ok::<_, wasmtime::Error>(ended.map_err(V2BusError::Invalid))
+                })?;
+                Ok::<_, wasmtime::Error>((
+                    v2::elastos::bus::types::InvokeStatus {
+                        status: "ok".into(),
+                        audit,
+                    },
+                    stream,
+                    trailer,
+                ))
+            })
+            .map_err(|err| V2BusError::Internal(format!("could not open the read: {err}")))
     }
 }
 
@@ -1801,6 +1938,98 @@ mod tests {
         .await
         .expect("the refused body writer must finish after the host closes its reader");
         assert!(provider.instances.read().await.is_empty());
+    }
+
+    fn read_request(max_bytes: u64) -> v2::elastos::bus::types::InvokeRequest {
+        v2::elastos::bus::types::InvokeRequest {
+            resource: "localhost://Users/self/Documents/note.bin".into(),
+            operation: "read".into(),
+            grant: Some("grant-token".into()),
+            params: format!(r#"{{"max_bytes":{max_bytes}}}"#).into_bytes(),
+        }
+    }
+
+    /// The bridge answers one window. `calls` records each `length`.
+    fn state_for(object: Vec<u8>, calls: Arc<Mutex<Vec<u64>>>) -> ComponentState {
+        ComponentState::new(
+            Some(Arc::new(move |line, _capsule, _principal| {
+                let value: serde_json::Value = serde_json::from_str(line).expect("bridge line");
+                let body = &value["request"]["body"];
+                let offset = body["offset"].as_u64().expect("offset") as usize;
+                let length = body["length"].as_u64().expect("length");
+                calls.lock().unwrap().push(length);
+                let start = offset.min(object.len());
+                let end = start.saturating_add(length as usize).min(object.len());
+                let window = object[start..end].to_vec();
+                Ok(serde_json::json!({
+                    "id": 1,
+                    "response": {
+                        "type": "resource_result",
+                        "result": {
+                            "status": "ok",
+                            "data": { "content": window, "size": window.len() }
+                        },
+                        "audit": "read-1"
+                    }
+                })
+                .to_string())
+            })),
+            "capsule-1".into(),
+            Some("person:local:test".into()),
+        )
+    }
+
+    fn opened_chunks(prepared: crate::providers::bus2_stream::PreparedRead) -> usize {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let mut stream = crate::providers::bus2_stream::WindowRead::new(prepared.bytes, tx);
+        let mut chunks = 0;
+        while stream.pull(usize::MAX).is_some() {
+            chunks += 1;
+        }
+        chunks
+    }
+
+    #[test]
+    fn v2_over_cap_read_is_refused_before_a_chunk() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut sealed = state_for(vec![9; 5], calls.clone());
+        sealed.sealed = true;
+        let err = sealed.windowed_read(&read_request(4), false).unwrap_err();
+        assert!(matches!(err, V2BusError::Denied(message) if message == SEALED_BRIDGE));
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "the seal runs before the bridge"
+        );
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut state = state_for(vec![9; 5], calls.clone());
+        let streamed = match state.windowed_read(&read_request(4), false) {
+            Ok(prepared) => opened_chunks(prepared),
+            Err(V2BusError::Invalid(message)) => {
+                assert_eq!(message, "object is 5 bytes, over the cap of 4");
+                0
+            }
+            Err(err) => panic!("over-cap read must be invalid, got {err:?}"),
+        };
+        assert_eq!(streamed, 0, "an over-cap read opens no chunk");
+        let lengths = calls.lock().unwrap().clone();
+        assert!(!lengths.is_empty(), "the size is learned from a window");
+        assert!(lengths
+            .iter()
+            .all(|length| *length <= crate::providers::bus2_stream::READ_CHUNK as u64));
+    }
+
+    #[tokio::test]
+    async fn v2_short_ok_is_refused() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut stream = crate::providers::bus2_stream::WindowRead::new(vec![1, 2, 3, 4, 5], tx);
+        assert_eq!(stream.pull(2).unwrap().len(), 2);
+        drop(stream);
+        let trailer = rx.await.expect("trailer");
+        assert!(
+            trailer.is_err(),
+            "a short stream must not complete the trailer with ok: {trailer:?}"
+        );
     }
 
     /// A file of `len` zero bytes named as the fixture manifest's entrypoint.

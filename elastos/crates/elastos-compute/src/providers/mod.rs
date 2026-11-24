@@ -1,5 +1,6 @@
 //! Compute provider implementations
 
+mod bus2_stream;
 mod component;
 
 use std::sync::Arc;
