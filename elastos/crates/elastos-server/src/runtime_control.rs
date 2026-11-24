@@ -1267,6 +1267,16 @@ async fn ensure_managed_runtime(
     allow_resources: &[&str],
     surface_name: &str,
 ) -> anyhow::Result<RuntimeCoords> {
+    let self_exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to determine runtime binary: {}", e))?;
+    let admitted = crate::binaries::checked_running_runtime(data_dir, &self_exe)?;
+    // Reuse keeps this digest. Holding waits until a spawn.
+    let signed_sha = admitted.signed_checksum().ok().map(|checksum| {
+        checksum
+            .strip_prefix("sha256:")
+            .unwrap_or(checksum)
+            .to_string()
+    });
     let coords_path = managed_runtime_coord_path(data_dir, runtime_kind);
     // Home boot can issue concurrent app/system/browser requests. Serialize the
     // check/start sequence across processes so only one managed runtime can be
@@ -1295,9 +1305,6 @@ async fn ensure_managed_runtime(
         }
     };
 
-    let self_exe = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("Failed to determine runtime binary: {}", e))?;
-    let binary_sha256 = sha256_file(&self_exe)?;
     let (_home_launch_signing_key, home_launch_signer_did) =
         elastos_identity::load_or_create_did(data_dir)?;
     let policy = serde_json::json!({
@@ -1328,6 +1335,10 @@ async fn ensure_managed_runtime(
                 {
                     match runtime_version_from_health(&coords.api_url).await {
                         Some(actual) if actual == expected => {
+                            let binary_sha256 = match &signed_sha {
+                                Some(sha) => sha.clone(),
+                                None => sha256_file(&self_exe)?,
+                            };
                             if coords.binary_sha256 == binary_sha256
                                 && coords.policy_sha256 == policy_sha256
                                 && coords.dependency_sha256 == dependency_sha256
@@ -1463,8 +1474,12 @@ async fn ensure_managed_runtime(
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| anyhow::anyhow!("Failed to create runtime log: {}", e))?;
 
-    // 5. Spawn managed runtime as detached background process
-    let mut child = std::process::Command::new(&self_exe);
+    let mut prepared = admitted.prepare()?;
+    let binary_sha256 = match signed_sha {
+        Some(sha) => sha,
+        None => prepared.held_content_sha256().to_string(),
+    };
+    let mut child = std::process::Command::new(prepared.exec_path());
     child
         .arg("serve")
         .arg("--addr")
@@ -1512,6 +1527,7 @@ async fn ensure_managed_runtime(
         .as_ref()
         .map(|owner| owner.lock_start())
         .transpose()?;
+    prepared.attach_std(&mut child, false)?;
     let child = child
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start runtime: {}", e))?;
@@ -1545,6 +1561,9 @@ async fn ensure_managed_runtime(
             terminate_sibling_managed_runtime_children(runtime_kind, coords.pid)?;
             child.ready();
             drop(start_guard);
+            // The child adopted the private copy before it became ready.
+            // Drop must not delete that directory out from under it.
+            prepared.persist_private_copy();
             Ok(coords)
         }
         StartWait::Exited(status) => anyhow::bail!(
@@ -1588,6 +1607,168 @@ async fn windows_refuses_managed_runtime_before_start() {
         Some(std::io::ErrorKind::Unsupported)
     );
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[cfg(all(test, unix))]
+#[tokio::test]
+async fn ensure_managed_runtime_refuses_a_changed_runtime_before_exec() {
+    if !crate::binaries::run_isolated(
+        "runtime_control::ensure_managed_runtime_refuses_a_changed_runtime_before_exec",
+    ) {
+        return;
+    }
+    let source = include_str!("runtime_control.rs");
+    let start = source
+        .find("async fn ensure_managed_runtime(")
+        .expect("unix ensure_managed_runtime");
+    let body = &source[start..];
+    let pos = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("ensure_managed_runtime lost {needle}"))
+    };
+    let door = pos("checked_running_runtime(data_dir, &self_exe)");
+    let lock = pos("acquire_managed_runtime_start_lock(data_dir)?");
+    let identity = pos("load_or_create_did(data_dir)?");
+    let prerequisite = pos("prerequisites not installed");
+    let ready = pos("StartWait::Ready");
+    let persist = pos("persist_private_copy()");
+    let exited = pos("StartWait::Exited");
+    assert!(
+        door < lock && lock < identity && identity < prerequisite,
+        "admission must precede the lock, the identity write, and the prerequisite check"
+    );
+    assert!(
+        ready < persist && persist < exited,
+        "the private copy is kept only after the child is ready"
+    );
+    let fixture = crate::installed_release::tests::Fixture::new();
+    fixture.substitute_runtime();
+    let bins = tempfile::tempdir().unwrap();
+    for name in ["localhost-provider", "did-provider", "shell"] {
+        let path = bins.path().join(name);
+        std::fs::write(&path, b"provider").unwrap();
+        let key = format!(
+            "ELASTOS_{}_BIN",
+            name.to_ascii_uppercase().replace('-', "_")
+        );
+        std::env::set_var(&key, &path);
+    }
+    let error = ensure_managed_runtime(
+        &fixture.data,
+        "managed-home",
+        "home-auto.json",
+        &["localhost://Users/*"],
+        "home",
+    )
+    .await
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("Installed artifact differs from its signed checksum"),
+        "{message}"
+    );
+    assert!(
+        !message.contains("prerequisites not installed"),
+        "{message}"
+    );
+    assert!(!fixture.data.join("identity").join("device.key").exists());
+    assert!(!fixture.data.join("managed-runtime-start.lock").exists());
+    assert!(!fixture.data.join("logs").exists());
+    assert!(!fixture.data.join("policy").exists());
+    assert!(!fixture.data.join("did").exists());
+}
+
+#[cfg(all(unix, test))]
+struct KillChild(std::process::Child);
+
+#[cfg(all(unix, test))]
+impl Drop for KillChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+    }
+}
+
+#[cfg(all(unix, test))]
+#[tokio::test]
+async fn reuse_makes_no_private_copy() {
+    if !crate::binaries::run_isolated("runtime_control::reuse_makes_no_private_copy") {
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let install = crate::binaries::InstallableRuntime::of(&exe);
+    let fixture = crate::installed_release::tests::Fixture::bound_to(&install.path);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/api/health",
+        axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "status": "ok",
+                "version": env!("ELASTOS_VERSION"),
+            }))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let health = format!("http://{addr}/api/health");
+    let client = reqwest::Client::new();
+    let mut ready = false;
+    for _ in 0..50 {
+        if client
+            .get(&health)
+            .send()
+            .await
+            .ok()
+            .is_some_and(|response| response.status().is_success())
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(ready, "health server did not accept a connection");
+    let (_key, did) = elastos_identity::load_or_create_did(&fixture.data).unwrap();
+    let allow = managed_home_allow_resources();
+    let policy = serde_json::json!({
+        "allow": allow,
+        "home_launch_signer_did": did,
+        "home_launch_auth_data_dir": fixture.data.display().to_string(),
+    });
+    let policy_sha256 = sha256_bytes(serde_json::to_vec(&policy).unwrap().as_slice());
+    let sleeper = KillChild(
+        std::process::Command::new("/bin/sleep")
+            .arg("300")
+            .spawn()
+            .unwrap(),
+    );
+    let coords = RuntimeCoords {
+        api_url: format!("http://{addr}"),
+        attach_secret: String::new(),
+        pid: sleeper.0.id(),
+        runtime_kind: RUNTIME_KIND_MANAGED_HOME.to_string(),
+        binary_sha256: fixture.binary_sha256(),
+        policy_sha256,
+        dependency_sha256: managed_runtime_dependency_sha256(),
+        generation: String::new(),
+        home_url: String::new(),
+    };
+    std::fs::write(
+        managed_runtime_coord_path(&fixture.data, RUNTIME_KIND_MANAGED_HOME),
+        serde_json::to_vec(&coords).unwrap(),
+    )
+    .unwrap();
+    let readonly = crate::binaries::ReadonlyTemp::enter();
+    let result = ensure_managed_runtime(
+        &fixture.data,
+        RUNTIME_KIND_MANAGED_HOME,
+        "home-auto.json",
+        allow,
+        "home",
+    )
+    .await;
+    drop(readonly);
+    drop(sleeper);
+    server.abort();
+    result.expect("reuse must admit without a private copy");
 }
 
 #[cfg(any(unix, test))]

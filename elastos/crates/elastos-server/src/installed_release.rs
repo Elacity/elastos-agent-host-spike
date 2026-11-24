@@ -692,7 +692,7 @@ fn read_capped(file: File, limit: u64, bound: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn file_digest(path: &Path) -> Result<(String, u64)> {
+pub(crate) fn file_digest(path: &Path) -> Result<(String, u64)> {
     let mut file = open_regular(path, false)?;
     let before = file.metadata()?;
     let mut digest = Sha256::new();
