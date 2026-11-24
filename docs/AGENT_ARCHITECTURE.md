@@ -179,9 +179,17 @@ the agent's public identity, private persona, or memory.
 
 ## One live run
 
-One agent has one live run. A second Start while that run is live is refused, and the refusal says "this agent is already running". The run ends when the owner stops it, when the guest fails or crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. Retire refuses a later Start because the agent is retired. Two different agents may run at the same time, and two Starts of one agent at the same moment produce one run.
+One Home process: one agent has one live run. A second `elastos serve` or `elastos gateway` on that data root is refused by the exclusive host lock (`elastos/crates/elastos-server/src/host_lock.rs:120`, called from `serve_cmd.rs:46` and `gateway_cmd.rs:71`). A process started with `ELASTOS_ALLOW_SUBORDINATE_RUNTIME_HOST=1` does not take that lock (`serve_cmd.rs:39`).
 
-A journal under `.AppData/Agents` is written as a whole object. The write carries `create_only` when the object is new, or `if_revision` with the revision last read, and append is refused. A write whose revision is not the stored revision is a conflict, so a run that has ended cannot replace the journal after a later run has stored a new revision. Outside `.AppData/Agents`, a plain write replaces the object and an append extends a file that is already there. One live run does not change those writes.
+A second Start while that run is live is refused, and the refusal says "this agent is already running", including when that Start presents the same grant. A Start while a Stop still holds its token is refused, and the refusal says "this agent is stopping". A Stop that has not finished answers "stopping" (`routes.rs:580`) and leaves the run live.
+
+The run ends when that Stop finishes, when the guest fails, when the guest crashes, when that run is cancelled, or when the Home process starts again, and a later Start can then begin. When an end cannot run (`OwedEnd::Lost`, `runtime.rs:939`), the live-run token is released while the registry row may still show the run as live.
+
+Retire refuses a later Start because the agent is retired. The launch answers "the caller owns no agent with that id" (`a_retired_or_unknown_agent_refuses_its_launch`).
+
+Two different agents may run at the same time, and two Starts of one agent at the same moment produce one run.
+
+A journal under `.AppData/Agents` is written as a whole object. The write carries `create_only` when the object is new, or `if_revision` with the revision last read. Append is refused (`an_append_to_a_journal_is_refused`, `resource_bridge.rs:1441`). An ended run cannot write that journal: its manifest ceiling is gone, so the bridge answers `manifest_capability_denied` (`an_ended_run_cannot_write_after_the_next_run_starts`). A write whose revision is not the stored revision is a `revision_conflict`, the second check. Outside `.AppData/Agents`, on a protected root, a plain write replaces an existing file and an append of a file that is not there creates it (`resource_bridge.rs:1476`); an append extends a file that is already there (`resource_bridge.rs:1468`). On a root with no principal-root protection, a plain write or an append is handled by the provider (`resource_bridge.rs:1387`). One live run does not change those writes.
 
 ## Runtime and provider architecture
 

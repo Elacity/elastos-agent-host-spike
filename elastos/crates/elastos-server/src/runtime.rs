@@ -256,13 +256,13 @@ pub struct Runtime {
     stop_marks: Arc<StdMutex<AgentStopMarks>>,
     /// One live run per agent. Set when the run is admitted. Cleared when
     /// that run's ending releases it, and also when the start is dropped
-    /// before the ending owns it. `agent_launches` is taken first when a
-    /// Start admits a run. This mutex and `live_run_slot` are never held
-    /// together, and neither is held across an await.
+    /// before the ending owns it. The token travels with the start that
+    /// admitted it. `agent_launches` covers the grant check and the session
+    /// record, not the load. `launch_turns` is one turn per agent, held from
+    /// that check until the session record is stored, and by the end until
+    /// it has read the record. Different agents do not share a turn.
     live_runs: Arc<StdMutex<AgentLiveRuns>>,
-    /// The admitted run for the start that holds `agent_launches`, until
-    /// `start_loaded` moves it into the activation. Empty otherwise.
-    live_run_slot: Arc<StdMutex<Option<AgentLiveRun>>>,
+    launch_turns: Arc<StdMutex<HashMap<String, LaunchTurn>>>,
     /// Reference to the component provider for ABI-specific launch.
     component_provider: Option<Arc<ComponentProvider>>,
     /// Per-launch manifest capability ceilings for capsule bridge requests.
@@ -482,6 +482,7 @@ pub(crate) struct StopRowsPause {
 #[cfg(test)]
 pub(crate) struct LiveRunPause {
     pub(crate) entered: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
     key: usize,
     point: &'static str,
 }
@@ -590,6 +591,9 @@ impl AgentLiveRuns {
     }
 }
 
+/// One agent's start and its end share this turn. Different agents do not.
+type LaunchTurn = Arc<tokio::sync::Mutex<()>>;
+
 /// Owns one admitted run. Dropping it, by the ending, a cancel, a panic, or a
 /// refusal after admission, removes only this token.
 struct AgentLiveRun {
@@ -602,23 +606,6 @@ impl Drop for AgentLiveRun {
     fn drop(&mut self) {
         let mut runs = self.runs.lock().unwrap_or_else(|err| err.into_inner());
         runs.clear(&self.agent_id, self.token);
-    }
-}
-
-/// Drops the admitted run if `start_loaded` has not taken it yet. Cancel and
-/// panic before that take drop this value with the start, so the token cannot
-/// outlive the start that admitted it.
-struct LiveRunSlot {
-    slot: Arc<StdMutex<Option<AgentLiveRun>>>,
-}
-
-impl Drop for LiveRunSlot {
-    fn drop(&mut self) {
-        let run = {
-            let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
-            slot.take()
-        };
-        drop(run);
     }
 }
 
@@ -661,6 +648,8 @@ struct ActivationContextHeld {
     /// This activation's live-run token. The ending drops it after the row
     /// records `ended_at`, or when this value is dropped without that ending.
     live_run: Option<AgentLiveRun>,
+    /// The same turns the start holds until the session record is stored.
+    launch_turns: Arc<StdMutex<HashMap<String, LaunchTurn>>>,
     /// How long the ended entry stays before the sweeper removes it:
     /// [`ENDED_CAPSULE_RETENTION`], which only a unit row shortens.
     retention: std::time::Duration,
@@ -710,6 +699,7 @@ impl ActivationContextHeld {
             authority,
             agent_sessions: runtime.agent_launches.clone(),
             live_run,
+            launch_turns: Arc::clone(&runtime.launch_turns),
             armed: true,
             owed: OwedEnd::Task,
             settled: None,
@@ -725,6 +715,20 @@ impl ActivationContextHeld {
     /// Whether the bridge left the guest's call because of its stop.
     fn stop_cancelled_guest(&self) -> bool {
         self.stop.cancelled()
+    }
+
+    /// The turn this agent's start holds until the session record is stored.
+    /// The end takes it before reading that record, so the read cannot pass
+    /// the insert.
+    async fn hold_launch_turn(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let agent_id = self.live_run.as_ref()?.agent_id.clone();
+        let turn = self
+            .launch_turns
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(&agent_id)?
+            .clone();
+        Some(turn.lock_owned().await)
     }
 
     /// Takes away what the start put in place: the provider's activation
@@ -794,6 +798,7 @@ impl ActivationContextHeld {
             }
         };
         self.release().await;
+        let _turn = self.hold_launch_turn().await;
         if let (Some(authority), false) = (&self.authority, self.audited) {
             let record = self
                 .agent_sessions
@@ -887,6 +892,7 @@ impl ActivationContextHeld {
             authority: self.authority.clone(),
             agent_sessions: self.agent_sessions.clone(),
             live_run: self.live_run.take(),
+            launch_turns: Arc::clone(&self.launch_turns),
             armed: true,
             owed: self.owed,
             settled: self.settled.take(),
@@ -1080,7 +1086,7 @@ impl Runtime {
             agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
             stop_marks: Arc::new(StdMutex::new(AgentStopMarks::default())),
             live_runs: Arc::new(StdMutex::new(AgentLiveRuns::default())),
-            live_run_slot: Arc::new(StdMutex::new(None)),
+            launch_turns: Arc::new(StdMutex::new(HashMap::new())),
             component_provider: None,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -1110,7 +1116,7 @@ impl Runtime {
             agent_launches: Arc::new(tokio::sync::Mutex::new(AgentLaunchState::default())),
             stop_marks: Arc::new(StdMutex::new(AgentStopMarks::default())),
             live_runs: Arc::new(StdMutex::new(AgentLiveRuns::default())),
-            live_run_slot: Arc::new(StdMutex::new(None)),
+            launch_turns: Arc::new(StdMutex::new(HashMap::new())),
             component_provider,
             bridge_manifest_capabilities: Arc::new(StdRwLock::new(HashMap::new())),
             bridge_model_token_ceilings: Arc::new(StdRwLock::new(HashMap::new())),
@@ -1425,6 +1431,7 @@ impl Runtime {
             (principal_id, None),
             None,
             LaunchMode::Bounded,
+            None,
             (|_| {}, |_| {}),
         )
         .await
@@ -1449,6 +1456,7 @@ impl Runtime {
             (None, None),
             None,
             LaunchMode::Bounded,
+            None,
             (before_folder_walk, after_folder_walk),
         )
         .await
@@ -1471,6 +1479,7 @@ impl Runtime {
             (principal_id, grant_name),
             None,
             LaunchMode::Detached,
+            None,
             (|_| {}, |_| {}),
         )
         .await
@@ -1491,27 +1500,29 @@ impl Runtime {
         args: Vec<String>,
         admission: crate::agent_admission::AdmissionContext,
     ) -> Result<(CapsuleHandle, Signer)> {
-        self.run_local_admitted_mode(path, args, admission, LaunchMode::Bounded)
+        self.run_local_admitted_mode(path, args, admission, LaunchMode::Bounded, None)
             .await
     }
 
     /// The launch route's admitted start: see [`Self::start_local_with_signer`].
-    pub(crate) async fn start_local_admitted(
+    /// `live_run` is the token this start admitted. It moves into the activation.
+    async fn start_local_admitted(
         &self,
         path: &Path,
         args: Vec<String>,
         admission: crate::agent_admission::AdmissionContext,
+        live_run: Option<AgentLiveRun>,
     ) -> Result<(CapsuleHandle, Signer)> {
-        self.run_local_admitted_mode(path, args, admission, LaunchMode::Detached)
+        self.run_local_admitted_mode(path, args, admission, LaunchMode::Detached, live_run)
             .await
     }
 
     /// Consume the short grant once. One live run for this agent refuses
     /// another start. The run is admitted under `live_runs` before any await
     /// that follows, and that admission does not read the registry, so a
-    /// registry writer cannot delay the model ceiling. The session record is
-    /// written before this returns, under the same lock as the one-use mark,
-    /// so a Stop that sees the row can take the tuple.
+    /// registry writer cannot delay the model ceiling. The token travels with
+    /// this call into the activation. This agent's turn is held until the
+    /// session record is stored, so a Stop that sees the row can take the tuple.
     pub(crate) async fn start_agent_once(
         &self,
         path: &Path,
@@ -1519,45 +1530,57 @@ impl Runtime {
         facts: AgentStartFacts<'_>,
     ) -> Result<(CapsuleHandle, Signer)> {
         let capsules = &self.running_capsules;
-        let mut state = self.agent_launches.lock().await;
-        if Self::refuse_start_for_stop(&self.stop_marks, capsules, &mut state, facts.agent_id) {
-            return Err(ElastosError::InvalidManifest(Self::AGENT_STOPPING.into()));
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        state.used.retain(|_, expiry| *expiry > now);
-        if facts.expires_at <= now {
-            return Err(ElastosError::InvalidManifest(
-                "agent launch grant expired".into(),
-            ));
-        }
-        if state.used.contains_key(facts.launch_id) {
-            return Err(ElastosError::InvalidManifest(
-                "agent launch grant was already used".into(),
-            ));
-        }
-        // A refused second grant is not marked used. The token is visible to
-        // the next waiter before this lock is released.
-        let Some(live_run) = self.admit_live_run(facts.agent_id) else {
-            return Err(ElastosError::InvalidManifest(
-                Self::AGENT_ALREADY_RUNNING.into(),
-            ));
+        let turn = self.launch_turn(facts.agent_id);
+        let _turn = turn.lock().await;
+        let live_run = {
+            let mut state = self.agent_launches.lock().await;
+            if Self::refuse_start_for_stop(&self.stop_marks, capsules, &mut state, facts.agent_id) {
+                return Err(ElastosError::InvalidManifest(Self::AGENT_STOPPING.into()));
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            state.used.retain(|_, expiry| *expiry > now);
+            if facts.expires_at <= now {
+                return Err(ElastosError::InvalidManifest(
+                    "agent launch grant expired".into(),
+                ));
+            }
+            // A live agent answers "already running" before the used-grant
+            // check, including when the second Start presents the same grant.
+            // A refused second grant is not marked used.
+            if self.live_run_held(facts.agent_id) {
+                return Err(ElastosError::InvalidManifest(
+                    Self::AGENT_ALREADY_RUNNING.into(),
+                ));
+            }
+            if state.used.contains_key(facts.launch_id) {
+                return Err(ElastosError::InvalidManifest(
+                    "agent launch grant was already used".into(),
+                ));
+            }
+            let Some(live_run) = self.admit_live_run(facts.agent_id) else {
+                return Err(ElastosError::InvalidManifest(
+                    Self::AGENT_ALREADY_RUNNING.into(),
+                ));
+            };
+            state
+                .used
+                .insert(facts.launch_id.to_string(), facts.expires_at);
+            #[cfg(test)]
+            if self.take_refuse_after_live_admit() {
+                return Err(ElastosError::InvalidManifest(
+                    "refused after the live run was admitted".into(),
+                ));
+            }
+            live_run
         };
-        let _live_slot = self.park_live_run(live_run);
-        state
-            .used
-            .insert(facts.launch_id.to_string(), facts.expires_at);
-        #[cfg(test)]
-        if self.take_refuse_after_live_admit() {
-            return Err(ElastosError::InvalidManifest(
-                "refused after the live run was admitted".into(),
-            ));
-        }
-        let started = self.start_local_admitted(path, vec![], admission).await?;
+        let started = self
+            .start_local_admitted(path, vec![], admission, Some(live_run))
+            .await?;
         let session_id = started.0.id.0.clone();
-        state.sessions.insert(
+        self.agent_launches.lock().await.sessions.insert(
             session_id.clone(),
             AgentSessionRecord {
                 agent_id: facts.agent_id.to_string(),
@@ -1568,6 +1591,22 @@ impl Runtime {
             },
         );
         Ok(started)
+    }
+
+    fn launch_turn(&self, agent_id: &str) -> LaunchTurn {
+        self.launch_turns
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .entry(agent_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn live_run_held(&self, agent_id: &str) -> bool {
+        self.live_runs
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .holds(agent_id)
     }
 
     /// `Some` is this start's token. `None` means this agent already has one.
@@ -1582,23 +1621,6 @@ impl Runtime {
             agent_id: agent_id.to_string(),
             token,
         })
-    }
-
-    fn park_live_run(&self, live_run: AgentLiveRun) -> LiveRunSlot {
-        *self
-            .live_run_slot
-            .lock()
-            .unwrap_or_else(|err| err.into_inner()) = Some(live_run);
-        LiveRunSlot {
-            slot: Arc::clone(&self.live_run_slot),
-        }
-    }
-
-    fn take_parked_live_run(&self) -> Option<AgentLiveRun> {
-        self.live_run_slot
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .take()
     }
 
     /// Live session ids whose principal is `agent_id`. The capsule name is
@@ -1624,8 +1646,10 @@ impl Runtime {
     /// Marks the agent with this Stop's token. The guard clears that token
     /// when Stop returns or the future is dropped, including a panic.
     pub(crate) async fn begin_agent_stop(self: &Arc<Self>, agent_id: &str) -> AgentStopGuard {
+        let turn = self.launch_turn(agent_id);
+        let _turn = turn.lock().await;
         let token = {
-            // A Start that already passed its check still holds this lock
+            // A Start that already passed its check holds this agent's turn
             // until its session is registered.
             let _gate = self.agent_launches.lock().await;
             let mut marks = self
@@ -1866,10 +1890,7 @@ impl Runtime {
 
     #[cfg(test)]
     pub(crate) fn agent_live_run_held(&self, agent_id: &str) -> bool {
-        self.live_runs
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .holds(agent_id)
+        self.live_run_held(agent_id)
     }
 
     #[cfg(test)]
@@ -1894,12 +1915,13 @@ impl Runtime {
                 point,
                 LiveRunGate {
                     entered: Arc::clone(&entered),
-                    release,
+                    release: Arc::clone(&release),
                     panic,
                 },
             ));
         LiveRunPause {
             entered,
+            release,
             key: self.live_run_key(),
             point,
         }
@@ -2053,6 +2075,7 @@ impl Runtime {
         args: Vec<String>,
         admission: crate::agent_admission::AdmissionContext,
         mode: LaunchMode,
+        live_run: Option<AgentLiveRun>,
     ) -> Result<(CapsuleHandle, Signer)> {
         let actor = crate::resource_bridge::BridgePrincipal::from_admission(&admission);
         let ceiling = admission.model_token_ceiling();
@@ -2076,6 +2099,7 @@ impl Runtime {
             (Some(actor), None),
             Some((manifest, entrypoint, model_admission)),
             mode,
+            live_run,
             (|_| {}, |_| {}),
         )
         .await
@@ -2092,6 +2116,7 @@ impl Runtime {
         launch: (Option<BridgePrincipal>, Option<&str>),
         admitted: Option<(CapsuleManifest, Vec<u8>, AgentModelCeiling)>,
         mode: LaunchMode,
+        live_run: Option<AgentLiveRun>,
         walk_hooks: (
             impl FnOnce(&Path) + Send,
             impl FnOnce(&CheckedBundle) + Send,
@@ -2317,6 +2342,7 @@ impl Runtime {
             principal_id.map(crate::resource_bridge::BridgePrincipal::into_bridge_principal_string),
             admitted_model,
             mode,
+            live_run,
         )
         .await?;
 
@@ -2723,6 +2749,7 @@ impl Runtime {
             principal_id,
             None,
             LaunchMode::Bounded,
+            None,
         );
         let started = started.await;
         drop(held);
@@ -2951,6 +2978,18 @@ impl Runtime {
         }
     }
 
+    /// Test only: the planted session sits behind the live run's manifest ceiling.
+    #[cfg(test)]
+    pub(crate) fn copy_manifest_ceiling_for_test(&self, from: &str, to: &str) {
+        let mut bounds = self
+            .bridge_manifest_capabilities
+            .write()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(ceiling) = bounds.get(from).cloned() {
+            bounds.insert(to.to_string(), ceiling);
+        }
+    }
+
     /// The end of every start, and the one place in this file that fills a
     /// capsule's ceiling: from the one bounds function, for a start from a
     /// folder and for a start by CID alike. While the activation runs, that
@@ -2971,6 +3010,7 @@ impl Runtime {
         principal_id: Option<String>,
         model_admission: Option<AgentModelCeiling>,
         mode: LaunchMode,
+        mut live_run: Option<AgentLiveRun>,
     ) -> Result<()> {
         let detached_component =
             if mode == LaunchMode::Detached && handle.manifest.is_component_capsule() {
@@ -2980,14 +3020,16 @@ impl Runtime {
             } else {
                 None
             };
+        let mut carried = if model_admission.is_some() {
+            live_run.take()
+        } else {
+            None
+        };
         let held = detached_component.as_ref().map(|component| {
-            let live_run = if model_admission.is_some() {
-                self.take_parked_live_run()
-            } else {
-                None
-            };
-            ActivationContextHeld::new(self, handle, component.clone(), live_run)
+            ActivationContextHeld::new(self, handle, component.clone(), carried.take())
         });
+        drop(live_run);
+        drop(carried);
         self.hold_launch_context(handle, principal_id.clone(), model_admission)
             .await;
 

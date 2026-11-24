@@ -1328,6 +1328,25 @@ pub(crate) mod tests {
       (instance $lifecycle (export "run" (func $run)))
       (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#;
 
+    /// The same world, but `run` executes `unreachable`. The activation ends
+    /// `failed` with the trap, and the live-run token is released.
+    #[cfg(unix)]
+    const CRASH_COMPONENT: &str = r#"(component
+      (import "elastos:bus/types@1.0.0" (instance $types
+        (type $error (variant
+          (case "denied" string) (case "not-found" string) (case "invalid" string)
+          (case "unavailable" string) (case "timeout" string) (case "internal" string)))
+        (export "bus-error" (type (eq $error)))))
+      (alias export $types "bus-error" (type $bus-error))
+      (core module $m
+        (memory (export "memory") 1)
+        (func (export "run") (result i32) unreachable))
+      (core instance $i (instantiate $m))
+      (func $run (result (result (error $bus-error)))
+        (canon lift (core func $i "run") (memory $i "memory")))
+      (instance $lifecycle (export "run" (func $run)))
+      (export "elastos:bus/lifecycle@1.0.0" (instance $lifecycle)))"#;
+
     impl ProbeLaunch {
         pub(crate) async fn new(names: &[&str]) -> Self {
             Self::new_with(tempfile::tempdir().unwrap(), names, None).await
@@ -8098,11 +8117,11 @@ pub(crate) mod tests {
             post_agent_grant(&home, agent, &grant)
         );
         let (success, refusal) = match (first, second) {
-            ((StatusCode::OK, success), (StatusCode::BAD_REQUEST, refusal))
-            | ((StatusCode::BAD_REQUEST, refusal), (StatusCode::OK, success)) => (success, refusal),
+            ((StatusCode::OK, success), (StatusCode::CONFLICT, refusal))
+            | ((StatusCode::CONFLICT, refusal), (StatusCode::OK, success)) => (success, refusal),
             other => panic!("double click outcomes: {other:?}"),
         };
-        assert!(refusal.contains("already used"), "{refusal}");
+        assert_eq!(refusal, "this agent is already running", "{refusal}");
         let answer: serde_json::Value = serde_json::from_str(&success).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -8760,6 +8779,178 @@ pub(crate) mod tests {
         grants.abort();
         assert_eq!(beside_end.cause.as_deref(), Some("completed"));
         assert_eq!(live_of(&home, &other).await, 0);
+    }
+
+    /// The ending drops the token after the row records its end. A later Start
+    /// waits until that drop is visible.
+    #[cfg(unix)]
+    async fn wait_token_clear(home: &ProbeLaunch, agent: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while home.runtime.agent_live_run_held(agent) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{agent} still holds a live run"));
+    }
+
+    /// A guest that fails, then a later Start of the same agent. The failure is
+    /// the probe's peer read. The token is clear before the later Start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_guest_failure_then_a_start_is_admitted() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&["x", "y"]).await;
+        let [x, y] = home.agents.as_slice() else {
+            panic!("two agents");
+        };
+        let (root_x, root_y) = (home.root(x), home.root(y));
+        let peer = format!("{root_y}/memory/notes.md");
+        let pointer_uri = format!("{root_x}/memory/peer");
+        let pointer_path =
+            elastos_common::localhost::rooted_localhost_fs_path(&home.data_dir, &pointer_uri)
+                .unwrap();
+        crate::auth::write_principal_root_object(
+            &home.data_dir,
+            x,
+            &root_x,
+            &pointer_uri,
+            &pointer_path,
+            peer.as_bytes(),
+        )
+        .unwrap();
+        let grants =
+            grant_probe_requests(home.pending_store.clone(), home.capability_manager.clone());
+        let first = home.launch(x).await.expect("the first start is admitted").0;
+        let ended = home.wait_ended(&first.id).await;
+        assert_eq!(ended.status, "failed", "{ended:?}");
+        wait_token_clear(&home, x).await;
+        let second = home
+            .launch(x)
+            .await
+            .expect("a Start after the guest fails")
+            .0;
+        assert_eq!(second.status, "starting");
+        assert_ne!(second.id, first.id);
+        let _ = home.wait_ended(&second.id).await;
+        grants.abort();
+    }
+
+    /// A guest that crashes, then a later Start of the same agent. The crash is
+    /// `unreachable` in `run`. The token is clear before the later Start.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_guest_crash_then_a_start_is_admitted() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.host_of("crash-host", CRASH_COMPONENT);
+        let agent = home.create_agent_for_host("crashing", &cid);
+        let first = home
+            .launch_from(&dir, &agent)
+            .await
+            .expect("the crashing guest is admitted")
+            .0;
+        let ended = home.wait_ended(&first.id).await;
+        assert_eq!(ended.status, "failed", "{ended:?}");
+        let cause = ended.cause.unwrap_or_default();
+        assert!(
+            cause.contains("unreachable") || cause.contains("trap"),
+            "{cause}"
+        );
+        wait_token_clear(&home, &agent).await;
+        let second = home
+            .launch_from(&dir, &agent)
+            .await
+            .expect("a Start after the guest crashes")
+            .0;
+        assert_eq!(second.status, "starting");
+        assert_ne!(second.id, first.id);
+        let _ = home.wait_ended(&second.id).await;
+    }
+
+    /// Two different agents start at the same moment. Each token stays with
+    /// the launch that admitted it. The first launch is paused after it
+    /// admitted its token and before it takes that token into the activation.
+    /// The second launch runs through that window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_different_agents_starting_at_once_keep_their_tokens() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = Arc::new(ProbeLaunch::new(&[]).await);
+        let (dir_a, cid_a) = home.host_of("spin-a", SPIN_COMPONENT);
+        let (dir_b, cid_b) = home.host_of("spin-b", SPIN_COMPONENT);
+        let agent_a = home.create_agent_for_host("agent-a", &cid_a);
+        let agent_b = home.create_agent_for_host("agent-b", &cid_b);
+        let pause = home.runtime.arm_live_run_await("entrypoint");
+        let entered = pause.entered.notified();
+        let home_a = Arc::clone(&home);
+        let agent_a_task = agent_a.clone();
+        let started = tokio::spawn(async move { home_a.launch_from(&dir_a, &agent_a_task).await });
+        tokio::time::timeout(std::time::Duration::from_secs(30), entered)
+            .await
+            .expect("the first launch reaches the entrypoint");
+        assert!(
+            home.runtime.agent_live_run_held(&agent_a),
+            "the first start admitted its token"
+        );
+        let b = home
+            .launch_from(&dir_b, &agent_b)
+            .await
+            .expect("the other agent starts while the first is still loading")
+            .0;
+        assert!(
+            home.runtime.agent_live_run_held(&agent_a),
+            "the first token stays with its own launch"
+        );
+        assert!(home.runtime.agent_live_run_held(&agent_b));
+        pause.release.notify_one();
+        let a = tokio::time::timeout(std::time::Duration::from_secs(60), started)
+            .await
+            .expect("the paused launch finishes")
+            .expect("the paused launch task joins")
+            .expect("the paused launch is admitted")
+            .0;
+        assert_ne!(a.id, b.id);
+        assert!(home.runtime.agent_live_run_held(&agent_a));
+        assert!(home.runtime.agent_live_run_held(&agent_b));
+        let (status, _) = stop_route(&home, &a.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = stop_route(&home, &b.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// A plain write outside `.AppData/Agents` replaces an existing file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_plain_write_replaces_an_existing_file_outside_agents() {
+        if crate::agents::require_build().is_err() {
+            return;
+        }
+        let home = ProbeLaunch::new(&[]).await;
+        let (dir, cid) = home.spin_host();
+        let agent = home.create_agent_for_host("notes", &cid);
+        let run = home
+            .launch_from(&dir, &agent)
+            .await
+            .expect("the notes guest starts")
+            .0;
+        home.wait_running(&run.id).await;
+        let notes = "localhost://UsersAI/self/memory/notes.md";
+        let _ = write_ok_revision(
+            &write_in_session(&home, &run.id, &agent, notes, b"one", serde_json::json!({})).await,
+        );
+        let _ = write_ok_revision(
+            &write_in_session(&home, &run.id, &agent, notes, b"two", serde_json::json!({})).await,
+        );
+        assert_eq!(object_bytes(&home, &agent, "/memory/notes.md"), b"two");
+        let (status, _) = stop_route(&home, &run.id, Some("user")).await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     /// Two starts of one agent at the same moment: the launch lock admits one.
