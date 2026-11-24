@@ -1441,7 +1441,8 @@ mod tests {
     /// A counted run uses the chain binary `just prepare-providers` built into
     /// `target/provider-fence-tests`. A missing binary, or a Linux kernel that
     /// refuses Landlock ABI 5, panics.
-    /// Linux-only companions, not this test: `a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer`
+    /// Linux-only companions, not this test: `a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer`,
+    /// `a_different_directory_swapped_in_at_the_same_name_is_refused_with_estale`,
     /// and `a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key`.
     #[cfg(all(
         not(elastos_unsupported_os_check),

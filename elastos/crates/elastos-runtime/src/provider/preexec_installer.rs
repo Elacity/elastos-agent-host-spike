@@ -564,17 +564,48 @@ mod tests {
         );
     }
 
+    /// Linux open of a symlink with `O_PATH|O_NOFOLLOW|O_DIRECTORY` returns
+    /// `ENOTDIR`. The child exits with that errno from `Add` of the first
+    /// root, before `landlock_add_rule`. A successful install would create
+    /// `marker` and exit 0, which is the program running.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer() {
-        landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
-        assert_eq!(
-            root_pin::DIRECTORY_OPEN_FLAGS,
-            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
-            "Linux pinned roots are opened with O_PATH|O_NOFOLLOW|O_DIRECTORY"
+    fn install_exit(prepared: &Prepared, root_index: usize, marker: &std::ffi::CStr) -> i32 {
+        let report = std::fs::File::open("/dev/null").unwrap();
+        assert!(report.as_raw_fd() >= 3);
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            let code = match unsafe { install(prepared, report.as_raw_fd(), -1) } {
+                Err(Failure(Step::Add(index), errno)) if index == root_index => errno,
+                Err(_) => 91,
+                Ok(()) => {
+                    let created = unsafe {
+                        libc::open(
+                            marker.as_ptr(),
+                            libc::O_CREAT | libc::O_WRONLY | libc::O_EXCL,
+                            0o600,
+                        )
+                    };
+                    if created >= 0 {
+                        unsafe { libc::close(created) };
+                    }
+                    0
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        assert!(
+            libc::WIFEXITED(status),
+            "the child exited before it could run the program (wait status {status})"
         );
-        let tmp = tempfile::tempdir().unwrap();
-        let data = tmp.path();
+        libc::WEXITSTATUS(status)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn chain_prepared(data: &Path) -> (super::Prepared, usize) {
+        landlock_plan::kernel_abi().expect("Landlock ABI 5 is required for this kernel row");
         std::fs::create_dir(data.join("identity")).unwrap();
         std::fs::create_dir(data.join("chain-provider")).unwrap();
         let executable = Path::new("/opt/elastos/helper-provider");
@@ -587,33 +618,68 @@ mod tests {
             .iter()
             .position(|rule| rule.0 == "chain-provider")
             .expect("chain root");
+        assert_eq!(
+            root_index, 0,
+            "the chain root is the first rule, so a refusal here is before any rule is loaded"
+        );
         let prepared = prepare_path_allow(RuntimeProviderId::Chain, &admitted, plan).unwrap();
+        (prepared, root_index)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer() {
+        assert_eq!(
+            root_pin::DIRECTORY_OPEN_FLAGS,
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY,
+            "Linux pinned roots are opened with O_PATH|O_NOFOLLOW|O_DIRECTORY"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let (prepared, root_index) = chain_prepared(data);
         let root = data.join("chain-provider");
         std::fs::remove_dir(&root).unwrap();
         std::os::unix::fs::symlink(data.join("identity"), &root).unwrap();
-        let report = std::fs::File::open("/dev/null").unwrap();
-        assert!(report.as_raw_fd() >= 3);
-        let pid = unsafe { libc::fork() };
-        assert!(pid >= 0);
-        if pid == 0 {
-            let code = match unsafe { install(&prepared, report.as_raw_fd(), -1) } {
-                Err(Failure(Step::Add(index), errno))
-                    if index == root_index && errno == libc::ESTALE =>
-                {
-                    0
-                }
-                Err(Failure(Step::Add(index), errno)) if index == root_index => errno,
-                Err(_) => 91,
-                Ok(()) => 92,
-            };
-            unsafe { libc::_exit(code) };
-        }
-        let mut status = 0;
-        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+        let marker = data.join("program-ran");
+        let marker_c = std::ffi::CString::new(marker.as_os_str().as_bytes()).unwrap();
+        let code = install_exit(&prepared, root_index, &marker_c);
+        assert!(!marker.exists(), "the child never runs the program");
         assert_eq!(
-            status, 0,
-            "a root swapped for a symlink must be refused by dev/ino mismatch (wait status {status}, exit {})",
-            libc::WEXITSTATUS(status)
+            code,
+            libc::ENOTDIR,
+            "a symlink swapped in is refused by the open (ENOTDIR) before any rule is loaded, and the child never runs the program (exit {code})"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_different_directory_swapped_in_at_the_same_name_is_refused_with_estale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let (prepared, root_index) = chain_prepared(data);
+        let root = data.join("chain-provider");
+        let other = data.join("other-directory");
+        std::fs::create_dir(&other).unwrap();
+        let aside = data.join("aside-root");
+        std::fs::rename(&root, &aside).unwrap();
+        std::fs::rename(&other, &root).unwrap();
+        let swapped = std::fs::symlink_metadata(&root).unwrap();
+        assert_ne!(
+            (
+                prepared.plan.root_dev[root_index],
+                prepared.plan.root_ino[root_index]
+            ),
+            (swapped.dev(), swapped.ino()),
+            "the renamed directory is a different directory"
+        );
+        let marker = data.join("program-ran");
+        let marker_c = std::ffi::CString::new(marker.as_os_str().as_bytes()).unwrap();
+        let code = install_exit(&prepared, root_index, &marker_c);
+        assert!(!marker.exists(), "the child never runs the program");
+        assert_eq!(
+            code,
+            libc::ESTALE,
+            "a different directory swapped in at the same name is refused with ESTALE, and the child never runs the program (exit {code})"
         );
     }
 

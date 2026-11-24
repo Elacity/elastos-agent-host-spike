@@ -73,8 +73,87 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
 
+    // Open of a symlink with DIRECTORY_OPEN_FLAGS.
+    // Linux (O_PATH|O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY) returns ENOTDIR.
+    // macOS (O_CLOEXEC|O_NOFOLLOW|O_DIRECTORY) returns ENOTDIR.
+    // ELOOP is the other refusal O_NOFOLLOW can return; these flags return ENOTDIR.
+    const SYMLINK_OPEN_ERRNO: i32 = libc::ENOTDIR;
+
+    fn chain_plan(data: &Path) -> super::super::landlock_plan::Plan {
+        let executable = Path::new("/opt/elastos/helper-provider");
+        let admitted = super::super::rights::admit_runtime_grant(
+            super::super::rights_table::RuntimeProviderId::Chain,
+        );
+        let (_confinement, plan) = super::super::path_allow::render_with_plan(
+            super::super::rights_table::RuntimeProviderId::Chain,
+            &admitted,
+            data,
+            executable,
+            5,
+        )
+        .unwrap_or_else(|err| panic!("render before the swap: {err}"));
+        assert_eq!(plan.rules[0].0, "chain-provider");
+        plan
+    }
+
     #[test]
     fn a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer() {
+        // A symlink whose target is the same directory must not be followed.
+        // The open returns ENOTDIR and no descriptor, so the dev/ino compare
+        // never sees that target. A symlink to another directory is the same
+        // open refusal.
+        for same_directory in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let data = tmp.path();
+            std::fs::create_dir(data.join("identity")).unwrap();
+            let root = data.join("chain-provider");
+            std::fs::create_dir(&root).unwrap();
+            let plan = chain_plan(data);
+            let dev = plan.root_dev[0];
+            let ino = plan.root_ino[0];
+            let before = std::fs::symlink_metadata(&root).unwrap();
+            assert_eq!((dev, ino), (before.dev(), before.ino()));
+            let target = if same_directory {
+                let saved = data.join("saved-root");
+                std::fs::rename(&root, &saved).unwrap();
+                saved
+            } else {
+                std::fs::remove_dir(&root).unwrap();
+                data.join("identity")
+            };
+            std::os::unix::fs::symlink(&target, &root).unwrap();
+            let admitted = super::super::rights::admit_runtime_grant(
+                super::super::rights_table::RuntimeProviderId::Chain,
+            );
+            let rendered_again = super::super::path_allow::render_with_plan(
+                super::super::rights_table::RuntimeProviderId::Chain,
+                &admitted,
+                data,
+                Path::new("/opt/elastos/helper-provider"),
+                5,
+            );
+            assert!(
+                rendered_again.is_err(),
+                "render after the swap must refuse the symlink"
+            );
+            let path = CString::new(root.as_os_str().as_bytes()).unwrap();
+            let error = match super::open_pinned_directory(
+                &path,
+                super::DIRECTORY_OPEN_FLAGS,
+                dev,
+                ino,
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!(
+                    "same_directory={same_directory}: the open refuses a swapped symlink with ENOTDIR"
+                ),
+            };
+            assert_eq!(
+                error, SYMLINK_OPEN_ERRNO,
+                "same_directory={same_directory}: the open refuses a swapped symlink with ENOTDIR (errno {error})"
+            );
+        }
+
         let installer = include_str!("preexec_installer.rs");
         let add = installer
             .split_once("let directory = if let Some(pin) = pinned")
@@ -101,64 +180,47 @@ mod tests {
             flags.contains("libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_DIRECTORY"),
             "Linux opens a pinned root with O_PATH|O_NOFOLLOW|O_DIRECTORY"
         );
+    }
 
-        // A symlink to identity has a different inode. A symlink whose target
-        // is the same directory still must not be followed: O_NOFOLLOW fails
-        // closed, and the link's own inode is not the pinned directory.
-        for same_directory in [false, true] {
-            let tmp = tempfile::tempdir().unwrap();
-            let data = tmp.path();
-            std::fs::create_dir(data.join("identity")).unwrap();
-            let root = data.join("chain-provider");
-            std::fs::create_dir(&root).unwrap();
-            let executable = Path::new("/opt/elastos/helper-provider");
-            let admitted = super::super::rights::admit_runtime_grant(
-                super::super::rights_table::RuntimeProviderId::Chain,
-            );
-            let (_confinement, plan) = super::super::path_allow::render_with_plan(
-                super::super::rights_table::RuntimeProviderId::Chain,
-                &admitted,
-                data,
-                executable,
-                5,
-            )
-            .unwrap_or_else(|err| panic!("render before the swap: {err}"));
-            assert_eq!(plan.rules[0].0, "chain-provider");
-            let dev = plan.root_dev[0];
-            let ino = plan.root_ino[0];
-            let before = std::fs::symlink_metadata(&root).unwrap();
-            assert_eq!((dev, ino), (before.dev(), before.ino()));
-            let target = if same_directory {
-                let saved = data.join("saved-root");
-                std::fs::rename(&root, &saved).unwrap();
-                saved
-            } else {
-                std::fs::remove_dir(&root).unwrap();
-                data.join("identity")
-            };
-            std::os::unix::fs::symlink(&target, &root).unwrap();
-            let rendered_again = super::super::path_allow::render_with_plan(
-                super::super::rights_table::RuntimeProviderId::Chain,
-                &admitted,
-                data,
-                executable,
-                5,
-            );
-            assert!(
-                rendered_again.is_err(),
-                "render after the swap must refuse the symlink"
-            );
-            let path = CString::new(root.as_os_str().as_bytes()).unwrap();
-            let error = super::open_pinned_directory(&path, super::DIRECTORY_OPEN_FLAGS, dev, ino)
-                .expect_err("the installer must refuse the swapped root");
-            assert_ne!(
-                error, 0,
-                "same_directory={same_directory}: the no-follow open refuses a swapped symlink"
-            );
-            assert!(
-                error == libc::ELOOP || error == libc::ENOTDIR || error == libc::ESTALE,
-                "same_directory={same_directory}: open refused with {error}"
-            );
-        }
+    #[test]
+    fn a_different_directory_swapped_in_at_the_same_name_is_refused_with_estale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let root = data.join("chain-provider");
+        std::fs::create_dir(&root).unwrap();
+        let plan = chain_plan(data);
+        let dev = plan.root_dev[0];
+        let ino = plan.root_ino[0];
+        let other = data.join("other-directory");
+        std::fs::create_dir(&other).unwrap();
+        let aside = data.join("aside-root");
+        std::fs::rename(&root, &aside).unwrap();
+        std::fs::rename(&other, &root).unwrap();
+        let swapped = std::fs::symlink_metadata(&root).unwrap();
+        assert!(swapped.is_dir(), "the swapped name is a real directory");
+        assert_ne!(
+            (dev, ino),
+            (swapped.dev(), swapped.ino()),
+            "the renamed directory is a different directory"
+        );
+        let admitted = super::super::rights::admit_runtime_grant(
+            super::super::rights_table::RuntimeProviderId::Chain,
+        );
+        super::super::path_allow::render_with_plan(
+            super::super::rights_table::RuntimeProviderId::Chain,
+            &admitted,
+            data,
+            Path::new("/opt/elastos/helper-provider"),
+            5,
+        )
+        .expect("a real directory at the same name still renders");
+        let path = CString::new(root.as_os_str().as_bytes()).unwrap();
+        let error = super::open_pinned_directory(&path, super::DIRECTORY_OPEN_FLAGS, dev, ino)
+            .expect_err("a different directory at the pinned name is refused");
+        assert_eq!(
+            error,
+            libc::ESTALE,
+            "a different directory swapped in at the same name is refused with ESTALE (errno {error})"
+        );
     }
 }
