@@ -20,6 +20,7 @@ import {
   createHomeBackgroundImageReader,
   targetById,
 } from "./shell-core.js?v=home-wallpaper-20261030b";
+import { startHomeFrame } from "./home-frame.js?v=home-frame-20261124a";
 import {
   addAccountPasskey,
   bindHomeUnlock,
@@ -2936,6 +2937,15 @@ function scheduleHomeEventPoll(delayMs) {
     pollHomeEvents,
     Math.max(250, Number(delayMs) || HOME_EVENTS_RETRY_MS),
   );
+}
+
+const homeV2Frame = document.getElementById("home-v2-frame");
+if (homeV2Frame) {
+  startHomeFrame(homeV2Frame, () => {
+    const app = homeV2Frame.dataset.app || "";
+    if (!app) return Promise.resolve({ nodes: [] });
+    return fetchJson("/api/apps/home/frame?app=" + encodeURIComponent(app));
+  });
 }
 
 function broadcastHomeRuntimeEvents(events) {

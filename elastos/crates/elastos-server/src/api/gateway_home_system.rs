@@ -1416,6 +1416,31 @@ fn unconfigured_people_discovery_summary() -> HomePeopleDiscoverySummary {
     }
 }
 
+#[derive(Deserialize)]
+pub(super) struct HomeFrameQuery {
+    app: Option<String>,
+}
+
+pub(super) async fn home_v2_frame(
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    Query(query): Query<HomeFrameQuery>,
+) -> Response {
+    let context = match require_home_token_context(&state.data_dir, &headers) {
+        Ok(context) => context,
+        Err(err) => return home_error_response(err),
+    };
+    let app = query.app.unwrap_or_default();
+    if app.is_empty() || app.len() > 128 {
+        return Json(serde_json::json!({ "nodes": [] })).into_response();
+    }
+    Json(crate::component::home_v2_frame_body(
+        context.principal_id(),
+        &app,
+    ))
+    .into_response()
+}
+
 #[cfg(unix)]
 #[cfg(test)]
 mod discovery_summary_tests {

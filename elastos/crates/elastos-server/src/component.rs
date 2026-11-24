@@ -148,6 +148,41 @@ pub fn read_v2_frame_for_home(
     provider.read_v2_frame(caller, id).map(|frame| frame.nodes)
 }
 
+static HOME_V2_GUESTS: std::sync::Mutex<
+    Option<std::sync::Weak<elastos_compute::providers::ComponentProvider>>,
+> = std::sync::Mutex::new(None);
+
+pub fn register_home_v2_guests(
+    provider: &std::sync::Arc<elastos_compute::providers::ComponentProvider>,
+) {
+    if let Ok(mut slot) = HOME_V2_GUESTS.lock() {
+        *slot = Some(std::sync::Arc::downgrade(provider));
+    }
+}
+
+pub fn home_v2_frame_body(principal: &str, app: &str) -> serde_json::Value {
+    let provider = HOME_V2_GUESTS
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().and_then(std::sync::Weak::upgrade));
+    let nodes = provider
+        .as_ref()
+        .and_then(|provider| read_v2_frame_for_home(provider, Some(principal), app));
+    let nodes: Vec<serde_json::Value> = nodes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|node| match node {
+            elastos_compute::providers::bus2_ui::FrameNode::Text(text) => {
+                serde_json::json!({ "kind": "text", "text": text })
+            }
+            elastos_compute::providers::bus2_ui::FrameNode::Image { resource, .. } => {
+                serde_json::json!({ "kind": "image", "resource": resource })
+            }
+        })
+        .collect();
+    serde_json::json!({ "nodes": nodes })
+}
+
 /// The public v1 component admission check for capsule kit host tests (kit
 /// item A2). Capsule and bundle starts use the manifest-aware check below.
 pub fn validate_component_imports(bytes: &[u8]) -> std::result::Result<(), String> {

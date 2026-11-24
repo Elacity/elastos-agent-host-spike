@@ -76,6 +76,109 @@ async fn home_test_get_json_without_origin(
     (status, payload)
 }
 
+#[tokio::test]
+async fn home_frame_is_only_the_presenting_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let other = passkey_authority_with_name_role_credential(
+        dir.path(),
+        Some("Other"),
+        crate::auth::RuntimePrincipalRole::Admin,
+        "other-home-frame",
+    );
+    let provider = Arc::new(elastos_compute::providers::ComponentProvider::new());
+    crate::component::register_home_v2_guests(&provider);
+    provider.testing_store_v2_frame(
+        "app-frame",
+        Some(owner.principal_id.as_str()),
+        vec![
+            elastos_compute::providers::bus2_ui::FrameNode::Text(
+                "<script>alert(1)</script>".into(),
+            ),
+            elastos_compute::providers::bus2_ui::FrameNode::Image {
+                grant: "grant-frame".into(),
+                resource: "localhost://photo".into(),
+            },
+        ],
+    );
+    let app = gateway_router(test_state(dir.path()));
+    let (status, body) = frame_body(&app, &owner.home_token).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let owner_frame: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(owner_frame["nodes"][0]["text"], "<script>alert(1)</script>");
+    assert_eq!(owner_frame["nodes"][1]["resource"], "localhost://photo");
+    assert!(owner_frame.get("grant").is_none());
+
+    let (other_status, other_body) = frame_body(&app, &other.home_token).await;
+    assert_eq!(other_status, StatusCode::OK, "{other_body}");
+    let other_frame: serde_json::Value = serde_json::from_str(&other_body).unwrap();
+    assert_eq!(
+        other_frame["nodes"].as_array().map(Vec::len),
+        Some(0),
+        "another person's session gets nothing"
+    );
+
+    let _ = provider
+        .deliver_grant_revoked(&elastos_common::CapsuleId::new("app-frame"), "grant-frame")
+        .await;
+    let (_, revoked) = frame_body(&app, &owner.home_token).await;
+    assert!(
+        !revoked.contains("localhost://photo"),
+        "a revoked image is gone"
+    );
+
+    provider.testing_store_v2_frame(
+        "app-frame",
+        Some(owner.principal_id.as_str()),
+        vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
+            "still here".into(),
+        )],
+    );
+    let manifest: elastos_common::CapsuleManifest = serde_json::from_str(
+        &std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/components/bus-v1/capsule.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let handle = elastos_compute::CapsuleHandle {
+        id: elastos_common::CapsuleId::new("app-frame"),
+        manifest,
+        args: Vec::new(),
+    };
+    elastos_compute::ComputeProvider::stop(provider.as_ref(), &handle)
+        .await
+        .unwrap();
+    let (stopped_status, stopped) = frame_body(&app, &owner.home_token).await;
+    assert_eq!(stopped_status, StatusCode::OK, "{stopped}");
+    let stopped_frame: serde_json::Value = serde_json::from_str(&stopped).unwrap();
+    assert_eq!(
+        stopped_frame["nodes"].as_array().map(Vec::len),
+        Some(0),
+        "a stopped app gets nothing"
+    );
+}
+
+async fn frame_body(app: &axum::Router, token: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            test_browser_request("localhost:61180", "http://localhost:61180")
+                .uri("/api/apps/home/frame?app=app-frame")
+                .header("x-elastos-home-token", token)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
 pub(super) async fn home_test_post_json(
     app: &axum::Router,
     uri: &str,

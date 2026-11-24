@@ -858,6 +858,9 @@ impl Runtime {
         compute_providers: Vec<Arc<dyn ComputeProvider>>,
         component_provider: Option<Arc<ComponentProvider>>,
     ) -> Self {
+        if let Some(provider) = component_provider.as_ref() {
+            crate::component::register_home_v2_guests(provider);
+        }
         Self {
             _storage: storage,
             compute_providers,

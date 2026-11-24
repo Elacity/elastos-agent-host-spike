@@ -305,6 +305,23 @@ impl ComponentProvider {
         Some(stored.frame.clone())
     }
 
+    /// Stores one frame so a same-process Home test can read it back.
+    /// A guest present is the production writer.
+    pub fn testing_store_v2_frame(
+        &self,
+        id: &str,
+        principal: Option<&str>,
+        nodes: Vec<crate::providers::bus2_ui::FrameNode>,
+    ) {
+        self.frames.lock().expect("frames").insert(
+            id.to_string(),
+            StoredFrame {
+                principal: principal.map(str::to_string),
+                frame: crate::providers::bus2_ui::Frame { nodes },
+            },
+        );
+    }
+
     /// Delivers `grant-revoked` on the guest's event stream. The next present
     /// of that grant is denied. This uses the stream the guest is already reading.
     /// A host frame whose image names the grant is dropped here, before the guest reads.
