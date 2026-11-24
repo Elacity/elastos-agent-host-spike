@@ -496,6 +496,7 @@ impl ActivationContextHeld {
     /// model-token ceiling and the launch content. It is called at the one
     /// end of every detached activation, before the entry records the end,
     /// so nothing of the instance is left for a reader or a late bridge call.
+    /// A plan that is still pending keeps the admission its submit stored.
     /// The stop request is not this method's: the entry's end takes it away
     /// after the write, so a racing stop still finds it.
     async fn release(&mut self) {

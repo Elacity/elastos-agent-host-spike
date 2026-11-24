@@ -402,8 +402,35 @@ pub(crate) fn retain_agent_plan_dispatch_authority(
 
 pub(crate) fn forget_agent_plan_dispatch_authority(capsule_id: &str) {
     if let Ok(mut authorities) = plan_authorities().lock() {
-        authorities.retain(|_, held| held.context.capsule_id != capsule_id);
+        authorities.retain(|request_id, held| {
+            held.context.capsule_id != capsule_id || held_plan_is_pending(held, request_id)
+        });
     }
+}
+
+/// The owner's answer can arrive after the guest's activation has ended.
+/// The admission the submit already retained stays while that plan is still
+/// pending. A missing record, or any other status, is dropped with the guest.
+fn held_plan_is_pending(held: &AgentPlanDispatchAuthority, request_id: &str) -> bool {
+    let Some(dir) = held.context.data_dir.as_deref() else {
+        return false;
+    };
+    let path = dir
+        .join("inspect-actions")
+        .join(format!("{request_id}.json"));
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(|status| status.as_str())
+                .map(str::to_owned)
+        })
+        .as_deref()
+        == Some("pending")
 }
 
 #[cfg(unix)]

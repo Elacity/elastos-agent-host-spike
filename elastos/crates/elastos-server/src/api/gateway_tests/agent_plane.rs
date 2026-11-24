@@ -791,6 +791,79 @@ async fn an_approved_plan_is_found_by_dispatch_in_this_process() {
     plane.shutdown().await;
 }
 
+#[tokio::test]
+async fn a_pending_plan_keeps_its_admission_after_the_guest_ends() {
+    let home = Home::open();
+    let step = json!({"scheme": "localhost", "operation": "read", "request": {"path": "note"}});
+    let ctx = crate::resource_bridge::BridgeContext {
+        provider_registry: Arc::new(elastos_runtime::provider::ProviderRegistry::new()),
+        capability_manager: Arc::new(elastos_runtime::capability::CapabilityManager::new(
+            Arc::new(elastos_runtime::capability::CapabilityStore::new()),
+            Arc::new(elastos_runtime::primitives::audit::AuditLog::new()),
+            Arc::new(elastos_runtime::primitives::metrics::MetricsManager::new()),
+        )),
+        pending_store: Arc::new(elastos_runtime::capability::PendingRequestStore::new(
+            Arc::new(elastos_runtime::primitives::audit::AuditLog::new()),
+        )),
+        capsule_id: "capsule:s1".to_string(),
+        session_id: "session:s1".to_string(),
+        principal_id: Some("agent:s1".to_string()),
+        manifest_capabilities: Vec::new(),
+        data_dir: Some(home.data.clone()),
+        launch: None,
+        model_token_ceiling: None,
+        model_budget: None,
+        stop: None,
+    };
+    let request_id = "plan-kept";
+    std::fs::create_dir_all(home.data.join("inspect-actions")).unwrap();
+    std::fs::write(
+        home.data
+            .join("inspect-actions")
+            .join(format!("{request_id}.json")),
+        r#"{"status":"pending"}"#,
+    )
+    .unwrap();
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        request_id,
+        "person:s1",
+        &ctx,
+        &step,
+    )
+    .unwrap();
+    crate::resource_bridge::forget_agent_plan_dispatch_authority("capsule:s1");
+    let kept = crate::resource_bridge::dispatch_agent_plan_step(
+        request_id,
+        "person:s1",
+        "agent:s1",
+        "capsule:s1",
+        "session:s1",
+        &home.data,
+        &step,
+    )
+    .await;
+    assert_ne!(kept["code"].as_str(), Some("admission_missing"), "{kept}");
+    crate::resource_bridge::retain_agent_plan_dispatch_authority(
+        "plan-gone",
+        "person:s1",
+        &ctx,
+        &step,
+    )
+    .unwrap();
+    crate::resource_bridge::forget_agent_plan_dispatch_authority("capsule:s1");
+    let dropped = crate::resource_bridge::dispatch_agent_plan_step(
+        "plan-gone",
+        "person:s1",
+        "agent:s1",
+        "capsule:s1",
+        "session:s1",
+        &home.data,
+        &step,
+    )
+    .await;
+    assert_eq!(dropped["code"], "admission_missing", "{dropped}");
+}
+
 async fn guest_cause(body: &str, needle: &str) {
     let home = Home::open();
     let dir = home._temp.path().join("guest");
