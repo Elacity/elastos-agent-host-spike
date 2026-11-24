@@ -234,6 +234,7 @@ pub(super) use gateway_passkey_step_up::{
     require_hosted_step_up_launch,
 };
 #[cfg(all(test, target_os = "macos"))]
+#[cfg(elastos_prototype_agents)]
 pub(crate) use gateway_provider_proxy::http_hosted_run_with_principal_for_test;
 #[cfg(unix)]
 #[cfg(test)]

@@ -2100,10 +2100,9 @@ impl ProviderBridge {
     pub fn confined_model_identity(&self) -> Option<(u32, u64)> {
         let pid = self._local_provider_pid.load(Ordering::Acquire);
         let stored = self._local_provider_birth.load(Ordering::Acquire);
-        // `from_io` names this process and leaves the birth unset. A provider
-        // process still has to present its own birth.
-        let birth = super::local_model_broker::process_birth(pid)?;
-        ((pid == std::process::id() && stored == 0) || stored == birth).then_some((pid, birth))
+        // A provider process presents its own birth. `from_io` leaves the pid at 0.
+        (pid != 0 && super::local_model_broker::process_birth(pid) == Some(stored))
+            .then_some((pid, stored))
     }
 
     #[cfg(target_os = "macos")]
@@ -2631,9 +2630,8 @@ impl ProviderBridge {
         }
     }
 
-    /// Create a bridge from existing I/O handles (for testing). On macOS it
-    /// names this process, with no stored birth, so a fixture can admit a
-    /// hosted run through `send_raw` and then production `handle`.
+    /// Create a bridge from existing I/O handles (for testing). The pid stays 0,
+    /// so this bridge is not a confined model process.
     pub fn from_io(
         reader: impl AsyncBufRead + Unpin + Send + 'static,
         writer: impl AsyncWrite + Unpin + Send + 'static,
@@ -2656,12 +2654,24 @@ impl ProviderBridge {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_brokers: Mutex::new(BrokerTasks::default()),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            _local_provider_pid: Arc::new(AtomicU32::new(std::process::id())),
+            _local_provider_pid: Arc::new(AtomicU32::new(0)),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             _local_provider_birth: Arc::new(AtomicU64::new(0)),
             #[cfg(target_os = "macos")]
             hosted_run_bindings: Arc::new(StdMutex::new(BTreeMap::new())),
         }
+    }
+
+    /// Names this process and stores its birth. A release build leaves this out,
+    /// so `from_io` cannot admit a hosted run.
+    #[cfg(all(target_os = "macos", feature = "in-process-model-for-test"))]
+    pub fn name_this_process_for_test(&self) {
+        let pid = std::process::id();
+        let Some(birth) = super::local_model_broker::process_birth(pid) else {
+            return;
+        };
+        self._local_provider_pid.store(pid, Ordering::Release);
+        self._local_provider_birth.store(birth, Ordering::Release);
     }
 
     /// Send a request and receive a response (with timeout).
@@ -3272,6 +3282,35 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         panic!("expected test provider marker {} to exist", path.display());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn from_io_does_not_admit_this_process() {
+        let (reader, _) = tokio::io::duplex(64);
+        let (writer, _) = tokio::io::duplex(64);
+        let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(reader), writer);
+        assert!(
+            bridge.confined_model_identity().is_none(),
+            "from_io named this process"
+        );
+    }
+
+    #[cfg(all(target_os = "macos", feature = "in-process-model-for-test"))]
+    #[test]
+    fn naming_this_process_admits_a_confined_model() {
+        let (reader, _) = tokio::io::duplex(64);
+        let (writer, _) = tokio::io::duplex(64);
+        let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(reader), writer);
+        bridge.name_this_process_for_test();
+        let (pid, birth) = bridge
+            .confined_model_identity()
+            .expect("the test name did not admit this process");
+        assert_eq!(pid, std::process::id());
+        assert_eq!(
+            Some(birth),
+            super::super::local_model_broker::process_birth(pid)
+        );
     }
 
     #[cfg(target_os = "macos")]

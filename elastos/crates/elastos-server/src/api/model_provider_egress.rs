@@ -1913,6 +1913,7 @@ async fn unavailable(stream: &mut UnixStream) -> io::Result<()> {
 }
 
 #[cfg(all(test, target_os = "macos"))]
+#[cfg(elastos_prototype_agents)]
 fn hosted_text_effect(
     data_dir: &Path,
     offer_id: &str,
@@ -1945,6 +1946,7 @@ fn hosted_text_effect(
 }
 
 #[cfg(all(test, target_os = "macos"))]
+#[cfg(elastos_prototype_agents)]
 pub(crate) fn approve_hosted_text_for_test(
     data_dir: &Path,
     offer_id: &str,
@@ -1970,6 +1972,7 @@ pub(crate) fn approve_hosted_text_for_test(
 }
 
 #[cfg(all(test, target_os = "macos"))]
+#[cfg(elastos_prototype_agents)]
 pub(crate) fn end_hosted_decision_for_test(
     data_dir: &Path,
     id: &str,
@@ -1979,6 +1982,7 @@ pub(crate) fn end_hosted_decision_for_test(
 }
 
 #[cfg(all(test, target_os = "macos"))]
+#[cfg(elastos_prototype_agents)]
 pub(crate) use tests::forward_hosted_text_for_test;
 
 #[cfg(test)]
@@ -1988,7 +1992,7 @@ mod tests {
 
     /// Drives production `send_raw` and then production `handle`. The effect
     /// is forwarded only when `confined_model_run_matches` is true.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     pub(crate) async fn forward_hosted_text_for_test(
         data_dir: &Path,
         runs_create: &serde_json::Value,
@@ -1999,6 +2003,7 @@ mod tests {
         let (provider_read, bridge_write) = tokio::io::duplex(4096);
         let (bridge_read, mut provider_write) = tokio::io::duplex(4096);
         let bridge = ProviderBridge::from_io(tokio::io::BufReader::new(bridge_read), bridge_write);
+        bridge.name_this_process_for_test();
         let answered = tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(provider_read);
             let mut line = String::new();

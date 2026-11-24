@@ -9137,30 +9137,30 @@ pub(crate) mod tests {
         assert_eq!(provider.requests.lock().await.len(), 1);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     const HOSTED_OFFER: &str = "model:openrouter";
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     const HOSTED_CAPSULE: &str = "capsule-agent";
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     const HOSTED_INPUT_LIMIT: u64 = 100;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     const HOSTED_INLINE_LIMIT: u64 = 128;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     const HOSTED_SECRET: &str = "fixture-hosted-secret";
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     fn hosted_offer_tokens() -> u64 {
         HOSTED_INPUT_LIMIT + 1024 + (HOSTED_INLINE_LIMIT / 4).max(1)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     struct BrokerModel {
         data_dir: std::path::PathBuf,
         creates: Arc<std::sync::atomic::AtomicUsize>,
         reply: Arc<std::sync::Mutex<String>>,
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     #[async_trait::async_trait]
     impl Provider for BrokerModel {
         async fn handle(&self, _: ResourceRequest) -> Result<ResourceResponse, ProviderError> {
@@ -9224,7 +9224,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     struct HostedHome {
         ctx: BridgeContext,
         creates: Arc<std::sync::atomic::AtomicUsize>,
@@ -9241,7 +9241,7 @@ pub(crate) mod tests {
         _temp: tempfile::TempDir,
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     fn enroll_hosted_owner(dir: &std::path::Path) -> (String, String) {
         let mut identity = elastos_identity::IdentityManager::new(dir.to_path_buf()).unwrap();
         let secret = crate::auth::random_secret_hex();
@@ -9289,7 +9289,7 @@ pub(crate) mod tests {
         (principal.principal_id, principal.proof_binding_id)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     fn hosted_owner_caller<'a>(owner_id: &'a str, proof: &'a str) -> crate::agents::Caller<'a> {
         crate::agents::Caller {
             principal_id: owner_id,
@@ -9298,7 +9298,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     fn write_hosted_fixture(path: &std::path::Path, bytes: &[u8]) {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
@@ -9307,7 +9307,7 @@ pub(crate) mod tests {
         options.open(path).unwrap().write_all(bytes).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     fn hosted_input() -> serde_json::Value {
         serde_json::json!({
             "schema": elastos_model_contract::TEXT_INPUT_V1_SCHEMA,
@@ -9315,7 +9315,7 @@ pub(crate) mod tests {
         })
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     fn hosted_run_id(agent_id: &str, request_id: &str) -> String {
         let input = hosted_input();
         let binding = RuntimeCreateBinding {
@@ -9332,7 +9332,7 @@ pub(crate) mod tests {
         elastos_model_contract::model_run_id(&binding)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     async fn hosted_agent_home(ceiling: u64) -> HostedHome {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -9508,7 +9508,7 @@ pub(crate) mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     async fn hosted_runs_create(ctx: &BridgeContext, request_id: &str) -> serde_json::Value {
         model_invoke(
             ctx,
@@ -9524,7 +9524,7 @@ pub(crate) mod tests {
         .await
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     fn demote_hosted_owner(data_dir: &std::path::Path, owner_id: &str) {
         let mut state = crate::auth::load_auth_state(data_dir).unwrap();
         for principal in &mut state.principals {
@@ -9537,7 +9537,7 @@ pub(crate) mod tests {
 
     /// An admitted agent reaches the loopback broker once. The fixture stores
     /// a hosted secret. The guest result and the broker reply carry no Authorization.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     #[tokio::test]
     async fn agent_hosted_run_reaches_the_egress_broker_once() {
         let home = hosted_agent_home(hosted_offer_tokens()).await;
@@ -9620,7 +9620,7 @@ pub(crate) mod tests {
     }
 
     /// An agent whose stored owner is not an admin keeps the hosted refusal.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     #[tokio::test]
     async fn agent_hosted_run_without_admin_owner_is_refused() {
         let home = hosted_agent_home(hosted_offer_tokens()).await;
@@ -9660,7 +9660,7 @@ pub(crate) mod tests {
     }
 
     /// A run that does not fit the signed ceiling is refused before dispatch.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     #[tokio::test]
     async fn agent_hosted_run_over_its_ceiling_is_refused_before_dispatch() {
         let home = hosted_agent_home(hosted_offer_tokens() - 1).await;
@@ -9687,7 +9687,7 @@ pub(crate) mod tests {
 
     /// Spend, then open the same folder in a new account. The next create does
     /// not fit and is refused before dispatch.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     #[tokio::test]
     async fn spent_total_survives_a_new_runtime_and_blocks_the_next_create() {
         let mut home = hosted_agent_home(hosted_offer_tokens()).await;
@@ -9726,7 +9726,7 @@ pub(crate) mod tests {
     }
 
     /// A record that does not parse is refused by that name before dispatch.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     #[tokio::test]
     async fn unreadable_agent_record_refuses_the_create_by_name() {
         let home = hosted_agent_home(hosted_offer_tokens()).await;
@@ -9752,7 +9752,7 @@ pub(crate) mod tests {
 
     /// Another Runtime fills the store. This Runtime's memory is still zero,
     /// and the create is refused from the stored total before dispatch.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     #[tokio::test]
     async fn two_runtimes_refuse_from_the_stored_total_before_dispatch() {
         let home = hosted_agent_home(hosted_offer_tokens()).await;
@@ -9798,7 +9798,7 @@ pub(crate) mod tests {
 
     /// An HTTP caller with an agent principal is refused. The same principal
     /// is allowed on the Bus path that reserves. The context is injected.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", elastos_prototype_agents))]
     #[tokio::test]
     async fn http_caller_with_an_agent_principal_is_refused() {
         let home = hosted_agent_home(hosted_offer_tokens()).await;
@@ -9833,6 +9833,37 @@ pub(crate) mod tests {
         assert_eq!(home.creates.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(home.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
         home.sink.abort();
+    }
+
+    /// The macOS hosted rows above. Linux CI runs this count with the feature.
+    /// A featureless build does not compile those rows.
+    #[cfg(elastos_prototype_agents)]
+    const HOSTED_AGENT_ROWS: usize = 7;
+
+    #[cfg(elastos_prototype_agents)]
+    #[test]
+    fn hosted_agent_rows_stay_in_the_agents_build() {
+        const NAMES: [&str; HOSTED_AGENT_ROWS] = [
+            "fn agent_hosted_run_reaches_the_egress_broker_once",
+            "fn agent_hosted_run_without_admin_owner_is_refused",
+            "fn agent_hosted_run_over_its_ceiling_is_refused_before_dispatch",
+            "fn spent_total_survives_a_new_runtime_and_blocks_the_next_create",
+            "fn unreadable_agent_record_refuses_the_create_by_name",
+            "fn two_runtimes_refuse_from_the_stored_total_before_dispatch",
+            "fn http_caller_with_an_agent_principal_is_refused",
+        ];
+        let source = include_str!("resource_bridge.rs");
+        assert_eq!(NAMES.len(), HOSTED_AGENT_ROWS);
+        for name in NAMES {
+            let at = source
+                .find(name)
+                .unwrap_or_else(|| panic!("{name} vanished from the agents build"));
+            let window = &source[at.saturating_sub(240)..at];
+            assert!(
+                window.contains("elastos_prototype_agents"),
+                "{name} is compiled without the agents feature: {window}"
+            );
+        }
     }
 
     /// The gateway walker keeps production code written after a `tests`

@@ -9,4 +9,10 @@ fn main() {
     });
 
     println!("cargo:rustc-env=ELASTOS_VERSION={version}");
+    // The agents cargo feature, under a cfg name the one-place reader does not
+    // count. Release builds leave the feature off, so the cfg stays unset.
+    println!("cargo:rustc-check-cfg=cfg(elastos_prototype_agents)");
+    if env::var_os("CARGO_FEATURE_PROTOTYPE_AGENTS").is_some() {
+        println!("cargo:rustc-cfg=elastos_prototype_agents");
+    }
 }

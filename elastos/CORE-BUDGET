@@ -35,4 +35,8 @@
 # authority, noted in #1802's description. Measured on main after the merge.
 # +5 for #1804 (P2-8 slice 4a: a capsule start requires the component closure; the gate in
 # capsule/manager.rs component_closure_required). Measured 23 Nov 2026 after merging main.
-13122
+# +9 for `ProviderBridge::name_this_process_for_test`. Release builds leave the
+# `in-process-model-for-test` feature off, so `from_io` does not name this process.
+# core-size counts the helper because that feature can be on without cfg(test):
+# elastos-server tests call it. Measured 25 Nov 2026.
+13131

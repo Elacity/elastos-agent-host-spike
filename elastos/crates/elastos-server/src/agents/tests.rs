@@ -2187,6 +2187,18 @@ fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
         slot.record.updated_at = 10;
     })
     .unwrap();
+    let field_less = home.agent_bytes();
+    assert!(
+        !std::str::from_utf8(&field_less)
+            .unwrap()
+            .contains("model_tokens_spent"),
+        "a zero total is absent from the file"
+    );
+    assert!(
+        parse_strict(&field_less).is_ok(),
+        "this build accepts the field-less file"
+    );
+    assert_eq!(frozen_older_agent_parser(&field_less), Ok(()));
     charge_model_spend(home.path(), OWNER_ID, &agent.agent_id, (0, 0), 1, 64).unwrap();
     let bytes = home.agent_bytes();
     assert!(std::str::from_utf8(&bytes)
@@ -2200,6 +2212,10 @@ fn an_older_build_refuses_a_spent_file_by_name_and_home_still_loads() {
         .remove("model_tokens_spent");
     let without = serde_json::to_vec(&without).unwrap();
     assert_eq!(frozen_older_agent_parser(&without), Ok(()));
+    assert!(
+        parse_strict(&without).is_ok(),
+        "the older build accepts a field-less file parse_strict accepts"
+    );
     let state = crate::auth::load_auth_state(home.path()).unwrap();
     assert!(
         state

@@ -4025,6 +4025,7 @@ fn hosted_run_allowed(
 
 /// Asks the HTTP gate with a context built for this principal.
 #[cfg(all(test, target_os = "macos"))]
+#[cfg(elastos_prototype_agents)]
 pub(crate) fn http_hosted_run_with_principal_for_test(
     data_dir: &std::path::Path,
     principal_id: &str,

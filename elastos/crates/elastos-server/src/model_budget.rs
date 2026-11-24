@@ -156,6 +156,13 @@ pub(crate) struct ModelBudget {
 
 type Block = Result<(u64, u64, Option<u64>), (u64, u64)>;
 
+/// Eight live agents; each raise or new agent costs rows.
+const LIVE_AGENT_ROW_SHARE: u64 = {
+    let rows = 64 / crate::agents::MAX_LIVE_AGENTS_PER_OWNER as u64;
+    assert!(rows > 0, "64 / live agents is 0");
+    rows
+};
+
 /// One run against the charged block. The block is
 /// `ceil(ceiling / (64 / live agents))`, so eight agents together write about
 /// 64 rows and the 512-row chain keeps the owner's earlier rows. A raised
@@ -173,8 +180,7 @@ pub(crate) fn block_charge(memory: (u64, u64), stored: u64, run: u64, ceiling: u
     if next <= charged {
         return Ok((next, charged, None));
     }
-    let rows = 64 / crate::agents::MAX_LIVE_AGENTS_PER_OWNER as u64;
-    let unit = ceiling.div_ceil(rows);
+    let unit = ceiling.div_ceil(LIVE_AGENT_ROW_SHARE);
     let raise = run.max(unit).min(ceiling.saturating_sub(charged));
     let sum = charged.checked_add(raise);
     let total = sum.filter(|n| *n > stored && *n >= next);
@@ -947,7 +953,7 @@ mod tests {
     /// row and still cannot pass the ceiling.
     #[cfg(unix)]
     #[test]
-    fn a_ceiling_under_64_charges_one_token_blocks() {
+    fn a_ceiling_under_eight_charges_one_token_blocks() {
         let (dir, owner, agent) = planted_agent();
         let other = crate::agents::tests::plant_another_dispatch(dir.path(), &owner, "request-c");
         let (budget, key) = opened_on(dir.path(), &agent, 7);
