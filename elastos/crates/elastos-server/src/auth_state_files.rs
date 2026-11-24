@@ -254,6 +254,7 @@ fn run_auth_state_write_hook(path: &Path) -> anyhow::Result<()> {
         hook(path)?;
     }
     Ok(())
+}
 
 /// Sets mode `0600` on a descriptor the caller already holds.
 #[cfg(unix)]
