@@ -51,6 +51,9 @@ const COMPONENT_FUEL: u64 = 100_000_000;
 // count already running, so the next slice takes the new fuel.
 const V2_FUEL: u64 = 1_000_000_000_000;
 const V2_FUEL_SLICE: u64 = 10_000_000;
+/// An idle wake spends a few dozen fuel. A tick counts once the guest has
+/// spent this much since the last refill.
+const V2_TICK_FUEL: u64 = 100_000;
 const COMPONENT_MEMORY_SIZE: usize = 128 * 1024 * 1024;
 /// The largest component file the Runtime reads or compiles. The largest
 /// component in this repository is under 1 MiB.
@@ -919,20 +922,21 @@ impl ComponentProvider {
         store
             .set_fuel(fuel)
             .map_err(|err| run_error("v2 fuel", err))?;
-        // Count guest execution between delivered events. A stream wake can
-        // reach the callback once even when the guest was idle for 10 ms.
+        // Count a tick when the guest used fuel. An idle wake, including a
+        // delivered event, leaves the count as it is.
         store.set_epoch_deadline(1);
-        let ticks = Arc::new(AtomicU64::new(0));
-        let deadline_ticks = ticks.clone();
+        let deadline_ticks = Arc::new(AtomicU64::new(0));
         let cancel_requested = control.cancel_requested.clone();
         let max_ticks = control.max_ticks;
         store.epoch_deadline_callback(move |mut context| {
             if cancel_requested.load(Ordering::Acquire) {
                 return Ok(UpdateDeadline::Interrupt);
             }
-            // Ticks are reset when an event is delivered. This refill then
-            // restores fuel, so an event source must bound those ticks.
+            let remaining = context.get_fuel()?;
             context.set_fuel(fuel)?;
+            if fuel.saturating_sub(remaining) < V2_TICK_FUEL {
+                return Ok(UpdateDeadline::Continue(1));
+            }
             Ok(
                 if deadline_ticks.fetch_add(1, Ordering::AcqRel) + 1 >= max_ticks {
                     UpdateDeadline::Interrupt
@@ -957,7 +961,6 @@ impl ComponentProvider {
             &mut store,
             V2EventFeed(
                 receiver,
-                ticks,
                 grants,
                 frames,
                 capsule_id,
@@ -988,7 +991,6 @@ impl ComponentProvider {
 
 struct V2EventFeed(
     mpsc::UnboundedReceiver<v2::elastos::bus::types::Event>,
-    Arc<AtomicU64>,
     Arc<Mutex<crate::providers::bus2_ui::GrantBook>>,
     Arc<Mutex<HashMap<String, StoredFrame>>>,
     String,
@@ -1008,8 +1010,7 @@ impl<D> StreamProducer<D> for V2EventFeed {
     ) -> Poll<wasmtime::Result<StreamResult>> {
         match self.0.poll_recv(cx) {
             Poll::Ready(Some(event)) => {
-                note_delivered_event(&self.2, &self.3, &self.4, &event);
-                self.1.store(0, Ordering::Release);
+                note_delivered_event(&self.1, &self.2, &self.3, &event);
                 destination.set_buffer(Some(event));
                 Poll::Ready(Ok(StreamResult::Completed))
             }
@@ -1017,7 +1018,7 @@ impl<D> StreamProducer<D> for V2EventFeed {
             Poll::Pending if finish => Poll::Ready(Ok(StreamResult::Cancelled)),
             Poll::Pending => {
                 #[cfg(test)]
-                self.5.store(true, Ordering::Release);
+                self.4.store(true, Ordering::Release);
                 Poll::Pending
             }
         }
@@ -2000,6 +2001,48 @@ mod tests {
         }
         provider.stop(&handle).await.unwrap();
         assert_eq!(v2_ending(&provider, &handle).await, "stopped");
+    }
+
+    /// The guest reads an event and then burns fuel, while a source keeps
+    /// sending. A delivered event leaves the tick count as it is, so the
+    /// guest still ends on the tick bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_a_delivered_event_does_not_clear_the_tick_bound() {
+        let provider = ComponentProvider::new();
+        let bytes = v2_variant(&[(
+            "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      local.get $event i32.const 2 i32.eq",
+            "(func (export \"callback\") (param $event i32) (param $handle i32) (param $result i32) (result i32)\n      i32.const 0 i32.const 0 i32.const 65536 memory.fill\n      local.get $event i32.const 2 i32.eq",
+        )]);
+        let handle = load_v2_fixture(&provider, bytes).await;
+        provider
+            .instances
+            .write()
+            .await
+            .get_mut(&handle.id)
+            .unwrap()
+            .test_max_ticks = 6;
+        provider.start(&handle).await.unwrap();
+        let sender = provider
+            .instances
+            .read()
+            .await
+            .get(&handle.id)
+            .and_then(|instance| instance.events.clone())
+            .expect("the guest is reading events");
+        let source = tokio::spawn(async move {
+            while sender
+                .send(v2::elastos::bus::types::Event::Message(Vec::new()))
+                .is_ok()
+            {
+                tokio::task::yield_now().await;
+            }
+        });
+        let ending = v2_ending(&provider, &handle).await;
+        source.abort();
+        assert!(
+            ending.contains(ENDING_EPOCH_DEADLINE),
+            "a stream of events must still end on the tick bound, got {ending}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
