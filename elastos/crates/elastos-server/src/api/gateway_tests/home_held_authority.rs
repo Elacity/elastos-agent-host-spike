@@ -1420,10 +1420,10 @@ fn rows() -> Vec<HeldRow> {
     ),
     row(
         "elastos-server/src/server_infra.rs",
-        "start_did_provider",
+        "did_provider_bridge_config",
         "encryption_key: device_key_hex",
         1,
-        mark("open", "device private key", "DID provider", "Home hands the device private key to the DID provider"),
+        mark("narrowed", "device private key", "DID provider", "DID provider receives the existing device signing seed and the existing `elastos-did-storage` key. It does not receive the raw device key. It can still sign chat as the device."),
     ),
     row(
         "elastos-server/src/server_infra.rs",

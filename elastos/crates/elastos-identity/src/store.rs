@@ -289,9 +289,22 @@ pub fn validate_nickname(nickname: &str) -> anyhow::Result<String> {
 }
 
 /// Load the locally persisted DID nickname using an explicit device key.
+///
+/// The file key is `derive_storage_key`. Passing that key here hashes it again
+/// and does not open the file.
 pub fn load_nickname_with_device_key(
     data_dir: &Path,
     device_key: &[u8; 32],
+) -> anyhow::Result<Option<String>> {
+    load_nickname_with_storage_key(data_dir, &derive_storage_key(device_key))
+}
+
+/// Load the locally persisted DID nickname using the expanded storage key.
+///
+/// `storage_key` is the AES-256 key. This function does not run HKDF.
+pub fn load_nickname_with_storage_key(
+    data_dir: &Path,
+    storage_key: &[u8; 32],
 ) -> anyhow::Result<Option<String>> {
     let path = nickname_path(data_dir);
     // `try_exists` propagates a denied metadata lookup; `exists` would read a
@@ -301,7 +314,7 @@ pub fn load_nickname_with_device_key(
     }
 
     let encrypted = std::fs::read(&path)?;
-    let plaintext = decrypt_data(&derive_storage_key(device_key), &encrypted)?;
+    let plaintext = decrypt_data(storage_key, &encrypted)?;
     let nickname = String::from_utf8(plaintext)?;
     let nickname = nickname.trim().to_string();
     if nickname.is_empty() {
@@ -318,10 +331,24 @@ pub fn save_nickname(data_dir: &Path, nickname: &str) -> anyhow::Result<()> {
 }
 
 /// Persist the local DID nickname using an explicit device key.
-#[cfg(unix)]
+///
+/// The file key is `derive_storage_key`. Passing that key here hashes it again
+/// and does not open a file this function wrote.
 pub fn save_nickname_with_device_key(
     data_dir: &Path,
     device_key: &[u8; 32],
+    nickname: &str,
+) -> anyhow::Result<()> {
+    save_nickname_with_storage_key(data_dir, &derive_storage_key(device_key), nickname)
+}
+
+/// Persist the local DID nickname using the expanded storage key.
+///
+/// `storage_key` is the AES-256 key. This function does not run HKDF.
+#[cfg(unix)]
+pub fn save_nickname_with_storage_key(
+    data_dir: &Path,
+    storage_key: &[u8; 32],
     nickname: &str,
 ) -> anyhow::Result<()> {
     let nickname = validate_nickname(nickname)?;
@@ -330,7 +357,7 @@ pub fn save_nickname_with_device_key(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let encrypted = encrypt_data(&derive_storage_key(device_key), nickname.as_bytes())?;
+    let encrypted = encrypt_data(storage_key, nickname.as_bytes())?;
 
     // Through the open file, so the bytes never sit under wider bits and a
     // confined provider needs fchmod on its own file, not a path-based fchmodat.
@@ -353,9 +380,9 @@ pub fn save_nickname_with_device_key(
 }
 
 #[cfg(not(unix))]
-pub fn save_nickname_with_device_key(
+pub fn save_nickname_with_storage_key(
     _data_dir: &Path,
-    _device_key: &[u8; 32],
+    _storage_key: &[u8; 32],
     _nickname: &str,
 ) -> anyhow::Result<()> {
     Err(std::io::Error::new(
@@ -365,16 +392,24 @@ pub fn save_nickname_with_device_key(
     .into())
 }
 
+/// The Ed25519 seed `derive_did` already hashes from `secret`.
+///
+/// `SHA-256("elastos-did-v1" || secret)`. A holder of this seed builds
+/// `SigningKey::from_bytes` on it. Hashing the seed again yields a different DID.
+pub fn derive_did_seed(secret: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"elastos-did-v1");
+    hasher.update(secret);
+    hasher.finalize().into()
+}
+
 /// Derive an Ed25519 SigningKey + `did:key` from a 32-byte secret.
 ///
 /// Derivation: `SHA-256("elastos-did-v1" || secret)` → Ed25519 SigningKey → `did:key:z6Mk...`
 ///
 /// The secret is typically the device key (stable DID) or random bytes (ephemeral DID).
 pub fn derive_did(secret: &[u8; 32]) -> (ed25519_dalek::SigningKey, String) {
-    let mut hasher = Sha256::new();
-    hasher.update(b"elastos-did-v1");
-    hasher.update(secret);
-    let derived: [u8; 32] = hasher.finalize().into();
+    let derived = derive_did_seed(secret);
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&derived);
     let did = encode_signing_key_did(&signing_key);
     (signing_key, did)
@@ -465,7 +500,7 @@ fn encrypt_data(key: &[u8; 32], plaintext: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 /// Decrypt an `EncryptedEnvelope` (as raw bytes) with AES-256-GCM.
-fn decrypt_data(key: &[u8; 32], data: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn decrypt_data(key: &[u8; 32], data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let envelope: EncryptedEnvelope = serde_json::from_slice(data)?;
     let nonce_bytes = hex::decode(&envelope.nonce)?;
     let ciphertext = hex::decode(&envelope.ciphertext)?;
@@ -485,7 +520,12 @@ fn decrypt_data(key: &[u8; 32], data: &[u8]) -> anyhow::Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("decryption failed: {}", e))
 }
 
-fn derive_storage_key(device_key: &[u8; 32]) -> [u8; 32] {
+/// The AES-256 key `elastos-did-storage` already expands from the device key.
+///
+/// `HKDF-SHA256` with no salt and info `elastos-did-storage`. Nickname and
+/// persona files use this output as the AES key. Expanding it again does not
+/// open those files, and the raw device key does not either.
+pub fn derive_storage_key(device_key: &[u8; 32]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, device_key);
     let mut okm = [0u8; 32];
     hk.expand(b"elastos-did-storage", &mut okm)
@@ -493,7 +533,7 @@ fn derive_storage_key(device_key: &[u8; 32]) -> [u8; 32] {
     okm
 }
 
-fn nickname_path(data_dir: &Path) -> PathBuf {
+pub(crate) fn nickname_path(data_dir: &Path) -> PathBuf {
     data_dir.join("did").join("nickname.enc")
 }
 
@@ -1538,6 +1578,7 @@ mod tests {
         let (sk1, did1) = derive_did(&key);
         let (sk2, did2) = derive_did(&key);
         assert_eq!(sk1.to_bytes(), sk2.to_bytes());
+        assert_eq!(sk1.to_bytes().as_slice(), derive_did_seed(&key).as_slice());
         assert_eq!(did1, did2);
         assert!(did1.starts_with("did:key:z6Mk"));
     }

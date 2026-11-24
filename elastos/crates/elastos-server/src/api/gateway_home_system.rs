@@ -29,11 +29,10 @@ const HOME_SERVICES_STATE_SCHEMA: &str = "elastos.services.state/v1";
 const HOME_SERVICES_STATE_MAX_BYTES: usize = 32 * 1024;
 const HOME_SERVICES_REQUESTS_SCHEMA: &str = "elastos.services.requests/v1";
 const HOME_SERVICES_REQUESTS_MAX_BYTES: usize = 64 * 1024;
-const HOME_SERVICES_REQUESTS_TOPIC: &str = "__elastos_internal/service-requests-v1";
+pub(crate) const HOME_SERVICES_REQUESTS_TOPIC: &str = "__elastos_internal/service-requests-v1";
 const HOME_MODEL_CATALOG_TTL_SECS: u64 = 120;
 const HOME_MODEL_CATALOG_MAX_OFFERS: usize = 16;
 const HOME_MODEL_CATALOG_RESPONSE_COOLDOWN_SECS: u64 = 5;
-const HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES: usize = 8192;
 const HOME_BROWSER_EXIT_LOCAL_OFFER_ID: &str = "local:provider:browser-exit";
 const HOME_BROWSER_EXIT_PEER_SERVICE_URI: &str = "elastos://peer/browser-exit";
 const HOME_REMOTE_EXIT_SERVICE_KIND: &str = "remote_exit";
@@ -377,7 +376,6 @@ enum ServicesPeerTransportBlocking {
 struct ServicesPeerRuntimeBlocking {
     transport: ServicesPeerTransportBlocking,
     peer_id: String,
-    connect_ticket: String,
 }
 
 pub(super) async fn home_summary(
@@ -2640,6 +2638,9 @@ pub(super) async fn services_summary(
             discovery_service.as_ref(),
             provider_registry.as_deref(),
         ) {
+            // Sync no longer dials. An unreachable-provider error cannot come
+            // from merging a decision, and returning it here would skip the
+            // summary after gossip has already moved on.
             tracing::warn!(
                 error = %err,
                 "could not sync Services access decisions"
@@ -3519,7 +3520,8 @@ fn home_services_require_remote_request_delivery(
         == Some("local_only");
     if local_only || remote_peer_count == 0 {
         anyhow::bail!(
-            "Carrier service access request was not delivered to the other person's device"
+            "Carrier service access request was not delivered to the other person's device ({})",
+            crate::carrier::SERVICE_PROVIDER_UNREACHABLE
         );
     }
     Ok(())
@@ -3577,7 +3579,6 @@ fn home_services_send_access_decision(
             "grant_id": home_services_remote_exit_grant_id(&request.request_id),
             "peer_did": &runtime.peer_id,
             "carrier_service": "elastos://exit/open_stream",
-            "connect_ticket": &runtime.connect_ticket,
             "allowed_schemes": ["tcp", "tls"],
             "allowed_ports": [80, 443],
             "expires_at": request.grant_expires_at,
@@ -3592,7 +3593,7 @@ fn home_services_send_access_decision(
         payload["remote_engine_grant"] = serde_json::json!({
             "schema":"elastos.service.remote-engine-grant/v1",
             "grant_id":crate::carrier::engine_grant_id(&request.request_id),
-            "peer_did":runtime.peer_id, "connect_ticket":runtime.connect_ticket,
+            "peer_did":runtime.peer_id,
             "operations":crate::carrier::browser_engine_binding::operations(request.grant_scope.as_deref()),
             "expires_at":request.grant_expires_at,
         });
@@ -3605,7 +3606,6 @@ fn home_services_send_access_decision(
             "schema": super::MODEL_GRANT_SCHEMA,
             "grant_id": super::model_grant_id(&request.request_id),
             "peer_did": runtime.peer_id,
-            "connect_ticket": runtime.connect_ticket,
             "offer_ids": &request.approved_offer_ids,
             "offer_revision": &request.approved_offer_revision,
             "operations": super::MODEL_OPERATIONS,
@@ -3707,7 +3707,7 @@ fn home_services_sync_access_decisions(
         serde_json::json!({
             "topic": HOME_SERVICES_REQUESTS_TOPIC,
             "consumer_id": format!("home-services-decisions:{}", context.principal_id()),
-            "skip_sender_id": runtime.peer_id,
+            "skip_sender_id": home_services_local_device_did(data_dir)?,
             "limit": 64,
         }),
     )?;
@@ -3745,6 +3745,8 @@ fn home_services_sync_access_decisions(
         }
         match home_services_merge_access_decision(context, &mut state, &payload, &runtime.peer_id) {
             Ok(merged) => changed |= merged,
+            // Keep going. Returning here would drop decisions already merged
+            // in this batch: gossip_recv has advanced, and the save is below.
             Err(err) => tracing::warn!("service access decision ignored: {err}"),
         }
     }
@@ -4497,6 +4499,17 @@ fn home_services_remote_exit_grant_id(request_id: &str) -> String {
     format!("services-remote-exit-grant-{}", hex::encode(&digest[..8]))
 }
 
+/// A service decision names the peer. It does not carry a Carrier ticket.
+/// `operator-control.json` still seeds the Carrier address book when an
+/// operator runs `elastos node peer add`. The installed grant does not copy
+/// that ticket.
+fn refuse_service_decision_ticket(grant: &serde_json::Value) -> anyhow::Result<()> {
+    if grant.get("connect_ticket").is_some() {
+        anyhow::bail!("approved service decision must not carry a Carrier ticket");
+    }
+    Ok(())
+}
+
 fn home_services_exit_provider_config_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("config/exit-provider.json")
 }
@@ -4515,12 +4528,7 @@ fn home_services_remote_exit_grant(
         .ok_or_else(|| {
             anyhow::anyhow!("approved Browser Exit decision did not include a remote Exit grant")
         })?;
-    let connect_ticket = home_services_payload_text(
-        grant,
-        "connect_ticket",
-        HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES,
-    )
-    .ok_or_else(|| anyhow::anyhow!("approved Browser Exit grant is missing a Carrier ticket"))?;
+    refuse_service_decision_ticket(grant)?;
     let provider_peer_id = home_services_payload_text(grant, "peer_did", 256)
         .or_else(|| home_services_payload_text(payload, "provider_peer_id", 256))
         .ok_or_else(|| anyhow::anyhow!("approved Browser Exit grant is missing a provider peer"))?;
@@ -4563,7 +4571,6 @@ fn home_services_remote_exit_grant(
         "grant_id": &grant_id,
         "peer_did": provider_peer_id,
         "carrier_service": "elastos://exit/open_stream",
-        "connect_ticket": connect_ticket,
         "allowed_principals": [context.principal_id()],
         "allowed_hosts": ["*"],
         "allowed_schemes": ["tcp", "tls"],
@@ -4580,18 +4587,13 @@ fn home_services_remote_engine_grant(
     payload: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     let grant = &payload["remote_engine_grant"];
+    refuse_service_decision_ticket(grant)?;
     let revision = payload["created_at"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("Engine grant revision required"))?;
     let expiry = grant["expires_at"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("Engine grant expiry required"))?;
-    let ticket = home_services_payload_text(
-        grant,
-        "connect_ticket",
-        HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES,
-    )
-    .ok_or_else(|| anyhow::anyhow!("Engine Carrier ticket required"))?;
     anyhow::ensure!(
         grant["schema"] == "elastos.service.remote-engine-grant/v1"
             && grant["grant_id"].as_str()
@@ -4610,7 +4612,7 @@ fn home_services_remote_engine_grant(
     Ok(
         serde_json::json!({"schema":"elastos.service.remote-engine-grant/v1",
         "id":format!("remote-engine-{}", hex::encode(&Sha256::digest(record.request_id.as_bytes())[..8])),
-        "grant_id":grant["grant_id"],"peer_did":record.target_peer_id,"connect_ticket":ticket,
+        "grant_id":grant["grant_id"],"peer_did":record.target_peer_id,
         "principal_id":context.principal_id(),"operations":grant["operations"],"expires_at":expiry}),
     )
 }
@@ -4621,18 +4623,13 @@ fn home_services_remote_model_grant(
     payload: &serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
     let grant = &payload["remote_model_grant"];
+    refuse_service_decision_ticket(grant)?;
     let revision = payload["created_at"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("model grant revision required"))?;
     let expiry = grant["expires_at"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("model grant expiry required"))?;
-    let ticket = home_services_payload_text(
-        grant,
-        "connect_ticket",
-        HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES,
-    )
-    .ok_or_else(|| anyhow::anyhow!("model Carrier ticket required"))?;
     anyhow::ensure!(
         grant["schema"] == super::MODEL_GRANT_SCHEMA
             && grant["grant_id"].as_str()
@@ -4660,7 +4657,6 @@ fn home_services_remote_model_grant(
         "id": format!("remote-model-{}", hex::encode(&Sha256::digest(record.request_id.as_bytes())[..8])),
         "grant_id": grant["grant_id"],
         "peer_did": record.target_peer_id,
-        "connect_ticket": ticket,
         "principal_id": context.principal_id(),
         "service_display_name": record.service_display_name,
         "offer_ids": offer_ids,
@@ -4926,7 +4922,7 @@ pub(super) fn home_services_sync_access_requests(
         serde_json::json!({
             "topic": HOME_SERVICES_REQUESTS_TOPIC,
             "consumer_id": format!("home-services-requests:{}", context.principal_id()),
-            "skip_sender_id": runtime.peer_id,
+            "skip_sender_id": home_services_local_device_did(data_dir)?,
             "limit": 64,
         }),
     )?;
@@ -7453,52 +7449,53 @@ fn services_attach_peer_runtime_blocking(
         &crate::collaboration_discovery_runtime::CollaborationDiscoveryService,
     >,
 ) -> anyhow::Result<ServicesPeerRuntimeBlocking> {
-    let transport = if let Some(service) = discovery_service {
-        ServicesPeerTransportBlocking::Runtime(service.clone())
+    let (transport, ticket) = if let Some(service) = discovery_service {
+        let ticket = service.private_local_ticket_blocking()?;
+        (
+            ServicesPeerTransportBlocking::Runtime(service.clone()),
+            ticket,
+        )
     } else {
         let coords = load_home_runtime_coords(data_dir)
             .ok_or_else(|| anyhow::anyhow!("local ElastOS service is not running"))?;
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(3))
             .build()?;
-        let token = services_attach_client_token_blocking(&client, &coords)
+        let shell_token = services_attach_scope_token_blocking(&client, &coords, "shell")
             .ok_or_else(|| anyhow::anyhow!("failed to attach to local ElastOS service"))?;
-        let cap = services_request_attached_capability_blocking(
+        let response = services_private_carrier_request_blocking(
             &client,
             &coords.api_url,
-            &token,
+            &shell_token,
+            "get_ticket",
+            serde_json::json!({}),
+        )?;
+        let ticket = crate::carrier::require_services_private_ticket(&response)?;
+        let client_token = services_attach_client_token_blocking(&client, &coords)
+            .ok_or_else(|| anyhow::anyhow!("failed to attach to local ElastOS service"))?;
+        let peer_cap = services_request_attached_capability_blocking(
+            &client,
+            &coords.api_url,
+            &client_token,
             "elastos://peer/*",
             "message",
         )
         .ok_or_else(|| anyhow::anyhow!("failed to acquire Carrier peer capability"))?;
-        ServicesPeerTransportBlocking::Attached {
-            client,
-            api_url: coords.api_url,
-            client_token: token,
-            peer_cap: cap,
-        }
+        (
+            ServicesPeerTransportBlocking::Attached {
+                client,
+                api_url: coords.api_url,
+                client_token,
+                peer_cap,
+            },
+            ticket,
+        )
     };
-    let response =
-        services_peer_provider_request_blocking(&transport, "get_ticket", serde_json::json!({}))?;
-    let peer_id = response
-        .get("data")
-        .and_then(|data| data.get("node_id"))
-        .and_then(serde_json::Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("Carrier peer provider did not return a node id"))?;
-    let connect_ticket = response
-        .get("data")
-        .and_then(|data| data.get("ticket"))
-        .and_then(serde_json::Value::as_str)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .filter(|value| value.len() <= HOME_SERVICES_REMOTE_EXIT_TICKET_MAX_BYTES)
-        .ok_or_else(|| anyhow::anyhow!("Carrier peer provider did not return a bounded ticket"))?;
+    // require_services_private_ticket already checked the local node returned
+    // a node id and a bounded ticket. Service grants do not store or send it.
     Ok(ServicesPeerRuntimeBlocking {
         transport,
-        peer_id,
-        connect_ticket,
+        peer_id: ticket.node_id,
     })
 }
 
@@ -7534,15 +7531,16 @@ fn services_gossip_join_known_peers_blocking(
     .map(|_| ())
 }
 
-fn services_attach_client_token_blocking(
+fn services_attach_scope_token_blocking(
     client: &reqwest::blocking::Client,
     coords: &GatewayRuntimeCoords,
+    scope: &str,
 ) -> Option<String> {
     let body: serde_json::Value = client
         .post(format!("{}/api/auth/attach", coords.api_url))
         .json(&serde_json::json!({
             "secret": coords.attach_secret,
-            "scope": "client",
+            "scope": scope,
         }))
         .send()
         .ok()?
@@ -7551,6 +7549,40 @@ fn services_attach_client_token_blocking(
     serde_json::from_value::<GatewayAttachResponse>(body)
         .ok()
         .map(|resp| resp.token)
+}
+
+fn services_attach_client_token_blocking(
+    client: &reqwest::blocking::Client,
+    coords: &GatewayRuntimeCoords,
+) -> Option<String> {
+    services_attach_scope_token_blocking(client, coords, "client")
+}
+
+fn services_private_carrier_request_blocking(
+    client: &reqwest::blocking::Client,
+    api: &str,
+    shell_token: &str,
+    op: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let response = client
+        .post(format!("{api}/api/provider/peer/{op}"))
+        .header(AUTHORIZATION, format!("Bearer {shell_token}"))
+        .json(&body)
+        .send()?;
+    if !response.status().is_success() {
+        anyhow::bail!("private Carrier request was refused");
+    }
+    let body: serde_json::Value = response.json()?;
+    if body.get("status").and_then(|status| status.as_str()) == Some("error") {
+        anyhow::bail!(
+            "{}",
+            body.get("message")
+                .and_then(|message| message.as_str())
+                .unwrap_or("unknown Carrier provider error")
+        );
+    }
+    Ok(body)
 }
 
 fn services_request_attached_capability_blocking(
@@ -11015,5 +11047,292 @@ mod r8d_passkey_rows {
             Some(KEPT_ELSEWHERE)
         );
         person.assert_child_holds_only(&[]);
+    }
+}
+
+#[cfg(test)]
+mod services_private_ticket_tests {
+    use super::services_attach_peer_runtime_blocking;
+    use crate::api::handlers::provider::{provider_proxy, ProviderProxyState};
+    use elastos_runtime::provider::{
+        Provider, ProviderError, ProviderRegistry, ResourceRequest, ResourceResponse,
+    };
+    use elastos_runtime::session::{Session, SessionType};
+
+    struct ServicesCarrier {
+        requests: std::sync::Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ServicesCarrier {
+        async fn handle(
+            &self,
+            _request: ResourceRequest,
+        ) -> Result<ResourceResponse, ProviderError> {
+            Err(ProviderError::Provider(
+                "services test carrier accepts raw requests only".into(),
+            ))
+        }
+
+        fn schemes(&self) -> Vec<&'static str> {
+            vec!["peer"]
+        }
+
+        fn name(&self) -> &'static str {
+            "services-test-carrier"
+        }
+
+        async fn send_raw(
+            &self,
+            request: &serde_json::Value,
+        ) -> Result<serde_json::Value, ProviderError> {
+            self.requests.lock().await.push(request.clone());
+            Ok(serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "ticket": "private-services-ticket",
+                    "node_id": "private-services-node"
+                }
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn services_attach_checks_a_bounded_local_ticket_and_keeps_the_peer_id() {
+        let requests = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let registry = std::sync::Arc::new(ProviderRegistry::new());
+        registry
+            .register_sub_provider(
+                "peer",
+                std::sync::Arc::new(ServicesCarrier {
+                    requests: requests.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        let proxy = axum::Router::new()
+            .route(
+                "/api/provider/:scheme/:op",
+                axum::routing::post(provider_proxy),
+            )
+            .layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let shell = request
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("Bearer shell-services");
+                    let kind = if shell {
+                        SessionType::Shell
+                    } else {
+                        SessionType::Capsule
+                    };
+                    request.extensions_mut().insert(Session::new(kind, None));
+                    next.run(request).await
+                },
+            ))
+            .with_state(ProviderProxyState {
+                registry,
+                capability_manager: None,
+            });
+        let app = axum::Router::new()
+            .route(
+                "/api/auth/attach",
+                axum::routing::post(
+                    |axum::Json(body): axum::Json<serde_json::Value>| async move {
+                        let scope = body
+                            .get("scope")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("client");
+                        if body.get("secret").and_then(|value| value.as_str())
+                            != Some("services-secret")
+                        {
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                axum::Json(serde_json::json!({"error": "bad attach secret"})),
+                            );
+                        }
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({"token": format!("{scope}-services")})),
+                        )
+                    },
+                ),
+            )
+            .route(
+                "/api/capability/request",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({"token": "services-cap"}))
+                }),
+            )
+            .merge(proxy);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("home-runtime-coords.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "api_url": api_url,
+                "attach_secret": "services-secret"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let path = dir.path().to_path_buf();
+        let runtime = tokio::task::spawn_blocking(move || {
+            services_attach_peer_runtime_blocking(&path, None).expect("services attach")
+        })
+        .await
+        .expect("services attach task");
+        server.abort();
+        assert_eq!(runtime.peer_id, "private-services-node");
+        // The local node must still return a bounded ticket and a node id.
+        // Services keeps the node id. The ticket is not stored on this runtime.
+        let seen = requests.lock().await.clone();
+        assert_eq!(seen, vec![serde_json::json!({"op": "get_ticket"})]);
+    }
+}
+
+#[cfg(test)]
+mod service_decision_ticket_tests {
+    use super::*;
+
+    fn record(peer: &str) -> HomeServicesRemoteOfferRequestRecord {
+        HomeServicesRemoteOfferRequestRecord {
+            request_id: "request-ticket-refusal".into(),
+            service_display_name: "Shared".into(),
+            target_peer_id: peer.into(),
+            ..HomeServicesRemoteOfferRequestRecord::default()
+        }
+    }
+
+    fn context() -> HomeLaunchTokenContext {
+        HomeLaunchTokenContext::for_test(
+            "person:local:alice",
+            "session",
+            None,
+            "launch",
+            crate::auth::PrincipalKind::Human,
+        )
+    }
+
+    #[test]
+    fn a_legacy_service_decision_ticket_is_refused() {
+        let peer = iroh::SecretKey::from_bytes(&[0x44; 32])
+            .public()
+            .to_string();
+        let now = now_ts();
+        let context = context();
+        let record = record(&peer);
+        let expiry = now + 120;
+        let exit_id = home_services_remote_exit_grant_id(&record.request_id);
+        let engine_id = crate::carrier::engine_grant_id(&record.request_id);
+        let model_id = model_grant_id(&record.request_id);
+        let engine_ops = crate::carrier::browser_engine_binding::operations(None);
+        for ticket in [serde_json::json!("legacy-ticket"), serde_json::json!(null)] {
+            let mut exit = serde_json::json!({
+                "schema": "elastos.service.remote-exit-grant/v1",
+                "peer_did": peer,
+                "grant_id": exit_id,
+                "expires_at": expiry,
+                "max_active_streams": 4,
+                "max_active_streams_per_principal": 2,
+            });
+            exit["connect_ticket"] = ticket.clone();
+            let err = home_services_remote_exit_grant(
+                &context,
+                &record,
+                &serde_json::json!({"created_at": now, "remote_exit_grant": exit}),
+            )
+            .expect_err("a ticket on an Exit decision is refused");
+            assert!(
+                err.to_string().contains("must not carry a Carrier ticket"),
+                "{err}"
+            );
+
+            let mut engine = serde_json::json!({
+                "schema": "elastos.service.remote-engine-grant/v1",
+                "peer_did": peer,
+                "grant_id": engine_id,
+                "expires_at": expiry,
+                "operations": engine_ops.clone(),
+            });
+            engine["connect_ticket"] = ticket.clone();
+            let err = home_services_remote_engine_grant(
+                &context,
+                &record,
+                &serde_json::json!({"created_at": now, "remote_engine_grant": engine}),
+            )
+            .expect_err("a ticket on an Engine decision is refused");
+            assert!(
+                err.to_string().contains("must not carry a Carrier ticket"),
+                "{err}"
+            );
+
+            let mut model = serde_json::json!({
+                "schema": MODEL_GRANT_SCHEMA,
+                "peer_did": peer,
+                "grant_id": model_id,
+                "expires_at": expiry,
+                "operations": MODEL_OPERATIONS,
+                "offer_ids": ["qwen-local"],
+                "offer_revision": format!("sha256:{}", "ab".repeat(32)),
+            });
+            model["connect_ticket"] = ticket;
+            let err = home_services_remote_model_grant(
+                &context,
+                &record,
+                &serde_json::json!({"created_at": now, "remote_model_grant": model}),
+            )
+            .expect_err("a ticket on a model decision is refused");
+            assert!(
+                err.to_string().contains("must not carry a Carrier ticket"),
+                "{err}"
+            );
+        }
+
+        let exit = home_services_remote_exit_grant(
+            &context,
+            &record,
+            &serde_json::json!({"created_at": now, "remote_exit_grant": {
+                "schema": "elastos.service.remote-exit-grant/v1",
+                "peer_did": peer,
+                "grant_id": exit_id,
+                "expires_at": expiry,
+                "max_active_streams": 4,
+                "max_active_streams_per_principal": 2,
+            }}),
+        )
+        .expect("an Exit decision with no ticket is a grant");
+        assert!(exit.get("connect_ticket").is_none(), "{exit}");
+        let engine = home_services_remote_engine_grant(
+            &context,
+            &record,
+            &serde_json::json!({"created_at": now, "remote_engine_grant": {
+                "schema": "elastos.service.remote-engine-grant/v1",
+                "peer_did": peer,
+                "grant_id": engine_id,
+                "expires_at": expiry,
+                "operations": engine_ops.clone(),
+            }}),
+        )
+        .expect("an Engine decision with no ticket is a grant");
+        assert!(engine.get("connect_ticket").is_none(), "{engine}");
+        let model = home_services_remote_model_grant(
+            &context,
+            &record,
+            &serde_json::json!({"created_at": now, "remote_model_grant": {
+                "schema": MODEL_GRANT_SCHEMA,
+                "peer_did": peer,
+                "grant_id": model_id,
+                "expires_at": expiry,
+                "operations": MODEL_OPERATIONS,
+                "offer_ids": ["qwen-local"],
+                "offer_revision": format!("sha256:{}", "ab".repeat(32)),
+            }}),
+        )
+        .expect("a model decision with no ticket is a grant");
+        assert!(model.get("connect_ticket").is_none(), "{model}");
     }
 }

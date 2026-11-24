@@ -512,11 +512,21 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-server/src/runtime.rs",
-            function: "run_signer",
+            function: "load_dev_unsigned_component",
             call: "component.load_admitted",
             class: "n/a",
             trust_root: "none",
             verified_when: "never",
+            evidence: ["component.l", "oad_admitted"].concat(),
+            os_path: "",
+        },
+        TrustColumn {
+            file: "elastos-server/src/runtime.rs",
+            function: "run_signer",
+            call: "component.load_admitted",
+            class: "n/a",
+            trust_root: "staged-cid",
+            verified_when: "at-stage-and-start",
             evidence: ["component.l", "oad_admitted"].concat(),
             os_path: "",
         },
@@ -779,12 +789,12 @@ fn columns() -> Vec<TrustColumn> {
         },
         TrustColumn {
             file: "elastos-server/src/setup.rs",
-            function: "ensure_browser_vm_image_in_context",
+            function: "ensure_browser_vm_image_in_context_for_platform",
             call: "component install",
             class: "n/a",
             trust_root: "release-signature",
-            verified_when: "at-install-only",
-            evidence: ["download_", "component("].concat(),
+            verified_when: "at-every-start",
+            evidence: "admit_installed_components(data_dir, context)?".into(),
             os_path: "",
         },
         TrustColumn {
@@ -1660,19 +1670,18 @@ fn trust_column_counts_and_chokepoint_queue() {
                 && matches!(column.trust_root, "none" | "components-json-in-data-dir")
         })
         .count();
-    // The row these fences added is
-    // server_infra.rs::spawn_allow_listed_provider ProviderBridge::spawn.
-    // Class stays n/a: a native provider. At c388e3220 the columns were
-    // trust root none and verified never, and the live counts were length
-    // 105, n/a 56, none 57, never 57, release-signature 25, at-every-start 32.
-    // verify_at_spawn checks the pinned release digest before exec, so this
-    // row is release-signature and at-every-start. none and never return to
-    // 56. release-signature becomes 26 and at-every-start becomes 33.
+    // The fence row is server_infra.rs::spawn_allow_listed_provider
+    // ProviderBridge::spawn. It is a native provider, so its class is n/a.
+    // verify_at_spawn checks the pinned release digest before exec, so the
+    // trust root is release-signature and the check is at-every-start.
+    // origin/spike/agent-host without that row is length 105, n/a 56,
+    // release-signature 25, at-every-start 33, at-install-only 7, staged-cid 8.
+    // The row adds one to length, n/a, release-signature, and at-every-start.
     // to_gate counts release-component and other, so this n/a row leaves it
     // at 31.
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 105);
-    assert_eq!(classes.get("n/a"), Some(&56));
+    assert_eq!(columns.len(), 106);
+    assert_eq!(classes.get("n/a"), Some(&57));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1682,12 +1691,33 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("none"), Some(&56));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
     assert_eq!(roots.get("release-signature"), Some(&26));
-    assert_eq!(roots.get("staged-cid"), Some(&7));
-    assert_eq!(times.get("at-every-start"), Some(&33));
-    assert_eq!(times.get("at-install-only"), Some(&8));
-    assert_eq!(times.get("at-stage-and-start"), Some(&8));
+    assert_eq!(roots.get("staged-cid"), Some(&8));
+    assert_eq!(times.get("at-every-start"), Some(&34));
+    assert_eq!(times.get("at-install-only"), Some(&7));
+    assert_eq!(times.get("at-stage-and-start"), Some(&9));
     assert_eq!(times.get("never"), Some(&56));
     assert_eq!(to_gate, 31);
+}
+
+#[test]
+fn slice_4b_vm_image_rows_are_still_unchecked_at_load() {
+    let vm_rows: Vec<_> = rows()
+        .into_iter()
+        .filter(|row| row.kind == "VM capsule; image check pending 4b-2")
+        .collect();
+    assert_eq!(vm_rows.len(), 4);
+    let columns = columns();
+    for row in vm_rows {
+        let column = columns
+            .iter()
+            .find(|column| {
+                (column.file, column.function, column.call)
+                    == (row.file, row.function, row.call.as_str())
+            })
+            .unwrap();
+        assert_eq!(column.trust_root, "none");
+        assert_eq!(column.verified_when, "never");
+    }
 }
 
 #[test]
