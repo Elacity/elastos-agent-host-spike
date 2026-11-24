@@ -3934,20 +3934,27 @@ fn request_journal_grants(
     }
     let mut ask = |action: &str| -> (Option<JournalGrant>, Option<&'static str>) {
         let what = format!("{action} {}", cursor.resource);
-        match bus.request_grant(&cursor.resource, action, "Agent Host task journal") {
-            Ok(id) => match JournalGrant::new(&id) {
-                Some(grant) => (Some(grant), None),
-                None => {
-                    record_grant_refusal(journal, "grant invalid", &what);
-                    (None, Some("grant invalid"))
+        // Each ask still waits 30s. An unknown outcome is a new ask, not a longer lock.
+        for _ in 0..8 {
+            match bus.request_grant(&cursor.resource, action, "Agent Host task journal") {
+                Ok(id) => match JournalGrant::new(&id) {
+                    Some(grant) => return (Some(grant), None),
+                    None => {
+                        record_grant_refusal(journal, "grant invalid", &what);
+                        return (None, Some("grant invalid"));
+                    }
+                },
+                Err(failure) => {
+                    let reason = grant_failure_reason(failure);
+                    if reason != "grant outcome unknown" {
+                        record_grant_refusal(journal, reason, &what);
+                        return (None, Some(reason));
+                    }
                 }
-            },
-            Err(failure) => {
-                let reason = grant_failure_reason(failure);
-                record_grant_refusal(journal, reason, &what);
-                (None, Some(reason))
             }
         }
+        record_grant_refusal(journal, "grant outcome unknown", &what);
+        (None, Some("grant outcome unknown"))
     };
     let (write, write_reason) = ask("write");
     let (read, read_reason) = ask("read");
