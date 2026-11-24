@@ -16,7 +16,7 @@ use wasmtime::StoreContextMut;
 
 /// Bytes one guest chunk may hold. The bridge call itself asks once.
 pub(crate) const READ_CHUNK: usize = 64 * 1024;
-/// The host cap on one read, and on every read in this process together.
+/// The host cap on one read, and on every read one provider holds together.
 pub(crate) const HOST_MAX_READ_BYTES: usize = 16 * 1024 * 1024;
 
 /// How long one open read may keep its reservation. A guest that never pulls
@@ -35,15 +35,29 @@ struct Slot {
     released: AtomicBool,
 }
 
+#[derive(Debug)]
 struct Ledger {
     held: usize,
     open: Vec<Weak<Slot>>,
 }
 
-static LEDGER: Mutex<Ledger> = Mutex::new(Ledger {
-    held: 0,
-    open: Vec::new(),
-});
+/// One provider's read budget. A new provider starts empty, so two providers
+/// do not refuse each other's guests.
+#[derive(Debug)]
+pub(crate) struct ReadBudget {
+    inner: Mutex<Ledger>,
+}
+
+impl ReadBudget {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(Ledger {
+                held: 0,
+                open: Vec::new(),
+            }),
+        })
+    }
+}
 
 fn release(ledger: &mut Ledger, slot: &Slot) {
     if slot.released.swap(true, Ordering::Relaxed) {
@@ -71,10 +85,11 @@ fn reap(ledger: &mut Ledger) {
     }
 }
 
-/// Bytes this process is keeping for reads that are still open.
+/// Bytes this provider is keeping for reads that are still open.
 #[derive(Debug)]
 pub(crate) struct ReadHold {
     slot: Arc<Slot>,
+    budget: Arc<ReadBudget>,
 }
 
 impl ReadHold {
@@ -84,16 +99,17 @@ impl ReadHold {
             slot: Arc::new(Slot {
                 bytes: AtomicUsize::new(0),
                 started: Mutex::new(Instant::now()),
-                released: AtomicBool::new(false),
+                released: AtomicBool::new(true),
             }),
+            budget: ReadBudget::new(),
         }
     }
 
-    /// Reserves `bytes` against the host cap. `None` means the cap is already
-    /// in use, so the caller makes no bridge call. A reservation older than
-    /// [`READ_HOLD_LIMIT`] is released here first.
-    pub(crate) fn try_reserve(bytes: usize) -> Option<Self> {
-        let mut ledger = LEDGER.lock().expect("read ledger");
+    /// Reserves `bytes` against this provider's cap. `None` means that cap is
+    /// already in use, so the caller makes no bridge call. A reservation older
+    /// than [`READ_HOLD_LIMIT`] is released here first.
+    pub(crate) fn try_reserve(budget: &Arc<ReadBudget>, bytes: usize) -> Option<Self> {
+        let mut ledger = budget.inner.lock().expect("read ledger");
         reap(&mut ledger);
         let next = ledger.held.checked_add(bytes)?;
         if next > HOST_MAX_READ_BYTES {
@@ -106,12 +122,15 @@ impl ReadHold {
             released: AtomicBool::new(false),
         });
         ledger.open.push(Arc::downgrade(&slot));
-        Some(Self { slot })
+        Some(Self {
+            slot,
+            budget: budget.clone(),
+        })
     }
 
     /// Keeps `bytes` and releases the rest, so a short object leaves room.
     pub(crate) fn shrink(&mut self, bytes: usize) {
-        let mut ledger = LEDGER.lock().expect("read ledger");
+        let mut ledger = self.budget.inner.lock().expect("read ledger");
         if self.slot.released.load(Ordering::Relaxed) {
             return;
         }
@@ -125,14 +144,14 @@ impl ReadHold {
 
     /// The guest has the bytes. The hold bound runs from here, not from the fetch.
     pub(crate) fn arm(&mut self) {
-        let _ledger = LEDGER.lock().expect("read ledger");
+        let _ledger = self.budget.inner.lock().expect("read ledger");
         *self.slot.started.lock().expect("hold start") = Instant::now();
     }
 }
 
 impl Drop for ReadHold {
     fn drop(&mut self) {
-        let mut ledger = LEDGER.lock().expect("read ledger");
+        let mut ledger = self.budget.inner.lock().expect("read ledger");
         release(&mut ledger, &self.slot);
     }
 }

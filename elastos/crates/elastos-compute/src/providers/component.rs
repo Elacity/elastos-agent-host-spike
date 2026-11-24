@@ -232,6 +232,8 @@ struct ComponentState {
     /// The one presented frame, keyed by capsule id, with the principal who
     /// presented it. A second present replaces it.
     frames: Arc<Mutex<HashMap<String, StoredFrame>>>,
+    /// This guest's provider budget. Guests of one provider share it.
+    reads: Arc<super::bus2_stream::ReadBudget>,
 }
 
 /// The host's copy of one presented frame. The principal is the caller the
@@ -254,6 +256,7 @@ pub struct ComponentProvider {
     bus_hostcall: std::sync::RwLock<Option<BridgeHostcall>>,
     bridge_principals: Arc<RwLock<HashMap<CapsuleId, Option<String>>>>,
     frames: Arc<Mutex<HashMap<String, StoredFrame>>>,
+    read_budget: Arc<super::bus2_stream::ReadBudget>,
     compile_slot: Arc<Semaphore>,
     /// Test only: holds the next compile job just after its worker has taken
     /// the compile slot, so a test can act while a compile is in progress.
@@ -275,6 +278,7 @@ impl ComponentProvider {
             bus_hostcall: std::sync::RwLock::new(None),
             bridge_principals: Arc::new(RwLock::new(HashMap::new())),
             frames: Arc::new(Mutex::new(HashMap::new())),
+            read_budget: super::bus2_stream::ReadBudget::new(),
             // One compile at a time: a burst of loads queues instead of
             // starting competing compiler jobs.
             compile_slot: Arc::new(Semaphore::new(1)),
@@ -645,10 +649,12 @@ impl ComponentProvider {
                 "v2 component is already running".into(),
             ));
         }
+        let reads = self.read_budget.clone();
         let state = ComponentState {
             sealed: instance.sealed,
             grants: instance.grants.clone(),
             frames,
+            reads,
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
         let (engine, component) = (instance.engine.clone(), instance.component.clone());
@@ -836,11 +842,13 @@ impl ComponentProvider {
             )
         };
 
+        let reads = self.read_budget.clone();
         let state = ComponentState {
             sealed,
             fuel,
             run_deadline,
             stop_requested,
+            reads,
             ..ComponentState::new(hostcall, handle.id.0.clone(), principal_id)
         };
 
@@ -1372,6 +1380,7 @@ impl ComponentState {
             execution_bound: false,
             grants: Arc::new(Mutex::new(crate::providers::bus2_ui::GrantBook::default())),
             frames: Arc::new(Mutex::new(HashMap::new())),
+            reads: super::bus2_stream::ReadBudget::new(),
         }
     }
 
@@ -1442,7 +1451,7 @@ impl ComponentState {
             .ok_or_else(|| {
                 V2BusError::Denied("resource invoke requires a capability grant".into())
             })?;
-        let mut hold = super::bus2_stream::ReadHold::try_reserve(cap)
+        let mut hold = super::bus2_stream::ReadHold::try_reserve(&self.reads, cap)
             .ok_or_else(|| V2BusError::Unavailable("the host read cap is already in use".into()))?;
         let resource = request.resource.clone();
         let (bytes, audit) = self.bridge_window(&resource, &grant, 0, cap as u64 + 1)?;
@@ -2622,8 +2631,21 @@ mod tests {
     }
 
     /// The bridge answers one window. `calls` records each `length`.
+    /// Each call has its own budget. Guests of one provider use [`state_on`].
     fn state_for(object: Vec<u8>, calls: Arc<Mutex<Vec<u64>>>) -> ComponentState {
-        ComponentState::new(
+        state_on(
+            &crate::providers::bus2_stream::ReadBudget::new(),
+            object,
+            calls,
+        )
+    }
+
+    fn state_on(
+        reads: &Arc<crate::providers::bus2_stream::ReadBudget>,
+        object: Vec<u8>,
+        calls: Arc<Mutex<Vec<u64>>>,
+    ) -> ComponentState {
+        let mut state = ComponentState::new(
             Some(Arc::new(move |line, _capsule, _principal| {
                 let value: serde_json::Value = serde_json::from_str(line).expect("bridge line");
                 let body = &value["request"]["body"];
@@ -2648,7 +2670,9 @@ mod tests {
             })),
             "capsule-1".into(),
             Some("person:local:test".into()),
-        )
+        );
+        state.reads = reads.clone();
+        state
     }
 
     fn opened_chunks(prepared: crate::providers::bus2_stream::PreparedRead) -> usize {
@@ -2788,7 +2812,8 @@ mod tests {
         let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
         let object = vec![3u8; host];
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut first = state_for(object.clone(), calls.clone());
+        let reads = crate::providers::bus2_stream::ReadBudget::new();
+        let mut first = state_on(&reads, object.clone(), calls.clone());
         let prepared = first
             .windowed_read(&read_request(host as u64), false)
             .expect("the first guest reads an object at the cap");
@@ -2798,7 +2823,7 @@ mod tests {
             vec![host as u64 + 1],
             "one bounded read of the object"
         );
-        let mut second = state_for(object, calls.clone());
+        let mut second = state_on(&reads, object, calls.clone());
         let before = calls.lock().unwrap().len();
         let err = match second.windowed_read(&read_request(host as u64), false) {
             Err(err) => err,
@@ -2817,11 +2842,37 @@ mod tests {
             "the refusal happens before the bridge"
         );
         drop(prepared);
-        let mut third = state_for(vec![4u8; 4], calls.clone());
+        let mut third = state_on(&reads, vec![4u8; 4], calls.clone());
         let again = third
             .windowed_read(&read_request(8), false)
             .expect("the cap is free once the first read ends");
         assert_eq!(again.bytes, vec![4, 4, 4, 4]);
+    }
+
+    /// Two providers each have a budget. One guest at the cap does not refuse
+    /// a guest of the other provider.
+    #[test]
+    fn two_providers_do_not_share_the_read_cap() {
+        let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut first = state_on(
+            &crate::providers::bus2_stream::ReadBudget::new(),
+            vec![3u8; host],
+            calls.clone(),
+        );
+        let held = first
+            .windowed_read(&read_request(host as u64), false)
+            .expect("the first provider takes its own cap");
+        let mut second = state_on(
+            &crate::providers::bus2_stream::ReadBudget::new(),
+            vec![4u8; 4],
+            calls,
+        );
+        let again = second
+            .windowed_read(&read_request(4), false)
+            .expect("another provider reads while the first holds its cap");
+        assert_eq!(again.bytes, vec![4, 4, 4, 4]);
+        drop(held);
     }
 
     /// A guest that keeps the capped read and never pulls a chunk must not
@@ -2830,20 +2881,21 @@ mod tests {
     fn v2_a_guest_that_never_drains_frees_the_read_cap() {
         let host = crate::providers::bus2_stream::HOST_MAX_READ_BYTES;
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut first = state_for(vec![3u8; host], calls.clone());
+        let reads = crate::providers::bus2_stream::ReadBudget::new();
+        let mut first = state_on(&reads, vec![3u8; host], calls.clone());
         let prepared = first
             .windowed_read(&read_request(host as u64), false)
             .expect("the first guest takes the cap");
         std::thread::sleep(
             crate::providers::bus2_stream::READ_HOLD_LIMIT + std::time::Duration::from_millis(50),
         );
-        let mut second = state_for(vec![5u8; host], calls.clone());
+        let mut second = state_on(&reads, vec![5u8; host], calls.clone());
         let again = second
             .windowed_read(&read_request(host as u64), false)
             .expect("a guest that never drains loses the cap");
         assert_eq!(again.bytes, vec![5u8; host]);
         drop(prepared);
-        let mut third = state_for(vec![9u8; host], calls.clone());
+        let mut third = state_on(&reads, vec![9u8; host], calls.clone());
         let err = third
             .windowed_read(&read_request(host as u64), false)
             .expect_err("the second guest still holds the cap");
@@ -2852,7 +2904,7 @@ mod tests {
             "dropping the reaped hold must leave the live read, got {err:?}"
         );
         drop(again);
-        let mut fourth = state_for(vec![6u8; 4], calls);
+        let mut fourth = state_on(&reads, vec![6u8; 4], calls);
         let after = fourth
             .windowed_read(&read_request(4), false)
             .expect("dropping the live read frees the cap");
