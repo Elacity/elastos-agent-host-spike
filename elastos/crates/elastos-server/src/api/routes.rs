@@ -459,8 +459,8 @@ struct StopAgentResponse {
     stopped: Vec<StoppedAgentBody>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stopping: Vec<StoppedAgentBody>,
-    /// `stopping` or `stopped` when this call found the sessions already
-    /// ending and did not stop a further row.
+    /// `stopped` when this call found the sessions already ended and did not
+    /// stop a further row.
     #[serde(skip_serializing_if = "Option::is_none")]
     already: Option<String>,
 }
@@ -492,10 +492,9 @@ pub async fn stop_agent_session(
         )
             .into_response();
     }
-    runtime.mark_agent_stopping(&agent_id).await;
-    let response = stop_collected_agent_rows(&runtime, &agent_id).await;
-    runtime.clear_agent_stopping(&agent_id).await;
-    response
+    // The guard clears the stopping mark on every exit, including cancellation.
+    let _stop = runtime.begin_agent_stop(&agent_id).await;
+    stop_collected_agent_rows(&runtime, &agent_id).await
 }
 
 /// Reads and stops rows after the per-agent stopping flag is set.
@@ -541,6 +540,7 @@ async fn stop_collected_agent_rows(runtime: &Runtime, agent_id: &str) -> axum::r
         )
             .into_response();
     }
+    runtime.note_agent_stop_requested(agent_id).await;
     let mut stopped = Vec::with_capacity(ready.len());
     let mut stopping = Vec::new();
     for id in ready {
@@ -8310,6 +8310,78 @@ pub(crate) mod tests {
         assert!(
             !runtime.agent_stop_flag_is_set(agent).await,
             "the stopping flag stayed set after Stop returned"
+        );
+    }
+
+    async fn start_refused_because_stopping(runtime: &Arc<Runtime>, agent: &str) -> bool {
+        let result = launch_capsule(
+            Extension(runtime.clone()),
+            Extension(Arc::new(AuditLog::new())),
+            Extension(Some(std::path::PathBuf::from("unused-home"))),
+            Json(LaunchRequest {
+                path: "unused".to_string(),
+                principal_id: None,
+                launch_grant: None,
+                agent_id: Some(agent.to_string()),
+            }),
+        )
+        .await;
+        match result {
+            Err((StatusCode::CONFLICT, body)) => {
+                body.contains(crate::runtime::Runtime::AGENT_STOPPING)
+                    || body.contains("agent_stopping")
+            }
+            _ => false,
+        }
+    }
+
+    /// A Stop dropped during its wait must not leave Start refused after the
+    /// session ends. While the session still runs, Start stays refused.
+    #[tokio::test]
+    async fn a_dropped_stop_allows_start_after_the_session_ends() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        runtime
+            .plant_open_agent_stop_for_test(agent, "session-held")
+            .await;
+        let _limit = runtime.limit_stop_wait_for_test(std::time::Duration::from_secs(5));
+        let task = tokio::spawn({
+            let runtime = runtime.clone();
+            let agent = agent.to_string();
+            async move {
+                stop_agent_session(
+                    Extension(runtime),
+                    Extension(Arc::new(AuditLog::new())),
+                    axum::body::Bytes::from(format!(r#"{{"agent_id":"{agent}"}}"#)),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if runtime.requested_stop_for_test("session-held").is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Stop did not reach its wait");
+        task.abort();
+        let _ = task.await;
+        assert!(
+            start_refused_because_stopping(&runtime, agent).await,
+            "Start was allowed while the session still runs"
+        );
+        runtime.end_planted_session_for_test("session-held").await;
+        assert!(
+            !start_refused_because_stopping(&runtime, agent).await,
+            "a dropped Stop left Start refused after the session ended"
+        );
+        assert!(
+            !runtime.agent_stop_flag_is_set(agent).await,
+            "a dropped Stop left the stopping mark set"
         );
     }
 }
