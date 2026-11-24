@@ -8197,6 +8197,9 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(runtime.list_capsules().await.is_empty());
     }
+
+    #[cfg(unix)]
+    mod instance_storage_rows;
 }
 
 /// `POST /api/launch/open` (shell only), `{cid}`: start the content at `cid`
