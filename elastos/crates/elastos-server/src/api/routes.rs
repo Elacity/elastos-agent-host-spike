@@ -7495,6 +7495,7 @@ pub(crate) mod tests {
             (a.as_str(), "request:agent-a", "count the sparks"),
             (b.as_str(), "request:agent-b", "name the ring"),
         ];
+        assert_ne!(home.root(&a), home.root(&b), "each agent has its own root");
         for (agent, request_id, task) in tasks {
             let lines = [
                 "invoke\telastos://model/offers\telastos://model/offers\toffers_list\tread\t"
@@ -7517,6 +7518,18 @@ pub(crate) mod tests {
                 answer["data"]["terminal"]["output"]["text"],
                 serde_json::json!(task),
                 "the answer recorded under {agent}'s own root names its own task: {outcome}"
+            );
+        }
+        // Agent B's turn left agent A's recorded answer where it was.
+        for (agent, _, task) in tasks {
+            let results = home.results(agent);
+            let kept = plan_outcome(&results, 1);
+            let (_, body) = kept.split_once(' ').unwrap();
+            let kept: serde_json::Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                kept["data"]["terminal"]["output"]["text"],
+                serde_json::json!(task),
+                "{agent}'s own answer is still in its own root: {results:?}"
             );
         }
         let calls = create_calls(&model);
