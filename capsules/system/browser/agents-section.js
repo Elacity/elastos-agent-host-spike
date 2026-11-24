@@ -43,7 +43,7 @@ export function bindAgents(doc, request, confirmStepUp) {
     "#agents-list", "#agents-status", "#agent-form", "#agent-name", "#agent-host", "#agent-create", "#agent-allow", "#agent-retry",
   ].map((id) => doc.querySelector(id));
   if (!listNode || !statusNode || !formNode || !nameInput || !hostInput || !createButton || !allowButton || !retryButton) return { load() {} };
-  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait";
+  let agents = [], pendingId = "", pendingLabel = "", failure = "", retry = null, busy = false, gate = "wait", stopping = new Set();
 
   function paint() {
     const banner = failure || (pendingId === "create" || pendingId === "allow" ? pendingLabel : "");
@@ -55,7 +55,8 @@ export function bindAgents(doc, request, confirmStepUp) {
     createButton.disabled = busy || gate !== "ready";
     const rows = agents.map((agent) => {
       const pending = pendingId === agent.agent_id ? pendingLabel : "";
-      const state = el(doc, "div", "pc2-card-sublabel", stateText(agent, pending));
+      const label = pending || (stopping.has(agent.agent_id) ? "Stopping" : stateText(agent, ""));
+      const state = el(doc, "div", "pc2-card-sublabel", label);
       state.dataset.agentState = agent.agent_id;
       const agentId = el(doc, "div", "pc2-card-sublabel", text(agent.agent_id));
       agentId.dataset.agentId = agent.agent_id;
@@ -68,7 +69,7 @@ export function bindAgents(doc, request, confirmStepUp) {
       if (agent.active === true) {
         const start = el(doc, "button", "pc2-btn pc2-btn-secondary", "Start");
         start.type = "button";
-        start.disabled = busy;
+        start.disabled = busy || stopping.has(agent.agent_id);
         start.addEventListener("click", () => run(startJob(agent)));
         actions.append(start);
       }
@@ -182,9 +183,18 @@ export function bindAgents(doc, request, confirmStepUp) {
   }
 
   function stopJob(agent) {
-    return post(agent.agent_id, "Stopping", "/api/apps/system/agents/stop", {
-      agent_id: agent.agent_id,
-    }, (reply) => reply && reply.agent_id === agent.agent_id && Array.isArray(reply.stopped) && reply.stopped.length > 0);
+    const id = agent.agent_id
+    return async () => {
+      pendingId = id
+      pendingLabel = "Stopping"
+      paint()
+      const reply = await request("/api/apps/system/agents/stop", { method: "POST", body: JSON.stringify({ agent_id: id }) })
+      const stopped = reply && Array.isArray(reply.stopped) ? reply.stopped : []
+      const still = reply && Array.isArray(reply.stopping) ? reply.stopping : []
+      if (!reply || reply.agent_id !== id || (!stopped.length && !still.length)) throw pageRefusal("The Home did not confirm that change.")
+      still.length ? stopping.add(id) : stopping.delete(id)
+      await load()
+    }
   }
 
   createButton.addEventListener("click", () => { if (gate === "ready") run(createJob()); });

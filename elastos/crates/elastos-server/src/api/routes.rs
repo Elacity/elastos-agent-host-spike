@@ -104,6 +104,11 @@ pub async fn launch_capsule(
     Extension(data_dir): Extension<Option<std::path::PathBuf>>,
     Json(req): Json<LaunchRequest>,
 ) -> Result<Json<LaunchResponse>, (StatusCode, String)> {
+    if let Some(agent_id) = req.agent_id.as_deref() {
+        if runtime.agent_is_stopping(agent_id).await {
+            return Err((StatusCode::CONFLICT, "this agent is stopping".to_string()));
+        }
+    }
     let path = std::path::Path::new(&req.path);
     reject_raw_launch_principal_id(req.principal_id.as_deref())?;
     let (launcher, admission, grant_name, agent_audit) = match req.agent_id.as_deref() {
@@ -444,6 +449,8 @@ struct StoppedAgentBody {
 #[derive(Serialize)]
 struct StopAgentResponse {
     stopped: Vec<StoppedAgentBody>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stopping: Vec<StoppedAgentBody>,
     /// `stopping` or `stopped` when this call found the sessions already
     /// ending and did not stop a further row.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -512,12 +519,14 @@ pub async fn stop_agent_session(
             StatusCode::OK,
             Json(StopAgentResponse {
                 stopped: Vec::new(),
+                stopping: Vec::new(),
                 already: Some("stopped".to_string()),
             }),
         )
             .into_response();
     }
     let mut stopped = Vec::with_capacity(ready.len());
+    let mut stopping = Vec::new();
     for id in ready {
         let matches = runtime
             .agent_session(&id)
@@ -543,13 +552,33 @@ pub async fn stop_agent_session(
                     .into_response();
             }
         };
-        stopped.push(StoppedAgentBody {
-            session_id: info.session_id,
-            status: info.status,
-        });
+        if info.ended_at.is_none() {
+            stopping.push(StoppedAgentBody {
+                session_id: info.session_id,
+                status: "stopping".to_string(),
+            });
+        } else {
+            stopped.push(StoppedAgentBody {
+                session_id: info.session_id,
+                status: info.status,
+            });
+        }
     }
-    let already = stopped.is_empty().then(|| "stopped".to_string());
-    (StatusCode::OK, Json(StopAgentResponse { stopped, already })).into_response()
+    let already = (stopped.is_empty() && stopping.is_empty()).then(|| "stopped".to_string());
+    let status = if stopping.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
+    (
+        status,
+        Json(StopAgentResponse {
+            stopped,
+            stopping,
+            already,
+        }),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -8045,6 +8074,46 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(runtime.list_capsules().await.is_empty());
+    }
+
+    /// A Stop whose wait ends while the row is still running must say stopping.
+    /// Today the same row is listed under `stopped` with status `running`.
+    #[tokio::test]
+    async fn a_stop_that_does_not_end_says_stopping_not_stopped() {
+        let (runtime, _dir) = crate::runtime::tests::test_runtime().await;
+        let runtime = Arc::new(runtime);
+        let agent = "agent:v2:0123456789abcdef0123456789abcdef";
+        runtime
+            .plant_open_agent_stop_for_test(agent, "session-held")
+            .await;
+        let _limit = runtime.limit_stop_wait_for_test(std::time::Duration::from_millis(20));
+        let response = stop_agent_session(
+            Extension(runtime.clone()),
+            Extension(Arc::new(AuditLog::new())),
+            axum::body::Bytes::from(format!(r#"{{"agent_id":"{agent}"}}"#)),
+        )
+        .await;
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let ended = runtime
+            .get_capsule("session-held")
+            .await
+            .and_then(|info| info.ended_at);
+        let stopped_rows = body["stopped"].as_array().map(Vec::len).unwrap_or(0);
+        let stopping_status = body["stopping"]
+            .get(0)
+            .and_then(|row| row["status"].as_str());
+        assert!(
+            status == StatusCode::ACCEPTED
+                && stopped_rows == 0
+                && stopping_status == Some("stopping")
+                && body["stopping"][0]["session_id"] == "session-held"
+                && ended.is_none(),
+            "a session that is still running was answered as stopped: {status} {body} ended={ended:?}"
+        );
     }
 }
 

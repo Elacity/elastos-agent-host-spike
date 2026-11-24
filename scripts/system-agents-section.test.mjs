@@ -51,6 +51,7 @@ function element(tag) {
       (this.handlers[type] ||= []).push(fn);
     },
     click() {
+      if (this.disabled) return;
       for (const fn of this.handlers.click || []) fn();
     },
   };
@@ -496,6 +497,32 @@ test("stop posts the agent id and does not ask for the passkey", async () => {
   assert.equal(stopped.length, 1);
   assert.deepEqual(stopped[0].body, { agent_id: AGENT_ID });
   assert.equal(steps, 0);
+});
+
+test("a stop that is still stopping stays Stopping and Start is disabled", async () => {
+  const calls = [];
+  const ui = mount((path, init = {}) => {
+    calls.push(callOf(path, init));
+    if ((init.method || "GET") === "GET") {
+      return Promise.resolve({
+        agents: [{ agent_id: AGENT_ID, display_name: "Helper", active: true }],
+      });
+    }
+    return Promise.resolve({
+      agent_id: AGENT_ID,
+      stopped: [],
+      stopping: [{ session_id: "session-1", status: "stopping" }],
+    });
+  }, () => Promise.resolve("step-token"));
+  await ui.load();
+  ui.button("Stop").click();
+  await flush();
+  await flush();
+  assert.equal(ui.state(AGENT_ID), "Stopping");
+  assert.equal(ui.button("Start").disabled, true);
+  ui.button("Start").click();
+  await flush();
+  assert.equal(calls.some((call) => call.path.endsWith("/launch")), false);
 });
 
 test("an agent that is off has Stop and no Start", async () => {

@@ -395,6 +395,24 @@ impl ActivationStop {
     }
 }
 
+#[cfg(test)]
+static TEST_STOP_WAITS: StdMutex<Vec<(usize, std::time::Duration)>> = StdMutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) struct StopWaitLimit {
+    key: usize,
+}
+
+#[cfg(test)]
+impl Drop for StopWaitLimit {
+    fn drop(&mut self) {
+        let mut waits = TEST_STOP_WAITS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        waits.retain(|(key, _)| *key != self.key);
+    }
+}
+
 /// Where an end that is still owed runs when its guard is dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OwedEnd {
@@ -1291,6 +1309,19 @@ impl Runtime {
         ids
     }
 
+    pub(crate) async fn agent_is_stopping(&self, agent_id: &str) -> bool {
+        let ids = self.live_sessions_for_agent(agent_id).await;
+        let stops = self
+            .activation_stops
+            .read()
+            .unwrap_or_else(|err| err.into_inner());
+        ids.iter().any(|id| {
+            stops
+                .get(id)
+                .is_some_and(|stop| stop.flag.requested.load(Ordering::Acquire))
+        })
+    }
+
     /// The start record for this session, if Start stored one and the
     /// session has not ended. Looking does not take the record: the session's
     /// one end removes it after `ended_at` is visible.
@@ -1316,6 +1347,63 @@ impl Runtime {
             .await
             .sessions
             .insert(session_id, record);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn plant_open_agent_stop_for_test(&self, agent_id: &str, session_id: &str) {
+        self.register_capsule(RunningCapsuleInfo {
+            id: session_id.to_string(),
+            name: "planted".to_string(),
+            status: CAPSULE_RUNNING.to_string(),
+            capsule_type: CapsuleType::Wasm,
+            handle: None,
+            session_id: session_id.to_string(),
+            principal: Some(agent_id.to_string()),
+            cause: None,
+            ended_at: None,
+        })
+        .await;
+        self.insert_agent_session_for_test(AgentSessionRecord {
+            agent_id: agent_id.to_string(),
+            owner: "person:owner".to_string(),
+            host_cid: "cid".to_string(),
+            launch_id: format!("launch:{session_id}"),
+            session_id: session_id.to_string(),
+        })
+        .await;
+        self.activation_stops
+            .write()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(
+                session_id.to_string(),
+                Arc::new(ActivationStop {
+                    flag: Arc::new(crate::resource_bridge::ActivationStopFlag::default()),
+                    cause: StdMutex::new(None),
+                }),
+            );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn limit_stop_wait_for_test(&self, bound: std::time::Duration) -> StopWaitLimit {
+        let key = Arc::as_ptr(&self.activation_stops) as usize;
+        TEST_STOP_WAITS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .push((key, bound));
+        StopWaitLimit { key }
+    }
+
+    #[cfg(test)]
+    fn test_stop_wait_bound(&self) -> std::time::Duration {
+        let key = Arc::as_ptr(&self.activation_stops) as usize;
+        TEST_STOP_WAITS
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+            .rev()
+            .find(|(stored, _)| *stored == key)
+            .map(|(_, bound)| *bound)
+            .unwrap_or(std::time::Duration::from_secs(40))
     }
 
     /// Both admitted entries derive the same actor and ceiling from the
@@ -2702,6 +2790,9 @@ impl Runtime {
     /// wait bound passes. The worker's own deadline is 10 s; the bridge's
     /// longest wait is 30 s.
     async fn wait_ended(&self, id: &str) {
+        #[cfg(test)]
+        let bound = self.test_stop_wait_bound();
+        #[cfg(not(test))]
         let bound = std::time::Duration::from_secs(40);
         let deadline = std::time::Instant::now() + bound;
         loop {

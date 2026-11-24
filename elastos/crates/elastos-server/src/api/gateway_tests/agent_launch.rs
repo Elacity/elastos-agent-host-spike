@@ -1273,3 +1273,55 @@ async fn one_owners_stop_leaves_the_other_owners_agent_running() {
         "one owner's stop ended the other owner's agent: {status} {body} rows={rows:?}"
     );
 }
+
+/// Today a Start while a session is still running after Stop is accepted, and
+/// a second live session is added. Stop's answer lists that row as stopped.
+#[tokio::test]
+async fn stop_that_does_not_end_says_stopping_and_start_is_refused() {
+    let world = world().await;
+    let agent = world.agent_a.clone();
+    world
+        .runtime
+        .runtime
+        .plant_open_agent_stop_for_test(&agent, "session-held")
+        .await;
+    let _limit = world
+        .runtime
+        .runtime
+        .limit_stop_wait_for_test(std::time::Duration::from_millis(20));
+    let (runtime_status, runtime_body) = runtime_stop(&world, json!({ "agent_id": &agent })).await;
+    let (gateway_status, gateway_body) = stop(&world, &world.admin, &agent).await;
+    let after_stop = live_principal(&live(&world).await, &agent);
+    let token = step_up(&world.app, &world.admin, &agent).await;
+    let (start_status, start_body) = start(&world, &world.admin, &agent, &token).await;
+    let after_start = live_principal(&live(&world).await, &agent);
+    let runtime_json: Value = serde_json::from_str(&runtime_body).unwrap_or(Value::Null);
+    let gateway_json: Value = serde_json::from_str(&gateway_body).unwrap_or(Value::Null);
+    let runtime_stopped = runtime_json["stopped"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let runtime_stopping = runtime_json["stopping"]
+        .get(0)
+        .and_then(|row| row["status"].as_str());
+    let gateway_stopped = gateway_json["stopped"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or(0);
+    let gateway_stopping = gateway_json["stopping"]
+        .get(0)
+        .and_then(|row| row["status"].as_str());
+    assert!(
+        runtime_status == StatusCode::ACCEPTED
+            && gateway_status == StatusCode::ACCEPTED
+            && runtime_stopped == 0
+            && runtime_stopping == Some("stopping")
+            && gateway_stopped == 0
+            && gateway_stopping == Some("stopping")
+            && start_status == StatusCode::CONFLICT
+            && start_body.contains("this agent is stopping")
+            && after_stop == 1
+            && after_start == 1,
+        "today Stop says stopped and Start adds a session: runtime {runtime_status} {runtime_body}; gateway {gateway_status} {gateway_body}; after stop {after_stop}; start {start_status} {start_body}; after start {after_start}"
+    );
+}

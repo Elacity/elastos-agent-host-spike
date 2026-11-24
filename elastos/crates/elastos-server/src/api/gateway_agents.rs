@@ -275,6 +275,8 @@ struct AgentStoppedSession {
 struct AgentStopResponse {
     agent_id: String,
     stopped: Vec<AgentStoppedSession>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stopping: Vec<AgentStoppedSession>,
 }
 
 pub(super) async fn agents_stop(
@@ -282,7 +284,12 @@ pub(super) async fn agents_stop(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    agents_response(stop_agent(&state, &headers, &body).await)
+    match stop_agent(&state, &headers, &body).await {
+        Ok(value) if !value.stopping.is_empty() => {
+            (StatusCode::ACCEPTED, Json(value)).into_response()
+        }
+        other => agents_response(other),
+    }
 }
 
 /// The owner gate. With no agent id this is the admin check, and it runs
@@ -318,7 +325,7 @@ async fn stop_agent(
     let request: AgentStopRequest = agents_request(body)?;
     owner_may_stop(state, headers, Some(&request.agent_id))?;
     let outcome = stop_runtime_agent(&state.data_dir, &request.agent_id).await?;
-    if outcome.stopped.is_empty() {
+    if outcome.stopped.is_empty() && outcome.stopping.is_empty() {
         let message = match outcome.already.as_deref() {
             Some("stopping") => "this agent is already stopping",
             Some("stopped") => "this agent is already stopped",
@@ -326,15 +333,13 @@ async fn stop_agent(
         };
         return Err(Refused(message.to_string()).into());
     }
+    let session = |session: super::gateway_home_runtime::StoppedRuntimeAgent| AgentStoppedSession {
+        session_id: session.session_id,
+        status: session.status,
+    };
     Ok(AgentStopResponse {
         agent_id: request.agent_id,
-        stopped: outcome
-            .stopped
-            .into_iter()
-            .map(|session| AgentStoppedSession {
-                session_id: session.session_id,
-                status: session.status,
-            })
-            .collect(),
+        stopped: outcome.stopped.into_iter().map(&session).collect(),
+        stopping: outcome.stopping.into_iter().map(&session).collect(),
     })
 }
