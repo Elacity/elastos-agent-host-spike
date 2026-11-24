@@ -59,3 +59,44 @@ test("a slow read does not overlap the next poll", async () => {
   clearInterval(timer);
   assert.equal(peak, 1);
 });
+
+test("a hidden page does not poll", async () => {
+  let calls = 0;
+  const timer = startHomeFrame(
+    root(),
+    async () => {
+      calls += 1;
+      return { nodes: [] };
+    },
+    20,
+    { hidden: () => true },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  clearInterval(timer);
+  assert.equal(calls, 0);
+});
+
+test("two failed polls clear the panel and the first failure keeps it", async () => {
+  const panel = root();
+  let calls = 0;
+  const timer = startHomeFrame(
+    panel,
+    () => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({ nodes: [{ kind: "text", text: "live" }] });
+      }
+      return Promise.reject(new Error("down"));
+    },
+    30,
+    { deadlineMs: 200 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(panel.children[0].textContent, "live");
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(panel.children[0].textContent, "live");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  clearInterval(timer);
+  assert.ok(calls >= 3);
+  assert.equal(panel.children.length, 0);
+});

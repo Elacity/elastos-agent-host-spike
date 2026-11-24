@@ -9891,6 +9891,7 @@ async fn test_browser_operator_admission_separate_session_quota_replay_and_hando
         Json(crate::api::handlers::attach::AttachRequest {
             secret: "private-test-attach".into(),
             scope: "client".into(),
+            principal: String::new(),
         }),
     )
     .await

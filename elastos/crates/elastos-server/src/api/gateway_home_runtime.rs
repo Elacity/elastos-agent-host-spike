@@ -2066,6 +2066,27 @@ pub(super) async fn home_attach_shell(
     gateway_attach_runtime_token(client, api_url, attach_secret, "shell").await
 }
 
+pub(super) async fn home_attach_frame_shell(
+    client: &reqwest::Client,
+    api_url: &str,
+    attach_secret: &str,
+    principal: &str,
+) -> anyhow::Result<String> {
+    Ok(client
+        .post(format!("{}/api/auth/attach", api_url))
+        .json(&serde_json::json!({
+            "secret": attach_secret,
+            "scope": "shell",
+            "principal": principal,
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<HomeAttachResponse>()
+        .await?
+        .token)
+}
+
 pub(in crate::api) async fn gateway_attach_runtime_token(
     client: &reqwest::Client,
     api_url: &str,

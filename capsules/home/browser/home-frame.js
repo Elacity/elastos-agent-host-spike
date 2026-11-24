@@ -18,15 +18,41 @@ export function paintFrame(root, frame) {
   else root.removeAttribute("hidden");
 }
 
-export function startHomeFrame(root, readFrame, intervalMs = 2000) {
+export function startHomeFrame(root, readFrame, intervalMs = 2000, options = {}) {
+  const deadlineMs = options.deadlineMs == null ? 1500 : options.deadlineMs;
+  let failures = 0;
   let busy = false;
+  const hidden = () => {
+    if (typeof options.hidden === "function") return options.hidden();
+    return typeof document !== "undefined" && document.hidden;
+  };
   const tick = async () => {
-    if (busy) return;
+    if (hidden() || busy) return;
     busy = true;
-    try { paintFrame(root, await readFrame()); }
-    catch { paintFrame(root, { nodes: [] }); }
-    finally { busy = false; }
+    let timer = 0;
+    try {
+      const frame = await Promise.race([
+        Promise.resolve(readFrame()),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("deadline")), deadlineMs);
+        }),
+      ]);
+      failures = 0;
+      paintFrame(root, frame);
+    } catch {
+      failures += 1;
+      if (failures >= 2) paintFrame(root, { nodes: [] });
+    } finally {
+      clearTimeout(timer);
+      busy = false;
+    }
   };
   tick();
-  return setInterval(tick, intervalMs);
+  const poll = setInterval(tick, intervalMs);
+  if (typeof document !== "undefined" && typeof options.hidden !== "function") {
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) tick();
+    });
+  }
+  return poll;
 }

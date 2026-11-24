@@ -1442,61 +1442,87 @@ pub(super) async fn home_v2_frame(
     Json(serde_json::json!({ "nodes": nodes })).into_response()
 }
 
-#[rustfmt::skip]
+/// A token with no proof binding is the device owner. The launch-token
+/// verifier admits `proof_binding_id == None` only for schema
+/// `elastos.home.launch-token/v4`, and only as the device principal for
+/// `home` and `home-cli` (`gateway_home_token` proofless arm). Every other
+/// verified token carries a binding. A missing binding is therefore the
+/// owner, and this function returns false.
 fn home_frame_guest(data_dir: &std::path::Path, context: &HomeLaunchTokenContext) -> bool {
-    let Some(id) = context.proof_binding_id() else { return false };
-    !matches!(crate::auth::load_principal_for_proof_binding(data_dir, id), Ok(principal) if principal.role != crate::auth::RuntimePrincipalRole::Guest)
-}
-
-type FrameSlot = (reqwest::Client, Vec<(String, String)>);
-
-#[rustfmt::skip]
-fn frame_slot() -> &'static Mutex<FrameSlot> {
-    static SLOT: OnceLock<Mutex<FrameSlot>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new((
-        reqwest::Client::builder().timeout(Duration::from_secs(2)).build().unwrap_or_else(|_| reqwest::Client::new()),
-        Vec::new(),
-    )))
-}
-
-fn frame_key(api_url: &str, secret: &str) -> String {
-    format!("{}\n{secret}", api_url.trim_end_matches('/'))
-}
-
-#[rustfmt::skip]
-async fn frame_shell(api_url: &str, secret: &str) -> Option<(reqwest::Client, String)> {
-    let key = frame_key(api_url, secret);
-    let client = {
-        let slot = frame_slot().lock().ok()?;
-        if let Some((_, token)) = slot.1.iter().find(|(saved, _)| saved == &key) {
-            return Some((slot.0.clone(), token.clone()));
-        }
-        slot.0.clone()
+    let Some(id) = context.proof_binding_id() else {
+        return false;
     };
-    let token = home_attach_shell(&client, api_url, secret).await.ok()?;
-    if let Ok(mut slot) = frame_slot().lock() {
-        slot.1.retain(|(saved, _)| saved != &key);
-        if slot.1.len() >= 32 { slot.1.remove(0); }
-        slot.1.push((key, token.clone()));
+    !matches!(
+        crate::auth::load_principal_for_proof_binding(data_dir, id),
+        Ok(principal) if principal.role != crate::auth::RuntimePrincipalRole::Guest
+    )
+}
+
+struct FrameSlot {
+    client: reqwest::Client,
+    shells: Vec<(String, String)>,
+}
+
+fn frame_slot() -> &'static tokio::sync::Mutex<FrameSlot> {
+    static SLOT: OnceLock<tokio::sync::Mutex<FrameSlot>> = OnceLock::new();
+    SLOT.get_or_init(|| {
+        tokio::sync::Mutex::new(FrameSlot {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            shells: Vec::new(),
+        })
+    })
+}
+
+fn frame_key(api_url: &str, secret: &str, principal: &str) -> String {
+    format!("{}\n{secret}\n{principal}", api_url.trim_end_matches('/'))
+}
+
+async fn frame_shell(
+    api_url: &str,
+    secret: &str,
+    principal: &str,
+) -> Option<(reqwest::Client, String)> {
+    let key = frame_key(api_url, secret, principal);
+    let mut slot = frame_slot().lock().await;
+    if let Some((_, token)) = slot.shells.iter().find(|(saved, _)| saved == &key) {
+        return Some((slot.client.clone(), token.clone()));
     }
+    let client = slot.client.clone();
+    let token = home_attach_frame_shell(&client, api_url, secret, principal)
+        .await
+        .ok()?;
+    slot.shells.retain(|(saved, _)| saved != &key);
+    if slot.shells.len() >= 32 {
+        slot.shells.remove(0);
+    }
+    slot.shells.push((key, token.clone()));
     Some((client, token))
 }
 
-#[rustfmt::skip]
-fn drop_frame_shell(api_url: &str, secret: &str) {
-    let key = frame_key(api_url, secret);
-    if let Ok(mut slot) = frame_slot().lock() { slot.1.retain(|(saved, _)| saved != &key); }
+async fn drop_frame_shell(api_url: &str, secret: &str, principal: &str) {
+    let key = frame_key(api_url, secret, principal);
+    frame_slot()
+        .lock()
+        .await
+        .shells
+        .retain(|(saved, _)| saved != &key);
 }
 
-#[rustfmt::skip]
 async fn frame_bytes(mut response: reqwest::Response) -> Vec<u8> {
     let cap = crate::component::V2_FRAME_ANSWER_MAX + 1;
     let mut bytes = Vec::new();
     while bytes.len() < cap {
-        let Ok(Some(chunk)) = response.chunk().await else { break };
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
         let room = cap - bytes.len();
         bytes.extend_from_slice(&chunk[..chunk.len().min(room)]);
-        if chunk.len() >= room { break }
+        if chunk.len() >= room {
+            break;
+        }
     }
     bytes
 }
@@ -1511,7 +1537,9 @@ async fn managed_frame_nodes(
     let Some(coords) = load_live_runtime_coords(data_dir).await else {
         return Vec::new();
     };
-    let Some((client, shell)) = frame_shell(&coords.api_url, &coords.attach_secret).await else {
+    let Some((client, shell)) =
+        frame_shell(&coords.api_url, &coords.attach_secret, principal).await
+    else {
         return Vec::new();
     };
     let Ok(response) = client
@@ -1524,11 +1552,11 @@ async fn managed_frame_nodes(
         .send()
         .await
     else {
-        drop_frame_shell(&coords.api_url, &coords.attach_secret);
+        drop_frame_shell(&coords.api_url, &coords.attach_secret, principal).await;
         return Vec::new();
     };
     if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
-        drop_frame_shell(&coords.api_url, &coords.attach_secret);
+        drop_frame_shell(&coords.api_url, &coords.attach_secret, principal).await;
         return Vec::new();
     }
     if !response.status().is_success() {

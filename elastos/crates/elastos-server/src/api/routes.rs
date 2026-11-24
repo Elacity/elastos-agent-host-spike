@@ -91,16 +91,17 @@ pub(crate) async fn resident_frame(
         return (StatusCode::UNAUTHORIZED, "no session").into_response();
     };
     if let Some(session) = sessions.validate_token(&token).await {
-        if session.is_shell() && shells.holds(&token) {
-            return resident_frame_body(&runtime, &query.app, &query.principal);
+        if session.is_shell() {
+            if let Some(principal) = shells.frame_principal(&token) {
+                let _query_names = query.principal.as_str();
+                return resident_frame_body(&runtime, &query.app, &principal);
+            }
+            if shells.evicted(&token) {
+                return (StatusCode::FORBIDDEN, "evicted").into_response();
+            }
+            return (StatusCode::FORBIDDEN, "no session").into_response();
         }
-        if !session.is_shell() {
-            return (StatusCode::FORBIDDEN, "guest session").into_response();
-        }
-        if shells.evicted(&token) {
-            return (StatusCode::FORBIDDEN, "evicted").into_response();
-        }
-        return (StatusCode::FORBIDDEN, "no session").into_response();
+        return (StatusCode::FORBIDDEN, "guest session").into_response();
     }
     shells.forget(&token);
     if home_app_session_token(&token) {

@@ -115,7 +115,7 @@ async fn home_frame_comes_from_the_managed_runtime() {
         Some(provider.clone()),
     ));
     let secret = "frame-attach";
-    let (api_url, runtime_task, _frame_shells, _frame_audit) =
+    let (api_url, runtime_task, frame_shells, _frame_audit) =
         spawn_frame_runtime(runtime, secret).await;
     write_frame_coords(dir.path(), &api_url, secret);
     let app = gateway_router(test_state(dir.path()));
@@ -147,6 +147,70 @@ async fn home_frame_comes_from_the_managed_runtime() {
     assert!(
         ignored.contains("<script>alert(1)</script>"),
         "a query principal is ignored, got {ignored}"
+    );
+    let bound = frame_shells.held();
+    let owner_shells: Vec<_> = bound
+        .iter()
+        .filter(|token| {
+            frame_shells.frame_principal(token).as_deref() == Some(owner.principal_id.as_str())
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        owner_shells.len(),
+        1,
+        "the owner has one frame shell, have {bound:?}"
+    );
+    let other_shells: Vec<_> = bound
+        .iter()
+        .filter(|token| {
+            frame_shells.frame_principal(token).as_deref() == Some(other.principal_id.as_str())
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        other_shells.len(),
+        1,
+        "another person binds their own shell, have {bound:?}"
+    );
+    let named = reqwest::Client::new()
+        .get(format!(
+            "{api_url}/api/residents/frame?app=app-frame&principal={}",
+            other.principal_id
+        ))
+        .header(AUTHORIZATION, format!("Bearer {}", owner_shells[0]))
+        .send()
+        .await
+        .unwrap();
+    let named_body = named.text().await.unwrap();
+    assert!(
+        named_body.contains("<script>alert(1)</script>"),
+        "the bound shell ignores the query principal, got {named_body}"
+    );
+    assert!(
+        !named_body.contains("other-home"),
+        "the query principal is not the frame, got {named_body}"
+    );
+    provider.testing_store_v2_frame(
+        "app-frame",
+        Some(other.principal_id.as_str()),
+        vec![elastos_compute::providers::bus2_ui::FrameNode::Text(
+            "other-home".into(),
+        )],
+    );
+    let stolen = reqwest::Client::new()
+        .get(format!(
+            "{api_url}/api/residents/frame?app=app-frame&principal={}",
+            other.principal_id
+        ))
+        .header(AUTHORIZATION, format!("Bearer {}", owner_shells[0]))
+        .send()
+        .await
+        .unwrap();
+    let stolen_body = stolen.text().await.unwrap();
+    assert!(
+        !stolen_body.contains("other-home"),
+        "a second gateway cannot read by naming, got {stolen_body}"
     );
 
     let (guest_status, guest_body) = frame_body(&app, &guest.home_token, "app=app-frame").await;
@@ -341,6 +405,13 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
     let (api_url, task, shells, audit) = spawn_frame_runtime(runtime, secret).await;
     write_frame_coords(dir.path(), &api_url, secret);
     let app = gateway_router(test_state(dir.path()));
+    let (first_status, second_status) = tokio::join!(
+        frame_body(&app, &owner.home_token, "app=app-frame"),
+        frame_body(&app, &owner.home_token, "app=app-frame"),
+    );
+    assert_eq!(first_status.0, StatusCode::OK, "{}", first_status.1);
+    assert_eq!(second_status.0, StatusCode::OK, "{}", second_status.1);
+    assert_eq!(shell_created(&audit), 1, "concurrent polls mint one shell");
     for _ in 0..1_000 {
         let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -351,10 +422,29 @@ async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
         1,
         "a thousand polls keep one shell, have {first:?}"
     );
-    assert_eq!(
-        shell_created(&audit),
-        1,
-        "a thousand polls keep the audit small"
+    // Each poll re-checks the attach secret. That records a client session, so
+    // the one shell event leaves the 1000-event ring. A shell minted on every
+    // poll would still fill the ring with shell events.
+    let shells_in_ring = shell_created(&audit);
+    assert!(
+        shells_in_ring <= 1,
+        "a thousand polls mint one shell, the ring holds {shells_in_ring}"
+    );
+    let frame_token = first[0].clone();
+    let client = reqwest::Client::new();
+    for _ in 0..crate::api::handlers::attach::ATTACH_SHELL_CAP {
+        client
+            .post(format!("{api_url}/api/auth/attach"))
+            .json(&json!({ "secret": secret, "scope": "shell" }))
+            .send()
+            .await
+            .unwrap();
+    }
+    let (kept_status, kept_body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(kept_status, StatusCode::OK, "{kept_body}");
+    assert!(
+        shells.frame_principal(&frame_token).is_some(),
+        "ordinary attach callers do not evict the frame shell"
     );
     task.abort();
 

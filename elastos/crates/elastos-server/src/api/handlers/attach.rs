@@ -12,10 +12,14 @@ use elastos_runtime::session::{SessionRegistry, SessionType};
 /// How many attach shells this process remembers. The next note drops the oldest.
 pub(crate) const ATTACH_SHELL_CAP: usize = 8;
 
-type NotedShells = (
-    std::collections::VecDeque<String>,
-    std::collections::VecDeque<String>,
-);
+#[derive(Default)]
+struct NotedShells {
+    held: std::collections::VecDeque<String>,
+    evicted: std::collections::VecDeque<String>,
+    /// Frame shells, each bound to the principal named when it was minted.
+    /// Other attach callers do not take these slots.
+    frame: Vec<(String, String)>,
+}
 
 /// Shell tokens minted by attach with the secret. A shell created another way
 /// is not in this set. A validate miss drops the token. The cap names the one it drops.
@@ -25,44 +29,89 @@ pub struct AttachShells {
 }
 
 impl AttachShells {
-    #[rustfmt::skip]
     pub fn note(&self, token: &str) {
-        let Ok(mut set) = self.inner.lock() else { return };
-        set.1.retain(|old| old != token);
-        if set.0.iter().any(|kept| kept == token) { return }
-        if set.0.len() >= ATTACH_SHELL_CAP {
-            if let Some(old) = set.0.pop_front() {
-                if set.1.len() >= ATTACH_SHELL_CAP { set.1.pop_front(); }
-                set.1.push_back(old);
+        let Ok(mut set) = self.inner.lock() else {
+            return;
+        };
+        set.evicted.retain(|old| old != token);
+        if set.held.iter().any(|kept| kept == token) {
+            return;
+        }
+        if set.held.len() >= ATTACH_SHELL_CAP {
+            if let Some(old) = set.held.pop_front() {
+                if set.evicted.len() >= ATTACH_SHELL_CAP {
+                    set.evicted.pop_front();
+                }
+                set.evicted.push_back(old);
             }
         }
-        set.0.push_back(token.to_string());
+        set.held.push_back(token.to_string());
+    }
+
+    /// A frame shell. It is not one of the eight ordinary attach slots.
+    pub fn note_frame(&self, token: &str, principal: &str) {
+        let Ok(mut set) = self.inner.lock() else {
+            return;
+        };
+        set.held.retain(|kept| kept != token);
+        set.evicted.retain(|old| old != token);
+        if let Some(found) = set.frame.iter_mut().find(|(kept, _)| kept == token) {
+            found.1 = principal.to_string();
+            return;
+        }
+        if set.frame.len() >= ATTACH_SHELL_CAP {
+            if let Some((old, _)) = set.frame.first().cloned() {
+                set.frame.remove(0);
+                if set.evicted.len() >= ATTACH_SHELL_CAP {
+                    set.evicted.pop_front();
+                }
+                set.evicted.push_back(old);
+            }
+        }
+        set.frame.push((token.to_string(), principal.to_string()));
+    }
+
+    /// The principal bound to this frame shell. An ordinary shell has none.
+    pub fn frame_principal(&self, token: &str) -> Option<String> {
+        self.inner.lock().ok().and_then(|set| {
+            set.frame
+                .iter()
+                .find(|(kept, _)| kept == token)
+                .map(|(_, principal)| principal.clone())
+        })
     }
 
     pub fn holds(&self, token: &str) -> bool {
-        self.inner
-            .lock()
-            .is_ok_and(|set| set.0.iter().any(|kept| kept == token))
+        self.inner.lock().is_ok_and(|set| {
+            set.held.iter().any(|kept| kept == token)
+                || set.frame.iter().any(|(kept, _)| kept == token)
+        })
     }
 
     pub fn evicted(&self, token: &str) -> bool {
         self.inner
             .lock()
-            .is_ok_and(|set| set.1.iter().any(|old| old == token))
+            .is_ok_and(|set| set.evicted.iter().any(|old| old == token))
     }
 
-    #[rustfmt::skip]
     pub fn forget(&self, token: &str) {
-        let Ok(mut set) = self.inner.lock() else { return };
-        set.0.retain(|kept| kept != token);
-        set.1.retain(|old| old != token);
+        let Ok(mut set) = self.inner.lock() else {
+            return;
+        };
+        set.held.retain(|kept| kept != token);
+        set.evicted.retain(|old| old != token);
+        set.frame.retain(|(kept, _)| kept != token);
     }
 
     #[cfg(test)]
     pub(crate) fn held(&self) -> Vec<String> {
         self.inner
             .lock()
-            .map(|set| set.0.iter().cloned().collect())
+            .map(|set| {
+                let mut tokens: Vec<_> = set.held.iter().cloned().collect();
+                tokens.extend(set.frame.iter().map(|(token, _)| token.clone()));
+                tokens
+            })
             .unwrap_or_default()
     }
 }
@@ -83,6 +132,9 @@ pub struct AttachRequest {
     /// Requested scope: "shell" or "client" (default: "client").
     #[serde(default = "default_scope")]
     pub scope: String,
+    /// The principal a frame shell is bound to. Empty for every other attach.
+    #[serde(default)]
+    pub principal: String,
 }
 
 fn default_scope() -> String {
@@ -122,7 +174,11 @@ pub async fn attach(
         .create_session(session_type, None)
         .await;
     if session.is_shell() {
-        state.shells.note(&session.token);
+        if body.principal.is_empty() {
+            state.shells.note(&session.token);
+        } else {
+            state.shells.note_frame(&session.token, &body.principal);
+        }
     }
 
     (
