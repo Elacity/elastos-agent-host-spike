@@ -103,7 +103,8 @@ impl RuntimeProviderId {
     /// descriptor, or the mode passed at create. Chain's names are its own
     /// row: reqwest 0.12.28, tokio 1.52.1, mio 1.2.0. `fcntl`, `clone`,
     /// `socket`, `setsockopt`, and `getsockopt` are argument-checked, so they
-    /// stay off this list.
+    /// stay off this list. Object's check allows only `F_GETFL` and `F_SETFD`
+    /// of `FD_CLOEXEC`: glibc `fdopendir` needs those for `remove_dir_all`.
     ///
     /// `readlink` is x86_64 glibc `realpath`: `__readlink` is syscall
     /// `readlink` (89). Landlock does not mediate it. This filter's deny is
