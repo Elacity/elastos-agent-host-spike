@@ -6,6 +6,86 @@ use elastos_runtime::provider::CheckedExecutable;
 
 use crate::{setup, sources::default_data_dir};
 
+/// The running runtime has been admitted. Call `prepare` immediately before spawn.
+#[derive(Debug)]
+pub struct AdmittedRuntime {
+    path: PathBuf,
+    checksum: Option<String>,
+}
+
+/// Canonical install path and lowercase sha256. `Ok(None)` with no release.
+pub(crate) fn signed_runtime_install(data_dir: &Path) -> anyhow::Result<Option<(PathBuf, String)>> {
+    let Some(source) = setup::installed_release_source(data_dir)? else {
+        return Ok(None);
+    };
+    let path = std::fs::canonicalize(&source.install_path)
+        .map_err(|error| anyhow::anyhow!("installed release binary: {error}"))?;
+    let (release_bytes, _) =
+        crate::installed_release::read_signed_release(data_dir, &path, &source, false, true)?;
+    let release: serde_json::Value = serde_json::from_slice(&release_bytes)?;
+    let sha256 = release["payload"]["platforms"][crate::update::detect_release_platform()]
+        ["binary"]["sha256"]
+        .as_str()
+        .filter(|sha| sha.len() == 64)
+        .ok_or_else(|| anyhow::anyhow!("signed runtime digest is malformed"))?
+        .to_ascii_lowercase();
+    Ok(Some((path, sha256)))
+}
+
+impl AdmittedRuntime {
+    /// Hold the admitted bytes. A `dev_mode` source Home holds that path unchecked.
+    pub fn prepare(&self) -> anyhow::Result<setup::verified_executable::VerifiedExecutable> {
+        if self.checksum.is_none() {
+            return setup::verified_executable::VerifiedExecutable::unchecked(&self.path);
+        }
+        setup::verified_executable::VerifiedExecutable::prepare(&self.path, self.signed_checksum()?)
+    }
+
+    pub fn signed_checksum(&self) -> anyhow::Result<&str> {
+        self.checksum.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("no signed release digest (dev_mode start is unchecked)")
+        })
+    }
+}
+
+/// Admit the running Runtime before this process starts it again.
+/// An installed Home admits only bytes that match its signed release.
+/// A source Home with no release continues only through `dev_mode = true`.
+pub fn checked_running_runtime(data_dir: &Path, exe: &Path) -> anyhow::Result<AdmittedRuntime> {
+    let Some((install, sha256)) = signed_runtime_install(data_dir)? else {
+        if !setup::source_home_dev_mode(data_dir) {
+            return Err(setup::missing_trusted_source_error());
+        }
+        return Ok(AdmittedRuntime {
+            path: exe.to_path_buf(),
+            checksum: None,
+        });
+    };
+    let running =
+        std::fs::canonicalize(exe).map_err(|error| anyhow::anyhow!("running binary: {error}"))?;
+    let checksum = format!("sha256:{sha256}");
+    // A different path is admitted only when that file's own bytes match.
+    if running != install {
+        anyhow::ensure!(
+            running_file_matches_digest(&running, &checksum)?,
+            "running binary is not the installed release"
+        );
+    }
+    Ok(AdmittedRuntime {
+        path: install,
+        checksum: Some(checksum),
+    })
+}
+
+fn running_file_matches_digest(path: &Path, checksum: &str) -> anyhow::Result<bool> {
+    let expected = checksum
+        .strip_prefix("sha256:")
+        .filter(|hex_digits| hex_digits.len() == 64)
+        .ok_or_else(|| anyhow::anyhow!("signed runtime digest is malformed"))?;
+    let (actual, _) = crate::installed_release::file_digest(path)?;
+    Ok(actual == expected.to_ascii_lowercase())
+}
+
 /// Bind a native provider start to the current publisher-signed release.
 /// A failed admission stays a refused executable until the bridge reports it.
 pub fn checked_native_provider(path: &Path) -> CheckedExecutable {
@@ -354,10 +434,144 @@ impl AdmittedProvider {
     }
 }
 
+/// A file `open_regular` will admit. The running test binary is used when it
+/// already has one link and a private mode; otherwise a byte copy is signed.
+#[cfg(all(test, unix))]
+pub(crate) struct InstallableRuntime {
+    _hold: Option<tempfile::TempDir>,
+    pub path: PathBuf,
+}
+
+#[cfg(all(test, unix))]
+impl InstallableRuntime {
+    pub(crate) fn of(exe: &Path) -> InstallableRuntime {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = std::fs::metadata(exe).expect("running binary metadata");
+        let installable = meta.is_file()
+            && meta.nlink() == 1
+            && meta.uid() == unsafe { libc::geteuid() }
+            && meta.mode() & 0o7022 == 0;
+        if installable {
+            return InstallableRuntime {
+                _hold: None,
+                path: exe.to_path_buf(),
+            };
+        }
+        let hold = tempfile::tempdir().unwrap();
+        let path = hold.path().join("runtime");
+        std::fs::copy(exe, &path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        InstallableRuntime {
+            _hold: Some(hold),
+            path,
+        }
+    }
+}
+
+/// Runs `test_name` in a child when this process is the parallel test gate.
+/// The child is the only place a case may set `TMPDIR` or `ELASTOS_*`.
+#[cfg(all(test, unix))]
+pub(crate) fn run_isolated(test_name: &str) -> bool {
+    if std::env::var_os("ELASTOS_TEST_ISOLATED").is_some() {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .arg("--exact")
+        .arg(test_name)
+        .env("ELASTOS_TEST_ISOLATED", "1")
+        .output()
+        .expect("isolated test process");
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && text.contains("1 passed"),
+        "isolated {test_name} failed: {:?}\n{text}",
+        output.status
+    );
+    false
+}
+
+#[cfg(all(test, unix))]
+pub(crate) struct ReadonlyTemp {
+    _root: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(all(test, unix))]
+impl ReadonlyTemp {
+    pub(crate) fn enter() -> ReadonlyTemp {
+        assert!(
+            std::env::var_os("ELASTOS_TEST_ISOLATED").is_some(),
+            "TMPDIR is process-global; run this case in an isolated child"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("ro");
+        std::fs::create_dir(&dir).unwrap();
+        let mut permissions = std::fs::metadata(&dir).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o500);
+        std::fs::set_permissions(&dir, permissions).unwrap();
+        let previous = std::env::var_os("TMPDIR");
+        std::env::set_var("TMPDIR", &dir);
+        ReadonlyTemp {
+            _root: root,
+            previous,
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+struct RuntimePathEnv;
+
+#[cfg(all(test, unix))]
+impl RuntimePathEnv {
+    fn point_at(path: &std::path::Path) -> RuntimePathEnv {
+        assert!(
+            std::env::var_os("ELASTOS_TEST_ISOLATED").is_some(),
+            "ELASTOS_* is process-global; run this case in an isolated child"
+        );
+        for key in [
+            "ELASTOS_BIN",
+            "ELASTOS_RUNTIME_BINARY",
+            "ELASTOS_RUNTIME_PATH",
+        ] {
+            std::env::set_var(key, path);
+        }
+        RuntimePathEnv
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for RuntimePathEnv {
+    fn drop(&mut self) {
+        for key in [
+            "ELASTOS_BIN",
+            "ELASTOS_RUNTIME_BINARY",
+            "ELASTOS_RUNTIME_PATH",
+        ] {
+            std::env::remove_var(key);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for ReadonlyTemp {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("TMPDIR", value),
+            None => std::env::remove_var("TMPDIR"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sha2::Digest;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn current_platform() -> &'static str {
         match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -864,5 +1078,359 @@ mod tests {
             error.to_string().contains("No trusted source configured"),
             "{error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_home_running_runtime_keeps_the_named_dev_opt_in() {
+        if !run_isolated("binaries::tests::source_home_running_runtime_keeps_the_named_dev_opt_in")
+        {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("dev-runtime");
+        std::fs::write(&exe, b"source runtime").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let refused = checked_running_runtime(temp.path(), &exe).unwrap_err();
+        let message = format!("{refused:#}");
+        assert!(
+            message.contains("No trusted source configured"),
+            "{message}"
+        );
+        assert!(message.contains("dev_mode = true"), "{message}");
+        std::fs::write(temp.path().join("config.toml"), "dev_mode = true\n").unwrap();
+        let _readonly = ReadonlyTemp::enter();
+        let admitted = checked_running_runtime(temp.path(), &exe).expect("dev admit must not copy");
+        drop(_readonly);
+        assert!(admitted.signed_checksum().is_err());
+        let held = admitted.prepare().unwrap();
+        assert_eq!(held.held_content_sha256().len(), 64);
+        assert!(held.exec_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_running_runtime_holds_the_release_bytes() {
+        if !run_isolated("binaries::tests::signed_running_runtime_holds_the_release_bytes") {
+            return;
+        }
+        let fixture = crate::installed_release::tests::Fixture::new();
+        let binary = fixture.data.join("runtime");
+        let digest = hex::encode(sha2::Sha256::digest(b"installed signed runtime"));
+        let _readonly = ReadonlyTemp::enter();
+        let admitted =
+            checked_running_runtime(&fixture.data, &binary).expect("admit must not copy");
+        drop(_readonly);
+        assert_eq!(
+            admitted.signed_checksum().unwrap(),
+            format!("sha256:{digest}")
+        );
+        let held = admitted.prepare().unwrap();
+        assert_eq!(held.signed_checksum().unwrap(), format!("sha256:{digest}"));
+        assert!(held.exec_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_bytes_at_another_path_are_admitted_without_a_copy() {
+        if !run_isolated("binaries::tests::same_bytes_at_another_path_are_admitted_without_a_copy")
+        {
+            return;
+        }
+        let fixture = crate::installed_release::tests::Fixture::new();
+        let binary = fixture.data.join("runtime");
+        let same = fixture.data.join("runtime-copy");
+        std::fs::copy(&binary, &same).unwrap();
+        std::fs::set_permissions(&same, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _env = RuntimePathEnv::point_at(&binary);
+        let _readonly = ReadonlyTemp::enter();
+        let admitted = checked_running_runtime(&fixture.data, &same).unwrap();
+        drop(_readonly);
+        drop(_env);
+        std::fs::write(&same, b"tampered caller path").unwrap();
+        let held = admitted.prepare().unwrap();
+        let digest = hex::encode(sha2::Sha256::digest(b"installed signed runtime"));
+        assert_eq!(held.signed_checksum().unwrap(), format!("sha256:{digest}"));
+        assert_eq!(held.held_content_sha256(), digest);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn different_bytes_are_refused_even_when_environment_names_the_release() {
+        if !run_isolated(
+            "binaries::tests::different_bytes_are_refused_even_when_environment_names_the_release",
+        ) {
+            return;
+        }
+        let fixture = crate::installed_release::tests::Fixture::new();
+        let binary = fixture.data.join("runtime");
+        let other = fixture.data.join("other-runtime");
+        std::fs::write(&other, b"not the signed runtime").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _env = RuntimePathEnv::point_at(&binary);
+        let error = checked_running_runtime(&fixture.data, &other).unwrap_err();
+        drop(_env);
+        assert!(
+            error
+                .to_string()
+                .contains("running binary is not the installed release"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dev_hold_fingerprint_is_the_held_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runtime");
+        std::fs::write(&path, b"held-bytes").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let held = setup::verified_executable::VerifiedExecutable::unchecked(&path).unwrap();
+        std::fs::write(&path, b"replaced-path").unwrap();
+        let digest = held.held_content_sha256();
+        assert_eq!(digest, hex::encode(sha2::Sha256::digest(b"held-bytes")));
+    }
+
+    /// Parent admits the test binary, `prepare` makes the macOS private copy,
+    /// and the child started from that copy admits its own bytes.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_child_of_private_copy_readmits() {
+        if std::env::var_os("ELASTOS_S5A_READMIT").is_some() {
+            let data = std::env::var("ELASTOS_S5A_DATA").unwrap();
+            let install = std::env::var("ELASTOS_S5A_INSTALL").unwrap();
+            let exe = std::env::current_exe().unwrap();
+            if exe.as_path() == std::path::Path::new(&install) {
+                eprintln!("child current_exe is still the install path");
+                std::process::exit(3);
+            }
+            match checked_running_runtime(std::path::Path::new(&data), &exe) {
+                Ok(admitted) => {
+                    if admitted.signed_checksum().is_err() {
+                        eprintln!("child admission has no signed digest");
+                        std::process::exit(4);
+                    }
+                    std::fs::write(std::env::var("ELASTOS_S5A_MARKER").unwrap(), b"admitted")
+                        .unwrap();
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("child readmit refused: {error:#}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        let exe = std::env::current_exe().unwrap();
+        let install = InstallableRuntime::of(&exe);
+        let fixture = crate::installed_release::tests::Fixture::bound_to(&install.path);
+        let marker = fixture.data.join("child-admitted");
+        let admitted = checked_running_runtime(&fixture.data, &exe).unwrap();
+        let prepared = admitted.prepare().unwrap();
+        let output = std::process::Command::new(prepared.exec_path())
+            .arg("--exact")
+            .arg("binaries::tests::macos_child_of_private_copy_readmits")
+            .env("ELASTOS_S5A_READMIT", "1")
+            .env("ELASTOS_S5A_DATA", &fixture.data)
+            .env("ELASTOS_S5A_INSTALL", &install.path)
+            .env("ELASTOS_S5A_MARKER", &marker)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "status {:?} stdout {} stderr {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), b"admitted");
+    }
+
+    /// The parent drops `prepared` while this child is still running. The child
+    /// holds the private copy the way `run_serve` does, and the production
+    /// supersession watch follows the signed install.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_detached_copy_outlives_prepared_and_yields_when_the_install_changes() {
+        const TEST_NAME: &str = "binaries::tests::macos_detached_copy_outlives_prepared_and_yields_when_the_install_changes";
+        if std::env::var_os("ELASTOS_S5A_GRANDCHILD").is_some() {
+            let data = std::env::var("ELASTOS_S5A_DATA").unwrap();
+            let exe = std::env::current_exe().unwrap();
+            match checked_running_runtime(std::path::Path::new(&data), &exe) {
+                Ok(admitted) => {
+                    if admitted.signed_checksum().is_err() {
+                        eprintln!("grandchild admission has no signed digest");
+                        std::process::exit(4);
+                    }
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    eprintln!("grandchild readmit refused: {error:#}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        if std::env::var_os("ELASTOS_S5A_DETACHED").is_some() {
+            macos_detached_serve();
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        // `InstallableRuntime::of` can return the running test binary. This test
+        // replaces the install, so the signed file is always a separate copy.
+        let install_hold = tempfile::tempdir().unwrap();
+        let install_path = install_hold.path().join("runtime");
+        std::fs::copy(&exe, &install_path).unwrap();
+        std::fs::set_permissions(&install_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(
+            std::fs::canonicalize(&install_path).unwrap(),
+            std::fs::canonicalize(&exe).unwrap(),
+            "the signed install must not be the running test binary"
+        );
+        let fixture = crate::installed_release::tests::Fixture::bound_to(&install_path);
+        let ready = fixture.data.join("detached-ready");
+        let go = fixture.data.join("detached-go");
+        let grand = fixture.data.join("grandchild-admitted");
+        let admitted = checked_running_runtime(&fixture.data, &exe).unwrap();
+        let mut prepared = admitted.prepare().unwrap();
+        let exec_path = prepared.exec_path().to_path_buf();
+        assert!(
+            exec_path
+                .parent()
+                .and_then(|dir| dir.file_name())
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("elastos-exec-")),
+            "private copy path {}",
+            exec_path.display()
+        );
+        let mut command = std::process::Command::new(&exec_path);
+        command
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .env("ELASTOS_S5A_DETACHED", "1")
+            .env("ELASTOS_S5A_DATA", &fixture.data)
+            .env("ELASTOS_S5A_READY", &ready)
+            .env("ELASTOS_S5A_GO", &go)
+            .env("ELASTOS_S5A_MARKER", &grand)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().unwrap();
+        let _kill = KillProcessGroup(child.id() as i32);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while !ready.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("detached child exited before ready: {status}");
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detached child did not become ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        prepared.persist_private_copy();
+        drop(prepared);
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "detached child died after the parent dropped its private copy"
+        );
+        assert!(
+            exec_path.exists(),
+            "private copy was removed while the child was running"
+        );
+        std::fs::write(&go, b"go").unwrap();
+        let grand_deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        while !grand.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("detached child exited before its child re-admitted: {status}");
+            }
+            assert!(
+                std::time::Instant::now() < grand_deadline,
+                "child of the detached runtime did not re-admit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(std::fs::read(&grand).unwrap(), b"ok");
+        let replacement = install_path.with_extension("next");
+        std::fs::write(&replacement, b"a different installed runtime").unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&replacement, &install_path).unwrap();
+        let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < exit_deadline,
+                "detached child did not exit 75 after the installed binary changed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+        assert_eq!(status.code(), Some(75), "{status}");
+        assert!(
+            !exec_path.exists(),
+            "private copy remained after the stale host exited"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_detached_serve() {
+        let data = std::path::PathBuf::from(std::env::var("ELASTOS_S5A_DATA").unwrap());
+        let ready = std::path::PathBuf::from(std::env::var("ELASTOS_S5A_READY").unwrap());
+        let go = std::path::PathBuf::from(std::env::var("ELASTOS_S5A_GO").unwrap());
+        let grand = std::path::PathBuf::from(std::env::var("ELASTOS_S5A_MARKER").unwrap());
+        let held = crate::host_lock::hold_running_exec_copy().unwrap_or_else(|error| {
+            eprintln!("adopt failed: {error:#}");
+            std::process::exit(2);
+        });
+        if held.is_none() {
+            eprintln!("detached process was not started from a private exec copy");
+            std::process::exit(3);
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            crate::host_lock::spawn_installed_binary_supersession_watch(&data, "serve");
+            std::fs::write(&ready, b"ready").unwrap();
+            while !go.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("binaries::tests::macos_detached_copy_outlives_prepared_and_yields_when_the_install_changes")
+                .env("ELASTOS_S5A_GRANDCHILD", "1")
+                .env("ELASTOS_S5A_DATA", &data)
+                .env_remove("ELASTOS_S5A_DETACHED")
+                .status()
+                .unwrap();
+            std::fs::write(
+                &grand,
+                if status.success() {
+                    &b"ok"[..]
+                } else {
+                    &b"bad"[..]
+                },
+            )
+            .unwrap();
+            std::future::pending::<()>().await
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    struct KillProcessGroup(i32);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for KillProcessGroup {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(-self.0, libc::SIGKILL);
+                libc::waitpid(self.0, std::ptr::null_mut(), 0);
+            }
+        }
     }
 }
