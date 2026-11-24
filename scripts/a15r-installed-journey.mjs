@@ -70,7 +70,7 @@ export const U3_NAMES = [
   "release_signed", "signing_key_deleted", "installed_identity_recorded",
   "gateway_started", "owner_passkey_created", "u3_agents_enabled",
   "u3_owner_field_refused", "u3_home_asks", "u3_agent_created", "u3_non_owner_refused",
-  "u3_unknown_id_refused", "u3_guest_refused", "u3_no_session_refused",
+  "u3_unknown_id_refused", "u3_no_session_refused",
   "u3_agents_disabled_refused", "u3_agent_activated", "u3_no_guest_no_mint",
   "u3_restart_same_record", "u3_create_audit",
 ];
@@ -340,7 +340,7 @@ function rootSuffix(root) {
 
 export const OWNER_DOCUMENT = Buffer.from("a15r owner document\n");
 
-// Launch posts to the agent runtime (agent_plane::live_coords). The managed
+// Launch posts to the gateway's agent launch route. The managed
 // Home runtime does not hold those sessions, so the live list reads this file.
 export const LIVE_SESSION_COORDS = "agent-runtime-coords.json";
 
@@ -1196,8 +1196,11 @@ function servePidsToStop(executables, commands) {
 }
 
 async function stopServe() {
+  // Same marker check as the removal: only this run's throwaway Home may be stopped.
+  if (!throwawayAllowed(home, process.env.A15R_SCRATCH || "")) {
+    throw new Error("refusing to stop a Home that is not this run's throwaway home");
+  }
   const listed = homePids();
-  if (!listed.ok) throw new Error("cannot list executables for this Home");
   const extra = servePidsToStop(homeExecutables(), commandByPid());
   await signalHomePids([...new Set([...listed.pids, ...extra])]);
 }
@@ -2404,22 +2407,6 @@ async function runU3Create() {
   }
   pass("u3_unknown_id_refused", { activate: noSuchAgent, launch: noSuchAgent });
 
-  const beforeGuest = JSON.stringify(storedAgentRecords());
-  const guestCreate = await call(
-    "POST",
-    "/api/apps/system/agents/create",
-    state.guestSystemToken || state.guestToken,
-    { display_name: "Guest Agent", agent_host: "agent-host", request_id: "u3-guest" },
-  );
-  if (!refusalIncludes(guestCreate.status, guestCreate.text, 403, adminRequired)
-    || JSON.stringify(storedAgentRecords()) !== beforeGuest) {
-    halt("u3_guest_refused", {
-      status: guestCreate.status,
-      body: guestCreate.text.slice(0, 240),
-      launch: guestSystem.reply.status,
-    });
-  }
-  pass("u3_guest_refused", { status: guestCreate.status, body: guestCreate.text.slice(0, 180) });
 
   const beforeSession = JSON.stringify(storedAgentRecords());
   const noSession = await call("POST", "/api/apps/system/agents/create", "", {

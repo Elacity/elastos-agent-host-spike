@@ -24,7 +24,20 @@ if [[ -z "$OUT" || "$OUT" == "-h" || "$OUT" == "--help" ]]; then
   echo "usage: $0 [--only u3-create] <output-folder>" >&2
   exit 2
 fi
-export A15R_ONLY="$ONLY"
+dot_base() {
+  case "$(basename "$1")" in
+    .|..) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if dot_base "$OUT"; then
+  echo "a15r-installed-journey: output folder basename must not be . or .." >&2
+  exit 2
+fi
+
+ STATUS=1
+CREATED=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 export CARGO_BUILD_BUILD_DIR="${CARGO_BUILD_BUILD_DIR:-$ROOT/target-build}"
@@ -34,7 +47,10 @@ rm -f "$OUT/receipt.json"
 SCRATCH="${A15R_SCRATCH:-$ROOT/target/a15r-homes}"
 export A15R_SCRATCH="$SCRATCH"
 HOME_ROOT="$SCRATCH/$(basename "$OUT")"
-# Mac only. On Darwin the runtime data dir is ~/Library/Application Support.
+if dot_base "$HOME_ROOT"; then
+  echo "a15r-installed-journey: home root basename must not be . or .." >&2
+  exit 2
+fi
 DATA="$HOME_ROOT/Library/Application Support/elastos"
 PID_FILE="$OUT/serve.pid"
 LOG="$OUT/serve.log"
@@ -45,6 +61,10 @@ node_proof() {
 }
 
 cleanup() {
+  # Only the run that wrote the throwaway marker may stop or remove the Home.
+  if [[ "$CREATED" != "1" ]]; then
+    return
+  fi
   A15R_OUT="$OUT" A15R_HOME="$HOME_ROOT" A15R_SCRATCH="$SCRATCH" A15R_DATA="$DATA" \
     node_proof --stop-home || echo "a15r-installed-journey: stop failed" >&2
   A15R_OUT="$OUT" node_proof --scrub-evidence || echo "a15r-installed-journey: scrub failed" >&2
@@ -93,6 +113,7 @@ fi
 mkdir -p "$SCRATCH"
 mkdir -p "$HOME_ROOT"
 printf '%s\n' "$HOME_ROOT" > "$HOME_ROOT/.a15r-throwaway"
+CREATED=1
 
 echo "building prototype-agents runtime"
 (

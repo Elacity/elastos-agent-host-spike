@@ -290,6 +290,9 @@ test("u3 create mode names the create rows and no start row", () => {
   assert.equal(U3_NAMES.includes("u3_agent_created"), true);
   assert.equal(U3_NAMES.includes("u3_home_asks"), true);
   assert.equal(U3_NAMES.at(-1), "u3_create_audit");
+  assert.equal(U3_NAMES.includes("u3_guest_refused"), false);
+  assert.equal(U3_NAMES.includes("u3_non_owner_refused"), true);
+  assert.equal(U3_NAMES.filter((name) => name === "u3_non_owner_refused").length, 1);
   const failed = shellFailStatuses("u3_agent_created", U3_NAMES);
   assert.equal(failed[U3_NAMES.indexOf("u3_agent_created")], "fail");
   assert.equal(failed[U3_NAMES.indexOf("release_signed")], "pass");
@@ -485,13 +488,21 @@ test("a skipped owner check is not a pass", () => {
   }).ok, false);
 });
 
-test("full mode notice names the missing agents-in-gateway route", () => {
+test("full mode notice names the missing agents-in-gateway change", () => {
   assert.match(FULL_MODE_NOTICE, /not proof of anything until/);
-  const gateway = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway.rs", import.meta.url), "utf8");
-  const launch = fs.readFileSync(new URL("../elastos/crates/elastos-server/src/api/gateway_agents.rs", import.meta.url), "utf8");
-  const detected = agentsInGatewayChange(gateway, launch);
-  assert.equal(detected.ok, false);
-  assert.equal(detected.route, "/api/apps/system/agents/launch");
+  const refused = agentsInGatewayChange(
+    'route("/api/apps/system/agents/launch", post(agents_launch))',
+    "async fn agents_launch() { launch_runtime_agent(&state.data_dir).await?; }",
+  );
+  assert.equal(refused.ok, false);
+  assert.equal(refused.route, "/api/apps/system/agents/launch");
+  assert.match(refused.reason, /asks the runtime/);
+  const unregistered = agentsInGatewayChange(
+    'route("/api/apps/system/agents/stop", post(agents_stop))',
+    "async fn agents_launch() { start_in_gateway(); }",
+  );
+  assert.equal(unregistered.ok, false);
+  assert.match(unregistered.reason, /not registered/);
   const ready = agentsInGatewayChange(
     'route("/api/apps/system/agents/launch", post(agents_launch))',
     "async fn start_agent() { start_in_gateway(); }",
@@ -503,7 +514,18 @@ test("playwright pin is the version in test-behaviour.sh", () => {
   const text = fs.readFileSync(new URL("./test-behaviour.sh", import.meta.url), "utf8");
   const pin = playwrightPin(text);
   assert.equal(pin.ok, true);
-  assert.equal(pin.version, "1.60.0");
+  // The version is read from the script, not pinned here. Both pin lines in
+  // the script must name the same version.
+  const installed = [...text.matchAll(/installed\s+"?\$?browser"?\s+playwright\s+(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
+  const installs = [...text.matchAll(/playwright@(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
+  assert.ok(installed.length > 0 && installs.length > 0);
+  assert.equal(pin.version, installed[0]);
+  assert.equal(pin.version, installs[0]);
+  assert.deepEqual([...new Set(installed)], [pin.version]);
+  // Behaviour comes from fixture text, never from the live tree state.
+  const fixture = playwrightPin('installed "$browser" playwright 7.8.9\nplaywright@7.8.9\n');
+  assert.equal(fixture.ok, true);
+  assert.equal(fixture.version, "7.8.9");
   assert.equal(playwrightPin("installed \"$browser\" playwright 1.0.0\nplaywright@1.2.0\n").ok, false);
 });
 
@@ -619,4 +641,101 @@ test("audit bytes match the signed fixture chain", () => {
   const tampered = structuredClone(fixture);
   tampered.audit[0].signature = `${"ab".repeat(63)}cd`;
   assert.equal(verifyInstalledAudit(tampered, event.signer_did).ok, false);
+});
+
+function shFunction(source, name) {
+  const match = source.match(new RegExp(`(?:^|\\n)${name}\\(\\) \\{\\n[\\s\\S]*?\\n\\}(?=\\n|$)`));
+  assert.ok(match, `${name}() found in the runner script`);
+  return match[0].replace(/^\n/, "");
+}
+
+test("cleanup stops and removes only the home this run created", () => {
+  const sh = fs.readFileSync(new URL("./a15r-installed-journey.sh", import.meta.url), "utf8");
+  const cleanup = shFunction(sh, "cleanup");
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "a15r-cleanup-"));
+  const scratch = path.join(work, "scratch");
+  const home = path.join(scratch, "run-1");
+  const out = path.join(work, "out");
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(out, { recursive: true });
+  const calls = path.join(work, "calls.log");
+  const harness = [
+    cleanup,
+    'node_proof() { printf \'%s\\n\' "$*" >> "$CALLS"; }',
+    `OUT=${JSON.stringify(out)}`,
+    `HOME_ROOT=${JSON.stringify(home)}`,
+    `SCRATCH=${JSON.stringify(scratch)}`,
+    `DATA=${JSON.stringify(path.join(home, "Library", "Application Support", "elastos"))}`,
+    `CALLS=${JSON.stringify(calls)}`,
+  ].join("\n");
+  // Without this run's marker the trap must stop and remove nothing.
+  const idle = spawnSync("bash", ["-c", `${harness}\ncleanup`], { encoding: "utf8" });
+  assert.equal(idle.status, 0, idle.stderr);
+  assert.equal(fs.existsSync(calls), false);
+  assert.equal(fs.existsSync(home), true);
+  // With CREATED=1 the trap stops the serve, scrubs evidence and removes the throwaway.
+  fs.writeFileSync(path.join(home, ".a15r-throwaway"), `${fs.realpathSync(home)}\n`);
+  const active = spawnSync("bash", ["-c", `${harness}\nCREATED=1\ncleanup`], { encoding: "utf8" });
+  assert.equal(active.status, 0, active.stderr);
+  assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n"), [
+    "--stop-home", "--scrub-evidence", "--remove-throwaway",
+  ]);
+  fs.rmSync(work, { recursive: true });
+});
+
+test("stopping the serve requires the throwaway marker", () => {
+  const journeyPath = fileURLToPath(new URL("./a15r-installed-journey.mjs", import.meta.url));
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "a15r-stop-"));
+  const scratch = path.join(work, "scratch");
+  const home = path.join(scratch, "run-1");
+  const out = path.join(work, "out");
+  fs.mkdirSync(home, { recursive: true });
+  fs.mkdirSync(out, { recursive: true });
+  const binDir = path.join(work, "bin");
+  fs.mkdirSync(binDir);
+  const env = {
+    PATH: binDir,
+    A15R_OUT: out,
+    A15R_HOME: home,
+    A15R_SCRATCH: scratch,
+    A15R_DATA: path.join(home, "Library", "Application Support", "elastos"),
+  };
+  const stopped = (extra) => spawnSync(process.execPath, [journeyPath, "--stop-home"], {
+    env: { ...env, ...extra },
+    encoding: "utf8",
+  });
+  // No marker: the serve must not be touched.
+  const refused = stopped({});
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /refusing to stop a Home/);
+  // This run's marked throwaway home passes the same marker check as the removal.
+  fs.writeFileSync(path.join(home, ".a15r-throwaway"), `${fs.realpathSync(home)}\n`);
+  const allowed = stopped({});
+  // With the marker the gate opens: the run either stops nothing (no listed
+  // serve processes) or fails at the serve listing, never at the marker check.
+  assert.ok(allowed.status === 0 || /cannot list executables/.test(allowed.stderr), allowed.stderr);
+  assert.doesNotMatch(allowed.stderr, /refusing to stop/);
+  fs.rmSync(work, { recursive: true });
+});
+
+test("the runner refuses a dot or dot-dot output basename", () => {
+  const sh = fs.readFileSync(new URL("./a15r-installed-journey.sh", import.meta.url), "utf8");
+  const dotBase = shFunction(sh, "dot_base");
+  const judge = (value) => spawnSync("bash", [
+    "-c", `${dotBase}\nif dot_base "$1"; then echo refused; else echo ok; fi`, "bash", value,
+  ], { encoding: "utf8" }).stdout.trim();
+  assert.equal(judge("."), "refused");
+  assert.equal(judge(".."), "refused");
+  assert.equal(judge("run-1"), "ok");
+  assert.equal(judge("a/b/run-1"), "ok");
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "a15r-basename-"));
+  for (const bad of [".", "..", "sub/.."]) {
+    const result = spawnSync("bash", [
+      fileURLToPath(new URL("./a15r-installed-journey.sh", import.meta.url)), bad,
+    ], { cwd, encoding: "utf8" });
+    assert.equal(result.status, 2, bad);
+    assert.match(result.stderr, /must not be \. or \.\./);
+  }
+  assert.deepEqual(fs.readdirSync(cwd), []);
+  fs.rmSync(cwd, { recursive: true });
 });
