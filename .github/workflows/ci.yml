@@ -690,7 +690,10 @@ jobs:
           # Debug binaries for the fence tests. They share one target dir so
           # chain-provider reuses crates object-provider already compiled.
           # The workspace dev profile uses line-tables-only; match it here.
-          # A missing binary fails those tests in this job (CI is set).
+          # The tests also build with --locked --offline into this directory
+          # when it is empty, so a plain cargo test --locked --workspace runs
+          # them. localhost-provider is built into target/fence-localhost-provider.
+          # A failed build panics the test.
           # Added time on one Mac, empty directory: object-provider 1m 41s,
           # then chain-provider 18s. About 2 minutes on this step.
           export CARGO_PROFILE_DEV_DEBUG=line-tables-only

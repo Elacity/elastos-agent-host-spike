@@ -1389,7 +1389,7 @@ fn rows() -> Vec<HeldRow> {
             "open",
             "device private key",
             "chain provider",
-            "Linux proof pending the CTO's run. CI builds chain-provider and fails if that binary is absent or the Landlock ABI is refused. A developer machine without the binary prints \"chain-provider binary is absent from the test build\".",
+            "Linux proof pending the CTO's run. A counted run builds chain-provider with --locked --offline into target/provider-fence-tests and panics if that build fails or the Landlock ABI is refused.",
         ),
     ),
     row(
@@ -2110,9 +2110,7 @@ fn localhost_object_and_chain_start_on_the_path_allow_list() {
                 "{}",
                 row.reason
             );
-            assert!(row
-                .reason
-                .contains("chain-provider binary is absent from the test build"));
+            assert!(row.reason.contains("panics if that build fails"));
         }
         if (row.function, row.mechanism)
             == (

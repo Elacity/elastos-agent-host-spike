@@ -691,15 +691,16 @@ fn columns() -> Vec<TrustColumn> {
             os_path: "",
         },
         // Unix is spawn_path_allow. Windows is ProviderBridge::spawn.
-        // Both sit in spawn_allow_listed_provider. The scanner's label is
-        // ProviderBridge::spawn for the shared prefix.
+        // Both re-check the CheckedExecutable's pinned release digest in
+        // verify_at_spawn before the process starts. The scanner's label is
+        // ProviderBridge::spawn because spawn_path_allow starts with that prefix.
         TrustColumn {
             file: "elastos-server/src/server_infra.rs",
             function: "spawn_allow_listed_provider",
             call: "ProviderBridge::spawn",
             class: "n/a",
-            trust_root: "none",
-            verified_when: "never",
+            trust_root: "release-signature",
+            verified_when: "at-every-start",
             evidence: ["ProviderBr", "idge::spawn"].concat(),
             os_path: "",
         },
@@ -1659,9 +1660,19 @@ fn trust_column_counts_and_chokepoint_queue() {
                 && matches!(column.trust_root, "none" | "components-json-in-data-dir")
         })
         .count();
+    // The row these fences added is
+    // server_infra.rs::spawn_allow_listed_provider ProviderBridge::spawn.
+    // Class stays n/a: a native provider. At c388e3220 the columns were
+    // trust root none and verified never, and the live counts were length
+    // 105, n/a 56, none 57, never 57, release-signature 25, at-every-start 32.
+    // verify_at_spawn checks the pinned release digest before exec, so this
+    // row is release-signature and at-every-start. none and never return to
+    // 56. release-signature becomes 26 and at-every-start becomes 33.
+    // to_gate counts release-component and other, so this n/a row leaves it
+    // at 31.
     println!("loader trust rows={} classes={classes:?} roots={roots:?} verified_when={times:?} to_gate={to_gate}", columns.len());
-    assert_eq!(columns.len(), 104);
-    assert_eq!(classes.get("n/a"), Some(&55));
+    assert_eq!(columns.len(), 105);
+    assert_eq!(classes.get("n/a"), Some(&56));
     assert_eq!(classes.get("os-tool"), Some(&2));
     assert_eq!(classes.get("other"), Some(&37));
     assert_eq!(classes.get("own-binary"), Some(&5));
@@ -1670,9 +1681,9 @@ fn trust_column_counts_and_chokepoint_queue() {
     assert_eq!(roots.get("content-cid"), Some(&3));
     assert_eq!(roots.get("none"), Some(&56));
     assert_eq!(roots.get("publisher-did-signature"), Some(&2));
-    assert_eq!(roots.get("release-signature"), Some(&25));
+    assert_eq!(roots.get("release-signature"), Some(&26));
     assert_eq!(roots.get("staged-cid"), Some(&7));
-    assert_eq!(times.get("at-every-start"), Some(&32));
+    assert_eq!(times.get("at-every-start"), Some(&33));
     assert_eq!(times.get("at-install-only"), Some(&8));
     assert_eq!(times.get("at-stage-and-start"), Some(&8));
     assert_eq!(times.get("never"), Some(&56));

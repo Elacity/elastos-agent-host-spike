@@ -5,7 +5,84 @@
 //! as macOS. The test lives in the library so it can store a signed auth
 //! record. `server_infra` is the binary crate and cannot see that helper.
 
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 use std::path::{Path, PathBuf};
+
+/// The binary Cargo would hand an integration test of this package, or a
+/// binary this test builds with `--locked --offline` into its own target dir.
+///
+/// `localhost-provider` is a workspace member. `CARGO_BIN_EXE_localhost_provider`
+/// is set for that package's own integration tests, not for `elastos-server`.
+/// When it is unset, this builds `-p localhost-provider --bin localhost-provider`
+/// into `target/fence-localhost-provider`. Object is its own package and builds
+/// into `target/provider-fence-tests`, the directory CI fills first.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn provider_binary(name: &str) -> PathBuf {
+    let env_key = format!("CARGO_BIN_EXE_{}", name.replace('-', "_"));
+    if let Some(value) = std::env::var_os(&env_key) {
+        let path = PathBuf::from(value);
+        if path.is_file() {
+            return path;
+        }
+        panic!("{env_key} is set but {} is not a file", path.display());
+    }
+    let repo = std::fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .expect("repo root");
+    let target_dir = if name == "localhost-provider" {
+        repo.join("target/fence-localhost-provider")
+    } else {
+        repo.join("target/provider-fence-tests")
+    };
+    let binary = target_dir.join("debug").join(name);
+    let manifest = if name == "localhost-provider" {
+        repo.join("elastos/Cargo.toml")
+    } else {
+        repo.join("capsules").join(name).join("Cargo.toml")
+    };
+    let mut command = std::process::Command::new(env!("CARGO"));
+    command
+        .arg("build")
+        .arg("--locked")
+        .arg("--offline")
+        .arg("--manifest-path")
+        .arg(&manifest);
+    if name == "localhost-provider" {
+        command.arg("-p").arg("localhost-provider");
+    }
+    let output = command
+        .arg("--bin")
+        .arg(name)
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .current_dir(&repo)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("CARGO_BUILD_BUILD_DIR", target_dir.join("build"))
+        .env("CARGO_PROFILE_DEV_DEBUG", "line-tables-only")
+        .env("CARGO_TERM_COLOR", "never")
+        .output()
+        .unwrap_or_else(|err| panic!("cargo build {name} did not start: {err}"));
+    if !output.status.success() || !binary.is_file() {
+        panic!(
+            "cargo build --locked --offline --bin {name} failed ({}); binary {}\n{}",
+            output.status,
+            binary.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    binary
+}
 
 /// Localhost and object do their file job and cannot open the device key.
 ///
@@ -27,36 +104,6 @@ async fn localhost_and_object_providers_work_inside_their_fences() {
     use base64::Engine;
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
-
-    fn provider_binary(name: &str) -> PathBuf {
-        let mut candidates = Vec::new();
-        if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
-            candidates.push(PathBuf::from(dir).join("debug").join(name));
-        }
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        candidates.push(manifest.join("../../target/debug").join(name));
-        // The test-elastos job builds object-provider into this directory.
-        // localhost-provider is a workspace member and is not built there.
-        candidates.push(
-            manifest
-                .join("../../../target/provider-fence-tests/debug")
-                .join(name),
-        );
-        candidates.push(
-            manifest
-                .join("../../../capsules")
-                .join(name)
-                .join("target/debug")
-                .join(name),
-        );
-        candidates
-            .iter()
-            .find(|path| path.is_file())
-            .cloned()
-            .unwrap_or_else(|| {
-                panic!("build the {name} binary before this test; looked in {candidates:?}")
-            })
-    }
 
     fn pinned(path: &Path, data_dir: &Path) -> elastos_runtime::provider::CheckedExecutable {
         let digest = hex::encode(Sha256::digest(std::fs::read(path).unwrap()));

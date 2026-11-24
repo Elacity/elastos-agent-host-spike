@@ -1310,10 +1310,9 @@ mod tests {
 
     /// The real `chain-provider` binary, started by `start_path_allow`.
     ///
-    /// CI builds that binary and this test runs it. A missing binary, or a
-    /// Linux kernel that refuses Landlock ABI 5, fails the test when `CI` is
-    /// set. A developer machine without the binary, or without that ABI,
-    /// prints the named reason and returns.
+    /// A counted run builds that binary with `--locked --offline` into
+    /// `target/provider-fence-tests` and runs it. A failed build, or a Linux
+    /// kernel that refuses Landlock ABI 5, panics.
     /// Linux-only companions, not this test: `a_root_swapped_for_a_symlink_between_render_and_install_is_refused_by_the_installer`
     /// and `a_clean_path_allow_plan_installs_and_allows_its_root_but_not_the_device_key`.
     #[cfg(all(
@@ -1331,30 +1330,11 @@ mod tests {
         use sha2::{Digest, Sha256};
         use std::io::{Read, Write};
 
-        fn ci_must_run_the_helper() -> bool {
-            let ci = std::env::var("CI").ok().is_some_and(|value| {
-                let value = value.trim();
-                !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-            });
-            ci || std::env::var_os("GITHUB_ACTIONS").is_some()
-        }
-        fn stop_without_proof(reason: &str) {
-            let text = format!("chain-provider real-binary proof did not run: {reason}");
-            if ci_must_run_the_helper() {
-                panic!("{text}");
-            }
-            eprintln!("{text}");
-        }
-
         #[cfg(target_os = "linux")]
         if let Err(reason) = super::super::landlock_plan::kernel_abi() {
-            stop_without_proof(&reason);
-            return;
+            panic!("chain-provider real-binary proof did not run: {reason}");
         }
-        let Some(bin) = chain_provider_binary() else {
-            stop_without_proof("chain-provider binary is absent from the test build");
-            return;
-        };
+        let bin = chain_provider_binary();
         assert!(bin.is_file(), "chain binary {}", bin.display());
         let binary_bytes = std::fs::read(&bin).unwrap();
         eprintln!("chain binary sha256 {:x}", Sha256::digest(&binary_bytes));
@@ -1612,24 +1592,44 @@ mod tests {
         );
     }
 
-    fn chain_provider_binary() -> Option<PathBuf> {
-        let mut candidates = Vec::new();
-        if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
-            candidates.push(PathBuf::from(dir).join("debug").join("chain-provider"));
+    #[cfg(all(
+        not(elastos_unsupported_os_check),
+        any(
+            target_os = "macos",
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            )
+        )
+    ))]
+    fn chain_provider_binary() -> PathBuf {
+        let repo =
+            std::fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .expect("repo root");
+        let target_dir = repo.join("target/provider-fence-tests");
+        let binary = target_dir.join("debug/chain-provider");
+        let manifest = repo.join("capsules/chain-provider/Cargo.toml");
+        let output = std::process::Command::new(env!("CARGO"))
+            .args(["build", "--locked", "--offline", "--manifest-path"])
+            .arg(&manifest)
+            .args(["--bin", "chain-provider", "--target-dir"])
+            .arg(&target_dir)
+            .current_dir(&repo)
+            .env("CARGO_TARGET_DIR", &target_dir)
+            .env("CARGO_BUILD_BUILD_DIR", target_dir.join("build"))
+            .env("CARGO_PROFILE_DEV_DEBUG", "line-tables-only")
+            .env("CARGO_TERM_COLOR", "never")
+            .output()
+            .unwrap_or_else(|err| panic!("cargo build chain-provider did not start: {err}"));
+        if !output.status.success() || !binary.is_file() {
+            panic!(
+                "cargo build --locked --offline --bin chain-provider failed ({}); binary {}\n{}",
+                output.status,
+                binary.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(debug_dir) = exe.parent().and_then(|path| path.parent()) {
-                candidates.push(debug_dir.join("chain-provider"));
-            }
-        }
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        candidates.push(manifest.join("../../../target/debug/chain-provider"));
-        // The test-elastos job builds this binary beside the other provider
-        // process binaries, in one shared debug directory.
-        candidates.push(manifest.join("../../../target/provider-fence-tests/debug/chain-provider"));
-        candidates
-            .push(manifest.join("../../../capsules/chain-provider/target/debug/chain-provider"));
-        candidates.into_iter().find(|path| path.is_file())
+        binary
     }
 
     fn probe_stdio() -> (ChildStdio, i32, i32) {
