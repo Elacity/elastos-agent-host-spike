@@ -1736,6 +1736,7 @@ impl ProviderBridge {
         })
     }
 
+    /// Admit only Runtime-selected private engine sockets.
     /// macOS model start from the admitted rights. The server binds the hosted socket.
     #[cfg(all(target_os = "macos", not(elastos_unsupported_os_check)))]
     pub async fn spawn_confined_model_from_rights(
