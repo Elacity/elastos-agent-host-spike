@@ -165,6 +165,73 @@ fn build_for_arch(
     })
 }
 
+/// The architecture of a Linux model plan. Both values are checked on every host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ModelArch {
+    X86_64,
+    Aarch64,
+}
+
+impl ModelArch {
+    fn loader(self) -> LoaderArch {
+        match self {
+            Self::X86_64 => LoaderArch::X86_64,
+            Self::Aarch64 => LoaderArch::Aarch64,
+        }
+    }
+
+    fn audit(self) -> super::seccomp_list::AuditArch {
+        match self {
+            Self::X86_64 => super::seccomp_list::AuditArch::X86_64,
+            Self::Aarch64 => super::seccomp_list::AuditArch::Aarch64,
+        }
+    }
+
+    pub(super) fn host() -> Self {
+        if cfg!(target_arch = "x86_64") {
+            Self::X86_64
+        } else {
+            Self::Aarch64
+        }
+    }
+}
+
+/// Landlock rules and the seccomp program for the admitted model grant.
+pub(super) struct LinuxModelPlan {
+    pub abi: u32,
+    pub handled: u64,
+    pub rules: Vec<PathRule>,
+    pub syscalls: Vec<&'static str>,
+    pub program: Vec<[u32; 4]>,
+}
+
+pub(super) fn linux_model_plan(
+    admitted: &AdmittedRights,
+    bindings: &Bindings,
+    arch: ModelArch,
+    abi: u32,
+) -> Result<LinuxModelPlan, String> {
+    let built = build_for_arch(
+        RuntimeProviderId::Model,
+        admitted,
+        bindings,
+        arch.loader(),
+        abi,
+    )?;
+    let audit = arch.audit();
+    Ok(LinuxModelPlan {
+        abi: built.abi,
+        handled: built.handled,
+        rules: built.rules,
+        syscalls: super::seccomp_list::linux_seccomp_list(
+            RuntimeProviderId::Model,
+            admitted,
+            audit,
+        ),
+        program: super::seccomp_program::program(RuntimeProviderId::Model, admitted, audit),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +454,86 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn golden_program(text: &str) -> Vec<[u32; 4]> {
+        text.lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(|line| {
+                let fields: Vec<u32> = line
+                    .split('#')
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|word| match word.strip_prefix("0x") {
+                        Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
+                        None => word.parse().unwrap(),
+                    })
+                    .collect();
+                fields.try_into().expect("golden instruction")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn linux_model_plan_matches_the_reference_on_both_architectures() {
+        let admitted = super::super::rights::admit_committed(RuntimeProviderId::Model);
+        let ids: Vec<_> = admitted.rows().iter().map(|row| row.id).collect();
+        assert_eq!(ids, ["storage", "bound-executable", "model-gpu"]);
+        let bindings = Bindings {
+            storage_root: "/provider/model".into(),
+            provider_executable: "/bin/model".into(),
+            storage_dev: 7,
+            storage_ino: 9,
+        };
+        for arch in [ModelArch::X86_64, ModelArch::Aarch64] {
+            let plan = linux_model_plan(&admitted, &bindings, arch, 5).unwrap();
+            let reference = build_for_arch(
+                RuntimeProviderId::Model,
+                &admitted,
+                &bindings,
+                arch.loader(),
+                5,
+            )
+            .unwrap();
+            assert_eq!(plan.rules, reference.rules, "{arch:?} landlock rows");
+            assert!(
+                plan.rules.iter().any(|rule| rule.0 == "STORAGE_ROOT"),
+                "{arch:?} keeps the storage row"
+            );
+            assert!(
+                plan.rules
+                    .iter()
+                    .any(|rule| rule.0 == "PROVIDER_EXECUTABLE"),
+                "{arch:?} keeps the bound-executable row"
+            );
+            assert!(
+                plan.rules
+                    .iter()
+                    .all(|rule| !rule.1.to_string_lossy().contains("AGX")),
+                "{arch:?} model-gpu has no Linux path"
+            );
+            let name = match arch {
+                ModelArch::X86_64 => "x86_64",
+                ModelArch::Aarch64 => "aarch64",
+            };
+            let golden = std::fs::read_to_string(format!(
+                "{}/../../../capsules/wallet-provider/tests/model-seccomp-{name}.golden",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap();
+            assert_eq!(plan.program, golden_program(&golden), "{arch:?} seccomp");
+            assert!(
+                plan.syscalls.contains(&"mkdirat"),
+                "{arch:?} storage syscall"
+            );
+            assert!(
+                plan.syscalls.contains(&"execve"),
+                "{arch:?} executable syscall"
+            );
+            assert_eq!(plan.abi, 5, "{arch:?}");
+            assert_eq!(plan.handled, reference.handled, "{arch:?} handled");
         }
     }
 }
