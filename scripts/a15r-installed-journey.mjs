@@ -267,6 +267,10 @@ function rootSuffix(root) {
 
 export const OWNER_DOCUMENT = Buffer.from("a15r owner document\n");
 
+// Launch posts to the agent runtime (agent_plane::live_coords). The managed
+// Home runtime does not hold those sessions, so the live list reads this file.
+export const LIVE_SESSION_COORDS = "agent-runtime-coords.json";
+
 // The document the guest used to submit. For this owner, Users/self is that
 // person's stored Users root, so the file is Documents/note.txt there.
 export const OWNER_NOTE = "Documents/note.txt";
@@ -520,16 +524,20 @@ function interestingFiles() {
   return found.sort((left, right) => left.path.localeCompare(right.path));
 }
 
-async function shellToken() {
-  const coords = readJson(path.join(data, "home-runtime-coords.json"));
+async function runtimeToken(coordFile) {
+  const coords = readJson(path.join(data, coordFile));
   const response = await fetch(String(coords.api_url).replace(/\/$/, "") + "/api/auth/attach", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ secret: coords.attach_secret, scope: "shell" }),
   });
   const body = await response.json();
-  if (!response.ok || !body.token) throw new Error("runtime attach failed");
+  if (!response.ok || !body.token) throw new Error("runtime attach failed: " + coordFile);
   return { token: body.token, api: String(coords.api_url).replace(/\/$/, "") };
+}
+
+async function shellToken() {
+  return runtimeToken("home-runtime-coords.json");
 }
 
 async function readThroughCapsuleRoute(session, root, fileName) {
@@ -579,7 +587,7 @@ function routeAttemptDetail(attempt) {
 }
 
 async function capsules() {
-  const attached = await shellToken();
+  const attached = await runtimeToken(LIVE_SESSION_COORDS);
   const response = await fetch(attached.api + "/api/capsules", {
     headers: { authorization: "Bearer " + attached.token },
   });
