@@ -292,7 +292,7 @@ fn inspect_action_path(data_dir: &Path, request_id: &str) -> anyhow::Result<Path
 /// names the file and not its bytes. The strict loader is unchanged.
 fn load_inspect_action_records_skipping_unreadable(
     data_dir: &Path,
-) -> anyhow::Result<Vec<InspectActionRequestRecord>> {
+) -> anyhow::Result<Vec<(PathBuf, InspectActionRequestRecord)>> {
     let root = inspect_actions_root(data_dir);
     let Ok(entries) = std::fs::read_dir(root) else {
         return Ok(Vec::new());
@@ -331,7 +331,7 @@ fn load_inspect_action_records_skipping_unreadable(
             );
             continue;
         };
-        records.push(record);
+        records.push((path, record));
     }
     Ok(records)
 }
@@ -358,13 +358,36 @@ fn load_inspect_action_records(data_dir: &Path) -> anyhow::Result<Vec<InspectAct
     Ok(records)
 }
 
+fn write_inspect_action_at_path(
+    path: &Path,
+    record: &InspectActionRequestRecord,
+) -> anyhow::Result<()> {
+    let parent = path.parent().filter(|dir| dir.is_dir()).ok_or_else(|| {
+        anyhow::anyhow!("inspect action record {} has no directory", path.display())
+    })?;
+    let data = serde_json::to_vec_pretty(record)?;
+    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut pending, &data)?;
+    pending.as_file().sync_all()?;
+    pending.persist(path)?;
+    Ok(())
+}
+
+/// The store lock is per process, so an update successor can mark a plan
+/// unknown after the draining process completed it.
 pub(super) fn settle_agent_plans_lost_before_start(
     data_dir: &Path,
     updated_at: u64,
 ) -> anyhow::Result<()> {
     let _guard = inspect_action_store_lock()?;
+    let records = load_inspect_action_records_skipping_unreadable(data_dir)?;
+    settle_records_in_place(records, updated_at);
+    Ok(())
+}
+
+fn settle_records_in_place(records: Vec<(PathBuf, InspectActionRequestRecord)>, updated_at: u64) {
     let reason = "a dispatch cannot survive a restart";
-    for mut record in load_inspect_action_records_skipping_unreadable(data_dir)? {
+    for (path, mut record) in records {
         if record.kind != AGENT_PLAN_KIND
             || !matches!(record.status.as_str(), "approved" | "dispatching")
         {
@@ -374,9 +397,13 @@ pub(super) fn settle_agent_plans_lost_before_start(
         record.error = Some(reason.into());
         record.result = Some(serde_json::json!({ "status": "unknown", "reason": reason }));
         record.updated_at = updated_at;
-        write_inspect_action_record_unlocked(data_dir, &record)?;
+        if let Err(error) = write_inspect_action_at_path(&path, &record) {
+            eprintln!(
+                "[gateway] skipped inspect action record {}: {error}",
+                path.display()
+            );
+        }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -512,5 +539,124 @@ mod tests {
             Some("a dispatch cannot survive a restart")
         );
         assert_eq!(std::fs::read(&bad).unwrap(), b"not json");
+    }
+
+    /// The settle writes the file it read. A different request id does not
+    /// become a second file, and an id the path check would refuse is still
+    /// settled in place.
+    #[test]
+    fn a_mismatched_request_id_is_settled_in_the_file_that_was_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("inspect-actions");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut kept = pending_record("other-id");
+        kept.kind = AGENT_PLAN_KIND.to_string();
+        kept.status = "dispatching".to_string();
+        let kept_path = root.join("kept-name.json");
+        std::fs::write(&kept_path, serde_json::to_vec_pretty(&kept).unwrap()).unwrap();
+        let mut dotted = pending_record("bad.id");
+        dotted.kind = AGENT_PLAN_KIND.to_string();
+        dotted.status = "dispatching".to_string();
+        let dotted_path = root.join("bad.id.json");
+        std::fs::write(&dotted_path, serde_json::to_vec_pretty(&dotted).unwrap()).unwrap();
+
+        settle_agent_plans_lost_before_start(dir.path(), 9).unwrap();
+
+        let kept_stored: InspectActionRequestRecord =
+            serde_json::from_slice(&std::fs::read(&kept_path).unwrap()).unwrap();
+        let dotted_stored: InspectActionRequestRecord =
+            serde_json::from_slice(&std::fs::read(&dotted_path).unwrap()).unwrap();
+        assert_eq!(kept_stored.status, "unknown");
+        assert_eq!(dotted_stored.status, "unknown");
+        assert!(
+            !root.join("other-id.json").exists(),
+            "a mismatched request id was settled into a new file"
+        );
+    }
+
+    /// A record that cannot be written back is skipped. The Home still settles
+    /// the records that can be written.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_record_that_cannot_be_written_back_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut good = pending_record("agent-plan-good");
+        good.kind = AGENT_PLAN_KIND.to_string();
+        good.status = "dispatching".to_string();
+        write_inspect_action_record(dir.path(), &good).unwrap();
+        let mut stuck = pending_record("agent-plan-stuck");
+        stuck.kind = AGENT_PLAN_KIND.to_string();
+        stuck.status = "dispatching".to_string();
+        write_inspect_action_record(dir.path(), &stuck).unwrap();
+        let stuck_path = dir
+            .path()
+            .join("inspect-actions")
+            .join("agent-plan-stuck.json");
+        let status = std::process::Command::new("chflags")
+            .arg("uchg")
+            .arg(&stuck_path)
+            .status()
+            .expect("chflags");
+        assert!(status.success(), "chflags uchg failed: {status}");
+        let _clear = ClearImmutable(stuck_path.clone());
+
+        let settled = settle_agent_plans_lost_before_start(dir.path(), 9);
+        assert!(
+            settled.is_ok(),
+            "one record that cannot be written back stopped settling: {settled:?}"
+        );
+        assert_eq!(
+            read_inspect_action_record(dir.path(), "agent-plan-good")
+                .unwrap()
+                .status,
+            "unknown"
+        );
+        let stuck_text = std::fs::read_to_string(&stuck_path).unwrap();
+        assert!(
+            stuck_text.contains("\"dispatching\""),
+            "the record that could not be written was changed: {stuck_text}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    struct ClearImmutable(std::path::PathBuf);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for ClearImmutable {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("chflags")
+                .arg("nouchg")
+                .arg(&self.0)
+                .status();
+        }
+    }
+
+    /// A record whose directory is gone is skipped. Settling continues with
+    /// the record that can be written.
+    #[test]
+    fn a_record_whose_directory_is_gone_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut good = pending_record("agent-plan-good");
+        good.kind = AGENT_PLAN_KIND.to_string();
+        good.status = "dispatching".to_string();
+        write_inspect_action_record(dir.path(), &good).unwrap();
+        let good_path = dir
+            .path()
+            .join("inspect-actions")
+            .join("agent-plan-good.json");
+        let mut stuck = pending_record("agent-plan-missing-dir");
+        stuck.kind = AGENT_PLAN_KIND.to_string();
+        stuck.status = "dispatching".to_string();
+        let missing = dir
+            .path()
+            .join("no-such-dir")
+            .join("agent-plan-missing-dir.json");
+        settle_records_in_place(vec![(missing, stuck), (good_path, good)], 9);
+        assert_eq!(
+            read_inspect_action_record(dir.path(), "agent-plan-good")
+                .unwrap()
+                .status,
+            "unknown"
+        );
     }
 }
