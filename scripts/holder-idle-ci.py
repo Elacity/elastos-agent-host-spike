@@ -145,6 +145,7 @@ def main():
             (data / "config.toml").write_text('carrier_bind_addr = "127.0.0.1:' + str(port(socket.SOCK_DGRAM))
                 + '"\ngateway_public_publisher_bootstrap = true\ngateway_allowed_hosts = ["127.0.0.1"]\n')
             (data / "config.toml").chmod(0o600)
+            holder_fixture.install_source_capsule_manifests(data, Path("."))
             holder_fixture.sign_install(home, data, runtime, environment)
             command(home, [str(runtime), "node", "info", "--json"], role + "-identity")
             installed[role] = home, data, runtime, port()

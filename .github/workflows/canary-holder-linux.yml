@@ -300,6 +300,7 @@ jobs:
                   (data / 'config.toml').write_text('carrier_bind_addr = "127.0.0.1:' + str(carrier_port) + '"\n'
                       'gateway_public_publisher_bootstrap = true\ngateway_allowed_hosts = ["127.0.0.1"]\n')
                   (data / 'config.toml').chmod(0o600)
+                  holder_fixture.install_source_capsule_manifests(data, Path('.'))
                   holder_fixture.sign_install(home, data, runtime, env)
                   command(home, [str(runtime), 'node', 'info', '--json'], role + '-identity')
                   if role != 'consumer':

@@ -550,6 +550,50 @@ class HolderFixtureTests(unittest.TestCase):
                     fixture.sign_install(home, data, runtime, lambda path: {"HOME": str(path)})
             self.assertFalse((data / ".ci-publisher.key").exists())
 
+    def test_installed_localhost_gets_its_source_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            data = root / "data"
+            manifest_dir = source / "elastos/capsules/localhost-provider"
+            manifest_dir.mkdir(parents=True)
+            body = b'{"name":"localhost-provider"}\n'
+            (manifest_dir / "capsule.json").write_bytes(body)
+            data.mkdir()
+            (data / "components.json").write_text(json.dumps({"external": {
+                "localhost-provider": {}, "kubo": {}}}))
+            fixture.install_source_capsule_manifests(data, source)
+            installed = data / "capsules/localhost-provider/capsule.json"
+            self.assertEqual(installed.read_bytes(), body)
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+            self.assertFalse((data / "capsules/kubo").exists())
+            fixture.install_source_capsule_manifests(data, source)
+            self.assertEqual(installed.read_bytes(), body)
+
+    def test_missing_admitted_manifest_names_the_provider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "data").mkdir()
+            (root / "data/components.json").write_text(json.dumps(
+                {"external": {"object-provider": {}}}))
+            with self.assertRaisesRegex(AssertionError, "object-provider"):
+                fixture.install_source_capsule_manifests(root / "data", root / "source")
+
+    def test_symlink_capsule_manifest_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source/elastos/capsules/chain-provider"
+            source.mkdir(parents=True)
+            (source / "capsule.json").write_text("{}")
+            data = root / "data"
+            data.mkdir()
+            (data / "components.json").write_text(json.dumps({"external": {"chain-provider": {}}}))
+            dest = data / "capsules/chain-provider"
+            dest.mkdir(parents=True)
+            (dest / "capsule.json").symlink_to(source / "capsule.json")
+            with self.assertRaisesRegex(AssertionError, "chain-provider"):
+                fixture.install_source_capsule_manifests(data, root / "source")
+
     def test_native_provider_exe_matches_both_generations(self):
         provider = Path("/fixture/bin/ipfs-provider")
         rows = [{"pid": pid, "command": "/proc/self/fd/9"} for pid in (101, 102)]
