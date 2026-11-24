@@ -1,6 +1,8 @@
 //! Windows owner-only files. The current user owns each new file and directory,
 //! the DACL does not inherit, and a reparse point is refused. Opens and renames
-//! are handle-relative, one component at a time.
+//! are handle-relative, one component at a time. An existing directory accepted
+//! by `refuse_other_writers` may be owned by the current user, SYSTEM, or
+//! Administrators.
 
 mod error;
 mod name;
