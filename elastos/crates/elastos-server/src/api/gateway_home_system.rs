@@ -1442,11 +1442,63 @@ pub(super) async fn home_v2_frame(
     Json(serde_json::json!({ "nodes": nodes })).into_response()
 }
 
+#[rustfmt::skip]
 fn home_frame_guest(data_dir: &std::path::Path, context: &HomeLaunchTokenContext) -> bool {
-    context
-        .proof_binding_id()
-        .and_then(|id| crate::auth::load_principal_for_proof_binding(data_dir, id).ok())
-        .is_some_and(|principal| principal.role == crate::auth::RuntimePrincipalRole::Guest)
+    let Some(id) = context.proof_binding_id() else { return false };
+    !matches!(crate::auth::load_principal_for_proof_binding(data_dir, id), Ok(principal) if principal.role != crate::auth::RuntimePrincipalRole::Guest)
+}
+
+type FrameSlot = (reqwest::Client, Vec<(String, String)>);
+
+#[rustfmt::skip]
+fn frame_slot() -> &'static Mutex<FrameSlot> {
+    static SLOT: OnceLock<Mutex<FrameSlot>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new((
+        reqwest::Client::builder().timeout(Duration::from_secs(2)).build().unwrap_or_else(|_| reqwest::Client::new()),
+        Vec::new(),
+    )))
+}
+
+fn frame_key(api_url: &str, secret: &str) -> String {
+    format!("{}\n{secret}", api_url.trim_end_matches('/'))
+}
+
+#[rustfmt::skip]
+async fn frame_shell(api_url: &str, secret: &str) -> Option<(reqwest::Client, String)> {
+    let key = frame_key(api_url, secret);
+    let client = {
+        let slot = frame_slot().lock().ok()?;
+        if let Some((_, token)) = slot.1.iter().find(|(saved, _)| saved == &key) {
+            return Some((slot.0.clone(), token.clone()));
+        }
+        slot.0.clone()
+    };
+    let token = home_attach_shell(&client, api_url, secret).await.ok()?;
+    if let Ok(mut slot) = frame_slot().lock() {
+        slot.1.retain(|(saved, _)| saved != &key);
+        if slot.1.len() >= 32 { slot.1.remove(0); }
+        slot.1.push((key, token.clone()));
+    }
+    Some((client, token))
+}
+
+#[rustfmt::skip]
+fn drop_frame_shell(api_url: &str, secret: &str) {
+    let key = frame_key(api_url, secret);
+    if let Ok(mut slot) = frame_slot().lock() { slot.1.retain(|(saved, _)| saved != &key); }
+}
+
+#[rustfmt::skip]
+async fn frame_bytes(mut response: reqwest::Response) -> Vec<u8> {
+    let cap = crate::component::V2_FRAME_ANSWER_MAX + 1;
+    let mut bytes = Vec::new();
+    while bytes.len() < cap {
+        let Ok(Some(chunk)) = response.chunk().await else { break };
+        let room = cap - bytes.len();
+        bytes.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        if chunk.len() >= room { break }
+    }
+    bytes
 }
 
 /// The managed Runtime's stored nodes for this session's principal. A down
@@ -1459,13 +1511,7 @@ async fn managed_frame_nodes(
     let Some(coords) = load_live_runtime_coords(data_dir).await else {
         return Vec::new();
     };
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-    else {
-        return Vec::new();
-    };
-    let Ok(shell) = home_attach_shell(&client, &coords.api_url, &coords.attach_secret).await else {
+    let Some((client, shell)) = frame_shell(&coords.api_url, &coords.attach_secret).await else {
         return Vec::new();
     };
     let Ok(response) = client
@@ -1478,15 +1524,17 @@ async fn managed_frame_nodes(
         .send()
         .await
     else {
+        drop_frame_shell(&coords.api_url, &coords.attach_secret);
         return Vec::new();
     };
+    if response.status() == StatusCode::UNAUTHORIZED || response.status() == StatusCode::FORBIDDEN {
+        drop_frame_shell(&coords.api_url, &coords.attach_secret);
+        return Vec::new();
+    }
     if !response.status().is_success() {
         return Vec::new();
     }
-    let Ok(bytes) = response.bytes().await else {
-        return Vec::new();
-    };
-    accepted_frame_nodes(&bytes)
+    accepted_frame_nodes(&frame_bytes(response).await)
 }
 
 fn accepted_frame_nodes(bytes: &[u8]) -> Vec<serde_json::Value> {
@@ -11447,5 +11495,31 @@ mod service_decision_ticket_tests {
         )
         .expect("a model decision with no ticket is a grant");
         assert!(model.get("connect_ticket").is_none(), "{model}");
+    }
+}
+
+#[cfg(test)]
+mod home_frame_guest_tests {
+    use super::{home_frame_guest, HomeLaunchTokenContext};
+
+    #[test]
+    fn a_principal_load_error_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = HomeLaunchTokenContext::for_test(
+            "owner",
+            "session",
+            Some("missing-binding".to_string()),
+            "grant",
+            crate::auth::PrincipalKind::Human,
+        );
+        assert!(home_frame_guest(dir.path(), &missing));
+        let unbound = HomeLaunchTokenContext::for_test(
+            "owner",
+            "session",
+            None,
+            "grant",
+            crate::auth::PrincipalKind::Human,
+        );
+        assert!(!home_frame_guest(dir.path(), &unbound));
     }
 }

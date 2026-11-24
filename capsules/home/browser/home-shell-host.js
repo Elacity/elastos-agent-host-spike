@@ -20,7 +20,7 @@ import {
   createHomeBackgroundImageReader,
   targetById,
 } from "./shell-core.js?v=home-wallpaper-20261030b";
-import { startHomeFrame } from "./home-frame.js?v=home-frame-20261124a";
+import { startHomeFrame } from "./home-frame.js?v=home-frame-20261125a";
 import {
   addAccountPasskey,
   bindHomeUnlock,

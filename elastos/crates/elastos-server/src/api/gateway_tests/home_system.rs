@@ -115,7 +115,8 @@ async fn home_frame_comes_from_the_managed_runtime() {
         Some(provider.clone()),
     ));
     let secret = "frame-attach";
-    let (api_url, runtime_task) = spawn_frame_runtime(runtime, secret).await;
+    let (api_url, runtime_task, _frame_shells, _frame_audit) =
+        spawn_frame_runtime(runtime, secret).await;
     write_frame_coords(dir.path(), &api_url, secret);
     let app = gateway_router(test_state(dir.path()));
 
@@ -268,11 +269,17 @@ fn write_frame_coords(dir: &std::path::Path, api_url: &str, secret: &str) {
 async fn spawn_frame_runtime(
     runtime: Arc<crate::runtime::Runtime>,
     secret: &str,
-) -> (String, tokio::task::JoinHandle<()>) {
+) -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    crate::api::handlers::attach::AttachShells,
+    Arc<elastos_runtime::primitives::audit::AuditLog>,
+) {
     let shells = crate::api::handlers::attach::AttachShells::default();
-    let sessions = Arc::new(elastos_runtime::session::SessionRegistry::new(Arc::new(
-        elastos_runtime::primitives::audit::AuditLog::new(),
-    )));
+    let audit = Arc::new(elastos_runtime::primitives::audit::AuditLog::new());
+    let sessions = Arc::new(elastos_runtime::session::SessionRegistry::new(
+        audit.clone(),
+    ));
     let attach = Router::new()
         .route(
             "/api/auth/attach",
@@ -294,14 +301,196 @@ async fn spawn_frame_runtime(
                 )
                 .layer(Extension(runtime))
                 .layer(Extension(sessions))
-                .layer(Extension(shells)),
+                .layer(Extension(shells.clone())),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let api_url = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (api_url, task)
+    (api_url, task, shells, audit)
+}
+
+#[cfg(unix)]
+fn shell_created(audit: &elastos_runtime::primitives::audit::AuditLog) -> usize {
+    use elastos_runtime::primitives::audit::AuditEvent;
+    audit
+        .recent_events(4_000)
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AuditEvent::SessionCreated { session_type, .. } if session_type == "shell"
+            )
+        })
+        .count()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_thousand_frame_polls_keep_one_shell_and_a_restart_mints_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage"));
+    let runtime = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        Arc::new(storage.await.unwrap()),
+        Vec::new(),
+        None,
+    ));
+    let secret = "frame-attach-poll";
+    let (api_url, task, shells, audit) = spawn_frame_runtime(runtime, secret).await;
+    write_frame_coords(dir.path(), &api_url, secret);
+    let app = gateway_router(test_state(dir.path()));
+    for _ in 0..1_000 {
+        let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let first = shells.held();
+    assert_eq!(
+        first.len(),
+        1,
+        "a thousand polls keep one shell, have {first:?}"
+    );
+    assert_eq!(
+        shell_created(&audit),
+        1,
+        "a thousand polls keep the audit small"
+    );
+    task.abort();
+
+    let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage-2"));
+    let restarted = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        Arc::new(storage.await.unwrap()),
+        Vec::new(),
+        None,
+    ));
+    let (next_url, next_task, next_shells, next_audit) =
+        spawn_frame_runtime(restarted, "frame-attach-next").await;
+    write_frame_coords(dir.path(), &next_url, "frame-attach-next");
+    for _ in 0..2 {
+        let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let second = next_shells.held();
+    assert_eq!(
+        second.len(),
+        1,
+        "a restarted Runtime keeps one shell, have {second:?}"
+    );
+    assert_eq!(
+        shell_created(&next_audit),
+        1,
+        "a restart mints the shell once"
+    );
+    assert_ne!(first, second, "a restart gets a new token");
+    next_task.abort();
+
+    let storage = elastos_storage::providers::LocalFSProvider::new(dir.path().join("storage-3"));
+    let third = Arc::new(crate::runtime::Runtime::with_providers_and_component(
+        Arc::new(storage.await.unwrap()),
+        Vec::new(),
+        None,
+    ));
+    let (evict_url, evict_task, evict_shells, _) =
+        spawn_frame_runtime(third, "frame-attach-evict").await;
+    evict_shells.note("not-a-session");
+    let missed = reqwest::Client::new()
+        .get(format!("{evict_url}/api/residents/frame?app=a&principal=p"))
+        .header(AUTHORIZATION, "Bearer not-a-session")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missed.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        !evict_shells
+            .held()
+            .iter()
+            .any(|token| token == "not-a-session"),
+        "a validate miss drops the token"
+    );
+    let client = reqwest::Client::new();
+    let mut tokens = Vec::new();
+    for _ in 0..=crate::api::handlers::attach::ATTACH_SHELL_CAP {
+        let value = client
+            .post(format!("{evict_url}/api/auth/attach"))
+            .json(&json!({ "secret": "frame-attach-evict", "scope": "shell" }))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        tokens.push(value["token"].as_str().unwrap().to_string());
+    }
+    let refused = client
+        .get(format!("{evict_url}/api/residents/frame?app=a&principal=p"))
+        .header(AUTHORIZATION, format!("Bearer {}", tokens[0]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert_eq!(refused.text().await.unwrap(), "evicted");
+    assert!(evict_shells.held().contains(tokens.last().unwrap()));
+    evict_task.abort();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hostile_frame_stops_reading_past_the_bound() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let Ok(n) = socket.read(&mut buf).await else {
+                    return;
+                };
+                let text = String::from_utf8_lossy(&buf[..n]);
+                if text.contains("POST /api/auth/attach") {
+                    let body = r#"{"token":"stall-shell"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    return;
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    1024 * 1024
+                );
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket
+                    .write_all(&vec![b'x'; crate::component::V2_FRAME_ANSWER_MAX + 1])
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            });
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let owner = passkey_authority(dir.path());
+    write_frame_coords(dir.path(), &api_url, "stall-secret");
+    let app = gateway_router(test_state(dir.path()));
+    let started = std::time::Instant::now();
+    let (status, body) = frame_body(&app, &owner.home_token, "app=app-frame").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(800),
+        "the gateway read past 48 KiB, elapsed {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["nodes"]
+            .as_array()
+            .map(Vec::len),
+        Some(0),
+        "{body}"
+    );
 }
 
 #[cfg(unix)]

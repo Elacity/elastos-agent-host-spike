@@ -9,25 +9,61 @@ use std::sync::Arc;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use elastos_runtime::session::{SessionRegistry, SessionType};
 
+/// How many attach shells this process remembers. The next note drops the oldest.
+pub(crate) const ATTACH_SHELL_CAP: usize = 8;
+
+type NotedShells = (
+    std::collections::VecDeque<String>,
+    std::collections::VecDeque<String>,
+);
+
 /// Shell tokens minted by attach with the secret. A shell created another way
-/// is not in this set.
+/// is not in this set. A validate miss drops the token. The cap names the one it drops.
 #[derive(Clone, Default)]
 pub struct AttachShells {
-    tokens: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    inner: Arc<std::sync::Mutex<NotedShells>>,
 }
 
 impl AttachShells {
+    #[rustfmt::skip]
     pub fn note(&self, token: &str) {
-        if let Ok(mut tokens) = self.tokens.lock() {
-            tokens.insert(token.to_string());
+        let Ok(mut set) = self.inner.lock() else { return };
+        set.1.retain(|old| old != token);
+        if set.0.iter().any(|kept| kept == token) { return }
+        if set.0.len() >= ATTACH_SHELL_CAP {
+            if let Some(old) = set.0.pop_front() {
+                if set.1.len() >= ATTACH_SHELL_CAP { set.1.pop_front(); }
+                set.1.push_back(old);
+            }
         }
+        set.0.push_back(token.to_string());
     }
 
     pub fn holds(&self, token: &str) -> bool {
-        self.tokens
+        self.inner
             .lock()
-            .map(|tokens| tokens.contains(token))
-            .unwrap_or(false)
+            .is_ok_and(|set| set.0.iter().any(|kept| kept == token))
+    }
+
+    pub fn evicted(&self, token: &str) -> bool {
+        self.inner
+            .lock()
+            .is_ok_and(|set| set.1.iter().any(|old| old == token))
+    }
+
+    #[rustfmt::skip]
+    pub fn forget(&self, token: &str) {
+        let Ok(mut set) = self.inner.lock() else { return };
+        set.0.retain(|kept| kept != token);
+        set.1.retain(|old| old != token);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|set| set.0.iter().cloned().collect())
+            .unwrap_or_default()
     }
 }
 

@@ -97,8 +97,12 @@ pub(crate) async fn resident_frame(
         if !session.is_shell() {
             return (StatusCode::FORBIDDEN, "guest session").into_response();
         }
+        if shells.evicted(&token) {
+            return (StatusCode::FORBIDDEN, "evicted").into_response();
+        }
         return (StatusCode::FORBIDDEN, "no session").into_response();
     }
+    shells.forget(&token);
     if home_app_session_token(&token) {
         return (StatusCode::FORBIDDEN, "Home app session").into_response();
     }

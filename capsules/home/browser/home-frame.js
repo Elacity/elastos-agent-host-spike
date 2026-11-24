@@ -18,14 +18,15 @@ export function paintFrame(root, frame) {
   else root.removeAttribute("hidden");
 }
 
-export function startHomeFrame(root, readFrame) {
+export function startHomeFrame(root, readFrame, intervalMs = 2000) {
+  let busy = false;
   const tick = async () => {
-    try {
-      paintFrame(root, await readFrame());
-    } catch {
-      paintFrame(root, { nodes: [] });
-    }
+    if (busy) return;
+    busy = true;
+    try { paintFrame(root, await readFrame()); }
+    catch { paintFrame(root, { nodes: [] }); }
+    finally { busy = false; }
   };
   tick();
-  return setInterval(tick, 2000);
+  return setInterval(tick, intervalMs);
 }
