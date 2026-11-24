@@ -1,0 +1,19 @@
+   Compiling elastos-server v2.0.1 (/Users/sash/code/wt-agent-anchor/elastos/crates/elastos-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 47s
+     Running unittests src/lib.rs (/Users/sash/code/wt-agent-anchor/target-build/debug/deps/elastos_server-71f954b274f1d8ae)
+
+running 1 test
+
+thread 'agents::tests::the_agent_rules_name_a_new_home_and_confinement' (86282805) panicked at crates/elastos-server/src/agents/tests.rs:2071:9:
+the rules comment lacks: A new Home has no agents.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test agents::tests::the_agent_rules_name_a_new_home_and_confinement ... FAILED
+
+failures:
+
+failures:
+    agents::tests::the_agent_rules_name_a_new_home_and_confinement
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4523 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p elastos-server --lib`

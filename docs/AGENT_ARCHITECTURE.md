@@ -344,6 +344,8 @@ applications may depend on them.
 
 ## Current implementation status
 
+A new Home has no agents. Confinement comes before a running agent outside a prototype build, and the prototype runs agents in Home's main program as a named interim.
+
 The repository already establishes several parts of this model:
 
 - `Users` and `UsersAI` are canonical local roots.

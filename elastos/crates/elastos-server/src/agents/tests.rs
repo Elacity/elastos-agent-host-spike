@@ -2049,6 +2049,37 @@ fn the_cargo_feature_is_read_in_one_place() {
 }
 
 #[test]
+fn the_agent_rules_name_a_new_home_and_confinement() {
+    const SENTENCES: [&str; 2] = [
+        "A new Home has no agents.",
+        "Confinement comes before a running agent outside a prototype build, and the prototype runs agents in Home's main program as a named interim.",
+    ];
+    let mut rules = String::new();
+    for line in include_str!("../agents.rs").lines() {
+        if line.starts_with("//!") {
+            rules.push_str(line);
+            rules.push('\n');
+        } else if !rules.is_empty() {
+            break;
+        }
+    }
+    let doc = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/AGENT_ARCHITECTURE.md"),
+    )
+    .unwrap();
+    for sentence in SENTENCES {
+        assert!(
+            rules.contains(sentence),
+            "the rules comment lacks: {sentence}"
+        );
+        assert!(
+            doc.contains(sentence),
+            "AGENT_ARCHITECTURE.md lacks: {sentence}"
+        );
+    }
+}
+
+#[test]
 fn the_agent_files_name_no_owner_key_function_and_read_no_environment() {
     let sources = [
         ("agents.rs", include_str!("../agents.rs")),
