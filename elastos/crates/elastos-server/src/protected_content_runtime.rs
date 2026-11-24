@@ -105,6 +105,7 @@ const MEDIA_PROVIDER_CONFIG_FILE: &str = "protected-content/media-provider/confi
 const MEDIA_PROVIDER_CONFIG_SCHEMA_V1: &str = "elastos.protected-content.media-provider-config/v1";
 const MEDIA_PROVIDER_OUTPUT_PROFILE_V1: &str = "browser_fmp4_h264_v1";
 const MAX_MEDIA_PROVIDER_CONFIG_BYTES: usize = 8 * 1024;
+#[cfg(unix)]
 const MAX_MEDIA_PROVIDER_IMPORTED_TOOL_BYTES: u64 = 512 * 1024 * 1024;
 const MEDIA_PROVIDER_TIMEOUT_MS_V1: u64 = 3_600_000;
 const MEDIA_PROVIDER_MAX_STDIO_BYTES_V1: usize = 1 << 20;
@@ -144,10 +145,13 @@ struct RuntimeMediaProviderConfigFile {
 }
 
 struct RuntimeMediaToolSource {
+    #[cfg(unix)]
     file: fs::File,
+    #[cfg(unix)]
     size: u64,
 }
 
+#[cfg(unix)]
 struct RuntimeMediaToolImport {
     path: PathBuf,
     created: bool,
@@ -2072,6 +2076,7 @@ pub(crate) fn prepare_runtime_media_provider_prerequisite(
     }
 }
 
+#[cfg(unix)]
 fn media_path_string(path: &Path, label: &str) -> anyhow::Result<String> {
     path.to_str()
         .map(str::to_owned)
@@ -8100,6 +8105,7 @@ fn runtime_viewer_path(data_dir: &Path, principal_id: &str, mint_id: Digest32) -
         .join(format!("{}.json", hex::encode(hasher.finalize())))
 }
 
+#[cfg(unix)]
 fn runtime_storage_write_error(reason: String) -> anyhow::Error {
     anyhow::anyhow!("Runtime custody protected-content storage is unavailable: {reason}")
 }

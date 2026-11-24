@@ -174,6 +174,7 @@ impl VerifiedLaunchGrant {
     }
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 impl VerifiedLaunchGrant {
     /// Test-only: the one test literal of `RequiredHomeLaunchToken` builds
@@ -339,6 +340,9 @@ pub(crate) fn issue_local_runtime_home_launch_token(
     data_dir: &std::path::Path,
     app: &str,
 ) -> anyhow::Result<String> {
+    if app != HOME_CAPSULE_ID && app != HOME_CLI_SHELL_ID {
+        anyhow::bail!("device launch authority is limited to home and home-cli");
+    }
     let context = local_home_launch_token_context(data_dir)?;
     issue_home_launch_token_with_context(data_dir, app, &context)
 }
@@ -498,6 +502,7 @@ pub(in crate::api) fn issue_home_agent_launch_token_at_for_test(
 /// Test seam: the same projection issuer with the issue time supplied, so a
 /// test can issue two tokens from one clock reading instead of racing the
 /// wall clock between them.
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn issue_home_projection_launch_token_with_context_at(
     data_dir: &std::path::Path,
@@ -643,6 +648,7 @@ pub(super) fn grant_bound_expiry(
     Ok(expires_at.min(grant.expires_at))
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 pub(crate) fn issue_expired_home_launch_token_with_context(
     data_dir: &std::path::Path,
@@ -1844,6 +1850,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn capsule_headers(token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("x-elastos-home-token", token.parse().unwrap());
@@ -1852,6 +1859,7 @@ mod tests {
         headers
     }
 
+    #[cfg(unix)]
     fn decode_launch_token(token: &str) -> HomeLaunchTokenEnvelope {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(token)
@@ -1859,6 +1867,7 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    #[cfg(unix)]
     fn sign_launch_token_for_test(
         data_dir: &std::path::Path,
         mut envelope: HomeLaunchTokenEnvelope,
@@ -1875,6 +1884,7 @@ mod tests {
             .encode(serde_json::to_vec(&envelope).unwrap())
     }
 
+    #[cfg(unix)]
     fn sign_context_for_test(
         data_dir: &std::path::Path,
         launch_context: HomeLaunchContext,
@@ -3088,6 +3098,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(unix)]
     fn r1_unstored_grant(
         dir: &std::path::Path,
         principal_id: &str,
@@ -3188,12 +3199,14 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     const FENCE_AGENT_REFUSAL: &str = GATEWAY_AGENT_REFUSAL;
 
     /// The Home browser headers for one token. The cookie carrier carries a
     /// single well-formed Home session cookie; the header carrier carries the
     /// token header and two Cookie headers, so path 1 refuses at
     /// `single_cookie_value` and path 2 verifies the header token.
+    #[cfg(unix)]
     fn fence_home_headers(token: &str, cookie_carrier: bool) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("host", "localhost:61180".parse().unwrap());
@@ -3209,6 +3222,7 @@ mod tests {
         headers
     }
 
+    #[cfg(unix)]
     fn fence_agent_token(home: &std::path::Path) -> String {
         use elastos_runtime::auth::AuthSessionGrantV1;
 
@@ -3228,6 +3242,7 @@ mod tests {
         issue_home_launch_token_for_auth_grant(home, HOME_CAPSULE_ID, &grant).unwrap()
     }
 
+    #[cfg(unix)]
     fn fence_person_token(home: &std::path::Path) -> String {
         use elastos_runtime::auth::AuthSessionGrantV1;
 
@@ -3501,5 +3516,29 @@ mod tests {
                 .to_string(),
             "home_shell_content_open_grant_mismatch"
         );
+    }
+
+    #[test]
+    fn device_launch_authority_is_limited_to_home_and_home_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        for app in [HOME_CAPSULE_ID, HOME_CLI_SHELL_ID] {
+            let token = issue_local_runtime_home_launch_token(dir.path(), app)
+                .unwrap_or_else(|err| panic!("{app} is Home's own shell: {err}"));
+            assert_eq!(
+                decode_launch_token(&token)
+                    .payload
+                    .launch_context
+                    .executable_actor,
+                app
+            );
+        }
+        for app in ["people", "marketplace"] {
+            let err =
+                issue_local_runtime_home_launch_token(dir.path(), app).expect_err("another app");
+            assert_eq!(
+                err.to_string(),
+                "device launch authority is limited to home and home-cli"
+            );
+        }
     }
 }

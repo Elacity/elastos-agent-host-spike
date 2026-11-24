@@ -1417,6 +1417,7 @@ fn native_chat_force_stdin() -> bool {
     )
 }
 
+#[cfg(unix)]
 fn native_chat_debug_tty() -> bool {
     matches!(
         std::env::var("ELASTOS_CHAT_DEBUG_TTY").ok().as_deref(),

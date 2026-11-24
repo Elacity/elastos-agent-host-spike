@@ -418,15 +418,20 @@ mod tests {
         set_presence_grant, test_authority, PresenceAuthority, PresenceDecision,
     };
     use crate::collaboration_product::{chat_message_request_binding, test_chat_product_port};
-    use elastos_runtime::provider::{ProviderCarrierInvoker, ResourceAction};
+    use elastos_runtime::provider::ProviderCarrierInvoker;
+    #[cfg(unix)]
+    use elastos_runtime::provider::ResourceAction;
     use std::collections::BTreeMap;
 
+    #[cfg(unix)]
     const PRINCIPAL: &str = "test-principal";
 
+    #[cfg(unix)]
     fn unchecked(fixture: &Fixture) -> UsableOwnPresence {
         UsableOwnPresence::test_unchecked(fixture.own_presence.clone())
     }
 
+    #[cfg(unix)]
     struct Fixture {
         root: tempfile::TempDir,
         product: CollaborationChatProductPort,
@@ -438,6 +443,7 @@ mod tests {
         profile_did: String,
     }
 
+    #[cfg(unix)]
     impl Fixture {
         async fn decide(&self, decision: PresenceDecision, now: u64) {
             set_presence_grant(
@@ -455,6 +461,7 @@ mod tests {
     }
 
     /// A Home whose person chose "Always" and whose own presence is live.
+    #[cfg(unix)]
     async fn fixture(network: &str, conversation: &str, now: u64) -> Fixture {
         let root = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -549,6 +556,7 @@ mod tests {
         fixture
     }
 
+    #[cfg(unix)]
     fn observe(observer: &Fixture, peer: &Fixture, now: u64) {
         observer
             .product
@@ -560,6 +568,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn store_chat(peer: &Fixture, id: &str, body: &str, created_at: u64) -> Vec<u8> {
         let profile = peer.product.test_person_profile("History author", None);
         let message = peer
@@ -585,6 +594,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     struct Plane {
         source: String,
         peers: BTreeMap<String, Arc<ProviderRegistry>>,
@@ -592,6 +602,7 @@ mod tests {
         stall: bool,
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl ProviderCarrierInvoker for Plane {
         async fn invoke_carrier_provider(
@@ -1026,6 +1037,7 @@ mod tests {
     }
 
     /// `a` observes `b` and reaches it; returns the calls `a` makes.
+    #[cfg(unix)]
     async fn reachable_pair(network: &str, now: u64) -> (Fixture, Fixture, Arc<Plane>) {
         let a = fixture(network, "community", now).await;
         let b = fixture(network, "community", now).await;
@@ -1042,6 +1054,7 @@ mod tests {
         (a, b, plane)
     }
 
+    #[cfg(unix)]
     fn assert_not_shown_and_nothing_sent(a: &Fixture, plane: &Plane, now: u64) {
         let view = a.product.conversation_transport_view().history.unwrap();
         assert_eq!(view.status, "unavailable");
@@ -1211,6 +1224,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     struct ChangeAfterFirstRequest {
         plane: Arc<Plane>,
         authority: Arc<PresenceAuthority>,
@@ -1220,6 +1234,7 @@ mod tests {
         hidden: bool,
     }
 
+    #[cfg(unix)]
     #[async_trait::async_trait]
     impl ProviderCarrierInvoker for ChangeAfterFirstRequest {
         async fn remember_peer_ticket(

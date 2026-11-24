@@ -2784,6 +2784,7 @@ pub async fn publish_bytes_via_provider(
     content_response_cid(&response)
 }
 
+#[cfg(any(unix, test))]
 const MODEL_PREPARATION_SOURCE: &str = "runtime-model-preparation";
 
 /// One preparation's read route for its package parts. Parts come from the
@@ -2792,11 +2793,13 @@ const MODEL_PREPARATION_SOURCE: &str = "runtime-model-preparation";
 /// miss instead of one per 64 KiB part. Reads take `&self` so preparation can
 /// keep several parts in flight. Preparation still checks each file's SHA-256
 /// and the package CID, whichever route served the bytes.
+#[cfg(any(unix, test))]
 #[derive(Debug, Default)]
 pub(crate) struct ModelPartReads {
     holders_only: std::sync::atomic::AtomicBool,
 }
 
+#[cfg(any(unix, test))]
 impl ModelPartReads {
     /// Complete one bounded model read. Preparation owns aggregate accounting,
     /// ordering, integrity and settlement.
@@ -2886,6 +2889,7 @@ impl ModelPartReads {
 }
 
 /// One part through the local Content path only; a miss never reaches Carrier.
+#[cfg(any(unix, test))]
 async fn read_local_model_part(
     registry: &ProviderRegistry,
     request: Value,
@@ -2908,6 +2912,7 @@ async fn read_local_model_part(
     Ok(stream.drain_to_vec()?)
 }
 
+#[cfg(any(unix, test))]
 fn checked_model_part(
     bytes: Vec<u8>,
     limit: u64,
@@ -9783,6 +9788,7 @@ fn file_cid_from_leaves(mut level: Vec<FileCidNode>, version: cid::Version) -> c
     level.pop().expect("file has one root").cid
 }
 
+#[cfg(unix)]
 #[cfg(test)]
 fn file_cid(bytes: &[u8], version: cid::Version, raw: bool) -> cid::Cid {
     let level: Vec<FileCidNode> = if bytes.is_empty() {
@@ -11075,6 +11081,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn requester_bound_mock_answer(mut body: Value, data_dir: &Path) -> Value {
         let (_, requester_did) = elastos_identity::load_or_create_did(data_dir).unwrap();
         body["__test_requester_did"] = json!(requester_did);
@@ -11769,6 +11776,7 @@ mod tests {
         assert!(matches!(err, ProviderError::Io(_)));
     }
 
+    #[cfg(unix)]
     fn fixture_file_cid(bytes: &[u8]) -> String {
         file_cid(bytes, cid::Version::V1, true).to_string()
     }
@@ -11945,6 +11953,7 @@ mod tests {
         assert!(!text.contains(local.as_str()), "{text}");
     }
 
+    #[cfg(unix)]
     async fn content_fetch_against_bridge(
         body: Value,
     ) -> (
@@ -11955,6 +11964,7 @@ mod tests {
         content_fetch_against_bridge_for_cid(TEST_CID, body).await
     }
 
+    #[cfg(unix)]
     async fn content_fetch_against_bridge_for_cid(
         cid: &str,
         body: Value,
@@ -12051,6 +12061,7 @@ mod tests {
     /// One verified receipt on a distinct-holders error. `with_required_one`
     /// puts `1` in the answer's required-count field; otherwise that field is
     /// absent. `distinct_holders` stays `1` and is not the signed requirement.
+    #[cfg(unix)]
     fn distinct_holder_error_answer(with_required_one: bool) -> Value {
         let mut data = json!({
             "distinct_holders": 1,
@@ -12069,6 +12080,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     async fn assert_availability_error_signs_the_callers_two(body: Value) {
         let (data_dir, availability, response) = content_fetch_against_bridge(body).await;
         let sent = availability.requests.lock().await.clone();
@@ -12630,6 +12642,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn carrier_import_exact_invocation() -> Value {
         json!({
             "schema": "elastos.provider.invocation/v1",
@@ -12675,6 +12688,7 @@ mod tests {
             .await
     }
 
+    #[cfg(unix)]
     async fn registry_with_content_and_ipfs_with_federated_alert_exchange_config(
         federated_operator_alert_exchange_config: Option<Value>,
     ) -> (
@@ -12714,6 +12728,7 @@ mod tests {
         .await
     }
 
+    #[cfg(unix)]
     async fn registry_with_content_and_ipfs_with_quota_ledger_exchange_config(
         federated_quota_ledger_exchange_config: Option<Value>,
     ) -> (
@@ -12733,6 +12748,7 @@ mod tests {
         .await
     }
 
+    #[cfg(unix)]
     async fn registry_with_content_and_ipfs_with_abuse_control_exchange_config(
         federated_abuse_control_exchange_config: Option<Value>,
     ) -> (
@@ -12805,6 +12821,7 @@ mod tests {
         (data_dir, registry, ipfs, content)
     }
 
+    #[cfg(unix)]
     fn spawn_operator_alert_sink() -> (String, std::thread::JoinHandle<String>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -12832,6 +12849,7 @@ mod tests {
         (format!("http://{addr}/content-alerts"), handle)
     }
 
+    #[cfg(unix)]
     fn spawn_federated_operator_alert_exchange(
         response: Value,
     ) -> (String, std::thread::JoinHandle<String>) {
@@ -12863,6 +12881,7 @@ mod tests {
         (format!("http://{addr}/alerts/exchange"), handle)
     }
 
+    #[cfg(unix)]
     fn signed_federated_quota_ledger_exchange_receipt(
         accepted: bool,
         reason: Option<&str>,
@@ -12892,6 +12911,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn spawn_federated_quota_ledger_exchange_endpoint(
         response: Value,
     ) -> (String, std::thread::JoinHandle<String>) {
@@ -12923,6 +12943,7 @@ mod tests {
         (format!("http://{addr}/quota/exchange"), handle)
     }
 
+    #[cfg(unix)]
     fn signed_federated_abuse_control_exchange_receipt(
         accepted: bool,
         reason: Option<&str>,
@@ -12957,6 +12978,7 @@ mod tests {
         })
     }
 
+    #[cfg(unix)]
     fn spawn_federated_abuse_control_exchange_endpoint(
         response: Value,
     ) -> (String, std::thread::JoinHandle<String>) {
@@ -13069,6 +13091,7 @@ mod tests {
         request.len() >= header_end + 4 + content_length
     }
 
+    #[cfg(unix)]
     async fn invoke_content_repair_worker(
         registry: &Arc<ProviderRegistry>,
         request: Value,
