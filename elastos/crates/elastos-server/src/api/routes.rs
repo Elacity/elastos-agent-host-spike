@@ -8276,6 +8276,13 @@ pub(crate) mod tests {
         assert!(runtime.list_capsules().await.is_empty());
     }
 
+    /// Storage-grant rows. Their body is compiled only in the agents build.
+    /// The next module is the skip a build without them lists, with the reason.
+    #[cfg(unix)]
+    mod instance_storage_rows;
+    #[cfg(unix)]
+    mod instance_storage_rows_feature_off;
+
     /// A Stop whose wait ends while the row is still running must say stopping.
     /// Today the same row is listed under `stopped` with status `running`.
     #[tokio::test]
